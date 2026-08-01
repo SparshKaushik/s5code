@@ -51,6 +51,22 @@ import {
 } from "./review.ts";
 import { KeybindingsConfigError } from "./keybindings.ts";
 import {
+  CHECKPOINT_MAINTENANCE_WS_METHODS,
+  CheckpointCleanupResult,
+  CheckpointMaintenanceCleanupInput,
+  CheckpointMaintenanceError,
+  CheckpointMaintenanceGetUsageInput,
+  CheckpointStorageUsage,
+} from "./checkpointMaintenance.ts";
+import {
+  REWIND_WS_METHODS,
+  RewindError,
+  RewindGetStatusInput,
+  RewindStatus,
+  RewindStepInput,
+  RewindStepResult,
+} from "./rewind.ts";
+import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
@@ -190,6 +206,15 @@ export const WS_METHODS = {
 
   // Review methods
   reviewGetDiffPreview: "review.getDiffPreview",
+
+  // Session rewind (experimental)
+  rewindGetStatus: REWIND_WS_METHODS.getStatus,
+  rewindUndo: REWIND_WS_METHODS.undo,
+  rewindRedo: REWIND_WS_METHODS.redo,
+
+  // Checkpoint storage maintenance
+  checkpointMaintenanceGetUsage: CHECKPOINT_MAINTENANCE_WS_METHODS.getUsage,
+  checkpointMaintenanceCleanup: CHECKPOINT_MAINTENANCE_WS_METHODS.cleanup,
 
   // Terminal methods
   terminalOpen: "terminal.open",
@@ -753,6 +778,39 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
   stream: true,
 });
 
+export const WsRewindGetStatusRpc = Rpc.make(WS_METHODS.rewindGetStatus, {
+  payload: RewindGetStatusInput,
+  success: RewindStatus,
+  error: Schema.Union([RewindError, EnvironmentAuthorizationError]),
+});
+
+export const WsRewindUndoRpc = Rpc.make(WS_METHODS.rewindUndo, {
+  payload: RewindStepInput,
+  success: RewindStepResult,
+  error: Schema.Union([RewindError, EnvironmentAuthorizationError]),
+});
+
+export const WsRewindRedoRpc = Rpc.make(WS_METHODS.rewindRedo, {
+  payload: RewindStepInput,
+  success: RewindStepResult,
+  error: Schema.Union([RewindError, EnvironmentAuthorizationError]),
+});
+
+export const WsCheckpointMaintenanceGetUsageRpc = Rpc.make(
+  WS_METHODS.checkpointMaintenanceGetUsage,
+  {
+    payload: CheckpointMaintenanceGetUsageInput,
+    success: CheckpointStorageUsage,
+    error: Schema.Union([CheckpointMaintenanceError, EnvironmentAuthorizationError]),
+  },
+);
+
+export const WsCheckpointMaintenanceCleanupRpc = Rpc.make(WS_METHODS.checkpointMaintenanceCleanup, {
+  payload: CheckpointMaintenanceCleanupInput,
+  success: CheckpointCleanupResult,
+  error: Schema.Union([CheckpointMaintenanceError, EnvironmentAuthorizationError]),
+});
+
 export const WsRpcGroup = RpcGroup.make(
   WsServerProbeRpc,
   WsServerGetConfigRpc,
@@ -798,6 +856,11 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsSwitchRefRpc,
   WsVcsInitRpc,
   WsReviewGetDiffPreviewRpc,
+  WsRewindGetStatusRpc,
+  WsRewindUndoRpc,
+  WsRewindRedoRpc,
+  WsCheckpointMaintenanceGetUsageRpc,
+  WsCheckpointMaintenanceCleanupRpc,
   WsTerminalOpenRpc,
   WsTerminalAttachRpc,
   WsTerminalWriteRpc,

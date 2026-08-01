@@ -25,12 +25,14 @@ import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
 import * as ManagedRuntime from "effect/ManagedRuntime";
+import * as Option from "effect/Option";
 import * as PubSub from "effect/PubSub";
 import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
+import * as RewindService from "../../rewind/RewindService.ts";
 import * as VcsDriverRegistry from "../../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../../vcs/VcsProcess.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
@@ -324,8 +326,33 @@ describe("CheckpointReactor", () => {
       streamStatus: () => Stream.empty,
     });
 
+    // Rewind is off in these tests: the reactor's capture path is a no-op when
+    // `isEnabled` is false, keeping the assertions focused on checkpoint refs.
+    const rewindServiceLayer = Layer.succeed(RewindService.RewindService, {
+      isEnabled: Effect.succeed(false),
+      beginTurn: () => Effect.succeed(null),
+      captureTurn: () => Effect.succeed(Option.none()),
+      getStatus: (threadId) => Effect.succeed(RewindService.unavailableStatus(threadId)),
+      undo: (threadId) =>
+        Effect.succeed({
+          outcome: "unavailable" as const,
+          restoredFiles: [],
+          prompt: null,
+          status: RewindService.unavailableStatus(threadId),
+        }),
+      redo: (threadId) =>
+        Effect.succeed({
+          outcome: "unavailable" as const,
+          restoredFiles: [],
+          prompt: null,
+          status: RewindService.unavailableStatus(threadId),
+        }),
+      forgetThread: () => Effect.succeed(0),
+    });
+
     const layer = CheckpointReactorLive.pipe(
       Layer.provideMerge(orchestrationLayer),
+      Layer.provideMerge(rewindServiceLayer),
       Layer.provideMerge(projectionSnapshotLayer),
       Layer.provideMerge(RuntimeReceiptBusLive),
       Layer.provideMerge(Layer.succeed(ProviderService, provider.service)),

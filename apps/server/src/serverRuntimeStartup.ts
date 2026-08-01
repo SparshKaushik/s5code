@@ -28,6 +28,7 @@ import * as ExternalLauncher from "./process/externalLauncher.ts";
 import * as OrchestrationEngine from "./orchestration/Services/OrchestrationEngine.ts";
 import * as ProjectionSnapshotQuery from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import * as OrchestrationReactor from "./orchestration/Services/OrchestrationReactor.ts";
+import { CheckpointMaintenance } from "./checkpointing/CheckpointMaintenance.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
 import * as ServerSettings from "./serverSettings.ts";
 import * as AnalyticsService from "./telemetry/AnalyticsService.ts";
@@ -292,6 +293,7 @@ export const make = Effect.gen(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const keybindings = yield* Keybindings.Keybindings;
   const orchestrationReactor = yield* OrchestrationReactor.OrchestrationReactor;
+  const checkpointMaintenance = yield* CheckpointMaintenance;
   const providerSessionReaper = yield* ProviderSessionReaper.ProviderSessionReaper;
   const lifecycleEvents = yield* ServerLifecycleEvents.ServerLifecycleEvents;
   const serverSettings = yield* ServerSettings.ServerSettingsService;
@@ -344,6 +346,22 @@ export const make = Effect.gen(function* () {
         yield* orchestrationReactor.start().pipe(Scope.provide(reactorScope));
         yield* providerSessionReaper.start().pipe(Scope.provide(reactorScope));
       }),
+    );
+
+    // Forked and failure-tolerant: a retention sweep walks every project
+    // repository, so it must not delay the server becoming ready, and a git
+    // failure in one workspace must not abort startup.
+    yield* runStartupPhase(
+      "checkpoints.sweep",
+      checkpointMaintenance.sweepIfConfigured().pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("checkpoint retention sweep failed", {
+            operation: error.operation,
+            detail: error.detail,
+          }),
+        ),
+        Effect.forkScoped,
+      ),
     );
 
     const welcomeBase = yield* resolveWelcomeBase;

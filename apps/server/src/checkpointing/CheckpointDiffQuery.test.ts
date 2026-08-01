@@ -69,6 +69,8 @@ describe("CheckpointDiffQuery.layer", () => {
             return "full thread diff patch";
           }),
         deleteCheckpointRefs: () => Effect.void,
+        listCheckpointRefs: () => Effect.succeed([]),
+        measureCheckpointRefs: () => Effect.succeed(0),
       };
 
       const layer = CheckpointDiffQuery.layer.pipe(
@@ -88,6 +90,9 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getThreadWorkspaceContextIncludingDeleted: () => Effect.succeed(Option.none()),
+            listThreadCheckpointOwners: () => Effect.succeed([]),
+            listCheckpointWorkspacePaths: () => Effect.succeed([]),
             getThreadCheckpointContext: () =>
               Effect.sync(() => {
                 getThreadCheckpointContextCalls += 1;
@@ -177,6 +182,8 @@ describe("CheckpointDiffQuery.layer", () => {
             return "diff patch";
           }),
         deleteCheckpointRefs: () => Effect.void,
+        listCheckpointRefs: () => Effect.succeed([]),
+        measureCheckpointRefs: () => Effect.succeed(0),
       };
 
       const layer = CheckpointDiffQuery.layer.pipe(
@@ -196,6 +203,9 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getThreadWorkspaceContextIncludingDeleted: () => Effect.succeed(Option.none()),
+            listThreadCheckpointOwners: () => Effect.succeed([]),
+            listCheckpointWorkspacePaths: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
             getThreadShellById: () => Effect.succeed(Option.none()),
@@ -260,6 +270,8 @@ describe("CheckpointDiffQuery.layer", () => {
             return "diff patch";
           }),
         deleteCheckpointRefs: () => Effect.void,
+        listCheckpointRefs: () => Effect.succeed([]),
+        measureCheckpointRefs: () => Effect.succeed(0),
       };
 
       const layer = CheckpointDiffQuery.layer.pipe(
@@ -279,6 +291,9 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getThreadWorkspaceContextIncludingDeleted: () => Effect.succeed(Option.none()),
+            listThreadCheckpointOwners: () => Effect.succeed([]),
+            listCheckpointWorkspacePaths: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
             getThreadShellById: () => Effect.succeed(Option.none()),
@@ -328,6 +343,8 @@ describe("CheckpointDiffQuery.layer", () => {
         restoreCheckpoint: () => Effect.succeed(true),
         diffCheckpoints: () => Effect.succeed("diff patch"),
         deleteCheckpointRefs: () => Effect.void,
+        listCheckpointRefs: () => Effect.succeed([]),
+        measureCheckpointRefs: () => Effect.succeed(0),
       };
 
       const layer = CheckpointDiffQuery.layer.pipe(
@@ -347,6 +364,9 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getThreadWorkspaceContextIncludingDeleted: () => Effect.succeed(Option.none()),
+            listThreadCheckpointOwners: () => Effect.succeed([]),
+            listCheckpointWorkspacePaths: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.some(threadCheckpointContext)),
             getFullThreadDiffContext: () => Effect.die("unused"),
             getThreadShellById: () => Effect.succeed(Option.none()),
@@ -381,6 +401,8 @@ describe("CheckpointDiffQuery.layer", () => {
         restoreCheckpoint: () => Effect.succeed(true),
         diffCheckpoints: () => Effect.succeed(""),
         deleteCheckpointRefs: () => Effect.void,
+        listCheckpointRefs: () => Effect.succeed([]),
+        measureCheckpointRefs: () => Effect.succeed(0),
       };
 
       const layer = CheckpointDiffQuery.layer.pipe(
@@ -400,6 +422,9 @@ describe("CheckpointDiffQuery.layer", () => {
             getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
             getProjectShellById: () => Effect.succeed(Option.none()),
             getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
+            getThreadWorkspaceContextIncludingDeleted: () => Effect.succeed(Option.none()),
+            listThreadCheckpointOwners: () => Effect.succeed([]),
+            listCheckpointWorkspacePaths: () => Effect.succeed([]),
             getThreadCheckpointContext: () => Effect.succeed(Option.none()),
             getFullThreadDiffContext: () => Effect.succeed(Option.none()),
             getThreadShellById: () => Effect.succeed(Option.none()),

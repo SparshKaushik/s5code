@@ -77,6 +77,8 @@ import * as HttpResponseCompression from "./httpCompression/HttpResponseCompress
 import { makeRoutesLayer } from "./server.ts";
 import { resolveAvailableEditorsForConfig } from "./ws.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
+import * as CheckpointMaintenance from "./checkpointing/CheckpointMaintenance.ts";
+import * as RewindService from "./rewind/RewindService.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -348,6 +350,8 @@ const buildAppUnderTest = (options?: {
     orchestrationEngine?: Partial<OrchestrationEngine.OrchestrationEngineService["Service"]>;
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
+    checkpointMaintenance?: Partial<CheckpointMaintenance.CheckpointMaintenance["Service"]>;
+    rewindService?: Partial<RewindService.RewindService["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
     serverRuntimeStartup?: Partial<ServerRuntimeStartup.ServerRuntimeStartup["Service"]>;
@@ -738,27 +742,80 @@ const buildAppUnderTest = (options?: {
           getActiveProjectByWorkspaceRoot: () => Effect.succeed(Option.none()),
           getFirstActiveThreadIdByProjectId: () => Effect.succeed(Option.none()),
           getThreadCheckpointContext: () => Effect.succeed(Option.none()),
+          getThreadWorkspaceContextIncludingDeleted: () => Effect.succeed(Option.none()),
+          listThreadCheckpointOwners: () => Effect.succeed([]),
+          listCheckpointWorkspacePaths: () => Effect.succeed([]),
           ...options?.layers?.projectionSnapshotQuery,
         }),
       ),
       Layer.provide(
-        Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
-          getTurnDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          getFullThreadDiff: () =>
-            Effect.succeed({
-              threadId: defaultThreadId,
-              fromTurnCount: 0,
-              toTurnCount: 0,
-              diff: "",
-            }),
-          ...options?.layers?.checkpointDiffQuery,
-        }),
+        Layer.mergeAll(
+          Layer.mock(CheckpointDiffQuery.CheckpointDiffQuery)({
+            getTurnDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            getFullThreadDiff: () =>
+              Effect.succeed({
+                threadId: defaultThreadId,
+                fromTurnCount: 0,
+                toTurnCount: 0,
+                diff: "",
+              }),
+            ...options?.layers?.checkpointDiffQuery,
+          }),
+          Layer.mock(CheckpointMaintenance.CheckpointMaintenance)({
+            getUsage: () =>
+              Effect.succeed({
+                generatedAt: "1970-01-01T00:00:00.000Z",
+                entries: [],
+                totalBytes: 0,
+                orphanedBytes: 0,
+              }),
+            cleanup: (input) =>
+              Effect.succeed({
+                scope: input.scope,
+                dryRun: input.dryRun === true,
+                removedEntries: [],
+                removedRefCount: 0,
+                reclaimedBytes: 0,
+                usage: {
+                  generatedAt: "1970-01-01T00:00:00.000Z",
+                  entries: [],
+                  totalBytes: 0,
+                  orphanedBytes: 0,
+                },
+              }),
+            forgetThread: () => Effect.succeed(0),
+            sweepIfConfigured: () => Effect.void,
+            ...options?.layers?.checkpointMaintenance,
+          }),
+          Layer.mock(RewindService.RewindService)({
+            isEnabled: Effect.succeed(false),
+            beginTurn: () => Effect.succeed(null),
+            captureTurn: () => Effect.succeed(Option.none()),
+            getStatus: (threadId) => Effect.succeed(RewindService.unavailableStatus(threadId)),
+            undo: (threadId) =>
+              Effect.succeed({
+                outcome: "unavailable" as const,
+                restoredFiles: [],
+                prompt: null,
+                status: RewindService.unavailableStatus(threadId),
+              }),
+            redo: (threadId) =>
+              Effect.succeed({
+                outcome: "unavailable" as const,
+                restoredFiles: [],
+                prompt: null,
+                status: RewindService.unavailableStatus(threadId),
+              }),
+            forgetThread: () => Effect.succeed(0),
+            ...options?.layers?.rewindService,
+          }),
+        ),
       ),
     );
 

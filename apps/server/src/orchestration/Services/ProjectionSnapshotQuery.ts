@@ -51,6 +51,19 @@ export interface ProjectionFullThreadDiffContext {
   readonly toCheckpointRef: CheckpointRef | null;
 }
 
+export interface ProjectionThreadWorkspaceContext {
+  readonly threadId: ThreadId;
+  readonly workspaceRoot: string;
+  readonly worktreePath: string | null;
+}
+
+export interface ProjectionThreadCheckpointOwner {
+  readonly threadId: ThreadId;
+  readonly title: string;
+  readonly workspaceRoot: string;
+  readonly worktreePath: string | null;
+}
+
 /**
  * ProjectionSnapshotQueryShape - Service API for read-model snapshots.
  */
@@ -135,6 +148,43 @@ export interface ProjectionSnapshotQueryShape {
   readonly getThreadCheckpointContext: (
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProjectionThreadCheckpointContext>, ProjectionRepositoryError>;
+
+  /**
+   * Read a thread's workspace paths **including soft-deleted threads**.
+   *
+   * Deletion cleanup needs the workspace after `thread.deleted` has been
+   * projected, at which point every other thread query filters the row out.
+   */
+  readonly getThreadWorkspaceContextIncludingDeleted: (
+    threadId: ThreadId,
+  ) => Effect.Effect<Option.Option<ProjectionThreadWorkspaceContext>, ProjectionRepositoryError>;
+
+  /**
+   * Every thread that may legitimately own checkpoint state, with its
+   * workspace.
+   *
+   * Includes archived threads: archiving is reversible, so an archived
+   * thread's checkpoints must not be reported as orphaned and swept.
+   * Excludes only soft-deleted threads.
+   */
+  readonly listThreadCheckpointOwners: () => Effect.Effect<
+    ReadonlyArray<ProjectionThreadCheckpointOwner>,
+    ProjectionRepositoryError
+  >;
+
+  /**
+   * Workspace paths that may contain T3 Code checkpoint refs.
+   *
+   * Union of every non-deleted project's workspace root and every thread's
+   * worktree path **including deleted threads**. Deleted threads matter here:
+   * their refs are exactly what cleanup targets, and without their worktree
+   * path a repository holding nothing but orphaned refs would never be
+   * scanned.
+   */
+  readonly listCheckpointWorkspacePaths: () => Effect.Effect<
+    ReadonlyArray<string>,
+    ProjectionRepositoryError
+  >;
 
   /**
    * Read only the narrow context needed to compute a full-thread diff from

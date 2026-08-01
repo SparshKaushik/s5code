@@ -9,13 +9,18 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { AppText as Text } from "../../components/AppText";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
 import { useThemeColor } from "../../lib/useThemeColor";
-import type { GitActionProgress } from "../../state/use-vcs-action-state";
+import type { ThreadActionProgress } from "../../state/use-vcs-action-state";
 
 const OVERLAY_LAYOUT_TRANSITION = LinearTransition.duration(220);
 const AnimatedLiquidGlassView = Animated.createAnimatedComponent(LiquidGlassView);
 
-export function GitActionProgressOverlay(props: {
-  readonly progress: GitActionProgress;
+/**
+ * Floating banner for the selected thread's git actions and rewind steps.
+ * One overlay per thread: both flows publish into the same notification
+ * channel, so they can never overlap.
+ */
+export function ThreadActionProgressOverlay(props: {
+  readonly progress: ThreadActionProgress;
   readonly onDismiss: () => void;
 }) {
   const { progress, onDismiss } = props;
@@ -62,7 +67,7 @@ export function GitActionProgressOverlay(props: {
   );
 }
 
-function OverlayContent(props: { readonly progress: GitActionProgress }) {
+function OverlayContent(props: { readonly progress: ThreadActionProgress }) {
   const { progress } = props;
   const iconColor = useThemeColor("--color-icon");
   const glassBorder = useThemeColor("--color-header-border");
@@ -142,7 +147,7 @@ function OverlayContent(props: { readonly progress: GitActionProgress }) {
 }
 
 function OverlayIcon(props: {
-  readonly phase: GitActionProgress["phase"];
+  readonly phase: ThreadActionProgress["phase"];
   readonly iconColor: ReturnType<typeof useThemeColor>;
 }) {
   switch (props.phase) {

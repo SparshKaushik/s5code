@@ -467,6 +467,75 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+// ── Experimental settings ─────────────────────────────────────
+
+export const MIN_CHECKPOINT_RETENTION_DAYS = 1;
+export const MAX_CHECKPOINT_RETENTION_DAYS = 365;
+export const CheckpointRetentionDays = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_CHECKPOINT_RETENTION_DAYS,
+    maximum: MAX_CHECKPOINT_RETENTION_DAYS,
+  }),
+);
+export type CheckpointRetentionDays = typeof CheckpointRetentionDays.Type;
+export const DEFAULT_CHECKPOINT_RETENTION_DAYS: CheckpointRetentionDays = 30;
+
+export const MIN_CHECKPOINT_RETENTION_MEGABYTES = 16;
+export const MAX_CHECKPOINT_RETENTION_MEGABYTES = 100_000;
+export const CheckpointRetentionMegabytes = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_CHECKPOINT_RETENTION_MEGABYTES,
+    maximum: MAX_CHECKPOINT_RETENTION_MEGABYTES,
+  }),
+);
+export type CheckpointRetentionMegabytes = typeof CheckpointRetentionMegabytes.Type;
+export const DEFAULT_CHECKPOINT_RETENTION_MEGABYTES: CheckpointRetentionMegabytes = 2_048;
+
+/**
+ * Checkpoint storage retention. `null` on either limit disables that limit.
+ *
+ * Cleanup only ever considers checkpoint state T3 Code created itself:
+ * hidden `refs/t3/checkpoints` refs inside project repositories and
+ * per-thread shadow-git rewind stores under the server state directory.
+ * Refs belonging to threads that still exist are only removed by the age
+ * and size limits; refs for deleted threads are always removed.
+ */
+export const CheckpointRetentionSettings = Schema.Struct({
+  /** Delete checkpoint state for deleted threads as soon as the thread goes away. */
+  deleteOnThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Delete checkpoint state older than this many days. `null` disables. */
+  maxAgeDays: Schema.NullOr(CheckpointRetentionDays).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECKPOINT_RETENTION_DAYS)),
+  ),
+  /** Delete oldest checkpoint state once total size exceeds this. `null` disables. */
+  maxTotalMegabytes: Schema.NullOr(CheckpointRetentionMegabytes).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECKPOINT_RETENTION_MEGABYTES)),
+  ),
+  /** Run the age/size sweep automatically on server start. */
+  sweepOnStartup: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type CheckpointRetentionSettings = typeof CheckpointRetentionSettings.Type;
+
+/**
+ * Opt-in, potentially-unstable server behavior.
+ *
+ * Distinct from the client-local `Beta` toggles: everything here changes
+ * what the server does on disk, so it lives in server-authoritative
+ * settings and is shared by every connected client.
+ */
+export const ExperimentalSettings = Schema.Struct({
+  /**
+   * Session rewind: per-turn undo/redo backed by shadow-git snapshots kept
+   * outside the project repository. Off by default; enabling it starts
+   * capturing snapshots on the next turn (earlier turns stay unrewindable).
+   */
+  sessionRewindEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  checkpointRetention: CheckpointRetentionSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+});
+export type ExperimentalSettings = typeof ExperimentalSettings.Type;
+
 export const ServerSettings = Schema.Struct({
   enableAssistantStreaming: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -530,6 +599,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  experimental: ExperimentalSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -654,6 +724,19 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Struct({
       otlpTracesUrl: Schema.optionalKey(TrimmedString),
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
+    }),
+  ),
+  experimental: Schema.optionalKey(
+    Schema.Struct({
+      sessionRewindEnabled: Schema.optionalKey(Schema.Boolean),
+      checkpointRetention: Schema.optionalKey(
+        Schema.Struct({
+          deleteOnThreadDelete: Schema.optionalKey(Schema.Boolean),
+          maxAgeDays: Schema.optionalKey(Schema.NullOr(CheckpointRetentionDays)),
+          maxTotalMegabytes: Schema.optionalKey(Schema.NullOr(CheckpointRetentionMegabytes)),
+          sweepOnStartup: Schema.optionalKey(Schema.Boolean),
+        }),
+      ),
     }),
   ),
   providers: Schema.optionalKey(

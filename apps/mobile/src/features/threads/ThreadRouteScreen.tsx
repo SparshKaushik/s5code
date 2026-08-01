@@ -13,7 +13,10 @@ import { Platform, ScrollView, View } from "react-native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { useWorkspaceState } from "../../state/workspace";
 import { useEnvironmentQuery } from "../../state/query";
-import { dismissGitActionResult, useGitActionProgress } from "../../state/use-vcs-action-state";
+import {
+  dismissThreadActionResult,
+  useThreadActionProgress,
+} from "../../state/use-vcs-action-state";
 import { vcsEnvironment } from "../../state/vcs";
 
 import { EmptyState } from "../../components/EmptyState";
@@ -34,7 +37,7 @@ import {
 import { useKnownTerminalSessions } from "../../state/use-terminal-session";
 import { useSelectedThreadDetailState } from "../../state/use-thread-detail";
 import { useThreadSelection } from "../../state/use-thread-selection";
-import { GitActionProgressOverlay } from "./GitActionProgressOverlay";
+import { ThreadActionProgressOverlay } from "./ThreadActionProgressOverlay";
 import {
   buildTerminalMenuSessions,
   nextOpenTerminalId,
@@ -51,11 +54,17 @@ import {
   useThreadGitCenterHeaderItems,
   useThreadGitRightHeaderItems,
 } from "./ThreadGitControls";
+import {
+  AndroidThreadRewindMenu,
+  renderRewindToolbarMenu,
+  rewindHeaderItem,
+} from "./ThreadRewindControls";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useSelectedThreadGitActions } from "../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-state";
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
+import { useSelectedThreadRewind } from "../../state/use-selected-thread-rewind";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
@@ -315,15 +324,22 @@ function ThreadRouteContent(
     onReconnectEnvironment(environmentId);
   }, [environmentId, onReconnectEnvironment]);
 
-  /* ─── Git action progress (for overlay banner) ──────────────────── */
-  const gitActionProgressTarget = useMemo(
+  /* ─── Thread action progress (for overlay banner) ───────────────── */
+  const threadActionProgressTarget = useMemo(
     () => ({
       environmentId: selectedThread?.environmentId ?? null,
       cwd: selectedThreadCwd,
     }),
     [selectedThread?.environmentId, selectedThreadCwd],
   );
-  const gitActionProgress = useGitActionProgress(gitActionProgressTarget);
+  const threadActionProgress = useThreadActionProgress(threadActionProgressTarget);
+
+  /* ─── Session rewind (experimental, server-gated) ───────────────── */
+  const rewind = useSelectedThreadRewind({ threadBusy: composer.activeThreadBusy });
+  const rewindMenuModel = useMemo(
+    () => ({ available: rewind.available, rows: rewind.rows, onStep: rewind.step }),
+    [rewind.available, rewind.rows, rewind.step],
+  );
 
   const handleOpenGitInspector = useCallback(() => {
     if (!fileInspector.supported) {
@@ -617,8 +633,19 @@ function ThreadRouteContent(
     onPull: gitActions.onPullSelectedThreadBranch,
     onRunAction: gitActions.onRunSelectedThreadGitAction,
   };
-  const threadCenterHeaderItems = useThreadGitCenterHeaderItems(threadGitControlProps);
-  const compactRightHeaderItems = useThreadGitRightHeaderItems(threadGitControlProps);
+  const threadGitCenterHeaderItems = useThreadGitCenterHeaderItems(threadGitControlProps);
+  const threadGitRightHeaderItems = useThreadGitRightHeaderItems(threadGitControlProps);
+  // Rewind leads the trailing group in both layouts: it acts on the thread
+  // itself, while the git/files/terminal items open other surfaces.
+  const rewindItem = useMemo(() => rewindHeaderItem(rewindMenuModel), [rewindMenuModel]);
+  const threadCenterHeaderItems = useMemo<NativeHeaderItems>(
+    () => (rewindItem ? [rewindItem, ...threadGitCenterHeaderItems] : threadGitCenterHeaderItems),
+    [rewindItem, threadGitCenterHeaderItems],
+  );
+  const compactRightHeaderItems = useMemo<NativeHeaderItems>(
+    () => (rewindItem ? [rewindItem, ...threadGitRightHeaderItems] : threadGitRightHeaderItems),
+    [rewindItem, threadGitRightHeaderItems],
+  );
   const splitLeftHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       {
@@ -743,9 +770,16 @@ function ThreadRouteContent(
   const serverConfig = routeEnvironmentRuntime?.serverConfig ?? null;
   const renderThreadRouteBody = (showActionControls: boolean) => (
     <>
-      <ThreadGitControls {...threadGitControlProps} showActionControls={showActionControls} />
+      <ThreadGitControls
+        {...threadGitControlProps}
+        leadingToolbarItems={renderRewindToolbarMenu(rewindMenuModel)}
+        showActionControls={showActionControls}
+      />
 
-      <GitActionProgressOverlay progress={gitActionProgress} onDismiss={dismissGitActionResult} />
+      <ThreadActionProgressOverlay
+        progress={threadActionProgress}
+        onDismiss={dismissThreadActionResult}
+      />
 
       <View className="flex-1 bg-screen">
         <ThreadDetailScreen
@@ -839,6 +873,7 @@ function ThreadRouteContent(
           subtitle={headerSubtitle}
           onBack={layout.usesSplitView ? undefined : () => navigation.goBack()}
           actions={androidHeaderActions}
+          trailing={<AndroidThreadRewindMenu model={rewindMenuModel} />}
         />
       ) : null}
 

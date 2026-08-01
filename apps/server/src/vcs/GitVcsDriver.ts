@@ -10,6 +10,8 @@ import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
+  CHECKPOINT_REFS_PREFIX,
+  CheckpointRef,
   GitCommandError,
   VcsProcessExitError,
   type VcsSwitchRefInput,
@@ -846,6 +848,99 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             }),
           { discard: true },
         );
+      },
+    ),
+
+    listCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.listCheckpointRefs")(function* (cwd) {
+      // The ref pattern keeps the scan inside the namespace this build owns, so
+      // a user branch, tag, stash, or remote-tracking ref can never appear in a
+      // maintenance listing.
+      //
+      // Timestamps are read as unix seconds and normalized to UTC here.
+      // `iso-strict` renders the committer's local offset, which callers would
+      // then have to compare across offsets when ordering by age.
+      const result = yield* execute({
+        operation: "GitVcsDriver.checkpoints.listCheckpointRefs",
+        cwd,
+        args: [
+          "for-each-ref",
+          "--format=%(refname)%09%(committerdate:unix)",
+          `${CHECKPOINT_REFS_PREFIX}/`,
+        ],
+        allowNonZeroExit: true,
+        maxOutputBytes: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
+      });
+      if (result.exitCode !== 0) {
+        return [];
+      }
+
+      const refs: Array<VcsDriver.VcsCheckpointRefInfo> = [];
+      for (const line of result.stdout.split("\n")) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+          continue;
+        }
+        const separatorIndex = trimmed.indexOf("\t");
+        const refName = separatorIndex === -1 ? trimmed : trimmed.slice(0, separatorIndex);
+        // Defensive: never surface a ref outside the namespace, whatever git
+        // pattern semantics do on a given version.
+        if (!refName.startsWith(`${CHECKPOINT_REFS_PREFIX}/`)) {
+          continue;
+        }
+        const unixSeconds =
+          separatorIndex === -1 ? Number.NaN : Number(trimmed.slice(separatorIndex + 1).trim());
+        refs.push({
+          checkpointRef: CheckpointRef.make(refName),
+          updatedAt: Number.isFinite(unixSeconds)
+            ? DateTime.formatIso(DateTime.makeUnsafe(unixSeconds * 1000))
+            : "",
+        });
+      }
+      return refs;
+    }),
+
+    measureCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.measureCheckpointRefs")(
+      function* (input) {
+        if (input.checkpointRefs.length === 0) {
+          return 0;
+        }
+        // Size of objects reachable *only* from these refs: anything also
+        // reachable from a branch, tag, or a checkpoint ref outside this set
+        // is excluded, so the number reflects what deleting exactly these refs
+        // would reclaim.
+        //
+        // Two flags carry the semantics:
+        //   - each `--exclude` applies to the `--all` that follows it, so the
+        //     exclusions must precede `--all`;
+        //   - `--objects-edge-aggressive` makes git walk the excluded side's
+        //     trees. Without it, trees and blobs shared with a branch are
+        //     still counted, which would overstate what deletion reclaims.
+        const result = yield* execute({
+          operation: "GitVcsDriver.checkpoints.measureCheckpointRefs",
+          cwd: input.cwd,
+          args: [
+            "rev-list",
+            "--disk-usage",
+            "--objects",
+            "--objects-edge-aggressive",
+            ...input.checkpointRefs,
+            "--not",
+            ...input.checkpointRefs.map((checkpointRef) => `--exclude=${checkpointRef}`),
+            "--all",
+          ],
+          allowNonZeroExit: true,
+        });
+        if (result.exitCode !== 0) {
+          return 0;
+        }
+        // `--objects-edge-aggressive` emits boundary object lines before the
+        // total, so read the last non-empty line rather than the whole output.
+        const lastLine = result.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .findLast((line) => line.length > 0);
+        const bytes = Number(lastLine);
+        return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
       },
     ),
   };

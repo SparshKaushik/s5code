@@ -15,6 +15,7 @@ import ProjectScriptsControl, {
   type ProjectScriptActionResult,
 } from "../ProjectScriptsControl";
 import { OpenInPicker } from "./OpenInPicker";
+import { RewindControls } from "./RewindControls";
 import { usePrimaryEnvironmentId } from "../../state/environments";
 import { useT3ProjectFileScripts } from "~/hooks/useT3ProjectFileScripts";
 import { ProjectFavicon } from "../ProjectFavicon";
@@ -34,6 +35,8 @@ interface ChatHeaderProps {
   availableEditors: ReadonlyArray<EditorId>;
   rightPanelOpen: boolean;
   gitCwd: string | null;
+  /** True while a turn or checkpoint revert is running; blocks rewind steps. */
+  isWorking: boolean;
   onNewThreadInProject: () => void;
   onRunProjectScript: (script: ProjectScript) => void;
   onAddProjectScript: (input: NewProjectScriptInput) => Promise<ProjectScriptActionResult>;
@@ -70,6 +73,7 @@ export const ChatHeader = memo(function ChatHeader({
   availableEditors,
   rightPanelOpen,
   gitCwd,
+  isWorking,
   onNewThreadInProject,
   onRunProjectScript,
   onAddProjectScript,
@@ -140,6 +144,11 @@ export const ChatHeader = memo(function ChatHeader({
           rightPanelOpen ? "pr-0" : "pr-16",
         )}
       >
+        <RewindControls
+          environmentId={activeThreadEnvironmentId}
+          threadId={activeThreadId}
+          disabled={isWorking}
+        />
         {activeProjectScripts && (
           <ProjectScriptsControl
             scripts={activeProjectScripts}
