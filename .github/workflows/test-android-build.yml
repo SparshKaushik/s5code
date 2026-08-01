@@ -1,0 +1,141 @@
+name: Test Android APK build (temporary)
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version to build and name the artifact with
+        required: false
+        default: 0.1.0-test
+      clerk_publishable_key:
+        description: Clerk publishable key (override)
+        required: false
+        default: pk_live_Y2xlcmsudDMuY29kZXMk
+      clerk_jwt_template:
+        description: Clerk JWT template (override)
+        required: false
+        default: t3-relay
+      clerk_cli_oauth_client_id:
+        description: Clerk CLI OAuth client id (override)
+        required: false
+        default: hzxSgY2cH10sDU2r
+      relay_url:
+        description: Relay URL (override)
+        required: false
+        default: https://relay.t3.codes
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    name: Build Android APK
+    runs-on: ubuntu-24.04
+    # Mirror of the android job in release.yml so the local eas build can be
+    # exercised without publishing a release. Removed after the test.
+    timeout-minutes: 120
+    env:
+      APP_VARIANT: production
+      NODE_OPTIONS: --max-old-space-size=8192
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=@t3tools/mobile...
+
+      - name: Setup Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+          cache: gradle
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install Android SDK components
+        shell: bash
+        run: |
+          set -euo pipefail
+          sdkmanager \
+            "platforms;android-36" \
+            "build-tools;36.0.0" \
+            "ndk;27.0.12077973" \
+            "cmake;3.22.1"
+
+      - name: Setup EAS
+        uses: expo/expo-github-action@v8
+        with:
+          eas-version: latest
+          token: ${{ secrets.EXPO_TOKEN }}
+          # npm, not pnpm: this only installs eas-cli into the action's own
+          # tool dir, and pnpm 11 hard-fails that install on dtrace-provider's
+          # ignored build script (no allowBuilds config outside the repo).
+          packager: npm
+
+      - name: Build release APK locally
+        working-directory: apps/mobile
+        env:
+          # eas-cli needs a project to resolve credentials and the remote
+          # version (eas.json sets appVersionSource to remote + autoIncrement,
+          # so versionCode is owned by EAS and strictly increases across
+          # releases — the property sideload upgrades rely on).
+          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+          EAS_OWNER: ${{ vars.EAS_OWNER }}
+          # versionName shown in the APK; versionCode stays EAS-managed.
+          MOBILE_VERSION: ${{ inputs.version }}
+          T3CODE_CLERK_PUBLISHABLE_KEY: ${{ inputs.clerk_publishable_key }}
+          T3CODE_CLERK_JWT_TEMPLATE: ${{ inputs.clerk_jwt_template }}
+          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ inputs.clerk_cli_oauth_client_id }}
+          T3CODE_RELAY_URL: ${{ inputs.relay_url }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+          eas build \
+            --platform android \
+            --profile production \
+            --local \
+            --non-interactive \
+            --output "release-publish/t3code-${{ inputs.version }}.apk"
+
+      - name: Verify and collect APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-publish
+
+          # --output names the artifact; fall back to whatever eas produced.
+          apk="apps/mobile/release-publish/t3code-${{ inputs.version }}.apk"
+          if [[ ! -f "$apk" ]]; then
+            apk="$(find apps/mobile -path '*/release-publish/*' -name '*.apk' -print -quit || true)"
+          fi
+          [[ -n "$apk" && -f "$apk" ]] || { echo "APK not produced by eas build --local" >&2; exit 1; }
+
+          if [[ -n "$ANDROID_HOME" ]]; then
+            apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -print -quit)"
+            if [[ -n "$apksigner" ]]; then
+              "$apksigner" verify --print-certs "$apk" >/dev/null
+              echo "APK signature verified."
+            fi
+          fi
+
+          cp "$apk" release-publish/t3code-${{ inputs.version }}.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: release-publish/*
+          if-no-files-found: error
