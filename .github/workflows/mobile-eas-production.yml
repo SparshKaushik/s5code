@@ -9,7 +9,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "build (+ auto-submit to TestFlight) or update (OTA)"
+        description: "build (artifact only, no store submission) or update (OTA)"
         required: true
         type: choice
         default: build
@@ -20,10 +20,10 @@ on:
         description: "Target platform"
         required: true
         type: choice
-        default: ios
+        default: android
         options:
-          - ios
           - android
+          - ios
           - all
       message:
         description: "OTA update message (mode=update only)"
@@ -33,7 +33,7 @@ on:
 jobs:
   production:
     name: EAS Production ${{ inputs.mode }}
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     env:
@@ -97,7 +97,9 @@ jobs:
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: eas build --platform ${{ inputs.platform }} --profile production --auto-submit --non-interactive --no-wait
+        # No --auto-submit: this fork never pushes to a store from CI. Download
+        # the artifact from EAS and submit deliberately if you want to.
+        run: eas build --platform ${{ inputs.platform }} --profile production --non-interactive --no-wait
 
       - name: Publish OTA update
         if: steps.expo-token.outputs.present == 'true' && inputs.mode == 'update'
