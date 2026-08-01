@@ -13,7 +13,17 @@ Methods mirror the `NativeApi` interface defined in `@t3tools/contracts`:
 - `providers.respondToRequest`, `providers.stopSession`
 - `shell.openInEditor`, `server.getConfig`
 
-Codex is the only implemented provider. `claudeCode` is reserved in contracts/UI.
+Each provider ships as a driver under `apps/server/src/provider/Drivers/`: Codex, Claude, Cursor, Grok, OpenCode, and pi. A driver owns config decoding, the availability snapshot, one adapter per instance, and text generation.
+
+## The pi driver
+
+pi (`@earendil-works/pi-coding-agent`) is driven over `pi --mode rpc`, a JSONL protocol on stdin/stdout. Three things about it differ from the other CLI-backed providers and shape the code:
+
+- **No fixed model catalog.** What a user can run depends on their own pi configuration, so the provider snapshot spawns a short-lived `pi --mode rpc --no-session` and reads `get_available_models`. An empty catalog is the only signal pi gives that nothing is authenticated, and is reported as such. Slugs are `<pi provider>/<model id>`, split on the first separator because some pi model ids contain slashes.
+- **No permission protocol.** pi tools just run. The only interactive channel a pi process has is `ctx.ui.*` from an extension, which in RPC mode becomes a blocking `extension_ui_request`. Runtime modes below `full-access` are therefore enforced from inside pi by the bundled `apps/server/pi-extension/t3-runtime-mode.ts`, loaded with `--extension` and configured through `T3CODE_PI_RUNTIME_MODE`. `confirm` requests map onto T3's approval surface; `select` and `input` map onto structured user input.
+- **No plan channel.** Task lists come from todo tool _results_ (`todowrite` / `patchtodo`), which carry the whole reconciled list even when the call patched one field.
+
+Instance isolation uses `PI_CODING_AGENT_DIR`, never `HOME`: overriding `HOME` also relocates the macOS keychain lookup and breaks pi's stored credentials. Threads resume by pi session file path, recorded in the durable resume cursor; a rollback uses pi's `fork`, which re-roots the session before a chosen user entry.
 
 ## Client transport
 

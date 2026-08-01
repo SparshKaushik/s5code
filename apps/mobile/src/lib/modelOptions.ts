@@ -7,6 +7,7 @@ import {
   buildProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
+import { formatProviderInstanceLabel } from "@t3tools/shared/providerLabels";
 
 export type ModelOption = {
   readonly key: string;
@@ -26,15 +27,21 @@ export type ProviderGroup = {
   readonly models: ReadonlyArray<ModelOption>;
 };
 
-function providerDisplayLabel(provider: {
-  readonly displayName?: string | undefined;
-  readonly driver: string;
-  readonly instanceId: string;
+/**
+ * Model label, qualified by upstream vendor when the provider has one.
+ *
+ * Aggregating providers (pi, OpenCode) expose models from many vendors, and
+ * several ship the same display name, so an unqualified list has ambiguous
+ * rows. A name that already leads with its vendor is left alone.
+ */
+function modelDisplayLabel(model: {
+  readonly name: string;
+  readonly subProvider?: string | undefined;
 }): string {
-  if (provider.displayName) return provider.displayName;
-  if (provider.driver === "codex") return "Codex";
-  if (provider.driver === "claudeAgent") return "Claude";
-  return provider.instanceId;
+  const subProvider = model.subProvider?.trim();
+  if (!subProvider) return model.name;
+  const alreadyQualified = model.name.toLowerCase().startsWith(subProvider.toLowerCase());
+  return alreadyQualified ? model.name : `${subProvider} · ${model.name}`;
 }
 
 function normalizeSelectionOptions(
@@ -69,12 +76,12 @@ export function buildModelOptions(
       continue;
     }
 
-    const providerLabel = providerDisplayLabel(provider);
+    const providerLabel = formatProviderInstanceLabel(provider);
     for (const model of provider.models) {
       const key = `${provider.instanceId}:${model.slug}`;
       options.set(key, {
         key,
-        label: model.name,
+        label: modelDisplayLabel(model),
         subtitle: providerLabel,
         providerKey: provider.instanceId,
         providerLabel,

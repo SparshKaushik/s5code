@@ -95,6 +95,10 @@ The live backend agent implementation and its event stream. The main service is 
 
 The backend agent runtime that actually performs work. See [ProviderService.ts][14], [ProviderAdapter.ts][15], and [CodexAdapter.ts][17].
 
+#### Runtime-mode extension
+
+A pi-specific bridge. pi has no permission protocol, so runtime modes below `full-access` are enforced from inside the pi process by [t3-runtime-mode.ts][25], which is loaded with `--extension` and raises blocking confirms through pi's extension UI channel. See [PiAdapter.ts][26].
+
 #### Session
 
 The live provider-backed runtime attached to a thread. Session shape is in [the orchestration contracts][1], and lifecycle is managed in [ProviderService.ts][14].
@@ -178,3 +182,5 @@ The file patch and changed-file summary for one turn. It is usually computed in 
 [22]: ../apps/server/src/checkpointing/Utils.ts
 [23]: ../apps/server/src/checkpointing/Diffs.ts
 [24]: ./architecture.md
+[25]: ../apps/server/pi-extension/t3-runtime-mode.ts
+[26]: ../apps/server/src/provider/Layers/PiAdapter.ts

@@ -332,6 +332,9 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
+  // Providers advertise whether a plan/default toggle means anything for them.
+  // Absent flag means yes, matching web and legacy snapshots.
+  const showInteractionModeToggle = selectedProviderStatus?.showInteractionModeToggle ?? true;
 
   // ── Trigger detection ────────────────────────────────────
   const [composerSelection, setComposerSelection] = useState(() => ({
@@ -657,24 +660,35 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
           };
         }),
       },
-      {
-        id: "options-interaction",
-        title: "Interaction",
-        subtitle: currentInteractionMode === "plan" ? "Plan" : "Default",
-        subactions: [
-          { id: "options:interaction:default", title: "Default" },
-          { id: "options:interaction:plan", title: "Plan" },
-        ].map((option) => {
-          const value = option.id.replace("options:interaction:", "");
-          return {
-            id: option.id,
-            title: option.title,
-            state: currentInteractionMode === value ? ("on" as const) : undefined,
-          };
-        }),
-      },
+      // Providers without a plan mode (pi) opt out; showing the toggle would
+      // offer a control that changes nothing.
+      ...(showInteractionModeToggle
+        ? [
+            {
+              id: "options-interaction",
+              title: "Interaction",
+              subtitle: currentInteractionMode === "plan" ? "Plan" : "Default",
+              subactions: [
+                { id: "options:interaction:default", title: "Default" },
+                { id: "options:interaction:plan", title: "Plan" },
+              ].map((option) => {
+                const value = option.id.replace("options:interaction:", "");
+                return {
+                  id: option.id,
+                  title: option.title,
+                  state: currentInteractionMode === value ? ("on" as const) : undefined,
+                };
+              }),
+            },
+          ]
+        : []),
     ],
-    [currentInteractionMode, currentRuntimeMode, providerOptionDescriptors],
+    [
+      currentInteractionMode,
+      currentRuntimeMode,
+      providerOptionDescriptors,
+      showInteractionModeToggle,
+    ],
   );
 
   // ── Menu handlers ────────────────────────────────────────

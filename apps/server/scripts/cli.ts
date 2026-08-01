@@ -165,6 +165,17 @@ const buildCmd = Command.make(
       const webDist = path.join(repoRoot, "apps/web/dist");
       const clientTarget = path.join(serverDir, "dist/client");
 
+      // pi loads extensions from source with its own TypeScript loader, so the
+      // runtime-mode bridge is copied rather than bundled. Copied file-by-file
+      // to keep the colocated test out of the published package.
+      const piExtensionTarget = path.join(serverDir, "dist/pi-extension");
+      yield* fs.makeDirectory(piExtensionTarget, { recursive: true });
+      yield* fs.copyFile(
+        path.join(serverDir, "pi-extension/t3-runtime-mode.ts"),
+        path.join(piExtensionTarget, "t3-runtime-mode.ts"),
+      );
+      yield* Effect.log("[cli] Copied pi extension sources into dist/pi-extension");
+
       if (yield* fs.exists(webDist)) {
         yield* fs.copy(webDist, clientTarget);
         yield* applyDevelopmentIconOverrides(repoRoot, serverDir);
@@ -223,7 +234,11 @@ const publishCmd = Command.make(
       const packageJsonPath = path.join(serverDir, "package.json");
 
       // Assert build assets exist
-      for (const relPath of ["dist/bin.mjs", "dist/client/index.html"]) {
+      for (const relPath of [
+        "dist/bin.mjs",
+        "dist/client/index.html",
+        "dist/pi-extension/t3-runtime-mode.ts",
+      ]) {
         const abs = path.join(serverDir, relPath);
         if (!(yield* fs.exists(abs))) {
           return yield* new ServerCliBuildAssetMissingError({ assetPath: abs });
