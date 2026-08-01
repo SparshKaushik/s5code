@@ -39,6 +39,11 @@ jobs:
     env:
       APP_VARIANT: production
       NODE_OPTIONS: --max-old-space-size=8192
+      # Which EAS project builds/publishes this app. app.config.ts omits
+      # extra.eas.projectId and owner when unset, so eas-cli has nothing to
+      # target until both repository variables are set.
+      EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
+      EAS_OWNER: ${{ vars.EAS_OWNER }}
     steps:
       - id: expo-token
         name: Check for EXPO_TOKEN
