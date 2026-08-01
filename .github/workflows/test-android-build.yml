@@ -93,6 +93,7 @@ jobs:
 
       - name: Build release APK locally
         working-directory: apps/mobile
+        continue-on-error: true
         env:
           # eas-cli needs a project to resolve credentials and the remote
           # version (eas.json sets appVersionSource to remote + autoIncrement,
@@ -106,6 +107,8 @@ jobs:
           T3CODE_CLERK_JWT_TEMPLATE: ${{ inputs.clerk_jwt_template }}
           T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ inputs.clerk_cli_oauth_client_id }}
           T3CODE_RELAY_URL: ${{ inputs.relay_url }}
+          EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-work
+          EAS_LOCAL_BUILD_SKIP_CLEANUP: "1"
         run: |
           set -euo pipefail
           mkdir -p release-publish
@@ -114,7 +117,19 @@ jobs:
             --profile production \
             --local \
             --non-interactive \
-            --output "release-publish/t3code-${{ inputs.version }}.apk"
+            --output "release-publish/t3code-${{ inputs.version }}.apk" || true
+
+      - name: Debug eas working dir
+        if: always()
+        run: |
+          echo "=== eas workingdir tree (top) ==="
+          find "${{ runner.temp }}/eas-work/build" -maxdepth 2 2>/dev/null | head -40
+          echo "=== workspace/lockfile files in build root ==="
+          ls -la "${{ runner.temp }}/eas-work/build" 2>/dev/null | head -30
+          echo "=== pnpm files ==="
+          ls -la "${{ runner.temp }}/eas-work/build/pnpm-lock.yaml" "${{ runner.temp }}/eas-work/build/pnpm-workspace.yaml" 2>&1 | head
+          echo "=== apps/mobile ==="
+          ls "${{ runner.temp }}/eas-work/build/apps/mobile" 2>/dev/null | head -20
 
       - name: Verify and collect APK
         shell: bash
