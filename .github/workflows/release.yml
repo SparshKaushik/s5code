@@ -388,6 +388,20 @@ jobs:
           # ignored build script (no allowBuilds config outside the repo).
           packager: npm
 
+      # eas-cli runs `eas build --local` through `npx eas-cli-local-build-plugin`,
+      # and npx installs that package with npm in the project cwd — which reads
+      # apps/mobile/package.json and dies on its nitro-markdown overrides
+      # (EOVERRIDE). Preinstall the plugin outside the project and hand it to
+      # eas-cli via EAS_LOCAL_BUILD_PLUGIN_PATH so no npm install ever touches
+      # the checkout.
+      - name: Preinstall eas local build plugin
+        id: plugin
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/eas-plugin"
+          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund eas-cli-local-build-plugin@21.4.0
+          echo "plugin_path=$RUNNER_TEMP/eas-plugin/node_modules/eas-cli-local-build-plugin/bin/run" >> "$GITHUB_OUTPUT"
+
       - name: Build release APK locally
         working-directory: apps/mobile
         env:
@@ -403,6 +417,7 @@ jobs:
           T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.relay_public_config.outputs.clerk_jwt_template }}
           T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.relay_public_config.outputs.clerk_cli_oauth_client_id }}
           T3CODE_RELAY_URL: ${{ needs.relay_public_config.outputs.relay_url }}
+          EAS_LOCAL_BUILD_PLUGIN_PATH: ${{ steps.plugin.outputs.plugin_path }}
         run: |
           set -euo pipefail
           mkdir -p release-publish
