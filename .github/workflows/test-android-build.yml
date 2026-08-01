@@ -109,6 +109,7 @@ jobs:
           T3CODE_RELAY_URL: ${{ inputs.relay_url }}
           EAS_LOCAL_BUILD_WORKINGDIR: ${{ runner.temp }}/eas-work
           EAS_LOCAL_BUILD_SKIP_CLEANUP: "1"
+          EAS_LOCAL_BUILD_LOGGER_LEVEL: debug
         run: |
           set -euo pipefail
           mkdir -p release-publish
@@ -122,14 +123,20 @@ jobs:
       - name: Debug eas working dir
         if: always()
         run: |
-          echo "=== eas workingdir tree (top) ==="
-          find "${{ runner.temp }}/eas-work/build" -maxdepth 2 2>/dev/null | head -40
-          echo "=== workspace/lockfile files in build root ==="
-          ls -la "${{ runner.temp }}/eas-work/build" 2>/dev/null | head -30
-          echo "=== pnpm files ==="
-          ls -la "${{ runner.temp }}/eas-work/build/pnpm-lock.yaml" "${{ runner.temp }}/eas-work/build/pnpm-workspace.yaml" 2>&1 | head
-          echo "=== apps/mobile ==="
-          ls "${{ runner.temp }}/eas-work/build/apps/mobile" 2>/dev/null | head -20
+          echo "=== eas-work exists? ==="
+          ls -la "${{ runner.temp }}/eas-work" 2>&1 | head -15
+          echo "=== build tree (top) ==="
+          find "${{ runner.temp }}/eas-work/build" -maxdepth 2 2>&1 | head -40
+          echo "=== pnpm files anywhere in eas-work ==="
+          find "${{ runner.temp }}/eas-work" -maxdepth 3 \( -name 'pnpm-lock.yaml' -o -name 'pnpm-workspace.yaml' -o -name 'package.json' \) 2>&1 | head -20
+          echo "=== npm debug log tail ==="
+          latest="$(ls -t /home/runner/.npm/_logs/*-debug-0.log 2>/dev/null | head -1)"
+          if [[ -n "$latest" ]]; then
+            grep -E 'verbose cwd|verbose command|error|silly placeDep|EOVERRIDE' "$latest" | tail -25
+            echo "--- log path: $latest"
+          else
+            echo "no npm debug log"
+          fi
 
       - name: Verify and collect APK
         shell: bash
