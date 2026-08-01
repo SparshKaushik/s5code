@@ -11,6 +11,17 @@ Object.assign(process.env, repoEnv);
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 
+// Release builds set these in CI so the APK carries the release version/versionCode
+// instead of the hardcoded defaults below. versionCode must strictly increase
+// across releases or Android refuses to install the new APK over the old one.
+const releaseVersion = repoEnv.MOBILE_VERSION?.trim() || undefined;
+const releaseVersionCode = repoEnv.MOBILE_VERSION_CODE?.trim()
+  ? Number(repoEnv.MOBILE_VERSION_CODE)
+  : undefined;
+if (releaseVersionCode !== undefined && !Number.isInteger(releaseVersionCode)) {
+  throw new Error("MOBILE_VERSION_CODE must be an integer when set.");
+}
+
 const personalTeamBundleIdentifier = repoEnv.T3CODE_IOS_PERSONAL_TEAM_BUNDLE_ID?.trim();
 const IOS_BUNDLE_IDENTIFIER_PATTERN = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/;
 
@@ -172,7 +183,7 @@ const config: ExpoConfig = {
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: "1.0.1",
+  version: releaseVersion ?? "1.0.1",
   runtimeVersion: {
     // Fingerprint (not appVersion) so an OTA only reaches binaries whose native
     // project — native deps, config plugins, AND patches/ — matches the update.
@@ -238,6 +249,7 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
+    ...(releaseVersionCode !== undefined ? { versionCode: releaseVersionCode } : {}),
     adaptiveIcon: {
       backgroundColor: variant.assets.androidAdaptiveBackgroundColor,
       foregroundImage: variant.assets.androidAdaptiveForeground,

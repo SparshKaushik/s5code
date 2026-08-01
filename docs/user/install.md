@@ -41,6 +41,17 @@ Arch Linux:
 yay -S t3code-bin
 ```
 
+## Android App
+
+Each release also publishes an Android APK (`t3code-<version>.apk`) as a release asset. Download
+it on the device, or download it on a computer and transfer it over, then open the file to install.
+
+Sideloading requires allowing installs from unknown sources for the browser or file manager you use.
+The APK is a universal build containing all four ABIs.
+
+> If a release is signed with a release keystore, you cannot install it over a debug-signed
+> build (or vice versa) — uninstall the old one first.
+
 ## Providers
 
 T3 Code drives provider CLIs; it does not ship them. Install the CLI for each provider you want
