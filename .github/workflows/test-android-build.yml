@@ -39,12 +39,11 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=8192
     steps:
       - name: Checkout
+        # No sparse-checkout here: it makes actions/checkout fetch with
+        # --filter=blob:none, and eas-cli's local build clones the workspace
+        # via `git clone --depth 1 file://<workspace>`, which fails (exit 128)
+        # when the partial clone can't serve the unfetched blobs.
         uses: actions/checkout@v6
-        with:
-          sparse-checkout: |
-            /*
-            !/.repos/
-          sparse-checkout-cone-mode: false
 
       - name: Setup Vite+
         uses: voidzero-dev/setup-vp@v1
