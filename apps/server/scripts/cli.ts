@@ -236,6 +236,7 @@ const publishCmd = Command.make(
       // Assert build assets exist
       for (const relPath of [
         "dist/bin.mjs",
+        "dist/service-launcher.mjs",
         "dist/client/index.html",
         "dist/pi-extension/t3-runtime-mode.ts",
       ]) {

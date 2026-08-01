@@ -16,6 +16,7 @@ import {
   ThreadDeletionReactor,
   type ThreadDeletionReactorShape,
 } from "../Services/ThreadDeletionReactor.ts";
+import { forkParked } from "../../serverActivation.ts";
 
 type ThreadDeletedEvent = Extract<OrchestrationEvent, { type: "thread.deleted" }>;
 
@@ -122,7 +123,7 @@ const make = Effect.gen(function* () {
   const worker = yield* makeDrainableWorker(processThreadDeletedSafely);
 
   const start: ThreadDeletionReactorShape["start"] = Effect.fn("start")(function* () {
-    yield* Effect.forkScoped(
+    yield* forkParked(
       Stream.runForEach(orchestrationEngine.streamDomainEvents, (event) => {
         if (event.type !== "thread.deleted") {
           return Effect.void;
