@@ -46,7 +46,7 @@ export function piToolItemType(toolName: string | undefined): ToolLifecycleItemT
  * pi's `tool_execution_end` event carries only the result, not the input that
  * produced it, so the command (or edited path) has to be recovered from the
  * args remembered at `tool_execution_start`. Without it the work log would
- * render a bare "bash" row with nothing to preview or expand.
+ * render a bare tool-name row with nothing to preview or expand.
  */
 export function piToolItemDetail(toolName: string | undefined, args: unknown): string | undefined {
   const record = piToolArgsRecord(args);
@@ -62,6 +62,48 @@ export function piToolItemDetail(toolName: string | undefined, args: unknown): s
     case "write": {
       const path = typeof record.path === "string" ? record.path.trim() : undefined;
       return path !== undefined && path.length > 0 ? path : undefined;
+    }
+    case "read": {
+      // The whole point of the row is the file being read, so the path is the
+      // detail; offset/limit are windowing on that path, not a separate row.
+      const path = typeof record.path === "string" ? record.path.trim() : undefined;
+      return path !== undefined && path.length > 0 ? path : undefined;
+    }
+    case "grep": {
+      // "pattern in path" — path is optional (defaults to cwd), pattern is not.
+      const pattern = typeof record.pattern === "string" ? record.pattern.trim() : undefined;
+      if (pattern === undefined || pattern.length === 0) {
+        return undefined;
+      }
+      const path = typeof record.path === "string" ? record.path.trim() : undefined;
+      return path !== undefined && path.length > 0 ? `${pattern} in ${path}` : pattern;
+    }
+    case "find":
+    case "ls": {
+      const path = typeof record.path === "string" ? record.path.trim() : undefined;
+      return path !== undefined && path.length > 0 ? path : undefined;
+    }
+    case "todowrite": {
+      // The args carry the whole list, so a count is the honest single-line
+      // summary; the full steps live in the plan panel via `details.todos`.
+      const todos = Array.isArray(record.todos) ? record.todos : undefined;
+      if (todos === undefined || todos.length === 0) {
+        return undefined;
+      }
+      return `${todos.length} todo${todos.length === 1 ? "" : "s"}`;
+    }
+    case "patchtodo": {
+      // Only the patched fields are in the args; name the target so the row
+      // reads as a change rather than a bare tool call.
+      const id = typeof record.id === "number" ? record.id : undefined;
+      const status = typeof record.status === "string" ? record.status.trim() : undefined;
+      const priority = typeof record.priority === "string" ? record.priority.trim() : undefined;
+      const content = typeof record.content === "string" ? record.content.trim() : undefined;
+      const changes = [status, priority, content].filter(
+        (change): change is string => change !== undefined && change.length > 0,
+      );
+      const target = id !== undefined ? `#${id}` : "";
+      return changes.length > 0 ? `${target} ${changes.join(", ")}`.trim() : undefined;
     }
     default:
       return undefined;
