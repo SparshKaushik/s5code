@@ -195,7 +195,7 @@ describe("ProviderSessionReaper", () => {
     };
 
     const orchestrationEngine = {
-      dispatch: vi.fn((command: { type: string }) => Effect.succeed({ sequence: 1 })),
+      dispatch: vi.fn((_command: { type: string }) => Effect.succeed({ sequence: 1 })),
       readEvents: () => Stream.empty,
       streamDomainEvents: Stream.empty,
       latestSequence: Effect.succeed(0),
@@ -401,9 +401,9 @@ describe("ProviderSessionReaper", () => {
     );
 
     const reaper = await runtime!.runPromise(Effect.service(ProviderSessionReaper));
-    scope = await Effect.runPromise(Scope.make("sequential"));
-    await Effect.runPromise(reaper.start().pipe(Scope.provide(scope)));
-    await Effect.runPromise(drainFibers);
+    scope = await runtime!.runPromise(Scope.make("sequential"));
+    await runtime!.runPromise(reaper.start().pipe(Scope.provide(scope)));
+    await runtime!.runPromise(drainFibers);
 
     expect(harness.stopSession).not.toHaveBeenCalled();
     expect(harness.orchestrationEngine.dispatch).not.toHaveBeenCalled();
