@@ -179,13 +179,6 @@ jobs:
             arch: arm64
             rust_target: aarch64-apple-darwin
             resource_key: darwin-arm64
-          - label: macOS x64
-            runner: macos-26
-            platform: mac
-            target: dmg
-            arch: x64
-            rust_target: x86_64-apple-darwin
-            resource_key: darwin-x64
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -466,6 +459,10 @@ jobs:
     timeout-minutes: 15
     permissions:
       contents: write
+      # actions/download-artifact lists artifacts through the Actions API;
+      # without this the token inherits nothing beyond the explicit grant
+      # above and the publish step sees 0 artifacts.
+      actions: read
     steps:
       - name: Checkout
         uses: actions/checkout@v6
