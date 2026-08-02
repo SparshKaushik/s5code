@@ -488,9 +488,11 @@ jobs:
       - name: Download all build artifacts
         uses: actions/download-artifact@v8
         with:
-          pattern: |
-            desktop-*
-            android-apk
+          # download-artifact@v8 treats `pattern` as a single glob string
+          # (v4 split the input on newlines; v8 does not), so a multiline
+          # pattern matches nothing. Match everything and let the publish
+          # step's file globs pick out the release files.
+          pattern: "*"
           merge-multiple: true
           path: release-assets
 
