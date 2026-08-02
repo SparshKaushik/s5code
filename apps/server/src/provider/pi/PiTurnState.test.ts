@@ -4,10 +4,36 @@ import {
   piAssistantText,
   piContentBlocks,
   piContentStreamKind,
+  piToolItemDetail,
   piToolItemType,
   piTurnStateFromStopReason,
   piUsageSnapshot,
 } from "./PiTurnState.ts";
+
+describe("piToolItemDetail", () => {
+  it("recovers the bash command from the args remembered at start", () => {
+    expect(piToolItemDetail("bash", { command: "ls -la", timeout: 30 })).toBe("ls -la");
+  });
+
+  it("handles string-encoded args", () => {
+    expect(piToolItemDetail("bash", JSON.stringify({ command: "git status" }))).toBe("git status");
+  });
+
+  it("shows the edited path for file mutations", () => {
+    expect(piToolItemDetail("edit", { path: "src/main.ts", oldText: "a", newText: "b" })).toBe(
+      "src/main.ts",
+    );
+    expect(piToolItemDetail("write", { path: "README.md" })).toBe("README.md");
+  });
+
+  it("renders nothing for tools with no useful input or absent args", () => {
+    expect(piToolItemDetail("bash", undefined)).toBeUndefined();
+    expect(piToolItemDetail("bash", {})).toBeUndefined();
+    expect(piToolItemDetail("bash", { command: "  " })).toBeUndefined();
+    expect(piToolItemDetail("read", { path: "x" })).toBeUndefined();
+    expect(piToolItemDetail(undefined, { command: "ls" })).toBeUndefined();
+  });
+});
 
 describe("piToolItemType", () => {
   it("maps pi's built-ins onto canonical lifecycles", () => {

@@ -40,6 +40,53 @@ export function piToolItemType(toolName: string | undefined): ToolLifecycleItemT
  * Which canonical stream a `message_update` delta belongs to. pi separates
  * thinking from visible text at the event level, so no heuristics are needed.
  */
+/**
+ * Display detail for a completed tool item.
+ *
+ * pi's `tool_execution_end` event carries only the result, not the input that
+ * produced it, so the command (or edited path) has to be recovered from the
+ * args remembered at `tool_execution_start`. Without it the work log would
+ * render a bare "bash" row with nothing to preview or expand.
+ */
+export function piToolItemDetail(toolName: string | undefined, args: unknown): string | undefined {
+  const record = piToolArgsRecord(args);
+  if (record === null) {
+    return undefined;
+  }
+  switch (toolName?.trim().toLowerCase()) {
+    case "bash": {
+      const command = typeof record.command === "string" ? record.command.trim() : undefined;
+      return command !== undefined && command.length > 0 ? command : undefined;
+    }
+    case "edit":
+    case "write": {
+      const path = typeof record.path === "string" ? record.path.trim() : undefined;
+      return path !== undefined && path.length > 0 ? path : undefined;
+    }
+    default:
+      return undefined;
+  }
+}
+
+function piToolArgsRecord(args: unknown): Record<string, unknown> | null {
+  if (typeof args === "string" && args.trim().length > 0) {
+    try {
+      const parsed: unknown = JSON.parse(args);
+      if (isPiObjectRecord(parsed)) {
+        return parsed;
+      }
+    } catch {
+      return null;
+    }
+    return null;
+  }
+  return isPiObjectRecord(args) ? args : null;
+}
+
+function isPiObjectRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 export function piContentStreamKind(deltaType: string): RuntimeContentStreamKind | undefined {
   switch (deltaType) {
     case "text_delta":

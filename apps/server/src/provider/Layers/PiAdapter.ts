@@ -82,6 +82,7 @@ import {
   piAssistantText,
   piContentBlocks,
   piContentStreamKind,
+  piToolItemDetail,
   piToolItemType,
   piTurnStateFromStopReason,
   piUsageSnapshot,
@@ -127,6 +128,12 @@ interface PiSessionContext {
    * we remember it here and auto-confirm later requests for the same tool.
    */
   readonly sessionApprovedTools: Set<string>;
+  /**
+   * Tool inputs by pi tool-call id. pi's `tool_execution_end` carries only the
+   * result, so the command/path the work log shows has to be recovered from
+   * the args remembered at `tool_execution_start`.
+   */
+  readonly pendingToolArgs: Map<string, unknown>;
   /** Latest plan steps, so a `patchtodo` result doesn't clear the plan. */
   lastPlanFingerprint: string | undefined;
   /** Turn ids already interrupted; a late `agent_end` must not resurrect them. */
@@ -676,6 +683,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
         case "tool_execution_start": {
           if (event.toolCallId === undefined) return;
+          context.pendingToolArgs.set(event.toolCallId, event.args);
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.threadId,
@@ -696,6 +704,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
         case "tool_execution_end": {
           if (event.toolCallId === undefined) return;
+          const args = context.pendingToolArgs.get(event.toolCallId);
+          context.pendingToolArgs.delete(event.toolCallId);
+          const detail = piToolItemDetail(event.toolName, args);
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.threadId,
@@ -708,6 +719,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               itemType: piToolItemType(event.toolName),
               status: event.isError === true ? "failed" : "completed",
               ...(event.toolName ? { title: event.toolName } : {}),
+              ...(detail !== undefined && detail.length > 0 ? { detail } : {}),
               ...(event.result !== undefined ? { data: event.result } : {}),
             },
           });
@@ -1014,6 +1026,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         assistantTextByTurn: new Map(),
         pendingExtensionUi: new Map(),
         sessionApprovedTools: new Set(),
+        pendingToolArgs: new Map(),
         lastPlanFingerprint: undefined,
         interruptedTurnIds: new Set(),
         agentRunTurnIds: new Set(),
