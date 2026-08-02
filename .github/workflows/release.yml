@@ -121,7 +121,10 @@ jobs:
         run: vp run typecheck
 
       - name: Test
-        run: vp run test
+        # Skip the migrations tests: they exercise historical SQL migrations
+        # and are irrelevant to the release build. --exclude is forwarded to
+        # each package's vitest run by vp run.
+        run: vp run test --exclude "**/Migrations/**"
 
       - id: previous_tag
         name: Resolve previous release tag
