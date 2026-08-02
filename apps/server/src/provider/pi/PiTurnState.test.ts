@@ -30,8 +30,35 @@ describe("piToolItemDetail", () => {
     expect(piToolItemDetail("bash", undefined)).toBeUndefined();
     expect(piToolItemDetail("bash", {})).toBeUndefined();
     expect(piToolItemDetail("bash", { command: "  " })).toBeUndefined();
-    expect(piToolItemDetail("read", { path: "x" })).toBeUndefined();
+    expect(piToolItemDetail("read", {})).toBeUndefined();
     expect(piToolItemDetail(undefined, { command: "ls" })).toBeUndefined();
+  });
+
+  it("shows the path for read so the work log names the file", () => {
+    expect(piToolItemDetail("read", { path: "src/main.ts", offset: 0, limit: 2000 })).toBe(
+      "src/main.ts",
+    );
+    expect(piToolItemDetail("read", JSON.stringify({ path: "README.md" }))).toBe("README.md");
+  });
+
+  it("shows the pattern (and search dir) for grep, and the dir for find/ls", () => {
+    expect(piToolItemDetail("grep", { pattern: "TODO", path: "src" })).toBe("TODO in src");
+    expect(piToolItemDetail("grep", { pattern: "TODO" })).toBe("TODO");
+    expect(piToolItemDetail("find", { pattern: "*.ts", path: "src" })).toBe("src");
+    expect(piToolItemDetail("ls", { path: "." })).toBe(".");
+    expect(piToolItemDetail("find", { pattern: "*.ts" })).toBeUndefined();
+  });
+
+  it("summarizes todo tools so the rows are not bare", () => {
+    expect(
+      piToolItemDetail("todowrite", {
+        todos: [{ content: "a" }, { content: "b" }],
+      }),
+    ).toBe("2 todos");
+    expect(piToolItemDetail("patchtodo", { id: 1, status: "completed" })).toBe("#1 completed");
+    expect(piToolItemDetail("patchtodo", { id: 2, priority: "high" })).toBe("#2 high");
+    expect(piToolItemDetail("read_todo", {})).toBeUndefined();
+    expect(piToolItemDetail("todowrite", { todos: [] })).toBeUndefined();
   });
 });
 
