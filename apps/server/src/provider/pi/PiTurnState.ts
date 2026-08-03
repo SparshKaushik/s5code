@@ -158,6 +158,19 @@ export function piTurnStateFromStopReason(stopReason: string | undefined): Runti
   }
 }
 
+/**
+ * Whether a terminal `agent_end` should settle the turn now rather than defer.
+ *
+ * pi retries transient provider errors (e.g. 5xx) by continuing the same turn
+ * with a fresh agent run. The `agent_end` for the failed attempt carries
+ * `willRetry: true`; settling then would mark the turn failed before the retry
+ * runs, even when the retry completes. So a `willRetry` end defers settling
+ * until the later run's `agent_end` (willRetry unset/false).
+ */
+export function piShouldSettleTurnOnAgentEnd(willRetry: boolean | undefined): boolean {
+  return willRetry !== true;
+}
+
 /** Concatenated visible text of an assistant message's content blocks. */
 export function piAssistantText(blocks: ReadonlyArray<PiAssistantContentBlock>): string {
   return blocks

@@ -82,6 +82,7 @@ import {
   piAssistantText,
   piContentBlocks,
   piContentStreamKind,
+  piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
   piTurnStateFromStopReason,
@@ -144,6 +145,12 @@ interface PiSessionContext {
    * `agent_end` and nothing but us can close their turn.
    */
   readonly agentRunTurnIds: Set<TurnId>;
+  /**
+   * Turns whose `agent_end` reported `willRetry: true`, meaning pi is about to
+   * continue the same turn with a fresh run after a transient provider error.
+   * The turn must not be settled until that retry run ends (or is aborted).
+   */
+  readonly retryPendingTurnIds: Set<TurnId>;
   stopped: boolean;
 }
 
@@ -525,6 +532,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       context.activeTurnId = undefined;
       context.interruptedTurnIds.delete(turnId);
       context.agentRunTurnIds.delete(turnId);
+      context.retryPendingTurnIds.delete(turnId);
       const assistantText = context.assistantTextByTurn.get(turnId);
       context.assistantTextByTurn.delete(turnId);
 
@@ -768,6 +776,9 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           // waiting for an `agent_end` that will never arrive.
           if (turnId !== undefined) {
             context.agentRunTurnIds.add(turnId);
+            // A retry's fresh run is now executing; the turn is no longer
+            // waiting on the pending-retry settle skip from `agent_end`.
+            context.retryPendingTurnIds.delete(turnId);
           }
           return;
         }
@@ -777,6 +788,15 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           if (context.interruptedTurnIds.has(turnId)) {
             context.interruptedTurnIds.delete(turnId);
             yield* settleTurn(context, turnId, { kind: "cancelled" }, raw);
+            return;
+          }
+          // pi retries transient provider errors (e.g. 5xx) by continuing the
+          // same turn with a fresh agent run. The agent_end for the failed
+          // attempt carries `willRetry: true`; settling here would mark the
+          // turn failed before the retry runs, even when the retry completes.
+          // Wait for the final agent_end (willRetry unset/false) instead.
+          if (!piShouldSettleTurnOnAgentEnd(event.willRetry)) {
+            context.retryPendingTurnIds.add(turnId);
             return;
           }
           const messages = Array.isArray(event.messages) ? event.messages : [];
@@ -1030,6 +1050,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         lastPlanFingerprint: undefined,
         interruptedTurnIds: new Set(),
         agentRunTurnIds: new Set(),
+        retryPendingTurnIds: new Set(),
         stopped: false,
       };
       sessions.set(input.threadId, context);
@@ -1268,7 +1289,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       // thread's active turn. A turn with an agent run behind it gets that from
       // the `agent_end` the abort triggers. An extension command has no run, so
       // it would hang here — close it now.
-      if (!context.agentRunTurnIds.has(targetTurnId)) {
+      // The same holds when the abort lands during pi's retry backoff: the
+      // failed attempt's `agent_end` already came (with `willRetry: true`), so
+      // no further `agent_end` will arrive to settle this turn.
+      if (
+        !context.agentRunTurnIds.has(targetTurnId) ||
+        context.retryPendingTurnIds.has(targetTurnId)
+      ) {
         yield* settleTurn(context, targetTurnId, { kind: "cancelled" });
       }
     });
