@@ -120,7 +120,7 @@ function CheckpointStorageSection() {
     >
       <SettingsRow
         title="Space used"
-        description="Hidden checkpoint commits inside your repositories plus rewind snapshots kept in T3 Code state. Your branches, tags, and commits are never counted or touched."
+        description="Hidden checkpoint commits inside your repositories plus rewind snapshots kept in S5 Code state. Your branches, tags, and commits are never counted or touched."
         status={
           error !== null ? (
             <span className="text-destructive">{error}</span>

@@ -103,7 +103,7 @@ jobs:
             echo "release_channel=stable" >> "$GITHUB_OUTPUT"
             echo "version=$version" >> "$GITHUB_OUTPUT"
             echo "tag=v$version" >> "$GITHUB_OUTPUT"
-            echo "name=T3 Code v$version" >> "$GITHUB_OUTPUT"
+            echo "name=S5 Code v$version" >> "$GITHUB_OUTPUT"
             echo "cli_dist_tag=latest" >> "$GITHUB_OUTPUT"
             if [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
               echo "is_prerelease=false" >> "$GITHUB_OUTPUT"
@@ -422,7 +422,7 @@ jobs:
             --profile production \
             --local \
             --non-interactive \
-            --output "release-publish/t3code-${{ needs.preflight.outputs.version }}.apk"
+            --output "release-publish/s5code-${{ needs.preflight.outputs.version }}.apk"
 
       - name: Verify and collect APK
         shell: bash
@@ -431,7 +431,7 @@ jobs:
           mkdir -p release-publish
 
           # --output names the artifact; fall back to whatever eas produced.
-          apk="apps/mobile/release-publish/t3code-${{ needs.preflight.outputs.version }}.apk"
+          apk="apps/mobile/release-publish/s5code-${{ needs.preflight.outputs.version }}.apk"
           if [[ ! -f "$apk" ]]; then
             apk="$(find apps/mobile -path '*/release-publish/*' -name '*.apk' -print -quit || true)"
           fi
@@ -445,7 +445,7 @@ jobs:
             fi
           fi
 
-          cp "$apk" release-publish/t3code-${{ needs.preflight.outputs.version }}.apk
+          cp "$apk" release-publish/s5code-${{ needs.preflight.outputs.version }}.apk
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v7

@@ -412,7 +412,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server URL",
-        description: "Leave blank to let T3 Code spawn the server when needed.",
+        description: "Leave blank to let S5 Code spawn the server when needed.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -535,7 +535,7 @@ export const DEFAULT_CHECKPOINT_RETENTION_MEGABYTES: CheckpointRetentionMegabyte
 /**
  * Checkpoint storage retention. `null` on either limit disables that limit.
  *
- * Cleanup only ever considers checkpoint state T3 Code created itself:
+ * Cleanup only ever considers checkpoint state S5 Code created itself:
  * hidden `refs/t3/checkpoints` refs inside project repositories and
  * per-thread shadow-git rewind stores under the server state directory.
  * Refs belonging to threads that still exist are only removed by the age

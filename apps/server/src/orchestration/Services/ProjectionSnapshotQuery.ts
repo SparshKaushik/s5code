@@ -183,7 +183,7 @@ export interface ProjectionSnapshotQueryShape {
   >;
 
   /**
-   * Workspace paths that may contain T3 Code checkpoint refs.
+   * Workspace paths that may contain S5 Code checkpoint refs.
    *
    * Union of every non-deleted project's workspace root and every thread's
    * worktree path **including deleted threads**. Deleted threads matter here:

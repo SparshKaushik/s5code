@@ -1,7 +1,7 @@
 /**
  * Checkpoint maintenance — inspect and reclaim checkpoint storage.
  *
- * Two kinds of state are covered, both created by T3 Code and invisible to
+ * Two kinds of state are covered, both created by S5 Code and invisible to
  * normal git usage:
  *
  *   - **Checkpoint refs**: `refs/t3/checkpoints/<thread>/turn/<n>` commits
@@ -24,7 +24,7 @@ export const CHECKPOINT_MAINTENANCE_WS_METHODS = {
 
 /**
  * Ref namespace for built-in checkpoints. Everything under it is created and
- * owned by T3 Code, which is what makes bulk deletion safe: no user branch,
+ * owned by S5 Code, which is what makes bulk deletion safe: no user branch,
  * tag, stash, or remote-tracking ref can live here.
  */
 export const CHECKPOINT_REFS_PREFIX = "refs/t3/checkpoints";

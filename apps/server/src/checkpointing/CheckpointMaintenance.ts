@@ -1,7 +1,7 @@
 /**
  * CheckpointMaintenance — report and reclaim checkpoint storage.
  *
- * Covers both stores T3 Code creates and nothing else:
+ * Covers both stores S5 Code creates and nothing else:
  *
  *   - hidden `refs/t3/checkpoints/**` commits inside each project repository
  *     (built-in checkpoint/revert), and
@@ -10,7 +10,7 @@
  *
  * Safety rules that are enforced here rather than left to callers:
  *
- *   1. Only refs under the T3 Code namespace are ever listed or deleted. A user
+ *   1. Only refs under the S5 Code namespace are ever listed or deleted. A user
  *      branch, tag, stash, or remote-tracking ref cannot be selected.
  *   2. Reported bytes are "reachable only from these refs", so a number can
  *      never imply that deleting checkpoints would drop objects a branch
@@ -205,7 +205,7 @@ export const make = Effect.gen(function* () {
    *
    * Repositories come from the read model: every known project workspace root
    * plus every thread worktree, including deleted threads. That is what makes
-   * orphan cleanup possible after a thread is gone. Workspaces T3 Code has no
+   * orphan cleanup possible after a thread is gone. Workspaces S5 Code has no
    * record of are never scanned; the alternative would be walking the user's
    * filesystem looking for repositories.
    */
