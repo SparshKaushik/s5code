@@ -377,7 +377,7 @@ jobs:
       - name: Setup EAS
         uses: expo/expo-github-action@v8
         with:
-          eas-version: latest
+          eas-version: 21.5.0
           token: ${{ secrets.EXPO_TOKEN }}
           # npm, not pnpm: this only installs eas-cli into the action's own
           # tool dir, and pnpm 11 hard-fails that install on dtrace-provider's
@@ -395,7 +395,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/eas-plugin"
-          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund eas-cli-local-build-plugin@21.4.0
+          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund eas-cli-local-build-plugin@21.5.0
           echo "plugin_path=$RUNNER_TEMP/eas-plugin/node_modules/eas-cli-local-build-plugin/bin/run" >> "$GITHUB_OUTPUT"
 
       - name: Build release APK locally
