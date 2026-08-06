@@ -1,14 +1,20 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import {
+  piAppendAssistantDelta,
+  piAssistantSegmentItemId,
   piAssistantText,
+  piCloseAssistantSegment,
   piContentBlocks,
   piContentStreamKind,
+  piOpenAssistantSegment,
   piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
+  piTurnHasAssistantText,
   piTurnStateFromStopReason,
   piUsageSnapshot,
+  type PiTurnAssistantSegments,
 } from "./PiTurnState.ts";
 
 describe("piToolItemDetail", () => {
@@ -151,6 +157,77 @@ describe("piAssistantText", () => {
         { type: "text", text: "world" },
       ]),
     ).toBe("Hello world");
+  });
+});
+
+describe("piAssistantSegmentItemId", () => {
+  it("keeps segment 0 on the historical assistant<turn> id so persisted ids stay stable", () => {
+    expect(piAssistantSegmentItemId("turn-1", 0)).toBe("assistant-turn-1");
+  });
+
+  it("extends later messages with a segment suffix so they land on their own bubble", () => {
+    expect(piAssistantSegmentItemId("turn-1", 1)).toBe("assistant-turn-1:seg:1");
+    expect(piAssistantSegmentItemId("turn-1", 2)).toBe("assistant-turn-1:seg:2");
+  });
+});
+
+describe("pi assistant message segments", () => {
+  const makeSegments = () => new Map<string, PiTurnAssistantSegments>();
+
+  it("opens segment 0 on the first delta and appends further text to it", () => {
+    const segments = makeSegments();
+    expect(piAppendAssistantDelta(segments, "turn-1", "Hello")).toEqual({
+      segmentIndex: 0,
+      text: "Hello",
+    });
+    expect(piAppendAssistantDelta(segments, "turn-1", " world")).toEqual({
+      segmentIndex: 0,
+      text: "Hello world",
+    });
+    expect(piOpenAssistantSegment(segments, "turn-1")?.text).toBe("Hello world");
+  });
+
+  it("closes the open message and starts the next one at segment 1", () => {
+    const segments = makeSegments();
+    piAppendAssistantDelta(segments, "turn-1", "First message");
+    expect(piCloseAssistantSegment(segments, "turn-1")).toEqual({
+      segmentIndex: 0,
+      text: "First message",
+    });
+    expect(piCloseAssistantSegment(segments, "turn-1")).toBeUndefined();
+    expect(piOpenAssistantSegment(segments, "turn-1")).toBeUndefined();
+
+    expect(piAppendAssistantDelta(segments, "turn-1", "Second message")).toEqual({
+      segmentIndex: 1,
+      text: "Second message",
+    });
+    expect(piAssistantSegmentItemId("turn-1", 1)).toBe("assistant-turn-1:seg:1");
+  });
+
+  it("tracks turns independently so a steer on one does not disturb the other", () => {
+    const segments = makeSegments();
+    piAppendAssistantDelta(segments, "turn-1", "a");
+    expect(piAppendAssistantDelta(segments, "turn-2", "b")).toEqual({
+      segmentIndex: 0,
+      text: "b",
+    });
+    expect(piOpenAssistantSegment(segments, "turn-1")?.text).toBe("a");
+    expect(piOpenAssistantSegment(segments, "turn-2")?.text).toBe("b");
+  });
+
+  it("reports whether any text accumulated, for the agent_end recovery decision", () => {
+    const segments = makeSegments();
+    expect(piTurnHasAssistantText(segments, "turn-1")).toBe(false);
+    piAppendAssistantDelta(segments, "turn-1", "streamed");
+    expect(piTurnHasAssistantText(segments, "turn-1")).toBe(true);
+    piCloseAssistantSegment(segments, "turn-1");
+    expect(piTurnHasAssistantText(segments, "turn-1")).toBe(true);
+  });
+
+  it("ignores a close when no message is streaming", () => {
+    const segments = makeSegments();
+    expect(piCloseAssistantSegment(segments, "turn-1")).toBeUndefined();
+    expect(piTurnHasAssistantText(segments, "turn-1")).toBe(false);
   });
 });
 

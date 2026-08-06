@@ -159,6 +159,96 @@ export function piTurnStateFromStopReason(stopReason: string | undefined): Runti
 }
 
 /**
+ * One assistant message inside one of our turns.
+ *
+ * pi emits a separate assistant message per text block between tool calls (or
+ * between turns), so each becomes its own canonical `assistant_message` item -
+ * the same shape the ACP adapters (Cursor, Grok) produce. `segmentIndex` is
+ * the message's 0-based position within our turn and gives it a stable item id.
+ */
+export interface PiAssistantSegment {
+  readonly segmentIndex: number;
+  text: string;
+}
+
+/**
+ * Streaming state for one of our turns: already-finalized messages plus the
+ * message currently accumulating text. Closed segments are only counted, not
+ * kept - their text already went out as `item.completed` payloads.
+ */
+export interface PiTurnAssistantSegments {
+  /** Messages already closed at their message boundary. */
+  readonly closedCount: number;
+  /** The message currently streaming text, if any. */
+  open: PiAssistantSegment | undefined;
+}
+
+/**
+ * Canonical item id for a pi assistant message within one of our turns.
+ *
+ * Segment 0 keeps the historical `assistant-<turn>` id so message ids stay
+ * stable for turns already persisted; later messages extend it with a segment
+ * suffix so each one lands on its own assistant message in the read model.
+ */
+export function piAssistantSegmentItemId(turnId: string, segmentIndex: number): string {
+  return segmentIndex === 0 ? `assistant-${turnId}` : `assistant-${turnId}:seg:${segmentIndex}`;
+}
+
+/** The message currently streaming text for a turn, if any. */
+export function piOpenAssistantSegment(
+  segmentsByTurn: ReadonlyMap<string, PiTurnAssistantSegments>,
+  turnId: string,
+): PiAssistantSegment | undefined {
+  return segmentsByTurn.get(turnId)?.open;
+}
+
+/** Whether any assistant text has accumulated for a turn (streamed or recovered). */
+export function piTurnHasAssistantText(
+  segmentsByTurn: ReadonlyMap<string, PiTurnAssistantSegments>,
+  turnId: string,
+): boolean {
+  const state = segmentsByTurn.get(turnId);
+  if (state === undefined) {
+    return false;
+  }
+  return state.closedCount > 0 || state.open !== undefined;
+}
+
+/**
+ * Append a streamed delta to a turn's open message, opening a new one when the
+ * previous message was closed (or nothing has streamed yet). Returns the
+ * segment the delta landed in so the caller can tag `content.delta` with it.
+ */
+export function piAppendAssistantDelta(
+  segmentsByTurn: Map<string, PiTurnAssistantSegments>,
+  turnId: string,
+  delta: string,
+): PiAssistantSegment {
+  const state = segmentsByTurn.get(turnId);
+  const nextOpen = state?.open
+    ? { ...state.open, text: state.open.text + delta }
+    : { segmentIndex: state?.closedCount ?? 0, text: delta };
+  segmentsByTurn.set(turnId, { closedCount: state?.closedCount ?? 0, open: nextOpen });
+  return nextOpen;
+}
+
+/**
+ * Close a turn's open message, returning it so the caller can emit its
+ * terminal item. No-op (returns `undefined`) when nothing is streaming.
+ */
+export function piCloseAssistantSegment(
+  segmentsByTurn: Map<string, PiTurnAssistantSegments>,
+  turnId: string,
+): PiAssistantSegment | undefined {
+  const state = segmentsByTurn.get(turnId);
+  if (state === undefined || state.open === undefined) {
+    return undefined;
+  }
+  segmentsByTurn.set(turnId, { closedCount: state.closedCount + 1, open: undefined });
+  return state.open;
+}
+
+/**
  * Whether a terminal `agent_end` should settle the turn now rather than defer.
  *
  * pi retries transient provider errors (e.g. 5xx) by continuing the same turn

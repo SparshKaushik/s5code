@@ -79,14 +79,19 @@ import {
   type PiExtensionUiRequest,
 } from "../pi/PiRpcSchemas.ts";
 import {
+  piAppendAssistantDelta,
+  piAssistantSegmentItemId,
   piAssistantText,
+  piCloseAssistantSegment,
   piContentBlocks,
   piContentStreamKind,
   piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
+  piTurnHasAssistantText,
   piTurnStateFromStopReason,
   piUsageSnapshot,
+  type PiTurnAssistantSegments,
 } from "../pi/PiTurnState.ts";
 
 const PROVIDER = ProviderDriverKind.make("pi");
@@ -120,8 +125,13 @@ interface PiSessionContext {
   /** pi session file, present once known. The resume cursor's payload. */
   sessionFile: string | undefined;
   activeTurnId: TurnId | undefined;
-  /** Assistant text accumulated for the active turn, for final message text. */
-  assistantTextByTurn: Map<TurnId, string>;
+  /**
+   * Assistant messages for the active turn. pi emits a separate message per
+   * text block between tool calls; each closes at its `message_end` and lands
+   * on its own `assistant_message` item, so a settled turn folds down to the
+   * last message instead of one bubble carrying every message's text.
+   */
+  assistantSegmentsByTurn: Map<string, PiTurnAssistantSegments>;
   readonly pendingExtensionUi: Map<ApprovalRequestId, PendingExtensionUi>;
   /**
    * Tools the user approved for the rest of the session. pi's `ctx.ui.confirm`
@@ -515,6 +525,31 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       return Option.isSome(state) ? state.value.isStreaming === true : false;
     });
 
+    const closeOpenAssistantSegment = Effect.fn("closeOpenAssistantSegment")(function* (
+      context: PiSessionContext,
+      turnId: TurnId,
+      raw?: unknown,
+    ) {
+      const segment = piCloseAssistantSegment(context.assistantSegmentsByTurn, String(turnId));
+      if (segment === undefined || segment.text.trim().length === 0) {
+        return;
+      }
+      yield* emit({
+        ...(yield* buildEventBase({
+          threadId: context.threadId,
+          turnId,
+          itemId: piAssistantSegmentItemId(String(turnId), segment.segmentIndex),
+          raw,
+        })),
+        type: "item.completed",
+        payload: {
+          itemType: "assistant_message",
+          status: "completed",
+          detail: segment.text,
+        },
+      });
+    });
+
     const settleTurn = Effect.fn("settleTurn")(function* (
       context: PiSessionContext,
       turnId: TurnId,
@@ -533,28 +568,16 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       context.interruptedTurnIds.delete(turnId);
       context.agentRunTurnIds.delete(turnId);
       context.retryPendingTurnIds.delete(turnId);
-      const assistantText = context.assistantTextByTurn.get(turnId);
-      context.assistantTextByTurn.delete(turnId);
 
       yield* updateSession(context, { status: "ready" }, { clearActiveTurnId: true });
 
-      if (outcome.kind === "completed" && assistantText !== undefined) {
-        // pi streams assistant text as deltas but does not emit a terminal
-        // item event, so close the message here or the UI keeps a spinner.
-        yield* emit({
-          ...(yield* buildEventBase({
-            threadId: context.threadId,
-            turnId,
-            itemId: `assistant-${turnId}`,
-          })),
-          type: "item.completed",
-          payload: {
-            itemType: "assistant_message",
-            status: "completed",
-            ...(assistantText.trim().length > 0 ? { detail: assistantText } : {}),
-          },
-        });
+      if (outcome.kind === "completed") {
+        // The final run's last message may not have reached its `message_end`
+        // (interrupt race, dropped event); close it here so the UI does not
+        // keep a spinner over an open assistant message.
+        yield* closeOpenAssistantSegment(context, turnId, raw);
       }
+      context.assistantSegmentsByTurn.delete(String(turnId));
 
       yield* emit({
         ...(yield* buildEventBase({ threadId: context.threadId, turnId, raw })),
@@ -663,17 +686,22 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           if (delta === undefined || delta.length === 0 || streamKind === undefined) {
             return;
           }
+          // Track the open message (and its segment id) only for visible text;
+          // thinking deltas stream but never become their own message.
+          let segmentItemId: string | undefined;
           if (turnId !== undefined && streamKind === "assistant_text") {
-            context.assistantTextByTurn.set(
-              turnId,
-              (context.assistantTextByTurn.get(turnId) ?? "") + delta,
+            const segment = piAppendAssistantDelta(
+              context.assistantSegmentsByTurn,
+              String(turnId),
+              delta,
             );
+            segmentItemId = piAssistantSegmentItemId(String(turnId), segment.segmentIndex);
           }
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.threadId,
               turnId,
-              itemId: turnId ? `assistant-${turnId}` : undefined,
+              ...(segmentItemId !== undefined ? { itemId: segmentItemId } : {}),
               raw,
             })),
             type: "content.delta",
@@ -683,14 +711,23 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
 
         case "message_end": {
-          // Only assistant messages need a terminal item event, and the turn
-          // settle already emits it. Tool results arrive via
-          // `tool_execution_end`, so nothing to do here.
+          // pi's message boundary is where the UI needs a turn separator: each
+          // assistant message closes here as its own item, so the tool rows
+          // that follow land between messages instead of inside one bubble.
+          if (turnId !== undefined) {
+            yield* closeOpenAssistantSegment(context, turnId, raw);
+          }
           return;
         }
 
         case "tool_execution_start": {
           if (event.toolCallId === undefined) return;
+          // Defensive boundary: pi normally closes the assistant message with
+          // `message_end` before executing its tool call, but a missing event
+          // must not bleed the tool row into the message bubble.
+          if (turnId !== undefined) {
+            yield* closeOpenAssistantSegment(context, turnId, raw);
+          }
           context.pendingToolArgs.set(event.toolCallId, event.args);
           yield* emit({
             ...(yield* buildEventBase({
@@ -805,10 +842,13 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             isRecord(last) && typeof last.stopReason === "string" ? last.stopReason : undefined;
           // Recover final text when streaming was disabled or a delta was
           // dropped; otherwise the accumulated deltas already hold it.
-          if (isRecord(last) && context.assistantTextByTurn.get(turnId) === undefined) {
+          if (
+            isRecord(last) &&
+            !piTurnHasAssistantText(context.assistantSegmentsByTurn, String(turnId))
+          ) {
             const text = piAssistantText(piContentBlocks(last.content));
             if (text.length > 0) {
-              context.assistantTextByTurn.set(turnId, text);
+              piAppendAssistantDelta(context.assistantSegmentsByTurn, String(turnId), text);
             }
           }
           yield* settleTurn(context, turnId, { kind: "completed", stopReason }, raw);
@@ -1043,7 +1083,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         connection,
         sessionFile: state.sessionFile,
         activeTurnId: undefined,
-        assistantTextByTurn: new Map(),
+        assistantSegmentsByTurn: new Map(),
         pendingExtensionUi: new Map(),
         sessionApprovedTools: new Set(),
         pendingToolArgs: new Map(),
