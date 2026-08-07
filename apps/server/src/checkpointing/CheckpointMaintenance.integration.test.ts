@@ -30,6 +30,8 @@ import * as RewindService from "../rewind/RewindService.ts";
 import * as RewindStore from "../rewind/RewindStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
+import * as ThreadPlanProgress from "../orchestration/ThreadPlanProgress.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import * as VcsProcess from "../vcs/VcsProcess.ts";
 
@@ -72,6 +74,8 @@ const makeTestLayer = (
     ),
     Layer.provideMerge(VcsProcessTestLayer),
     Layer.provideMerge(VcsDriverTestLayer),
+    Layer.provideMerge(ThreadBackgroundLiveness.layer),
+    Layer.provideMerge(ThreadPlanProgress.layer),
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), { prefix: "t3-checkpoint-maintenance-test-" }),
     ),
