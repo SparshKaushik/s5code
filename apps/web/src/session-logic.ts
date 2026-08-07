@@ -1289,6 +1289,7 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   const item = asRecord(data?.item);
   const itemResult = asRecord(item?.result);
   const itemInput = asRecord(item?.input);
+  const rawOutput = asRecord(data?.rawOutput);
   const itemType = asTrimmedString(payload?.itemType);
   const detail = asTrimmedString(payload?.detail);
   const candidates: unknown[] = [
@@ -1296,6 +1297,7 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
     itemInput?.command,
     itemResult?.command,
     data?.command,
+    rawOutput?.command,
     itemType === "command_execution" && detail ? stripTrailingExitCode(detail).output : null,
   ];
 
@@ -1380,9 +1382,19 @@ function summarizeToolRawOutput(payload: Record<string, unknown> | null): string
     return summarizeToolTextOutput(content);
   }
 
+  const output = asTrimmedString(rawOutput.output);
+  if (output) {
+    return summarizeToolTextOutput(output);
+  }
+
   const stdout = asTrimmedString(rawOutput.stdout);
   if (stdout) {
     return summarizeToolTextOutput(stdout);
+  }
+
+  const command = asTrimmedString(rawOutput.command);
+  if (command) {
+    return summarizeToolTextOutput(command);
   }
 
   return null;
@@ -1480,8 +1492,39 @@ function pushChangedFile(target: string[], seen: Set<string>, value: unknown) {
   target.push(normalized);
 }
 
+/** Normalize an ACP resource/link `uri` to a local file path when it names one. */
+function normalizeChangedFileUri(value: unknown): string | undefined {
+  const raw = asTrimmedString(value);
+  if (!raw) {
+    return undefined;
+  }
+  let path = raw;
+  if (path.startsWith("file://")) {
+    path = path.slice("file://".length);
+  } else if (path.startsWith("zed://")) {
+    try {
+      path = new URL(path).searchParams.get("path") ?? "";
+    } catch {
+      return undefined;
+    }
+  } else if (/^[a-z][a-z0-9+.-]*:/iu.test(path)) {
+    return undefined;
+  }
+  const queryIndex = path.search(/[?#]/u);
+  if (queryIndex >= 0) {
+    path = path.slice(0, queryIndex);
+  }
+  let normalized: string;
+  try {
+    normalized = decodeURIComponent(path.trim());
+  } catch {
+    normalized = path.trim();
+  }
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function collectChangedFiles(value: unknown, target: string[], seen: Set<string>, depth: number) {
-  if (depth > 4 || target.length >= 12) {
+  if (depth > 6 || target.length >= 12) {
     return;
   }
   if (Array.isArray(value)) {
@@ -1505,8 +1548,13 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
   pushChangedFile(target, seen, record.filename);
   pushChangedFile(target, seen, record.newPath);
   pushChangedFile(target, seen, record.oldPath);
+  pushChangedFile(target, seen, normalizeChangedFileUri(record.uri));
 
   for (const nestedKey of [
+    "content",
+    "locations",
+    "rawInput",
+    "rawOutput",
     "item",
     "result",
     "input",
