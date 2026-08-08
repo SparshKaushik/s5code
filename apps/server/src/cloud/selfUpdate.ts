@@ -44,6 +44,12 @@ export function resolveServerSelfUpdateCapability(input: {
   return input.launcherManaged ? ("boot-service" as const) : null;
 }
 
+export function advertiseServerSelfUpdateCapability(
+  capability: ServerSelfUpdateCapability | null,
+): ServerSelfUpdateCapability | null {
+  return capability === "binary" ? ("boot-service" as const) : capability;
+}
+
 export class ServerSelfUpdate extends Context.Service<
   ServerSelfUpdate,
   {

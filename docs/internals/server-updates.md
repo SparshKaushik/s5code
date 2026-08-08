@@ -58,7 +58,10 @@ applies.
 ## Release Binary Updates
 
 A release binary (`scripts/build-server-binary.ts`, `bun build --compile`) has no npm tree to stage
-into and no launcher, so it takes a separate path and advertises the `binary` capability.
+into and no launcher, so it takes a separate path. Internally it selects the `binary` update method
+from runtime identity; the public environment descriptor still advertises `boot-service` until
+production `relay.t3.codes` (and app clients) decode the `binary` capability — otherwise link-proof
+JWTs fail schema validation as `environment_link_proof_invalid`.
 
 It recognizes itself from two facts, both required: `process.argv[1]` starts with `/$bunfs/` (Bun's
 virtual entry point, the only reliable standalone signal on the pinned Bun), and the build inlined

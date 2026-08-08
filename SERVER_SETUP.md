@@ -111,7 +111,9 @@ systemctl --user status t3code.service
 The binary updates **itself**. When a client notices a version mismatch it shows
 **Update server**; the binary then downloads the matching release asset for its
 own version and arch, runs `--version` on the download to prove it works, swaps
-itself with an atomic `rename`, and restarts.
+itself with an atomic `rename`, and restarts. (The public descriptor advertises
+`boot-service` for T3 Connect / app.t3.codes schema compatibility; the update
+RPC still uses the binary download path.)
 
 Under any systemd unit (the binary detects it via `INVOCATION_ID`, which
 systemd sets for every unit) the binary exits and `Restart=always` starts the

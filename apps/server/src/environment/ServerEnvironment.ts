@@ -11,7 +11,10 @@ import * as Schema from "effect/Schema";
 
 import packageJson from "../../package.json" with { type: "json" };
 import { ServerBinaryRuntime } from "../cloud/binaryRuntime.ts";
-import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
+import {
+  advertiseServerSelfUpdateCapability,
+  resolveServerSelfUpdateCapability,
+} from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -130,11 +133,13 @@ export const make = Effect.gen(function* () {
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
   const launcher = yield* resolveServiceLauncherMode();
   const binaryIdentity = yield* ServerBinaryRuntime;
-  const serverSelfUpdate = resolveServerSelfUpdateCapability({
-    desktopManaged: serverConfig.mode === "desktop",
-    launcherManaged: launcher.managed,
-    releaseBinary: Option.isSome(binaryIdentity),
-  });
+  const serverSelfUpdate = advertiseServerSelfUpdateCapability(
+    resolveServerSelfUpdateCapability({
+      desktopManaged: serverConfig.mode === "desktop",
+      launcherManaged: launcher.managed,
+      releaseBinary: Option.isSome(binaryIdentity),
+    }),
+  );
 
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
@@ -152,7 +157,6 @@ export const make = Effect.gen(function* () {
       threadPinning: true,
       threadTitleRegeneration: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
-      // Both self-updating paths stream download/install progress.
       ...(serverSelfUpdate === "boot-service" || serverSelfUpdate === "binary"
         ? { serverSelfUpdateProgress: true }
         : {}),

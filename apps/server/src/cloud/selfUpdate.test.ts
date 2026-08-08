@@ -190,3 +190,13 @@ it("prefers the release-binary path over the launcher, and desktop over both", (
     }),
   ).toBeNull();
 });
+
+it("advertises release-binary servers as boot-service for production relay schema compatibility", () => {
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("binary")).toBe("boot-service");
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("boot-service")).toBe("boot-service");
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("desktop-managed")).toBe(
+    "desktop-managed",
+  );
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("respawn")).toBe("respawn");
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability(null)).toBeNull();
+});
