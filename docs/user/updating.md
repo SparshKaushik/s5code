@@ -22,11 +22,11 @@ The update does not remove saved threads, settings, or project files.
 
 ## Choose the Action You See
 
-| Action                     | What to do                                                                                                                                                                  |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Update server**          | Available for the S5 Code Linux background service. Select the button and leave S5 Code open while it prepares, tests, restarts, and reconnects.                            |
-| **Update the desktop app** | Open the S5 Code desktop app on the machine that runs the server and install the app update there. Reopen it if needed.                                                     |
-| **Copy update command**    | Copy the command, open a terminal on the server machine, stop the current S5 Code server, and relaunch it with the copied command and any startup options you normally use. |
+| Action                     | What to do                                                                                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Update server**          | Available for the S5 Code Linux background service and for precompiled Linux server binaries. Select the button and leave S5 Code open while it prepares, tests, restarts, and reconnects. |
+| **Update the desktop app** | Open the S5 Code desktop app on the machine that runs the server and install the app update there. Reopen it if needed.                                                                    |
+| **Copy update command**    | Copy the command, open a terminal on the server machine, stop the current S5 Code server, and relaunch it with the copied command and any startup options you normally use.                |
 
 The available action depends on how that server was started. S5 Code does not update connected
 servers silently in the background.
@@ -34,6 +34,12 @@ servers silently in the background.
 An older background-service launcher may ask you to run the exact
 `npx t3@<version> service update` command on the server machine. That one local update installs the
 rollback support needed for later remote updates, including versions that change the database.
+
+A **precompiled Linux server binary** updates the same way through that button: it downloads the
+release build for its own version and processor, checks that the download runs and reports the
+version you asked for, then replaces itself and restarts. If the download is missing, incomplete,
+or built for a different processor, the update stops and the server keeps running the version it
+already had.
 
 After selecting **Update**, the notice becomes a live status line: **Downloading…** while the new
 version is fetched and verified, then **Restarting…** while the server restarts into it. The same

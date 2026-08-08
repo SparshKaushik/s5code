@@ -100,6 +100,11 @@ describe("versionSkew", () => {
     expect(serverUpdateGuidance("respawn", "Remote server")).toBe(
       "Update the Remote server so they stay in sync.",
     );
+    // A release binary replaces its own executable, so it offers the same
+    // one-click action as the launcher-backed service.
+    expect(serverUpdateGuidance("binary", "Remote server")).toBe(
+      "Update the Remote server so they stay in sync.",
+    );
     expect(serverUpdateGuidance("desktop-managed", "Desktop server")).toBe(
       "The Desktop server is run by the S5 Code desktop app on its machine — update the desktop app there to sync them.",
     );

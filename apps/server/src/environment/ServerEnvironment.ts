@@ -5,10 +5,12 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import packageJson from "../../package.json" with { type: "json" };
+import { ServerBinaryRuntime } from "../cloud/binaryRuntime.ts";
 import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
@@ -127,9 +129,11 @@ export const make = Effect.gen(function* () {
   const cwdBaseName = path.basename(serverConfig.cwd).trim();
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
   const launcher = yield* resolveServiceLauncherMode();
+  const binaryIdentity = yield* ServerBinaryRuntime;
   const serverSelfUpdate = resolveServerSelfUpdateCapability({
     desktopManaged: serverConfig.mode === "desktop",
     launcherManaged: launcher.managed,
+    releaseBinary: Option.isSome(binaryIdentity),
   });
 
   const descriptor: ExecutionEnvironmentDescriptor = {
@@ -148,7 +152,10 @@ export const make = Effect.gen(function* () {
       threadPinning: true,
       threadTitleRegeneration: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
-      ...(serverSelfUpdate === "boot-service" ? { serverSelfUpdateProgress: true } : {}),
+      // Both self-updating paths stream download/install progress.
+      ...(serverSelfUpdate === "boot-service" || serverSelfUpdate === "binary"
+        ? { serverSelfUpdateProgress: true }
+        : {}),
     },
   };
 

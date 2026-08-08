@@ -21,9 +21,10 @@ export const ExecutionEnvironmentPlatform = Schema.Struct({
 export type ExecutionEnvironmentPlatform = typeof ExecutionEnvironmentPlatform.Type;
 
 /** How a server can replace itself with another version when asked over RPC.
-    New servers only advertise the stable launcher-backed "boot-service" path;
+    New servers only advertise the stable launcher-backed "boot-service" path
+    or, for precompiled single-file server binaries, "binary";
     "respawn" remains decodable for compatibility with older servers. */
-export const ServerSelfUpdateMethod = Schema.Literals(["boot-service", "respawn"]);
+export const ServerSelfUpdateMethod = Schema.Literals(["boot-service", "binary", "respawn"]);
 export type ServerSelfUpdateMethod = typeof ServerSelfUpdateMethod.Type;
 
 /** What update path a client should offer for a server: one of the RPC
@@ -32,6 +33,7 @@ export type ServerSelfUpdateMethod = typeof ServerSelfUpdateMethod.Type;
     app on that machine is the only way to update the server. */
 export const ServerSelfUpdateCapability = Schema.Literals([
   "boot-service",
+  "binary",
   "respawn",
   "desktop-managed",
 ]);

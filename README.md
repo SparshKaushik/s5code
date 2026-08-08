@@ -33,6 +33,16 @@ This will launch S5 Code's backend on your machine as well as the local web app 
 
 Tip: Use `npx t3@latest --help` for the full CLI reference.
 
+### Precompiled server binary (Linux, no Node or pnpm)
+
+For headless servers, each [GitHub Release](https://github.com/pingdotgg/t3code/releases)
+ships a precompiled, standalone Linux binary (`s5code-server-<version>-linux-x64`
+and `-arm64`) built with `bun build --compile`. Download it, `chmod +x`, and run
+`./s5code-server serve` — no Node.js, pnpm, vite-plus, or `node_modules` needed.
+It updates itself from GitHub Releases when you select **Update server** in a
+client. The binary serves the API and WebSocket; connect a UI from app.t3.codes,
+desktop, or mobile. See `SERVER_SETUP.md` for the download-and-run systemd flow.
+
 ### Desktop app
 
 Install the latest version of the desktop app from [GitHub Releases](https://github.com/pingdotgg/t3code/releases), or from your favorite package registry:

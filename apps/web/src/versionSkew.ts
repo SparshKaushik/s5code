@@ -70,6 +70,7 @@ export function serverUpdateGuidance(
 ): string {
   switch (capability) {
     case "boot-service":
+    case "binary":
     case "respawn":
       return `Update the ${serverLabel} so they stay in sync.`;
     case "desktop-managed":
