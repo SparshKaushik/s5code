@@ -341,9 +341,6 @@ export const ThreadComposer = memo(function ThreadComposer(props: ThreadComposer
       ) ?? null
     );
   }, [props.serverConfig, props.selectedThread.modelSelection.instanceId]);
-  // Providers advertise whether a plan/default toggle means anything for them.
-  // Absent flag means yes, matching web and legacy snapshots.
-  const showInteractionModeToggle = selectedProviderStatus?.showInteractionModeToggle ?? true;
 
   // ── Trigger detection ────────────────────────────────────
   const [composerSelection, setComposerSelection] = useState(() => ({

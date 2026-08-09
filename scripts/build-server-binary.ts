@@ -14,6 +14,8 @@ import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
 
+import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 
 /**
@@ -305,7 +307,9 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
 
   yield* Effect.log("[server-binary] Done.").pipe(Effect.annotateLogs({ artifact: outfile }));
 
-  if (process.platform === "linux" && process.arch === options.arch) {
+  const hostPlatform = yield* HostProcessPlatform;
+  const hostArch = yield* HostProcessArchitecture;
+  if (hostPlatform === "linux" && hostArch === options.arch) {
     yield* Effect.log(`[server-binary] Smoke-testing ${outfile} --version...`);
     yield* runCommand("server binary --version", outfile, ["--version"], {
       verbose: options.verbose,
