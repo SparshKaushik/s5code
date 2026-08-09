@@ -1,7 +1,7 @@
 import type { UsageCatalogModelId, UsageModelAlias } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { applyTag, clearTag, type UsageModelTagTarget } from "./usageTags";
+import { applyTag, clearTag, type UsageModelTagTarget } from "./usageTags.ts";
 
 const OPUS = "anthropic/claude-opus-5" as UsageCatalogModelId;
 const SONNET = "anthropic/claude-sonnet-5" as UsageCatalogModelId;

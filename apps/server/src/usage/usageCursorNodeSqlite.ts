@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeSqlite from "node:sqlite";
 
 export function openCursorAuthDatabase(databasePath: string) {

@@ -12,7 +12,7 @@
 import { useDeferredValue, useState } from "react";
 
 import { useUsageModelSearch } from "../../state/usage";
-import type { UsageModelTagTarget } from "../../usage/usageTags";
+import type { UsageModelTagTarget } from "@t3tools/shared/usageTags";
 import { Button } from "../ui/button";
 import {
   Dialog,
