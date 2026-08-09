@@ -304,6 +304,13 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
   }
 
   yield* Effect.log("[server-binary] Done.").pipe(Effect.annotateLogs({ artifact: outfile }));
+
+  if (process.platform === "linux" && process.arch === options.arch) {
+    yield* Effect.log(`[server-binary] Smoke-testing ${outfile} --version...`);
+    yield* runCommand("server binary --version", outfile, ["--version"], {
+      verbose: options.verbose,
+    });
+  }
 });
 
 /** Substring search over raw bytes, so a 100MB binary needs no string copy. */

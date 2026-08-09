@@ -15,12 +15,18 @@
 import * as NodeCrypto from "node:crypto";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
-import * as NodeSqlite from "node:sqlite";
 
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 
 import { totalTokens, type UsageRecord } from "./usageTranscripts.ts";
+
+type CursorAuthDatabase = {
+  readonly prepare: (sql: string) => {
+    readonly get: () => unknown;
+  };
+  readonly close: () => void;
+};
 
 export const CURSOR_USAGE_URL = "https://cursor.com/api/dashboard/get-filtered-usage-events";
 export const CURSOR_USAGE_PAGE_SIZE = 1_000;
@@ -99,14 +105,14 @@ export function resolveCursorAuthDatabasePath(
   return NodePath.posix.join(base, "Cursor", "User", "globalStorage", "state.vscdb");
 }
 
-/**
- * Reads Cursor.app's access token without mutating or copying its database.
- * Returns `null` when Cursor is absent, signed out, or the token is expired.
- */
-export function readCursorAppSession(nowMs: number, databasePath: string): CursorAppSession | null {
-  let database: NodeSqlite.DatabaseSync | null = null;
+export async function readCursorAppSession(
+  nowMs: number,
+  databasePath: string,
+): Promise<CursorAppSession | null> {
+  let database: CursorAuthDatabase | null = null;
   try {
-    database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+    const { openCursorAuthDatabase } = await import("./usageCursorNodeSqlite.ts");
+    database = openCursorAuthDatabase(databasePath);
     const row = database
       .prepare("SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken' LIMIT 1")
       .get() as { readonly value?: unknown } | undefined;

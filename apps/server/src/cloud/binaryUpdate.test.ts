@@ -203,4 +203,36 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
       }),
     ),
   );
+
+  it.effect("includes process output when the downloaded binary exits non-zero", () =>
+    withBinary(({ identity }) =>
+      Effect.gen(function* () {
+        const error = yield* prepareServerBinaryUpdate({
+          identity,
+          targetVersion: "1.2.3",
+          reportProgress: () => Effect.void,
+        }).pipe(
+          Effect.provideService(HttpClient.HttpClient, makeHttpClient(REPLACEMENT_BYTES)),
+          Effect.provideService(
+            ProcessRunner.ProcessRunner,
+            ProcessRunner.ProcessRunner.of({
+              run: () =>
+                Effect.succeed({
+                  stdout: "",
+                  stderr: "error: No such built-in module: node:sqlite\n",
+                  code: ChildProcessSpawner.ExitCode(1),
+                  timedOut: false,
+                  stdoutTruncated: false,
+                  stderrTruncated: false,
+                }),
+            }),
+          ),
+          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.flip,
+        );
+        expect(error.step).toBe("validate");
+        expect(error.detail).toContain("node:sqlite");
+      }),
+    ),
+  );
 });

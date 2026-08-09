@@ -436,7 +436,7 @@ export const make = Effect.gen(function* () {
         NodeOS.homedir(),
         hostEnvironment,
       );
-      const session = yield* Effect.sync(() => readCursorAppSession(nowMs, databasePath));
+      const session = yield* Effect.promise(() => readCursorAppSession(nowMs, databasePath));
       if (session === null) {
         return {
           records: [] as readonly UsageRecord[],

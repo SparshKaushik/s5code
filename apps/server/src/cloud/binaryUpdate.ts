@@ -177,9 +177,15 @@ export const prepareServerBinaryUpdate = Effect.fn("cloud.binary_update.prepare"
           Effect.mapError((cause) => fail("validate", "The downloaded binary did not run.", cause)),
         );
       if (reported.code !== 0) {
+        const detail = [reported.stderr.trim(), reported.stdout.trim()]
+          .filter((part) => part.length > 0)
+          .join("\n")
+          .slice(0, 500);
         return yield* fail(
           "validate",
-          `The downloaded binary exited with code ${String(reported.code)} instead of reporting its version.`,
+          detail.length > 0
+            ? `The downloaded binary exited with code ${String(reported.code)} instead of reporting its version: ${detail}`
+            : `The downloaded binary exited with code ${String(reported.code)} instead of reporting its version.`,
         );
       }
       if (!reported.stdout.includes(input.targetVersion)) {
