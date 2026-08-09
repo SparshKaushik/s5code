@@ -3,23 +3,32 @@
 The Usage page shows what your coding agents have actually consumed: tokens, cost, and which
 models did the work.
 
-Numbers come from the agent CLIs' own session transcripts on disk, not from S5 Code's history.
-Work you did outside S5 Code counts too, and usage from before you installed S5 Code is already
-there the first time you open the page.
+Numbers come from the agent CLIs' own session transcripts on disk, plus Cursor's account-wide
+usage API. They do not come from S5 Code's history. Work you did outside S5 Code counts too, and
+usage from before you installed S5 Code is already there the first time you open the page.
 
 Cost is what the same work would cost at published API rates. It is not what you were billed. If
 you are on a subscription, treat it as the value you got out of it rather than a statement.
 
 ## What is counted
 
-| Agent       | Read from              |
-| ----------- | ---------------------- |
-| Codex       | `~/.codex/sessions`    |
-| Claude Code | `~/.claude/projects`   |
-| pi          | `~/.pi/agent/sessions` |
+| Agent       | Read from                                                     |
+| ----------- | ------------------------------------------------------------- |
+| Codex       | `~/.codex/sessions`                                           |
+| Claude Code | `~/.claude/projects`                                          |
+| Cursor      | `cursor.com` using the signed-in Cursor desktop app's session |
+| pi          | `~/.pi/agent/sessions`                                        |
+
+Cursor usage is account-wide, so it includes work from every machine signed into that Cursor
+account. S5 Code reads Cursor's local auth database read-only, sends the derived first-party
+session only to `cursor.com`, and never sends it to a client. If several environments use the same
+Cursor account, that account is counted once.
 
 If you connect several environments, the page adds them together. Two environments sharing one
-transcript directory are counted once, and the page says so.
+transcript directory, or the same Cursor account, are counted once and the page says so.
+
+Cursor's usage endpoint requires a valid desktop-app session. If Cursor is signed out or that
+session has expired, sign in or restart Cursor, then refresh the Usage page.
 
 ## Where cost comes from
 

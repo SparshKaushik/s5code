@@ -18,12 +18,12 @@ import {
   type UsageCatalogModel,
   type UsageModelSearchInput,
   type UsageModelSearchResult,
-  type UsageProviderKind,
   type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
 } from "@t3tools/contracts";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -34,14 +34,26 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { expandHomePath } from "../pathExpansion.ts";
+import {
+  CURSOR_USAGE_MAX_PAGES,
+  CURSOR_USAGE_PAGE_SIZE,
+  CURSOR_USAGE_URL,
+  parseCursorUsageEvent,
+  parseCursorUsagePage,
+  readCursorAppSession,
+  reconcileCursorUsagePages,
+  resolveCursorAuthDatabasePath,
+  type CursorUsagePage,
+} from "./usageCursor.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
+import type { TranscriptUsageProvider, UsageRecord } from "./usageTranscripts.ts";
 import {
   EMPTY_CATALOG,
   parseModelCatalog,
@@ -61,8 +73,6 @@ import {
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
-
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
@@ -71,6 +81,8 @@ const LITELLM_RATES_URL =
  * that can price a gateway's model names. Used for pi and for every user tag.
  */
 const MODELS_DEV_CATALOG_URL = "https://models.dev/api.json";
+
+const CURSOR_USAGE_TTL_MS = 60 * 60 * 1000;
 
 /** Most a catalog search returns. The picker is a list, not a database browser. */
 const MODEL_SEARCH_LIMIT = 50;
@@ -145,6 +157,8 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const hostPlatform = yield* HostProcessPlatform;
+  const hostEnvironment = yield* HostProcessEnvironment;
 
   const fileCache: ScanCache = new Map();
   let cacheDirty = false;
@@ -158,6 +172,14 @@ export const make = Effect.gen(function* () {
   let catalog: ModelCatalog = EMPTY_CATALOG;
   let catalogFetchedAtMs: number | null = null;
   let catalogStatus: UsageSummary["pricing"]["status"] = "unavailable";
+  const cursorUsageCache = new Map<
+    string,
+    {
+      readonly fetchedAtMs: number;
+      readonly records: readonly UsageRecord[];
+      readonly malformedRecords: number;
+    }
+  >();
 
   const loadCachedRates = Effect.fn("UsageService.loadCachedRates")(function* () {
     if (ratesFetchedAtMs !== null) return;
@@ -310,7 +332,7 @@ export const make = Effect.gen(function* () {
       : path.join(NodeOS.homedir(), ".pi", "agent");
   };
 
-  /** Resolves the transcript directory for each provider. */
+  /** Resolves transcript directories. Cursor is fetched separately from its account-wide API. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
     // A settings failure must surface as an error: swallowing it here would
     // present "zero usage from every provider" as a valid answer.
@@ -379,7 +401,7 @@ export const make = Effect.gen(function* () {
     filePath: string,
     size: number,
     mtimeMs: number,
-    provider: UsageProviderKind,
+    provider: TranscriptUsageProvider,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
@@ -406,6 +428,146 @@ export const make = Effect.gen(function* () {
       cacheDirty = true;
       return records;
     });
+
+  const readCursorUsage = Effect.fn("UsageService.readCursorUsage")(
+    function* (input: UsageSummaryInput, nowMs: number) {
+      const databasePath = resolveCursorAuthDatabasePath(
+        hostPlatform,
+        NodeOS.homedir(),
+        hostEnvironment,
+      );
+      const session = yield* Effect.sync(() => readCursorAppSession(nowMs, databasePath));
+      if (session === null) {
+        return {
+          records: [] as readonly UsageRecord[],
+          source: {
+            fingerprint: {
+              hostId: NodeOS.hostname(),
+              provider: "cursor" as const,
+              resolvedHomePath: databasePath,
+              volumeId: "",
+            },
+            status: "missing" as const,
+            scannedFiles: 0,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: 0,
+            message: "Cursor is not installed, signed in, or its session has expired.",
+          } satisfies UsageSource,
+        };
+      }
+
+      const sourceId = `cursor-account:${session.accountFingerprint}`;
+      const cacheKey = `${session.accountFingerprint}\u0000${input.sinceDay}\u0000${input.untilDay}`;
+      const cached = cursorUsageCache.get(cacheKey);
+      let records: readonly UsageRecord[];
+      let malformedRecords: number;
+
+      if (cached !== undefined && nowMs - cached.fetchedAtMs < CURSOR_USAGE_TTL_MS) {
+        records = cached.records;
+        malformedRecords = cached.malformedRecords;
+      } else {
+        const pages: CursorUsagePage[] = [];
+        let completed = false;
+        for (let page = 1; page <= CURSOR_USAGE_MAX_PAGES; page += 1) {
+          const document = yield* HttpClientRequest.post(CURSOR_USAGE_URL).pipe(
+            HttpClientRequest.setHeaders({
+              accept: "application/json",
+              cookie: session.cookieHeader,
+              origin: "https://cursor.com",
+            }),
+            HttpClientRequest.bodyJsonUnsafe({
+              page,
+              pageSize: CURSOR_USAGE_PAGE_SIZE,
+              startDate: String(Date.parse(`${input.sinceDay}T00:00:00Z`) - MTIME_SLACK_MS),
+              endDate: String(
+                Date.parse(`${input.untilDay}T00:00:00Z`) +
+                  24 * 60 * 60 * 1000 -
+                  1 +
+                  MTIME_SLACK_MS,
+              ),
+            }),
+            httpClient.execute,
+            Effect.flatMap(HttpClientResponse.filterStatusOk),
+            Effect.flatMap((response) => response.json),
+            Effect.timeout(30_000),
+          );
+          const parsed = parseCursorUsagePage(document);
+          if (parsed === null) {
+            return yield* new UsageReadError({
+              reason: "scanFailed",
+              detail: "Cursor returned an unrecognised usage response.",
+            });
+          }
+          pages.push(parsed);
+          if (parsed.events.length < CURSOR_USAGE_PAGE_SIZE) {
+            completed = true;
+            break;
+          }
+        }
+
+        const events = yield* Effect.try({
+          try: () => reconcileCursorUsagePages(pages, completed),
+          catch: (cause) =>
+            new UsageReadError({
+              reason: "scanFailed",
+              detail: "Cursor usage pagination was incomplete.",
+              cause,
+            }),
+        });
+        const parsedRecords: UsageRecord[] = [];
+        malformedRecords = 0;
+        for (const event of events) {
+          const parsed = parseCursorUsageEvent(event);
+          if (parsed._tag === "record") parsedRecords.push(parsed.record);
+          if (parsed._tag === "malformed") malformedRecords += 1;
+        }
+        records = parsedRecords;
+        cursorUsageCache.set(cacheKey, { fetchedAtMs: nowMs, records, malformedRecords });
+      }
+
+      return {
+        records,
+        source: {
+          fingerprint: {
+            hostId: NodeOS.hostname(),
+            provider: "cursor" as const,
+            resolvedHomePath: sourceId,
+            volumeId: "",
+          },
+          status: "ok" as const,
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords,
+          distinctSessions: 0,
+          message: "Account-wide usage from cursor.com.",
+        } satisfies UsageSource,
+      };
+    },
+    Effect.catchCause((cause) =>
+      Effect.succeed({
+        records: [] as readonly UsageRecord[],
+        source: {
+          fingerprint: {
+            hostId: NodeOS.hostname(),
+            provider: "cursor" as const,
+            resolvedHomePath: resolveCursorAuthDatabasePath(
+              hostPlatform,
+              NodeOS.homedir(),
+              hostEnvironment,
+            ),
+            volumeId: "",
+          },
+          status: "failed" as const,
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message: `Cursor usage could not be read: ${String(Cause.squash(cause)).slice(0, 180)}`,
+        } satisfies UsageSource,
+      }),
+    ),
+  );
 
   const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
     if (input.sinceDay > input.untilDay) {
@@ -441,6 +603,14 @@ export const make = Effect.gen(function* () {
     });
 
     const sources: UsageSource[] = [];
+    const cursor = yield* readCursorUsage(input, startedAtMs);
+    const cursorSessionIds = new Set<string>();
+    for (const record of cursor.records) {
+      if (aggregator.add(record) && record.sessionId.length > 0) {
+        cursorSessionIds.add(record.sessionId);
+      }
+    }
+    sources.push({ ...cursor.source, distinctSessions: cursorSessionIds.size });
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
 

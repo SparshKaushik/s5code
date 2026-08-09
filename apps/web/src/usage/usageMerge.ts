@@ -88,14 +88,21 @@ export interface MergedUsage {
 }
 
 /**
- * Two sources are the same physical transcript directory only when host,
- * provider, path and filesystem identity all agree.
+ * Two transcript sources are the same physical directory only when host,
+ * provider, path and filesystem identity all agree. Cursor sources are
+ * account-wide, so their hashed account identity matches across hosts.
  *
  * `volumeId` is what stops two machines that happen to share a hostname and a
  * home path, which is every Mac in a fleet, from collapsing into one source and
  * having one of them silently dropped.
  */
 function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
+  // Cursor's dashboard is account-wide rather than machine-local. Two remote
+  // environments signed into the same account therefore own one source even
+  // when their hostnames differ; the hashed account id is in resolvedHomePath.
+  if (fingerprint.provider === "cursor") {
+    return [fingerprint.provider, fingerprint.resolvedHomePath].join("\u0000");
+  }
   return [
     fingerprint.hostId,
     fingerprint.provider,

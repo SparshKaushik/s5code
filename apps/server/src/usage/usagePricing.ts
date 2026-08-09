@@ -4,7 +4,8 @@
  * Two rate sources, because two shapes of problem. Claude Code and Codex each
  * speak to one vendor under names LiteLLM already publishes, which is the table
  * `ccusage` prices against and the one that keeps those numbers stable. pi
- * speaks to gateways whose names only models.dev knows, provider-scoped. The
+ * speaks to gateways whose names only models.dev knows, provider-scoped.
+ * Cursor reports API-equivalent cost on each dashboard event. The
  * {@link UsagePricer} picks per provider and applies the user's tags over both.
  *
  * Everything here is pure: fetching and caching the tables lives in

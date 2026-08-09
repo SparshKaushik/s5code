@@ -3,7 +3,8 @@
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
  * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
- * `~/.pi/agent/sessions/**\/*.jsonl`) rather than relying on T3 Code's own
+ * `~/.pi/agent/sessions/**\/*.jsonl`) plus Cursor's account-wide dashboard
+ * API rather than relying on T3 Code's own
  * orchestration projections, so usage stays complete even for turns that were
  * never driven through T3 Code. This mirrors the approach `ccusage` takes.
  *
@@ -22,9 +23,9 @@ import { NonNegativeInt, TrimmedNonEmptyString, TrimmedString } from "./baseSche
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 4 as const;
+export const USAGE_CONTRACT_VERSION = 5 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex", "pi"]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "cursor", "pi"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -123,7 +124,7 @@ export const UsageBucket = Schema.Struct({
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
   /**
-   * The upstream API provider, when the transcript names one. pi routes through
+   * The upstream API provider, when the usage source names one. pi routes through
    * gateways, so this is what separates `claude-opus-5` served by a reseller
    * from the same name served by Anthropic. Empty for providers that speak to a
    * single vendor.
@@ -156,7 +157,8 @@ export const UsageBucket = Schema.Struct({
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
- * Identifies the physical transcript directory a source read from.
+ * Identifies the physical transcript directory or remote account a source read
+ * from.
  *
  * Two environments on the same machine (worktree servers, for example) resolve
  * the same provider home and would otherwise double count. The client drops
@@ -165,11 +167,18 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
+  /**
+   * Stable source identity. Local transcript sources carry a filesystem path;
+   * account-wide APIs carry a non-secret account identifier such as
+   * `cursor-account:<hash>`.
+   */
   resolvedHomePath: TrimmedNonEmptyString,
   /**
-   * Filesystem identity of the transcript directory, as `device:inode`.
+   * Filesystem identity of a transcript directory, as `device:inode`. Empty
+   * for remote account sources.
    *
-   * Hostname and path alone are not enough: every Mac in a fleet resolves
+   * Hostname and path alone are not enough for local sources: every Mac in a
+   * fleet resolves
    * `/Users/<user>/.claude`, so two machines that happen to share a hostname
    * would look like one source and have their usage silently dropped. The
    * device/inode pair is stable for two servers reading the same directory and

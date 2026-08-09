@@ -252,6 +252,49 @@ describe("mergeUsage", () => {
     expect(merged.sessions).toBe(1);
   });
 
+  it("deduplicates the same Cursor account across different hosts", () => {
+    const cursorBucket = bucket({ provider: "cursor", model: "composer-2" });
+    const first = {
+      provider: "cursor" as const,
+      hostId: "mac-a",
+      homePath: "cursor-account:abc123",
+      volumeId: "",
+    };
+    const second = { ...first, hostId: "linux-b" };
+    const merged = mergeUsage(
+      [
+        environment("env-a", summary([cursorBucket], [first])),
+        environment("env-b", summary([cursorBucket], [second])),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(10);
+    expect(merged.records).toBe(5);
+    expect(merged.duplicateSources).toHaveLength(1);
+  });
+
+  it("keeps different Cursor accounts separate even on one host", () => {
+    const cursorBucket = bucket({ provider: "cursor", model: "composer-2" });
+    const source = { provider: "cursor" as const, hostId: "mac", volumeId: "" };
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary([cursorBucket], [{ ...source, homePath: "cursor-account:abc123" }]),
+        ),
+        environment(
+          "env-b",
+          summary([cursorBucket], [{ ...source, homePath: "cursor-account:def456" }]),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costUsd).toBe(20);
+    expect(merged.duplicateSources).toHaveLength(0);
+  });
+
   it("returns empty totals with no environments", () => {
     const merged = mergeUsage([], USAGE_CONTRACT_VERSION);
     expect(merged.costUsd).toBe(0);
