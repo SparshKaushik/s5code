@@ -16,5 +16,6 @@ jobs:
         run: |
           mkdir -p project
           cd project
+          printf '%s\n' '{"private":true,"dependencies":{"expo":"55.0.0"}}' > package.json
           printf '%s\n' '{"expo":{"name":"S5 Code","slug":"t3-code","owner":"touchtechclub","extra":{"eas":{"projectId":"cb1e4b79-dfe3-4959-b200-acdc5755170e"}}}}' > app.json
           eas build:view "$EAS_BUILD_ID" --json
