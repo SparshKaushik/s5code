@@ -15,6 +15,9 @@ import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
+  type UsageCatalogModel,
+  type UsageModelSearchInput,
+  type UsageModelSearchResult,
   type UsageProviderKind,
   type UsageSource,
   type UsageSummary,
@@ -37,8 +40,15 @@ import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { expandHomePath } from "../pathExpansion.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
-import { parseRateTable, type RateTable } from "./usagePricing.ts";
+import {
+  EMPTY_CATALOG,
+  parseModelCatalog,
+  searchCatalog,
+  type ModelCatalog,
+} from "./usageModelCatalog.ts";
+import { parseRateTable, UsagePricer, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -55,6 +65,15 @@ import type { UsageRecord } from "./usageTranscripts.ts";
 
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+/**
+ * models.dev's catalog, which is provider-scoped and therefore the only one
+ * that can price a gateway's model names. Used for pi and for every user tag.
+ */
+const MODELS_DEV_CATALOG_URL = "https://models.dev/api.json";
+
+/** Most a catalog search returns. The picker is a list, not a database browser. */
+const MODEL_SEARCH_LIMIT = 50;
 
 /** Rates move rarely; a day-old table keeps the page working offline. */
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
@@ -89,6 +108,9 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    readonly searchModels: (
+      input: UsageModelSearchInput,
+    ) => Effect.Effect<UsageModelSearchResult, UsageReadError>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -113,6 +135,7 @@ export const layerTest = Layer.succeed(
         },
         scanDurationMs: 0,
       }),
+    searchModels: () => Effect.succeed({ models: [] }),
   }),
 );
 
@@ -127,10 +150,91 @@ export const make = Effect.gen(function* () {
   let cacheDirty = false;
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
+  const catalogCachePath = path.join(config.stateDir, "usage-model-catalog.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
+  let catalog: ModelCatalog = EMPTY_CATALOG;
+  let catalogFetchedAtMs: number | null = null;
+  let catalogStatus: UsageSummary["pricing"]["status"] = "unavailable";
+
+  const loadCachedRates = Effect.fn("UsageService.loadCachedRates")(function* () {
+    if (ratesFetchedAtMs !== null) return;
+    const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
+      Effect.flatMap((raw) => decodeRatesCache(raw)),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fromDisk !== null) {
+      const parsed = parseRateTable(fromDisk.document);
+      if (parsed.size > 0) {
+        rates = parsed;
+        ratesFetchedAtMs = fromDisk.fetchedAtMs;
+        ratesStatus = "cached";
+      }
+    }
+  });
+
+  /**
+   * Same shape as the rates cache, but the models.dev document. The two share
+   * a TTL but live in separate files so a corrupted one cannot drag the other
+   * down with it.
+   */
+  const loadCachedCatalog = Effect.fn("UsageService.loadCachedCatalog")(function* () {
+    if (catalogFetchedAtMs !== null) return;
+    const fromDisk = yield* fileSystem.readFileString(catalogCachePath).pipe(
+      Effect.flatMap((raw) => decodeRatesCache(raw)),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fromDisk !== null) {
+      const parsed = parseModelCatalog(fromDisk.document);
+      if (parsed.size > 0) {
+        catalog = parsed;
+        catalogFetchedAtMs = fromDisk.fetchedAtMs;
+        catalogStatus = "cached";
+      }
+    }
+  });
+
+  const fetchRates = Effect.fn("UsageService.fetchRates")(function* () {
+    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(10_000),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fetched === null) return null;
+
+    const parsed = parseRateTable(fetched);
+    if (parsed.size === 0) return null;
+    return { document: fetched, parsed };
+  });
+
+  const fetchCatalog = Effect.fn("UsageService.fetchCatalog")(function* () {
+    const fetched = yield* httpClient.get(MODELS_DEV_CATALOG_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(10_000),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fetched === null) return null;
+
+    const parsed = parseModelCatalog(fetched);
+    if (parsed.size === 0) return null;
+    return { document: fetched, parsed };
+  });
+
+  const persistRates = Effect.fn("UsageService.persistRates")(function* (
+    cachePath: string,
+    fetchedAtMs: number,
+    document: unknown,
+  ) {
+    // A snapshot we cannot write is a slower next start, not a failed read.
+    yield* encodeRatesCache({ fetchedAtMs, document }).pipe(
+      Effect.flatMap((serialized) => fileSystem.writeFileString(cachePath, serialized)),
+      Effect.catchCause(() => Effect.void),
+    );
+  });
 
   /**
    * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
@@ -141,28 +245,10 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
 
-    if (ratesFetchedAtMs === null) {
-      const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
-        Effect.flatMap((raw) => decodeRatesCache(raw)),
-        Effect.catchCause(() => Effect.succeed(null)),
-      );
-      if (fromDisk !== null) {
-        const parsed = parseRateTable(fromDisk.document);
-        if (parsed.size > 0) {
-          rates = parsed;
-          ratesFetchedAtMs = fromDisk.fetchedAtMs;
-          ratesStatus = "cached";
-          if (now - fromDisk.fetchedAtMs < RATES_TTL_MS) return;
-        }
-      }
-    }
+    if (ratesFetchedAtMs === null) yield* loadCachedRates();
+    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
 
-    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(10_000),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
+    const fetched = yield* fetchRates();
     if (fetched === null) {
       // The refresh failed; whatever we are serving is now past its TTL and
       // must not keep claiming to be fresh.
@@ -170,17 +256,32 @@ export const make = Effect.gen(function* () {
       return;
     }
 
-    const parsed = parseRateTable(fetched);
-    if (parsed.size === 0) return;
-
-    rates = parsed;
+    rates = fetched.parsed;
     ratesFetchedAtMs = now;
     ratesStatus = "fresh";
 
-    yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
-      Effect.flatMap((serialized) => fileSystem.writeFileString(ratesCachePath, serialized)),
-      Effect.catchCause(() => Effect.void),
-    );
+    yield* persistRates(ratesCachePath, now, fetched.document);
+  });
+
+  /** Same lifecycle as {@link ensureRates}, for the models.dev catalog. */
+  const ensureCatalog = Effect.fn("UsageService.ensureCatalog")(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    if (catalogFetchedAtMs !== null && now - catalogFetchedAtMs < RATES_TTL_MS) return;
+
+    if (catalogFetchedAtMs === null) yield* loadCachedCatalog();
+    if (catalogFetchedAtMs !== null && now - catalogFetchedAtMs < RATES_TTL_MS) return;
+
+    const fetched = yield* fetchCatalog();
+    if (fetched === null) {
+      if (catalog.size > 0) catalogStatus = "cached";
+      return;
+    }
+
+    catalog = fetched.parsed;
+    catalogFetchedAtMs = now;
+    catalogStatus = "fresh";
+
+    yield* persistRates(catalogCachePath, now, fetched.document);
   });
 
   /**
@@ -195,6 +296,19 @@ export const make = Effect.gen(function* () {
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
       return nestedExists ? nested : path.join(homePath, "projects");
     });
+
+  /**
+   * pi's agent directory, which holds `sessions/` alongside its settings and
+   * credentials. Mirrors `PiLaunch.makePiEnvironment`: the configured
+   * `agentDirPath` is what a spawned pi would see as `PI_CODING_AGENT_DIR`, and
+   * `~/.pi/agent` is pi's own default.
+   */
+  const resolvePiAgentDir = (piSettings: { readonly agentDirPath: string }): string => {
+    const agentDirPath = piSettings.agentDirPath.trim();
+    return agentDirPath.length > 0
+      ? path.resolve(expandHomePath(agentDirPath))
+      : path.join(NodeOS.homedir(), ".pi", "agent");
+  };
 
   /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
@@ -221,6 +335,10 @@ export const make = Effect.gen(function* () {
     return [
       { provider: "claude" as const, dir: claudeDir },
       { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
+      {
+        provider: "pi" as const,
+        dir: path.join(resolvePiAgentDir(settings.providers.pi), "sessions"),
+      },
     ];
   });
 
@@ -299,6 +417,7 @@ export const make = Effect.gen(function* () {
 
     const startedAtMs = yield* Clock.currentTimeMillis;
     yield* ensureRates();
+    yield* ensureCatalog();
     yield* ensureScanCacheLoaded;
 
     const hostId = NodeOS.hostname();
@@ -318,7 +437,7 @@ export const make = Effect.gen(function* () {
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
-      rates,
+      pricer: new UsagePricer({ rates, catalog, aliases: input.modelAliases }),
     });
 
     const sources: UsageSource[] = [];
@@ -402,19 +521,56 @@ export const make = Effect.gen(function* () {
       buckets: aggregated.buckets,
       sources,
       pricing: {
-        status: ratesStatus,
-        source: LITELLM_RATES_URL,
-        fetchedAt:
-          ratesFetchedAtMs === null
-            ? null
-            : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
-        knownModels: rates.size,
+        // Two tables, one figure: a page that priced half its rows from a stale
+        // snapshot has stale pricing, so the weaker of the two wins.
+        status: weakerPricingStatus(ratesStatus, catalogStatus),
+        source: `${LITELLM_RATES_URL} + ${MODELS_DEV_CATALOG_URL}`,
+        fetchedAt: formatOldestFetch(ratesFetchedAtMs, catalogFetchedAtMs),
+        knownModels: rates.size + catalog.size,
       },
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
     } satisfies UsageSummary;
   });
 
-  return { readSummary } as const;
+  const searchModels = Effect.fn("UsageService.searchModels")(function* (
+    input: UsageModelSearchInput,
+  ) {
+    yield* ensureCatalog();
+    return {
+      models: searchCatalog(catalog, input.query, MODEL_SEARCH_LIMIT).map(
+        (model) =>
+          ({
+            id: model.id,
+            providerName: model.providerName,
+            modelName: model.modelName,
+            inputCostPerMillion: model.inputCostPerMillion,
+            outputCostPerMillion: model.outputCostPerMillion,
+          }) as UsageCatalogModel,
+      ),
+    } satisfies UsageModelSearchResult;
+  });
+
+  return { readSummary, searchModels } as const;
 });
+
+const PRICING_STATUS_RANK: Record<UsageSummary["pricing"]["status"], number> = {
+  unavailable: 0,
+  cached: 1,
+  fresh: 2,
+};
+
+function weakerPricingStatus(
+  a: UsageSummary["pricing"]["status"],
+  b: UsageSummary["pricing"]["status"],
+): UsageSummary["pricing"]["status"] {
+  return PRICING_STATUS_RANK[a] <= PRICING_STATUS_RANK[b] ? a : b;
+}
+
+/** The staler of the two snapshots, which is the age the page can claim. */
+function formatOldestFetch(a: number | null, b: number | null): string | null {
+  const known = [a, b].filter((value): value is number => value !== null);
+  if (known.length === 0) return null;
+  return DateTime.formatIso(DateTime.makeUnsafe(Math.min(...known)));
+}
 
 export const layer = Layer.effect(UsageService, make);

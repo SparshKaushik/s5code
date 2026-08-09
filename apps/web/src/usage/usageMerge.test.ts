@@ -15,6 +15,7 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     day: "2026-08-07" as UsageDay,
     provider: "claude",
     model: "claude-fable-5",
+    apiProvider: "",
     totals: {
       uncachedInputTokens: 100,
       cachedInputTokens: 1000,
@@ -25,6 +26,7 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     costUsd: 10,
     cacheSavingsUsd: 2,
     costSource: "modelPriced",
+    pricedAs: null,
     records: 5,
     unpricedRecords: 0,
     sessions: 1,
@@ -254,5 +256,116 @@ describe("mergeUsage", () => {
     const merged = mergeUsage([], USAGE_CONTRACT_VERSION);
     expect(merged.costUsd).toBe(0);
     expect(merged.daily).toHaveLength(0);
+  });
+
+  it("keeps one gateway's model apart from another's", () => {
+    // Two resellers of the same name are two products at two prices, so they
+    // must stay separately taggable rather than blending into one row.
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [
+              bucket({
+                provider: "pi",
+                model: "claude-opus-5",
+                apiProvider: "agentrouter",
+                costSource: "unpriced",
+                costUsd: 0,
+                unpricedRecords: 5,
+              }),
+              bucket({
+                provider: "pi",
+                model: "claude-opus-5",
+                apiProvider: "tokenrouter",
+                costSource: "unpriced",
+                costUsd: 0,
+                unpricedRecords: 5,
+              }),
+            ],
+            [{ provider: "pi", hostId: "mac", homePath: "/a/.pi/agent/sessions" }],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.models).toHaveLength(2);
+    expect(merged.models.map((model) => model.apiProvider).toSorted()).toEqual([
+      "agentrouter",
+      "tokenrouter",
+    ]);
+    expect(merged.models.every((model) => model.unpriced)).toBe(true);
+  });
+
+  it("consolidates models tagged as the same thing into one row", () => {
+    // The point of tagging: two gateway names the user has said are the same
+    // model report as one line, at one cost.
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [
+              bucket({
+                provider: "pi",
+                model: "claude-opus-5",
+                apiProvider: "agentrouter",
+                costSource: "userTagged",
+                pricedAs: "anthropic/claude-opus-5" as UsageBucket["pricedAs"],
+                costUsd: 4,
+              }),
+              bucket({
+                provider: "pi",
+                model: "opus-5-latest",
+                apiProvider: "tokenrouter",
+                costSource: "userTagged",
+                pricedAs: "anthropic/claude-opus-5" as UsageBucket["pricedAs"],
+                costUsd: 6,
+              }),
+            ],
+            [{ provider: "pi", hostId: "mac", homePath: "/a/.pi/agent/sessions" }],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.models).toHaveLength(1);
+    expect(merged.models[0]).toMatchObject({
+      model: "anthropic/claude-opus-5",
+      // Blank because the row now spans two gateways; naming one would lie.
+      apiProvider: "",
+      unpriced: false,
+      // The row is priced, but still needs the affordance to change or drop the
+      // tag. Without this the tag would be a one-way door.
+      tagged: true,
+      costUsd: 10,
+    });
+  });
+
+  it("counts tagged records as priced", () => {
+    const merged = mergeUsage(
+      [
+        environment(
+          "env-a",
+          summary(
+            [
+              bucket({
+                provider: "pi",
+                costSource: "userTagged",
+                pricedAs: "anthropic/claude-opus-5" as UsageBucket["pricedAs"],
+              }),
+            ],
+            [{ provider: "pi", hostId: "mac", homePath: "/a/.pi/agent/sessions" }],
+          ),
+        ),
+      ],
+      USAGE_CONTRACT_VERSION,
+    );
+
+    expect(merged.costQuality.modelPricedShare).toBe(1);
+    expect(merged.costQuality.unpricedShare).toBe(0);
   });
 });

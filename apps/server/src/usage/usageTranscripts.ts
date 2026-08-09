@@ -12,6 +12,14 @@ export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;
+  /**
+   * The upstream API provider the model was served by, when the transcript
+   * names one. pi routes through gateways, so `claude-opus-5` via `agentrouter`
+   * and via `anthropic` are different products at different prices and cannot
+   * be priced from the model name alone. Empty for providers that speak to a
+   * single vendor.
+   */
+  readonly apiProvider: string;
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
   readonly reportedCostUsd: number | null;
@@ -32,6 +40,10 @@ const EMPTY_TOTALS: UsageTokenTotals = {
 
 function int(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+function finitePositive(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function parseTimestampMs(value: unknown): number | null {
@@ -68,7 +80,7 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * an order of magnitude.
  */
 export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  return provider === "claude" ? line.includes('"usage"') : line.includes('"token_count"');
+  return provider === "codex" ? line.includes('"token_count"') : line.includes('"usage"');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -122,6 +134,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     provider: "claude",
     timestampMs,
     model,
+    apiProvider: "",
     sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
     totals: {
       uncachedInputTokens: int(usageRecord["input_tokens"]),
@@ -234,12 +247,112 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     provider: "codex",
     timestampMs,
     model: state.model,
+    apiProvider: "",
     sessionId: state.sessionId,
     totals,
     // Codex does not report cost in the rollout.
     reportedCostUsd: null,
     // Rollout files are unique per session, so events need no global dedup.
     dedupeKey: null,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* pi                                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rolling state for a single pi session file.
+ *
+ * The session id only appears on the file's opening `session` line; assistant
+ * messages do not repeat it.
+ */
+export interface PiScanState {
+  sessionId: string;
+}
+
+export function initialPiScanState(): PiScanState {
+  return { sessionId: "" };
+}
+
+/**
+ * Feeds one line of a pi session log into `state`, returning a record when the
+ * line was an assistant message with usage.
+ *
+ * pi's token fields are disjoint (`input + cacheRead + cacheWrite + output`
+ * reconciles with its own `totalTokens`), so unlike Codex there is nothing to
+ * subtract out. `reasoning` is a subset of `output`.
+ *
+ * pi also computes a cost per message, but only when it has rates for the
+ * model; gateways it has no pricing for report a zero cost object next to real
+ * tokens. A zero total is therefore read as "pi did not price this" and left to
+ * our own pricing, which at worst agrees.
+ */
+export function parsePiLine(line: string, state: PiScanState): UsageRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const record = parsed as Record<string, unknown>;
+
+  if (record["type"] === "session") {
+    if (typeof record["id"] === "string") state.sessionId = record["id"];
+    return null;
+  }
+  if (record["type"] !== "message") return null;
+
+  const message = record["message"];
+  if (typeof message !== "object" || message === null) return null;
+  const messageRecord = message as Record<string, unknown>;
+  if (messageRecord["role"] !== "assistant") return null;
+
+  const usage = messageRecord["usage"];
+  if (typeof usage !== "object" || usage === null) return null;
+  const usageRecord = usage as Record<string, unknown>;
+
+  const timestampMs = parseTimestampMs(record["timestamp"]);
+  if (timestampMs === null) return null;
+
+  const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
+  if (model.length === 0) return null;
+
+  const outputTokens = int(usageRecord["output"]);
+  const totals: UsageTokenTotals = {
+    uncachedInputTokens: int(usageRecord["input"]),
+    cachedInputTokens: int(usageRecord["cacheRead"]),
+    // `cacheWrite1h` is the long-TTL slice of `cacheWrite`, priced higher by
+    // Anthropic. Base-tier pricing folds it in with the rest.
+    cacheCreationTokens: int(usageRecord["cacheWrite"]),
+    outputTokens,
+    reasoningTokens: Math.min(outputTokens, int(usageRecord["reasoning"])),
+  };
+
+  if (totalTokens(totals) === 0) return null;
+
+  const cost = usageRecord["cost"];
+  const reportedCostUsd =
+    typeof cost === "object" && cost !== null
+      ? finitePositive((cost as Record<string, unknown>)["total"])
+      : null;
+
+  const responseId =
+    typeof messageRecord["responseId"] === "string" ? messageRecord["responseId"] : null;
+
+  return {
+    provider: "pi",
+    timestampMs,
+    model,
+    apiProvider: typeof messageRecord["provider"] === "string" ? messageRecord["provider"] : "",
+    sessionId: state.sessionId,
+    totals,
+    reportedCostUsd,
+    // The upstream response id survives a session fork, which copies messages
+    // into a new file. pi's own message ids are short and only unique per file.
+    dedupeKey: responseId,
   };
 }
 

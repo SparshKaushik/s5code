@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
 
 import { UsageAggregator } from "./usageAggregation.ts";
-import type { RateTable } from "./usagePricing.ts";
+import { EMPTY_CATALOG } from "./usageModelCatalog.ts";
+import { UsagePricer, type RateTable } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
 const rates: RateTable = new Map([
@@ -22,6 +23,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     // 2026-08-07T04:05Z is still Aug 6 in Los Angeles.
     timestampMs: Date.parse("2026-08-07T04:05:13.944Z"),
     model: "claude-fable-5",
+    apiProvider: "",
     sessionId: "session-a",
     totals: {
       uncachedInputTokens: 100,
@@ -36,12 +38,14 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   };
 }
 
+const pricer = new UsagePricer({ rates, catalog: EMPTY_CATALOG, aliases: [] });
+
 function aggregate(records: readonly UsageRecord[], timeZone = "UTC") {
   const aggregator = new UsageAggregator({
     timeZone,
     sinceDay: "2026-08-01",
     untilDay: "2026-08-31",
-    rates,
+    pricer,
   });
   for (const item of records) aggregator.add(item);
   return aggregator.finish();
@@ -112,7 +116,7 @@ describe("UsageAggregator", () => {
       timeZone: "UTC",
       sinceDay: "2026-08-01",
       untilDay: "2026-08-31",
-      rates,
+      pricer,
     });
 
     expect(aggregator.add(record({ dedupeKey: "msg_1:" }))).toBe(true);

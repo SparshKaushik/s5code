@@ -714,6 +714,13 @@ export function createServerEnvironmentAtoms<R, E>(
       tag: WS_METHODS.serverGetUsageSummary,
       staleTimeMs: 60_000,
     }),
+    // The models.dev catalog is megabytes and lives on the server, so the tag
+    // picker asks it questions instead of holding it.
+    usageModelSearch: createEnvironmentRpcQueryAtomFamily(runtime, {
+      label: "environment-data:server:usage-model-search",
+      tag: WS_METHODS.serverSearchUsageModels,
+      staleTimeMs: 300_000,
+    }),
     configProjection,
     welcome: createEnvironmentRpcSubscriptionAtomFamily(runtime, {
       label: "environment-data:server:welcome",

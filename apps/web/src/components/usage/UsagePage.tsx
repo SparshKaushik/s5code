@@ -1,7 +1,12 @@
-import type { UsageProviderKind } from "@t3tools/contracts";
-import { RefreshCwIcon } from "lucide-react";
-import { useMemo, useState } from "react";
+import {
+  UsageCatalogModelId,
+  type UsageModelAlias,
+  type UsageProviderKind,
+} from "@t3tools/contracts";
+import { RefreshCwIcon, TagIcon } from "lucide-react";
+import { useCallback, useMemo, useState } from "react";
 
+import { useClientSettings, useUpdateClientSettings } from "../../hooks/useSettings";
 import { cn } from "../../lib/utils";
 import { useUsage } from "../../state/usage";
 import {
@@ -13,7 +18,9 @@ import {
   formatUsd,
   makeWindow,
 } from "../../usage/usageFormat";
+import { applyTag, clearTag, type UsageModelTagTarget } from "../../usage/usageTags";
 import { ScrollArea } from "../ui/scroll-area";
+import { UsageModelTagDialog } from "./UsageModelTagDialog";
 import { UsageChartLegend, UsageProviderChart, type UsageChartMetric } from "./UsageProviderChart";
 import { PROVIDER_COLOR, PROVIDER_LABEL, PROVIDER_MARK, PROVIDER_ORDER } from "./usageProviders";
 
@@ -27,11 +34,38 @@ export function UsagePage() {
   const [windowDays, setWindowDays] = useState<number>(30);
   const [metric, setMetric] = useState<UsageChartMetric>("cost");
   const [breakdown, setBreakdown] = useState<"model" | "day">("model");
+  const [tagTarget, setTagTarget] = useState<UsageModelTagTarget | null>(null);
 
-  // Recomputed only when the window length changes, so a re-render does not
-  // shift the range and refetch every environment.
-  const window = useMemo(() => makeWindow(windowDays), [windowDays]);
+  // Tags live in client settings rather than per-environment server settings:
+  // the same model reported by three environments is one decision, not three.
+  const modelAliases = useClientSettings((settings) => settings.usageModelAliases);
+  const updateClientSettings = useUpdateClientSettings();
+
+  // Recomputed only when the window length or the tags change, so a re-render
+  // does not shift the range and refetch every environment.
+  const window = useMemo(() => makeWindow(windowDays, modelAliases), [windowDays, modelAliases]);
   const { merged, environments, isPending, isPartial, refresh } = useUsage(window);
+
+  const applyAliases = useCallback(
+    (next: readonly UsageModelAlias[]) => {
+      void updateClientSettings({ usageModelAliases: next });
+      setTagTarget(null);
+    },
+    [updateClientSettings],
+  );
+
+  const handleTag = useCallback(
+    (catalogModelId: string) => {
+      if (tagTarget === null) return;
+      applyAliases(applyTag(modelAliases, tagTarget, UsageCatalogModelId.make(catalogModelId)));
+    },
+    [applyAliases, modelAliases, tagTarget],
+  );
+
+  const handleClearTag = useCallback(() => {
+    if (tagTarget === null) return;
+    applyAliases(clearTag(modelAliases, tagTarget));
+  }, [applyAliases, modelAliases, tagTarget]);
 
   const days = useMemo(
     () => enumerateDays(window.sinceDay, window.untilDay),
@@ -265,13 +299,39 @@ export function UsagePage() {
                       ) : (
                         merged.models.map((model) => (
                           <tr
-                            key={`${model.provider}:${model.model}`}
+                            key={`${model.provider}:${model.apiProvider}:${model.model}`}
                             className="border-b border-border/50"
                           >
                             <td className="py-2 text-foreground">
                               <span className="flex items-center gap-2">
                                 <ProviderMark provider={model.provider} className="size-3.5" />
-                                {model.model}
+                                <span className="truncate">{model.model}</span>
+                                {model.apiProvider.length > 0 ? (
+                                  <span className="shrink-0 text-xs text-muted-foreground">
+                                    via {model.apiProvider}
+                                  </span>
+                                ) : null}
+                                {/* Rows we could not price are worth tagging,
+                                    and tagged rows need the way back out. */}
+                                {model.unpriced || model.tagged ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      setTagTarget({
+                                        provider: model.provider,
+                                        label: model.model,
+                                        untagged: model.tagged
+                                          ? null
+                                          : { apiProvider: model.apiProvider, model: model.model },
+                                        taggedAs: model.tagged ? model.pricedAs : null,
+                                      })
+                                    }
+                                    className="flex shrink-0 items-center gap-1 rounded border border-dashed border-border px-1.5 py-0.5 text-xs text-muted-foreground hover:border-solid hover:text-foreground"
+                                  >
+                                    <TagIcon className="size-3" />
+                                    {model.tagged ? "Tagged" : "Tag"}
+                                  </button>
+                                ) : null}
                               </span>
                             </td>
                             <td className="py-2 text-right text-foreground tabular-nums">
@@ -360,6 +420,13 @@ export function UsagePage() {
           </>
         )}
       </div>
+
+      <UsageModelTagDialog
+        target={tagTarget}
+        onClose={() => setTagTarget(null)}
+        onTag={handleTag}
+        onClear={handleClearTag}
+      />
     </ScrollArea>
   );
 }

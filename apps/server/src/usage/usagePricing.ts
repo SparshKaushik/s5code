@@ -1,13 +1,27 @@
 /**
  * Model rate lookup and cost arithmetic.
  *
- * Rates come from LiteLLM's `model_prices_and_context_window.json`, the same
- * table `ccusage` prices against. Everything here is pure: fetching and caching
- * the table lives in `UsageService`.
+ * Two rate sources, because two shapes of problem. Claude Code and Codex each
+ * speak to one vendor under names LiteLLM already publishes, which is the table
+ * `ccusage` prices against and the one that keeps those numbers stable. pi
+ * speaks to gateways whose names only models.dev knows, provider-scoped. The
+ * {@link UsagePricer} picks per provider and applies the user's tags over both.
+ *
+ * Everything here is pure: fetching and caching the tables lives in
+ * `UsageService`.
  *
  * @module usagePricing
  */
-import type { UsageCostSource, UsageTokenTotals } from "@t3tools/contracts";
+import type { UsageCostSource, UsageModelAlias, UsageTokenTotals } from "@t3tools/contracts";
+
+import {
+  EMPTY_CATALOG,
+  resolveCatalogModel,
+  resolveModelRate,
+  type CatalogEntry,
+  type ModelCatalog,
+} from "./usageModelCatalog.ts";
+import type { UsageRecord } from "./usageTranscripts.ts";
 
 /**
  * The subset of a LiteLLM entry we price against. All values are USD per token.
@@ -107,42 +121,128 @@ export function lookupRate(table: RateTable, model: string): ModelRate | null {
 export interface PricedUsage {
   readonly costUsd: number;
   readonly costSource: UsageCostSource;
+  /**
+   * The catalog entry the cost was computed from, when one was involved.
+   *
+   * The UI shows this so a user can see which guess we made and correct it, and
+   * so tagged rows can be labelled by what they were tagged as.
+   */
+  readonly pricedAs: string | null;
 }
 
-/**
- * Prices a bucket's tokens.
- *
- * `reasoningTokens` is intentionally not charged separately: it is already
- * counted inside `outputTokens`.
- */
-export function priceUsage(
-  table: RateTable,
-  model: string,
-  totals: UsageTokenTotals,
-  reportedCostUsd: number | null,
-): PricedUsage {
-  if (reportedCostUsd !== null && Number.isFinite(reportedCostUsd)) {
-    return { costUsd: reportedCostUsd, costSource: "providerReported" };
-  }
-
-  const rate = lookupRate(table, model);
-  if (rate === null) return { costUsd: 0, costSource: "unpriced" };
-
-  const costUsd =
+function applyRate(rate: ModelRate, totals: UsageTokenTotals): number {
+  // reasoningTokens is intentionally not charged separately: it is already
+  // counted inside outputTokens.
+  return (
     totals.uncachedInputTokens * rate.inputCostPerToken +
     totals.cachedInputTokens * rate.cacheReadCostPerToken +
     totals.cacheCreationTokens * rate.cacheCreationCostPerToken +
-    totals.outputTokens * rate.outputCostPerToken;
-
-  return { costUsd, costSource: "modelPriced" };
+    totals.outputTokens * rate.outputCostPerToken
+  );
 }
 
 /**
- * What the cached input would have cost at full input rates, minus what it
- * actually cost. Drives the "cache savings" figure.
+ * Identity of a model as the user tags it: the T3 provider, the upstream api
+ * provider, and the raw model name. All three matter, because the same name
+ * from two gateways can be two different products at two different prices.
  */
-export function cacheSavingsUsd(table: RateTable, model: string, totals: UsageTokenTotals): number {
-  const rate = lookupRate(table, model);
-  if (rate === null) return 0;
-  return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
+export function modelAliasKey(provider: string, apiProvider: string, model: string): string {
+  return `${provider}\u0000${apiProvider.trim().toLowerCase()}\u0000${model.trim().toLowerCase()}`;
+}
+
+export interface UsagePricerOptions {
+  /** LiteLLM's flat table, used for Claude Code and Codex. */
+  readonly rates: RateTable;
+  /** models.dev, used for pi and for every user tag. */
+  readonly catalog: ModelCatalog;
+  readonly aliases: readonly UsageModelAlias[];
+}
+
+/**
+ * Resolves one record to a cost.
+ *
+ * Order matters and is the whole design: an explicit cost the provider reported
+ * beats everything, then the user's own tag, then automatic detection. A user
+ * who tags a model has said something we could not work out, so nothing later
+ * gets to override it.
+ */
+export class UsagePricer {
+  readonly #rates: RateTable;
+  readonly #catalog: ModelCatalog;
+  readonly #aliasEntries = new Map<string, CatalogEntry>();
+
+  constructor(options: UsagePricerOptions) {
+    this.#rates = options.rates;
+    this.#catalog = options.catalog;
+    for (const alias of options.aliases) {
+      const entry = resolveCatalogModel(this.#catalog, alias.catalogModelId);
+      // A tag pointing at a catalog entry this environment's snapshot does not
+      // have resolves to nothing rather than to zero, so the model keeps
+      // reporting as unpriced and the user is not told a tag worked when it did
+      // not.
+      if (entry !== null) {
+        this.#aliasEntries.set(
+          modelAliasKey(alias.provider, alias.apiProvider, alias.model),
+          entry,
+        );
+      }
+    }
+  }
+
+  /** The rate for a record, and where it came from. `null` means unpriced. */
+  #resolve(
+    record: UsageRecord,
+  ): { rate: ModelRate; source: UsageCostSource; pricedAs: string | null } | null {
+    const tagged = this.#aliasEntries.get(
+      modelAliasKey(record.provider, record.apiProvider, record.model),
+    );
+    if (tagged !== undefined) {
+      return { rate: tagged.rate, source: "userTagged", pricedAs: tagged.id };
+    }
+
+    if (record.provider === "pi") {
+      const entry = resolveModelRate(this.#catalog, record.apiProvider, record.model);
+      return entry === null
+        ? null
+        : { rate: entry.rate, source: "modelPriced", pricedAs: entry.id };
+    }
+
+    const rate = lookupRate(this.#rates, record.model);
+    return rate === null ? null : { rate, source: "modelPriced", pricedAs: null };
+  }
+
+  price(record: UsageRecord): PricedUsage {
+    if (record.reportedCostUsd !== null && Number.isFinite(record.reportedCostUsd)) {
+      return {
+        costUsd: record.reportedCostUsd,
+        costSource: "providerReported",
+        pricedAs: null,
+      };
+    }
+    const resolved = this.#resolve(record);
+    if (resolved === null) return { costUsd: 0, costSource: "unpriced", pricedAs: null };
+    return {
+      costUsd: applyRate(resolved.rate, record.totals),
+      costSource: resolved.source,
+      pricedAs: resolved.pricedAs,
+    };
+  }
+
+  /**
+   * What the cached input would have cost at full input rates, minus what it
+   * actually cost. Drives the "cache savings" figure.
+   */
+  cacheSavingsUsd(record: UsageRecord): number {
+    const resolved = this.#resolve(record);
+    if (resolved === null) return 0;
+    return (
+      record.totals.cachedInputTokens *
+      (resolved.rate.inputCostPerToken - resolved.rate.cacheReadCostPerToken)
+    );
+  }
+}
+
+/** A pricer that prices nothing, for tests and for a cold rate fetch. */
+export function emptyPricer(): UsagePricer {
+  return new UsagePricer({ rates: new Map(), catalog: EMPTY_CATALOG, aliases: [] });
 }
