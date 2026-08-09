@@ -103,6 +103,8 @@ const appendCloudCredentialResponseHeaders = HttpEffect.appendPreResponseHandler
     Effect.succeed(HttpServerResponse.setHeaders(response, CLOUD_CREDENTIAL_RESPONSE_HEADERS)),
 );
 
+const isEnvironmentHttpInternalServerError = Schema.is(EnvironmentHttpInternalServerError);
+
 const failEnvironmentCloudInternalError =
   (message: string) =>
   (cause: unknown): Effect.Effect<never, EnvironmentHttpInternalServerError> =>
@@ -539,7 +541,7 @@ const relayClientRequest = <A>(
       }),
     ),
     Effect.mapError((cause) =>
-      cause instanceof EnvironmentHttpInternalServerError
+      isEnvironmentHttpInternalServerError(cause)
         ? cause
         : new EnvironmentHttpInternalServerError({
             message: `T3 Connect relay request failed: ${String(cause)}`,
