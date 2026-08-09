@@ -71,7 +71,7 @@ export function resolveCursorAuthDatabasePath(
   environment: Readonly<Record<string, string | undefined>> = process.env,
 ): string {
   if (platform === "darwin") {
-    return NodePath.join(
+    return NodePath.posix.join(
       home,
       "Library",
       "Application Support",
@@ -82,10 +82,21 @@ export function resolveCursorAuthDatabasePath(
     );
   }
 
+  if (platform === "win32") {
+    const roamingAppData = environment["APPDATA"]?.trim();
+    const base =
+      roamingAppData && NodePath.win32.isAbsolute(roamingAppData)
+        ? roamingAppData
+        : NodePath.win32.join(home, "AppData", "Roaming");
+    return NodePath.win32.join(base, "Cursor", "User", "globalStorage", "state.vscdb");
+  }
+
   const configHome = environment["XDG_CONFIG_HOME"]?.trim();
   const base =
-    configHome && NodePath.isAbsolute(configHome) ? configHome : NodePath.join(home, ".config");
-  return NodePath.join(base, "Cursor", "User", "globalStorage", "state.vscdb");
+    configHome && NodePath.posix.isAbsolute(configHome)
+      ? configHome
+      : NodePath.posix.join(home, ".config");
+  return NodePath.posix.join(base, "Cursor", "User", "globalStorage", "state.vscdb");
 }
 
 /**

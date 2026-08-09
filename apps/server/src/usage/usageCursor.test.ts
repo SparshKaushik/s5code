@@ -155,6 +155,19 @@ describe("resolveCursorAuthDatabasePath", () => {
     );
   });
 
+  it("uses APPDATA only when it is absolute on Windows", () => {
+    expect(
+      resolveCursorAuthDatabasePath("win32", "C:\\Users\\test", {
+        APPDATA: "D:\\Roaming",
+      }),
+    ).toBe("D:\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb");
+    expect(
+      resolveCursorAuthDatabasePath("win32", "C:\\Users\\test", {
+        APPDATA: "relative",
+      }),
+    ).toBe("C:\\Users\\test\\AppData\\Roaming\\Cursor\\User\\globalStorage\\state.vscdb");
+  });
+
   it("uses XDG_CONFIG_HOME only when it is absolute on Linux", () => {
     expect(
       resolveCursorAuthDatabasePath("linux", "/home/test", { XDG_CONFIG_HOME: "/config" }),
