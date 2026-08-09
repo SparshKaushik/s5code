@@ -10,7 +10,7 @@ jobs:
           eas-version: 21.5.0
           token: ${{ secrets.EXPO_TOKEN }}
           packager: npm
-      - name: Inspect build
+      - name: Wait for build
         env:
           EAS_BUILD_ID: 488e24df-197c-459e-a032-1818cb3b38cf
         run: |
@@ -18,4 +18,16 @@ jobs:
           cd project
           printf '%s\n' '{"private":true,"dependencies":{"expo":"55.0.0"}}' > package.json
           printf '%s\n' '{"expo":{"name":"S5 Code","slug":"t3-code","owner":"touchtechclub","extra":{"eas":{"projectId":"cb1e4b79-dfe3-4959-b200-acdc5755170e"}}}}' > app.json
-          eas build:view "$EAS_BUILD_ID" --json
+          for attempt in $(seq 1 90); do
+            eas build:view "$EAS_BUILD_ID" --json > build.json
+            status=$(node -e 'console.log(require("./build.json").status)')
+            echo "EAS build status: $status (attempt $attempt)"
+            case "$status" in
+              FINISHED) cat build.json; exit 0 ;;
+              ERRORED|CANCELED) cat build.json; exit 1 ;;
+            esac
+            sleep 60
+          done
+          echo "Timed out waiting for EAS build." >&2
+          cat build.json
+          exit 1
