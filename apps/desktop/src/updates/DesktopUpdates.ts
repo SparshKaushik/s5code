@@ -17,6 +17,8 @@ import * as Option from "effect/Option";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import { ChildProcess } from "effect/unstable/process";
+import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -27,6 +29,7 @@ import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
+import * as DesktopWindow from "../window/DesktopWindow.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
@@ -137,6 +140,18 @@ export class DesktopUpdateUnexpectedActionError extends Schema.TaggedErrorClass<
   }
 }
 
+export class DesktopUpdateQuarantineClearError extends Schema.TaggedErrorClass<DesktopUpdateQuarantineClearError>()(
+  "DesktopUpdateQuarantineClearError",
+  {
+    appPath: Schema.String,
+    cause: Schema.Defect(),
+  },
+) {
+  override get message(): string {
+    return `Failed to clear macOS quarantine attributes on ${this.appPath}.`;
+  }
+}
+
 export type DesktopUpdateConfigureError = never;
 
 export const DesktopUpdateSetChannelError = Schema.Union([
@@ -244,15 +259,31 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
   return runtimeInfo.hostArch === "arm64" && runtimeInfo.appArch === "x64";
 }
 
+function formatUpdaterErrorCause(cause: unknown): string {
+  if (cause instanceof Error) {
+    return cause.stack ?? cause.message;
+  }
+  if (typeof cause === "string") {
+    return cause;
+  }
+  try {
+    return JSON.stringify(cause);
+  } catch {
+    return String(cause);
+  }
+}
+
 export const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
   const pool = yield* DesktopBackendPool.DesktopBackendPool;
   const desktopState = yield* DesktopState.DesktopState;
   const electronUpdater = yield* ElectronUpdater.ElectronUpdater;
   const electronWindow = yield* ElectronWindow.ElectronWindow;
+  const desktopWindow = yield* DesktopWindow.DesktopWindow;
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const fileSystem = yield* FileSystem.FileSystem;
   const desktopSettings = yield* DesktopAppSettings.DesktopAppSettings;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
 
   const appUpdateYmlConfigRef = yield* Ref.make<Option.Option<AppUpdateYmlConfig>>(Option.none());
   const updateCheckInFlightRef = yield* Ref.make(false);
@@ -451,6 +482,60 @@ export const make = Effect.gen(function* () {
     { discard: true },
   );
 
+  const clearMacAppQuarantine = Effect.gen(function* () {
+    if (environment.platform !== "darwin" || !environment.isPackaged) {
+      return;
+    }
+
+    yield* Effect.scoped(
+      spawner
+        .exitCode(
+          ChildProcess.make("xattr", ["-cr", environment.appPath], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new DesktopUpdateQuarantineClearError({
+                appPath: environment.appPath,
+                cause,
+              }),
+          ),
+        ),
+    ).pipe(
+      Effect.catchTag("DesktopUpdateQuarantineClearError", (error) =>
+        logUpdaterWarning("failed to clear macOS quarantine attributes before update install", {
+          appPath: error.appPath,
+          cause: formatUpdaterErrorCause(error.cause),
+        }),
+      ),
+    );
+  });
+
+  const recoverAfterInstallFailure = Effect.gen(function* () {
+    yield* resetInstallAction;
+    const instances = yield* pool.list;
+    yield* Effect.forEach(instances, (instance) => instance.start, {
+      concurrency: "unbounded",
+    });
+    yield* desktopWindow.revealOrCreateMain.pipe(
+      Effect.catchCause((cause) =>
+        logUpdaterError("failed to restore main window after update install failure", {
+          cause: formatUpdaterErrorCause(Cause.squash(cause)),
+        }),
+      ),
+    );
+  }).pipe(
+    Effect.catchCause((cause) =>
+      logUpdaterError("failed to recover desktop after update install failure", {
+        cause: formatUpdaterErrorCause(Cause.squash(cause)),
+      }),
+    ),
+  );
+
   const installDownloadedUpdate = Effect.gen(function* () {
     const state = yield* Ref.get(updateStateRef);
     if (
@@ -465,20 +550,13 @@ export const make = Effect.gen(function* () {
     yield* Ref.set(updateInstallInFlightRef, true);
 
     return yield* Effect.gen(function* () {
-      // Stop every backend in the pool, not just the primary. With
-      // parallel WSL + Windows backends, leaving the WSL instance up
-      // means quitAndInstall's app.quit() exits before the pool's
-      // scope cascade has a chance to run its stop finalizer, so the
-      // WSL child gets hard-killed by the OS instead of receiving
-      // SIGTERM + grace. Stops run concurrently with the same 5s
-      // budget the primary had on its own.
       const instances = yield* pool.list;
       yield* Effect.forEach(
         instances,
         (instance) => instance.stop({ timeout: Duration.seconds(5) }),
         { concurrency: "unbounded" },
       );
-      yield* electronWindow.destroyAll;
+      yield* clearMacAppQuarantine;
       yield* electronUpdater.quitAndInstall({
         isSilent: true,
         isForceRunAfter: true,
@@ -488,7 +566,6 @@ export const make = Effect.gen(function* () {
       Effect.catchTags({
         ElectronUpdaterQuitAndInstallError: Effect.fn("desktop.updates.handleInstallFailure")(
           function* (error) {
-            yield* resetInstallAction;
             yield* updateState((current) =>
               reduceDesktopUpdateStateOnInstallFailure(current, error.message),
             );
@@ -497,7 +574,9 @@ export const make = Effect.gen(function* () {
               channel: error.channel,
               isSilent: error.isSilent,
               isForceRunAfter: error.isForceRunAfter,
+              cause: formatUpdaterErrorCause(error.cause),
             });
+            yield* recoverAfterInstallFailure;
             return { accepted: true, completed: false };
           },
         ),
@@ -508,7 +587,6 @@ export const make = Effect.gen(function* () {
           if (Cause.hasInterruptsOnly(cause)) {
             return yield* Effect.failCause(cause);
           }
-          yield* resetInstallAction;
           const error = new DesktopUpdateUnexpectedActionError({ action: "install", cause });
           yield* updateState((current) =>
             reduceDesktopUpdateStateOnInstallFailure(current, error.message),
@@ -516,7 +594,9 @@ export const make = Effect.gen(function* () {
           yield* logUpdaterError(error.message, {
             errorTag: error._tag,
             action: error.action,
+            cause: formatUpdaterErrorCause(Cause.squash(cause)),
           });
+          yield* recoverAfterInstallFailure;
           return { accepted: true, completed: false };
         }),
       ),
@@ -615,15 +695,15 @@ export const make = Effect.gen(function* () {
       cause,
     });
     if (yield* Ref.get(updateInstallInFlightRef)) {
-      yield* Ref.set(updateInstallInFlightRef, false);
-      yield* Ref.set(desktopState.quitting, false);
       yield* updateState((current) =>
         reduceDesktopUpdateStateOnInstallFailure(current, error.message),
       );
       yield* logUpdaterError(error.message, {
         errorTag: error._tag,
         operation: error.operation,
+        cause: formatUpdaterErrorCause(cause),
       });
+      yield* recoverAfterInstallFailure;
       return;
     }
 
@@ -644,6 +724,7 @@ export const make = Effect.gen(function* () {
     yield* logUpdaterError(error.message, {
       errorTag: error._tag,
       operation: error.operation,
+      cause: formatUpdaterErrorCause(cause),
     });
   });
 
