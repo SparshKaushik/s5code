@@ -11,7 +11,6 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   BotIcon,
-  FlaskConicalIcon,
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
@@ -53,9 +52,7 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/providers": BotIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/connections": Link2Icon,
-  "/settings/beta": FlaskConicalIcon,
-  // Experimental sits directly under Beta: both are opt-in, but Beta toggles
-  // are client-local UI while Experimental changes server behavior on disk.
+  // Experimental is opt-in: it changes server behavior on disk.
   "/settings/experimental": TestTubeDiagonalIcon,
   "/settings/archived": ArchiveIcon,
 };
