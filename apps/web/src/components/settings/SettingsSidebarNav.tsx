@@ -11,12 +11,14 @@ import {
   ArchiveIcon,
   ArrowLeftIcon,
   BotIcon,
+  FolderIcon,
   GitBranchIcon,
   KeyboardIcon,
   Link2Icon,
   PaletteIcon,
   SearchIcon,
   Settings2Icon,
+  TestTubeDiagonalIcon,
   XIcon,
 } from "lucide-react";
 import { useCanGoBack, useLocation, useNavigate } from "@tanstack/react-router";
@@ -48,9 +50,12 @@ const SETTINGS_SECTION_ICONS: Readonly<
   "/settings/general": Settings2Icon,
   "/settings/appearance": PaletteIcon,
   "/settings/keybindings": KeyboardIcon,
+  "/settings/projects": FolderIcon,
   "/settings/providers": BotIcon,
   "/settings/source-control": GitBranchIcon,
   "/settings/connections": Link2Icon,
+  // Experimental is opt-in: it changes server behavior on disk.
+  "/settings/experimental": TestTubeDiagonalIcon,
   "/settings/archived": ArchiveIcon,
 };
 
@@ -232,7 +237,9 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 <XIcon className="size-3" />
               </Button>
             ) : (
-              <Kbd className="h-4 min-w-0 rounded-sm px-1.5 text-[10px]">/</Kbd>
+              <Kbd className="mr-px h-4 min-w-0 rounded-sm bg-sidebar-control-surface px-1.5 text-[10px] text-sidebar-muted-foreground ring-1 ring-sidebar-border">
+                /
+              </Kbd>
             )}
           </div>
           {isSearching && results.length === 0 ? (
@@ -277,6 +284,8 @@ export function SettingsSidebarNav({ pathname }: { pathname: string }) {
                 ))
               : SETTINGS_NAV_ITEMS.map((item) => {
                   const Icon = item.icon;
+                  // Prefix match keeps the section active on nested routes
+                  // like /settings/projects/$projectKey.
                   const isActive = pathname === item.to || pathname.startsWith(`${item.to}/`);
                   return (
                     <SidebarMenuItem key={item.to}>

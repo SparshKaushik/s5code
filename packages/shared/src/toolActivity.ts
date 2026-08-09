@@ -55,19 +55,22 @@ function extractToolCommand(data: Record<string, unknown> | undefined, title: st
   const itemInput = asRecord(item?.input);
   const itemResult = asRecord(item?.result);
   const rawInput = asRecord(data?.rawInput);
+  const rawOutput = asRecord(data?.rawOutput);
   const candidates = [
     normalizeCommandValue(item?.command),
     normalizeCommandValue(itemInput?.command),
     normalizeCommandValue(itemResult?.command),
     normalizeCommandValue(data?.command),
     normalizeCommandValue(rawInput?.command),
+    normalizeCommandValue(rawOutput?.command),
   ];
   const direct = candidates.find((candidate) => candidate !== undefined);
   if (direct) {
     return direct;
   }
-  const executable = asTrimmedString(rawInput?.executable);
-  const args = normalizeCommandValue(rawInput?.args);
+  const executable =
+    asTrimmedString(rawInput?.executable) ?? asTrimmedString(rawOutput?.executable);
+  const args = normalizeCommandValue(rawInput?.args) ?? normalizeCommandValue(rawOutput?.args);
   if (executable && args) {
     return `${executable} ${args}`;
   }
@@ -92,8 +95,47 @@ function maybePathLike(value: string | undefined): string | undefined {
   return undefined;
 }
 
+/**
+ * Normalizes a resource/link URI to its file path when it points at a file
+ * (ACP clients commonly carry file identity as `file://` or `zed://` URIs on
+ * tool-call `content` blocks for read/edit tools). Non-file URIs (http(s),
+ * data:) return undefined.
+ */
+function normalizeUriPath(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+  let path = value.trim();
+  if (!path) {
+    return undefined;
+  }
+  if (path.startsWith("file://")) {
+    path = path.slice("file://".length);
+  } else if (path.startsWith("zed://")) {
+    try {
+      path = new URL(path).searchParams.get("path") ?? "";
+    } catch {
+      return undefined;
+    }
+  } else if (/^[a-z][a-z0-9+.-]*:/iu.test(path)) {
+    // http(s)://, data:, mem://, plan:// ... not a local file path.
+    return undefined;
+  }
+  const queryIndex = path.search(/[?#]/u);
+  if (queryIndex >= 0) {
+    path = path.slice(0, queryIndex);
+  }
+  let normalized: string;
+  try {
+    normalized = decodeURIComponent(path.trim());
+  } catch {
+    normalized = path.trim();
+  }
+  return normalized.length > 0 ? maybePathLike(normalized) : undefined;
+}
+
 function collectPaths(value: unknown, paths: string[], seen: Set<string>, depth: number): void {
-  if (depth > 4 || paths.length >= 8) {
+  if (depth > 6 || paths.length >= 8) {
     return;
   }
   if (Array.isArray(value)) {
@@ -109,8 +151,9 @@ function collectPaths(value: unknown, paths: string[], seen: Set<string>, depth:
   if (!record) {
     return;
   }
-  for (const key of ["path", "filePath", "relativePath", "filename", "newPath", "oldPath"]) {
-    const candidate = maybePathLike(asTrimmedString(record[key]));
+  for (const key of ["path", "filePath", "relativePath", "filename", "newPath", "oldPath", "uri"]) {
+    const raw = asTrimmedString(record[key]);
+    const candidate = key === "uri" ? normalizeUriPath(raw) : maybePathLike(raw);
     if (!candidate || seen.has(candidate)) {
       continue;
     }
@@ -120,7 +163,25 @@ function collectPaths(value: unknown, paths: string[], seen: Set<string>, depth:
       return;
     }
   }
-  for (const nestedKey of ["locations", "item", "input", "result", "rawInput", "data", "changes"]) {
+  // Recursively descend the ACP tool-call envelope. `content` blocks (diffs
+  // with a `path` and resource links whose `uri` names a file) and
+  // `rawInput`/`rawOutput` are where Cursor's agent actually carries the
+  // files it reads and edits when `locations` is sparse.
+  for (const nestedKey of [
+    "content",
+    "locations",
+    "rawInput",
+    "rawOutput",
+    "item",
+    "input",
+    "result",
+    "data",
+    "changes",
+    "resource",
+    "resource_link",
+    "textResourceContents",
+    "blobResourceContents",
+  ]) {
     if (!(nestedKey in record)) {
       continue;
     }

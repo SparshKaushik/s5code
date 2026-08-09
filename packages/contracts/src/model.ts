@@ -153,6 +153,9 @@ export const DEFAULT_MODEL_BY_PROVIDER: Partial<Record<ProviderDriverKind, strin
   [CURSOR_DRIVER_KIND]: "auto",
   [GROK_DRIVER_KIND]: "grok-build",
   [OPENCODE_DRIVER_KIND]: "openai/gpt-5",
+  // pi has no fixed catalog: models come from the user's own pi settings, so
+  // there is no meaningful cross-install default to hardcode. The provider
+  // snapshot marks a default from the live `get_available_models` response.
 };
 
 /** Per-provider text generation model defaults. */

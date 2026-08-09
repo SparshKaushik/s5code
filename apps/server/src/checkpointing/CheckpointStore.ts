@@ -19,7 +19,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import type { CheckpointStoreError } from "./Errors.ts";
-import type { VcsCheckpointOps } from "../vcs/VcsDriver.ts";
+import type { VcsCheckpointOps, VcsCheckpointRefInfo } from "../vcs/VcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 
 export interface CaptureCheckpointInput {
@@ -42,6 +42,11 @@ export interface DiffCheckpointsInput {
 }
 
 export interface DeleteCheckpointRefsInput {
+  readonly cwd: string;
+  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
+}
+
+export interface MeasureCheckpointRefsInput {
   readonly cwd: string;
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
 }
@@ -93,6 +98,24 @@ export class CheckpointStore extends Context.Service<
     readonly deleteCheckpointRefs: (
       input: DeleteCheckpointRefsInput,
     ) => Effect.Effect<void, CheckpointStoreError>;
+
+    /**
+     * List every checkpoint ref this build owns in a repository.
+     *
+     * Scoped to the `refs/t3/checkpoints` namespace, so user branches, tags,
+     * stashes, and remote-tracking refs can never appear here.
+     */
+    readonly listCheckpointRefs: (
+      cwd: string,
+    ) => Effect.Effect<ReadonlyArray<VcsCheckpointRefInfo>, CheckpointStoreError>;
+
+    /**
+     * Bytes reachable only from the provided checkpoint refs — what deleting
+     * them would actually reclaim.
+     */
+    readonly measureCheckpointRefs: (
+      input: MeasureCheckpointRefsInput,
+    ) => Effect.Effect<number, CheckpointStoreError>;
   }
 >()("t3/checkpointing/CheckpointStore") {}
 
@@ -157,6 +180,23 @@ export const make = Effect.gen(function* () {
     return yield* checkpoints.deleteCheckpointRefs(input);
   });
 
+  const listCheckpointRefs: CheckpointStore["Service"]["listCheckpointRefs"] = Effect.fn(
+    "listCheckpointRefs",
+  )(function* (cwd) {
+    const checkpoints = yield* resolveCheckpoints("CheckpointStore.listCheckpointRefs", cwd);
+    return yield* checkpoints.listCheckpointRefs(cwd);
+  });
+
+  const measureCheckpointRefs: CheckpointStore["Service"]["measureCheckpointRefs"] = Effect.fn(
+    "measureCheckpointRefs",
+  )(function* (input) {
+    const checkpoints = yield* resolveCheckpoints(
+      "CheckpointStore.measureCheckpointRefs",
+      input.cwd,
+    );
+    return yield* checkpoints.measureCheckpointRefs(input);
+  });
+
   return CheckpointStore.of({
     isGitRepository,
     captureCheckpoint,
@@ -164,6 +204,8 @@ export const make = Effect.gen(function* () {
     restoreCheckpoint,
     diffCheckpoints,
     deleteCheckpointRefs,
+    listCheckpointRefs,
+    measureCheckpointRefs,
   });
 });
 

@@ -15,13 +15,14 @@ import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
 import * as NodeReadline from "node:readline";
 
-import type { UsageProviderKind } from "@t3tools/contracts";
-
 import {
   initialCodexScanState,
+  initialPiScanState,
   mightCarryUsage,
   parseClaudeLine,
   parseCodexLine,
+  parsePiLine,
+  type TranscriptUsageProvider,
   type UsageRecord,
 } from "./usageTranscripts.ts";
 
@@ -99,15 +100,16 @@ export async function readDirectoryVolumeId(path: string): Promise<string> {
  * until the file next changes.
  *
  * Codex carries the active model on `turn_context` lines that hold no usage of
- * their own, so those still have to pass through the reducer to keep model
- * attribution correct.
+ * their own, and pi carries the session id on its opening `session` line, so
+ * those still have to pass through the reducer to keep attribution correct.
  */
 export async function readTranscriptRecords(
   filePath: string,
-  provider: UsageProviderKind,
+  provider: TranscriptUsageProvider,
 ): Promise<readonly UsageRecord[] | null> {
   const records: UsageRecord[] = [];
   const codexState = initialCodexScanState();
+  const piState = initialPiScanState();
 
   try {
     const lines = NodeReadline.createInterface({
@@ -125,6 +127,13 @@ export async function readTranscriptRecords(
           continue;
         }
         const record = parseCodexLine(line, codexState);
+        if (record !== null) records.push(record);
+        continue;
+      }
+
+      if (provider === "pi") {
+        if (!mightCarryUsage(line, provider) && !line.includes('"session"')) continue;
+        const record = parsePiLine(line, piState);
         if (record !== null) records.push(record);
         continue;
       }

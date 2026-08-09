@@ -7,7 +7,7 @@ orchestration layer does not know which one is behind a thread.
 
 ## Built-in drivers
 
-[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with five entries:
+[`builtInDrivers.ts`][drivers] exports `BUILT_IN_DRIVERS` with six entries:
 
 | Driver kind   | Driver source                           |
 | ------------- | --------------------------------------- |
@@ -16,12 +16,37 @@ orchestration layer does not know which one is behind a thread.
 | `cursor`      | [`Drivers/CursorDriver.ts`][cursor]     |
 | `grok`        | [`Drivers/GrokDriver.ts`][grok]         |
 | `opencode`    | [`Drivers/OpenCodeDriver.ts`][opencode] |
+| `pi`          | [`Drivers/PiDriver.ts`][pi]             |
 
 Each driver declares its `driverKind`, a `configSchema`, and a `create` function that builds an
 adapter in a child scope. Adapter implementations live beside them in
 `apps/server/src/provider/Layers/` (`CodexAdapter.ts`, `ClaudeAdapter.ts`, and so on) and conform to
 [`ProviderAdapter.ts`][adapter]. Read the driver plus its adapter to see how a specific agent's
 transport, config, and event shapes are mapped.
+
+## The pi driver
+
+pi (`@earendil-works/pi-coding-agent`) is driven over `pi --mode rpc`, a JSONL protocol on
+stdin/stdout. Three things about it differ from the other CLI-backed providers and shape the code:
+
+- **No fixed model catalog.** What a user can run depends on their own pi configuration, so the
+  provider snapshot spawns a short-lived `pi --mode rpc --no-session` and reads
+  `get_available_models`. An empty catalog is the only signal pi gives that nothing is
+  authenticated, and is reported as such. Slugs are `<pi provider>/<model id>`, split on the first
+  separator because some pi model ids contain slashes.
+- **No permission protocol.** pi tools just run. The only interactive channel a pi process has is
+  `ctx.ui.*` from an extension, which in RPC mode becomes a blocking `extension_ui_request`. Runtime
+  modes below `full-access` are therefore enforced from inside pi by the bundled
+  `apps/server/pi-extension/t3-runtime-mode.ts`, loaded with `--extension` and configured through
+  `T3CODE_PI_RUNTIME_MODE`. `confirm` requests map onto T3's approval surface; `select` and `input`
+  map onto structured user input.
+- **No plan channel.** Task lists come from todo tool _results_ (`todowrite` / `patchtodo`), which
+  carry the whole reconciled list even when the call patched one field.
+
+Instance isolation uses `PI_CODING_AGENT_DIR`, never `HOME`: overriding `HOME` also relocates the
+macOS keychain lookup and breaks pi's stored credentials. Threads resume by pi session file path,
+recorded in the durable resume cursor; a rollback uses pi's `fork`, which re-roots the session
+before a chosen user entry.
 
 ## Registry and routing
 
@@ -81,6 +106,7 @@ when a request opens (approval) or user input is requested, via
 [cursor]: ../../apps/server/src/provider/Drivers/CursorDriver.ts
 [grok]: ../../apps/server/src/provider/Drivers/GrokDriver.ts
 [opencode]: ../../apps/server/src/provider/Drivers/OpenCodeDriver.ts
+[pi]: ../../apps/server/src/provider/Drivers/PiDriver.ts
 [adapter]: ../../apps/server/src/provider/Services/ProviderAdapter.ts
 [instances]: ../../apps/server/src/provider/Services/ProviderInstanceRegistry.ts
 [registry]: ../../apps/server/src/provider/Services/ProviderAdapterRegistry.ts

@@ -83,10 +83,6 @@
       "types": "./src/state/projects.ts",
       "default": "./src/state/projects.ts"
     },
-    "./state/pull-requests": {
-      "types": "./src/state/pullRequests.ts",
-      "default": "./src/state/pullRequests.ts"
-    },
     "./state/project-grouping": {
       "types": "./src/state/projectGrouping.ts",
       "default": "./src/state/projectGrouping.ts"
@@ -98,6 +94,10 @@
     "./state/review": {
       "types": "./src/state/review.ts",
       "default": "./src/state/review.ts"
+    },
+    "./state/rewind": {
+      "types": "./src/state/rewind.ts",
+      "default": "./src/state/rewind.ts"
     },
     "./state/runtime": {
       "types": "./src/state/runtime.ts",

@@ -2,8 +2,10 @@
 
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
-Remote server updates use one stable systemd launcher. Foreground CLI processes do not self-update,
-and a running server never edits its systemd unit or durable service state.
+There are two self-update shapes. Servers running from an npm tree use one stable systemd launcher.
+Precompiled single-file binaries replace their own executable (see [Release Binary
+Updates](#release-binary-updates)). Foreground CLI processes do not self-update, and a running
+server never edits its systemd unit or durable service state.
 
 ## Ownership
 
@@ -53,6 +55,46 @@ snapshot, records rollback, and starts A. A durable restore marker makes an inte
 resume before either version can boot. After commit, B is active and normal systemd restart policy
 applies.
 
+## Release Binary Updates
+
+A release binary (`scripts/build-server-binary.ts`, `bun build --compile`) has no npm tree to stage
+into and no launcher, so it takes a separate path. Internally it selects the `binary` update method
+from runtime identity; the public environment descriptor still advertises `boot-service` until
+production `relay.t3.codes` (and app clients) decode the `binary` capability — otherwise link-proof
+JWTs fail schema validation as `environment_link_proof_invalid`.
+
+It recognizes itself from two facts, both required: `process.argv[1]` starts with `/$bunfs/` (Bun's
+virtual entry point, the only reliable standalone signal on the pinned Bun), and the build inlined
+`T3CODE_SERVER_BINARY_TARGET` plus `T3CODE_SERVER_BINARY_REPO` via `--define`. A half-configured
+build resolves to no identity, so it gets no update path rather than a broken one.
+
+Those two reads must stay written as literal `process.env.<NAME>` member expressions at module
+scope, because that is the only form bun's `--define` rewrites. Reading them off a passed-around
+`process.env` leaves the lookup dynamic, the values never apply, and every binary silently resolves
+to no identity. The build script asserts the inline landed by requiring both variable _names_ to be
+absent from the compiled output, and fails the build otherwise.
+
+The update is:
+
+1. Download `https://github.com/<repo>/releases/download/v<target>/s5code-server-<target>-<arch>`.
+   The plain download route needs no API call or token, so a host with only HTTPS egress can update.
+2. Write it to a staged path in the executable's own directory and `chmod 0755`.
+3. Run the staged file with `--version` and require exit 0 and the requested version in stdout. A
+   truncated download, wrong architecture, or glibc mismatch fails here rather than at next boot.
+4. `rename` the staged file over the running executable. This is atomic on POSIX and legal while the
+   old image is executing: the running process keeps its open inode, only the directory entry moves.
+5. Acknowledge the RPC, then restart. Under systemd (the launcher-installed unit sets
+   `T3_BOOT_SERVICE_UNIT`, and systemd itself sets `INVOCATION_ID` for every unit invocation, which
+   covers hand-written units) the process exits non-zero and `Restart=always` starts the
+   replacement, keeping systemd the sole owner. Unsupervised, it spawns the replacement detached
+   and exits cleanly. The self-exec path is never chosen under systemd: the default
+   `KillMode=control-group` would kill the detached replacement along with the exiting unit.
+
+Any failure after the write removes the staged artifact and leaves the running binary in place.
+There is no launcher and therefore no database snapshot: the replacement runs its own normal
+startup, including migrations, and a version that migrates the database cannot be rolled back
+automatically.
+
 ## Database Rollback
 
 The launcher snapshots `state.sqlite`, `state.sqlite-wal`, and `state.sqlite-shm` after the old
@@ -83,7 +125,8 @@ recorded reason. Older servers without an ID retain version-only reconnect behav
 ## Capability and Compatibility
 
 The existing additive RPC and lifecycle schemas remain compatible with older clients. New servers
-advertise remote self-update only when they have valid launcher context and a live IPC channel.
+advertise launcher-backed remote self-update only when they have valid launcher context and a live
+IPC channel, and `binary` self-update only when they resolve a release-binary identity.
 Desktop-managed servers direct the user to update the desktop app. Other process shapes provide a
 manual command; the old detached foreground respawn path no longer exists.
 
@@ -93,6 +136,9 @@ manual command; the old detached foreground respawn path no longer exists.
 - IPC and durable state types: `apps/server/src/cloud/serviceProtocol.ts`
 - Child IPC adapter: `apps/server/src/cloud/serviceLauncherClient.ts`
 - Staging and preflight: `apps/server/src/cloud/pinnedRuntime.ts` and `servicePreflight.ts`
+- Release-binary identity: `apps/server/src/cloud/binaryRuntime.ts`
+- Release-binary download and swap: `apps/server/src/cloud/binaryUpdate.ts`
+- Capability selection and RPC entry: `apps/server/src/cloud/selfUpdate.ts`
 - Service installation: `apps/server/src/cloud/bootService.ts`
 - Activation boundary: `apps/server/src/serverRuntimeStartup.ts` and `serverActivation.ts`
 - Client outcome correlation: `packages/client-runtime/src/state/server.ts`

@@ -31,8 +31,6 @@ const successfulRunner = (fs: FileSystem.FileSystem, path: Path.Path) =>
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
-          stdoutInvalidUtf8: false,
-          stderrInvalidUtf8: false,
         };
       }),
   });

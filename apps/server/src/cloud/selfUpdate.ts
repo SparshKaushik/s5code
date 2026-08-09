@@ -5,17 +5,22 @@ import {
   type ServerSelfUpdateProgressStage,
   type ServerSelfUpdateResult,
 } from "@t3tools/contracts";
-import { HostProcessExecutablePath } from "@t3tools/shared/hostProcess";
+import { HostProcessArguments, HostProcessExecutablePath } from "@t3tools/shared/hostProcess";
 import * as Context from "effect/Context";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Ref from "effect/Ref";
+import { HttpClient } from "effect/unstable/http";
+import { ChildProcessSpawner } from "effect/unstable/process";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { ServerBinaryRuntime } from "./binaryRuntime.ts";
+import { prepareServerBinaryUpdate, restartIntoServerBinary } from "./binaryUpdate.ts";
 import {
   ensurePinnedRuntimeInstalled,
   PinnedRuntimeInstallError,
@@ -30,9 +35,19 @@ const PREFLIGHT_TIMEOUT = Duration.seconds(30);
 export function resolveServerSelfUpdateCapability(input: {
   readonly desktopManaged: boolean;
   readonly launcherManaged: boolean;
+  readonly releaseBinary: boolean;
 }): ServerSelfUpdateCapability | null {
   if (input.desktopManaged) return "desktop-managed" as const;
+  // A release binary replaces its own executable; it has no launcher and no npm
+  // tree, so this must be decided before the launcher path.
+  if (input.releaseBinary) return "binary" as const;
   return input.launcherManaged ? ("boot-service" as const) : null;
+}
+
+export function advertiseServerSelfUpdateCapability(
+  capability: ServerSelfUpdateCapability | null,
+): ServerSelfUpdateCapability | null {
+  return capability === "binary" ? ("boot-service" as const) : capability;
 }
 
 export class ServerSelfUpdate extends Context.Service<
@@ -52,10 +67,22 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const execPath = yield* HostProcessExecutablePath;
+  const argv = yield* HostProcessArguments;
+  const binaryIdentity = yield* ServerBinaryRuntime;
+  // Captured here so the binary update path stays inside the Service's
+  // requirement-free signature.
+  const httpClient = yield* HttpClient.HttpClient;
+  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const inFlight = yield* Ref.make(false);
 
   const capability: ServerSelfUpdateCapability | null =
-    serverConfig.mode === "desktop" ? "desktop-managed" : launcher.managed ? "boot-service" : null;
+    serverConfig.mode === "desktop"
+      ? "desktop-managed"
+      : Option.isSome(binaryIdentity)
+        ? "binary"
+        : launcher.managed
+          ? "boot-service"
+          : null;
   const failWith = (reason: string, cause?: unknown) =>
     cause === undefined
       ? new ServerSelfUpdateError({ reason })
@@ -66,12 +93,12 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   )(function* (input, reportProgress = () => Effect.void) {
     if (capability === "desktop-managed") {
       return yield* failWith(
-        "This server is managed by the T3 Code desktop app on its machine; update the desktop app to update it.",
+        "This server is managed by the S5 Code desktop app on its machine; update the desktop app to update it.",
       );
     }
     if (capability === null) {
       return yield* failWith(
-        "Remote updates require the T3 Code background service. Run `t3 service install` on the server machine.",
+        "Remote updates require the S5 Code background service. Run `t3 service install` on the server machine.",
       );
     }
 
@@ -81,6 +108,46 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
     }
     if (yield* Ref.getAndSet(inFlight, true)) {
       return yield* failWith("A server update is already in progress.");
+    }
+
+    if (capability === "binary") {
+      // The capability already implies a release binary, but the identity is
+      // what carries the repo and target, so read it rather than re-deriving.
+      if (Option.isNone(binaryIdentity)) {
+        return yield* failWith("This server is not a precompiled S5 Code release binary.");
+      }
+      return yield* Effect.gen(function* () {
+        const plan = yield* prepareServerBinaryUpdate({
+          identity: binaryIdentity.value,
+          targetVersion,
+          reportProgress,
+        }).pipe(
+          Effect.provideService(FileSystem.FileSystem, fs),
+          Effect.provideService(Path.Path, path),
+          Effect.provideService(HttpClient.HttpClient, httpClient),
+          Effect.provideService(ProcessRunner.ProcessRunner, runner),
+          Effect.mapError((error) => failWith(error.detail, error)),
+        );
+
+        // Restart only after the acknowledgement reaches the client, so the
+        // client sees a handoff rather than a bare transport loss.
+        yield* restartIntoServerBinary({
+          plan,
+          argv,
+          exit: (code) => {
+            process.exit(code);
+          },
+        }).pipe(
+          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
+          Effect.catchCause((cause) =>
+            Effect.logError("Could not restart into the updated server binary.", { cause }),
+          ),
+          Effect.delay(Duration.seconds(1)),
+          Effect.forkDetach,
+        );
+
+        return { targetVersion, method: "binary" as const };
+      }).pipe(Effect.onError(() => Ref.set(inFlight, false)));
     }
 
     return yield* Effect.gen(function* () {

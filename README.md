@@ -1,19 +1,19 @@
-# T3 Code
+# S5 Code
 
-T3 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=com.t3tools.t3code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+S5 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=club.touchtech.s5code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
 
-Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, T3 Code can control them.
+Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, S5 Code can control them.
 
 ## "Wait, what are you selling me?"
 
-Nothing. We built T3 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
+Nothing. We built S5 Code because we wanted the best possible development experience with agents. We were inspired by existing solutions like the Codex desktop app, Conductor, Claude Desktop and Cursor Glass, but none met our bar.
 
 We wanted something performant, remote-ready, and truly open. If we ever go the wrong direction, we want you to have everything you need to fork and build the editor that you want.
 
 ## Installation
 
 > [!WARNING]
-> T3 Code currently supports Codex, Claude, Cursor, Grok Build and OpenCode. Install and authenticate at least one provider before use:
+> S5 Code currently supports Codex, Claude, Cursor, Grok Build and OpenCode. Install and authenticate at least one provider before use:
 >
 > - Codex: install [Codex CLI](https://developers.openai.com/codex/cli) and run `codex login`
 > - Claude: install [Claude Code](https://claude.com/product/claude-code) and run `claude auth login`
@@ -23,15 +23,25 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 
 ### Try it out (install-free)
 
-The easiest way to test T3 Code is to run the server in your terminal (requires Node.js 22.16+, 23.11+, or 24.10+):
+The easiest way to test S5 Code is to run the server in your terminal (requires Node.js 22.16+, 23.11+, or 24.10+):
 
 ```bash
 npx t3@latest
 ```
 
-This will launch T3 Code's backend on your machine as well as the local web app to control your agents.
+This will launch S5 Code's backend on your machine as well as the local web app to control your agents.
 
 Tip: Use `npx t3@latest --help` for the full CLI reference.
+
+### Precompiled server binary (Linux, no Node or pnpm)
+
+For headless servers, each [GitHub Release](https://github.com/pingdotgg/t3code/releases)
+ships a precompiled, standalone Linux binary (`s5code-server-<version>-linux-x64`
+and `-arm64`) built with `bun build --compile`. Download it, `chmod +x`, and run
+`./s5code-server serve` — no Node.js, pnpm, vite-plus, or `node_modules` needed.
+It updates itself from GitHub Releases when you select **Update server** in a
+client. The binary serves the API and WebSocket; connect a UI from app.t3.codes,
+desktop, or mobile. See `SERVER_SETUP.md` for the download-and-run systemd flow.
 
 ### Desktop app
 
@@ -73,7 +83,7 @@ Full docs live in [docs/](./docs). There's no docs site yet.
 - [Keeping app and server in sync](./docs/user/updating.md)
 - [Source control integrations](./docs/user/source-control.md)
 - Multiple accounts: [Codex](./docs/user/providers-codex.md) · [Claude](./docs/user/providers-claude.md)
-- Linux: [run T3 Code as a background service](./docs/user/background-service.md)
+- Linux: [run S5 Code as a background service](./docs/user/background-service.md)
 
 Building from source? Start at [docs/internals/overview.md](./docs/internals/overview.md).
 
@@ -81,7 +91,7 @@ Building from source? Start at [docs/internals/overview.md](./docs/internals/ove
 
 ### Install `vp`
 
-T3 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
+S5 Code uses Vite+ so you'll need to install the global `vp` command-line tool.
 
 #### macOS / Linux
 

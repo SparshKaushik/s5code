@@ -220,7 +220,6 @@ function AboutVersionTitle() {
 function AboutVersionSection() {
   const updateState = useDesktopUpdateState();
   const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
-  const [isUpdateActionPending, setIsUpdateActionPending] = useState(false);
 
   const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
   const selectedUpdateChannel = updateState?.channel ?? "latest";
@@ -256,7 +255,7 @@ function AboutVersionSection() {
     [selectedUpdateChannel],
   );
 
-  const handleButtonClick = useCallback(async () => {
+  const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
     if (!bridge) return;
 
@@ -276,43 +275,22 @@ function AboutVersionSection() {
     }
 
     if (action === "install") {
-      if (isUpdateActionPending) return;
-      setIsUpdateActionPending(true);
-      let confirmed = false;
-      try {
-        confirmed = await ensureLocalApi().dialogs.confirm(
-          getDesktopUpdateInstallConfirmationMessage(
-            updateState ?? { availableVersion: null, downloadedVersion: null },
-            navigator.platform,
-          ),
-        );
-      } catch (error) {
-        setIsUpdateActionPending(false);
+      const confirmed = window.confirm(
+        getDesktopUpdateInstallConfirmationMessage(
+          updateState ?? { availableVersion: null, downloadedVersion: null },
+          navigator.platform,
+        ),
+      );
+      if (!confirmed) return;
+      void bridge.installUpdate().catch((error: unknown) => {
         toastManager.add(
           stackedThreadToast({
             type: "error",
-            title: "Could not confirm update",
-            description: error instanceof Error ? error.message : "Update confirmation failed.",
+            title: "Could not install update",
+            description: error instanceof Error ? error.message : "Install failed.",
           }),
         );
-        return;
-      }
-      if (!confirmed) {
-        setIsUpdateActionPending(false);
-        return;
-      }
-      void bridge
-        .installUpdate()
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not install update",
-              description: error instanceof Error ? error.message : "Install failed.",
-            }),
-          );
-        })
-        .finally(() => setIsUpdateActionPending(false));
+      });
       return;
     }
 
@@ -340,7 +318,7 @@ function AboutVersionSection() {
           }),
         );
       });
-  }, [isUpdateActionPending, updateState]);
+  }, [updateState]);
 
   const action = updateState ? resolveDesktopUpdateButtonAction(updateState) : "none";
   const buttonTooltip = updateState ? getDesktopUpdateButtonTooltip(updateState) : null;
@@ -374,7 +352,7 @@ function AboutVersionSection() {
                 <Button
                   size="xs"
                   variant={action === "install" ? "default" : "outline"}
-                  disabled={buttonDisabled || isUpdateActionPending}
+                  disabled={buttonDisabled}
                   onClick={handleButtonClick}
                 >
                   {buttonLabel}
@@ -561,7 +539,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       settings.wordWrap,
       followSystem,
       theme,
-      themeHalves,
     ],
   );
 
@@ -572,7 +549,6 @@ export function useSettingsRestore(onRestored?: () => void) {
       ["Restore default settings?", `This will reset: ${changedSettingLabels.join(", ")}.`].join(
         "\n",
       ),
-      { variant: "destructive" },
     );
     if (!confirmed) return;
 

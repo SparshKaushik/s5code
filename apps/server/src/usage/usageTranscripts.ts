@@ -8,12 +8,28 @@
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
+export type TranscriptUsageProvider = Exclude<UsageProviderKind, "cursor">;
+
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;
+  /**
+   * The upstream API provider the model was served by, when the transcript
+   * names one. pi routes through gateways, so `claude-opus-5` via `agentrouter`
+   * and via `anthropic` are different products at different prices and cannot
+   * be priced from the model name alone. Empty for providers that speak to a
+   * single vendor.
+   */
+  readonly apiProvider: string;
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
+  /**
+   * Some adapters can only estimate context size instead of reporting billed
+   * input/cache tokens. The scanner may derive a conservative cache split from
+   * that context; consumers must surface the resulting cost as estimated.
+   */
+  readonly inputTokensEstimated: boolean;
   readonly reportedCostUsd: number | null;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
@@ -32,6 +48,10 @@ const EMPTY_TOTALS: UsageTokenTotals = {
 
 function int(value: unknown): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.trunc(value) : 0;
+}
+
+function finitePositive(value: unknown): number | null {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : null;
 }
 
 function parseTimestampMs(value: unknown): number | null {
@@ -67,8 +87,8 @@ export function totalTokens(totals: UsageTokenTotals): number {
  * a 30-day window this skips roughly half the lines outright and is worth about
  * an order of magnitude.
  */
-export function mightCarryUsage(line: string, provider: UsageProviderKind): boolean {
-  return provider === "claude" ? line.includes('"usage"') : line.includes('"token_count"');
+export function mightCarryUsage(line: string, provider: TranscriptUsageProvider): boolean {
+  return provider === "codex" ? line.includes('"token_count"') : line.includes('"usage"');
 }
 
 /* -------------------------------------------------------------------------- */
@@ -122,6 +142,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     provider: "claude",
     timestampMs,
     model,
+    apiProvider: "",
     sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
     totals: {
       uncachedInputTokens: int(usageRecord["input_tokens"]),
@@ -131,6 +152,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
       // Anthropic folds thinking tokens into output and does not break them out.
       reasoningTokens: 0,
     },
+    inputTokensEstimated: false,
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     dedupeKey,
   };
@@ -151,42 +173,10 @@ export interface CodexScanState {
   model: string;
   sessionId: string;
   lastUsageSignature: string | null;
-  sawSessionMeta: boolean;
-  /** While true, leading usage events are re-stamped copies of parent history. */
-  suppressingForkCopies: boolean;
-  forkCopyAnchorMs: number;
 }
 
 export function initialCodexScanState(): CodexScanState {
-  return {
-    model: "",
-    sessionId: "",
-    lastUsageSignature: null,
-    sawSessionMeta: false,
-    suppressingForkCopies: false,
-    forkCopyAnchorMs: 0,
-  };
-}
-
-/**
- * A forked or subagent rollout opens with the parent's full history copied in,
- * every line re-stamped to the fork instant. Those copies are written in one
- * synchronous burst (observed gaps 0-40ms), while the child's first genuine
- * usage event only lands after a real model turn (observed 5s+). One second of
- * separation splits the two cleanly; `ccusage` uses the same threshold.
- */
-const FORK_COPY_MAX_GAP_MS = 1000;
-
-/** Whether a `session_meta` payload marks the rollout as a fork or subagent. */
-function isForkedSessionMeta(payload: Record<string, unknown>): boolean {
-  if (typeof payload["forked_from_id"] === "string") return true;
-  const source = payload["source"];
-  if (typeof source !== "object" || source === null) return false;
-  const subagent = (source as Record<string, unknown>)["subagent"];
-  if (typeof subagent !== "object" || subagent === null) return false;
-  const spawn = (subagent as Record<string, unknown>)["thread_spawn"];
-  if (typeof spawn !== "object" || spawn === null) return false;
-  return typeof (spawn as Record<string, unknown>)["parent_thread_id"] === "string";
+  return { model: "", sessionId: "", lastUsageSignature: null };
 }
 
 /**
@@ -213,18 +203,8 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   const payloadType = payloadRecord["type"];
 
   if (record["type"] === "session_meta") {
-    // Only the first meta describes this file's own session. A forked rollout
-    // repeats the ancestors' metas right after it; letting those through would
-    // reassign every subsequent record to an ancestor session.
-    if (state.sawSessionMeta) return null;
-    state.sawSessionMeta = true;
     const id = payloadRecord["id"] ?? payloadRecord["session_id"];
     if (typeof id === "string") state.sessionId = id;
-    const metaTimestampMs = parseTimestampMs(record["timestamp"]);
-    if (metaTimestampMs !== null && isForkedSessionMeta(payloadRecord)) {
-      state.suppressingForkCopies = true;
-      state.forkCopyAnchorMs = metaTimestampMs;
-    }
     return null;
   }
 
@@ -255,17 +235,6 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   if (signature === state.lastUsageSignature) return null;
   state.lastUsageSignature = signature;
 
-  // In a forked rollout the copied parent history was already counted from the
-  // parent's own file. Drop the leading burst; the first usage event separated
-  // from its predecessor by a real turn's worth of time ends it for good.
-  if (state.suppressingForkCopies) {
-    if (timestampMs - state.forkCopyAnchorMs < FORK_COPY_MAX_GAP_MS) {
-      state.forkCopyAnchorMs = timestampMs;
-      return null;
-    }
-    state.suppressingForkCopies = false;
-  }
-
   const inputTokens = int(lastRecord["input_tokens"]);
   const cachedInputTokens = int(lastRecord["cached_input_tokens"]);
   const cacheCreationTokens = int(lastRecord["cache_write_input_tokens"]);
@@ -287,13 +256,140 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     provider: "codex",
     timestampMs,
     model: state.model,
+    apiProvider: "",
     sessionId: state.sessionId,
     totals,
     // Codex does not report cost in the rollout.
+    inputTokensEstimated: false,
     reportedCostUsd: null,
-    // Events surviving the fork-copy suppression above are unique to this
-    // rollout, so they need no global dedup.
+    // Rollout files are unique per session, so events need no global dedup.
     dedupeKey: null,
+  };
+}
+
+/* -------------------------------------------------------------------------- */
+/* pi                                                                         */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Rolling state for a single pi session file.
+ *
+ * The session id only appears on the file's opening `session` line; assistant
+ * messages do not repeat it.
+ */
+export interface PiScanState {
+  sessionId: string;
+  /** Last estimated Kiro context by model, used for rolling-prefix cache simulation. */
+  kiroContextTokensByModel: Map<string, number>;
+}
+
+export function initialPiScanState(): PiScanState {
+  return { sessionId: "", kiroContextTokensByModel: new Map() };
+}
+
+/**
+ * Feeds one line of a pi session log into `state`, returning a record when the
+ * line was an assistant message with usage.
+ *
+ * pi's token fields are disjoint (`input + cacheRead + cacheWrite + output`
+ * reconciles with its own `totalTokens`), so unlike Codex there is nothing to
+ * subtract out. `reasoning` is a subset of `output`.
+ *
+ * pi also computes a cost per message, but only when it has rates for the
+ * model; gateways it has no pricing for report a zero cost object next to real
+ * tokens. A zero total is therefore read as "pi did not price this" and left to
+ * our own pricing, which at worst agrees.
+ */
+export function parsePiLine(line: string, state: PiScanState): UsageRecord | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null) return null;
+
+  const record = parsed as Record<string, unknown>;
+
+  if (record["type"] === "session") {
+    if (typeof record["id"] === "string") state.sessionId = record["id"];
+    return null;
+  }
+  if (record["type"] !== "message") return null;
+
+  const message = record["message"];
+  if (typeof message !== "object" || message === null) return null;
+  const messageRecord = message as Record<string, unknown>;
+  if (messageRecord["role"] !== "assistant") return null;
+
+  const usage = messageRecord["usage"];
+  if (typeof usage !== "object" || usage === null) return null;
+  const usageRecord = usage as Record<string, unknown>;
+
+  const timestampMs = parseTimestampMs(record["timestamp"]);
+  if (timestampMs === null) return null;
+
+  const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
+  if (model.length === 0) return null;
+
+  const outputTokens = int(usageRecord["output"]);
+  const apiProvider =
+    typeof messageRecord["provider"] === "string" ? messageRecord["provider"] : "";
+  const reportedInputTokens = int(usageRecord["input"]);
+  const reportedCachedInputTokens = int(usageRecord["cacheRead"]);
+  const reportedCacheCreationTokens = int(usageRecord["cacheWrite"]);
+  const inputTokensEstimated =
+    apiProvider === "kiro" &&
+    reportedInputTokens > 0 &&
+    reportedCachedInputTokens === 0 &&
+    reportedCacheCreationTokens === 0;
+
+  let uncachedInputTokens = reportedInputTokens;
+  let cachedInputTokens = reportedCachedInputTokens;
+  if (inputTokensEstimated) {
+    // Kiro exposes context utilisation, not billed input/cache metrics. Its pi
+    // adapter turns that percentage into `usage.input`, so treating every turn
+    // as fresh input multiplies a long agent loop's apparent cost. Simulate a
+    // conservative rolling-prefix cache: only the unchanged prefix of a
+    // non-shrinking context is cached. A smaller context means compaction,
+    // branch/reset, or a model switch and is treated as entirely fresh.
+    const previousContextTokens = state.kiroContextTokensByModel.get(model) ?? 0;
+    cachedInputTokens = reportedInputTokens >= previousContextTokens ? previousContextTokens : 0;
+    uncachedInputTokens = reportedInputTokens - cachedInputTokens;
+    state.kiroContextTokensByModel.set(model, reportedInputTokens);
+  }
+
+  const totals: UsageTokenTotals = {
+    uncachedInputTokens,
+    cachedInputTokens,
+    cacheCreationTokens: reportedCacheCreationTokens,
+    outputTokens,
+    reasoningTokens: Math.min(outputTokens, int(usageRecord["reasoning"])),
+  };
+
+  if (totalTokens(totals) === 0) return null;
+
+  const cost = usageRecord["cost"];
+  const reportedCostUsd =
+    typeof cost === "object" && cost !== null
+      ? finitePositive((cost as Record<string, unknown>)["total"])
+      : null;
+
+  const responseId =
+    typeof messageRecord["responseId"] === "string" ? messageRecord["responseId"] : null;
+
+  return {
+    provider: "pi",
+    timestampMs,
+    model,
+    apiProvider,
+    sessionId: state.sessionId,
+    totals,
+    inputTokensEstimated,
+    reportedCostUsd,
+    // The upstream response id survives a session fork, which copies messages
+    // into a new file. pi's own message ids are short and only unique per file.
+    dedupeKey: responseId,
   };
 }
 

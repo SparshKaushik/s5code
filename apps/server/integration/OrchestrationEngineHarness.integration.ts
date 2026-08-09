@@ -23,6 +23,7 @@ import * as Scope from "effect/Scope";
 import * as Stream from "effect/Stream";
 
 import * as CheckpointStore from "../src/checkpointing/CheckpointStore.ts";
+import * as RewindService from "../src/rewind/RewindService.ts";
 import { TextGeneration, type TextGenerationShape } from "../src/textGeneration/TextGeneration.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../src/persistence/Layers/OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "../src/persistence/Layers/OrchestrationEventStore.ts";
@@ -337,8 +338,32 @@ export const makeOrchestrationIntegrationHarness = (
       Layer.provideMerge(textGenerationLayer),
       Layer.provideMerge(serverSettingsLayer),
     );
+    // Rewind stays disabled in the harness so checkpoint assertions are not
+    // perturbed by shadow-store snapshots.
+    const rewindServiceLayer = Layer.succeed(RewindService.RewindService, {
+      isEnabled: Effect.succeed(false),
+      beginTurn: () => Effect.succeed(null),
+      captureTurn: () => Effect.succeed(Option.none()),
+      getStatus: (threadId) => Effect.succeed(RewindService.unavailableStatus(threadId)),
+      undo: (threadId) =>
+        Effect.succeed({
+          outcome: "unavailable" as const,
+          restoredFiles: [],
+          prompt: null,
+          status: RewindService.unavailableStatus(threadId),
+        }),
+      redo: (threadId) =>
+        Effect.succeed({
+          outcome: "unavailable" as const,
+          restoredFiles: [],
+          prompt: null,
+          status: RewindService.unavailableStatus(threadId),
+        }),
+      forgetThread: () => Effect.succeed(0),
+    });
     const checkpointReactorLayer = CheckpointReactorLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),
+      Layer.provideMerge(rewindServiceLayer),
       Layer.provideMerge(
         Layer.succeed(VcsStatusBroadcaster, {
           getStatus: () => Effect.die("getStatus should not be called in this test"),

@@ -1196,6 +1196,65 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.detail).toBeUndefined();
   });
 
+  it("collects file paths from ACP diff content blocks and resource links even without locations", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "cursor-edit",
+        kind: "tool.completed",
+        summary: "Changed files",
+        payload: {
+          itemType: "dynamic_tool_call",
+          title: "Edit file",
+          detail: "apps/web/src/EditView.tsx",
+          data: {
+            kind: "edit",
+            rawInput: {},
+            content: [
+              { type: "diff", path: "apps/web/src/EditView.tsx", oldText: "a", newText: "b" },
+              {
+                type: "content",
+                content: {
+                  type: "resource_link",
+                  uri: "file:///home/dev/src/apps/web/src/ReadView.tsx",
+                  name: "ReadView.tsx",
+                },
+              },
+            ],
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.changedFiles).toEqual([
+      "apps/web/src/EditView.tsx",
+      "/home/dev/src/apps/web/src/ReadView.tsx",
+    ]);
+  });
+
+  it("reads the command from rawOutput.command for terminal rows", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "cursor-term",
+        kind: "tool.completed",
+        summary: "Ran command",
+        payload: {
+          itemType: "command_execution",
+          title: "Ran command",
+          detail: "cat server/package.json",
+          data: {
+            kind: "execute",
+            rawInput: {},
+            rawOutput: { output: "...", command: "cat server/package.json" },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.command).toBe("cat server/package.json");
+  });
+
   it("uses grep raw output summaries instead of repeating the generic tool label", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

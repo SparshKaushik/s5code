@@ -229,6 +229,56 @@ describe("buildThreadFeed", () => {
     expect(group.activities[0]?.getFullDetail()).toContain("repository.search");
   });
 
+  it("lists edited files from ACP diff content blocks even without locations", () => {
+    const thread = makeThread({
+      id: ThreadId.make("thread-cursor-edit"),
+      projectId: ProjectId.make("project-1"),
+      title: "Cursor edit",
+      latestTurn: {
+        turnId: TurnId.make("turn-1"),
+        state: "completed",
+        requestedAt: "2026-04-01T00:00:00.000Z",
+        startedAt: "2026-04-01T00:00:01.000Z",
+        completedAt: "2026-04-01T00:00:03.000Z",
+        assistantMessageId: null,
+      },
+      activities: [
+        makeActivity({
+          id: EventId.make("cursor-edit"),
+          kind: "tool.completed",
+          tone: "tool",
+          summary: "Changed files",
+          createdAt: "2026-04-01T00:00:02.000Z",
+          turnId: TurnId.make("turn-1"),
+          payload: {
+            title: "Changed files",
+            itemType: "dynamic_tool_call",
+            detail: "apps/web/src/EditView.tsx",
+            data: {
+              kind: "edit",
+              rawInput: {},
+              content: [
+                { type: "diff", path: "apps/web/src/EditView.tsx", oldText: "a", newText: "b" },
+              ],
+            },
+          },
+        }),
+      ],
+    });
+
+    const feed = buildThreadFeed(thread);
+    const group = feed[0];
+    expect(group).toMatchObject({ type: "activity-group" });
+    if (!group || group.type !== "activity-group") {
+      return;
+    }
+    expect(group.activities[0]).toMatchObject({
+      icon: "edit",
+      canExpand: true,
+    });
+    expect(group.activities[0]?.getFullDetail()).toContain("apps/web/src/EditView.tsx");
+  });
+
   it("defers large tool output expansion until a work row is opened or copied", () => {
     let serializedToolOutputs = 0;
     const activities = Array.from({ length: 5_000 }, (_, index) =>

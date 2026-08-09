@@ -554,8 +554,6 @@ function toolDetailTextLooksLikeFailure(text: string): boolean {
     normalized.includes("command not found") ||
     (normalized.includes("cannot find path") && normalized.includes("because it does not exist")) ||
     (normalized.includes("is not recognized") && normalized.includes("the term '")) ||
-    normalized.includes("is not recognized as the name of a cmdlet") ||
-    normalized.includes("a parameter cannot be found that matches parameter name") ||
     /<exited with exit code\s+[1-9]\d*\s*>/i.test(text) ||
     /exit(?:ed)? with exit code\s+[1-9]\d*/i.test(text) ||
     /exit code\s*[:\s]\s*[1-9]\d*\b/i.test(text)
@@ -866,6 +864,7 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   const item = asRecord(data?.item);
   const itemResult = asRecord(item?.result);
   const itemInput = asRecord(item?.input);
+  const rawOutput = asRecord(data?.rawOutput);
   const itemType = asTrimmedString(payload?.itemType);
   const detail = asTrimmedString(payload?.detail);
   const candidates: unknown[] = [
@@ -873,6 +872,7 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
     itemInput?.command,
     itemResult?.command,
     data?.command,
+    rawOutput?.command,
     itemType === "command_execution" && detail ? stripTrailingExitCode(detail).output : null,
   ];
 
@@ -965,8 +965,39 @@ function pushChangedFile(target: string[], seen: Set<string>, value: unknown) {
   target.push(normalized);
 }
 
+/** Normalize an ACP resource/link `uri` to a local file path when it names one. */
+function normalizeChangedFileUri(value: unknown): string | undefined {
+  const raw = asTrimmedString(value);
+  if (!raw) {
+    return undefined;
+  }
+  let path = raw;
+  if (path.startsWith("file://")) {
+    path = path.slice("file://".length);
+  } else if (path.startsWith("zed://")) {
+    try {
+      path = new URL(path).searchParams.get("path") ?? "";
+    } catch {
+      return undefined;
+    }
+  } else if (/^[a-z][a-z0-9+.-]*:/iu.test(path)) {
+    return undefined;
+  }
+  const queryIndex = path.search(/[?#]/u);
+  if (queryIndex >= 0) {
+    path = path.slice(0, queryIndex);
+  }
+  let normalized: string;
+  try {
+    normalized = decodeURIComponent(path.trim());
+  } catch {
+    normalized = path.trim();
+  }
+  return normalized.length > 0 ? normalized : undefined;
+}
+
 function collectChangedFiles(value: unknown, target: string[], seen: Set<string>, depth: number) {
-  if (depth > 4 || target.length >= 12) {
+  if (depth > 6 || target.length >= 12) {
     return;
   }
   if (Array.isArray(value)) {
@@ -990,8 +1021,13 @@ function collectChangedFiles(value: unknown, target: string[], seen: Set<string>
   pushChangedFile(target, seen, record.filename);
   pushChangedFile(target, seen, record.newPath);
   pushChangedFile(target, seen, record.oldPath);
+  pushChangedFile(target, seen, normalizeChangedFileUri(record.uri));
 
   for (const nestedKey of [
+    "content",
+    "locations",
+    "rawInput",
+    "rawOutput",
     "item",
     "result",
     "input",

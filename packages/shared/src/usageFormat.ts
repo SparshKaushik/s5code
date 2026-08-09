@@ -4,7 +4,7 @@
  *
  * @module usageFormat
  */
-import { UsageDay, type UsageSummaryInput } from "@t3tools/contracts";
+import { UsageDay, type UsageModelAlias, type UsageSummaryInput } from "@t3tools/contracts";
 
 const CURRENCY = new Intl.NumberFormat("en-US", {
   style: "currency",
@@ -84,7 +84,11 @@ export function enumerateDays(sinceDay: string, untilDay: string): readonly stri
  * The window the page requests, expressed in the viewer's own time zone so days
  * line up with what they actually experienced.
  */
-export function makeWindow(days: number, now = new Date()): UsageSummaryInput {
+export function makeWindow(
+  days: number,
+  modelAliases: readonly UsageModelAlias[] = [],
+  now = new Date(),
+): UsageSummaryInput {
   const timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
   const format = new Intl.DateTimeFormat("en-CA", {
     timeZone,
@@ -104,5 +108,6 @@ export function makeWindow(days: number, now = new Date()): UsageSummaryInput {
     sinceDay: UsageDay.make(start.toISOString().slice(0, 10)),
     untilDay: UsageDay.make(untilDay),
     timeZone,
+    modelAliases,
   };
 }

@@ -1,7 +1,7 @@
-# Keeping T3 Code in Sync
+# Keeping S5 Code in Sync
 
-The T3 Code web or desktop app and the server it connects to work best when they use the same
-version. If they do not match, T3 Code shows a warning with the right update option for that server.
+The S5 Code web or desktop app and the server it connects to work best when they use the same
+version. If they do not match, S5 Code shows a warning with the right update option for that server.
 
 ## Where to Find the Update
 
@@ -22,18 +22,24 @@ The update does not remove saved threads, settings, or project files.
 
 ## Choose the Action You See
 
-| Action                     | What to do                                                                                                                                                                  |
-| -------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **Update server**          | Available for the T3 Code Linux background service. Select the button and leave T3 Code open while it prepares, tests, restarts, and reconnects.                            |
-| **Update the desktop app** | Open the T3 Code desktop app on the machine that runs the server and install the app update there. Reopen it if needed.                                                     |
-| **Copy update command**    | Copy the command, open a terminal on the server machine, stop the current T3 Code server, and relaunch it with the copied command and any startup options you normally use. |
+| Action                     | What to do                                                                                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Update server**          | Available for the S5 Code Linux background service and for precompiled Linux server binaries. Select the button and leave S5 Code open while it prepares, tests, restarts, and reconnects. |
+| **Update the desktop app** | Open the S5 Code desktop app on the machine that runs the server and install the app update there. Reopen it if needed.                                                                    |
+| **Copy update command**    | Copy the command, open a terminal on the server machine, stop the current S5 Code server, and relaunch it with the copied command and any startup options you normally use.                |
 
-The available action depends on how that server was started. T3 Code does not update connected
+The available action depends on how that server was started. S5 Code does not update connected
 servers silently in the background.
 
 An older background-service launcher may ask you to run the exact
 `npx t3@<version> service update` command on the server machine. That one local update installs the
 rollback support needed for later remote updates, including versions that change the database.
+
+A **precompiled Linux server binary** updates the same way through that button: it downloads the
+release build for its own version and processor, checks that the download runs and reports the
+version you asked for, then replaces itself and restarts. If the download is missing, incomplete,
+or built for a different processor, the update stops and the server keeps running the version it
+already had.
 
 After selecting **Update**, the notice becomes a live status line: **Downloading…** while the new
 version is fetched and verified, then **Restarting…** while the server restarts into it. The same
@@ -43,7 +49,7 @@ update. A failure remains visible with its error and an option to retry.
 **Copy update command** gives you `npx t3@<client-version>`, which relaunches the server directly
 at the matching version. Add whatever startup options you normally use.
 
-If the server instead runs as the T3 Code background service, update the service on the host and
+If the server instead runs as the S5 Code background service, update the service on the host and
 pin the same version:
 
 ```sh
@@ -54,7 +60,7 @@ npx t3@<client-version> service update
 only resolves the skew when your client happens to be on the latest release. The exact version from
 the warning always works.
 
-See [Running T3 Code in the Background](./background-service.md) for install, status, and removal
+See [Running S5 Code in the Background](./background-service.md) for install, status, and removal
 commands.
 
 ## After the Update

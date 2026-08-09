@@ -10,6 +10,8 @@ import * as Path from "effect/Path";
 import { ChildProcessSpawner } from "effect/unstable/process";
 
 import {
+  CHECKPOINT_REFS_PREFIX,
+  CheckpointRef,
   GitCommandError,
   VcsProcessExitError,
   type VcsSwitchRefInput,
@@ -144,36 +146,6 @@ export interface GitFetchPullRequestBranchInput {
   branch: string;
 }
 
-export interface GitFetchPullRequestHeadCommitInput {
-  cwd: string;
-  prNumber: number;
-}
-
-export interface GitResolveCommitInput {
-  cwd: string;
-  revision: string;
-}
-
-export interface GitResolveCommitResult {
-  commitSha: string;
-}
-
-export interface GitRefreshCheckedOutBranchInput {
-  cwd: string;
-  targetCommit: string;
-  /**
-   * Commit the checkout is allowed to be hard-reset away from: the upstream commit read before
-   * the fetch. HEAD sitting there means the checkout holds no work of its own.
-   */
-  resetWhenHeadCommit?: string | null | undefined;
-}
-
-export interface GitRefreshCheckedOutBranchResult {
-  headCommit: string;
-  moved: boolean;
-  onTarget: boolean;
-}
-
 export interface GitEnsureRemoteInput {
   cwd: string;
   preferredName: string;
@@ -275,17 +247,6 @@ export class GitVcsDriver extends Context.Service<
     readonly fetchPullRequestBranch: (
       input: GitFetchPullRequestBranchInput,
     ) => Effect.Effect<void, GitCommandError>;
-    /** Fetches `refs/pull/<n>/head` without writing a branch, for heads that exist nowhere else. */
-    readonly fetchPullRequestHeadCommit: (
-      input: GitFetchPullRequestHeadCommitInput,
-    ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
-    readonly resolveCommit: (
-      input: GitResolveCommitInput,
-    ) => Effect.Effect<GitResolveCommitResult, GitCommandError>;
-    /** Moves the branch checked out in `cwd` onto `targetCommit`, from inside that worktree. */
-    readonly refreshCheckedOutBranch: (
-      input: GitRefreshCheckedOutBranchInput,
-    ) => Effect.Effect<GitRefreshCheckedOutBranchResult, GitCommandError>;
     readonly ensureRemote: (input: GitEnsureRemoteInput) => Effect.Effect<string, GitCommandError>;
     readonly resolvePrimaryRemoteName: (cwd: string) => Effect.Effect<string, GitCommandError>;
     readonly fetchRemote: (input: GitFetchRemoteInput) => Effect.Effect<void, GitCommandError>;
@@ -710,9 +671,9 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
       const commitEnv: NodeJS.ProcessEnv = {
         ...process.env,
         GIT_INDEX_FILE: tempIndexPath,
-        GIT_AUTHOR_NAME: "T3 Code",
+        GIT_AUTHOR_NAME: "S5 Code",
         GIT_AUTHOR_EMAIL: "t3code@users.noreply.github.com",
-        GIT_COMMITTER_NAME: "T3 Code",
+        GIT_COMMITTER_NAME: "S5 Code",
         GIT_COMMITTER_EMAIL: "t3code@users.noreply.github.com",
       };
 
@@ -898,6 +859,99 @@ export const makeVcsDriverShape = Effect.fn("makeGitVcsDriverShape")(function* (
             }),
           { discard: true },
         );
+      },
+    ),
+
+    listCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.listCheckpointRefs")(function* (cwd) {
+      // The ref pattern keeps the scan inside the namespace this build owns, so
+      // a user branch, tag, stash, or remote-tracking ref can never appear in a
+      // maintenance listing.
+      //
+      // Timestamps are read as unix seconds and normalized to UTC here.
+      // `iso-strict` renders the committer's local offset, which callers would
+      // then have to compare across offsets when ordering by age.
+      const result = yield* execute({
+        operation: "GitVcsDriver.checkpoints.listCheckpointRefs",
+        cwd,
+        args: [
+          "for-each-ref",
+          "--format=%(refname)%09%(committerdate:unix)",
+          `${CHECKPOINT_REFS_PREFIX}/`,
+        ],
+        allowNonZeroExit: true,
+        maxOutputBytes: CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
+      });
+      if (result.exitCode !== 0) {
+        return [];
+      }
+
+      const refs: Array<VcsDriver.VcsCheckpointRefInfo> = [];
+      for (const line of result.stdout.split("\n")) {
+        const trimmed = line.trim();
+        if (trimmed.length === 0) {
+          continue;
+        }
+        const separatorIndex = trimmed.indexOf("\t");
+        const refName = separatorIndex === -1 ? trimmed : trimmed.slice(0, separatorIndex);
+        // Defensive: never surface a ref outside the namespace, whatever git
+        // pattern semantics do on a given version.
+        if (!refName.startsWith(`${CHECKPOINT_REFS_PREFIX}/`)) {
+          continue;
+        }
+        const unixSeconds =
+          separatorIndex === -1 ? Number.NaN : Number(trimmed.slice(separatorIndex + 1).trim());
+        refs.push({
+          checkpointRef: CheckpointRef.make(refName),
+          updatedAt: Number.isFinite(unixSeconds)
+            ? DateTime.formatIso(DateTime.makeUnsafe(unixSeconds * 1000))
+            : "",
+        });
+      }
+      return refs;
+    }),
+
+    measureCheckpointRefs: Effect.fn("GitVcsDriver.checkpoints.measureCheckpointRefs")(
+      function* (input) {
+        if (input.checkpointRefs.length === 0) {
+          return 0;
+        }
+        // Size of objects reachable *only* from these refs: anything also
+        // reachable from a branch, tag, or a checkpoint ref outside this set
+        // is excluded, so the number reflects what deleting exactly these refs
+        // would reclaim.
+        //
+        // Two flags carry the semantics:
+        //   - each `--exclude` applies to the `--all` that follows it, so the
+        //     exclusions must precede `--all`;
+        //   - `--objects-edge-aggressive` makes git walk the excluded side's
+        //     trees. Without it, trees and blobs shared with a branch are
+        //     still counted, which would overstate what deletion reclaims.
+        const result = yield* execute({
+          operation: "GitVcsDriver.checkpoints.measureCheckpointRefs",
+          cwd: input.cwd,
+          args: [
+            "rev-list",
+            "--disk-usage",
+            "--objects",
+            "--objects-edge-aggressive",
+            ...input.checkpointRefs,
+            "--not",
+            ...input.checkpointRefs.map((checkpointRef) => `--exclude=${checkpointRef}`),
+            "--all",
+          ],
+          allowNonZeroExit: true,
+        });
+        if (result.exitCode !== 0) {
+          return 0;
+        }
+        // `--objects-edge-aggressive` emits boundary object lines before the
+        // total, so read the last non-empty line rather than the whole output.
+        const lastLine = result.stdout
+          .split("\n")
+          .map((line) => line.trim())
+          .findLast((line) => line.length > 0);
+        const bytes = Number(lastLine);
+        return Number.isFinite(bytes) && bytes > 0 ? bytes : 0;
       },
     ),
   };

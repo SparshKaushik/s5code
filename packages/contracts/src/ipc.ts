@@ -1042,6 +1042,7 @@ export interface DesktopBridge {
    * web callers fall back to a plain file input.
    */
   pickThemeFiles?: () => Promise<readonly PickedThemeFile[] | null>;
+  confirm: (message: string) => Promise<boolean>;
   setTheme: (theme: DesktopTheme) => Promise<void>;
   showContextMenu: <T extends string>(
     items: readonly ContextMenuItem<T>[],
@@ -1136,12 +1137,6 @@ export interface DesktopPreviewBridge {
   onPointerEvent: (listener: (event: DesktopPreviewPointerEvent) => void) => () => void;
 }
 
-export type ConfirmDialogVariant = "default" | "destructive";
-
-export interface ConfirmDialogOptions {
-  readonly variant?: ConfirmDialogVariant;
-}
-
 /**
  * APIs bound to the local app shell, not to any particular backend environment.
  *
@@ -1155,7 +1150,7 @@ export interface ConfirmDialogOptions {
 export interface LocalApi {
   dialogs: {
     pickFolder: (options?: PickFolderOptions) => Promise<string | null>;
-    confirm: (message: string, options?: ConfirmDialogOptions) => Promise<boolean>;
+    confirm: (message: string) => Promise<boolean>;
   };
   shell: {
     openExternal: (url: string) => Promise<void>;

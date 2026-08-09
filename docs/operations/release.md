@@ -13,24 +13,17 @@ This document covers the unified release workflow for stable and nightly desktop
   - manual `workflow_dispatch` for either channel
 - Runs quality gates first: lint, typecheck, test.
 - Reads the shared production T3 Connect relay URL and Clerk client configuration before packaging clients.
-- Builds four artifacts in parallel for both channels:
+- Builds artifacts in parallel for both channels:
   - macOS `arm64` DMG
   - macOS `x64` DMG
-  - Linux `x64` AppImage
-  - Windows `x64` NSIS installer
-- Publishes one GitHub Release with all produced files.
+  - Android universal APK (all four ABIs), built on the runner with `eas build --local` (no EAS cloud)
+- Publishes one GitHub Release with all produced files, including the APK under `t3code-<version>.apk`.
   - Stable tags with a suffix after `X.Y.Z` (for example `1.2.3-alpha.1`) are published as GitHub prereleases.
   - Only plain stable `X.Y.Z` releases are marked as the repository's latest release.
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Publishes the CLI package (`apps/server`, npm package `t3`) with OIDC trusted publishing from the same workflow file:
-  - stable releases publish npm dist-tag `latest`
-  - nightly releases publish npm dist-tag `nightly`
-- Deploys the hosted web app to Vercel only after a release is published:
-  - stable releases are aliased to the `latest` hosted app channel
-  - nightly releases are aliased to the `nightly` hosted app channel
-- Signing is optional and auto-detected per platform from secrets.
+- Signing is optional and auto-detected per platform from secrets: Apple secrets sign the DMGs, EAS-managed Android credentials sign the APK. Without them the DMGs are unsigned and the APK is debug-signed (still sideloadable).
 
 ## Required release credentials
 
@@ -43,6 +36,10 @@ credentials documented below:
 The finalize job uses them to commit and push aligned package versions to `main` as the Release App.
 GitHub Release publication uses the repository-scoped workflow token so it has a rate-limit quota
 independent from the shared Release App installation.
+
+Android APK signing uses the credentials EAS manages for the configured project (see
+`eas.json`, `credentialsSource` defaults to `remote`). No Android secrets are stored in this
+repository.
 
 ## T3 Connect relay deployment
 

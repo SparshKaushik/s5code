@@ -54,4 +54,75 @@ describe("toolActivity", () => {
       summary: "Read file",
     });
   });
+
+  it("finds the edited file inside an ACP diff content block when locations are sparse", () => {
+    expect(
+      deriveToolActivityPresentation({
+        itemType: "dynamic_tool_call",
+        title: "Edit file",
+        detail: "Edit file",
+        data: {
+          kind: "edit",
+          rawInput: {},
+          content: [{ type: "diff", path: "/tmp/app.ts", oldText: "a", newText: "b" }],
+        },
+        fallbackSummary: "Edit file",
+      }),
+    ).toEqual({
+      summary: "Changed files",
+      detail: "/tmp/app.ts",
+    });
+  });
+
+  it("finds the read file inside an ACP resource block uri when locations are sparse", () => {
+    expect(
+      deriveToolActivityPresentation({
+        itemType: "dynamic_tool_call",
+        title: "Read",
+        detail: "Read",
+        data: {
+          kind: "read",
+          rawInput: {},
+          content: [
+            {
+              type: "content",
+              content: {
+                type: "resource",
+                resource: {
+                  textResourceContents: {
+                    uri: "file:///tmp/app.ts",
+                    mimeType: "text/plain",
+                    text: "const x = 1;",
+                  },
+                },
+              },
+            },
+          ],
+        },
+        fallbackSummary: "Read",
+      }),
+    ).toEqual({
+      summary: "Read file",
+      detail: "/tmp/app.ts",
+    });
+  });
+
+  it("reads the command from rawOutput when Cursor omits rawInput", () => {
+    expect(
+      deriveToolActivityPresentation({
+        itemType: "command_execution",
+        title: "Terminal",
+        detail: "Running checks",
+        data: {
+          kind: "execute",
+          rawInput: {},
+          rawOutput: { output: "bun run typecheck", command: "bun run typecheck" },
+        },
+        fallbackSummary: "Terminal",
+      }),
+    ).toEqual({
+      summary: "Ran command",
+      detail: "bun run typecheck",
+    });
+  });
 });

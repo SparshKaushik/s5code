@@ -29,17 +29,19 @@ export type ThreadEnvMode = typeof ThreadEnvMode.Type;
 export type ExecutionEnvironmentPlatform = typeof ExecutionEnvironmentPlatform.Type;
 
 /** How a server can replace itself with another version when asked over RPC.
-    New servers only advertise the stable launcher-backed "boot-service" path;
+    New servers only advertise the stable launcher-backed "boot-service" path
+    or, for precompiled single-file server binaries, "binary";
     "respawn" remains decodable for compatibility with older servers. */
-export const ServerSelfUpdateMethod = Schema.Literals(["boot-service", "respawn"]);
+export const ServerSelfUpdateMethod = Schema.Literals(["boot-service", "binary", "respawn"]);
 export type ServerSelfUpdateMethod = typeof ServerSelfUpdateMethod.Type;
 
 /** What update path a client should offer for a server: one of the RPC
     self-update methods above, or "desktop-managed" when the backend's
-    version belongs to the T3 Code desktop app supervising it — updating the
+    version belongs to the S5 Code desktop app supervising it — updating the
     app on that machine is the only way to update the server. */
 export const ServerSelfUpdateCapability = Schema.Literals([
   "boot-service",
+  "binary",
   "respawn",
   "desktop-managed",
 ]);
@@ -48,9 +50,6 @@ export type ServerSelfUpdateCapability = typeof ServerSelfUpdateCapability.Type;
 export const ExecutionEnvironmentCapabilities = Schema.Struct({
   repositoryIdentity: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   connectionProbe: Schema.optionalKey(Schema.Boolean),
-  /** Server exposes the pull-request list, detail, activity, diff, and mutation APIs. Absent on
-      servers from before the pull-request workspace shipped, so clients must not probe them. */
-  pullRequests: Schema.optionalKey(Schema.Boolean),
   /** Server understands thread.settle / thread.unsettle commands. Absent on
       pre-settlement servers, so clients treat missing as unsupported and
       never send the commands under version skew. */

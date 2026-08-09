@@ -1,7 +1,6 @@
 import { DownloadIcon, RotateCwIcon, TriangleAlertIcon, XIcon } from "lucide-react";
 import { useCallback, useState } from "react";
 import { isElectron } from "../../env";
-import { ensureLocalApi } from "../../localApi";
 import { useDesktopUpdateState } from "../../state/desktopUpdate";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import {
@@ -71,7 +70,6 @@ function SidebarUpdateReleaseNotesTooltip({
 export function SidebarUpdatePill() {
   const state = useDesktopUpdateState();
   const [dismissed, setDismissed] = useState(false);
-  const [isActionPending, setIsActionPending] = useState(false);
 
   const visible = isElectron && shouldShowDesktopUpdateButton(state) && !dismissed;
   const tooltip = state ? getDesktopUpdateButtonTooltip(state) : "Update available";
@@ -82,12 +80,10 @@ export function SidebarUpdatePill() {
   const arm64Description =
     state && showArm64Warning ? getArm64IntelBuildWarningDescription(state) : null;
 
-  const handleAction = useCallback(async () => {
+  const handleAction = useCallback(() => {
     const bridge = window.desktopBridge;
     if (!bridge || !state) return;
-    if (disabled || action === "none" || isActionPending) return;
-
-    setIsActionPending(true);
+    if (disabled || action === "none") return;
 
     if (action === "download") {
       void bridge
@@ -115,32 +111,15 @@ export function SidebarUpdatePill() {
               description: error instanceof Error ? error.message : "An unexpected error occurred.",
             }),
           );
-        })
-        .finally(() => setIsActionPending(false));
+        });
       return;
     }
 
     if (action === "install") {
-      let confirmed = false;
-      try {
-        confirmed = await ensureLocalApi().dialogs.confirm(
-          getDesktopUpdateInstallConfirmationMessage(state, navigator.platform),
-        );
-      } catch (error) {
-        setIsActionPending(false);
-        toastManager.add(
-          stackedThreadToast({
-            type: "error",
-            title: "Could not confirm update",
-            description: error instanceof Error ? error.message : "Update confirmation failed.",
-          }),
-        );
-        return;
-      }
-      if (!confirmed) {
-        setIsActionPending(false);
-        return;
-      }
+      const confirmed = window.confirm(
+        getDesktopUpdateInstallConfirmationMessage(state, navigator.platform),
+      );
+      if (!confirmed) return;
       void bridge
         .installUpdate()
         .then((result) => {
@@ -163,10 +142,9 @@ export function SidebarUpdatePill() {
               description: error instanceof Error ? error.message : "An unexpected error occurred.",
             }),
           );
-        })
-        .finally(() => setIsActionPending(false));
+        });
     }
-  }, [action, disabled, isActionPending, state]);
+  }, [action, disabled, state]);
 
   if (!visible && !showArm64Warning) return null;
 
@@ -181,7 +159,7 @@ export function SidebarUpdatePill() {
       )}
       {visible && (
         <div
-          className={`group/update relative flex h-7 w-full items-center rounded-lg bg-update-surface text-xs font-medium text-update-foreground ${
+          className={`group/update relative flex h-7 w-full items-center rounded-lg bg-update-surface text-xs font-medium text-update ${
             disabled ? " cursor-not-allowed opacity-60" : ""
           }`}
         >
@@ -192,8 +170,8 @@ export function SidebarUpdatePill() {
                 <button
                   type="button"
                   aria-label={tooltip}
-                  aria-disabled={disabled || isActionPending || undefined}
-                  disabled={disabled || isActionPending}
+                  aria-disabled={disabled || undefined}
+                  disabled={disabled}
                   className="update-main relative flex h-full flex-1 items-center gap-2 px-2 enabled:cursor-pointer"
                   onClick={handleAction}
                 >
@@ -246,7 +224,7 @@ export function SidebarUpdatePill() {
                   <button
                     type="button"
                     aria-label="Dismiss update"
-                    className="mr-1 inline-flex size-5 items-center justify-center rounded-md text-update-foreground transition-colors"
+                    className="mr-1 inline-flex size-5 items-center justify-center rounded-md text-update/60 transition-colors hover:text-update"
                     onClick={() => setDismissed(true)}
                   >
                     <XIcon className="size-3.5" />

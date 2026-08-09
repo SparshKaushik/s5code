@@ -5,11 +5,16 @@ import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 
 import packageJson from "../../package.json" with { type: "json" };
-import { resolveServerSelfUpdateCapability } from "../cloud/selfUpdate.ts";
+import { ServerBinaryRuntime } from "../cloud/binaryRuntime.ts";
+import {
+  advertiseServerSelfUpdateCapability,
+  resolveServerSelfUpdateCapability,
+} from "../cloud/selfUpdate.ts";
 import { resolveServiceLauncherMode } from "../cloud/serviceLauncherClient.ts";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -127,10 +132,14 @@ export const make = Effect.gen(function* () {
   const cwdBaseName = path.basename(serverConfig.cwd).trim();
   const label = yield* resolveServerEnvironmentLabel({ cwdBaseName });
   const launcher = yield* resolveServiceLauncherMode();
-  const serverSelfUpdate = resolveServerSelfUpdateCapability({
-    desktopManaged: serverConfig.mode === "desktop",
-    launcherManaged: launcher.managed,
-  });
+  const binaryIdentity = yield* ServerBinaryRuntime;
+  const serverSelfUpdate = advertiseServerSelfUpdateCapability(
+    resolveServerSelfUpdateCapability({
+      desktopManaged: serverConfig.mode === "desktop",
+      launcherManaged: launcher.managed,
+      releaseBinary: Option.isSome(binaryIdentity),
+    }),
+  );
 
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
@@ -143,14 +152,15 @@ export const make = Effect.gen(function* () {
     capabilities: {
       repositoryIdentity: true,
       connectionProbe: true,
-      pullRequests: true,
       threadSettlement: true,
       threadSnooze: true,
       threadPinning: true,
       threadPinReorder: true,
       threadTitleRegeneration: true,
       ...(serverSelfUpdate === null ? {} : { serverSelfUpdate }),
-      ...(serverSelfUpdate === "boot-service" ? { serverSelfUpdateProgress: true } : {}),
+      ...(serverSelfUpdate === "boot-service" || serverSelfUpdate === "binary"
+        ? { serverSelfUpdateProgress: true }
+        : {}),
     },
   };
 

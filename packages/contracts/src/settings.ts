@@ -11,6 +11,7 @@ import {
 } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import { UsageModelAlias } from "./usage.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -114,6 +115,12 @@ export type FontFamilyPreference = typeof FontFamilyPreference.Type;
 export const ClientSettingsSchema = Schema.Struct({
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Manual model tags for the usage page. Client-scoped rather than
+  // server-scoped on purpose: a gateway's model name means the same thing on
+  // every environment, and a user with three environments should tag it once.
+  usageModelAliases: Schema.Array(UsageModelAlias).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -421,6 +428,47 @@ export const GrokSettings = makeProviderSettingsSchema(
 );
 export type GrokSettings = typeof GrokSettings.Type;
 
+export const PiSettings = makeProviderSettingsSchema(
+  {
+    enabled: Schema.Boolean.pipe(
+      Schema.withDecodingDefault(Effect.succeed(true)),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+    binaryPath: makeBinaryPathSetting("pi").pipe(
+      Schema.annotateKey({
+        title: "Binary path",
+        description: "Path to the pi CLI binary.",
+        providerSettingsForm: { placeholder: "pi", clearWhenEmpty: "omit" },
+      }),
+    ),
+    agentDirPath: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "PI_CODING_AGENT_DIR path",
+        description:
+          "Custom pi agent directory. Keeps settings, extensions, and credentials separate per instance.",
+        providerSettingsForm: { placeholder: "~/.pi/agent", clearWhenEmpty: "omit" },
+      }),
+    ),
+    launchArgs: TrimmedString.pipe(
+      Schema.withDecodingDefault(Effect.succeed("")),
+      Schema.annotateKey({
+        title: "Launch arguments",
+        description: "Additional CLI arguments passed to `pi --mode rpc` on session start.",
+        providerSettingsForm: { placeholder: "e.g. --no-skills", clearWhenEmpty: "omit" },
+      }),
+    ),
+    customModels: Schema.Array(Schema.String).pipe(
+      Schema.withDecodingDefault(Effect.succeed([])),
+      Schema.annotateKey({ providerSettingsForm: { hidden: true } }),
+    ),
+  },
+  {
+    order: ["binaryPath", "agentDirPath", "launchArgs"],
+  },
+);
+export type PiSettings = typeof PiSettings.Type;
+
 export const OpenCodeSettings = makeProviderSettingsSchema(
   {
     enabled: Schema.Boolean.pipe(
@@ -441,7 +489,7 @@ export const OpenCodeSettings = makeProviderSettingsSchema(
       Schema.withDecodingDefault(Effect.succeed("")),
       Schema.annotateKey({
         title: "Server URL",
-        description: "Leave blank to let T3 Code spawn the server when needed.",
+        description: "Leave blank to let S5 Code spawn the server when needed.",
         providerSettingsForm: {
           placeholder: "http://127.0.0.1:4096",
           clearWhenEmpty: "omit",
@@ -537,6 +585,75 @@ export const BackgroundActivitySettings = Schema.Struct({
 }).pipe(Schema.withDecodingDefault(Effect.succeed({})));
 export type BackgroundActivitySettings = typeof BackgroundActivitySettings.Type;
 
+// ── Experimental settings ─────────────────────────────────────
+
+export const MIN_CHECKPOINT_RETENTION_DAYS = 1;
+export const MAX_CHECKPOINT_RETENTION_DAYS = 365;
+export const CheckpointRetentionDays = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_CHECKPOINT_RETENTION_DAYS,
+    maximum: MAX_CHECKPOINT_RETENTION_DAYS,
+  }),
+);
+export type CheckpointRetentionDays = typeof CheckpointRetentionDays.Type;
+export const DEFAULT_CHECKPOINT_RETENTION_DAYS: CheckpointRetentionDays = 30;
+
+export const MIN_CHECKPOINT_RETENTION_MEGABYTES = 16;
+export const MAX_CHECKPOINT_RETENTION_MEGABYTES = 100_000;
+export const CheckpointRetentionMegabytes = Schema.Int.check(
+  Schema.isBetween({
+    minimum: MIN_CHECKPOINT_RETENTION_MEGABYTES,
+    maximum: MAX_CHECKPOINT_RETENTION_MEGABYTES,
+  }),
+);
+export type CheckpointRetentionMegabytes = typeof CheckpointRetentionMegabytes.Type;
+export const DEFAULT_CHECKPOINT_RETENTION_MEGABYTES: CheckpointRetentionMegabytes = 2_048;
+
+/**
+ * Checkpoint storage retention. `null` on either limit disables that limit.
+ *
+ * Cleanup only ever considers checkpoint state S5 Code created itself:
+ * hidden `refs/t3/checkpoints` refs inside project repositories and
+ * per-thread shadow-git rewind stores under the server state directory.
+ * Refs belonging to threads that still exist are only removed by the age
+ * and size limits; refs for deleted threads are always removed.
+ */
+export const CheckpointRetentionSettings = Schema.Struct({
+  /** Delete checkpoint state for deleted threads as soon as the thread goes away. */
+  deleteOnThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  /** Delete checkpoint state older than this many days. `null` disables. */
+  maxAgeDays: Schema.NullOr(CheckpointRetentionDays).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECKPOINT_RETENTION_DAYS)),
+  ),
+  /** Delete oldest checkpoint state once total size exceeds this. `null` disables. */
+  maxTotalMegabytes: Schema.NullOr(CheckpointRetentionMegabytes).pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHECKPOINT_RETENTION_MEGABYTES)),
+  ),
+  /** Run the age/size sweep automatically on server start. */
+  sweepOnStartup: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+});
+export type CheckpointRetentionSettings = typeof CheckpointRetentionSettings.Type;
+
+/**
+ * Opt-in, potentially-unstable server behavior.
+ *
+ * Distinct from the client-local `Beta` toggles: everything here changes
+ * what the server does on disk, so it lives in server-authoritative
+ * settings and is shared by every connected client.
+ */
+export const ExperimentalSettings = Schema.Struct({
+  /**
+   * Session rewind: per-turn undo/redo backed by shadow-git snapshots kept
+   * outside the project repository. Off by default; enabling it starts
+   * capturing snapshots on the next turn (earlier turns stay unrewindable).
+   */
+  sessionRewindEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  checkpointRetention: CheckpointRetentionSettings.pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
+  ),
+});
+export type ExperimentalSettings = typeof ExperimentalSettings.Type;
+
 export const ServerSettings = Schema.Struct({
   // Legacy token-by-token assistant output. Deliberately a fresh key (was
   // `enableAssistantStreaming`): decoding drops the old key, so everyone,
@@ -601,6 +718,7 @@ export const ServerSettings = Schema.Struct({
     cursor: CursorSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     grok: GrokSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
     opencode: OpenCodeSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+    pi: PiSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   }).pipe(Schema.withDecodingDefault(Effect.succeed({}))),
   // New driver-agnostic instance map. Keyed by `ProviderInstanceId`; values
   // are `ProviderInstanceConfig` envelopes. The driver-specific config blob
@@ -611,6 +729,7 @@ export const ServerSettings = Schema.Struct({
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
   observability: ObservabilitySettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
+  experimental: ExperimentalSettings.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type ServerSettings = typeof ServerSettings.Type;
 
@@ -696,6 +815,14 @@ const GrokSettingsPatch = Schema.Struct({
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
 });
 
+const PiSettingsPatch = Schema.Struct({
+  enabled: Schema.optionalKey(Schema.Boolean),
+  binaryPath: Schema.optionalKey(TrimmedString),
+  agentDirPath: Schema.optionalKey(TrimmedString),
+  launchArgs: Schema.optionalKey(TrimmedString),
+  customModels: Schema.optionalKey(Schema.Array(Schema.String)),
+});
+
 const OpenCodeSettingsPatch = Schema.Struct({
   enabled: Schema.optionalKey(Schema.Boolean),
   binaryPath: Schema.optionalKey(TrimmedString),
@@ -737,6 +864,19 @@ export const ServerSettingsPatch = Schema.Struct({
       otlpMetricsUrl: Schema.optionalKey(TrimmedString),
     }),
   ),
+  experimental: Schema.optionalKey(
+    Schema.Struct({
+      sessionRewindEnabled: Schema.optionalKey(Schema.Boolean),
+      checkpointRetention: Schema.optionalKey(
+        Schema.Struct({
+          deleteOnThreadDelete: Schema.optionalKey(Schema.Boolean),
+          maxAgeDays: Schema.optionalKey(Schema.NullOr(CheckpointRetentionDays)),
+          maxTotalMegabytes: Schema.optionalKey(Schema.NullOr(CheckpointRetentionMegabytes)),
+          sweepOnStartup: Schema.optionalKey(Schema.Boolean),
+        }),
+      ),
+    }),
+  ),
   providers: Schema.optionalKey(
     Schema.Struct({
       codex: Schema.optionalKey(CodexSettingsPatch),
@@ -744,6 +884,7 @@ export const ServerSettingsPatch = Schema.Struct({
       cursor: Schema.optionalKey(CursorSettingsPatch),
       grok: Schema.optionalKey(GrokSettingsPatch),
       opencode: Schema.optionalKey(OpenCodeSettingsPatch),
+      pi: Schema.optionalKey(PiSettingsPatch),
     }),
   ),
   // Whole-map replacement for the new instance config. Patching individual
@@ -801,6 +942,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
+  usageModelAliases: Schema.optionalKey(Schema.Array(UsageModelAlias)),
   wordWrap: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

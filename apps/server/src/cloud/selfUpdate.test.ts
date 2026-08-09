@@ -5,11 +5,14 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Fiber from "effect/Fiber";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
+import { HttpClient } from "effect/unstable/http";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
+import { ServerBinaryRuntime } from "./binaryRuntime.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 import * as ServerSelfUpdate from "./selfUpdate.ts";
@@ -45,8 +48,6 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
             timedOut: false,
             stdoutTruncated: false,
             stderrTruncated: false,
-            stdoutInvalidUtf8: false,
-            stderrInvalidUtf8: false,
           };
         }
         order.push("preflight");
@@ -66,8 +67,6 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
-          stdoutInvalidUtf8: false,
-          stderrInvalidUtf8: false,
         };
       }),
   });
@@ -89,6 +88,14 @@ const makeHarness = Effect.fn("test.make_self_update_harness")(function* (
     Effect.provideService(ProcessRunner.ProcessRunner, runner),
     Effect.provideService(ServiceLauncherClient.ServiceLauncherClient, launcher),
     Effect.provideService(HostProcessExecutablePath, "/usr/bin/node"),
+    // Pin the process shape: without this the reference reads the ambient
+    // process, so the launcher path under test would depend on how vitest ran.
+    Effect.provideService(ServerBinaryRuntime, Option.none()),
+    // Only the binary path uses HTTP; die loudly if the launcher path reaches it.
+    Effect.provideService(
+      HttpClient.HttpClient,
+      HttpClient.make(() => Effect.die("unexpected release-binary download")),
+    ),
     Effect.provide(ServerConfig.layer({ ...config, mode: options.mode ?? "web" })),
   );
   return { selfUpdate, order };
@@ -149,4 +156,47 @@ it.layer(NodeServices.layer)("server self update", (it) => {
       expect((yield* Fiber.join(first)).updateId).toBe("launcher-id");
     }),
   );
+});
+
+it("prefers the release-binary path over the launcher, and desktop over both", () => {
+  expect(
+    ServerSelfUpdate.resolveServerSelfUpdateCapability({
+      desktopManaged: true,
+      launcherManaged: true,
+      releaseBinary: true,
+    }),
+  ).toBe("desktop-managed");
+  // A release binary has no npm tree to stage into, so it must win over the
+  // launcher path even if launcher context somehow looks present.
+  expect(
+    ServerSelfUpdate.resolveServerSelfUpdateCapability({
+      desktopManaged: false,
+      launcherManaged: true,
+      releaseBinary: true,
+    }),
+  ).toBe("binary");
+  expect(
+    ServerSelfUpdate.resolveServerSelfUpdateCapability({
+      desktopManaged: false,
+      launcherManaged: true,
+      releaseBinary: false,
+    }),
+  ).toBe("boot-service");
+  expect(
+    ServerSelfUpdate.resolveServerSelfUpdateCapability({
+      desktopManaged: false,
+      launcherManaged: false,
+      releaseBinary: false,
+    }),
+  ).toBeNull();
+});
+
+it("advertises release-binary servers as boot-service for production relay schema compatibility", () => {
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("binary")).toBe("boot-service");
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("boot-service")).toBe("boot-service");
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("desktop-managed")).toBe(
+    "desktop-managed",
+  );
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability("respawn")).toBe("respawn");
+  expect(ServerSelfUpdate.advertiseServerSelfUpdateCapability(null)).toBeNull();
 });

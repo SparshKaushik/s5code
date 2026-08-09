@@ -175,6 +175,17 @@ const ProjectionThreadCheckpointContextThreadRowSchema = Schema.Struct({
   workspaceRoot: Schema.String,
   worktreePath: Schema.NullOr(Schema.String),
 });
+const ProjectionThreadWorkspaceContextRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  workspaceRoot: Schema.String,
+  worktreePath: Schema.NullOr(Schema.String),
+});
+const ProjectionThreadCheckpointOwnerRowSchema = Schema.Struct({
+  threadId: ThreadId,
+  title: Schema.String,
+  workspaceRoot: Schema.String,
+  worktreePath: Schema.NullOr(Schema.String),
+});
 const FullThreadDiffContextLookupInput = Schema.Struct({
   threadId: ThreadId,
   checkpointTurnCount: NonNegativeInt,
@@ -917,6 +928,63 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         WHERE threads.thread_id = ${threadId}
           AND threads.deleted_at IS NULL
         LIMIT 1
+      `,
+  });
+
+  // Intentionally does **not** filter `deleted_at`: deletion cleanup runs
+  // after `thread.deleted` is projected and still needs the workspace path to
+  // remove that thread's checkpoint refs.
+  const getThreadWorkspaceContextRowIncludingDeleted = SqlSchema.findOneOption({
+    Request: ThreadIdLookupInput,
+    Result: ProjectionThreadWorkspaceContextRowSchema,
+    execute: ({ threadId }) =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId",
+          projects.workspace_root AS "workspaceRoot",
+          threads.worktree_path AS "worktreePath"
+        FROM projection_threads AS threads
+        INNER JOIN projection_projects AS projects
+          ON projects.project_id = threads.project_id
+        WHERE threads.thread_id = ${threadId}
+        LIMIT 1
+      `,
+  });
+
+  // Archived threads are included on purpose: archiving is reversible, so
+  // their checkpoints are not orphans. Only soft-deleted threads drop out.
+  const listThreadCheckpointOwnerRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProjectionThreadCheckpointOwnerRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          threads.thread_id AS "threadId",
+          threads.title,
+          projects.workspace_root AS "workspaceRoot",
+          threads.worktree_path AS "worktreePath"
+        FROM projection_threads AS threads
+        INNER JOIN projection_projects AS projects
+          ON projects.project_id = threads.project_id
+        WHERE threads.deleted_at IS NULL
+        ORDER BY threads.thread_id ASC
+      `,
+  });
+
+  // Deleted threads are included on purpose: their worktree may be the only
+  // place a repository with orphaned checkpoint refs is reachable from.
+  const listCheckpointWorkspacePathRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: Schema.Struct({ path: Schema.String }),
+    execute: () =>
+      sql`
+        SELECT workspace_root AS "path"
+        FROM projection_projects
+        WHERE deleted_at IS NULL
+        UNION
+        SELECT worktree_path AS "path"
+        FROM projection_threads
+        WHERE worktree_path IS NOT NULL
       `,
   });
 
@@ -2219,6 +2287,40 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
         Effect.map(Option.map((row) => row.threadId)),
       );
 
+  const getThreadWorkspaceContextIncludingDeleted: ProjectionSnapshotQueryShape["getThreadWorkspaceContextIncludingDeleted"] =
+    (threadId) =>
+      getThreadWorkspaceContextRowIncludingDeleted({ threadId }).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.getThreadWorkspaceContextIncludingDeleted:query",
+            "ProjectionSnapshotQuery.getThreadWorkspaceContextIncludingDeleted:decodeRow",
+          ),
+        ),
+      );
+
+  const listThreadCheckpointOwners: ProjectionSnapshotQueryShape["listThreadCheckpointOwners"] =
+    () =>
+      listThreadCheckpointOwnerRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listThreadCheckpointOwners:query",
+            "ProjectionSnapshotQuery.listThreadCheckpointOwners:decodeRows",
+          ),
+        ),
+      );
+
+  const listCheckpointWorkspacePaths: ProjectionSnapshotQueryShape["listCheckpointWorkspacePaths"] =
+    () =>
+      listCheckpointWorkspacePathRows(undefined).pipe(
+        Effect.mapError(
+          toPersistenceSqlOrDecodeError(
+            "ProjectionSnapshotQuery.listCheckpointWorkspacePaths:query",
+            "ProjectionSnapshotQuery.listCheckpointWorkspacePaths:decodeRows",
+          ),
+        ),
+        Effect.map((rows) => rows.map((row) => row.path).filter((path) => path.length > 0)),
+      );
+
   const getThreadCheckpointContext: ProjectionSnapshotQueryShape["getThreadCheckpointContext"] = (
     threadId,
   ) =>
@@ -2676,6 +2778,9 @@ const makeProjectionSnapshotQuery = Effect.gen(function* () {
     getProjectShellById,
     getFirstActiveThreadIdByProjectId,
     getThreadCheckpointContext,
+    getThreadWorkspaceContextIncludingDeleted,
+    listThreadCheckpointOwners,
+    listCheckpointWorkspacePaths,
     getFullThreadDiffContext,
     getThreadShellById,
     getThreadDetailById,

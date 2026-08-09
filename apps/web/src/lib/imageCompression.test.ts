@@ -123,9 +123,12 @@ describe("compressImageForStash", () => {
   });
 
   it("reports too-large when even the smallest encoding overflows the budget", async () => {
-    const { close } = stubCanvasPipeline(() => 8_000_000);
+    // 1MB base64-encodes to ~1.33M chars, just over the 1.3M budget. Keep the
+    // stub as small as the branch allows: jsdom's FileReader is slow enough
+    // that larger stubs blow the 15s test timeout on shared CI runners.
+    const { close } = stubCanvasPipeline(() => 1_000_000);
 
-    const result = await compressImageForStash(makeFile(9_000_000));
+    const result = await compressImageForStash(makeFile(2_000_000));
 
     expect(result).toEqual({ ok: false, reason: "too-large" });
     // The bitmap must still be released on the give-up path.

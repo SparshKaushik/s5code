@@ -619,7 +619,7 @@ export function ProviderInstanceCard({
                           "size-5 rounded-sm p-0",
                           versionAdvisory.emphasis === "strong"
                             ? "text-warning hover:text-warning"
-                            : "text-update-foreground hover:text-update-foreground",
+                            : "text-update hover:text-update",
                         )}
                         aria-label="Update available — view details"
                       >

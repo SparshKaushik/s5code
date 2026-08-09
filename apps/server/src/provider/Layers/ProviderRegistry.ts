@@ -78,17 +78,29 @@ const makeManualProviderMaintenanceCapabilities = (provider: ProviderDriverKind)
 const hasModelCapabilities = (model: ServerProvider["models"][number]): boolean =>
   (model.capabilities?.optionDescriptors?.length ?? 0) > 0;
 
+/**
+ * Drivers whose probe reports a complete live inventory, so an empty model list
+ * is a real removal rather than a gap to paper over. OpenCode reads its
+ * inventory from the running server; pi reads it from `get_available_models` on
+ * a live process. For both, keeping stale models after the user logs out or
+ * removes a provider would show models that can no longer be selected.
+ */
+const LIVE_INVENTORY_DRIVERS: ReadonlySet<ProviderDriverKind> = new Set([
+  ProviderDriverKind.make("opencode"),
+  ProviderDriverKind.make("pi"),
+]);
+
 const shouldRetainMissingProviderModels = (provider: ServerProvider): boolean => {
-  if (provider.driver !== ProviderDriverKind.make("opencode")) {
+  if (!LIVE_INVENTORY_DRIVERS.has(provider.driver)) {
     return true;
   }
 
-  // OpenCode's initial snapshot is deliberately non-authoritative while its
-  // first probe is still running. A probe error from an installed CLI/server
-  // is likewise partial: it could not establish the current inventory.
-  // Conversely, disabled and missing-CLI snapshots are authoritative removals,
-  // as are successful ready/warning inventories (including an empty one after
-  // logout or plugin removal).
+  // These drivers' initial snapshots are deliberately non-authoritative while
+  // the first probe is still running. A probe error from an installed CLI is
+  // likewise partial: it could not establish the current inventory. Conversely,
+  // disabled and missing-CLI snapshots are authoritative removals, as are
+  // successful ready/warning inventories (including an empty one after logout
+  // or plugin removal).
   const isPendingInitialProbe =
     provider.enabled && !provider.installed && provider.status === "warning";
   const didInstalledProviderProbeFail = provider.installed && provider.status === "error";

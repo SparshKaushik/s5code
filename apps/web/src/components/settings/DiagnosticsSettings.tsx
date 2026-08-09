@@ -12,7 +12,7 @@ import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import type {
   ServerProcessDiagnosticsEntry,
   ServerProcessResourceHistorySummary,
@@ -22,7 +22,6 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import { cn } from "../../lib/utils";
-import { ensureLocalApi } from "../../localApi";
 import { resolveAndPersistPreferredEditor } from "../../editorPreferences";
 import { formatRelativeTimeLabel, getRelativeTimeState } from "../../timestampFormat";
 import { useEnvironmentQuery } from "../../state/query";
@@ -858,11 +857,6 @@ export function DiagnosticsSettingsPanel() {
   const [isOpeningLogsDirectory, setIsOpeningLogsDirectory] = useState(false);
   const [openLogsDirectoryError, setOpenLogsDirectoryError] = useState<string | null>(null);
   const [signalingPid, setSignalingPid] = useState<number | null>(null);
-  const signalingPidRef = useRef<number | null>(null);
-  const environmentIdRef = useRef(environmentId);
-  const processDataRef = useRef(processData);
-  environmentIdRef.current = environmentId;
-  processDataRef.current = processData;
 
   const openLogsDirectory = useCallback(() => {
     const logsDirectoryPath = observability?.logsDirectoryPath ?? null;
@@ -901,51 +895,28 @@ export function DiagnosticsSettingsPanel() {
   const isInitialLoading = isPending && data === null;
   const isProcessInitialLoading = isProcessPending && processData === null;
   const signalProcess = useCallback(
-    async (pid: number, signal: ServerProcessSignal) => {
-      if (signalingPidRef.current !== null) return;
-      signalingPidRef.current = pid;
-      setSignalingPid(pid);
-      const clearSignaling = () => {
-        signalingPidRef.current = null;
-        setSignalingPid(null);
-      };
-      if (signal === "SIGKILL") {
-        let confirmed = false;
-        try {
-          confirmed = await ensureLocalApi().dialogs.confirm(
-            `Send SIGKILL to process ${pid}? This cannot be handled by the process.`,
-            { variant: "destructive" },
-          );
-        } catch (error) {
-          clearSignaling();
-          toastManager.add({
-            type: "error",
-            title: "Could not confirm signal",
-            description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
-          });
-          return;
-        }
-        if (!confirmed) {
-          clearSignaling();
-          return;
-        }
-      }
-      const currentEnvironmentId = environmentIdRef.current;
-      if (currentEnvironmentId === null) {
-        clearSignaling();
+    (pid: number, signal: ServerProcessSignal) => {
+      if (
+        signal === "SIGKILL" &&
+        !window.confirm(`Send SIGKILL to process ${pid}? This cannot be handled by the process.`)
+      ) {
         return;
       }
-      const process = processDataRef.current?.processes.find((entry) => entry.pid === pid);
+      if (environmentId === null) {
+        return;
+      }
+      const process = processData?.processes.find((entry) => entry.pid === pid);
       if (process === undefined) {
-        clearSignaling();
         return;
       }
 
-      try {
+      setSignalingPid(pid);
+      void (async () => {
         const result = await signalServerProcess({
-          environmentId: currentEnvironmentId,
+          environmentId,
           input: { pid, startTimeMs: process.startTimeMs, signal },
         });
+        setSignalingPid(null);
         if (result._tag === "Failure") {
           if (!isAtomCommandInterrupted(result)) {
             const error = squashAtomCommandFailure(result);
@@ -978,11 +949,9 @@ export function DiagnosticsSettingsPanel() {
           return;
         }
         refreshProcesses();
-      } finally {
-        clearSignaling();
-      }
+      })();
     },
-    [refreshProcesses, signalServerProcess],
+    [environmentId, processData?.processes, refreshProcesses, signalServerProcess],
   );
 
   const processDiagnosticsError = processData ? Option.getOrNull(processData.error) : null;

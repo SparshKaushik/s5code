@@ -28,6 +28,7 @@ import {
 } from "../../checkpointing/Utils.ts";
 import * as CheckpointStore from "../../checkpointing/CheckpointStore.ts";
 import { ProviderService } from "../../provider/Services/ProviderService.ts";
+import { RewindService } from "../../rewind/RewindService.ts";
 import { CheckpointReactor, type CheckpointReactorShape } from "../Services/CheckpointReactor.ts";
 import { forkParked } from "../../serverActivation.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
@@ -88,6 +89,7 @@ const make = Effect.gen(function* () {
   const receiptBus = yield* RuntimeReceiptBus;
   const workspaceEntries = yield* WorkspaceEntries.WorkspaceEntries;
   const vcsStatusBroadcaster = yield* VcsStatusBroadcaster;
+  const rewindService = yield* RewindService;
 
   const appendRevertFailureActivity = (input: {
     readonly threadId: ThreadId;
@@ -189,23 +191,7 @@ const make = Effect.gen(function* () {
     readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
     readonly preferSessionRuntime: boolean;
   }): Effect.fn.Return<string | undefined> {
-    const fromSession = yield* resolveSessionRuntimeForThread(input.threadId);
-    const fromThread = resolveThreadWorkspaceCwd({
-      thread: input.thread,
-      projects: input.projects,
-    });
-
-    const cwd = input.preferSessionRuntime
-      ? (Option.match(fromSession, {
-          onNone: () => undefined,
-          onSome: (runtime) => runtime.cwd,
-        }) ?? fromThread)
-      : (fromThread ??
-        Option.match(fromSession, {
-          onNone: () => undefined,
-          onSome: (runtime) => runtime.cwd,
-        }));
-
+    const cwd = yield* resolveWorkspaceCwd(input);
     if (!cwd) {
       return undefined;
     }
@@ -213,6 +199,162 @@ const make = Effect.gen(function* () {
       return undefined;
     }
     return cwd;
+  });
+
+  // Same resolution without the git requirement. Session rewind snapshots into
+  // its own shadow store, so it works in workspaces that are not repositories
+  // (which is exactly where a filesystem-level undo matters most).
+  const resolveWorkspaceCwd = Effect.fn("resolveWorkspaceCwd")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
+    readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
+    readonly preferSessionRuntime: boolean;
+  }): Effect.fn.Return<string | undefined> {
+    const fromSession = yield* resolveSessionRuntimeForThread(input.threadId);
+    const fromThread = resolveThreadWorkspaceCwd({
+      thread: input.thread,
+      projects: input.projects,
+    });
+
+    return input.preferSessionRuntime
+      ? (Option.match(fromSession, {
+          onNone: () => undefined,
+          onSome: (runtime) => runtime.cwd,
+        }) ?? fromThread)
+      : (fromThread ??
+          Option.match(fromSession, {
+            onNone: () => undefined,
+            onSome: (runtime) => runtime.cwd,
+          }));
+  });
+
+  /**
+   * Take the pre-turn rewind snapshot.
+   *
+   * Failures are logged and swallowed: rewind is an experiment and must never
+   * block a turn from starting.
+   */
+  const beginRewindTurn = Effect.fn("beginRewindTurn")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly thread: { readonly projectId: ProjectId; readonly worktreePath: string | null };
+    readonly projects: ReadonlyArray<{ readonly id: ProjectId; readonly workspaceRoot: string }>;
+  }) {
+    if (!(yield* rewindService.isEnabled.pipe(Effect.orElseSucceed(() => false)))) {
+      return;
+    }
+    const cwd = yield* resolveWorkspaceCwd({
+      threadId: input.threadId,
+      thread: input.thread,
+      projects: input.projects,
+      preferSessionRuntime: false,
+    });
+    if (!cwd) {
+      return;
+    }
+    yield* rewindService.beginTurn({ threadId: input.threadId, cwd }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("rewind pre-turn snapshot failed", {
+          threadId: input.threadId,
+          detail: error.message,
+        }),
+      ),
+    );
+  });
+
+  /** Record the post-turn rewind snapshot. Same fail-open policy as capture. */
+  const captureRewindTurn = Effect.fn("captureRewindTurn")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+    readonly cwd: string;
+    readonly userMessageId: MessageId | null;
+    readonly assistantMessageId: MessageId | null;
+    readonly prompt: string;
+  }) {
+    if (!(yield* rewindService.isEnabled.pipe(Effect.orElseSucceed(() => false)))) {
+      return;
+    }
+    yield* rewindService.captureTurn(input).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("rewind turn capture failed", {
+          threadId: input.threadId,
+          turnId: input.turnId,
+          detail: error.message,
+        }),
+      ),
+    );
+  });
+
+  /**
+   * Resolve the rewind capture context for a completed turn.
+   *
+   * The prompt label prefers the user message bound to this turn and falls
+   * back to the most recent user message, which is what the client shows on
+   * the undo affordance ("Undo <prompt>").
+   */
+  const resolveRewindTurnContext = Effect.fn("resolveRewindTurnContext")(function* (input: {
+    readonly threadId: ThreadId;
+    readonly turnId: TurnId;
+  }) {
+    const thread = yield* resolveThreadDetail(input.threadId);
+    if (!thread) {
+      return undefined;
+    }
+    const projects = yield* resolveThreadProjects(thread.projectId);
+    const cwd = yield* resolveWorkspaceCwd({
+      threadId: input.threadId,
+      thread,
+      projects,
+      preferSessionRuntime: true,
+    });
+    if (!cwd) {
+      return undefined;
+    }
+
+    const userMessages = thread.messages.filter((message) => message.role === "user");
+    const userMessage =
+      userMessages.findLast((message) => message.turnId === input.turnId) ?? userMessages.at(-1);
+    const assistantMessage = thread.messages.findLast(
+      (message) => message.role === "assistant" && message.turnId === input.turnId,
+    );
+
+    return {
+      cwd,
+      userMessageId: userMessage?.id ?? null,
+      assistantMessageId: assistantMessage?.id ?? null,
+      prompt: userMessage?.text ?? "",
+    };
+  });
+
+  const captureRewindForCompletedTurn = Effect.fn("captureRewindForCompletedTurn")(
+    function* (input: { readonly threadId: ThreadId; readonly turnId: TurnId }) {
+      if (!(yield* rewindService.isEnabled.pipe(Effect.orElseSucceed(() => false)))) {
+        return;
+      }
+      const context = yield* resolveRewindTurnContext(input);
+      if (context === undefined) {
+        return;
+      }
+      yield* captureRewindTurn({
+        threadId: input.threadId,
+        turnId: input.turnId,
+        ...context,
+      });
+    },
+  );
+
+  const beginRewindForThread = Effect.fn("beginRewindForThread")(function* (threadId: ThreadId) {
+    if (!(yield* rewindService.isEnabled.pipe(Effect.orElseSucceed(() => false)))) {
+      return;
+    }
+    const thread = yield* resolveThreadDetail(threadId);
+    if (!thread) {
+      return;
+    }
+    yield* beginRewindTurn({
+      threadId,
+      thread,
+      projects: yield* resolveThreadProjects(thread.projectId),
+    });
   });
 
   // Shared tail for both capture paths: creates the git checkpoint ref, diffs
@@ -820,6 +962,12 @@ const make = Effect.gen(function* () {
   const processDomainEvent = Effect.fn("processDomainEvent")(function* (event: OrchestrationEvent) {
     if (event.type === "thread.turn-start-requested" || event.type === "thread.message-sent") {
       yield* ensurePreTurnBaselineFromDomainTurnStart(event);
+      if (event.type === "thread.turn-start-requested") {
+        // Domain event rather than the runtime `turn.started`: the shared
+        // runtime PubSub does not reliably reach this reactor, and a missed
+        // pre-turn snapshot would silently disable undo for the turn.
+        yield* beginRewindForThread(event.payload.threadId);
+      }
       return;
     }
 
@@ -857,6 +1005,13 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+      // Turn-end rewind capture rides the same domain event for the same
+      // delivery-reliability reason. Capture is keyed by `{threadId, turnId}`,
+      // so overlapping with the runtime path is a no-op.
+      yield* captureRewindForCompletedTurn({
+        threadId: event.payload.threadId,
+        turnId: event.payload.turnId,
+      });
     }
   });
 
@@ -865,6 +1020,7 @@ const make = Effect.gen(function* () {
   ) {
     if (event.type === "turn.started") {
       yield* ensurePreTurnBaselineFromTurnStart(event);
+      yield* beginRewindForThread(event.threadId);
       return;
     }
 
@@ -883,6 +1039,9 @@ const make = Effect.gen(function* () {
           ),
         ),
       );
+      if (turnId !== null) {
+        yield* captureRewindForCompletedTurn({ threadId: event.threadId, turnId });
+      }
       return;
     }
   });

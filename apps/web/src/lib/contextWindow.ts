@@ -1,4 +1,5 @@
 import type { OrchestrationThreadActivity, ThreadTokenUsageSnapshot } from "@t3tools/contracts";
+import { formatProviderDriverName } from "@t3tools/shared/providerLabels";
 
 function asRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" ? (value as Record<string, unknown>) : null;
@@ -25,27 +26,12 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly updatedAt: string;
 };
 
-/** Map a provider driver kind to a user-facing display name. */
-export function formatProviderDisplayName(provider: string | null | undefined): string {
-  if (!provider) return "This agent";
-  switch (provider) {
-    case "claudeAgent":
-    case "claude":
-      return "Claude";
-    case "codex":
-      return "Codex";
-    case "cursor":
-      return "Cursor";
-    case "opencode":
-      return "OpenCode";
-    default: {
-      // Title-case unknown driver kinds so they read reasonably.
-      const trimmed = provider.replace(/Agent$/i, "").trim();
-      if (trimmed.length === 0) return provider;
-      return trimmed.charAt(0).toUpperCase() + trimmed.slice(1);
-    }
-  }
-}
+/**
+ * Map a provider driver kind to a user-facing display name.
+ *
+ * Re-exported from the shared table so mobile renders the same names.
+ */
+export const formatProviderDisplayName = formatProviderDriverName;
 
 export function deriveLatestContextWindowSnapshot(
   activities: ReadonlyArray<OrchestrationThreadActivity>,

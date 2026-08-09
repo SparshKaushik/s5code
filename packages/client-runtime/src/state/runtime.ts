@@ -477,7 +477,7 @@ export function followStreamInEnvironment<A, E, R>(
   );
 }
 
-export function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
+function createEnvironmentQueryAtomFamily<R, ER, Input, A, E>(
   runtime: Atom.AtomRuntime<EnvironmentRegistry | R, ER>,
   options: EnvironmentQueryAtomOptions<Input, A, E, EnvironmentSupervisor | R>,
 ): (target: {

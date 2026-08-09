@@ -38,6 +38,17 @@ export interface VcsDeleteCheckpointRefsInput {
   readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
 }
 
+export interface VcsCheckpointRefInfo {
+  readonly checkpointRef: CheckpointRef;
+  /** Commit timestamp of the checkpoint, ISO-8601. */
+  readonly updatedAt: string;
+}
+
+export interface VcsMeasureCheckpointRefsInput {
+  readonly cwd: string;
+  readonly checkpointRefs: ReadonlyArray<CheckpointRef>;
+}
+
 export interface VcsCheckpointOps {
   readonly captureCheckpoint: (input: VcsCaptureCheckpointInput) => Effect.Effect<void, VcsError>;
   readonly hasCheckpointRef: (
@@ -50,6 +61,18 @@ export interface VcsCheckpointOps {
   readonly deleteCheckpointRefs: (
     input: VcsDeleteCheckpointRefsInput,
   ) => Effect.Effect<void, VcsError>;
+  /** Every checkpoint ref this build owns in the repository, with its timestamp. */
+  readonly listCheckpointRefs: (
+    cwd: string,
+  ) => Effect.Effect<ReadonlyArray<VcsCheckpointRefInfo>, VcsError>;
+  /**
+   * Bytes reachable only from the provided checkpoint refs, i.e. what would
+   * actually be reclaimed by deleting them. Objects also reachable from a
+   * branch, tag, or other checkpoint ref are excluded.
+   */
+  readonly measureCheckpointRefs: (
+    input: VcsMeasureCheckpointRefsInput,
+  ) => Effect.Effect<number, VcsError>;
 }
 
 export class VcsDriver extends Context.Service<

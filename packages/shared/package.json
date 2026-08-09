@@ -171,6 +171,10 @@
       "types": "./src/terminalLabels.ts",
       "import": "./src/terminalLabels.ts"
     },
+    "./providerLabels": {
+      "types": "./src/providerLabels.ts",
+      "import": "./src/providerLabels.ts"
+    },
     "./relayClient": {
       "types": "./src/relayClient.ts",
       "import": "./src/relayClient.ts"
@@ -218,6 +222,10 @@
     "./usageFormat": {
       "types": "./src/usageFormat.ts",
       "import": "./src/usageFormat.ts"
+    },
+    "./usageTags": {
+      "types": "./src/usageTags.ts",
+      "import": "./src/usageTags.ts"
     }
   },
   "scripts": {

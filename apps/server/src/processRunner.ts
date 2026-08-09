@@ -13,7 +13,6 @@ import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import { resolveSpawnCommand } from "@t3tools/shared/shell";
 import {
   collectUint8StreamText,
-  decodeUtf8,
   type CollectedUint8StreamText,
 } from "./stream/collectUint8StreamText.ts";
 
@@ -42,8 +41,6 @@ export interface ProcessRunOutput {
   readonly timedOut: boolean;
   readonly stdoutTruncated: boolean;
   readonly stderrTruncated: boolean;
-  readonly stdoutInvalidUtf8: boolean;
-  readonly stderrInvalidUtf8: boolean;
 }
 
 const ProcessInvocationFields = {
@@ -241,7 +238,7 @@ const collectText = Effect.fn("processRunner.collectText")(function* (input: {
     ),
     Effect.map(
       (state): CollectedUint8StreamText => ({
-        ...decodeUtf8(Buffer.concat(state.chunks, state.bytes)),
+        text: Buffer.concat(state.chunks, state.bytes).toString("utf8"),
         bytes: state.bytes,
         truncated: false,
       }),
@@ -271,8 +268,6 @@ function finalizeRunProcess<R>(
           timedOut: true,
           stdoutTruncated: false,
           stderrTruncated: false,
-          stdoutInvalidUtf8: false,
-          stderrInvalidUtf8: false,
         } satisfies ProcessRunOutput);
       }
       return Effect.fail(
@@ -399,8 +394,6 @@ const runProcessCore = Effect.fn("processRunner.runProcessCore")(function* (
     timedOut: false,
     stdoutTruncated: stdout.truncated,
     stderrTruncated: stderr.truncated,
-    stdoutInvalidUtf8: stdout.invalidUtf8,
-    stderrInvalidUtf8: stderr.invalidUtf8,
   } satisfies ProcessRunOutput;
 });
 

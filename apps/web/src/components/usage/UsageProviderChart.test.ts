@@ -85,6 +85,8 @@ describe("buildDayColumns", () => {
     expect(first?.bands).toEqual([
       { provider: "codex", value: 10 },
       { provider: "claude", value: 20 },
+      { provider: "cursor", value: 0 },
+      { provider: "pi", value: 0 },
     ]);
   });
 
