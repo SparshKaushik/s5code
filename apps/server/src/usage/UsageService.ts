@@ -15,12 +15,15 @@ import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
-  type UsageProviderKind,
+  type UsageCatalogModel,
+  type UsageModelSearchInput,
+  type UsageModelSearchResult,
   type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
 } from "@t3tools/contracts";
+import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
@@ -31,14 +34,33 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
-import { HttpClient, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { expandHomePath } from "../pathExpansion.ts";
+import {
+  CURSOR_USAGE_MAX_PAGES,
+  CURSOR_USAGE_PAGE_SIZE,
+  CURSOR_USAGE_URL,
+  parseCursorUsageEvent,
+  parseCursorUsagePage,
+  readCursorAppSession,
+  reconcileCursorUsagePages,
+  resolveCursorAuthDatabasePath,
+  type CursorUsagePage,
+} from "./usageCursor.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
-import { parseRateTable, type RateTable } from "./usagePricing.ts";
+import type { TranscriptUsageProvider, UsageRecord } from "./usageTranscripts.ts";
+import {
+  EMPTY_CATALOG,
+  parseModelCatalog,
+  searchCatalog,
+  type ModelCatalog,
+} from "./usageModelCatalog.ts";
+import { parseRateTable, UsagePricer, type RateTable } from "./usagePricing.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -51,10 +73,19 @@ import {
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
-
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
+
+/**
+ * models.dev's catalog, which is provider-scoped and therefore the only one
+ * that can price a gateway's model names. Used for pi and for every user tag.
+ */
+const MODELS_DEV_CATALOG_URL = "https://models.dev/api.json";
+
+const CURSOR_USAGE_TTL_MS = 60 * 60 * 1000;
+
+/** Most a catalog search returns. The picker is a list, not a database browser. */
+const MODEL_SEARCH_LIMIT = 50;
 
 /** Rates move rarely; a day-old table keeps the page working offline. */
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
@@ -89,6 +120,9 @@ export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    readonly searchModels: (
+      input: UsageModelSearchInput,
+    ) => Effect.Effect<UsageModelSearchResult, UsageReadError>;
   }
 >()("t3/usage/UsageService") {}
 
@@ -113,6 +147,7 @@ export const layerTest = Layer.succeed(
         },
         scanDurationMs: 0,
       }),
+    searchModels: () => Effect.succeed({ models: [] }),
   }),
 );
 
@@ -122,15 +157,106 @@ export const make = Effect.gen(function* () {
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
+  const hostPlatform = yield* HostProcessPlatform;
+  const hostEnvironment = yield* HostProcessEnvironment;
 
   const fileCache: ScanCache = new Map();
   let cacheDirty = false;
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
+  const catalogCachePath = path.join(config.stateDir, "usage-model-catalog.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
+  let catalog: ModelCatalog = EMPTY_CATALOG;
+  let catalogFetchedAtMs: number | null = null;
+  let catalogStatus: UsageSummary["pricing"]["status"] = "unavailable";
+  const cursorUsageCache = new Map<
+    string,
+    {
+      readonly fetchedAtMs: number;
+      readonly records: readonly UsageRecord[];
+      readonly malformedRecords: number;
+    }
+  >();
+
+  const loadCachedRates = Effect.fn("UsageService.loadCachedRates")(function* () {
+    if (ratesFetchedAtMs !== null) return;
+    const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
+      Effect.flatMap((raw) => decodeRatesCache(raw)),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fromDisk !== null) {
+      const parsed = parseRateTable(fromDisk.document);
+      if (parsed.size > 0) {
+        rates = parsed;
+        ratesFetchedAtMs = fromDisk.fetchedAtMs;
+        ratesStatus = "cached";
+      }
+    }
+  });
+
+  /**
+   * Same shape as the rates cache, but the models.dev document. The two share
+   * a TTL but live in separate files so a corrupted one cannot drag the other
+   * down with it.
+   */
+  const loadCachedCatalog = Effect.fn("UsageService.loadCachedCatalog")(function* () {
+    if (catalogFetchedAtMs !== null) return;
+    const fromDisk = yield* fileSystem.readFileString(catalogCachePath).pipe(
+      Effect.flatMap((raw) => decodeRatesCache(raw)),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fromDisk !== null) {
+      const parsed = parseModelCatalog(fromDisk.document);
+      if (parsed.size > 0) {
+        catalog = parsed;
+        catalogFetchedAtMs = fromDisk.fetchedAtMs;
+        catalogStatus = "cached";
+      }
+    }
+  });
+
+  const fetchRates = Effect.fn("UsageService.fetchRates")(function* () {
+    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(10_000),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fetched === null) return null;
+
+    const parsed = parseRateTable(fetched);
+    if (parsed.size === 0) return null;
+    return { document: fetched, parsed };
+  });
+
+  const fetchCatalog = Effect.fn("UsageService.fetchCatalog")(function* () {
+    const fetched = yield* httpClient.get(MODELS_DEV_CATALOG_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(10_000),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
+    if (fetched === null) return null;
+
+    const parsed = parseModelCatalog(fetched);
+    if (parsed.size === 0) return null;
+    return { document: fetched, parsed };
+  });
+
+  const persistRates = Effect.fn("UsageService.persistRates")(function* (
+    cachePath: string,
+    fetchedAtMs: number,
+    document: unknown,
+  ) {
+    // A snapshot we cannot write is a slower next start, not a failed read.
+    yield* encodeRatesCache({ fetchedAtMs, document }).pipe(
+      Effect.flatMap((serialized) => fileSystem.writeFileString(cachePath, serialized)),
+      Effect.catchCause(() => Effect.void),
+    );
+  });
 
   /**
    * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
@@ -141,28 +267,10 @@ export const make = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
 
-    if (ratesFetchedAtMs === null) {
-      const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
-        Effect.flatMap((raw) => decodeRatesCache(raw)),
-        Effect.catchCause(() => Effect.succeed(null)),
-      );
-      if (fromDisk !== null) {
-        const parsed = parseRateTable(fromDisk.document);
-        if (parsed.size > 0) {
-          rates = parsed;
-          ratesFetchedAtMs = fromDisk.fetchedAtMs;
-          ratesStatus = "cached";
-          if (now - fromDisk.fetchedAtMs < RATES_TTL_MS) return;
-        }
-      }
-    }
+    if (ratesFetchedAtMs === null) yield* loadCachedRates();
+    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
 
-    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(10_000),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
+    const fetched = yield* fetchRates();
     if (fetched === null) {
       // The refresh failed; whatever we are serving is now past its TTL and
       // must not keep claiming to be fresh.
@@ -170,17 +278,32 @@ export const make = Effect.gen(function* () {
       return;
     }
 
-    const parsed = parseRateTable(fetched);
-    if (parsed.size === 0) return;
-
-    rates = parsed;
+    rates = fetched.parsed;
     ratesFetchedAtMs = now;
     ratesStatus = "fresh";
 
-    yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
-      Effect.flatMap((serialized) => fileSystem.writeFileString(ratesCachePath, serialized)),
-      Effect.catchCause(() => Effect.void),
-    );
+    yield* persistRates(ratesCachePath, now, fetched.document);
+  });
+
+  /** Same lifecycle as {@link ensureRates}, for the models.dev catalog. */
+  const ensureCatalog = Effect.fn("UsageService.ensureCatalog")(function* () {
+    const now = yield* Clock.currentTimeMillis;
+    if (catalogFetchedAtMs !== null && now - catalogFetchedAtMs < RATES_TTL_MS) return;
+
+    if (catalogFetchedAtMs === null) yield* loadCachedCatalog();
+    if (catalogFetchedAtMs !== null && now - catalogFetchedAtMs < RATES_TTL_MS) return;
+
+    const fetched = yield* fetchCatalog();
+    if (fetched === null) {
+      if (catalog.size > 0) catalogStatus = "cached";
+      return;
+    }
+
+    catalog = fetched.parsed;
+    catalogFetchedAtMs = now;
+    catalogStatus = "fresh";
+
+    yield* persistRates(catalogCachePath, now, fetched.document);
   });
 
   /**
@@ -196,7 +319,20 @@ export const make = Effect.gen(function* () {
       return nestedExists ? nested : path.join(homePath, "projects");
     });
 
-  /** Resolves the transcript directory for each provider. */
+  /**
+   * pi's agent directory, which holds `sessions/` alongside its settings and
+   * credentials. Mirrors `PiLaunch.makePiEnvironment`: the configured
+   * `agentDirPath` is what a spawned pi would see as `PI_CODING_AGENT_DIR`, and
+   * `~/.pi/agent` is pi's own default.
+   */
+  const resolvePiAgentDir = (piSettings: { readonly agentDirPath: string }): string => {
+    const agentDirPath = piSettings.agentDirPath.trim();
+    return agentDirPath.length > 0
+      ? path.resolve(expandHomePath(agentDirPath))
+      : path.join(NodeOS.homedir(), ".pi", "agent");
+  };
+
+  /** Resolves transcript directories. Cursor is fetched separately from its account-wide API. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
     // A settings failure must surface as an error: swallowing it here would
     // present "zero usage from every provider" as a valid answer.
@@ -221,6 +357,10 @@ export const make = Effect.gen(function* () {
     return [
       { provider: "claude" as const, dir: claudeDir },
       { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
+      {
+        provider: "pi" as const,
+        dir: path.join(resolvePiAgentDir(settings.providers.pi), "sessions"),
+      },
     ];
   });
 
@@ -261,7 +401,7 @@ export const make = Effect.gen(function* () {
     filePath: string,
     size: number,
     mtimeMs: number,
-    provider: UsageProviderKind,
+    provider: TranscriptUsageProvider,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
@@ -289,6 +429,146 @@ export const make = Effect.gen(function* () {
       return records;
     });
 
+  const readCursorUsage = Effect.fn("UsageService.readCursorUsage")(
+    function* (input: UsageSummaryInput, nowMs: number) {
+      const databasePath = resolveCursorAuthDatabasePath(
+        hostPlatform,
+        NodeOS.homedir(),
+        hostEnvironment,
+      );
+      const session = yield* Effect.sync(() => readCursorAppSession(nowMs, databasePath));
+      if (session === null) {
+        return {
+          records: [] as readonly UsageRecord[],
+          source: {
+            fingerprint: {
+              hostId: NodeOS.hostname(),
+              provider: "cursor" as const,
+              resolvedHomePath: databasePath,
+              volumeId: "",
+            },
+            status: "missing" as const,
+            scannedFiles: 0,
+            skippedFiles: 0,
+            malformedRecords: 0,
+            distinctSessions: 0,
+            message: "Cursor is not installed, signed in, or its session has expired.",
+          } satisfies UsageSource,
+        };
+      }
+
+      const sourceId = `cursor-account:${session.accountFingerprint}`;
+      const cacheKey = `${session.accountFingerprint}\u0000${input.sinceDay}\u0000${input.untilDay}`;
+      const cached = cursorUsageCache.get(cacheKey);
+      let records: readonly UsageRecord[];
+      let malformedRecords: number;
+
+      if (cached !== undefined && nowMs - cached.fetchedAtMs < CURSOR_USAGE_TTL_MS) {
+        records = cached.records;
+        malformedRecords = cached.malformedRecords;
+      } else {
+        const pages: CursorUsagePage[] = [];
+        let completed = false;
+        for (let page = 1; page <= CURSOR_USAGE_MAX_PAGES; page += 1) {
+          const document = yield* HttpClientRequest.post(CURSOR_USAGE_URL).pipe(
+            HttpClientRequest.setHeaders({
+              accept: "application/json",
+              cookie: session.cookieHeader,
+              origin: "https://cursor.com",
+            }),
+            HttpClientRequest.bodyJsonUnsafe({
+              page,
+              pageSize: CURSOR_USAGE_PAGE_SIZE,
+              startDate: String(Date.parse(`${input.sinceDay}T00:00:00Z`) - MTIME_SLACK_MS),
+              endDate: String(
+                Date.parse(`${input.untilDay}T00:00:00Z`) +
+                  24 * 60 * 60 * 1000 -
+                  1 +
+                  MTIME_SLACK_MS,
+              ),
+            }),
+            httpClient.execute,
+            Effect.flatMap(HttpClientResponse.filterStatusOk),
+            Effect.flatMap((response) => response.json),
+            Effect.timeout(30_000),
+          );
+          const parsed = parseCursorUsagePage(document);
+          if (parsed === null) {
+            return yield* new UsageReadError({
+              reason: "scanFailed",
+              detail: "Cursor returned an unrecognised usage response.",
+            });
+          }
+          pages.push(parsed);
+          if (parsed.events.length < CURSOR_USAGE_PAGE_SIZE) {
+            completed = true;
+            break;
+          }
+        }
+
+        const events = yield* Effect.try({
+          try: () => reconcileCursorUsagePages(pages, completed),
+          catch: (cause) =>
+            new UsageReadError({
+              reason: "scanFailed",
+              detail: "Cursor usage pagination was incomplete.",
+              cause,
+            }),
+        });
+        const parsedRecords: UsageRecord[] = [];
+        malformedRecords = 0;
+        for (const event of events) {
+          const parsed = parseCursorUsageEvent(event);
+          if (parsed._tag === "record") parsedRecords.push(parsed.record);
+          if (parsed._tag === "malformed") malformedRecords += 1;
+        }
+        records = parsedRecords;
+        cursorUsageCache.set(cacheKey, { fetchedAtMs: nowMs, records, malformedRecords });
+      }
+
+      return {
+        records,
+        source: {
+          fingerprint: {
+            hostId: NodeOS.hostname(),
+            provider: "cursor" as const,
+            resolvedHomePath: sourceId,
+            volumeId: "",
+          },
+          status: "ok" as const,
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords,
+          distinctSessions: 0,
+          message: "Account-wide usage from cursor.com.",
+        } satisfies UsageSource,
+      };
+    },
+    Effect.catchCause((cause) =>
+      Effect.succeed({
+        records: [] as readonly UsageRecord[],
+        source: {
+          fingerprint: {
+            hostId: NodeOS.hostname(),
+            provider: "cursor" as const,
+            resolvedHomePath: resolveCursorAuthDatabasePath(
+              hostPlatform,
+              NodeOS.homedir(),
+              hostEnvironment,
+            ),
+            volumeId: "",
+          },
+          status: "failed" as const,
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message: `Cursor usage could not be read: ${String(Cause.squash(cause)).slice(0, 180)}`,
+        } satisfies UsageSource,
+      }),
+    ),
+  );
+
   const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
@@ -299,6 +579,7 @@ export const make = Effect.gen(function* () {
 
     const startedAtMs = yield* Clock.currentTimeMillis;
     yield* ensureRates();
+    yield* ensureCatalog();
     yield* ensureScanCacheLoaded;
 
     const hostId = NodeOS.hostname();
@@ -318,10 +599,18 @@ export const make = Effect.gen(function* () {
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
-      rates,
+      pricer: new UsagePricer({ rates, catalog, aliases: input.modelAliases }),
     });
 
     const sources: UsageSource[] = [];
+    const cursor = yield* readCursorUsage(input, startedAtMs);
+    const cursorSessionIds = new Set<string>();
+    for (const record of cursor.records) {
+      if (aggregator.add(record) && record.sessionId.length > 0) {
+        cursorSessionIds.add(record.sessionId);
+      }
+    }
+    sources.push({ ...cursor.source, distinctSessions: cursorSessionIds.size });
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
 
@@ -402,19 +691,56 @@ export const make = Effect.gen(function* () {
       buckets: aggregated.buckets,
       sources,
       pricing: {
-        status: ratesStatus,
-        source: LITELLM_RATES_URL,
-        fetchedAt:
-          ratesFetchedAtMs === null
-            ? null
-            : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
-        knownModels: rates.size,
+        // Two tables, one figure: a page that priced half its rows from a stale
+        // snapshot has stale pricing, so the weaker of the two wins.
+        status: weakerPricingStatus(ratesStatus, catalogStatus),
+        source: `${LITELLM_RATES_URL} + ${MODELS_DEV_CATALOG_URL}`,
+        fetchedAt: formatOldestFetch(ratesFetchedAtMs, catalogFetchedAtMs),
+        knownModels: rates.size + catalog.size,
       },
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
     } satisfies UsageSummary;
   });
 
-  return { readSummary } as const;
+  const searchModels = Effect.fn("UsageService.searchModels")(function* (
+    input: UsageModelSearchInput,
+  ) {
+    yield* ensureCatalog();
+    return {
+      models: searchCatalog(catalog, input.query, MODEL_SEARCH_LIMIT).map(
+        (model) =>
+          ({
+            id: model.id,
+            providerName: model.providerName,
+            modelName: model.modelName,
+            inputCostPerMillion: model.inputCostPerMillion,
+            outputCostPerMillion: model.outputCostPerMillion,
+          }) as UsageCatalogModel,
+      ),
+    } satisfies UsageModelSearchResult;
+  });
+
+  return { readSummary, searchModels } as const;
 });
+
+const PRICING_STATUS_RANK: Record<UsageSummary["pricing"]["status"], number> = {
+  unavailable: 0,
+  cached: 1,
+  fresh: 2,
+};
+
+function weakerPricingStatus(
+  a: UsageSummary["pricing"]["status"],
+  b: UsageSummary["pricing"]["status"],
+): UsageSummary["pricing"]["status"] {
+  return PRICING_STATUS_RANK[a] <= PRICING_STATUS_RANK[b] ? a : b;
+}
+
+/** The staler of the two snapshots, which is the age the page can claim. */
+function formatOldestFetch(a: number | null, b: number | null): string | null {
+  const known = [a, b].filter((value): value is number => value !== null);
+  if (known.length === 0) return null;
+  return DateTime.formatIso(DateTime.makeUnsafe(Math.min(...known)));
+}
 
 export const layer = Layer.effect(UsageService, make);

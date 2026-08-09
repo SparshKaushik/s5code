@@ -10,6 +10,7 @@ import { useAtomValue } from "@effect/atom-react";
 import {
   USAGE_CONTRACT_VERSION,
   type EnvironmentId,
+  type UsageCatalogModel,
   type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
@@ -72,14 +73,17 @@ export interface UsageView {
 }
 
 export function useUsage(input: UsageSummaryInput): UsageView {
+  // Aliases are part of the query: the server prices with them, so a new tag
+  // must produce a new key rather than reusing the previous window's answer.
   const windowKey = useMemo(
     () =>
       JSON.stringify({
         sinceDay: input.sinceDay,
         untilDay: input.untilDay,
         timeZone: input.timeZone,
+        modelAliases: input.modelAliases,
       }),
-    [input.sinceDay, input.untilDay, input.timeZone],
+    [input.sinceDay, input.untilDay, input.timeZone, input.modelAliases],
   );
   const atom = usageByWindowAtom(windowKey);
   const environments = useAtomValue(atom);
@@ -123,4 +127,36 @@ export function useUsage(input: UsageSummaryInput): UsageView {
     isPartial: answeredCount > 0 && stillReporting > 0,
     refresh,
   };
+}
+
+/**
+ * Searches the models.dev catalog for the tag picker.
+ *
+ * Every environment holds the same public catalog, so one answer is enough:
+ * this asks whichever environment sorts first and is stable across renders,
+ * rather than fanning out and merging identical results.
+ */
+const modelSearchAtom = Atom.family((query: string) =>
+  Atom.make(
+    (get): { readonly models: readonly UsageCatalogModel[]; readonly isPending: boolean } => {
+      const presentations = get(environmentPresentations.presentationsAtom);
+      const environmentId = [...presentations.keys()].toSorted((a, b) => a.localeCompare(b))[0];
+      if (query.trim().length === 0 || environmentId === undefined) {
+        return { models: [], isPending: false };
+      }
+
+      const result = get(serverEnvironment.usageModelSearch({ environmentId, input: { query } }));
+      return {
+        models: Option.getOrNull(AsyncResult.value(result))?.models ?? [],
+        isPending: result.waiting,
+      };
+    },
+  ).pipe(Atom.withLabel(`web-usage:model-search:${query}`)),
+);
+
+export function useUsageModelSearch(query: string): {
+  readonly models: readonly UsageCatalogModel[];
+  readonly isPending: boolean;
+} {
+  return useAtomValue(modelSearchAtom(query));
 }

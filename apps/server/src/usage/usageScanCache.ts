@@ -18,7 +18,7 @@ import type { UsageProviderKind } from "@t3tools/contracts";
 
 import type { UsageRecord } from "./usageTranscripts.ts";
 
-export const USAGE_SCAN_CACHE_VERSION = 1 as const;
+export const USAGE_SCAN_CACHE_VERSION = 2 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -45,6 +45,7 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  apiProviderIndex: number,
 ];
 
 interface SerializedFile {
@@ -58,6 +59,7 @@ interface SerializedCache {
   readonly version: number;
   readonly models: readonly string[];
   readonly sessions: readonly string[];
+  readonly apiProviders: readonly string[];
   readonly files: Readonly<Record<string, SerializedFile>>;
 }
 
@@ -65,8 +67,10 @@ interface SerializedCache {
 export function encodeScanCache(cache: ScanCache): SerializedCache {
   const models: string[] = [];
   const sessions: string[] = [];
+  const apiProviders: string[] = [];
   const modelIndex = new Map<string, number>();
   const sessionIndex = new Map<string, number>();
+  const apiProviderIndex = new Map<string, number>();
 
   const intern = (table: string[], index: Map<string, number>, value: string): number => {
     const existing = index.get(value);
@@ -94,11 +98,12 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
         record.totals.reasoningTokens,
         record.dedupeKey,
         record.reportedCostUsd,
+        intern(apiProviders, apiProviderIndex, record.apiProvider),
       ]),
     };
   }
 
-  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, files };
+  return { version: USAGE_SCAN_CACHE_VERSION, models, sessions, apiProviders, files };
 }
 
 function isRecordArray(value: unknown): value is readonly unknown[] {
@@ -118,6 +123,7 @@ export function decodeScanCache(document: unknown): ScanCache {
   const root = document as Partial<SerializedCache>;
   if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
+  if (!isRecordArray(root.apiProviders)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
   // The intern tables must be all strings: a numeric entry would pass the
@@ -125,14 +131,16 @@ export function decodeScanCache(document: unknown): ScanCache {
   // at normalizeModelName. A corrupt table rejects the whole cache.
   if (!root.models.every((value) => typeof value === "string")) return cache;
   if (!root.sessions.every((value) => typeof value === "string")) return cache;
+  if (!root.apiProviders.every((value) => typeof value === "string")) return cache;
   const models = root.models as readonly string[];
   const sessions = root.sessions as readonly string[];
+  const apiProviders = root.apiProviders as readonly string[];
 
   for (const [path, raw] of Object.entries(root.files)) {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
     if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
-    if (entry.p !== "claude" && entry.p !== "codex") continue;
+    if (entry.p !== "claude" && entry.p !== "codex" && entry.p !== "pi") continue;
     if (!isRecordArray(entry.r)) continue;
 
     const provider: UsageProviderKind = entry.p;
@@ -142,7 +150,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     // file would never be re-parsed, silently losing the dropped rows' usage.
     let corrupt = false;
     for (const row of entry.r) {
-      if (!isRecordArray(row) || row.length < 10) {
+      if (!isRecordArray(row) || row.length < 11) {
         corrupt = true;
         break;
       }
@@ -157,6 +165,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        apiProviderIndex,
       ] = row as SerializedRecord;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
@@ -178,6 +187,8 @@ export function decodeScanCache(document: unknown): ScanCache {
         provider,
         timestampMs,
         model,
+        apiProvider:
+          (typeof apiProviderIndex === "number" ? apiProviders[apiProviderIndex] : undefined) ?? "",
         sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
         totals: {
           uncachedInputTokens: uncached,

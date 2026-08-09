@@ -10,6 +10,7 @@ import {
 } from "./model.ts";
 import { ModelSelection } from "./orchestration.ts";
 import { ProviderInstanceConfig, ProviderInstanceId } from "./providerInstance.ts";
+import { UsageModelAlias } from "./usage.ts";
 
 // ── Client Settings (local-only) ───────────────────────────────
 
@@ -113,6 +114,12 @@ export type FontFamilyPreference = typeof FontFamilyPreference.Type;
 export const ClientSettingsSchema = Schema.Struct({
   confirmThreadArchive: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Manual model tags for the usage page. Client-scoped rather than
+  // server-scoped on purpose: a gateway's model name means the same thing on
+  // every environment, and a user with three environments should tag it once.
+  usageModelAliases: Schema.Array(UsageModelAlias).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
   dismissedProviderUpdateNotificationKeys: Schema.Array(TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
@@ -933,6 +940,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   sidebarThreadPreviewCount: Schema.optionalKey(SidebarThreadPreviewCount),
   timestampFormat: Schema.optionalKey(TimestampFormat),
+  usageModelAliases: Schema.optionalKey(Schema.Array(UsageModelAlias)),
   wordWrap: Schema.optionalKey(Schema.Boolean),
 });
 export type ClientSettingsPatch = typeof ClientSettingsPatch.Type;

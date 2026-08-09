@@ -32,6 +32,21 @@ export interface ProviderTotals {
 export interface ModelTotals {
   readonly model: string;
   readonly provider: UsageProviderKind;
+  /**
+   * The upstream gateway, when one was named and this row represents a single
+   * one. Empty once several gateways consolidate into one tagged model.
+   */
+  readonly apiProvider: string;
+  /** The catalog entry this row was priced against, when any. */
+  readonly pricedAs: string | null;
+  /** True when no rate could be found, which is what makes a row worth tagging. */
+  readonly unpriced: boolean;
+  /**
+   * True when this row exists because the user tagged it. Distinct from
+   * `unpriced`: a tagged row is priced, but still needs the affordance so the
+   * tag can be changed or removed.
+   */
+  readonly tagged: boolean;
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly records: number;
@@ -73,14 +88,21 @@ export interface MergedUsage {
 }
 
 /**
- * Two sources are the same physical transcript directory only when host,
- * provider, path and filesystem identity all agree.
+ * Two transcript sources are the same physical directory only when host,
+ * provider, path and filesystem identity all agree. Cursor sources are
+ * account-wide, so their hashed account identity matches across hosts.
  *
  * `volumeId` is what stops two machines that happen to share a hostname and a
  * home path, which is every Mac in a fleet, from collapsing into one source and
  * having one of them silently dropped.
  */
 function fingerprintKey(fingerprint: UsageSourceFingerprint): string {
+  // Cursor's dashboard is account-wide rather than machine-local. Two remote
+  // environments signed into the same account therefore own one source even
+  // when their hostnames differ; the hashed account id is in resolvedHomePath.
+  if (fingerprint.provider === "cursor") {
+    return [fingerprint.provider, fingerprint.resolvedHomePath].join("\u0000");
+  }
   return [
     fingerprint.hostId,
     fingerprint.provider,
@@ -222,7 +244,17 @@ export function mergeUsage(
   >();
   const modelAccumulator = new Map<
     string,
-    { provider: UsageProviderKind; costUsd: number; totalTokens: number; records: number }
+    {
+      provider: UsageProviderKind;
+      model: string;
+      apiProviders: Set<string>;
+      pricedAs: string | null;
+      unpricedOnly: boolean;
+      tagged: boolean;
+      costUsd: number;
+      totalTokens: number;
+      records: number;
+    }
   >();
   const dailyAccumulator = new Map<
     string,
@@ -266,13 +298,30 @@ export function mergeUsage(
       provider.records += bucket.records;
       providerAccumulator.set(bucket.provider, provider);
 
-      const modelKey = `${bucket.provider} ${bucket.model}`;
+      // A tagged bucket keys by what the user said it is, so the same model
+      // reported under several gateway names collapses into one row. Everything
+      // else keeps its own identity, which is what keeps it taggable.
+      const modelKey =
+        bucket.costSource === "userTagged" && bucket.pricedAs !== null
+          ? `${bucket.provider}\u0000tag\u0000${bucket.pricedAs}`
+          : `${bucket.provider}\u0000${bucket.apiProvider}\u0000${bucket.model}`;
       const model = modelAccumulator.get(modelKey) ?? {
         provider: bucket.provider,
+        model:
+          bucket.costSource === "userTagged" && bucket.pricedAs !== null
+            ? bucket.pricedAs
+            : bucket.model,
+        apiProviders: new Set<string>(),
+        pricedAs: bucket.pricedAs,
+        unpricedOnly: true,
+        tagged: false,
         costUsd: 0,
         totalTokens: 0,
         records: 0,
       };
+      if (bucket.apiProvider.length > 0) model.apiProviders.add(bucket.apiProvider);
+      if (bucket.costSource !== "unpriced") model.unpricedOnly = false;
+      if (bucket.costSource === "userTagged") model.tagged = true;
       model.costUsd += bucket.costUsd;
       model.totalTokens += tokens;
       model.records += bucket.records;
@@ -306,10 +355,16 @@ export function mergeUsage(
     }))
     .sort((a, b) => b.costUsd - a.costUsd);
 
-  const models: ModelTotals[] = [...modelAccumulator.entries()]
-    .map(([key, totals]) => ({
-      model: key.slice(key.indexOf(" ") + 1),
+  const models: ModelTotals[] = [...modelAccumulator.values()]
+    .map((totals) => ({
+      model: totals.model,
       provider: totals.provider,
+      // Only meaningful when exactly one gateway fed the row: naming one of
+      // several would be a lie, and naming none of one loses the distinction.
+      apiProvider: totals.apiProviders.size === 1 ? [...totals.apiProviders][0]! : "",
+      pricedAs: totals.pricedAs,
+      unpriced: totals.unpricedOnly,
+      tagged: totals.tagged,
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
       records: totals.records,

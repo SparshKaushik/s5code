@@ -2,29 +2,66 @@
  * Usage reporting contract.
  *
  * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`) rather than
- * relying on T3 Code's own orchestration projections, so usage stays complete
- * even for turns that were never driven through T3 Code. This mirrors the
- * approach `ccusage` takes.
+ * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
+ * `~/.pi/agent/sessions/**\/*.jsonl`) plus Cursor's account-wide dashboard
+ * API rather than relying on T3 Code's own
+ * orchestration projections, so usage stays complete even for turns that were
+ * never driven through T3 Code. This mirrors the approach `ccusage` takes.
  *
  * Environments return pre-aggregated `(day, provider, model)` buckets. Raw
  * transcript records never cross the wire.
  *
  * @module usage
  */
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
+import { NonNegativeInt, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 3 as const;
+export const USAGE_CONTRACT_VERSION = 5 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex"]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "cursor", "pi"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
+
+/**
+ * A models.dev catalog entry, as `<providerId>/<modelKey>`.
+ *
+ * The model key may itself contain slashes (`cline-pass/deepseek-v4-flash`),
+ * so only the first separator delimits the provider.
+ */
+export const UsageCatalogModelId = TrimmedNonEmptyString.check(
+  Schema.isPattern(/^[^/]+\/.+$/),
+).pipe(Schema.brand("UsageCatalogModelId"));
+export type UsageCatalogModelId = typeof UsageCatalogModelId.Type;
+
+/**
+ * A user's answer to "what is this model, really?".
+ *
+ * Routers and gateways report names that no catalog knows (`cline-free/glm-5.2`)
+ * or names several catalogs price differently (`claude-opus-5` costs three
+ * different amounts across the eleven providers that serve it). Those stay
+ * unpriced rather than guessed, and this is how a user resolves one. Tagged
+ * records are priced at the target's rates and consolidate into its row.
+ */
+export const UsageModelAlias = Schema.Struct({
+  provider: UsageProviderKind,
+  /**
+   * The upstream API provider the transcript named, or `""` when the provider
+   * talks to one vendor. Part of the identity because two gateways reselling
+   * the same model name can charge differently, so tagging one must not
+   * silently retag the other.
+   */
+  apiProvider: TrimmedString,
+  /** The model name exactly as the transcript reported it. */
+  model: TrimmedNonEmptyString,
+  catalogModelId: UsageCatalogModelId,
+});
+export type UsageModelAlias = typeof UsageModelAlias.Type;
 
 /**
  * A calendar day in the reporting time zone, formatted `YYYY-MM-DD`.
@@ -43,11 +80,18 @@ export type UsageDay = typeof UsageDay.Type;
  * Why a bucket's cost is what it is.
  *
  * - `providerReported` - the transcript carried an explicit cost figure.
- * - `modelPriced` - we matched the model against the LiteLLM rate table.
+ * - `modelPriced` - we matched the model against a rate table.
+ * - `userTagged` - the model was unknown until the user mapped it to a catalog
+ *   entry, and is priced at that entry's rates.
  * - `unpriced` - tokens are known, rates are not. Counted in totals, excluded
- *   from cost.
+ *   from cost. These are the rows worth tagging.
  */
-export const UsageCostSource = Schema.Literals(["providerReported", "modelPriced", "unpriced"]);
+export const UsageCostSource = Schema.Literals([
+  "providerReported",
+  "modelPriced",
+  "userTagged",
+  "unpriced",
+]);
 export type UsageCostSource = typeof UsageCostSource.Type;
 
 /**
@@ -79,6 +123,13 @@ export const UsageBucket = Schema.Struct({
   day: UsageDay,
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
+  /**
+   * The upstream API provider, when the usage source names one. pi routes through
+   * gateways, so this is what separates `claude-opus-5` served by a reseller
+   * from the same name served by Anthropic. Empty for providers that speak to a
+   * single vendor.
+   */
+  apiProvider: Schema.String,
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
   /**
@@ -88,6 +139,15 @@ export const UsageBucket = Schema.Struct({
    */
   cacheSavingsUsd: Schema.Number,
   costSource: UsageCostSource,
+  /**
+   * The catalog entry this cell was priced against, as `<providerId>/<modelKey>`,
+   * or `null` when no catalog was involved (provider-reported, LiteLLM-priced,
+   * or unpriced).
+   *
+   * Present so the UI can show which model we assumed and let the user correct
+   * it, rather than presenting a guess as fact.
+   */
+  pricedAs: Schema.NullOr(UsageCatalogModelId),
   /** Distinct assistant responses, after de-duplication. */
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,
@@ -97,7 +157,8 @@ export const UsageBucket = Schema.Struct({
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
- * Identifies the physical transcript directory a source read from.
+ * Identifies the physical transcript directory or remote account a source read
+ * from.
  *
  * Two environments on the same machine (worktree servers, for example) resolve
  * the same provider home and would otherwise double count. The client drops
@@ -106,11 +167,18 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
+  /**
+   * Stable source identity. Local transcript sources carry a filesystem path;
+   * account-wide APIs carry a non-secret account identifier such as
+   * `cursor-account:<hash>`.
+   */
   resolvedHomePath: TrimmedNonEmptyString,
   /**
-   * Filesystem identity of the transcript directory, as `device:inode`.
+   * Filesystem identity of a transcript directory, as `device:inode`. Empty
+   * for remote account sources.
    *
-   * Hostname and path alone are not enough: every Mac in a fleet resolves
+   * Hostname and path alone are not enough for local sources: every Mac in a
+   * fleet resolves
    * `/Users/<user>/.claude`, so two machines that happen to share a hostname
    * would look like one source and have their usage silently dropped. The
    * device/inode pair is stable for two servers reading the same directory and
@@ -165,8 +233,35 @@ export const UsageSummaryInput = Schema.Struct({
    * any window that crosses a DST boundary.
    */
   timeZone: TrimmedNonEmptyString,
+  /**
+   * The client's model tags. Pricing runs server-side (the catalog is megabytes
+   * and never crosses the wire), but the tags belong to the user rather than to
+   * one environment, so they travel with the request and apply everywhere.
+   */
+  modelAliases: Schema.Array(UsageModelAlias).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
 });
 export type UsageSummaryInput = typeof UsageSummaryInput.Type;
+
+/** One candidate in the tag picker. */
+export const UsageCatalogModel = Schema.Struct({
+  id: UsageCatalogModelId,
+  providerName: TrimmedNonEmptyString,
+  modelName: TrimmedNonEmptyString,
+  /** USD per million input/output tokens, for a sanity check before tagging. */
+  inputCostPerMillion: Schema.Number,
+  outputCostPerMillion: Schema.Number,
+});
+export type UsageCatalogModel = typeof UsageCatalogModel.Type;
+
+export const UsageModelSearchInput = Schema.Struct({
+  query: TrimmedNonEmptyString,
+});
+export type UsageModelSearchInput = typeof UsageModelSearchInput.Type;
+
+export const UsageModelSearchResult = Schema.Struct({
+  models: Schema.Array(UsageCatalogModel),
+});
+export type UsageModelSearchResult = typeof UsageModelSearchResult.Type;
 
 export const UsageSummary = Schema.Struct({
   contractVersion: Schema.Number,
