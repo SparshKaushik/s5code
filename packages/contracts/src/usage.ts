@@ -23,7 +23,7 @@ import { NonNegativeInt, TrimmedNonEmptyString, TrimmedString } from "./baseSche
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 5 as const;
+export const USAGE_CONTRACT_VERSION = 6 as const;
 
 export const UsageProviderKind = Schema.Literals(["claude", "codex", "cursor", "pi"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
@@ -138,6 +138,11 @@ export const UsageBucket = Schema.Struct({
    * rather than derived on the client.
    */
   cacheSavingsUsd: Schema.Number,
+  /**
+   * True when at least one record's input/cache split was simulated from a
+   * rolling context estimate rather than reported as billed tokens.
+   */
+  inputTokensEstimated: Schema.Boolean,
   costSource: UsageCostSource,
   /**
    * The catalog entry this cell was priced against, as `<providerId>/<modelKey>`,

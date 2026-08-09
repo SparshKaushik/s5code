@@ -146,6 +146,9 @@ describe("parsePiLine", () => {
       provider?: string;
       model?: string;
       costTotal?: number;
+      input?: number;
+      cacheRead?: number;
+      cacheWrite?: number;
       output?: number;
       reasoning?: number;
     } = {},
@@ -162,10 +165,10 @@ describe("parsePiLine", () => {
         provider: overrides.provider ?? "clinepass",
         model: overrides.model ?? "cline-pass/deepseek-v4-flash",
         usage: {
-          input: 12,
+          input: overrides.input ?? 12,
           output,
-          cacheRead: 30_000,
-          cacheWrite: 4_000,
+          cacheRead: overrides.cacheRead ?? 30_000,
+          cacheWrite: overrides.cacheWrite ?? 4_000,
           cacheWrite1h: 4_000,
           reasoning: overrides.reasoning ?? 128,
           totalTokens: 12 + output + 30_000 + 4_000,
@@ -206,6 +209,84 @@ describe("parsePiLine", () => {
     // pi's own totalTokens must reconcile: its fields are disjoint, unlike
     // Codex's cumulative ones.
     expect(totalTokens(record!.totals)).toBe(34_524);
+  });
+
+  it("simulates Kiro rolling-prefix cache and marks it estimated", () => {
+    const state = initialPiScanState();
+    const first = parsePiLine(
+      piMessage({
+        provider: "kiro",
+        model: "claude-opus-5",
+        input: 100_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+      }),
+      state,
+    );
+    const next = parsePiLine(
+      piMessage({
+        provider: "kiro",
+        model: "claude-opus-5",
+        input: 105_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+      }),
+      state,
+    );
+
+    expect(first?.inputTokensEstimated).toBe(true);
+    expect(first?.totals).toMatchObject({
+      uncachedInputTokens: 100_000,
+      cachedInputTokens: 0,
+    });
+    expect(next?.inputTokensEstimated).toBe(true);
+    expect(next?.totals).toMatchObject({
+      uncachedInputTokens: 5_000,
+      cachedInputTokens: 100_000,
+    });
+  });
+
+  it("treats a shrinking Kiro context as a fresh reset", () => {
+    const state = initialPiScanState();
+    parsePiLine(
+      piMessage({
+        provider: "kiro",
+        model: "claude-opus-5",
+        input: 100_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+      }),
+      state,
+    );
+    const compacted = parsePiLine(
+      piMessage({
+        provider: "kiro",
+        model: "claude-opus-5",
+        input: 40_000,
+        cacheRead: 0,
+        cacheWrite: 0,
+      }),
+      state,
+    );
+
+    expect(compacted?.totals).toMatchObject({
+      uncachedInputTokens: 40_000,
+      cachedInputTokens: 0,
+    });
+  });
+
+  it("keeps provider-reported cache authoritative", () => {
+    const record = parsePiLine(
+      piMessage({ provider: "kiro", input: 100, cacheRead: 500, cacheWrite: 25 }),
+      initialPiScanState(),
+    );
+
+    expect(record?.inputTokensEstimated).toBe(false);
+    expect(record?.totals).toMatchObject({
+      uncachedInputTokens: 100,
+      cachedInputTokens: 500,
+      cacheCreationTokens: 25,
+    });
   });
 
   it("attributes messages to the session id from the opening line", () => {

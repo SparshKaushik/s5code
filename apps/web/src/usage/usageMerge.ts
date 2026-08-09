@@ -47,6 +47,8 @@ export interface ModelTotals {
    * tag can be changed or removed.
    */
   readonly tagged: boolean;
+  /** True when input/cache for any contributing record was simulated. */
+  readonly inputTokensEstimated: boolean;
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly records: number;
@@ -69,6 +71,7 @@ export interface CostQuality {
 
 export interface MergedUsage {
   readonly costUsd: number;
+  readonly inputTokensEstimated: boolean;
   readonly uncachedInputTokens: number;
   readonly cachedInputTokens: number;
   readonly cacheCreationTokens: number;
@@ -179,6 +182,7 @@ function bucketTokens(bucket: UsageBucket): number {
 
 const EMPTY_MERGED: MergedUsage = {
   costUsd: 0,
+  inputTokensEstimated: false,
   uncachedInputTokens: 0,
   cachedInputTokens: 0,
   cacheCreationTokens: 0,
@@ -227,6 +231,7 @@ export function mergeUsage(
   const { ownerByFingerprint, duplicates } = claimSources(current);
 
   let costUsd = 0;
+  let inputTokensEstimated = false;
   let uncachedInputTokens = 0;
   let cachedInputTokens = 0;
   let cacheCreationTokens = 0;
@@ -251,6 +256,7 @@ export function mergeUsage(
       pricedAs: string | null;
       unpricedOnly: boolean;
       tagged: boolean;
+      inputTokensEstimated: boolean;
       costUsd: number;
       totalTokens: number;
       records: number;
@@ -278,6 +284,7 @@ export function mergeUsage(
       const tokens = bucketTokens(bucket);
 
       costUsd += bucket.costUsd;
+      inputTokensEstimated ||= bucket.inputTokensEstimated;
       cacheSavingsUsd += bucket.cacheSavingsUsd;
       uncachedInputTokens += bucket.totals.uncachedInputTokens;
       cachedInputTokens += bucket.totals.cachedInputTokens;
@@ -315,6 +322,7 @@ export function mergeUsage(
         pricedAs: bucket.pricedAs,
         unpricedOnly: true,
         tagged: false,
+        inputTokensEstimated: false,
         costUsd: 0,
         totalTokens: 0,
         records: 0,
@@ -322,6 +330,7 @@ export function mergeUsage(
       if (bucket.apiProvider.length > 0) model.apiProviders.add(bucket.apiProvider);
       if (bucket.costSource !== "unpriced") model.unpricedOnly = false;
       if (bucket.costSource === "userTagged") model.tagged = true;
+      model.inputTokensEstimated ||= bucket.inputTokensEstimated;
       model.costUsd += bucket.costUsd;
       model.totalTokens += tokens;
       model.records += bucket.records;
@@ -365,6 +374,7 @@ export function mergeUsage(
       pricedAs: totals.pricedAs,
       unpriced: totals.unpricedOnly,
       tagged: totals.tagged,
+      inputTokensEstimated: totals.inputTokensEstimated,
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
       records: totals.records,
@@ -383,6 +393,7 @@ export function mergeUsage(
 
   return {
     costUsd,
+    inputTokensEstimated,
     uncachedInputTokens,
     cachedInputTokens,
     cacheCreationTokens,

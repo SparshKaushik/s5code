@@ -76,5 +76,7 @@ All three are fixable by tagging.
 - **Rounding and rate changes.** Rates are the published ones as of the last refresh.
 - **Subscriptions.** A plan does not bill per token, so the figure here is an equivalent, not a charge.
 - **Cache.** Cached input is cheaper than fresh input, and the page shows what caching saved you
-  separately.
+  separately. When an adapter such as Kiro reports only rolling context size, S5 Code simulates a
+  conservative cache split and labels that model **Estimated**; it is an API-rate estimate, not a
+  provider-reported bill.
 - **Free tiers and credits.** Not modelled. Usage on a free tier still shows a cost.

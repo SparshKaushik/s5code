@@ -46,6 +46,7 @@ describe("parseCursorUsageEvent", () => {
       timestampMs: 1_786_000_000_000,
       model: "composer-2",
       sessionId: "conversation-a",
+      inputTokensEstimated: false,
       reportedCostUsd: 0.025,
       dedupeKey: null,
     });

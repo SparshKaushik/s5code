@@ -23,6 +23,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
       outputTokens: 50,
       reasoningTokens: 0,
     },
+    inputTokensEstimated: false,
     reportedCostUsd: null,
     dedupeKey: "msg_1:",
     ...overrides,
@@ -40,7 +41,14 @@ function cacheWith(entries: readonly [string, number, readonly UsageRecord[]][])
 describe("scan cache round trip", () => {
   it("restores records unchanged", () => {
     const original = cacheWith([
-      ["/a.jsonl", 100, [record(), record({ dedupeKey: "msg_2:", model: "claude-opus-5" })]],
+      [
+        "/a.jsonl",
+        100,
+        [
+          record({ inputTokensEstimated: true }),
+          record({ dedupeKey: "msg_2:", model: "claude-opus-5" }),
+        ],
+      ],
       ["/b.jsonl", 200, [record({ sessionId: "session-b", reportedCostUsd: 1.5 })]],
     ]);
 

@@ -302,6 +302,7 @@ export function parseCursorUsageEvent(event: CursorRawUsageEvent): CursorEventPa
       sessionId: decoded.conversationId === undefined ? "" : String(decoded.conversationId),
       totals,
       // Cursor reports API-equivalent list cost in cents for each event.
+      inputTokensEstimated: false,
       reportedCostUsd: reportedCostUsd === undefined ? null : reportedCostUsd / 100,
       // The endpoint exposes no event id. Pagination overlap is reconciled
       // before parsing; equal rows included in the authoritative count remain

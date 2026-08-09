@@ -233,7 +233,7 @@ export function UsagePage() {
               <Metric
                 label="Cached input"
                 value={formatTokens(merged.cachedInputTokens)}
-                detail={`${formatPercent(cachedShare)} of observed input`}
+                detail={`${formatPercent(cachedShare)} of observed input${merged.inputTokensEstimated ? " · includes estimates" : ""}`}
               />
               <Metric
                 label="Uncached input"
@@ -249,9 +249,11 @@ export function UsagePage() {
                 label="Cache savings"
                 value={formatUsd(merged.costQuality.cacheSavingsUsd)}
                 detail={
-                  merged.costUsd > 0
-                    ? `${(merged.costQuality.cacheSavingsUsd / merged.costUsd).toFixed(1)}x the raw token cost`
-                    : "vs full input rates"
+                  merged.inputTokensEstimated
+                    ? "includes simulated cache"
+                    : merged.costUsd > 0
+                      ? `${(merged.costQuality.cacheSavingsUsd / merged.costUsd).toFixed(1)}x the raw token cost`
+                      : "vs full input rates"
                 }
               />
             </section>
@@ -309,6 +311,14 @@ export function UsagePage() {
                                 {model.apiProvider.length > 0 ? (
                                   <span className="shrink-0 text-xs text-muted-foreground">
                                     via {model.apiProvider}
+                                  </span>
+                                ) : null}
+                                {model.inputTokensEstimated ? (
+                                  <span
+                                    className="shrink-0 rounded border border-border px-1.5 py-0.5 text-xs text-muted-foreground"
+                                    title="Kiro does not report billed cache tokens. Input and cache are estimated from the rolling context size."
+                                  >
+                                    Estimated
                                   </span>
                                 ) : null}
                                 {/* Rows we could not price are worth tagging,

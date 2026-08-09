@@ -32,6 +32,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
       outputTokens: 50,
       reasoningTokens: 0,
     },
+    inputTokensEstimated: false,
     reportedCostUsd: null,
     dedupeKey: null,
     ...overrides,
@@ -102,6 +103,12 @@ describe("UsageAggregator", () => {
 
     expect(result.buckets[0]?.costUsd).toBe(1.25);
     expect(result.buckets[0]?.costSource).toBe("providerReported");
+  });
+
+  it("marks buckets containing simulated input/cache", () => {
+    const result = aggregate([record({ inputTokensEstimated: true })]);
+
+    expect(result.buckets[0]?.inputTokensEstimated).toBe(true);
   });
 
   it("drops records outside the window", () => {

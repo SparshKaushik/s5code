@@ -24,6 +24,12 @@ export interface UsageRecord {
   readonly apiProvider: string;
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
+  /**
+   * Some adapters can only estimate context size instead of reporting billed
+   * input/cache tokens. The scanner may derive a conservative cache split from
+   * that context; consumers must surface the resulting cost as estimated.
+   */
+  readonly inputTokensEstimated: boolean;
   readonly reportedCostUsd: number | null;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
@@ -146,6 +152,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
       // Anthropic folds thinking tokens into output and does not break them out.
       reasoningTokens: 0,
     },
+    inputTokensEstimated: false,
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
     dedupeKey,
   };
@@ -253,6 +260,7 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     sessionId: state.sessionId,
     totals,
     // Codex does not report cost in the rollout.
+    inputTokensEstimated: false,
     reportedCostUsd: null,
     // Rollout files are unique per session, so events need no global dedup.
     dedupeKey: null,
@@ -271,10 +279,12 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
  */
 export interface PiScanState {
   sessionId: string;
+  /** Last estimated Kiro context by model, used for rolling-prefix cache simulation. */
+  kiroContextTokensByModel: Map<string, number>;
 }
 
 export function initialPiScanState(): PiScanState {
-  return { sessionId: "" };
+  return { sessionId: "", kiroContextTokensByModel: new Map() };
 }
 
 /**
@@ -323,12 +333,36 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
   if (model.length === 0) return null;
 
   const outputTokens = int(usageRecord["output"]);
+  const apiProvider =
+    typeof messageRecord["provider"] === "string" ? messageRecord["provider"] : "";
+  const reportedInputTokens = int(usageRecord["input"]);
+  const reportedCachedInputTokens = int(usageRecord["cacheRead"]);
+  const reportedCacheCreationTokens = int(usageRecord["cacheWrite"]);
+  const inputTokensEstimated =
+    apiProvider === "kiro" &&
+    reportedInputTokens > 0 &&
+    reportedCachedInputTokens === 0 &&
+    reportedCacheCreationTokens === 0;
+
+  let uncachedInputTokens = reportedInputTokens;
+  let cachedInputTokens = reportedCachedInputTokens;
+  if (inputTokensEstimated) {
+    // Kiro exposes context utilisation, not billed input/cache metrics. Its pi
+    // adapter turns that percentage into `usage.input`, so treating every turn
+    // as fresh input multiplies a long agent loop's apparent cost. Simulate a
+    // conservative rolling-prefix cache: only the unchanged prefix of a
+    // non-shrinking context is cached. A smaller context means compaction,
+    // branch/reset, or a model switch and is treated as entirely fresh.
+    const previousContextTokens = state.kiroContextTokensByModel.get(model) ?? 0;
+    cachedInputTokens = reportedInputTokens >= previousContextTokens ? previousContextTokens : 0;
+    uncachedInputTokens = reportedInputTokens - cachedInputTokens;
+    state.kiroContextTokensByModel.set(model, reportedInputTokens);
+  }
+
   const totals: UsageTokenTotals = {
-    uncachedInputTokens: int(usageRecord["input"]),
-    cachedInputTokens: int(usageRecord["cacheRead"]),
-    // `cacheWrite1h` is the long-TTL slice of `cacheWrite`, priced higher by
-    // Anthropic. Base-tier pricing folds it in with the rest.
-    cacheCreationTokens: int(usageRecord["cacheWrite"]),
+    uncachedInputTokens,
+    cachedInputTokens,
+    cacheCreationTokens: reportedCacheCreationTokens,
     outputTokens,
     reasoningTokens: Math.min(outputTokens, int(usageRecord["reasoning"])),
   };
@@ -348,9 +382,10 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
     provider: "pi",
     timestampMs,
     model,
-    apiProvider: typeof messageRecord["provider"] === "string" ? messageRecord["provider"] : "",
+    apiProvider,
     sessionId: state.sessionId,
     totals,
+    inputTokensEstimated,
     reportedCostUsd,
     // The upstream response id survives a session fork, which copies messages
     // into a new file. pi's own message ids are short and only unique per file.

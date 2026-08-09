@@ -18,7 +18,7 @@ import type { UsageProviderKind } from "@t3tools/contracts";
 
 import type { UsageRecord } from "./usageTranscripts.ts";
 
-export const USAGE_SCAN_CACHE_VERSION = 2 as const;
+export const USAGE_SCAN_CACHE_VERSION = 3 as const;
 
 export interface CachedFile {
   readonly size: number;
@@ -45,6 +45,7 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  inputTokensEstimated: boolean,
   apiProviderIndex: number,
 ];
 
@@ -98,6 +99,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
         record.totals.reasoningTokens,
         record.dedupeKey,
         record.reportedCostUsd,
+        record.inputTokensEstimated,
         intern(apiProviders, apiProviderIndex, record.apiProvider),
       ]),
     };
@@ -150,7 +152,7 @@ export function decodeScanCache(document: unknown): ScanCache {
     // file would never be re-parsed, silently losing the dropped rows' usage.
     let corrupt = false;
     for (const row of entry.r) {
-      if (!isRecordArray(row) || row.length < 11) {
+      if (!isRecordArray(row) || row.length < 12) {
         corrupt = true;
         break;
       }
@@ -165,6 +167,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
+        inputTokensEstimated,
         apiProviderIndex,
       ] = row as SerializedRecord;
 
@@ -198,6 +201,7 @@ export function decodeScanCache(document: unknown): ScanCache {
           reasoningTokens: reasoning,
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
+        inputTokensEstimated: inputTokensEstimated === true,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
       });
     }

@@ -72,6 +72,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
       outputTokens: 50,
       reasoningTokens: 0,
     },
+    inputTokensEstimated: false,
     reportedCostUsd: null,
     dedupeKey: null,
     ...overrides,
@@ -105,6 +106,28 @@ describe("UsagePricer", () => {
     );
 
     expect(priced).toEqual({ costUsd: 0, costSource: "unpriced", pricedAs: null });
+  });
+
+  it("prices simulated Kiro cache at cache-read rates", () => {
+    const priced = pricer.price(
+      record({
+        provider: "pi",
+        apiProvider: "anthropic",
+        model: "claude-opus-5",
+        inputTokensEstimated: true,
+        totals: {
+          uncachedInputTokens: 1_000,
+          cachedInputTokens: 99_000,
+          cacheCreationTokens: 0,
+          outputTokens: 500,
+          reasoningTokens: 0,
+        },
+      }),
+    );
+
+    // 1k fresh input + 99k simulated cache reads + real output.
+    expect(priced.costUsd).toBeCloseTo(0.067, 9);
+    expect(priced.costSource).toBe("modelPriced");
   });
 
   it("prefers a reported cost over every table", () => {

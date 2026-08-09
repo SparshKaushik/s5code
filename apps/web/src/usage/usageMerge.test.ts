@@ -25,6 +25,7 @@ function bucket(overrides: Partial<UsageBucket> = {}): UsageBucket {
     },
     costUsd: 10,
     cacheSavingsUsd: 2,
+    inputTokensEstimated: false,
     costSource: "modelPriced",
     pricedAs: null,
     records: 5,
@@ -386,6 +387,17 @@ describe("mergeUsage", () => {
       tagged: true,
       costUsd: 10,
     });
+  });
+
+  it("carries estimated input/cache provenance to model rows", () => {
+    const usage = summary(
+      [bucket({ inputTokensEstimated: true })],
+      [{ provider: "claude", hostId: "mac", homePath: "/a/.claude" }],
+    );
+    const merged = mergeUsage([environment("a", usage)], USAGE_CONTRACT_VERSION);
+
+    expect(merged.inputTokensEstimated).toBe(true);
+    expect(merged.models[0]?.inputTokensEstimated).toBe(true);
   });
 
   it("counts tagged records as priced", () => {
