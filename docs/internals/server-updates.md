@@ -74,6 +74,12 @@ scope, because that is the only form bun's `--define` rewrites. Reading them off
 to no identity. The build script asserts the inline landed by requiring both variable _names_ to be
 absent from the compiled output, and fails the build otherwise.
 
+Release CI builds each Linux arch on a matching runner (`ubuntu-24.04` / `ubuntu-24.04-arm`).
+Cross-compiling `bun-linux-arm64` on x64 can produce a binary that omits
+`@yuuang/ffi-rs-linux-arm64-gnu` (required by `@ff-labs/fff-node`) and still exits the compile
+step cleanly; the host-arch `--version` smoke test in `scripts/build-server-binary.ts` is what
+catches that before publish.
+
 The update is:
 
 1. Download `https://github.com/<repo>/releases/download/v<target>/s5code-server-<target>-<arch>`.
