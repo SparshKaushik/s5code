@@ -458,9 +458,12 @@ jobs:
     name: Build Server Binary (${{ matrix.arch }})
     needs: [preflight, relay_public_config]
     if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' }}
-    runs-on: ubuntu-24.04
-    # Cross-compiling the Bun runtime for both Linux archs plus the web client
-    # bundle on a fresh runner needs a comfortable budget.
+    # Build each arch on a matching runner. Cross-compiling linux-arm64 on
+    # x64 leaves @ff-labs/fff-node's @yuuang/ffi-rs-linux-arm64-gnu optional
+    # native out of the Bun compile, so the release asset dies on --version
+    # (and self-update validation rejects every download). Native runners also
+    # exercise the build script's host-arch --version smoke test.
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     env:
       T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.relay_public_config.outputs.clerk_publishable_key }}
@@ -470,9 +473,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch:
-          - x64
-          - arm64
+        include:
+          - arch: x64
+            runner: ubuntu-24.04
+          - arch: arm64
+            runner: ubuntu-24.04-arm
     steps:
       - name: Checkout
         uses: actions/checkout@v6

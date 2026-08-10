@@ -307,6 +307,10 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
 
   yield* Effect.log("[server-binary] Done.").pipe(Effect.annotateLogs({ artifact: outfile }));
 
+  // Only runnable when the host can execute the target. Release CI therefore
+  // builds each Linux arch on a matching runner: a cross-compiled arm64 binary
+  // can omit @yuuang/ffi-rs-linux-arm64-gnu (pulled in by @ff-labs/fff-node) and
+  // still look like a successful compile until --version dies at process start.
   const hostPlatform = yield* HostProcessPlatform;
   const hostArch = yield* HostProcessArchitecture;
   if (hostPlatform === "linux" && hostArch === options.arch) {
