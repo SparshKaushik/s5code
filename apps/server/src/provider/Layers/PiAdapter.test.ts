@@ -7,6 +7,7 @@ import {
   piApprovalToolName,
   piExtensionUiQuestions,
   piExtensionUiResponsePayload,
+  piShouldReportCompaction,
   piShouldSettleTurnAfterPrompt,
 } from "./PiAdapter.ts";
 import type { PiExtensionUiRequest } from "../pi/PiRpcSchemas.ts";
@@ -108,6 +109,22 @@ describe("piApprovalRequestType", () => {
   it("falls back to a generic tool call for unknown or absent tools", () => {
     expect(piApprovalRequestType("mystery")).toBe("dynamic_tool_call");
     expect(piApprovalRequestType(undefined)).toBe("dynamic_tool_call");
+  });
+});
+
+describe("piShouldReportCompaction", () => {
+  it("reports successful compactions", () => {
+    expect(piShouldReportCompaction({ aborted: false })).toBe(true);
+  });
+
+  it("does not report cancelled or failed compactions as successes", () => {
+    expect(piShouldReportCompaction({ aborted: true })).toBe(false);
+    expect(
+      piShouldReportCompaction({
+        aborted: false,
+        errorMessage: "Auto-compaction failed: Summarization failed: 401",
+      }),
+    ).toBe(false);
   });
 });
 

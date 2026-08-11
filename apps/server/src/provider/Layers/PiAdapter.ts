@@ -233,6 +233,12 @@ export function piShouldSettleTurnAfterPrompt<E, R>(input: {
   return Effect.map(input.agentRunActive(), (active) => !active);
 }
 
+export function piShouldReportCompaction(
+  event: Pick<PiAgentEvent, "aborted" | "errorMessage">,
+): boolean {
+  return event.aborted !== true && event.errorMessage === undefined;
+}
+
 /**
  * Canonical request type for a gated tool, so the approval card renders with
  * the right affordances instead of a generic tool row.
@@ -862,7 +868,10 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         }
 
         case "compaction_end": {
-          if (event.aborted === true) {
+          // pi also emits compaction_end when summarization fails. Those events
+          // have an errorMessage despite aborted=false and did not compact the
+          // context, so reporting them as successes creates a row per retry.
+          if (!piShouldReportCompaction(event)) {
             return;
           }
           yield* emit({
