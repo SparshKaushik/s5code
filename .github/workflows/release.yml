@@ -315,144 +315,17 @@ jobs:
           path: resource-monitor-publish/${{ matrix.resource_key }}/*
           if-no-files-found: error
 
-  android:
-    name: Build Android APK
-    needs: [preflight, relay_public_config]
-    if: ${{ !cancelled() && needs.preflight.result == 'success' && needs.relay_public_config.result == 'success' }}
-    runs-on: ubuntu-24.04
-    # `eas build --local` runs the same build steps EAS would run in the cloud,
-    # but on this runner. First run downloads Gradle 9.3.1 plus every Maven
-    # dependency and compiles Hermes for four ABIs on a 4-core runner; budget
-    # generously.
-    timeout-minutes: 120
-    env:
-      APP_VARIANT: production
-      NODE_OPTIONS: --max-old-space-size=8192
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v6
-        with:
-          ref: ${{ needs.preflight.outputs.ref }}
-          # No sparse-checkout here: it makes actions/checkout fetch with
-          # --filter=blob:none, and eas-cli's local build clones the workspace
-          # via `git clone --depth 1 file://<workspace>`, which fails (exit 128)
-          # when the partial clone can't serve the unfetched blobs.
-
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: |
-            args:
-              - --filter=@t3tools/mobile...
-
-      - name: Expose pnpm
-        run: |
-          pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
-          vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
-          echo "$vp_pnpm_bin" >> "$GITHUB_PATH"
-          "$vp_pnpm_bin/pnpm" --version
-
-      - name: Setup Java
-        uses: actions/setup-java@v4
-        with:
-          distribution: temurin
-          java-version: "17"
-          cache: gradle
-
-      - name: Setup Android SDK
-        uses: android-actions/setup-android@v3
-
-      - name: Install Android SDK components
-        shell: bash
-        run: |
-          set -euo pipefail
-          sdkmanager \
-            "platforms;android-36" \
-            "build-tools;36.0.0" \
-            "ndk;27.0.12077973" \
-            "cmake;3.22.1"
-
-      - name: Setup EAS
-        uses: expo/expo-github-action@v8
-        with:
-          eas-version: 21.5.0
-          token: ${{ secrets.EXPO_TOKEN }}
-          # npm, not pnpm: this only installs eas-cli into the action's own
-          # tool dir, and pnpm 11 hard-fails that install on dtrace-provider's
-          # ignored build script (no allowBuilds config outside the repo).
-          packager: npm
-
-      # eas-cli runs `eas build --local` through `npx eas-cli-local-build-plugin`,
-      # and npx installs that package with npm in the project cwd — which reads
-      # apps/mobile/package.json and dies on its nitro-markdown overrides
-      # (EOVERRIDE). Preinstall the plugin outside the project and hand it to
-      # eas-cli via EAS_LOCAL_BUILD_PLUGIN_PATH so no npm install ever touches
-      # the checkout.
-      - name: Preinstall eas local build plugin
-        id: plugin
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/eas-plugin"
-          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund eas-cli-local-build-plugin@21.5.0
-          echo "plugin_path=$RUNNER_TEMP/eas-plugin/node_modules/eas-cli-local-build-plugin/bin/run" >> "$GITHUB_OUTPUT"
-
-      - name: Build release APK locally
-        working-directory: apps/mobile
-        env:
-          # eas-cli needs a project to resolve credentials and the remote
-          # version (eas.json sets appVersionSource to remote + autoIncrement,
-          # so versionCode is owned by EAS and strictly increases across
-          # releases — the property sideload upgrades rely on).
-          EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
-          EAS_OWNER: ${{ vars.EAS_OWNER }}
-          # versionName shown in the APK; versionCode stays EAS-managed.
-          MOBILE_VERSION: ${{ needs.preflight.outputs.version }}
-          T3CODE_CLERK_PUBLISHABLE_KEY: ${{ needs.relay_public_config.outputs.clerk_publishable_key }}
-          T3CODE_CLERK_JWT_TEMPLATE: ${{ needs.relay_public_config.outputs.clerk_jwt_template }}
-          T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: ${{ needs.relay_public_config.outputs.clerk_cli_oauth_client_id }}
-          T3CODE_RELAY_URL: ${{ needs.relay_public_config.outputs.relay_url }}
-          EAS_LOCAL_BUILD_PLUGIN_PATH: ${{ steps.plugin.outputs.plugin_path }}
-        run: |
-          set -euo pipefail
-          mkdir -p release-publish
-          eas build \
-            --platform android \
-            --profile production \
-            --local \
-            --non-interactive \
-            --output "release-publish/s5code-${{ needs.preflight.outputs.version }}.apk"
-
-      - name: Verify and collect APK
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p release-publish
-
-          # --output names the artifact; fall back to whatever eas produced.
-          apk="apps/mobile/release-publish/s5code-${{ needs.preflight.outputs.version }}.apk"
-          if [[ ! -f "$apk" ]]; then
-            apk="$(find apps/mobile -path '*/release-publish/*' -name '*.apk' -print -quit || true)"
-          fi
-          [[ -n "$apk" && -f "$apk" ]] || { echo "APK not produced by eas build --local" >&2; exit 1; }
-
-          if [[ -n "$ANDROID_HOME" ]]; then
-            apksigner="$(find "$ANDROID_HOME/build-tools" -name apksigner -print -quit)"
-            if [[ -n "$apksigner" ]]; then
-              "$apksigner" verify --print-certs "$apk" >/dev/null
-              echo "APK signature verified."
-            fi
-          fi
-
-          cp "$apk" release-publish/s5code-${{ needs.preflight.outputs.version }}.apk
-
-      - name: Upload APK artifact
-        uses: actions/upload-artifact@v7
-        with:
-          name: android-apk
-          path: release-publish/*
-          if-no-files-found: error
+  mobile:
+    name: Reconcile Mobile Release
+    needs: preflight
+    if: ${{ !cancelled() && needs.preflight.result == 'success' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/mobile-eas-production.yml
+    with:
+      release_version: ${{ needs.preflight.outputs.version }}
+      release_ref: ${{ needs.preflight.outputs.ref }}
+    secrets: inherit
 
   server:
     name: Build Server Binary (${{ matrix.arch }})
@@ -540,8 +413,8 @@ jobs:
 
   release:
     name: Publish GitHub Release
-    needs: [preflight, build, android, server]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.android.result == 'success' && needs.server.result == 'success' }}
+    needs: [preflight, build, mobile, server]
+    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.build.result == 'success' && needs.mobile.result == 'success' && needs.server.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
@@ -593,6 +466,22 @@ jobs:
             fi
           done
 
+      - id: release-apk
+        name: Detect optional mobile APK
+        shell: bash
+        run: |
+          shopt -s nullglob
+          apks=(release-assets/*.apk)
+          if (( ${#apks[@]} > 1 )); then
+            echo "Expected at most one mobile APK, found ${#apks[@]}." >&2
+            exit 1
+          fi
+          if (( ${#apks[@]} == 1 )); then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish release
         if: needs.preflight.outputs.previous_tag != ''
         uses: softprops/action-gh-release@v2
@@ -609,7 +498,6 @@ jobs:
             release-assets/*.zip
             release-assets/*.blockmap
             release-assets/*.yml
-            release-assets/*.apk
             release-assets/s5code-server-*-linux-*
           fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}
@@ -629,7 +517,12 @@ jobs:
             release-assets/*.zip
             release-assets/*.blockmap
             release-assets/*.yml
-            release-assets/*.apk
             release-assets/s5code-server-*-linux-*
           fail_on_unmatched_files: true
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Attach native mobile build
+        if: steps.release-apk.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload "${{ needs.preflight.outputs.tag }}" release-assets/*.apk --clobber

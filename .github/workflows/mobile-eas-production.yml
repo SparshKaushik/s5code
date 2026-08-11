@@ -1,11 +1,22 @@
 name: Mobile EAS Production
 
-# Production builds and OTA updates run from CI (Linux) — never from a laptop.
-# Under the fingerprint runtime-version policy the fingerprint must be computed
-# in the same OS/pnpm as the EAS build; a macOS `eas build` computes a different
-# fingerprint (platform-specific deps + pnpm version) and errors. On this Linux
-# runner, with corepack pinning pnpm 10.24 in eas.json, local == build.
+# Production mobile releases are reconciled by the unified release workflow.
+# The committed source has no release version: CI injects either the version of
+# the latest compatible build (OTA) or the unified release version (new build).
 on:
+  workflow_call:
+    inputs:
+      release_version:
+        description: "Unified release version used only when a native build is required"
+        required: true
+        type: string
+      release_ref:
+        description: "Commit to build or publish"
+        required: true
+        type: string
+    secrets:
+      EXPO_TOKEN:
+        required: false
   workflow_dispatch:
     inputs:
       mode:
@@ -25,50 +36,58 @@ on:
           - android
           - ios
           - all
+      version:
+        description: "Existing mobile version for OTA, or new version for a build"
+        required: true
+        type: string
       message:
         description: "OTA update message (mode=update only)"
         required: false
         type: string
 
+concurrency:
+  group: mobile-eas-production
+  cancel-in-progress: false
+
 jobs:
   production:
-    name: EAS Production ${{ inputs.mode }}
+    name: EAS Production ${{ github.event_name == 'workflow_call' && 'release' || inputs.mode }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 120
     permissions:
       contents: read
     env:
       APP_VARIANT: production
       NODE_OPTIONS: --max-old-space-size=8192
-      # Which EAS project builds/publishes this app. app.config.ts omits
-      # extra.eas.projectId and owner when unset, so eas-cli has nothing to
-      # target until both repository variables are set.
       EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
       EAS_OWNER: ${{ vars.EAS_OWNER }}
     steps:
       - id: expo-token
-        name: Check for EXPO_TOKEN
+        name: Check release configuration
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: |
-          if [ -n "$EXPO_TOKEN" ]; then
-            echo "present=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "EXPO_TOKEN is not available; skipping EAS production job."
+          set -euo pipefail
+          missing=""
+          for name in EXPO_TOKEN EAS_PROJECT_ID EAS_OWNER; do
+            if [ -z "${!name:-}" ]; then
+              missing="$missing $name"
+            fi
+          done
+          if [ -n "$missing" ]; then
+            echo "Mobile EAS release is not configured; missing:${missing}" >&2
+            exit 1
           fi
 
       - name: Checkout
-        if: steps.expo-token.outputs.present == 'true'
         uses: actions/checkout@v6
         with:
+          ref: ${{ github.event_name == 'workflow_call' && inputs.release_ref || github.sha }}
           fetch-depth: 0
-          # No sparse-checkout here: it makes actions/checkout fetch with
-          # --filter=blob:none, and eas-cli archives the project via
-          # `git clone --depth 1 file://<workspace>`, which fails (exit 128)
-          # when the partial clone can't serve the unfetched blobs.
+          # EAS archives the project through a local git clone. Partial clones
+          # cannot serve blobs that were omitted by sparse checkout.
 
       - name: Setup Vite+
-        if: steps.expo-token.outputs.present == 'true'
         uses: voidzero-dev/setup-vp@v1
         with:
           node-version-file: package.json
@@ -78,7 +97,6 @@ jobs:
               - --filter=@t3tools/mobile...
 
       - name: Expose pnpm
-        if: steps.expo-token.outputs.present == 'true'
         run: |
           pnpm_version="$(node --print "require('./package.json').packageManager.split('@').pop()")"
           vp_pnpm_bin="$HOME/.vite-plus/package_manager/pnpm/$pnpm_version/pnpm/bin"
@@ -86,37 +104,162 @@ jobs:
           "$vp_pnpm_bin/pnpm" --version
 
       - name: Setup EAS
-        if: steps.expo-token.outputs.present == 'true'
         uses: expo/expo-github-action@v8
         with:
           eas-version: latest
           token: ${{ secrets.EXPO_TOKEN }}
-          # npm, not pnpm: this only installs eas-cli into the action's own
-          # tool dir, and pnpm 11 hard-fails that install on dtrace-provider's
-          # ignored build script (no allowBuilds config outside the repo).
           packager: npm
 
       - name: Pull production environment variables
-        if: steps.expo-token.outputs.present == 'true'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas env:pull production --non-interactive
 
-      - name: Build and submit
-        if: steps.expo-token.outputs.present == 'true' && inputs.mode == 'build'
+      - id: release-decision
+        name: Compare fingerprint with latest production build
+        if: github.event_name == 'workflow_call'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        # No --auto-submit: this fork never pushes to a store from CI. Download
-        # the artifact from EAS and submit deliberately if you want to.
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          set -euo pipefail
+
+          latest_json="$(eas build:list \
+            --platform android \
+            --build-profile production \
+            --status finished \
+            --limit 1 \
+            --json \
+            --non-interactive)"
+          latest_id="$(jq -r '.[0].id // empty' <<<"$latest_json")"
+          latest_version="$(jq -r '.[0].appVersion // empty' <<<"$latest_json")"
+
+          if [ -z "$latest_id" ] || [ -z "$latest_version" ]; then
+            echo "mode=build" >> "$GITHUB_OUTPUT"
+            echo "mobile_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+            echo "No finished production Android build exists; building $RELEASE_VERSION." >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          export MOBILE_VERSION="$latest_version"
+          fingerprint_json="$(eas fingerprint:generate \
+            --platform android \
+            --environment production \
+            --json \
+            --non-interactive)"
+          fingerprint_hash="$(jq -r '.hash' <<<"$fingerprint_json")"
+          matching_json="$(eas build:list \
+            --platform android \
+            --build-profile production \
+            --status finished \
+            --fingerprint-hash "$fingerprint_hash" \
+            --limit 1 \
+            --json \
+            --non-interactive)"
+          matching_id="$(jq -r '.[0].id // empty' <<<"$matching_json")"
+
+          echo "fingerprint=$fingerprint_hash" >> "$GITHUB_OUTPUT"
+          if [ "$matching_id" = "$latest_id" ]; then
+            echo "mode=update" >> "$GITHUB_OUTPUT"
+            echo "mobile_version=$latest_version" >> "$GITHUB_OUTPUT"
+            echo "Android fingerprint matches latest build $latest_id; publishing OTA for mobile $latest_version." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "mode=build" >> "$GITHUB_OUTPUT"
+            echo "mobile_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+            echo "Android fingerprint differs from latest build $latest_id; building unified release $RELEASE_VERSION." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Sync release mobile version to EAS
+        if: github.event_name == 'workflow_call'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}
+        run: |
+          eas env:set production \
+            --name MOBILE_VERSION \
+            --value "$MOBILE_VERSION" \
+            --visibility plaintext \
+            --scope project \
+            --non-interactive
+
+      - name: Publish release OTA
+        if: github.event_name == 'workflow_call' && steps.release-decision.outputs.mode == 'update'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}
+        run: |
+          eas update \
+            --channel production \
+            --environment production \
+            --platform android \
+            --message "S5 Code ${{ inputs.release_version }} (mobile $MOBILE_VERSION)" \
+            --non-interactive
+
+      - name: Build release Android APK
+        if: github.event_name == 'workflow_call' && steps.release-decision.outputs.mode == 'build'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}
+        run: |
+          set -euo pipefail
+          build_json="$(eas build \
+            --platform android \
+            --profile production \
+            --non-interactive \
+            --wait \
+            --json)"
+          build_url="$(jq -r 'if type == "array" then .[0].artifacts.buildUrl else .artifacts.buildUrl end // empty' <<<"$build_json")"
+          if [ -z "$build_url" ]; then
+            echo "EAS build completed without an Android artifact URL." >&2
+            exit 1
+          fi
+
+          mkdir -p release-publish
+          curl --fail --location --retry 3 \
+            "$build_url" \
+            --output "release-publish/s5code-${{ inputs.release_version }}.apk"
+
+      - name: Upload release APK
+        if: github.event_name == 'workflow_call' && steps.release-decision.outputs.mode == 'build'
+        uses: actions/upload-artifact@v7
+        with:
+          name: android-apk
+          path: apps/mobile/release-publish/s5code-${{ inputs.release_version }}.apk
+          if-no-files-found: error
+
+      - name: Sync manual mobile version to EAS
+        if: github.event_name == 'workflow_dispatch'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MOBILE_VERSION: ${{ inputs.version }}
+        run: |
+          eas env:set production \
+            --name MOBILE_VERSION \
+            --value "$MOBILE_VERSION" \
+            --visibility plaintext \
+            --scope project \
+            --non-interactive
+
+      - name: Build manually
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MOBILE_VERSION: ${{ inputs.version }}
         run: eas build --platform ${{ inputs.platform }} --profile production --non-interactive --no-wait
 
-      - name: Publish OTA update
-        if: steps.expo-token.outputs.present == 'true' && inputs.mode == 'update'
+      - name: Publish OTA manually
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'update'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          MOBILE_VERSION: ${{ inputs.version }}
         run: |
           eas update \
             --channel production \
