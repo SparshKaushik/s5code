@@ -146,17 +146,18 @@ jobs:
       clerk_cli_oauth_client_id: ${{ steps.public_config.outputs.clerk_cli_oauth_client_id }}
       relay_url: ${{ steps.public_config.outputs.relay_url }}
     steps:
-      # This fork ships no relay of its own: clients use the official hosted
-      # T3 Connect relay. These are public build-time identifiers, the same
-      # values baked into the upstream `t3` package — not secrets.
+      # This fork runs its own self-hosted T3 Connect relay (deployed by
+      # .github/workflows/deploy-relay.yml to relay.s5code.dpdns.org) and its
+      # own Clerk instance. These are public build-time identifiers, not
+      # secrets; CLERK_SECRET_KEY and DATABASE_URL stay in GitHub secrets.
       - id: public_config
-        name: Emit official relay public config
+        name: Emit self-hosted relay public config
         shell: bash
         run: |
-          echo "clerk_publishable_key=pk_live_Y2xlcmsudDMuY29kZXMk" >> "$GITHUB_OUTPUT"
-          echo "clerk_jwt_template=t3-relay" >> "$GITHUB_OUTPUT"
-          echo "clerk_cli_oauth_client_id=hzxSgY2cH10sDU2r" >> "$GITHUB_OUTPUT"
-          echo "relay_url=https://relay.t3.codes" >> "$GITHUB_OUTPUT"
+          echo "clerk_publishable_key=pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA" >> "$GITHUB_OUTPUT"
+          echo "clerk_jwt_template=s5-relay" >> "$GITHUB_OUTPUT"
+          echo "clerk_cli_oauth_client_id=Uh0fH8x0GWSj2HIL" >> "$GITHUB_OUTPUT"
+          echo "relay_url=https://relay.s5code.dpdns.org" >> "$GITHUB_OUTPUT"
 
   build:
     name: Build ${{ matrix.label }}
