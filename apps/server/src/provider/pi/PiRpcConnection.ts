@@ -49,8 +49,8 @@ import {
 } from "./PiRpcSchemas.ts";
 
 const UnknownFromJsonString = Schema.fromJsonString(Schema.Unknown);
-const decodeJsonLine = (line: string) => Schema.decodeUnknownEffect(UnknownFromJsonString)(line);
-const encodeJsonLine = (value: unknown) => Schema.encodeUnknownEffect(UnknownFromJsonString)(value);
+const decodeJsonLine = Schema.decodeUnknownEffect(UnknownFromJsonString);
+const encodeJsonLine = Schema.encodeUnknownEffect(UnknownFromJsonString);
 const decodeResponseEnvelope = Schema.decodeUnknownEffect(PiRpcResponseEnvelope);
 const decodeExtensionUiRequest = Schema.decodeUnknownEffect(PiExtensionUiRequest);
 const decodeAgentEvent = Schema.decodeUnknownEffect(PiAgentEvent);
