@@ -228,18 +228,15 @@ export const ApiLive = Api.make(
         ),
       ),
       Layer.provideMerge(DpopProofs.layer),
-      ...(apnsEnabled
-        ? [
-            Layer.provideMerge(ApnsDeliveries.layer),
-            Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
-            Layer.provideMerge(
-              ApnsDeliveryQueue.layerCloudflareQueues(
-                apnsDeliveryQueueSender,
-                alchemyRuntimeContext,
-              ),
-            ),
-          ]
-        : []),
+      // APNs services must always be provided: AgentActivityPublisher depends on
+      // ApnsDeliveries, and these layers build fine with the placeholder
+      // credentials used when APNs is disabled. Only the delivery-queue
+      // *consumer* below is gated on `apnsEnabled`.
+      Layer.provideMerge(ApnsDeliveries.layer),
+      Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
+      Layer.provideMerge(
+        ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
+      ),
       Layer.provideMerge(AgentActivityRows.layer),
       Layer.provideMerge(Devices.layer),
       Layer.provideMerge(EnvironmentCredentials.layer),
