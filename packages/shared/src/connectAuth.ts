@@ -10,9 +10,10 @@ const CONNECT_CALLBACK_PATH = "/connect/callback";
 /**
  * The CLI prints URLs against this origin and the web bundle uses it to
  * decide whether it is the hosted deployment — the two must agree, so the
- * default lives here.
+ * default lives here. This is the fork's self-hosted Cloudflare Pages
+ * deployment; override with T3CODE_HOSTED_APP_URL / VITE_HOSTED_APP_URL.
  */
-export const DEFAULT_HOSTED_APP_URL = "https://app.t3.codes";
+export const DEFAULT_HOSTED_APP_URL = "https://s5code.pages.dev";
 
 /**
  * Requested at authorize time by the hosted page and honored by the CLI's

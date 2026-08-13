@@ -1,6 +1,6 @@
 # S5 Code
 
-S5 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=club.touchtech.s5code)), [web app](https://app.t3.codes) and [Electron-based desktop app](https://t3.codes).
+S5 Code is an "agent harness control surface". It enables control of the agents on your machine with a best-in-class mobile app ([iOS](https://apps.apple.com/us/app/t3-code-remote-claude-more/id6787819824), [Android](https://play.google.com/store/apps/details?id=club.touchtech.s5code)), [web app](https://s5code.pages.dev) and [Electron-based desktop app](https://t3.codes).
 
 Works with your subscriptions on Claude Code, Codex, Cursor, Grok Build, and OpenCode. If they're set up on your computer, S5 Code can control them.
 
@@ -40,7 +40,7 @@ ships a precompiled, standalone Linux binary (`s5code-server-<version>-linux-x64
 and `-arm64`) built with `bun build --compile`. Download it, `chmod +x`, and run
 `./s5code-server serve` — no Node.js, pnpm, vite-plus, or `node_modules` needed.
 It updates itself from GitHub Releases when you select **Update server** in a
-client. The binary serves the API and WebSocket; connect a UI from app.t3.codes,
+client. The binary serves the API and WebSocket; connect a UI from s5code.pages.dev,
 desktop, or mobile. See `SERVER_SETUP.md` for the download-and-run systemd flow.
 
 ### Desktop app
