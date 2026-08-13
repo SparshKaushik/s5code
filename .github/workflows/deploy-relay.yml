@@ -66,6 +66,13 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: vp run --filter t3code-relay migrate
 
+      - name: Seed Cloudflare state-store credentials
+        run: |
+          mkdir -p ~/.alchemy/credentials/default
+          printf '%s' "$ALCHEMY_STATE_STORE_CREDENTIALS" > ~/.alchemy/credentials/default/cloudflare-state-store.json
+        env:
+          ALCHEMY_STATE_STORE_CREDENTIALS: ${{ secrets.ALCHEMY_STATE_STORE_CREDENTIALS }}
+
       - name: Deploy production relay stage
         id: deploy
         run: vp run --filter t3code-relay deploy --stage prod --yes --github-output
