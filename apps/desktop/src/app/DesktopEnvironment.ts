@@ -7,12 +7,14 @@ import type {
 import * as Config from "effect/Config";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopConfig from "./DesktopConfig.ts";
+import { adoptLegacyT3HomeIfNeeded } from "./DesktopHomeAdoption.ts";
 import { resolveDesktopBaseDir, resolveDesktopStateDir } from "./DesktopStatePaths.ts";
 import { isNightlyDesktopVersion } from "../updates/updateChannels.ts";
 
@@ -136,7 +138,11 @@ function resolveDesktopRuntimeInfo(input: {
 
 const make = Effect.fn("desktop.environment.make")(function* (
   input: MakeDesktopEnvironmentInput,
-): Effect.fn.Return<DesktopEnvironment["Service"], Config.ConfigError, Path.Path> {
+): Effect.fn.Return<
+  DesktopEnvironment["Service"],
+  Config.ConfigError,
+  Path.Path | FileSystem.FileSystem
+> {
   const path = yield* Path.Path;
   const config = yield* DesktopConfig.DesktopConfig;
   const homeDirectory = input.homeDirectory;
@@ -168,6 +174,18 @@ const make = Effect.fn("desktop.environment.make")(function* (
     joinPath: path.join,
     t3Home: config.t3Home,
   });
+  yield* adoptLegacyT3HomeIfNeeded({
+    homeDirectory,
+    isDevelopment,
+    isPackaged: input.isPackaged,
+    t3Home: config.t3Home,
+  }).pipe(
+    Effect.catch((error) =>
+      Effect.logWarning("Legacy T3 home adoption failed").pipe(
+        Effect.annotateLogs({ error: String(error) }),
+      ),
+    ),
+  );
   const userDataDirName = isDevelopment ? "s5code-dev" : "s5code";
   const legacyUserDataDirName = isDevelopment ? "t3code-dev" : "t3code";
   const linuxApplicationsDir = path.join(
