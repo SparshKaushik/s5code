@@ -87,7 +87,7 @@ const VARIANT_CONFIG = {
     scheme: "s5code-dev",
     iosBundleIdentifier: "club.touchtech.s5code.dev",
     androidPackage: "club.touchtech.s5code.dev",
-    relyingParty: "clerk.t3.codes",
+    relyingParty: "clerk.s5code.touchtech.club",
     assets: DEVELOPMENT_ASSETS,
   },
   preview: {
@@ -95,7 +95,7 @@ const VARIANT_CONFIG = {
     scheme: "s5code-preview",
     iosBundleIdentifier: "club.touchtech.s5code.preview",
     androidPackage: "club.touchtech.s5code.preview",
-    relyingParty: "clerk.t3.codes",
+    relyingParty: "clerk.s5code.touchtech.club",
     assets: PREVIEW_ASSETS,
   },
   production: {
@@ -103,7 +103,7 @@ const VARIANT_CONFIG = {
     scheme: "s5code",
     iosBundleIdentifier: "club.touchtech.s5code",
     androidPackage: "club.touchtech.s5code",
-    relyingParty: "clerk.t3.codes",
+    relyingParty: "clerk.s5code.touchtech.club",
     assets: RELEASE_ASSETS,
   },
 } as const;
