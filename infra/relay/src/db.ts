@@ -1,6 +1,6 @@
 import type { PgClient } from "@effect/sql-pg/PgClient";
 import * as Cloudflare from "alchemy/Cloudflare";
-import type { PublicOrigin } from "alchemy/Cloudflare/Hyperdrive/Connection";
+import type { PublicOrigin } from "alchemy/Cloudflare/Hyperdrive";
 import * as Config from "effect/Config";
 import type { EffectPgDatabase } from "drizzle-orm/effect-postgres";
 import * as Context from "effect/Context";
