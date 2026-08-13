@@ -5,6 +5,7 @@ import * as Path from "effect/Path";
 
 const SQLITE_HEADER = "SQLite format 3";
 const ADOPTION_MARKER = ".adopted-from-t3";
+const SKIP_ADOPTION_ENTRIES = new Set(["clerk-tokens.json", "clerk-instance.json"]);
 
 const isReadableSqlite = Effect.fn("isReadableSqlite")(function* (filePath: string) {
   const fileSystem = yield* FileSystem.FileSystem;
@@ -51,6 +52,9 @@ export const adoptLegacyT3HomeIfNeeded = Effect.fn("adoptLegacyT3HomeIfNeeded")(
   yield* fileSystem.makeDirectory(destUserdata, { recursive: true });
   const entries = yield* fileSystem.readDirectory(sourceUserdata);
   for (const entry of entries) {
+    if (SKIP_ADOPTION_ENTRIES.has(entry)) {
+      continue;
+    }
     const fromPath = path.join(sourceUserdata, entry);
     const toPath = path.join(destUserdata, entry);
     if (!(yield* fileSystem.exists(toPath))) {

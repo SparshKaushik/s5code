@@ -1,12 +1,18 @@
 import { assert, describe, it } from "vite-plus/test";
 
 import {
+  getAppProtocolSchemes,
   makeDevelopmentLauncherScript,
   resolveElectronBinaryPath,
   resolveMacLauncherPaths,
 } from "./electron-launcher.mjs";
 
 describe("electron development launcher", () => {
+  it("registers the renderer schemes Clerk OAuth callbacks use", () => {
+    assert.deepEqual(getAppProtocolSchemes(true), ["s5code-dev", "t3code-dev"]);
+    assert.deepEqual(getAppProtocolSchemes(false), ["s5code", "t3code"]);
+  });
+
   it("uses captured values only as fallbacks for a live runner environment", () => {
     const script = makeDevelopmentLauncherScript({
       electronBinaryPath: "/repo/node_modules/electron/Electron",

@@ -157,15 +157,17 @@ In **Clerk Dashboard > Native applications**, enable the Native API and add thes
 mobile SSO redirect allowlist:
 
 ```text
-t3code-dev://app/
-t3code://app/
+s5code-dev://app/
+s5code://app/
 ```
 
-Local desktop development uses `t3code-dev://app`, while packaged builds use `t3code://app`. Add the
-matching origin to each Clerk instance's Backend API `allowed_origins` array as well. The development
-Clerk instance should only need `t3code-dev://app`; the production Clerk instance should only need
-`t3code://app`. `@clerk/electron` owns the native request adapter, encrypted Clerk token persistence,
-external-browser OAuth transport, and callback delivery for initial sign-in and linked-account flows.
+Local desktop development uses `s5code-dev://app`, while packaged builds use `s5code://app`. Keep
+`t3code://app` and `t3code-dev://app` on the OS handler allowlist during the rebrand so older
+callbacks still open the app. Add the matching origin to each Clerk instance's Backend API
+`allowed_origins` array as well. The development Clerk instance should only need `s5code-dev://app`;
+the production Clerk instance should only need `s5code://app`. `@clerk/electron` owns the native
+request adapter, encrypted Clerk token persistence, external-browser OAuth transport, and callback
+delivery for initial sign-in and linked-account flows.
 
 There is currently no Dashboard UI for `allowed_origins`. Preserve any existing entries and update
 the instance through the Backend API:
@@ -174,7 +176,7 @@ the instance through the Backend API:
 curl -X PATCH https://api.clerk.com/v1/instance \
   -H "Content-Type: application/json" \
   -H "Authorization: Bearer $CLERK_SECRET_KEY" \
-  -d '{"allowed_origins":["t3code://app"]}'
+  -d '{"allowed_origins":["s5code://app","s5code-dev://app"]}'
 ```
 
 Never put `CLERK_SECRET_KEY` in the desktop app, a client-facing environment file, or a build

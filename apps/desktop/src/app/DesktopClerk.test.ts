@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -61,6 +62,74 @@ describe("DesktopClerk", () => {
   beforeEach(() => {
     createClerkBridgeMock.mockReset();
     storageMock.mockReset();
+  });
+
+  it("rewrites custom-scheme Origin headers to the Clerk satellite HTTPS origin", () => {
+    assert.deepEqual(
+      DesktopClerk.rewriteCustomSchemeOriginHeader(
+        {
+          Origin: "s5code://app",
+          Authorization: "Bearer native-token",
+        },
+        "https://s5code.touchtech.club",
+      ),
+      { Authorization: "Bearer native-token" },
+    );
+    assert.deepEqual(
+      DesktopClerk.rewriteCustomSchemeOriginHeader(
+        { Origin: "s5code://app" },
+        "https://s5code.touchtech.club",
+      ),
+      { Origin: "https://s5code.touchtech.club" },
+    );
+    assert.deepEqual(
+      DesktopClerk.rewriteCustomSchemeOriginHeader(
+        { origin: "t3code://app" },
+        "https://s5code.touchtech.club",
+      ),
+      { origin: "https://s5code.touchtech.club" },
+    );
+    assert.deepEqual(
+      DesktopClerk.rewriteCustomSchemeOriginHeader(
+        {
+          Origin: "https://s5code.touchtech.club",
+          Accept: "application/json",
+        },
+        "https://example.invalid",
+      ),
+      {
+        Origin: "https://s5code.touchtech.club",
+        Accept: "application/json",
+      },
+    );
+  });
+
+  it("derives the satellite HTTPS origin Clerk accepts from the Frontend API host", () => {
+    assert.equal(
+      DesktopClerk.clerkSatelliteHttpsOriginFromFrontendApiHostname("clerk.s5code.touchtech.club"),
+      "https://s5code.touchtech.club",
+    );
+    assert.equal(
+      DesktopClerk.clerkSatelliteHttpsOriginFromFrontendApiHostname("example.clerk.accounts.dev"),
+      undefined,
+    );
+  });
+
+  it("restores the renderer origin on Clerk CORS responses after rewriting Origin", () => {
+    assert.deepEqual(
+      DesktopClerk.rewriteClerkCorsOrigin(
+        { "Access-Control-Allow-Origin": ["https://s5code.touchtech.club"] },
+        "s5code://app",
+      ),
+      { "Access-Control-Allow-Origin": ["s5code://app"] },
+    );
+    assert.deepEqual(
+      DesktopClerk.rewriteClerkCorsOrigin(
+        { "access-control-allow-origin": ["https://s5code.touchtech.club"] },
+        "s5code-dev://app",
+      ),
+      { "Access-Control-Allow-Origin": ["s5code-dev://app"] },
+    );
   });
 
   it("derives the Clerk Frontend API hostname used by the desktop CSP", () => {
@@ -231,4 +300,55 @@ describe("DesktopClerk", () => {
     storageMock.mockClear();
     createClerkBridgeMock.mockClear();
   });
+
+  it.effect("discards Clerk tokens copied from a different Clerk instance", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const stateDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "s5-clerk-tokens-",
+      });
+      const tokensPath = `${stateDir}/clerk-tokens.json`;
+      const instancePath = `${stateDir}/clerk-instance.json`;
+      yield* fileSystem.writeFileString(
+        tokensPath,
+        '{"__clerk_client_jwt":"enc:legacy-t3-session"}',
+      );
+
+      yield* DesktopClerk.discardIncompatibleClerkTokens({
+        stateDir,
+        publishableKey: "pk_live_s5code",
+      });
+
+      assert.isFalse(yield* fileSystem.exists(tokensPath));
+      assert.equal(
+        yield* fileSystem.readFileString(instancePath),
+        JSON.stringify({ publishableKey: "pk_live_s5code" }),
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
+
+  it.effect("keeps Clerk tokens that already belong to this instance", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const stateDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "s5-clerk-tokens-",
+      });
+      const tokensPath = `${stateDir}/clerk-tokens.json`;
+      yield* fileSystem.writeFileString(tokensPath, '{"__clerk_client_jwt":"enc:current"}');
+      yield* fileSystem.writeFileString(
+        `${stateDir}/clerk-instance.json`,
+        JSON.stringify({ publishableKey: "pk_live_s5code" }),
+      );
+
+      yield* DesktopClerk.discardIncompatibleClerkTokens({
+        stateDir,
+        publishableKey: "pk_live_s5code",
+      });
+
+      assert.equal(
+        yield* fileSystem.readFileString(tokensPath),
+        '{"__clerk_client_jwt":"enc:current"}',
+      );
+    }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
+  );
 });

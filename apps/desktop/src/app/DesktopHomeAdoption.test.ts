@@ -34,7 +34,7 @@ const seedLegacyHome = Effect.fn("seedLegacyHome")(function* (
 });
 
 describe("DesktopHomeAdoption", () => {
-  it.effect("copies legacy t3 userdata into an empty s5code home and writes a marker", () =>
+  it.effect("copies legacy t3 userdata into an empty s5code home without Clerk tokens", () =>
     withHome((homeDirectory) =>
       Effect.gen(function* () {
         const fileSystem = yield* FileSystem.FileSystem;
@@ -42,6 +42,8 @@ describe("DesktopHomeAdoption", () => {
         yield* seedLegacyHome(homeDirectory, {
           "state.sqlite": SQLITE_HEADER,
           "settings.json": '{"ok":true}',
+          "clerk-tokens.json": '{"__clerk_client_jwt":"enc:legacy-t3-session"}',
+          "clerk-instance.json": '{"publishableKey":"pk_live_legacy"}',
         });
 
         yield* adoptLegacyT3HomeIfNeeded({
@@ -66,6 +68,13 @@ describe("DesktopHomeAdoption", () => {
         assert.isTrue(
           yield* fileSystem.exists(path.join(homeDirectory, ".t3", "userdata", "state.sqlite")),
         );
+        assert.isTrue(
+          yield* fileSystem.exists(
+            path.join(homeDirectory, ".t3", "userdata", "clerk-tokens.json"),
+          ),
+        );
+        assert.isFalse(yield* fileSystem.exists(path.join(dest, "clerk-tokens.json")));
+        assert.isFalse(yield* fileSystem.exists(path.join(dest, "clerk-instance.json")));
       }),
     ),
   );

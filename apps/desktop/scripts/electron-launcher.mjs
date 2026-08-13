@@ -19,8 +19,11 @@ export const APP_DISPLAY_NAME = isDevelopment ? "S5 Code (Dev)" : "S5 Code (Alph
 export const APP_BUNDLE_ID = isDevelopment
   ? `club.touchtech.s5code.dev.${devBundleIdSuffix || "local"}`
   : "club.touchtech.s5code";
-const APP_PROTOCOL_SCHEMES = isDevelopment ? ["t3code-dev"] : ["t3code"];
-const LAUNCHER_VERSION = 14;
+export function getAppProtocolSchemes(development = isDevelopment) {
+  return development ? ["s5code-dev", "t3code-dev"] : ["s5code", "t3code"];
+}
+const APP_PROTOCOL_SCHEMES = getAppProtocolSchemes();
+const LAUNCHER_VERSION = 15;
 const defaultIconPath = NodePath.join(desktopDir, "resources", "icon.icns");
 const developmentMacIconPngPath = NodePath.join(
   repoRoot,

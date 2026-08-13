@@ -1571,7 +1571,7 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       protocols: [
         {
           name: "S5 Code",
-          schemes: ["t3code", "t3code-dev"],
+          schemes: ["s5code", "s5code-dev", "t3code", "t3code-dev"],
         },
       ],
       ...(macPasskeySigning
@@ -1589,13 +1589,10 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
       executableName: "s5code",
       icon: "icons",
       category: "Development",
-      // electron-builder turns these into MimeType=x-scheme-handler/<scheme>;
-      // in the .desktop entry (Exec already gets %U), so browsers can hand
-      // t3code:// OAuth callbacks to the app.
       protocols: [
         {
           name: "S5 Code",
-          schemes: ["t3code", "t3code-dev"],
+          schemes: ["s5code", "s5code-dev", "t3code", "t3code-dev"],
         },
       ],
       desktop: {
