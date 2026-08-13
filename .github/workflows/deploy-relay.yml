@@ -64,11 +64,7 @@ jobs:
       - name: Apply Neon database migrations
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-        run: |
-          pnpm --filter t3code-relay exec drizzle-kit migrate \
-            --dialect=postgres \
-            --url="$DATABASE_URL" \
-            --out=./migrations/postgres
+        run: vp run --filter t3code-relay migrate
 
       - name: Deploy production relay stage
         id: deploy
