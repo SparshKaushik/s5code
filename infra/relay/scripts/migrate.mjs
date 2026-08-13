@@ -12,13 +12,13 @@
  *
  *   vp run --filter t3code-relay migrate
  */
-import { createRequire } from "node:module";
-import { createHash } from "node:crypto";
-import { readdirSync, readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import * as NodeModule from "node:module";
+import * as NodeCrypto from "node:crypto";
+import * as NodeFS from "node:fs";
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
 
-const require = createRequire(import.meta.url);
+const require = NodeModule.createRequire(import.meta.url);
 const { Client } = require("pg");
 
 /**
@@ -52,12 +52,14 @@ function listSqlFiles(directory) {
   const files = [];
 
   const walk = (relativeDir) => {
-    for (const entry of readdirSync(join(directory, relativeDir), { withFileTypes: true })) {
-      const relativePath = relativeDir ? join(relativeDir, entry.name) : entry.name;
+    for (const entry of NodeFS.readdirSync(NodePath.join(directory, relativeDir), {
+      withFileTypes: true,
+    })) {
+      const relativePath = relativeDir ? NodePath.join(relativeDir, entry.name) : entry.name;
       if (entry.isDirectory()) {
         walk(relativePath);
       } else if (entry.name.endsWith(".sql")) {
-        const sql = readFileSync(join(directory, relativePath), "utf8");
+        const sql = NodeFS.readFileSync(NodePath.join(directory, relativePath), "utf8");
         // Match the existing `relay_migrations.name` convention: the migration
         // directory basename (e.g. `20260527044716_baseline`), not the full
         // relative `.../migration.sql` path. Idempotency relies on this.
@@ -65,7 +67,7 @@ function listSqlFiles(directory) {
         files.push({
           id,
           sql,
-          hash: createHash("sha256").update(sql).digest("hex"),
+          hash: NodeCrypto.createHash("sha256").update(sql).digest("hex"),
         });
       }
     }
@@ -134,7 +136,12 @@ async function applyMigrations(connectionUri, migrationsTable, files) {
   }
 }
 
-const migrationsDir = join(dirname(fileURLToPath(import.meta.url)), "..", "migrations", "postgres");
+const migrationsDir = NodePath.join(
+  NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)),
+  "..",
+  "migrations",
+  "postgres",
+);
 
 async function main() {
   const url = process.env.DATABASE_URL?.trim();
