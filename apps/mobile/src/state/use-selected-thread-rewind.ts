@@ -1,6 +1,7 @@
 import {
   describeRewindStepFailure,
   describeRewindStepResult,
+  undonePromptForComposer,
   type RewindDirection,
 } from "@t3tools/client-runtime/state/rewind";
 import {
@@ -14,9 +15,11 @@ import {
   buildRewindMenuRows,
   type RewindMenuRow,
 } from "../features/threads/threadRewindPresentation";
+import { scopedThreadKey } from "../lib/scopedEntities";
 import { useEnvironmentQuery } from "./query";
 import { rewindEnvironment } from "./rewind";
 import { useAtomCommand } from "./use-atom-command";
+import { setComposerDraftText } from "./use-composer-drafts";
 import { showThreadActionResult } from "./use-vcs-action-state";
 import { useThreadSelection } from "./use-thread-selection";
 
@@ -94,6 +97,12 @@ export function useSelectedThreadRewind(input: {
             title: notification.title,
             description: notification.description,
           });
+        }
+        // Undo restores files; also hand the undone prompt back to the composer
+        // so the user can edit and resend it without retyping.
+        const undonePrompt = undonePromptForComposer({ direction, result: result.value });
+        if (undonePrompt) {
+          setComposerDraftText(scopedThreadKey(environmentId, threadId), undonePrompt);
         }
         refresh();
       })();

@@ -1,9 +1,11 @@
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { Redo2Icon, Undo2Icon } from "lucide-react";
+import { scopeThreadRef } from "@t3tools/client-runtime/environment";
 import {
   describeRewindAction,
   describeRewindStepFailure,
   describeRewindStepResult,
+  undonePromptForComposer,
 } from "@t3tools/client-runtime/state/rewind";
 import {
   isAtomCommandInterrupted,
@@ -11,6 +13,7 @@ import {
 } from "@t3tools/client-runtime/state/runtime";
 import type { EnvironmentId, ThreadId } from "@t3tools/contracts";
 
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { useEnvironmentQuery } from "../../state/query";
 import { rewindEnvironment } from "../../state/rewind";
 import { useAtomCommand } from "../../state/use-atom-command";
@@ -72,6 +75,14 @@ export const RewindControls = memo(function RewindControls({
         const toast = describeRewindStepResult({ direction, result: result.value });
         if (toast) {
           toastManager.add(toast);
+        }
+        // Undo restores files; also hand the undone prompt back to the composer
+        // so the user can edit and resend it without retyping.
+        const undonePrompt = undonePromptForComposer({ direction, result: result.value });
+        if (undonePrompt) {
+          useComposerDraftStore
+            .getState()
+            .setPrompt(scopeThreadRef(environmentId, threadId), undonePrompt);
         }
         refresh();
       })();
