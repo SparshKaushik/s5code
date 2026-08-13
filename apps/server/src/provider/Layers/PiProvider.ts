@@ -129,11 +129,27 @@ export interface PiCatalog {
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 }
 
+/**
+ * Built-in pi commands surfaced in the composer that `get_commands` omits.
+ *
+ * pi's `get_commands` only reports extension commands, prompt templates, and
+ * skills — not built-in commands like `/compact`, even though the adapter
+ * executes them. Keeping `/compact` here makes the manual-compaction path
+ * discoverable in the slash menu.
+ */
+const PI_BUILTIN_SLASH_COMMANDS: ReadonlyArray<ServerProviderSlashCommand> = [
+  {
+    name: "compact",
+    description: "Summarize the conversation to free up context space",
+    input: { hint: "Optional custom instructions for the summary" },
+  },
+];
+
 function slashCommandsFromPi(
   commands: ReadonlyArray<{ readonly name: string; readonly description?: string | undefined }>,
 ): ReadonlyArray<ServerProviderSlashCommand> {
-  const seen = new Set<string>();
-  const result: Array<ServerProviderSlashCommand> = [];
+  const seen = new Set(PI_BUILTIN_SLASH_COMMANDS.map((command) => command.name));
+  const result: Array<ServerProviderSlashCommand> = [...PI_BUILTIN_SLASH_COMMANDS];
   for (const command of commands) {
     const name = command.name.trim();
     if (name.length === 0 || seen.has(name)) {

@@ -3,6 +3,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 
 import {
+  parsePiCompactCommand,
   piApprovalRequestType,
   piApprovalToolName,
   piExtensionUiQuestions,
@@ -109,6 +110,31 @@ describe("piApprovalRequestType", () => {
   it("falls back to a generic tool call for unknown or absent tools", () => {
     expect(piApprovalRequestType("mystery")).toBe("dynamic_tool_call");
     expect(piApprovalRequestType(undefined)).toBe("dynamic_tool_call");
+  });
+});
+
+describe("parsePiCompactCommand", () => {
+  it("recognises a bare /compact with no custom instructions", () => {
+    expect(parsePiCompactCommand("/compact")).toEqual({ instructions: undefined });
+    expect(parsePiCompactCommand("  /compact  ")).toEqual({ instructions: undefined });
+  });
+
+  it("keeps the custom instructions after /compact", () => {
+    expect(parsePiCompactCommand("/compact Focus on code changes")).toEqual({
+      instructions: "Focus on code changes",
+    });
+  });
+
+  it("is case-insensitive like the other composer slash commands", () => {
+    expect(parsePiCompactCommand("/Compact")).toEqual({ instructions: undefined });
+  });
+
+  it("does not match lookalike commands or plain prompts", () => {
+    expect(parsePiCompactCommand("/compactfoo")).toBeUndefined();
+    expect(parsePiCompactCommand("compact")).toBeUndefined();
+    expect(parsePiCompactCommand("Please /compact this")).toBeUndefined();
+    expect(parsePiCompactCommand(undefined)).toBeUndefined();
+    expect(parsePiCompactCommand("  ")).toBeUndefined();
   });
 });
 
