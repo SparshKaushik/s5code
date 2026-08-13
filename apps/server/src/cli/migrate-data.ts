@@ -16,7 +16,6 @@
  * - Copies the SQLite file plus its `-wal`/`-shm` siblings so a clean shutdown
  *   history survives intact.
  */
-import * as NodePath from "node:path";
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -48,6 +47,17 @@ export class MigrateDataError extends Schema.TaggedErrorClass<MigrateDataError>(
 const exists = (fs: FileSystem.FileSystem, inputPath: string) =>
   fs.exists(inputPath).pipe(Effect.orElseSucceed(() => false));
 
+const copyFile = (fs: FileSystem.FileSystem, from: string, to: string) =>
+  fs.copyFile(from, to).pipe(
+    Effect.mapError(
+      (error) =>
+        new MigrateDataError({
+          message: `Failed to copy ${from} to ${to}: ${error.message}`,
+          suggestion: "Check file permissions and available disk space.",
+        }),
+    ),
+  );
+
 const joinStateEntries = (
   root: string,
   joinPath: Path.Path["join"],
@@ -59,7 +69,7 @@ const migrateData = Effect.fn("cli.migrateData")(function* (input: {
   readonly sourceHome: string | undefined;
   readonly targetHome: string | undefined;
   readonly force: boolean;
-}): Effect.Effect<void, MigrateDataError, FileSystem.FileSystem | Path.Path> {
+}) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
@@ -95,8 +105,8 @@ const migrateData = Effect.fn("cli.migrateData")(function* (input: {
   // Copy the database plus its WAL/SHM siblings.
   for (const entry of joinStateEntries(sourceBaseDir, path.join, SQLITE_FILENAMES)) {
     if (yield* exists(fs, entry.from)) {
-      yield* fs.mkdir(NodePath.dirname(entry.to), { recursive: true }).pipe(Effect.ignore);
-      yield* fs.copyFile(entry.from, entry.to);
+      yield* fs.makeDirectory(path.dirname(entry.to), { recursive: true }).pipe(Effect.ignore);
+      yield* copyFile(fs, entry.from, entry.to);
     }
   }
 
@@ -105,8 +115,8 @@ const migrateData = Effect.fn("cli.migrateData")(function* (input: {
   for (const entry of joinStateEntries(sourceBaseDir, path.join, COPY_ENTRIES)) {
     if (yield* exists(fs, entry.from)) {
       if (yield* exists(fs, entry.to)) continue;
-      yield* fs.mkdir(NodePath.dirname(entry.to), { recursive: true }).pipe(Effect.ignore);
-      yield* fs.copyFile(entry.from, entry.to);
+      yield* fs.makeDirectory(path.dirname(entry.to), { recursive: true }).pipe(Effect.ignore);
+      yield* copyFile(fs, entry.from, entry.to);
     }
   }
 
@@ -136,8 +146,8 @@ export const migrateDataCommand = Command.make("migrate-data", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       yield* migrateData({
-        sourceHome: flags.source,
-        targetHome: flags.target,
+        sourceHome: Option.getOrUndefined(flags.source),
+        targetHome: Option.getOrUndefined(flags.target),
         force: flags.force,
       });
       return Option.none();
