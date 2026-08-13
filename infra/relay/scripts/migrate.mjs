@@ -58,8 +58,12 @@ function listSqlFiles(directory) {
         walk(relativePath);
       } else if (entry.name.endsWith(".sql")) {
         const sql = readFileSync(join(directory, relativePath), "utf8");
+        // Match the existing `relay_migrations.name` convention: the migration
+        // directory basename (e.g. `20260527044716_baseline`), not the full
+        // relative `.../migration.sql` path. Idempotency relies on this.
+        const id = relativeDir || entry.name.replace(/\.sql$/, "");
         files.push({
-          id: relativePath,
+          id,
           sql,
           hash: createHash("sha256").update(sql).digest("hex"),
         });
@@ -105,6 +109,7 @@ async function applyMigrations(connectionUri, migrationsTable, files) {
     }
     nextSeq += 1;
 
+    let appliedCount = 0;
     for (const file of files) {
       if (applied.has(file.id)) continue;
       const migrationId = nextSeq.toString().padStart(5, "0");
@@ -117,11 +122,13 @@ async function applyMigrations(connectionUri, migrationsTable, files) {
           file.id,
         ]);
         await client.query("COMMIT");
+        appliedCount += 1;
       } catch (error) {
         await client.query("ROLLBACK").catch(() => {});
         throw error;
       }
     }
+    return appliedCount;
   } finally {
     await client.end().catch(() => {});
   }
@@ -141,9 +148,9 @@ async function main() {
     return;
   }
 
-  await applyMigrations(url, "relay_migrations", files);
+  const appliedCount = await applyMigrations(url, "relay_migrations", files);
   console.log(
-    `Applied ${files.length} migration file(s) from ${migrationsDir} (last: ${files.at(-1).id})`,
+    `Applied ${appliedCount} migration(s), ${files.length - appliedCount} already present (${migrationsDir}).`,
   );
 }
 
