@@ -25,6 +25,7 @@ vi.mock("@clerk/electron/storage", () => ({
 
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Path from "effect/Path";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
@@ -53,6 +54,7 @@ const makeDesktopClerkLayer = (isDevelopment = true, events: string[] = []) => {
         Layer.succeed(DesktopEnvironment.DesktopEnvironment, environment),
         Layer.succeed(ElectronApp.ElectronApp, electronApp),
         FileSystem.layerNoop({ exists: () => Effect.succeed(false) }),
+        Path.layer,
       ),
     ),
   );
@@ -322,7 +324,7 @@ describe("DesktopClerk", () => {
       assert.isFalse(yield* fileSystem.exists(tokensPath));
       assert.equal(
         yield* fileSystem.readFileString(instancePath),
-        JSON.stringify({ publishableKey: "pk_live_s5code" }),
+        '{"publishableKey":"pk_live_s5code"}',
       );
     }).pipe(Effect.provide(NodeServices.layer), Effect.scoped),
   );
@@ -337,7 +339,7 @@ describe("DesktopClerk", () => {
       yield* fileSystem.writeFileString(tokensPath, '{"__clerk_client_jwt":"enc:current"}');
       yield* fileSystem.writeFileString(
         `${stateDir}/clerk-instance.json`,
-        JSON.stringify({ publishableKey: "pk_live_s5code" }),
+        '{"publishableKey":"pk_live_s5code"}',
       );
 
       yield* DesktopClerk.discardIncompatibleClerkTokens({

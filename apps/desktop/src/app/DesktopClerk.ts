@@ -77,6 +77,13 @@ export const desktopClerkFrontendApiHostname = resolveDesktopClerkFrontendApiHos
 
 const CLERK_TOKENS_FILE = "clerk-tokens.json";
 const CLERK_INSTANCE_FILE = "clerk-instance.json";
+const ClerkInstanceFile = Schema.Struct({
+  publishableKey: Schema.String,
+});
+const decodeClerkInstanceFile = Schema.decodeUnknownEffect(
+  Schema.fromJsonString(ClerkInstanceFile),
+);
+const encodeClerkInstanceFile = Schema.encodeEffect(Schema.fromJsonString(ClerkInstanceFile));
 
 const readStoredPublishableKey = Effect.fn("desktop.clerk.readStoredPublishableKey")(function* (
   instancePath: string,
@@ -86,20 +93,11 @@ const readStoredPublishableKey = Effect.fn("desktop.clerk.readStoredPublishableK
     return null;
   }
   const raw = yield* fileSystem.readFileString(instancePath);
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "publishableKey" in parsed &&
-      typeof parsed.publishableKey === "string"
-    ) {
-      return parsed.publishableKey.trim() || null;
-    }
-  } catch {
+  const parsed = yield* decodeClerkInstanceFile(raw).pipe(Effect.option);
+  if (Option.isNone(parsed)) {
     return null;
   }
-  return null;
+  return parsed.value.publishableKey.trim() || null;
 });
 
 export const discardIncompatibleClerkTokens = Effect.fn("desktop.clerk.discardIncompatibleTokens")(
@@ -125,7 +123,10 @@ export const discardIncompatibleClerkTokens = Effect.fn("desktop.clerk.discardIn
       );
     }
 
-    yield* fileSystem.writeFileString(instancePath, JSON.stringify({ publishableKey }));
+    yield* fileSystem.writeFileString(
+      instancePath,
+      yield* encodeClerkInstanceFile({ publishableKey }),
+    );
   },
 );
 
@@ -178,24 +179,7 @@ export function rewriteClerkCorsOrigin(
 }
 
 export function installClerkDesktopOriginFilter(
-  session: {
-    readonly webRequest: {
-      readonly onBeforeSendHeaders: (
-        filter: { readonly urls: readonly string[] },
-        listener: (
-          details: { readonly id: number; readonly requestHeaders: Record<string, string> },
-          callback: (response: { readonly requestHeaders: Record<string, string> }) => void,
-        ) => void,
-      ) => void;
-      readonly onHeadersReceived: (
-        filter: { readonly urls: readonly string[] },
-        listener: (
-          details: { readonly id: number; readonly responseHeaders?: Record<string, string[]> },
-          callback: (response: { readonly responseHeaders?: Record<string, string[]> }) => void,
-        ) => void,
-      ) => void;
-    };
-  },
+  session: Electron.Session,
   clerkFrontendApiHostname: string | undefined,
 ) {
   const allowedHttpsOrigin =
@@ -204,10 +188,10 @@ export function installClerkDesktopOriginFilter(
     return;
   }
 
-  const urls = { urls: [`https://${clerkFrontendApiHostname}/*`] };
+  const urls = [`https://${clerkFrontendApiHostname}/*`];
   const rewrittenOrigins = new Map<number, string>();
 
-  session.webRequest.onBeforeSendHeaders(urls, (details, callback) => {
+  session.webRequest.onBeforeSendHeaders({ urls }, (details, callback) => {
     const originKey = Object.keys(details.requestHeaders).find(
       (key) => key.toLowerCase() === "origin",
     );
@@ -220,11 +204,11 @@ export function installClerkDesktopOriginFilter(
     });
   });
 
-  session.webRequest.onHeadersReceived(urls, (details, callback) => {
+  session.webRequest.onHeadersReceived({ urls }, (details, callback) => {
     const rendererOrigin = rewrittenOrigins.get(details.id);
     rewrittenOrigins.delete(details.id);
     if (rendererOrigin === undefined || details.responseHeaders === undefined) {
-      callback({ responseHeaders: details.responseHeaders });
+      callback({});
       return;
     }
     callback({
@@ -269,16 +253,14 @@ export const make = Effect.gen(function* () {
   // detection in resolveUserDataPath match on fresh installs.
   const userDataPath = yield* DesktopAppIdentity.resolveUserDataPath;
   yield* electronApp.setPath("userData", userDataPath);
-  yield* Effect.sync(() => {
-    try {
+  yield* Effect.try({
+    try: () =>
       installClerkDesktopOriginFilter(
         Electron.session.defaultSession,
         desktopClerkFrontendApiHostname,
-      );
-    } catch {
-      return;
-    }
-  });
+      ),
+    catch: () => undefined,
+  }).pipe(Effect.ignore);
 
   const bridge = yield* Effect.acquireRelease(
     Effect.try({
