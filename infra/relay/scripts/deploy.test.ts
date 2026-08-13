@@ -209,14 +209,14 @@ describe("release workflow tracing config propagation", () => {
       );
       const workflow = yield* fileSystem.readFileString(workflowPath);
 
-      // This fork deploys no relay: clients use the official hosted T3
-      // Connect relay, so the release bakes in its public config as
-      // constants and carries no tracing artifact or masked token output.
+      // This fork deploys its own relay (see .github/workflows/deploy-relay.yml
+      // and infra/relay), so the release bakes in that relay's public config
+      // as constants and carries no tracing artifact or masked token output.
       expect(workflow).not.toContain("client_tracing_token:");
       expect(workflow).not.toContain("needs.relay_public_config.outputs.client_tracing_token");
       expect(workflow).not.toContain("relay-client-tracing");
       expect(workflow).not.toContain("--read-state");
-      expect(workflow).toContain("relay_url=https://relay.t3.codes");
+      expect(workflow).toContain("relay_url=https://relay.s5code.dpdns.org");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 });
