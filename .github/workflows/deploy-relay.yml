@@ -1,0 +1,101 @@
+name: Deploy T3 Connect relay
+
+# Self-hosted relay deployment for the S5 Code fork (Neon-backed, no APNs).
+# Mirrors upstream `pingdotgg/t3code`{.github/workflows/deploy-relay.yml} but
+# replaces hosted PlanetScale with a Neon `DATABASE_URL` and drops the optional
+# Apple/APNs keys (push notifications are disabled on this relay). Vars and
+# secrets are read from the `production` GitHub Environment; Cloudflare and
+# Axiom account credentials may live there or at the repository level (Actions
+# falls back to repo-level for `vars.*` / `secrets.*`).
+#
+#   DB migrations are NOT run here: the schema must be applied to Neon
+#   out-of-band with `drizzle-kit migrate` against the same DATABASE_URL (see
+#   infra/relay/README.md). The relay Worker reads schema written by migration.
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  id-token: none
+  statuses: write
+
+concurrency:
+  group: relay-production
+  cancel-in-progress: false
+
+jobs:
+  deploy_relay:
+    name: Deploy production relay
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment:
+      name: production
+    env:
+      CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+      AXIOM_ORG_ID: ${{ vars.AXIOM_ORG_ID }}
+      RELAY_DOMAIN: ${{ vars.RELAY_DOMAIN }}
+      RELAY_API_ZONE_NAME: ${{ vars.RELAY_API_ZONE_NAME }}
+      RELAY_TUNNEL_ZONE_NAME: ${{ vars.RELAY_TUNNEL_ZONE_NAME }}
+      CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
+      CLERK_JWT_AUDIENCE: ${{ vars.CLERK_JWT_AUDIENCE }}
+      CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      ALCHEMY_TELEMETRY_DISABLED: "1"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3code-relay...
+
+      - name: Apply Neon database migrations
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          pnpm --filter t3code-relay exec drizzle-kit migrate \
+            --dialect=postgres \
+            --url="$DATABASE_URL" \
+            --out=./migrations/postgres
+
+      - name: Deploy production relay stage
+        id: deploy
+        run: vp run --filter t3code-relay deploy --stage prod --yes --github-output
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
+          CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
+
+      - name: Publish relay deploy commit status
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const result = "${{ steps.deploy.outputs.result }}";
+            const changed = "${{ steps.deploy.outputs.changed }}" === "true";
+            const description = changed
+              ? "Relay production deploy applied infrastructure changes."
+              : result === "noop"
+                ? "Relay production deploy was a no-op."
+                : `Relay production deploy completed with result: ${result}.`;
+
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: "success",
+              context: "Relay deploy / production",
+              description,
+              target_url: `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            });

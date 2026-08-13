@@ -6,6 +6,8 @@ import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
+import * as Redacted from "effect/Redacted";
 import * as Stream from "effect/Stream";
 import * as Etag from "effect/unstable/http/Etag";
 import * as HttpPlatform from "effect/unstable/http/HttpPlatform";
@@ -126,14 +128,26 @@ export const ApiLive = Api.make(
     //
     // 2. Create bindings
     //
-    const environment = yield* Config.schema(
+    // APNs is optional. When any required Apple/APNs key is absent the relay
+    // still deploys and serves remote connections; mobile push notifications
+    // and Live Activities are simply disabled. The APNs-only layers and the
+    // delivery-queue consumption below are gated on this flag, and the
+    // RelayConfiguration receives placeholder credentials that are never read
+    // because the delivery path is not built.
+    const apnsEnvironment = yield* Config.schema(
       RelayConfiguration.ApnsEnvironment,
       "APNS_ENVIRONMENT",
-    );
-    const apnsTeamId = yield* Config.string("APNS_TEAM_ID");
-    const apnsKeyId = yield* Config.string("APNS_KEY_ID");
-    const apnsBundleId = yield* Config.string("APNS_BUNDLE_ID");
-    const apnsPrivateKey = yield* Config.redacted("APNS_PRIVATE_KEY");
+    ).pipe(Config.option);
+    const apnsTeamId = yield* Config.string("APNS_TEAM_ID").pipe(Config.option);
+    const apnsKeyId = yield* Config.string("APNS_KEY_ID").pipe(Config.option);
+    const apnsBundleId = yield* Config.string("APNS_BUNDLE_ID").pipe(Config.option);
+    const apnsPrivateKey = yield* Config.redacted("APNS_PRIVATE_KEY").pipe(Config.option);
+    const apnsEnabled =
+      Option.isSome(apnsEnvironment) &&
+      Option.isSome(apnsTeamId) &&
+      Option.isSome(apnsKeyId) &&
+      Option.isSome(apnsBundleId) &&
+      Option.isSome(apnsPrivateKey);
     const apnsDeliveryJobSigningSecret = yield* randomApnsDeliveryJobSigningSecret;
     const apnsDeliveryQueueSender = yield* Cloudflare.Queues.WriteQueue(apnsDeliveryQueue);
 
@@ -164,13 +178,23 @@ export const ApiLive = Api.make(
     const loadSettings = Effect.gen(function* () {
       return RelayConfiguration.RelayConfiguration.of({
         relayIssuer: relayPublicOrigin,
-        apns: {
-          environment,
-          teamId: apnsTeamId,
-          keyId: apnsKeyId,
-          bundleId: apnsBundleId,
-          privateKey: apnsPrivateKey,
-        },
+        apns: apnsEnabled
+          ? {
+              environment: Option.getOrThrow(apnsEnvironment),
+              teamId: Option.getOrThrow(apnsTeamId),
+              keyId: Option.getOrThrow(apnsKeyId),
+              bundleId: Option.getOrThrow(apnsBundleId),
+              privateKey: Option.getOrThrow(apnsPrivateKey),
+            }
+          : {
+              // Placeholder. Read only when `apnsEnabled`, which selects the
+              // branch above; when disabled the APNs delivery path is not built.
+              environment: "sandbox",
+              teamId: "",
+              keyId: "",
+              bundleId: "",
+              privateKey: Redacted.make(""),
+            },
         apnsDeliveryJobSigningSecret: yield* apnsDeliveryJobSigningSecret,
         clerkSecretKey,
         clerkPublishableKey,
@@ -204,11 +228,18 @@ export const ApiLive = Api.make(
         ),
       ),
       Layer.provideMerge(DpopProofs.layer),
-      Layer.provideMerge(ApnsDeliveries.layer),
-      Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
-      Layer.provideMerge(
-        ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
-      ),
+      ...(apnsEnabled
+        ? [
+            Layer.provideMerge(ApnsDeliveries.layer),
+            Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
+            Layer.provideMerge(
+              ApnsDeliveryQueue.layerCloudflareQueues(
+                apnsDeliveryQueueSender,
+                alchemyRuntimeContext,
+              ),
+            ),
+          ]
+        : []),
       Layer.provideMerge(AgentActivityRows.layer),
       Layer.provideMerge(Devices.layer),
       Layer.provideMerge(EnvironmentCredentials.layer),
@@ -238,27 +269,33 @@ export const ApiLive = Api.make(
       Layer.provide(runtimeLayer),
     );
 
-    yield* Cloudflare.Queues.consumeQueueMessages<unknown>(
-      apnsDeliveryQueue,
-      {
-        batchSize: 10,
-        maxRetries: 5,
-        maxWaitTime: "5 seconds",
-        retryDelay: "30 seconds",
-        deadLetterQueue: apnsDeliveryDeadLetterQueue.queueName as unknown as string,
-      },
-      (stream) =>
-        stream.pipe(
-          Stream.withSpan("relay.apn_delivery_queue.process_batch"),
-          Stream.runForEach((message) =>
-            ApnsDeliveries.ApnsDeliveries.pipe(
-              Effect.flatMap((deliveries) => deliveries.processSignedJob(message.body)),
-              Effect.withSpan("relay.apn_delivery_queue.process_message"),
+    if (!apnsEnabled) {
+      yield* Effect.logWarning(
+        "APNs not configured; mobile notifications and Live Activities disabled",
+      );
+    } else {
+      yield* Cloudflare.Queues.consumeQueueMessages<unknown>(
+        apnsDeliveryQueue,
+        {
+          batchSize: 10,
+          maxRetries: 5,
+          maxWaitTime: "5 seconds",
+          retryDelay: "30 seconds",
+          deadLetterQueue: apnsDeliveryDeadLetterQueue.queueName as unknown as string,
+        },
+        (stream) =>
+          stream.pipe(
+            Stream.withSpan("relay.apn_delivery_queue.process_batch"),
+            Stream.runForEach((message) =>
+              ApnsDeliveries.ApnsDeliveries.pipe(
+                Effect.flatMap((deliveries) => deliveries.processSignedJob(message.body)),
+                Effect.withSpan("relay.apn_delivery_queue.process_message"),
+              ),
             ),
+            Effect.provide(runtimeLayer),
           ),
-          Effect.provide(runtimeLayer),
-        ),
-    );
+      );
+    }
 
     yield* Cloudflare.Workers.cron("*/5 * * * *", () =>
       DpopProofs.DpopProofReplay.pipe(

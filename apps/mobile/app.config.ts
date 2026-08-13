@@ -84,7 +84,7 @@ const RELEASE_ASSETS = {
 const VARIANT_CONFIG = {
   development: {
     appName: "S5 Code Dev",
-    scheme: "t3code-dev",
+    scheme: "s5code-dev",
     iosBundleIdentifier: "club.touchtech.s5code.dev",
     androidPackage: "club.touchtech.s5code.dev",
     relyingParty: "clerk.t3.codes",
@@ -92,7 +92,7 @@ const VARIANT_CONFIG = {
   },
   preview: {
     appName: "S5 Code Preview",
-    scheme: "t3code-preview",
+    scheme: "s5code-preview",
     iosBundleIdentifier: "club.touchtech.s5code.preview",
     androidPackage: "club.touchtech.s5code.preview",
     relyingParty: "clerk.t3.codes",
@@ -100,7 +100,7 @@ const VARIANT_CONFIG = {
   },
   production: {
     appName: "S5 Code",
-    scheme: "t3code",
+    scheme: "s5code",
     iosBundleIdentifier: "club.touchtech.s5code",
     androidPackage: "club.touchtech.s5code",
     relyingParty: "clerk.t3.codes",

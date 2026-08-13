@@ -82,22 +82,43 @@ The relay deploys through Alchemy:
 vp run --filter t3code-relay deploy
 ```
 
-The stack provisions the Cloudflare Worker and queues, managed endpoint resources, database
-connectivity, and relay tracing resources. Copy [`infra/relay/.env.example`](./.env.example) to
-`infra/relay/.env` and fill in the deployment-specific values before deploying. Alchemy loads that
-file from the relay directory. Runtime secrets include Clerk and APNs credentials. Production adopts
-the configured API and tunnel DNS zones as retained Cloudflare resources. Personal stages reference
-the production-owned zones.
+The stack provisions the Cloudflare Worker and queues, managed environment endpoints, a Cloudflare
+Hyperdrive into the configured Postgres database, and relay tracing resources. Copy
+[`infra/relay/.env.example`](./.env.example) to `infra/relay/.env` and fill in the deployment-specific
+values before deploying. Alchemy loads that file from the relay directory. Runtime secrets include
+Clerk and (optionally) APNs credentials. Production adopts the configured API and tunnel DNS zones
+as retained Cloudflare resources. Personal stages reference the production-owned zones.
 
-The `prod` Alchemy stage owns the retained PlanetScale database and is the shared hosted relay for
-stable and nightly clients. Every other stage references that database and provisions an isolated
-PlanetScale branch and runtime role for local development, so deploy `prod` before creating
-developer stages:
+### Database (Neon, not PlanetScale)
+
+The `prod` Alchemy stage owns the retained database and is the shared hosted relay for stable and
+nightly clients. Every other stage references that same database rather than provisioning an isolated
+branch — with Neon you supply a single `DATABASE_URL` in `infra/relay/.env` (a pooled or direct
+standard Postgres string) and the relay points a Cloudflare Hyperdrive at its origin, so the Worker
+talks to Neon through the edge instead of the public internet:
 
 ```sh
 vp run --filter t3code-relay deploy -- --stage prod
 vp run --filter t3code-relay deploy -- --env-file .env.local
 ```
+
+**Run migrations out-of-band.** Alchemy no longer applies `./migrations/postgres` for you (that was
+PlanetScale provider behavior). Apply them against the same `DATABASE_URL` once, before or right after
+the first deploy, using drizzle-kit from the relay directory:
+
+```sh
+drizzle-kit migrate --dialect=postgres --url="$DATABASE_URL" --out=./migrations/postgres
+```
+
+`DATABASE_URL` belongs in the deploy environment (or `infra/relay/.env`), not in the repository.
+Keep schema changes in `src/persistence/schema.ts` together with generated migrations as before.
+
+### Optional APNs
+
+Apple push credentials (`APNS_ENVIRONMENT`, `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_BUNDLE_ID`,
+`APNS_PRIVATE_KEY`) are optional. When any of them is absent the relay still deploys and links
+then serves remote connections; only mobile push notifications and Live Activities are disabled.
+The worker logs `APNs not configured; mobile notifications and Live Activities disabled`.
 
 Alchemy defaults personal deployments to the `dev_$USER` stage. Relay custom domains apply the same
 DNS-safe sanitization as Alchemy physical resource names, so `prod` uses
@@ -129,9 +150,10 @@ The repository must define these Actions variables shared by relay deployments:
 The repository must define these Actions secrets shared by relay deployments:
 
 - `CLOUDFLARE_API_TOKEN`
-- `PLANETSCALE_API_TOKEN_ID`
-- `PLANETSCALE_API_TOKEN`
 - `AXIOM_TOKEN`
+
+The relay `DATABASE_URL` is supplied per-deploy (from `infra/relay/.env` or the deploy environment); it
+is a Postgres connection string and should not be committed. `APNS_*` are optional (see above).
 
 The `production` GitHub environment must define these Actions variables:
 
