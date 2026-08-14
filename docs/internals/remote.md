@@ -106,7 +106,7 @@ Endpoint identifiers are synthesized in `apps/desktop/src/backend/tailscaleEndpo
 A hosted pairing request is a bootstrap URL for the static web app, not a transport:
 
 ```text
-https://s5code.pages.dev/pair?host=https://backend.example.com:3773#token=PAIRCODE
+https://app.s5code.touchtech.club/pair?host=https://backend.example.com:3773#token=PAIRCODE
 ```
 
 The hosted app reads `host`, takes the token from the URL hash, exchanges it directly with that

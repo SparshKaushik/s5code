@@ -46,7 +46,7 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
  * directory tree at a stable path) ships in Bun 1.4; on 1.3.x it is silently
  * ignored as an unknown flag, producing a binary that looks correct and serves
  * nothing. This binary therefore runs API + WebSocket only: connect to it from
- * s5code.pages.dev, the desktop app, or mobile.
+ * app.s5code.touchtech.club, the desktop app, or mobile.
  *
  * Only the Linux server targets are configured here (the scenario this fills):
  *   - bun-linux-x64

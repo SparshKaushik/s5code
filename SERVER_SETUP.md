@@ -40,7 +40,7 @@ server (`dist/bin.mjs`) are in one file. No Node, pnpm, or `node_modules` are
 needed on the host.
 
 > The binary serves the **API and WebSocket only** — the web client is not
-> bundled into it. Connect from [s5code.pages.dev](https://s5code.pages.dev), the desktop
+> bundled into it. Connect from [app.s5code.touchtech.club](https://app.s5code.touchtech.club), the desktop
 > app, or mobile. (Embedding a directory tree in a compiled binary needs Bun's
 > `--asset`, which ships in Bun 1.4; on the pinned 1.3.x it is silently ignored.)
 
@@ -112,7 +112,7 @@ The binary updates **itself**. When a client notices a version mismatch it shows
 **Update server**; the binary then downloads the matching release asset for its
 own version and arch, runs `--version` on the download to prove it works, swaps
 itself with an atomic `rename`, and restarts. (The public descriptor advertises
-`boot-service` for T3 Connect / s5code.pages.dev schema compatibility; the update
+`boot-service` for T3 Connect / app.s5code.touchtech.club schema compatibility; the update
 RPC still uses the binary download path.)
 
 Under any systemd unit (the binary detects it via `INVOCATION_ID`, which
@@ -339,7 +339,7 @@ node apps/server/dist/bin.mjs connect link --headless
 Interactive flow (drive it inside a `tmux` session so it survives SSH drops):
 
 1. **Install relay client?** — type `y` (downloads pinned `cloudflared`).
-2. **Headless authorization** — the CLI prints a `https://s5code.pages.dev/connect#state=...&challenge=...`
+2. **Headless authorization** — the CLI prints a `https://app.s5code.touchtech.club/connect#state=...&challenge=...`
    URL. Open it in a browser, sign in with the T3 account, copy the code the page
    shows, paste it back into the prompt.
 3. Output: `✓ Authorized as <email>`.
@@ -380,7 +380,7 @@ curl -sS -o /dev/null -w "%{http_code}\n" -H "Connection: Upgrade" -H "Upgrade: 
 ```
 
 Connecting: open the endpoint URL in a browser and pair, or sign in at
-`https://s5code.pages.dev` / the desktop app / mobile app with the same account — the
+`https://app.s5code.touchtech.club` / the desktop app / mobile app with the same account — the
 environment appears under **Connections**.
 
 ### How the endpoint hostname is derived

@@ -13,7 +13,7 @@ const CONNECT_CALLBACK_PATH = "/connect/callback";
  * default lives here. This is the fork's self-hosted Cloudflare Pages
  * deployment; override with T3CODE_HOSTED_APP_URL / VITE_HOSTED_APP_URL.
  */
-export const DEFAULT_HOSTED_APP_URL = "https://s5code.pages.dev";
+export const DEFAULT_HOSTED_APP_URL = "https://app.s5code.touchtech.club";
 
 /**
  * Requested at authorize time by the hosted page and honored by the CLI's
