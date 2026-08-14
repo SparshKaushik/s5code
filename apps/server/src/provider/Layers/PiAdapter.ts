@@ -239,6 +239,30 @@ export function piShouldReportCompaction(
   return event.aborted !== true && event.errorMessage === undefined;
 }
 
+/** A parsed manual `/compact` command. `instructions` is absent for `/compact`. */
+export interface PiCompactCommand {
+  readonly instructions: string | undefined;
+}
+
+/**
+ * Parse a manual `/compact` command out of a user turn.
+ *
+ * pi's built-in `/compact` command never executes through `prompt` (only
+ * extension and skill commands do), so the adapter must recognise it and send
+ * the dedicated `compact` RPC command instead. Returns `undefined` when the
+ * input is not a compact command, so it falls through to a normal prompt.
+ */
+export function parsePiCompactCommand(input: string | undefined): PiCompactCommand | undefined {
+  const text = input?.trim();
+  if (text === undefined || text.length === 0) return undefined;
+  const match = /^\/compact(?:\s+([\s\S]*))?$/i.exec(text);
+  if (!match) return undefined;
+  const instructions = match[1]?.trim();
+  return {
+    instructions: instructions !== undefined && instructions.length > 0 ? instructions : undefined,
+  };
+}
+
 /**
  * Canonical request type for a gated tool, so the approval card renders with
  * the right affordances instead of a generic tool row.
@@ -1170,10 +1194,82 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       return modelSelection?.model;
     });
 
+    /**
+     * Run pi's built-in `/compact` command as its dedicated RPC command.
+     *
+     * `/compact` never executes through `prompt`, and it does not start an
+     * agent run, so this opens a turn, awaits the compaction result, and
+     * settles the turn itself rather than waiting for an `agent_end` that will
+     * never arrive. The event pump still reports the compaction via the
+     * `compaction_end` event's `thread.state.changed` transition.
+     */
+    const sendCompactTurn = Effect.fn("sendCompactTurn")(function* (
+      context: PiSessionContext,
+      input: ProviderSendTurnInput,
+      instructions: string | undefined,
+    ) {
+      if (context.activeTurnId !== undefined) {
+        return yield* new ProviderAdapterValidationError({
+          provider: PROVIDER,
+          operation: "sendTurn",
+          issue: "Cannot compact while a turn is running.",
+        });
+      }
+
+      const turnId = TurnId.make(`pi-turn-${yield* randomUUIDv4}`);
+      context.activeTurnId = turnId;
+      yield* updateSession(
+        context,
+        { status: "running", activeTurnId: turnId },
+        { clearLastError: true },
+      );
+      yield* emit({
+        ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+        type: "turn.started",
+        payload: {},
+      });
+
+      yield* context.connection
+        .request("compact", instructions !== undefined ? { customInstructions: instructions } : {})
+        .pipe(
+          Effect.mapError(toRequestError("compact")),
+          Effect.tapError((requestError) =>
+            Effect.gen(function* () {
+              context.activeTurnId = undefined;
+              yield* updateSession(
+                context,
+                { status: "ready", lastError: requestError.detail },
+                { clearActiveTurnId: true },
+              );
+              yield* emit({
+                ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+                type: "turn.aborted",
+                payload: { reason: requestError.detail },
+              });
+            }),
+          ),
+        );
+
+      yield* settleTurn(context, turnId, { kind: "completed", stopReason: undefined });
+
+      const resumeCursor = resumeCursorFor(context);
+      return {
+        threadId: input.threadId,
+        turnId,
+        ...(resumeCursor ? { resumeCursor } : {}),
+      };
+    });
+
     const sendTurn: ProviderAdapterShape<ProviderAdapterError>["sendTurn"] = Effect.fn("sendTurn")(
       function* (input) {
         const context = yield* requireContext(input.threadId);
         const text = input.input?.trim();
+
+        const compactCommand = parsePiCompactCommand(text);
+        if (compactCommand !== undefined) {
+          return yield* sendCompactTurn(context, input, compactCommand.instructions);
+        }
+
         const images = yield* readAttachmentImages(input);
 
         if ((text === undefined || text.length === 0) && images.length === 0) {

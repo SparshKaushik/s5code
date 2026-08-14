@@ -42,6 +42,9 @@ stdin/stdout. Three things about it differ from the other CLI-backed providers a
   map onto structured user input.
 - **No plan channel.** Task lists come from todo tool _results_ (`todowrite` / `patchtodo`), which
   carry the whole reconciled list even when the call patched one field.
+- **Built-in `/compact` needs its own command.** pi's `get_commands` only reports extension
+  commands, prompt templates, and skills, and `/compact` never runs through `prompt`. The adapter
+  surfaces it in the slash menu and routes it to the dedicated `compact` RPC command.
 
 Instance isolation uses `PI_CODING_AGENT_DIR`, never `HOME`: overriding `HOME` also relocates the
 macOS keychain lookup and breaks pi's stored credentials. Threads resume by pi session file path,
