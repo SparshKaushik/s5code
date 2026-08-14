@@ -4,6 +4,7 @@ import {
   TurnId,
   type RewindEntry,
   type RewindStatus,
+  type RewindStepResult,
 } from "@t3tools/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -12,6 +13,7 @@ import {
   describeRewindStepFailure,
   describeRewindStepResult,
   formatRewindPromptLabel,
+  undonePromptForComposer,
 } from "./rewindPresentation.ts";
 
 const threadId = ThreadId.make("thread-1");
@@ -145,5 +147,44 @@ describe("describeRewindStepFailure", () => {
       title: "Redo failed",
       description: "The workspace was not changed.",
     });
+  });
+});
+
+describe("undonePromptForComposer", () => {
+  function appliedResult(overrides: Partial<RewindStepResult> = {}): RewindStepResult {
+    return {
+      outcome: "applied",
+      restoredFiles: ["src/a.ts"],
+      prompt: "Rename the helper",
+      status: status(),
+      ...overrides,
+    };
+  }
+
+  it("returns the prompt for an applied undo", () => {
+    expect(undonePromptForComposer({ direction: "undo", result: appliedResult() })).toBe(
+      "Rename the helper",
+    );
+  });
+
+  it("returns null for redo", () => {
+    expect(undonePromptForComposer({ direction: "redo", result: appliedResult() })).toBeNull();
+  });
+
+  it("returns null for non-applied outcomes", () => {
+    for (const outcome of ["nothing-to-do", "unavailable", "busy"] as const) {
+      expect(
+        undonePromptForComposer({ direction: "undo", result: appliedResult({ outcome }) }),
+      ).toBeNull();
+    }
+  });
+
+  it("returns null when the prompt is missing or whitespace-only", () => {
+    expect(
+      undonePromptForComposer({ direction: "undo", result: appliedResult({ prompt: null }) }),
+    ).toBeNull();
+    expect(
+      undonePromptForComposer({ direction: "undo", result: appliedResult({ prompt: "   " }) }),
+    ).toBeNull();
   });
 });

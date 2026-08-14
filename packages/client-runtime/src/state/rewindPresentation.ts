@@ -115,3 +115,22 @@ export function describeRewindStepFailure(input: {
     description: message,
   };
 }
+
+/**
+ * The prompt to hand back to the composer after an undo step, or `null` when
+ * the composer should be left untouched.
+ *
+ * Undo restores files; returning the prompt lets the user edit and resend the
+ * turn without retyping it. Redo and non-applied outcomes never repopulate
+ * the composer, and empty prompts are treated as "nothing to restore".
+ */
+export function undonePromptForComposer(input: {
+  readonly direction: RewindDirection;
+  readonly result: RewindStepResult;
+}): string | null {
+  if (input.direction !== "undo" || input.result.outcome !== "applied") {
+    return null;
+  }
+  const prompt = input.result.prompt;
+  return prompt !== null && prompt.trim().length > 0 ? prompt : null;
+}
