@@ -20,6 +20,7 @@ export const RIGHT_PANEL_KINDS = [
   "file",
   "preview",
   "terminal",
+  "pull-request",
   "agents",
 ] as const;
 export type RightPanelKind = (typeof RIGHT_PANEL_KINDS)[number];
@@ -65,7 +66,15 @@ export type RightPanelSurface =
 
 const RIGHT_PANEL_STORAGE_KEY = "t3code:right-panel-state:v2";
 // v9 removed the "plan" surface kind (plans render inline in the transcript).
-const RIGHT_PANEL_STORAGE_VERSION = 9;
+// v10 keys pull-request surfaces by reference instead of a singleton tab.
+// v11 stops persisting the pull-request list's shared panel, so a restart opens the page fresh.
+const RIGHT_PANEL_STORAGE_VERSION = 11;
+
+/**
+ * The pull-request list's shared panel (see PULL_REQUESTS_PANEL_ID in the route) is session
+ * state: reopening the app should show the list, not last session's tabs and detail fetches.
+ */
+const isPullRequestsPanelKey = (threadKey: string) => threadKey.endsWith(":pull-requests-panel");
 
 export interface ThreadRightPanelState {
   isOpen: boolean;
@@ -75,7 +84,10 @@ export interface ThreadRightPanelState {
 
 interface RightPanelStoreState {
   byThreadKey: Record<string, ThreadRightPanelState>;
-  open: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  open: (
+    ref: ScopedThreadRef,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
+  ) => void;
   openBrowser: (ref: ScopedThreadRef, tabId: string | null) => void;
   openFile: (ref: ScopedThreadRef, relativePath: string, line?: number) => void;
   openPullRequest: (
@@ -101,7 +113,10 @@ interface RightPanelStoreState {
   show: (ref: ScopedThreadRef) => void;
   close: (ref: ScopedThreadRef) => void;
   toggleVisibility: (ref: ScopedThreadRef) => void;
-  toggle: (ref: ScopedThreadRef, kind: Exclude<RightPanelKind, "file" | "terminal">) => void;
+  toggle: (
+    ref: ScopedThreadRef,
+    kind: Exclude<RightPanelKind, "file" | "terminal" | "pull-request">,
+  ) => void;
   removeThread: (ref: ScopedThreadRef) => void;
 }
 
@@ -112,7 +127,7 @@ const EMPTY_THREAD_STATE: ThreadRightPanelState = {
 };
 
 const singletonSurface = (
-  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal">,
+  kind: Exclude<RightPanelKind, "file" | "preview" | "terminal" | "pull-request">,
 ): RightPanelSurface => {
   switch (kind) {
     case "diff":
@@ -241,8 +256,9 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
     persistedState.byThreadKey &&
     typeof persistedState.byThreadKey === "object"
       ? Object.fromEntries(
-          Object.entries(persistedState.byThreadKey as Record<string, ThreadRightPanelState>).map(
-            ([threadKey, threadState]) => {
+          Object.entries(persistedState.byThreadKey as Record<string, ThreadRightPanelState>)
+            .filter(([threadKey]) => !isPullRequestsPanelKey(threadKey))
+            .map(([threadKey, threadState]) => {
               const validThreadState =
                 threadState && typeof threadState === "object" ? threadState : null;
               const surfaces = Array.isArray(validThreadState?.surfaces)
@@ -317,11 +333,14 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
                     ];
                   })
                 : [];
+              const rawActiveSurfaceId = validThreadState?.activeSurfaceId;
               const persistedActiveSurfaceId = surfaces.some(
-                (surface) => surface.id === validThreadState?.activeSurfaceId,
+                (surface) => surface.id === rawActiveSurfaceId,
               )
-                ? (validThreadState?.activeSurfaceId ?? null)
-                : null;
+                ? (rawActiveSurfaceId ?? null)
+                : rawActiveSurfaceId === "pull-request"
+                  ? (surfaces.find((surface) => surface.kind === "pull-request")?.id ?? null)
+                  : null;
               // A migration that dropped every surface (e.g. plan-only panels
               // in v9) must not reopen an empty panel.
               const isOpen =
@@ -335,8 +354,7 @@ export function migratePersistedRightPanelState(persistedState: unknown): {
               const activeSurfaceId =
                 persistedActiveSurfaceId ?? (isOpen ? (surfaces[0]?.id ?? null) : null);
               return [threadKey, { isOpen, surfaces, activeSurfaceId }];
-            },
-          ),
+            }),
         )
       : {};
   return { byThreadKey };
@@ -364,6 +382,12 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
               ? current.surfaces.filter((entry) => entry.id !== "browser:new")
               : current.surfaces;
             return upsertSurface({ ...current, surfaces: withoutPlaceholder }, surface);
+          }),
+        })),
+      openPullRequest: (ref, target) =>
+        set((state) => ({
+          byThreadKey: updateThread(state.byThreadKey, scopedThreadKey(ref), (current) => {
+            return upsertSurface(current, pullRequestSurface(target));
           }),
         })),
       openFile: (ref, relativePath, line) =>
@@ -634,7 +658,13 @@ export const useRightPanelStore = create<RightPanelStoreState>()(
       storage: createJSONStorage(() =>
         resolveStorage(typeof window !== "undefined" ? window.localStorage : undefined),
       ),
-      partialize: (state) => ({ byThreadKey: state.byThreadKey }),
+      partialize: (state) => ({
+        byThreadKey: Object.fromEntries(
+          Object.entries(state.byThreadKey).filter(
+            ([threadKey]) => !isPullRequestsPanelKey(threadKey),
+          ),
+        ),
+      }),
       migrate: migratePersistedRightPanelState,
     },
   ),
@@ -663,5 +693,14 @@ export function selectActiveRightPanelSurface(
 ): RightPanelSurface | null {
   const state = selectThreadRightPanelState(byThreadKey, ref);
   if (!state.isOpen) return null;
+  return selectSelectedRightPanelSurface(byThreadKey, ref);
+}
+
+/** The selected surface even while the panel is hidden, so a layout control can restore it. */
+export function selectSelectedRightPanelSurface(
+  byThreadKey: Record<string, ThreadRightPanelState>,
+  ref: ScopedThreadRef | null | undefined,
+): RightPanelSurface | null {
+  const state = selectThreadRightPanelState(byThreadKey, ref);
   return state.surfaces.find((surface) => surface.id === state.activeSurfaceId) ?? null;
 }
