@@ -8,7 +8,7 @@ import * as Headers from "effect/unstable/http/Headers";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import { ApnsEnvironment as ApnsEnvironmentSchema, type ApnsCredentials } from "../Config.ts";
-import type { ApnsLiveActivityAlert, ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
+import type { LiveActivityAlert, NotificationPayload } from "./deliveryJobs.ts";
 import { ApnsJwtEncodingError, ApnsJwtSigningError } from "./apnsJwt.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
 
@@ -100,18 +100,18 @@ type MakeLiveActivityRequestInput =
   | (LiveActivityRequestBase & {
       readonly event: "end";
       readonly state: RelayAgentActivityAggregateState | null;
-      readonly alert?: ApnsLiveActivityAlert | null;
+      readonly alert?: LiveActivityAlert | null;
     })
   | (LiveActivityRequestBase & {
       readonly event: "start" | "update";
       readonly state: RelayAgentActivityAggregateState;
-      readonly alert?: ApnsLiveActivityAlert | null;
+      readonly alert?: LiveActivityAlert | null;
     });
 
 // An alert dict on an update/end makes it an "alerting" update: iOS wakes the
 // screen and plays the haptic (the Apple Sports score-change behavior) instead
 // of silently redrawing the activity.
-function liveActivityAlertPayload(alert: ApnsLiveActivityAlert) {
+function liveActivityAlertPayload(alert: LiveActivityAlert) {
   return {
     alert: {
       title: alert.title,
@@ -173,7 +173,7 @@ function makeLiveActivityRequest(input: MakeLiveActivityRequestInput): ApnsLiveA
 
 function makePushNotificationRequest(input: {
   readonly token: string;
-  readonly notification: ApnsNotificationPayload;
+  readonly notification: NotificationPayload;
 }): ApnsPushNotificationRequest {
   return {
     token: input.token,
@@ -193,7 +193,7 @@ function makePushNotificationRequest(input: {
   };
 }
 
-function apnsReasonFromBody(body: string): string | undefined {
+function deliveryReasonFromBody(body: string): string | undefined {
   if (body.trim().length === 0) {
     return undefined;
   }
@@ -275,7 +275,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    const reason = apnsReasonFromBody(responseText);
+    const reason = deliveryReasonFromBody(responseText);
     return {
       ok: response.status >= 200 && response.status < 300,
       status: response.status,
@@ -335,7 +335,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      const reason = apnsReasonFromBody(responseText);
+      const reason = deliveryReasonFromBody(responseText);
       return {
         ok: response.status >= 200 && response.status < 300,
         status: response.status,

@@ -254,6 +254,10 @@ const config: ExpoConfig = {
   android: {
     icon: variant.assets.appIcon,
     package: variant.androidPackage,
+    // Firebase bundles every registered Android app (dev/preview/prod) into
+    // this single file; the Google Services Gradle plugin picks the entry
+    // matching whichever applicationId is actually being built.
+    googleServicesFile: "./google-services.json",
     ...(releaseVersionCode !== undefined ? { versionCode: releaseVersionCode } : {}),
     adaptiveIcon: {
       backgroundColor: variant.assets.androidAdaptiveBackgroundColor,

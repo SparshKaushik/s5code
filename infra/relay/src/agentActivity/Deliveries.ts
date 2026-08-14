@@ -21,25 +21,27 @@ import {
   isExpiredAgentActivityState,
   isTerminalPhase,
   sanitizeAgentActivityAggregateState,
-  sanitizeApnsNotificationPayload,
+  sanitizeNotificationPayload,
 } from "./agentActivityPayloads.ts";
 import * as Apns from "./ApnsClient.ts";
+import * as Fcm from "./FcmClient.ts";
 import {
-  ApnsDeliveryJobLiveActivityAggregateMissing,
-  ApnsDeliveryJobPushNotificationMissing,
-  ApnsDeliveryJobQueuePayloadInvalid,
-  type ApnsLiveActivityAlert,
-  type ApnsNotificationPayload,
-  SignedApnsDeliveryJob,
-  isApnsDeliveryJobVerificationError,
-  verifySignedApnsDeliveryJob,
-  type ApnsDeliveryJobVerificationError,
-} from "./apnsDeliveryJobs.ts";
+  DeliveryJobLiveActivityAggregateMissing,
+  DeliveryJobPushNotificationMissing,
+  DeliveryJobQueuePayloadInvalid,
+  type DeliveryChannel,
+  type LiveActivityAlert,
+  type NotificationPayload,
+  SignedDeliveryJob,
+  isDeliveryJobVerificationError,
+  verifySignedDeliveryJob,
+  type DeliveryJobVerificationError,
+} from "./deliveryJobs.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
-import * as ApnsDeliveryQueue from "./ApnsDeliveryQueue.ts";
+import * as DeliveryQueue from "./DeliveryQueue.ts";
 import { withSpanAttributes } from "../observability.ts";
 
 const MIN_LIVE_ACTIVITY_UPDATE_INTERVAL_MS = 15_000;
@@ -52,6 +54,9 @@ const PERMANENT_APNS_TOKEN_REASONS = new Set([
   "DeviceTokenNotForTopic",
   "Unregistered",
 ]);
+// FCM reports invalid tokens as 404 NOT_FOUND (UNREGISTERED) or 403 with
+// SENDER_ID_MISMATCH (token minted for a different Firebase project).
+const PERMANENT_FCM_TOKEN_REASONS = new Set(["UNREGISTERED", "SENDER_ID_MISMATCH"]);
 
 type LiveActivityDeliveryKind = Extract<
   RelayDeliveryKind,
@@ -63,33 +68,34 @@ type ChosenLiveActivityDelivery =
       readonly kind: "live_activity_start" | "live_activity_update";
       readonly token: string;
       readonly aggregate: RelayAgentActivityAggregateState;
-      readonly alert: ApnsLiveActivityAlert | null;
+      readonly alert: LiveActivityAlert | null;
     }
   | {
       readonly kind: "live_activity_end";
       readonly token: string;
       readonly aggregate: RelayAgentActivityAggregateState | null;
-      readonly alert: ApnsLiveActivityAlert | null;
+      readonly alert: LiveActivityAlert | null;
     };
 
 type ChosenPushNotificationDelivery = {
   readonly kind: "push_notification";
+  readonly channel: DeliveryChannel;
   readonly token: string;
-  readonly notification: ApnsNotificationPayload;
+  readonly notification: NotificationPayload;
 };
 
 type ChosenDelivery = ChosenLiveActivityDelivery | ChosenPushNotificationDelivery;
 
-export type ApnsDeliveryError =
-  | ApnsDeliveryQueue.ApnsDeliveryQueueError
-  | ApnsDeliveryJobVerificationError
-  | ApnsDeliveryJobClaimInFlight
+export type DeliveryError =
+  | DeliveryQueue.DeliveryQueueError
+  | DeliveryJobVerificationError
+  | DeliveryJobClaimInFlight
   | DeliveryAttempts.DeliveryAttemptRecordPersistenceError
   | LiveActivities.LiveActivityTargetListPersistenceError
   | LiveActivities.LiveActivityDeliveryMarkPersistenceError;
 
-export class ApnsDeliveryJobClaimInFlight extends Schema.TaggedErrorClass<ApnsDeliveryJobClaimInFlight>()(
-  "ApnsDeliveryJobClaimInFlight",
+export class DeliveryJobClaimInFlight extends Schema.TaggedErrorClass<DeliveryJobClaimInFlight>()(
+  "DeliveryJobClaimInFlight",
   {
     sourceJobId: Schema.String,
   },
@@ -99,27 +105,24 @@ export class ApnsDeliveryJobClaimInFlight extends Schema.TaggedErrorClass<ApnsDe
   }
 }
 
-export class ApnsDeliveryTransportError extends Schema.TaggedErrorClass<ApnsDeliveryTransportError>()(
-  "ApnsDeliveryTransportError",
+export class DeliveryTransportError extends Schema.TaggedErrorClass<DeliveryTransportError>()(
+  "DeliveryTransportError",
   {
     deviceId: Schema.String,
     kind: RelayDeliveryKindSchema,
     sourceJobId: Schema.NullOr(Schema.String),
-    apnsErrorTag: Schema.Literals([
-      "ApnsJwtEncodingError",
-      "ApnsJwtSigningError",
-      "ApnsHttpRequestError",
-    ]),
+    channel: Schema.Literals(["apns", "fcm"]),
+    transportErrorTag: Schema.String,
     requestStage: Schema.NullOr(Schema.Literals(["send", "read-response"])),
     cause: Schema.Defect(),
   },
 ) {
   override get message(): string {
-    return `APNs ${this.kind} delivery failed for device ${this.deviceId}.`;
+    return `${this.channel} ${this.kind} delivery failed for device ${this.deviceId}.`;
   }
 }
 
-export const isApnsDeliveryTransportError = Schema.is(ApnsDeliveryTransportError);
+export const isDeliveryTransportError = Schema.is(DeliveryTransportError);
 
 const decodeRelayAgentActivityAggregateStateJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(RelayAgentActivityAggregateStateSchema),
@@ -127,7 +130,7 @@ const decodeRelayAgentActivityAggregateStateJson = Schema.decodeUnknownOption(
 const decodeRelayAgentAwarenessPreferencesJson = Schema.decodeUnknownOption(
   Schema.fromJsonString(RelayAgentAwarenessPreferencesSchema),
 );
-const decodeSignedApnsDeliveryJob = Schema.decodeUnknownEffect(SignedApnsDeliveryJob);
+const decodeSignedDeliveryJob = Schema.decodeUnknownEffect(SignedDeliveryJob);
 
 function parseAggregate(value: string | null): RelayAgentActivityAggregateState | null {
   if (!value) {
@@ -182,7 +185,7 @@ export function alertForAttentionTransition(input: {
   readonly previousAggregate: RelayAgentActivityAggregateState | null;
   readonly nextAggregate: RelayAgentActivityAggregateState;
   readonly preferences: RelayAgentAwarenessPreferences | null;
-}): ApnsLiveActivityAlert | null {
+}): LiveActivityAlert | null {
   if (input.previousAggregate === null) {
     return null;
   }
@@ -252,7 +255,7 @@ export function alertForNewlyTerminal(input: {
   readonly nextAggregate: RelayAgentActivityAggregateState;
   readonly preferences: RelayAgentAwarenessPreferences | null;
   readonly nowMs: number;
-}): ApnsLiveActivityAlert | null {
+}): LiveActivityAlert | null {
   const newlyTerminal = newlyTerminalRows(input.previousAggregate, input.nextAggregate).filter(
     (row) =>
       alertAllowedForPhase(input.preferences, row.phase) &&
@@ -277,7 +280,7 @@ export function alertForNewlyTerminal(input: {
 export function alertForTerminalAggregate(input: {
   readonly aggregate: RelayAgentActivityAggregateState | null;
   readonly preferences: RelayAgentAwarenessPreferences | null;
-}): ApnsLiveActivityAlert | null {
+}): LiveActivityAlert | null {
   const row = input.aggregate?.activities[0];
   if (!row || (row.phase !== "completed" && row.phase !== "failed")) {
     return null;
@@ -330,12 +333,26 @@ function shouldUpdateLiveActivity(input: {
 // recently-finished thread) must not ring the device again.
 const TERMINAL_NOTIFICATION_FRESHNESS_MS = 2 * 60 * 1_000;
 
+// A device registers exactly one push token (APNs on iOS, FCM on Android).
+// Return whichever is present together with the channel it must be sent over.
+function pushTokenForTarget(
+  target: LiveActivities.TargetRow,
+): { readonly channel: DeliveryChannel; readonly token: string } | null {
+  if (target.fcm_token) {
+    return { channel: "fcm", token: target.fcm_token };
+  }
+  if (target.push_token) {
+    return { channel: "apns", token: target.push_token };
+  }
+  return null;
+}
+
 function notificationForAggregate(input: {
   readonly target: LiveActivities.TargetRow;
   readonly aggregate: RelayAgentActivityAggregateState | null;
   readonly nowMs: number;
-}): ApnsNotificationPayload | null {
-  if (!input.target.push_token || input.aggregate === null) {
+}): NotificationPayload | null {
+  if (input.aggregate === null || pushTokenForTarget(input.target) === null) {
     return null;
   }
   const preferences = parsePreferences(input.target.preferences_json);
@@ -468,10 +485,12 @@ function chooseDelivery(input: {
     return liveActivityDelivery;
   }
   const notification = notificationForAggregate(input);
-  return notification && input.target.push_token
+  const pushToken = notification === null ? null : pushTokenForTarget(input.target);
+  return notification && pushToken
     ? {
         kind: "push_notification",
-        token: input.target.push_token,
+        channel: pushToken.channel,
+        token: pushToken.token,
         notification,
       }
     : null;
@@ -488,13 +507,44 @@ function deliveryEvent(kind: LiveActivityDeliveryKind): Apns.ApnsLiveActivityEve
   }
 }
 
-function isPermanentApnsTokenFailure(result: Apns.ApnsDeliveryResult): boolean {
+interface TransportDeliveryResult {
+  readonly ok: boolean;
+  readonly status: number;
+  readonly reason?: string;
+  readonly providerMessageId: string | null;
+}
+
+function apnsDeliveryResult(result: Apns.ApnsDeliveryResult): TransportDeliveryResult {
+  return {
+    ok: result.ok,
+    status: result.status,
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+    providerMessageId: result.apnsId,
+  };
+}
+
+function fcmDeliveryResult(result: Fcm.FcmDeliveryResult): TransportDeliveryResult {
+  return {
+    ok: result.ok,
+    status: result.status,
+    ...(result.reason === undefined ? {} : { reason: result.reason }),
+    providerMessageId: result.messageId,
+  };
+}
+
+function isPermanentApnsTokenFailure(result: TransportDeliveryResult): boolean {
   return (
     !result.ok &&
     (result.status === 410 ||
       (result.status === 400 &&
         result.reason !== undefined &&
         PERMANENT_APNS_TOKEN_REASONS.has(result.reason)))
+  );
+}
+
+function isPermanentFcmTokenFailure(result: TransportDeliveryResult): boolean {
+  return (
+    !result.ok && result.reason !== undefined && PERMANENT_FCM_TOKEN_REASONS.has(result.reason)
   );
 }
 
@@ -506,9 +556,9 @@ function duplicateJobResult(input: {
     deviceId: input.deviceId,
     kind: input.kind,
     ok: true,
-    apnsStatus: null,
-    apnsReason: "Duplicate APNs delivery job skipped.",
-    apnsId: null,
+    deliveryStatus: null,
+    deliveryReason: "Duplicate delivery job skipped.",
+    providerMessageId: null,
   };
 }
 
@@ -520,42 +570,54 @@ function staleJobResult(input: {
     deviceId: input.deviceId,
     kind: input.kind,
     ok: true,
-    apnsStatus: null,
-    apnsReason: "Stale APNs delivery job skipped.",
-    apnsId: null,
+    deliveryStatus: null,
+    deliveryReason: "Stale delivery job skipped.",
+    providerMessageId: null,
   };
 }
 
-function deliveryAttemptOutcome(result: Apns.ApnsDeliveryResult) {
+function deliveryAttemptOutcome(result: TransportDeliveryResult) {
   return {
-    ...(result.status === 0 ? {} : { apnsStatus: result.status }),
-    ...(result.reason === undefined ? {} : { apnsReason: result.reason }),
-    apnsId: result.apnsId,
-    ...(result.status === 0 ? { transportError: result.reason ?? "APNs request failed." } : {}),
+    ...(result.status === 0 ? {} : { deliveryStatus: result.status }),
+    ...(result.reason === undefined ? {} : { deliveryReason: result.reason }),
+    providerMessageId: result.providerMessageId,
+    ...(result.status === 0 ? { transportError: result.reason ?? "request failed." } : {}),
   };
 }
 
-const recoverApnsDeliveryTransportError = (
+function httpRequestStage(cause: Apns.ApnsError | Fcm.FcmError): "send" | "read-response" | null {
+  switch (cause._tag) {
+    case "ApnsHttpRequestError":
+    case "FcmHttpRequestError":
+      return cause.stage;
+    default:
+      return null;
+  }
+}
+
+const recoverDeliveryTransportError = (
   input: {
     readonly deviceId: string;
     readonly kind: RelayDeliveryKind;
     readonly sourceJobId: string | null;
+    readonly channel: DeliveryChannel;
   },
-  cause: Apns.ApnsError,
-): Effect.Effect<Apns.ApnsDeliveryResult> => {
-  const error = new ApnsDeliveryTransportError({
+  cause: Apns.ApnsError | Fcm.FcmError,
+): Effect.Effect<TransportDeliveryResult> => {
+  const error = new DeliveryTransportError({
     deviceId: input.deviceId,
     kind: input.kind,
     sourceJobId: input.sourceJobId,
-    apnsErrorTag: cause._tag,
-    requestStage: cause._tag === "ApnsHttpRequestError" ? cause.stage : null,
+    channel: input.channel,
+    transportErrorTag: cause._tag,
+    requestStage: httpRequestStage(cause),
     cause,
   });
   return Effect.logError(error.message).pipe(
     Effect.annotateLogs({
       error: Redacted.make(error, { label: error._tag }),
       "error.type": error._tag,
-      "error.apns_error_tag": error.apnsErrorTag,
+      "error.transport_error_tag": error.transportErrorTag,
       ...(error.requestStage === null ? {} : { "error.request_stage": error.requestStage }),
       ...(error.stack === undefined ? {} : { "error.stack": error.stack }),
       "relay.mobile.device_id": error.deviceId,
@@ -566,7 +628,7 @@ const recoverApnsDeliveryTransportError = (
       ok: false,
       status: 0,
       reason: cause.message,
-      apnsId: null,
+      providerMessageId: null,
     }),
   );
 };
@@ -597,6 +659,7 @@ function credentialsForTarget(
 function expectedCurrentToken(input: {
   readonly target: LiveActivities.TargetRow;
   readonly kind: RelayDeliveryKind;
+  readonly channel?: DeliveryChannel;
 }): string | null {
   switch (input.kind) {
     case "live_activity_start":
@@ -605,7 +668,7 @@ function expectedCurrentToken(input: {
     case "live_activity_end":
       return input.target.activity_push_token;
     case "push_notification":
-      return input.target.push_token;
+      return input.channel === "fcm" ? input.target.fcm_token : input.target.push_token;
   }
 }
 
@@ -619,12 +682,12 @@ export type SendLiveActivityDeliveryInput =
   | (SendLiveActivityDeliveryInputBase & {
       readonly kind: "live_activity_start" | "live_activity_update";
       readonly aggregate: RelayAgentActivityAggregateState;
-      readonly alert?: ApnsLiveActivityAlert | null;
+      readonly alert?: LiveActivityAlert | null;
     })
   | (SendLiveActivityDeliveryInputBase & {
       readonly kind: "live_activity_end";
       readonly aggregate: RelayAgentActivityAggregateState | null;
-      readonly alert?: ApnsLiveActivityAlert | null;
+      readonly alert?: LiveActivityAlert | null;
     });
 
 function makeLiveActivityDeliveryRequest(
@@ -665,39 +728,39 @@ function makeLiveActivityDeliveryRequest(
   }
 }
 
-export class ApnsDeliveries extends Context.Service<
-  ApnsDeliveries,
+export class Deliveries extends Context.Service<
+  Deliveries,
   {
     readonly sendForTarget: (input: {
       readonly target: LiveActivities.TargetRow;
       readonly aggregate: RelayAgentActivityAggregateState | null;
       readonly nowMs: number;
-    }) => Effect.Effect<RelayDeliveryResult | null, ApnsDeliveryError>;
+    }) => Effect.Effect<RelayDeliveryResult | null, DeliveryError>;
     readonly sendPushNotificationForTarget: (input: {
       readonly target: LiveActivities.TargetRow;
       readonly aggregate: RelayAgentActivityAggregateState | null;
-    }) => Effect.Effect<RelayDeliveryResult | null, ApnsDeliveryError>;
+    }) => Effect.Effect<RelayDeliveryResult | null, DeliveryError>;
     readonly sendLiveActivity: (
       input: SendLiveActivityDeliveryInput,
-    ) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryError>;
-    readonly processSignedJob: (
-      body: unknown,
-    ) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryError>;
+    ) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
+    readonly processSignedJob: (body: unknown) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
     readonly sendPushNotification: (input: {
+      readonly channel: DeliveryChannel;
       readonly target: LiveActivityDeliveryTarget;
       readonly token: string;
       readonly sourceJobId?: string | null;
-      readonly notification: ApnsNotificationPayload;
-    }) => Effect.Effect<RelayDeliveryResult, ApnsDeliveryError>;
+      readonly notification: NotificationPayload;
+    }) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
   }
->()("t3code-relay/agentActivity/ApnsDeliveries") {}
+>()("t3code-relay/agentActivity/Deliveries") {}
 
 export const make = Effect.gen(function* () {
   const attempts = yield* DeliveryAttempts.DeliveryAttempts;
   const liveActivities = yield* LiveActivities.LiveActivities;
-  const deliveryQueue = yield* ApnsDeliveryQueue.ApnsDeliveryQueue;
+  const deliveryQueue = yield* DeliveryQueue.DeliveryQueue;
   const config = yield* RelayConfiguration.RelayConfiguration;
   const apns = yield* Apns.ApnsClient;
+  const fcm = yield* Fcm.FcmClient;
   const activityRows = yield* AgentActivityRows.AgentActivityRows;
 
   // Start jobs are decided at publish time, but consecutive publishes land in
@@ -789,7 +852,7 @@ export const make = Effect.gen(function* () {
 
   const notificationStateIsCurrent = Effect.fnUntraced(function* (input: {
     readonly userId: string;
-    readonly notification: ApnsNotificationPayload;
+    readonly notification: NotificationPayload;
   }) {
     // Jobs from older relay versions do not carry a state identity. Preserve
     // backwards compatibility and only revalidate newly queued jobs.
@@ -809,20 +872,25 @@ export const make = Effect.gen(function* () {
     readonly target: LiveActivityDeliveryTarget;
     readonly kind: RelayDeliveryKind;
     readonly token: string;
+    readonly channel?: DeliveryChannel;
   }) {
     return yield* liveActivities.listTargets({ userId: input.target.user_id }).pipe(
       Effect.map((targets) => {
         const currentTarget = targets.find((row) => row.device_id === input.target.device_id);
         return (
           currentTarget !== undefined &&
-          expectedCurrentToken({ target: currentTarget, kind: input.kind }) === input.token
+          expectedCurrentToken({
+            target: currentTarget,
+            kind: input.kind,
+            ...(input.channel ? { channel: input.channel } : {}),
+          }) === input.token
         );
       }),
     );
   });
 
-  const sendLiveActivity: ApnsDeliveries["Service"]["sendLiveActivity"] = Effect.fn(
-    "relay.apns_deliveries.send_live_activity",
+  const sendLiveActivity: Deliveries["Service"]["sendLiveActivity"] = Effect.fn(
+    "relay.deliveries.send_live_activity",
   )(function* (input) {
     yield* Effect.annotateCurrentSpan({
       "relay.mobile.device_id": input.target.device_id,
@@ -838,11 +906,12 @@ export const make = Effect.gen(function* () {
       now,
     );
     const recoverTransportError = (cause: Apns.ApnsError) =>
-      recoverApnsDeliveryTransportError(
+      recoverDeliveryTransportError(
         {
           deviceId: input.target.device_id,
           kind: input.kind,
           sourceJobId: input.sourceJobId ?? null,
+          channel: "apns",
         },
         cause,
       );
@@ -860,7 +929,7 @@ export const make = Effect.gen(function* () {
         return duplicateJobResult({ deviceId: input.target.device_id, kind: input.kind });
       }
       if (claim === "in_flight") {
-        return yield* new ApnsDeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
+        return yield* new DeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
       }
       const tokenIsCurrent = yield* isCurrentSignedJobToken({
         target: input.target,
@@ -870,7 +939,7 @@ export const make = Effect.gen(function* () {
       if (!tokenIsCurrent) {
         yield* attempts.completeSourceJob({
           sourceJobId: input.sourceJobId,
-          apnsReason: "Stale APNs delivery job skipped.",
+          deliveryReason: "Stale delivery job skipped.",
         });
         return staleJobResult({ deviceId: input.target.device_id, kind: input.kind });
       }
@@ -884,7 +953,7 @@ export const make = Effect.gen(function* () {
       ) {
         yield* attempts.completeSourceJob({
           sourceJobId: input.sourceJobId,
-          apnsReason: "Stale agent activity state skipped.",
+          deliveryReason: "Stale agent activity state skipped.",
         });
         return staleJobResult({ deviceId: input.target.device_id, kind: input.kind });
       }
@@ -900,7 +969,7 @@ export const make = Effect.gen(function* () {
       if (input.sourceJobId) {
         yield* attempts.completeSourceJob({
           sourceJobId: input.sourceJobId,
-          apnsReason: "Stale APNs start job skipped.",
+          deliveryReason: "Stale start job skipped.",
         });
       }
       return staleJobResult({ deviceId: input.target.device_id, kind: input.kind });
@@ -912,6 +981,7 @@ export const make = Effect.gen(function* () {
         issuedAtUnixSeconds: epochSeconds,
       })
       .pipe(
+        Effect.map(apnsDeliveryResult),
         Effect.catchTags({
           ApnsJwtEncodingError: recoverTransportError,
           ApnsJwtSigningError: recoverTransportError,
@@ -959,37 +1029,35 @@ export const make = Effect.gen(function* () {
       deviceId: input.target.device_id,
       kind: input.kind,
       ok: result.ok,
-      apnsStatus: result.status === 0 ? null : result.status,
-      apnsReason: result.reason ?? null,
-      apnsId: result.apnsId,
+      deliveryStatus: result.status === 0 ? null : result.status,
+      deliveryReason: result.reason ?? null,
+      providerMessageId: result.providerMessageId,
     };
   });
 
-  const sendPushNotification: ApnsDeliveries["Service"]["sendPushNotification"] = Effect.fn(
-    "relay.apns_deliveries.send_push_notification",
+  const sendPushNotification: Deliveries["Service"]["sendPushNotification"] = Effect.fn(
+    "relay.deliveries.send_push_notification",
   )(function* (input) {
     yield* Effect.annotateCurrentSpan({
       "relay.mobile.device_id": input.target.device_id,
       "relay.delivery.kind": "push_notification",
+      "relay.delivery.channel": input.channel,
       ...(input.sourceJobId ? { "relay.delivery.job_id": input.sourceJobId } : {}),
     });
     const now = yield* DateTime.now;
     const epochSeconds = Math.floor(now.epochMilliseconds / 1_000);
-    const notification = sanitizeApnsNotificationPayload(input.notification);
+    const notification = sanitizeNotificationPayload(input.notification);
     yield* Effect.annotateCurrentSpan({
       "relay.environment_id": notification.environmentId,
       "relay.thread_id": notification.threadId,
     });
-    const request = apns.makePushNotificationRequest({
-      token: input.token,
-      notification,
-    });
-    const recoverTransportError = (cause: Apns.ApnsError) =>
-      recoverApnsDeliveryTransportError(
+    const recoverTransportError = (cause: Apns.ApnsError | Fcm.FcmError) =>
+      recoverDeliveryTransportError(
         {
           deviceId: input.target.device_id,
           kind: "push_notification",
           sourceJobId: input.sourceJobId ?? null,
+          channel: input.channel,
         },
         cause,
       );
@@ -1010,17 +1078,18 @@ export const make = Effect.gen(function* () {
         });
       }
       if (claim === "in_flight") {
-        return yield* new ApnsDeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
+        return yield* new DeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
       }
       const tokenIsCurrent = yield* isCurrentSignedJobToken({
         target: input.target,
         kind: "push_notification",
+        channel: input.channel,
         token: input.token,
       });
       if (!tokenIsCurrent) {
         yield* attempts.completeSourceJob({
           sourceJobId: input.sourceJobId,
-          apnsReason: "Stale APNs delivery job skipped.",
+          deliveryReason: "Stale delivery job skipped.",
         });
         return staleJobResult({
           deviceId: input.target.device_id,
@@ -1035,7 +1104,7 @@ export const make = Effect.gen(function* () {
       ) {
         yield* attempts.completeSourceJob({
           sourceJobId: input.sourceJobId,
-          apnsReason: "Stale agent activity state skipped.",
+          deliveryReason: "Stale agent activity state skipped.",
         });
         return staleJobResult({
           deviceId: input.target.device_id,
@@ -1043,24 +1112,53 @@ export const make = Effect.gen(function* () {
         });
       }
     }
-    const result = yield* apns
-      .sendPushNotificationRequest({
-        credentials: credentialsForTarget(config.apns, input.target),
-        request,
-        issuedAtUnixSeconds: epochSeconds,
-      })
-      .pipe(
-        Effect.catchTags({
-          ApnsJwtEncodingError: recoverTransportError,
-          ApnsJwtSigningError: recoverTransportError,
-          ApnsHttpRequestError: recoverTransportError,
-        }),
-      );
-    if (isPermanentApnsTokenFailure(result)) {
+    const result =
+      input.channel === "fcm"
+        ? yield* fcm
+            .sendPushNotificationRequest({
+              credentials: config.fcm,
+              request: fcm.makePushNotificationRequest({
+                token: input.token,
+                notification,
+              }),
+              issuedAtUnixSeconds: epochSeconds,
+            })
+            .pipe(
+              Effect.map(fcmDeliveryResult),
+              Effect.catchTags({
+                FcmJwtEncodingError: recoverTransportError,
+                FcmJwtSigningError: recoverTransportError,
+                FcmAccessTokenRequestError: recoverTransportError,
+                FcmHttpRequestError: recoverTransportError,
+              }),
+            )
+        : yield* apns
+            .sendPushNotificationRequest({
+              credentials: credentialsForTarget(config.apns, input.target),
+              request: apns.makePushNotificationRequest({
+                token: input.token,
+                notification,
+              }),
+              issuedAtUnixSeconds: epochSeconds,
+            })
+            .pipe(
+              Effect.map(apnsDeliveryResult),
+              Effect.catchTags({
+                ApnsJwtEncodingError: recoverTransportError,
+                ApnsJwtSigningError: recoverTransportError,
+                ApnsHttpRequestError: recoverTransportError,
+              }),
+            );
+    const permanent =
+      input.channel === "fcm"
+        ? isPermanentFcmTokenFailure(result)
+        : isPermanentApnsTokenFailure(result);
+    if (permanent) {
       yield* liveActivities.invalidateDeliveryToken({
         userId: input.target.user_id,
         deviceId: input.target.device_id,
         kind: "push_notification",
+        channel: input.channel,
         invalidatedAt: DateTime.formatIso(now),
       });
     }
@@ -1084,36 +1182,37 @@ export const make = Effect.gen(function* () {
       deviceId: input.target.device_id,
       kind: "push_notification" as const,
       ok: result.ok,
-      apnsStatus: result.status === 0 ? null : result.status,
-      apnsReason: result.reason ?? null,
-      apnsId: result.apnsId,
+      deliveryStatus: result.status === 0 ? null : result.status,
+      deliveryReason: result.reason ?? null,
+      providerMessageId: result.providerMessageId,
     };
   });
 
-  const processSignedJob: ApnsDeliveries["Service"]["processSignedJob"] = Effect.fn(
-    "relay.apns_deliveries.process_signed_job",
+  const processSignedJob: Deliveries["Service"]["processSignedJob"] = Effect.fn(
+    "relay.deliveries.process_signed_job",
   )(function* (body) {
-    const signedJob = yield* decodeSignedApnsDeliveryJob(body).pipe(
+    const signedJob = yield* decodeSignedDeliveryJob(body).pipe(
       Effect.mapError(
         (cause) =>
-          new ApnsDeliveryJobQueuePayloadInvalid({
+          new DeliveryJobQueuePayloadInvalid({
             receivedType: Array.isArray(body) ? "array" : body === null ? "null" : typeof body,
             cause,
           }),
       ),
     );
     const now = yield* DateTime.now;
-    const payload = verifySignedApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const payload = verifySignedDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       job: signedJob,
       nowMs: now.epochMilliseconds,
     });
-    if (isApnsDeliveryJobVerificationError(payload)) {
+    if (isDeliveryJobVerificationError(payload)) {
       return yield* payload;
     }
     yield* Effect.annotateCurrentSpan({
       "relay.mobile.device_id": payload.target.deviceId,
       "relay.delivery.kind": payload.kind,
+      "relay.delivery.channel": payload.channel,
       "relay.delivery.job_id": payload.jobId,
     });
     return yield* Effect.suspend(() => {
@@ -1122,7 +1221,7 @@ export const make = Effect.gen(function* () {
         case "live_activity_update":
           if (payload.aggregate === null) {
             return Effect.fail(
-              new ApnsDeliveryJobLiveActivityAggregateMissing({
+              new DeliveryJobLiveActivityAggregateMissing({
                 jobId: payload.jobId,
                 kind: payload.kind,
                 userId: payload.target.userId,
@@ -1160,7 +1259,7 @@ export const make = Effect.gen(function* () {
         case "push_notification":
           if (payload.notification === null) {
             return Effect.fail(
-              new ApnsDeliveryJobPushNotificationMissing({
+              new DeliveryJobPushNotificationMissing({
                 jobId: payload.jobId,
                 userId: payload.target.userId,
                 deviceId: payload.target.deviceId,
@@ -1168,6 +1267,7 @@ export const make = Effect.gen(function* () {
             );
           }
           return sendPushNotification({
+            channel: payload.channel,
             target: {
               user_id: payload.target.userId,
               device_id: payload.target.deviceId,
@@ -1182,7 +1282,7 @@ export const make = Effect.gen(function* () {
     }).pipe(withSpanAttributes({ "user.id": payload.target.userId }));
   });
 
-  return ApnsDeliveries.of({
+  return Deliveries.of({
     sendLiveActivity,
     sendPushNotification,
     processSignedJob,
@@ -1193,12 +1293,13 @@ export const make = Effect.gen(function* () {
         aggregate: input.aggregate,
         nowMs: now.epochMilliseconds,
       });
-      const token = input.target.push_token;
-      return yield* notification && token
+      const pushToken = notification === null ? null : pushTokenForTarget(input.target);
+      return yield* notification && pushToken
         ? deliveryQueue.enqueuePushNotification({
             userId: input.target.user_id,
             deviceId: input.target.device_id,
-            token,
+            channel: pushToken.channel,
+            token: pushToken.token,
             bundleId: input.target.bundle_id,
             apsEnvironment: input.target.aps_environment,
             notification,
@@ -1218,6 +1319,7 @@ export const make = Effect.gen(function* () {
         const result = yield* deliveryQueue.enqueuePushNotification({
           userId: input.target.user_id,
           deviceId: input.target.device_id,
+          channel: delivery.channel,
           token: delivery.token,
           bundleId: input.target.bundle_id,
           apsEnvironment: input.target.aps_environment,
@@ -1230,13 +1332,14 @@ export const make = Effect.gen(function* () {
         aggregate: input.aggregate,
         nowMs: input.nowMs,
       });
+      const pushToken = notification === null ? null : pushTokenForTarget(input.target);
       // The end event doubles as the "task finished" moment. When a companion
       // push notification is about to ring the device (below), the activity end
       // stays silent; otherwise the end itself carries the alert so LA-only
       // users still get the buzz.
       const alert =
         delivery.kind === "live_activity_end"
-          ? notification && input.target.push_token
+          ? notification && pushToken
             ? null
             : alertForTerminalAggregate({
                 aggregate: delivery.aggregate,
@@ -1253,11 +1356,12 @@ export const make = Effect.gen(function* () {
         aggregate: delivery.aggregate,
         alert,
       });
-      if (delivery.kind === "live_activity_end" && notification && input.target.push_token) {
+      if (delivery.kind === "live_activity_end" && notification && pushToken) {
         yield* deliveryQueue.enqueuePushNotification({
           userId: input.target.user_id,
           deviceId: input.target.device_id,
-          token: input.target.push_token,
+          channel: pushToken.channel,
+          token: pushToken.token,
           bundleId: input.target.bundle_id,
           apsEnvironment: input.target.aps_environment,
           notification,
@@ -1276,4 +1380,4 @@ export const make = Effect.gen(function* () {
   });
 });
 
-export const layer = Layer.effect(ApnsDeliveries, make);
+export const layer = Layer.effect(Deliveries, make);

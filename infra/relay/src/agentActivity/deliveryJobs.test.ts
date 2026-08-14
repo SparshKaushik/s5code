@@ -4,10 +4,10 @@ import type { RelayAgentActivityAggregateState } from "@t3tools/contracts/relay"
 import * as Redacted from "effect/Redacted";
 
 import {
-  makeApnsDeliveryJobPayload,
-  signApnsDeliveryJob,
-  verifySignedApnsDeliveryJob,
-} from "./apnsDeliveryJobs.ts";
+  makeDeliveryJobPayload,
+  signDeliveryJob,
+  verifySignedDeliveryJob,
+} from "./deliveryJobs.ts";
 
 const secret = Redacted.make("queue-signing-secret");
 const aggregate: RelayAgentActivityAggregateState = {
@@ -38,9 +38,10 @@ const notification = {
   deepLink: "/threads/env/thread",
 };
 
-describe("apnsDeliveryJobs", () => {
+describe("deliveryJobs", () => {
   it("rejects tampered signed queue jobs", () => {
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_end",
       userId: "user-1",
       deviceId: "device-1",
@@ -50,7 +51,7 @@ describe("apnsDeliveryJobs", () => {
       expiresAt: "2026-05-25T00:05:00.000Z",
       jobId: "job-1",
     });
-    const signed = signApnsDeliveryJob({ secret, payload });
+    const signed = signDeliveryJob({ secret, payload });
     const tampered = {
       ...signed,
       payload: {
@@ -62,24 +63,25 @@ describe("apnsDeliveryJobs", () => {
       },
     };
 
-    const result = verifySignedApnsDeliveryJob({
+    const result = verifySignedDeliveryJob({
       secret,
       job: tampered,
       nowMs: 0,
     });
 
     expect(result).toMatchObject({
-      _tag: "ApnsDeliveryJobSignatureInvalid",
+      _tag: "DeliveryJobSignatureInvalid",
       jobId: "job-1",
       kind: "live_activity_end",
       userId: "user-1",
       deviceId: "device-1",
-      message: "Invalid signature for APNs delivery job job-1.",
+      message: "Invalid signature for delivery job job-1.",
     });
   });
 
   it("rejects Live Activity start jobs without aggregate state", () => {
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_start",
       userId: "user-1",
       deviceId: "device-1",
@@ -89,26 +91,27 @@ describe("apnsDeliveryJobs", () => {
       expiresAt: "2026-05-25T00:05:00.000Z",
       jobId: "job-start-invalid",
     });
-    const signed = signApnsDeliveryJob({ secret, payload });
+    const signed = signDeliveryJob({ secret, payload });
 
-    const result = verifySignedApnsDeliveryJob({
+    const result = verifySignedDeliveryJob({
       secret,
       job: signed,
       nowMs: 0,
     });
 
     expect(result).toMatchObject({
-      _tag: "ApnsDeliveryJobLiveActivityAggregateMissing",
+      _tag: "DeliveryJobLiveActivityAggregateMissing",
       jobId: "job-start-invalid",
       kind: "live_activity_start",
       userId: "user-1",
       deviceId: "device-1",
-      message: "APNs live activity start job job-start-invalid requires an aggregate.",
+      message: "live activity start job job-start-invalid requires an aggregate.",
     });
   });
 
   it("rejects push notification jobs carrying aggregate state", () => {
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: "user-1",
       deviceId: "device-1",
@@ -119,25 +122,26 @@ describe("apnsDeliveryJobs", () => {
       expiresAt: "2026-05-25T00:05:00.000Z",
       jobId: "job-push-invalid",
     });
-    const signed = signApnsDeliveryJob({ secret, payload });
+    const signed = signDeliveryJob({ secret, payload });
 
-    const result = verifySignedApnsDeliveryJob({
+    const result = verifySignedDeliveryJob({
       secret,
       job: signed,
       nowMs: 0,
     });
 
     expect(result).toMatchObject({
-      _tag: "ApnsDeliveryJobPushNotificationAggregateUnexpected",
+      _tag: "DeliveryJobPushNotificationAggregateUnexpected",
       jobId: "job-push-invalid",
       userId: "user-1",
       deviceId: "device-1",
-      message: "APNs push notification job job-push-invalid must not carry aggregate state.",
+      message: "push notification job job-push-invalid must not carry aggregate state.",
     });
   });
 
   it("accepts minimal kind-specific signed queue jobs", () => {
-    const pushPayload = makeApnsDeliveryJobPayload({
+    const pushPayload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: "user-1",
       deviceId: "device-1",
@@ -148,7 +152,8 @@ describe("apnsDeliveryJobs", () => {
       expiresAt: "2026-05-25T00:05:00.000Z",
       jobId: "job-push-valid",
     });
-    const liveActivityPayload = makeApnsDeliveryJobPayload({
+    const liveActivityPayload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_update",
       userId: "user-1",
       deviceId: "device-1",
@@ -160,23 +165,24 @@ describe("apnsDeliveryJobs", () => {
     });
 
     expect(
-      verifySignedApnsDeliveryJob({
+      verifySignedDeliveryJob({
         secret,
-        job: signApnsDeliveryJob({ secret, payload: pushPayload }),
+        job: signDeliveryJob({ secret, payload: pushPayload }),
         nowMs: 0,
       }),
     ).toEqual(pushPayload);
     expect(
-      verifySignedApnsDeliveryJob({
+      verifySignedDeliveryJob({
         secret,
-        job: signApnsDeliveryJob({ secret, payload: liveActivityPayload }),
+        job: signDeliveryJob({ secret, payload: liveActivityPayload }),
         nowMs: 0,
       }),
     ).toEqual(liveActivityPayload);
   });
 
   it("rejects jobs with invalid or overlong time windows", () => {
-    const basePayload = makeApnsDeliveryJobPayload({
+    const basePayload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_end",
       userId: "user-1",
       deviceId: "device-1",
@@ -200,28 +206,28 @@ describe("apnsDeliveryJobs", () => {
     };
 
     expect(
-      verifySignedApnsDeliveryJob({
+      verifySignedDeliveryJob({
         secret,
-        job: signApnsDeliveryJob({ secret, payload: invalidCreatedAt }),
+        job: signDeliveryJob({ secret, payload: invalidCreatedAt }),
         nowMs: 0,
       }),
     ).toMatchObject({
-      _tag: "ApnsDeliveryJobCreatedAtInvalid",
+      _tag: "DeliveryJobCreatedAtInvalid",
       jobId: "job-window",
       kind: "live_activity_end",
       userId: "user-1",
       deviceId: "device-1",
       createdAt: "not-a-date",
-      message: "APNs delivery job job-window has invalid creation time not-a-date.",
+      message: "delivery job job-window has invalid creation time not-a-date.",
     });
     expect(
-      verifySignedApnsDeliveryJob({
+      verifySignedDeliveryJob({
         secret,
-        job: signApnsDeliveryJob({ secret, payload: invertedWindow }),
+        job: signDeliveryJob({ secret, payload: invertedWindow }),
         nowMs: 0,
       }),
     ).toMatchObject({
-      _tag: "ApnsDeliveryJobTimeWindowInvalid",
+      _tag: "DeliveryJobTimeWindowInvalid",
       jobId: "job-window",
       kind: "live_activity_end",
       userId: "user-1",
@@ -229,16 +235,16 @@ describe("apnsDeliveryJobs", () => {
       createdAt: "2026-05-25T00:00:00.000Z",
       expiresAt: "2026-05-24T23:59:59.000Z",
       message:
-        "APNs delivery job job-window has invalid time window 2026-05-25T00:00:00.000Z to 2026-05-24T23:59:59.000Z.",
+        "delivery job job-window has invalid time window 2026-05-25T00:00:00.000Z to 2026-05-24T23:59:59.000Z.",
     });
     expect(
-      verifySignedApnsDeliveryJob({
+      verifySignedDeliveryJob({
         secret,
-        job: signApnsDeliveryJob({ secret, payload: overlongWindow }),
+        job: signDeliveryJob({ secret, payload: overlongWindow }),
         nowMs: 0,
       }),
     ).toMatchObject({
-      _tag: "ApnsDeliveryJobTimeWindowTooLong",
+      _tag: "DeliveryJobTimeWindowTooLong",
       jobId: "job-window",
       kind: "live_activity_end",
       userId: "user-1",
@@ -246,7 +252,7 @@ describe("apnsDeliveryJobs", () => {
       createdAt: "2026-05-25T00:00:00.000Z",
       expiresAt: "2026-05-25T00:10:01.000Z",
       message:
-        "APNs delivery job job-window time window 2026-05-25T00:00:00.000Z to 2026-05-25T00:10:01.000Z is too long.",
+        "delivery job job-window time window 2026-05-25T00:00:00.000Z to 2026-05-25T00:10:01.000Z is too long.",
     });
   });
 });

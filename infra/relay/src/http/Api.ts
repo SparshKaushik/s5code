@@ -902,79 +902,79 @@ export const serverApi = HttpApiBuilder.group(
               reason: "persistence_failed",
               traceId,
             }),
-          ApnsDeliveryJobQueuePayloadInvalid: (_error, traceId) =>
+          DeliveryJobQueuePayloadInvalid: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobLiveActivityAggregateMissing: (_error, traceId) =>
+          DeliveryJobLiveActivityAggregateMissing: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobLiveActivityNotificationUnexpected: (_error, traceId) =>
+          DeliveryJobLiveActivityNotificationUnexpected: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobPushNotificationMissing: (_error, traceId) =>
+          DeliveryJobPushNotificationMissing: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobPushNotificationAggregateUnexpected: (_error, traceId) =>
+          DeliveryJobPushNotificationAggregateUnexpected: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobCreatedAtInvalid: (_error, traceId) =>
+          DeliveryJobCreatedAtInvalid: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobExpiresAtInvalid: (_error, traceId) =>
+          DeliveryJobExpiresAtInvalid: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobTimeWindowInvalid: (_error, traceId) =>
+          DeliveryJobTimeWindowInvalid: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobTimeWindowTooLong: (_error, traceId) =>
+          DeliveryJobTimeWindowTooLong: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobSignatureInvalid: (_error, traceId) =>
+          DeliveryJobSignatureInvalid: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobExpired: (_error, traceId) =>
+          DeliveryJobExpired: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryJobClaimInFlight: (_error, traceId) =>
+          DeliveryJobClaimInFlight: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "internal_error",
               traceId,
             }),
-          ApnsDeliveryQueueSendError: (_error, traceId) =>
+          DeliveryQueueSendError: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
               reason: "upstream_unavailable",

@@ -232,6 +232,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
   it("preserves disabled Live Activity preferences in relay registrations", () => {
     expect(
       makeRelayDeviceRegistrationRequest({
+        platform: "ios",
         deviceId: "device-1",
         label: "Julius's iPhone",
         iosMajorVersion: 18,
@@ -265,6 +266,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
   it("registers the app's APNs routing so the relay targets the right bundle", () => {
     expect(
       makeRelayDeviceRegistrationRequest({
+        platform: "ios",
         deviceId: "device-1",
         label: "Julius's iPhone",
         iosMajorVersion: 18,
@@ -292,6 +294,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
 
     expect(
       makeRelayDeviceRegistrationRequest({
+        platform: "ios",
         deviceId: "device-1",
         label: "Julius's iPhone",
         iosMajorVersion: 18,
@@ -310,6 +313,7 @@ describe("makeRelayDeviceRegistrationRequest", () => {
   it("marks notification delivery disabled when APNs permission is unavailable", () => {
     expect(
       makeRelayDeviceRegistrationRequest({
+        platform: "ios",
         deviceId: "device-1",
         label: "Julius's iPhone",
         iosMajorVersion: 18,

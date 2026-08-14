@@ -21,7 +21,7 @@ export { isExpiredAgentActivityState } from "./agentActivityPayloads.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
-import * as ApnsDeliveries from "./ApnsDeliveries.ts";
+import * as Deliveries from "./Deliveries.ts";
 
 export type AgentActivityPublishError =
   | AgentActivityRows.AgentActivityRowUpsertPersistenceError
@@ -29,7 +29,7 @@ export type AgentActivityPublishError =
   | AgentActivityRows.AgentActivityRowListPersistenceError
   | EnvironmentLinks.EnvironmentLinkUserListPersistenceError
   | LiveActivities.LiveActivityTargetListPersistenceError
-  | ApnsDeliveries.ApnsDeliveryError;
+  | Deliveries.DeliveryError;
 
 export class AgentActivityPublisher extends Context.Service<
   AgentActivityPublisher,
@@ -51,7 +51,7 @@ export const make = Effect.gen(function* () {
   const rows = yield* AgentActivityRows.AgentActivityRows;
   const links = yield* EnvironmentLinks.EnvironmentLinks;
   const liveActivities = yield* LiveActivities.LiveActivities;
-  const apnsDeliveries = yield* ApnsDeliveries.ApnsDeliveries;
+  const deliveries = yield* Deliveries.Deliveries;
 
   const publishForDeliveryUser = Effect.fnUntraced(function* (input: {
     readonly deliveryUser: EnvironmentLinks.AgentAwarenessDeliveryUserRecord;
@@ -82,14 +82,14 @@ export const make = Effect.gen(function* () {
       (target) =>
         Effect.all(
           [
-            apnsDeliveries.sendForTarget({
+            deliveries.sendForTarget({
               target,
               aggregate: liveActivityAggregate,
               nowMs: input.nowMs,
             }),
             notificationOnlyAggregate === null
               ? Effect.succeed(null)
-              : apnsDeliveries.sendPushNotificationForTarget({
+              : deliveries.sendPushNotificationForTarget({
                   target,
                   aggregate: notificationOnlyAggregate,
                 }),
@@ -126,7 +126,7 @@ export const make = Effect.gen(function* () {
         terminalState: null,
         nowMs: now.epochMilliseconds,
       });
-      return yield* apnsDeliveries.sendForTarget({
+      return yield* deliveries.sendForTarget({
         target,
         aggregate,
         nowMs: now.epochMilliseconds,
