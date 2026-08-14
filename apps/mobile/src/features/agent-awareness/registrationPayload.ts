@@ -5,12 +5,14 @@ import { supportsAgentAwarenessPush } from "./capabilities";
 
 // Development builds are Xcode-signed and receive sandbox APNs tokens;
 // preview and production builds are distribution-signed and use production
-// APNs. The relay routes each device's pushes accordingly.
+// APNs. The relay routes each device's pushes accordingly. Android has no
+// equivalent split: every build variant sends through the same FCM project.
 export function resolveApsEnvironment(appVariant: unknown): "sandbox" | "production" {
   return appVariant === "development" ? "sandbox" : "production";
 }
 
-export function makeRelayDeviceRegistrationRequest(input: {
+interface IosRegistrationInput {
+  readonly platform: "ios";
   readonly deviceId: string;
   readonly label: string;
   readonly iosMajorVersion: number;
@@ -21,9 +23,49 @@ export function makeRelayDeviceRegistrationRequest(input: {
   readonly pushToStartToken?: string;
   readonly notificationsEnabled: boolean;
   readonly preferences: Preferences;
-}): RelayDeviceRegistrationRequest {
+}
+
+interface AndroidRegistrationInput {
+  readonly platform: "android";
+  readonly deviceId: string;
+  readonly label: string;
+  readonly appVersion?: string;
+  readonly fcmToken?: string;
+  readonly notificationsEnabled: boolean;
+  readonly preferences: Preferences;
+}
+
+export type RegistrationInput = IosRegistrationInput | AndroidRegistrationInput;
+
+export function makeRelayDeviceRegistrationRequest(
+  input: RegistrationInput,
+): RelayDeviceRegistrationRequest {
   const pushAvailable = supportsAgentAwarenessPush();
-  const liveActivitiesEnabled = pushAvailable && input.preferences.liveActivitiesEnabled !== false;
+  // Live Activities are iOS-only; Android's "agent activity" surface (a
+  // persistent ongoing notification) is a later phase and never reads this
+  // preference today.
+  const liveActivitiesEnabled =
+    input.platform === "ios" && pushAvailable && input.preferences.liveActivitiesEnabled !== false;
+  const preferences = {
+    liveActivitiesEnabled,
+    notificationsEnabled: pushAvailable && input.notificationsEnabled,
+    notifyOnApproval: true,
+    notifyOnInput: true,
+    notifyOnCompletion: true,
+    notifyOnFailure: true,
+  };
+
+  if (input.platform === "android") {
+    return {
+      deviceId: input.deviceId,
+      label: input.label,
+      platform: "android",
+      appVersion: input.appVersion,
+      ...(input.fcmToken ? { fcmToken: input.fcmToken } : {}),
+      preferences,
+    };
+  }
+
   return {
     deviceId: input.deviceId,
     label: input.label,
@@ -34,13 +76,6 @@ export function makeRelayDeviceRegistrationRequest(input: {
     ...(input.apsEnvironment ? { apsEnvironment: input.apsEnvironment } : {}),
     ...(input.pushToken ? { pushToken: input.pushToken } : {}),
     ...(input.pushToStartToken ? { pushToStartToken: input.pushToStartToken } : {}),
-    preferences: {
-      liveActivitiesEnabled,
-      notificationsEnabled: pushAvailable && input.notificationsEnabled,
-      notifyOnApproval: true,
-      notifyOnInput: true,
-      notifyOnCompletion: true,
-      notifyOnFailure: true,
-    },
+    preferences,
   };
 }

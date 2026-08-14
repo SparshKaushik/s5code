@@ -39,6 +39,7 @@ const REMOTE_ACTIVITY_REGISTRATION_RETRY_MS = 15_000;
 const AgentAwarenessOperation = Schema.Literals([
   "read-notification-permissions",
   "read-native-push-token",
+  "create-android-notification-channel",
   "read-device-registration-relay-token",
   "read-device-unregistration-relay-token",
   "read-live-activity-registration-relay-token",
@@ -161,6 +162,44 @@ function canRegisterRemoteLiveActivities(): boolean {
   return Platform.OS === "ios";
 }
 
+// Push notifications (not the Live Activity lock-screen surface) work on both
+// platforms: iOS via APNs, Android via FCM.
+function canRegisterPushNotifications(): boolean {
+  return Platform.OS === "ios" || Platform.OS === "android";
+}
+
+// Android 13+ (API 33) requires a notification channel to exist before a
+// push token is meaningfully deliverable; creating it is idempotent.
+const AGENT_AWARENESS_ANDROID_CHANNEL_ID = "agent-awareness";
+let androidNotificationChannelEnsured = false;
+function ensureAndroidNotificationChannel(): Effect.Effect<void> {
+  if (Platform.OS !== "android" || androidNotificationChannelEnsured) {
+    return Effect.void;
+  }
+  return Effect.tryPromise({
+    try: () =>
+      Notifications.setNotificationChannelAsync(AGENT_AWARENESS_ANDROID_CHANNEL_ID, {
+        name: "Agent activity",
+        importance: Notifications.AndroidImportance.HIGH,
+      }),
+    catch: (cause) =>
+      new AgentAwarenessOperationError({ operation: "create-android-notification-channel", cause }),
+  }).pipe(
+    Effect.tap(() =>
+      Effect.sync(() => {
+        androidNotificationChannelEnsured = true;
+      }),
+    ),
+    Effect.tapError((error) =>
+      Effect.sync(() => {
+        logRegistrationError("android notification channel creation failed", error);
+      }),
+    ),
+    Effect.orElseSucceed(() => null),
+    Effect.asVoid,
+  );
+}
+
 export function shouldRegisterAgentAwarenessDeviceForProvider(
   previousIdentity: string | null,
   identity: string | undefined,
@@ -250,12 +289,13 @@ function iosMajorVersion(): number {
 
 function nativePushTokenRegistration(observedPushToken?: string) {
   return Effect.gen(function* () {
-    if (!canRegisterRemoteLiveActivities() || !supportsAgentAwarenessPush()) {
+    if (!canRegisterPushNotifications() || !supportsAgentAwarenessPush()) {
       return { notificationsEnabled: false, pushToken: null };
     }
     if (observedPushToken) {
       return { notificationsEnabled: true, pushToken: observedPushToken };
     }
+    yield* ensureAndroidNotificationChannel();
     const permissions = yield* Effect.tryPromise({
       try: () => Notifications.getPermissionsAsync(),
       catch: (cause) =>
@@ -277,13 +317,15 @@ function nativePushTokenRegistration(observedPushToken?: string) {
     }).pipe(
       Effect.tapError((error) =>
         Effect.sync(() => {
-          logRegistrationError("native APNs token lookup failed", error);
+          logRegistrationError("native push token lookup failed", error);
         }),
       ),
       Effect.orElseSucceed(() => null),
     );
     const pushToken =
-      token?.type === "ios" && typeof token.data === "string" && token.data.trim().length > 0
+      (token?.type === "ios" || token?.type === "android") &&
+      typeof token.data === "string" &&
+      token.data.trim().length > 0
         ? token.data.trim()
         : null;
     return { notificationsEnabled: pushToken !== null, pushToken };
@@ -672,7 +714,7 @@ function registerDevice(
   expectedGeneration = deviceRegistrationGeneration,
 ): Effect.Effect<void, unknown, ManagedRelay.ManagedRelayClient> {
   return Effect.gen(function* () {
-    if (!canRegisterRemoteLiveActivities()) {
+    if (!canRegisterPushNotifications()) {
       logRegistrationDebug("device registration skipped; platform does not support it");
       return;
     }
@@ -705,19 +747,39 @@ function registerDevice(
       expectedGeneration,
       notificationsEnabled: pushTokenRegistration.notificationsEnabled,
     });
-    const bundleId = Constants.expoConfig?.ios?.bundleIdentifier?.trim();
+    const label =
+      Constants.deviceName?.trim() || (Platform.OS === "android" ? "Android device" : "iOS device");
+    const registrationInput =
+      Platform.OS === "android"
+        ? ({
+            platform: "android",
+            deviceId,
+            label,
+            appVersion: Constants.expoConfig?.version,
+            ...(pushTokenRegistration.pushToken
+              ? { fcmToken: pushTokenRegistration.pushToken }
+              : {}),
+            notificationsEnabled: pushTokenRegistration.notificationsEnabled,
+            preferences,
+          } as const)
+        : ({
+            platform: "ios",
+            deviceId,
+            label,
+            iosMajorVersion: iosMajorVersion(),
+            appVersion: Constants.expoConfig?.version,
+            ...(Constants.expoConfig?.ios?.bundleIdentifier?.trim()
+              ? { bundleId: Constants.expoConfig.ios.bundleIdentifier.trim() }
+              : {}),
+            apsEnvironment: resolveApsEnvironment(Constants.expoConfig?.extra?.appVariant),
+            ...(pushTokenRegistration.pushToken
+              ? { pushToken: pushTokenRegistration.pushToken }
+              : {}),
+            notificationsEnabled: pushTokenRegistration.notificationsEnabled,
+            preferences,
+          } as const);
     yield* registerDeviceWithRelay(
-      makeRelayDeviceRegistrationRequest({
-        deviceId,
-        label: Constants.deviceName?.trim() || "iOS device",
-        iosMajorVersion: iosMajorVersion(),
-        appVersion: Constants.expoConfig?.version,
-        ...(bundleId ? { bundleId } : {}),
-        apsEnvironment: resolveApsEnvironment(Constants.expoConfig?.extra?.appVariant),
-        ...(pushTokenRegistration.pushToken ? { pushToken: pushTokenRegistration.pushToken } : {}),
-        notificationsEnabled: pushTokenRegistration.notificationsEnabled,
-        preferences,
-      }),
+      makeRelayDeviceRegistrationRequest(registrationInput),
       expectedGeneration,
     );
   });
@@ -732,15 +794,19 @@ function registerDeviceForCurrentUser(): Effect.Effect<
 }
 
 function ensurePushTokenListener(): void {
-  if (pushTokenSubscription || !canRegisterRemoteLiveActivities()) {
+  if (pushTokenSubscription || !canRegisterPushNotifications()) {
     return;
   }
 
   pushTokenSubscription = Notifications.addPushTokenListener((token) => {
-    if (token.type === "ios" && typeof token.data === "string" && token.data.trim().length > 0) {
+    if (
+      (token.type === "ios" || token.type === "android") &&
+      typeof token.data === "string" &&
+      token.data.trim().length > 0
+    ) {
       enqueueDeviceRegistration(
         { observedPushToken: token.data.trim() },
-        "native APNs token rotation registration failed",
+        "native push token rotation registration failed",
       );
     }
   });
@@ -753,7 +819,7 @@ function ensurePushTokenListener(): void {
 // foreground/sign-in bursts collapse to one registration, but returning after
 // real time away still replays.)
 function ensureAppStateListener(): void {
-  if (appStateSubscription || !canRegisterRemoteLiveActivities()) {
+  if (appStateSubscription || !canRegisterPushNotifications()) {
     return;
   }
 
@@ -784,7 +850,7 @@ function endLocalLiveActivities(context: string): void {
 }
 
 export function registerAgentAwarenessConnection(connection: SavedRemoteConnection): void {
-  if (!canRegisterRemoteLiveActivities()) {
+  if (!canRegisterPushNotifications()) {
     return;
   }
 

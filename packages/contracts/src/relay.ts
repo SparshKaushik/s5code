@@ -11,7 +11,7 @@ import * as OpenApi from "effect/unstable/httpapi/OpenApi";
 import { EnvironmentId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { ExecutionEnvironmentDescriptor } from "./environment.ts";
 
-export const RelayAgentAwarenessPlatform = Schema.Literal("ios");
+export const RelayAgentAwarenessPlatform = Schema.Literals(["ios", "android"]);
 export type RelayAgentAwarenessPlatform = typeof RelayAgentAwarenessPlatform.Type;
 
 export const RelayAgentAwarenessPhase = Schema.Literals([
@@ -42,16 +42,21 @@ export const RelayDeviceRegistrationRequest = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+  // iOS-only: the Live Activity runtime requires iOS 18+. Android builds omit
+  // this and identify themselves with appVersion instead.
+  iosMajorVersion: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
   appVersion: Schema.optional(TrimmedNonEmptyString),
   // APNs routing for this install: the topic must match the app's bundle id
   // (dev/preview/prod variants differ) and development-signed builds receive
   // sandbox tokens. Optional so older app builds keep registering; the relay
-  // falls back to its configured defaults.
+  // falls back to its configured defaults. Android builds omit these.
   bundleId: Schema.optional(TrimmedNonEmptyString),
   apsEnvironment: Schema.optional(RelayApnsEnvironment),
   pushToken: Schema.optional(TrimmedNonEmptyString),
   pushToStartToken: Schema.optional(TrimmedNonEmptyString),
+  // Android FCM registration token. Android builds send this instead of the
+  // iOS push tokens above.
+  fcmToken: Schema.optional(TrimmedNonEmptyString),
   preferences: RelayAgentAwarenessPreferences,
 });
 export type RelayDeviceRegistrationRequest = typeof RelayDeviceRegistrationRequest.Type;
@@ -60,7 +65,8 @@ export const RelayClientDeviceRecord = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+  // Null for Android devices, which do not report an iOS major version.
+  iosMajorVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
   appVersion: Schema.NullOr(TrimmedNonEmptyString),
   notifications: Schema.Struct({
     enabled: Schema.Boolean,
@@ -842,9 +848,9 @@ export const RelayDeliveryResult = Schema.Struct({
   kind: RelayDeliveryKind,
   ok: Schema.Boolean,
   queued: Schema.optional(Schema.Boolean),
-  apnsStatus: Schema.NullOr(Schema.Number),
-  apnsReason: Schema.NullOr(Schema.String),
-  apnsId: Schema.NullOr(Schema.String),
+  deliveryStatus: Schema.NullOr(Schema.Number),
+  deliveryReason: Schema.NullOr(Schema.String),
+  providerMessageId: Schema.NullOr(Schema.String),
 });
 export type RelayDeliveryResult = typeof RelayDeliveryResult.Type;
 

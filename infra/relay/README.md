@@ -117,8 +117,17 @@ Keep schema changes in `src/persistence/schema.ts` together with generated migra
 
 Apple push credentials (`APNS_ENVIRONMENT`, `APNS_TEAM_ID`, `APNS_KEY_ID`, `APNS_BUNDLE_ID`,
 `APNS_PRIVATE_KEY`) are optional. When any of them is absent the relay still deploys and links
-then serves remote connections; only mobile push notifications and Live Activities are disabled.
-The worker logs `APNs not configured; mobile notifications and Live Activities disabled`.
+then serves remote connections; only iOS mobile push notifications and Live Activities are disabled.
+The worker logs `Neither APNs nor FCM configured; mobile notifications and Live Activities disabled`
+when both providers are absent, and skips only the disabled provider's queue when one is configured.
+
+### Optional FCM
+
+Firebase Cloud Messaging credentials (`FCM_PROJECT_ID`, `FCM_CLIENT_EMAIL`, `FCM_PRIVATE_KEY`) are
+optional and mirror APNs: when any of them is absent, Android mobile push notifications are disabled
+while the relay still deploys normally. Get the values from the Firebase console under Project
+settings -> Service accounts -> Generate new private key; use the `project_id`, `client_email`, and
+`private_key` fields from the downloaded JSON.
 
 Alchemy defaults personal deployments to the `dev_$USER` stage. Relay custom domains apply the same
 DNS-safe sanitization as Alchemy physical resource names, so `prod` uses
@@ -153,7 +162,7 @@ The repository must define these Actions secrets shared by relay deployments:
 - `AXIOM_TOKEN`
 
 The relay `DATABASE_URL` is supplied per-deploy (from `infra/relay/.env` or the deploy environment); it
-is a Postgres connection string and should not be committed. `APNS_*` are optional (see above).
+is a Postgres connection string and should not be committed. `APNS_*` and `FCM_*` are optional (see above).
 
 The `production` GitHub environment must define these Actions variables:
 
@@ -167,11 +176,14 @@ The `production` GitHub environment must define these Actions variables:
 - `APNS_TEAM_ID`
 - `APNS_KEY_ID`
 - `APNS_BUNDLE_ID`
+- `FCM_PROJECT_ID`
+- `FCM_CLIENT_EMAIL`
 
 The `production` GitHub environment must define these Actions secrets:
 
 - `CLERK_SECRET_KEY`
 - `APNS_PRIVATE_KEY`
+- `FCM_PRIVATE_KEY`
 
 The account-scoped repository credentials are consumed by Alchemy while provisioning relay stages; they
 are not bound into the relay Worker. The production deployment uses an Axiom personal access token,

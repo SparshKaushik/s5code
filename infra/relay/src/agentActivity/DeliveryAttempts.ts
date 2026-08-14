@@ -36,17 +36,17 @@ export interface DeliveryAttemptInput {
   readonly kind: string;
   readonly sourceJobId?: string | null;
   readonly token: string | null;
-  readonly apnsStatus?: number;
-  readonly apnsReason?: string;
-  readonly apnsId?: string | null;
+  readonly deliveryStatus?: number;
+  readonly deliveryReason?: string;
+  readonly providerMessageId?: string | null;
   readonly transportError?: string;
 }
 
 export interface DeliveryAttemptCompletionInput {
   readonly sourceJobId: string;
-  readonly apnsStatus?: number;
-  readonly apnsReason?: string;
-  readonly apnsId?: string | null;
+  readonly deliveryStatus?: number;
+  readonly deliveryReason?: string;
+  readonly providerMessageId?: string | null;
   readonly transportError?: string;
 }
 
@@ -84,9 +84,9 @@ function insertValues(
     kind: input.kind,
     sourceJobId: input.sourceJobId ?? null,
     tokenSuffix: input.token?.slice(-8) ?? null,
-    apnsStatus: input.apnsStatus ?? null,
-    apnsReason: input.apnsReason ?? null,
-    apnsId: input.apnsId ?? null,
+    deliveryStatus: input.deliveryStatus ?? null,
+    deliveryReason: input.deliveryReason ?? null,
+    providerMessageId: input.providerMessageId ?? null,
     transportError: input.transportError ?? null,
   };
 }
@@ -160,9 +160,9 @@ export const make = Effect.gen(function* () {
         const existing = yield* db
           .select({
             createdAt: relayDeliveryAttempts.createdAt,
-            apnsStatus: relayDeliveryAttempts.apnsStatus,
-            apnsReason: relayDeliveryAttempts.apnsReason,
-            apnsId: relayDeliveryAttempts.apnsId,
+            deliveryStatus: relayDeliveryAttempts.deliveryStatus,
+            deliveryReason: relayDeliveryAttempts.deliveryReason,
+            providerMessageId: relayDeliveryAttempts.providerMessageId,
             transportError: relayDeliveryAttempts.transportError,
           })
           .from(relayDeliveryAttempts)
@@ -173,9 +173,9 @@ export const make = Effect.gen(function* () {
           return "in_flight";
         }
         if (
-          row.apnsStatus !== null ||
-          row.apnsReason !== null ||
-          row.apnsId !== null ||
+          row.deliveryStatus !== null ||
+          row.deliveryReason !== null ||
+          row.providerMessageId !== null ||
           row.transportError !== null
         ) {
           return "completed";
@@ -193,9 +193,9 @@ export const make = Effect.gen(function* () {
             and(
               eq(relayDeliveryAttempts.sourceJobId, input.sourceJobId),
               eq(relayDeliveryAttempts.createdAt, row.createdAt),
-              isNull(relayDeliveryAttempts.apnsStatus),
-              isNull(relayDeliveryAttempts.apnsReason),
-              isNull(relayDeliveryAttempts.apnsId),
+              isNull(relayDeliveryAttempts.deliveryStatus),
+              isNull(relayDeliveryAttempts.deliveryReason),
+              isNull(relayDeliveryAttempts.providerMessageId),
               isNull(relayDeliveryAttempts.transportError),
             ),
           )
@@ -224,9 +224,9 @@ export const make = Effect.gen(function* () {
         .update(relayDeliveryAttempts)
         .set({
           createdAt: completedAt,
-          apnsStatus: input.apnsStatus ?? null,
-          apnsReason: input.apnsReason ?? null,
-          apnsId: input.apnsId ?? null,
+          deliveryStatus: input.deliveryStatus ?? null,
+          deliveryReason: input.deliveryReason ?? null,
+          providerMessageId: input.providerMessageId ?? null,
           transportError: input.transportError ?? null,
         })
         .where(eq(relayDeliveryAttempts.sourceJobId, input.sourceJobId))
