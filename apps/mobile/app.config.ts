@@ -11,9 +11,10 @@ Object.assign(process.env, repoEnv);
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
 const isIosPersonalTeamBuild = repoEnv.T3CODE_IOS_PERSONAL_TEAM === "1";
 
-// Release builds set these in CI so the APK carries the release version/versionCode
-// instead of the hardcoded defaults below. versionCode must strictly increase
-// across releases or Android refuses to install the new APK over the old one.
+// Production app versions are release metadata. Source commits intentionally keep
+// no mobile release version; CI injects the unified release version only when a
+// native fingerprint change requires a new binary. OTA releases inject the
+// version of the latest compatible production build.
 const releaseVersion = repoEnv.MOBILE_VERSION?.trim() || undefined;
 const releaseVersionCode = repoEnv.MOBILE_VERSION_CODE?.trim()
   ? Number(repoEnv.MOBILE_VERSION_CODE)
@@ -178,18 +179,22 @@ const sharingPlugin: NonNullable<ExpoConfig["plugins"]>[number] = [
 // names on Android so React Native and the native composer use one set of
 // family names without waiting for runtime font loading.
 
+const runtimeVersionPolicy =
+  process.env.MOBILE_VERSION_POLICY ??
+  (APP_VARIANT === "production" ? "appVersion" : "fingerprint");
+
 const config: ExpoConfig = {
   name: variant.appName,
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: releaseVersion ?? "1.0.1",
+  ...(releaseVersion ? { version: releaseVersion } : {}),
   runtimeVersion: {
-    // Fingerprint (not appVersion) so an OTA only reaches binaries whose native
-    // project — native deps, config plugins, AND patches/ — matches the update.
-    // With appVersion, every 0.1.0 build shares a runtime version, so a JS update
-    // could land on a binary missing the native changes it needs and crash.
-    policy: process.env.MOBILE_VERSION_POLICY ?? "fingerprint",
+    // The app version is the explicit OTA compatibility boundary. Release CI
+    // compares Expo fingerprints against the latest production build: matching
+    // native code reuses that build's version for an OTA, while native changes
+    // receive the unified release version and a new binary.
+    policy: runtimeVersionPolicy,
   },
   orientation: "portrait",
   icon: variant.assets.appIcon,

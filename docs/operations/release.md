@@ -2,7 +2,7 @@
 
 > For maintainers. Using T3 Code? See [docs/user](../user/).
 
-This document covers the unified release workflow for stable and nightly desktop releases.
+This document covers the unified release workflow for stable and nightly desktop, server, web, and mobile releases.
 
 ## What the workflow does
 
@@ -13,17 +13,29 @@ This document covers the unified release workflow for stable and nightly desktop
   - manual `workflow_dispatch` for either channel
 - Runs quality gates first: lint, typecheck, test.
 - Reads the shared production T3 Connect relay URL and Clerk client configuration before packaging clients.
-- Builds artifacts in parallel for both channels:
-  - macOS `arm64` DMG
-  - macOS `x64` DMG
-  - Android universal APK (all four ABIs), built on the runner with `eas build --local` (no EAS cloud)
-- Publishes one GitHub Release with all produced files, including the APK under `t3code-<version>.apk`.
+- Reconciles the Android mobile release through EAS:
+  - if the current native fingerprint matches the latest finished production build, publishes an OTA update using that build's existing mobile version
+  - otherwise, injects the unified release version, creates a new EAS production APK, and attaches it as `t3code-<version>.apk`
+- Publishes one GitHub Release with all produced files. OTA-only releases intentionally reuse the previous mobile binary and therefore have no new APK asset.
   - Stable tags with a suffix after `X.Y.Z` (for example `1.2.3-alpha.1`) are published as GitHub prereleases.
   - Only plain stable `X.Y.Z` releases are marked as the repository's latest release.
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Signing is optional and auto-detected per platform from secrets: Apple secrets sign the DMGs, EAS-managed Android credentials sign the APK. Without them the DMGs are unsigned and the APK is debug-signed (still sideloadable).
+- Signing is optional and auto-detected per platform from secrets: Apple secrets sign the DMGs and EAS-managed Android credentials sign native APK releases. Without Apple credentials the DMGs are unsigned. Mobile reconciliation requires EAS configuration and fails rather than silently omitting a requested OTA or build.
+
+## Mobile release invariant
+
+Mobile app versions are CI-owned release metadata. Never edit or add a mobile release version in a source commit. `apps/mobile/app.config.ts` omits the version field unless CI supplies `MOBILE_VERSION`; release build and update commands always receive that value from CI.
+
+The production runtime policy is `appVersion`; Expo Fingerprint is the release decision input, not the runtime version. The release job computes the fingerprint with the latest production build's app version and production EAS environment. A match publishes JavaScript and assets to that exact runtime version. A mismatch uses the unified release version for a new binary. Before publishing or building, CI synchronizes the selected version to the EAS production environment so local and remote app-config evaluation agree; source files remain unchanged. `eas.json` keeps native build numbers remote and auto-increments them only when a native build runs.
+
+Required repository configuration:
+
+- Secret `EXPO_TOKEN`
+- Variables `EAS_PROJECT_ID` and `EAS_OWNER`
+
+The EAS `production` environment must contain the public mobile build configuration used by the app. Manual runs of `.github/workflows/mobile-eas-production.yml` are recovery controls and require an explicit mobile version.
 
 ## Required release credentials
 
