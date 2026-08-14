@@ -19,6 +19,7 @@ export * from "./git.ts";
 export * from "./vcs.ts";
 export * from "./sourceControl.ts";
 export * from "./orchestration.ts";
+export * from "./pullRequest.ts";
 export * from "./rewind.ts";
 export * from "./checkpointMaintenance.ts";
 export * from "./t3ProjectFile.ts";

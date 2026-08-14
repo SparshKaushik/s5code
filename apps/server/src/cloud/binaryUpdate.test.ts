@@ -35,6 +35,8 @@ const makeRunner = (options: {
           timedOut: false,
           stdoutTruncated: false,
           stderrTruncated: false,
+          stdoutInvalidUtf8: false,
+          stderrInvalidUtf8: false,
         };
       }),
   });
@@ -224,6 +226,8 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
                   timedOut: false,
                   stdoutTruncated: false,
                   stderrTruncated: false,
+                  stdoutInvalidUtf8: false,
+                  stderrInvalidUtf8: false,
                 }),
             }),
           ),
