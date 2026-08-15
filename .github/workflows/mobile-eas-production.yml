@@ -141,9 +141,15 @@ jobs:
         run: |
           set -euo pipefail
 
+          # --build-profile, not --environment: eas-cli has a known bug
+          # (expo/eas-cli#3870) where --environment logs a stray
+          # "Using environment: ..." line to real stdout before the JSON
+          # redirect is installed, corrupting --json output for jq. The
+          # "production" build profile in eas.json maps to the same EAS
+          # environment, so this is equivalent here.
           fingerprint_json="$(eas fingerprint:generate \
             --platform android \
-            --environment production \
+            --build-profile production \
             --json \
             --non-interactive)"
           fingerprint_hash="$(jq -r '.hash' <<<"$fingerprint_json")"
