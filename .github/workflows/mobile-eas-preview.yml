@@ -1,5 +1,14 @@
 name: Mobile EAS Preview
 
+# Publishes a JS-only OTA update for the PR's Android dev-client build.
+# `eas build --local` (see mobile-eas-production.yml for why) means EAS's
+# cloud build history no longer reflects what dev-client binaries reviewers
+# already have installed, so per-PR native builds are not attempted here.
+# When the native fingerprint changes on a PR, this only publishes the OTA
+# for the runtime version that fingerprint would map to; a reviewer without
+# a dev-client build matching that fingerprint needs one built and installed
+# out of band (`pnpm eas:android:preview:dev` locally) before the OTA is
+# visible in their app.
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
@@ -80,15 +89,52 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
         run: eas env:pull preview --non-interactive
 
-      - name: Deploy with fingerprint check
+      - id: fingerprint
+        name: Compute Android fingerprint
         if: steps.expo-token.outputs.present == 'true'
-        uses: expo/expo-github-action/continuous-deploy-fingerprint@main
+        working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        with:
-          profile: preview:dev
-          branch: pr-${{ github.event.pull_request.number }}
-          platform: all
-          environment: preview
-          working-directory: apps/mobile
-          github-token: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          fingerprint_json="$(eas fingerprint:generate \
+            --platform android \
+            --environment preview \
+            --json \
+            --non-interactive)"
+          echo "hash=$(jq -r '.hash' <<<"$fingerprint_json")" >> "$GITHUB_OUTPUT"
+
+      - name: Publish preview OTA
+        if: steps.expo-token.outputs.present == 'true'
+        working-directory: apps/mobile
+        env:
+          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+        run: |
+          eas update \
+            --channel preview \
+            --environment preview \
+            --platform android \
+            --branch pr-${{ github.event.pull_request.number }} \
+            --message "PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" \
+            --non-interactive
+
+      - name: Comment on PR
+        if: steps.expo-token.outputs.present == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh pr comment ${{ github.event.pull_request.number }} \
+            --repo "${{ github.repository }}" \
+            --edit-last --create-if-none \
+            --body "$(cat <<EOF
+          ### 🚀 Mobile Preview
+
+          Published a JS-only OTA update to branch \`pr-${{ github.event.pull_request.number }}\` (Android fingerprint \`${{ steps.fingerprint.outputs.hash }}\`).
+
+          This updates JS/assets on an existing dev-client build with a matching native fingerprint. If the fingerprint changed with this push (native deps, config plugins, or app.config.ts), rebuild the dev client before this update is visible:
+
+          \`\`\`
+          pnpm --filter @t3tools/mobile eas:android:preview:dev
+          \`\`\`
+          EOF
+          )"

@@ -14,21 +14,29 @@ This document covers the unified release workflow for stable and nightly desktop
 - Runs quality gates first: lint, typecheck, test.
 - Reads the shared production T3 Connect relay URL and Clerk client configuration before packaging clients.
 - Reconciles the Android mobile release through EAS:
-  - if the current native fingerprint matches the latest finished production build, publishes an OTA update using that build's existing mobile version
-  - otherwise, injects the unified release version, creates a new EAS production APK, and attaches it as `t3code-<version>.apk`
+  - if the current native fingerprint matches the fingerprint recorded on the previous GitHub Release, publishes an OTA update reusing that release's mobile version
+  - otherwise, injects the unified release version, builds a new Android APK locally on the runner (`eas build --local`, signed with EAS-managed remote credentials but not run on EAS's cloud queue), and attaches it as `s5code-<version>.apk` alongside a `fingerprint.txt` recording the native fingerprint it was built from
 - Publishes one GitHub Release with all produced files. OTA-only releases intentionally reuse the previous mobile binary and therefore have no new APK asset.
   - Stable tags with a suffix after `X.Y.Z` (for example `1.2.3-alpha.1`) are published as GitHub prereleases.
   - Only plain stable `X.Y.Z` releases are marked as the repository's latest release.
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 - Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Signing is optional and auto-detected per platform from secrets: Apple secrets sign the DMGs and EAS-managed Android credentials sign native APK releases. Without Apple credentials the DMGs are unsigned. Mobile reconciliation requires EAS configuration and fails rather than silently omitting a requested OTA or build.
+- Signing is optional and auto-detected per platform from secrets: Apple secrets sign the DMGs. Android APKs are always signed, using the credentials EAS manages remotely for the "production" build profile (downloaded to the runner over `EXPO_TOKEN` at build time). Mobile reconciliation requires EAS configuration and fails rather than silently omitting a requested OTA or build.
 
 ## Mobile release invariant
 
 Mobile app versions are CI-owned release metadata. Never edit or add a mobile release version in a source commit. `apps/mobile/app.config.ts` omits the version field unless CI supplies `MOBILE_VERSION`; release build and update commands always receive that value from CI.
 
-The production runtime policy is `appVersion`; Expo Fingerprint is the release decision input, not the runtime version. The release job computes the fingerprint with the latest production build's app version and production EAS environment. A match publishes JavaScript and assets to that exact runtime version. A mismatch uses the unified release version for a new binary. Before publishing or building, CI synchronizes the selected version to the EAS production environment so local and remote app-config evaluation agree; source files remain unchanged. `eas.json` keeps native build numbers remote and auto-increments them only when a native build runs.
+The production runtime policy is `appVersion`; Expo Fingerprint is the release decision input, not the runtime version. The release job computes the current fingerprint and compares it against a `fingerprint.txt` asset attached to the previous GitHub Release (see below for why this replaces `eas build:list`). A match publishes JavaScript and assets to that exact runtime version. A mismatch uses the unified release version for a new binary. Before publishing or building, CI synchronizes the selected version to the EAS production environment so local and remote app-config evaluation agree; source files remain unchanged. `eas.json`'s `autoIncrement` for `versionCode` is unaffected by local builds: with `appVersionSource: "remote"`, the version code is a counter EAS's servers track and bump via API on every build, independent of `eas build:list` history.
+
+### Why builds run locally instead of on EAS's cloud queue
+
+Android builds run with `eas build --local`, which executes the actual Gradle build on the GitHub Actions runner instead of queueing it on EAS's cloud build infrastructure. This avoids EAS's shared build queue wait times. Credentials are unaffected: `eas.json`'s `credentialsSource` for the `production` profile still defaults to `remote`, so the signing keystore is downloaded from EAS (authenticated via `EXPO_TOKEN`) at build time, the same as a cloud build. No keystore or signing secret lives in this repository.
+
+The tradeoff: `eas build --local` builds are never recorded in EAS's build history (`eas build:list` only sees cloud builds), which is what the OTA-vs-new-build fingerprint comparison used previously. This repo now tracks that itself: every release job attaches a `fingerprint.txt` file next to the APK on its GitHub Release, and the next release compares against the most recent GitHub Release's `fingerprint.txt` instead of querying EAS. If a previous release predates this mechanism, or was OTA-only and never got a new `fingerprint.txt`, the next run falls back to building rather than guessing.
+
+PR preview builds (`.github/workflows/mobile-eas-preview.yml`) only publish OTA updates for this same reason: a fresh per-PR dev-client APK can no longer be tracked against EAS's build history to decide when one is actually needed, and building one on every push is wasteful. When a PR's native fingerprint changes, reviewers rebuild their local dev client with `pnpm --filter @t3tools/mobile eas:android:preview:dev` (still an EAS cloud build; this is a manual, infrequent developer action, not CI).
 
 Required repository configuration:
 
