@@ -51,7 +51,12 @@ concurrency:
 
 jobs:
   production:
-    name: EAS Production ${{ github.event_name == 'workflow_call' && 'release' || inputs.mode }}
+    # github.event_name inside a called reusable workflow reflects the
+    # *caller's* triggering event (push/workflow_dispatch on release.yml),
+    # never 'workflow_call' itself. Every step below branches on whether
+    # release_version was supplied (only present via the workflow_call
+    # inputs) instead.
+    name: EAS Production ${{ inputs.release_version != '' && 'release' || inputs.mode }}
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -82,7 +87,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v6
         with:
-          ref: ${{ github.event_name == 'workflow_call' && inputs.release_ref || github.sha }}
+          ref: ${{ inputs.release_version != '' && inputs.release_ref || github.sha }}
           fetch-depth: 0
           # EAS archives the project through a local git clone. Partial clones
           # cannot serve blobs that were omitted by sparse checkout.
@@ -127,7 +132,7 @@ jobs:
 
       - id: release-decision
         name: Compare fingerprint with latest release
-        if: github.event_name == 'workflow_call'
+        if: inputs.release_version != ''
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -183,7 +188,7 @@ jobs:
           fi
 
       - name: Sync release mobile version to EAS
-        if: github.event_name == 'workflow_call'
+        if: inputs.release_version != ''
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -197,7 +202,7 @@ jobs:
             --non-interactive
 
       - name: Publish release OTA
-        if: github.event_name == 'workflow_call' && steps.release-decision.outputs.mode == 'update'
+        if: inputs.release_version != '' && steps.release-decision.outputs.mode == 'update'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -211,7 +216,7 @@ jobs:
             --non-interactive
 
       - name: Build release Android APK locally
-        if: github.event_name == 'workflow_call' && steps.release-decision.outputs.mode == 'build'
+        if: inputs.release_version != '' && steps.release-decision.outputs.mode == 'build'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -228,7 +233,7 @@ jobs:
           echo "${{ steps.release-decision.outputs.fingerprint }}" > release-publish/fingerprint.txt
 
       - name: Upload release APK
-        if: github.event_name == 'workflow_call' && steps.release-decision.outputs.mode == 'build'
+        if: inputs.release_version != '' && steps.release-decision.outputs.mode == 'build'
         uses: actions/upload-artifact@v7
         with:
           name: android-apk
@@ -238,7 +243,7 @@ jobs:
           if-no-files-found: error
 
       - name: Sync manual mobile version to EAS
-        if: github.event_name == 'workflow_dispatch'
+        if: inputs.release_version == ''
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -252,7 +257,7 @@ jobs:
             --non-interactive
 
       - name: Build manually
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build'
+        if: inputs.release_version == '' && inputs.mode == 'build'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
@@ -267,7 +272,7 @@ jobs:
             --output "release-publish/s5code-${{ inputs.version }}.apk"
 
       - name: Upload manual build APK
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'build'
+        if: inputs.release_version == '' && inputs.mode == 'build'
         uses: actions/upload-artifact@v7
         with:
           name: android-apk-manual
@@ -275,7 +280,7 @@ jobs:
           if-no-files-found: error
 
       - name: Publish OTA manually
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'update'
+        if: inputs.release_version == '' && inputs.mode == 'update'
         working-directory: apps/mobile
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
