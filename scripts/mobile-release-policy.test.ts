@@ -22,10 +22,14 @@ describe("mobile release policy", () => {
 
     expect(releaseWorkflow).toContain("uses: ./.github/workflows/mobile-eas-production.yml");
     expect(releaseWorkflow).toContain("release_version: ${{ needs.preflight.outputs.version }}");
-    expect(releaseWorkflow).not.toContain("eas build --local");
+    // Android builds run locally on the runner (eas build --local) instead of
+    // EAS's cloud build queue; release.yml attaches the fingerprint.txt asset
+    // that mobile-eas-production.yml's next run compares against.
+    expect(releaseWorkflow).toContain("release-assets/fingerprint.txt");
 
-    expect(mobileWorkflow).toContain("Compare fingerprint with latest production build");
+    expect(mobileWorkflow).toContain("Compare fingerprint with latest release");
     expect(mobileWorkflow).toContain("eas fingerprint:generate");
+    expect(mobileWorkflow).toContain("eas build \\\n            --local");
     expect(mobileWorkflow).toContain('echo "mode=update" >> "$GITHUB_OUTPUT"');
     expect(mobileWorkflow).toContain('echo "mode=build" >> "$GITHUB_OUTPUT"');
     expect(mobileWorkflow).toContain(
