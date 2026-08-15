@@ -124,6 +124,21 @@ jobs:
           token: ${{ secrets.EXPO_TOKEN }}
           packager: npm
 
+      # eas-cli runs `eas build --local` through `npx eas-cli-local-build-plugin`,
+      # and npx installs that package with npm in the project cwd — which reads
+      # apps/mobile/package.json and dies on its nitro-markdown overrides
+      # (EOVERRIDE). Preinstall the plugin outside the project and hand it to
+      # eas-cli via EAS_LOCAL_BUILD_PLUGIN_PATH so no npm install ever touches
+      # the checkout.
+      - name: Preinstall eas local build plugin
+        id: plugin
+        run: |
+          set -euo pipefail
+          eas_cli_version="$(npm view eas-cli version)"
+          mkdir -p "$RUNNER_TEMP/eas-plugin"
+          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund "eas-cli-local-build-plugin@$eas_cli_version"
+          echo "plugin_path=$RUNNER_TEMP/eas-plugin/node_modules/eas-cli-local-build-plugin/bin/run" >> "$GITHUB_OUTPUT"
+
       - name: Pull production environment variables
         working-directory: apps/mobile
         env:
@@ -227,6 +242,7 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}
+          EAS_LOCAL_BUILD_PLUGIN_PATH: ${{ steps.plugin.outputs.plugin_path }}
         run: |
           set -euo pipefail
           mkdir -p release-publish
@@ -268,6 +284,7 @@ jobs:
         env:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           MOBILE_VERSION: ${{ inputs.version }}
+          EAS_LOCAL_BUILD_PLUGIN_PATH: ${{ steps.plugin.outputs.plugin_path }}
         run: |
           mkdir -p release-publish
           eas build \
