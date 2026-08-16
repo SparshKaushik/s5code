@@ -133,18 +133,29 @@ export const detectPrTemplate = Effect.fn("detectPrTemplate")(function* (
   return yield* Effect.gen(function* () {
     // Worktree paths can be replaced between validation and open. Read regular blobs from the
     // committed base tree so repository-controlled symlinks and path races never reach the host filesystem.
-    const result = yield* executeGit({
-      operation: "PrTemplateDetection.listTemplates",
-      cwd,
-      args: ["ls-tree", "-r", "-z", "--full-tree", treeish, "--", ...TREE_PATHS],
-      maxOutputBytes: TREE_LIST_MAX_BYTES,
-      appendTruncationMarker: true,
-    });
-    if (result.stdoutTruncated) {
+    // Split file and directory pathspecs into separate ls-tree calls: a
+    // directory pathspec that is a leading-path prefix of a file pathspec
+    // (docs/PULL_REQUEST_TEMPLATE vs docs/PULL_REQUEST_TEMPLATE.md) can shadow
+    // the file on some git versions.
+    const listTreeEntries = (paths: ReadonlyArray<string>) =>
+      executeGit({
+        operation: "PrTemplateDetection.listTemplates",
+        cwd,
+        args: ["ls-tree", "-r", "-z", "--full-tree", treeish, "--", ...paths],
+        maxOutputBytes: TREE_LIST_MAX_BYTES,
+        appendTruncationMarker: true,
+      });
+
+    const fileResult = yield* listTreeEntries(TEMPLATE_PATHS);
+    const directoryResult = yield* listTreeEntries(TEMPLATE_DIRECTORIES);
+    if (fileResult.stdoutTruncated || directoryResult.stdoutTruncated) {
       return Option.none();
     }
 
-    const entries = parseTemplateTreeEntries(result.stdout);
+    const entries = [
+      ...parseTemplateTreeEntries(fileResult.stdout),
+      ...parseTemplateTreeEntries(directoryResult.stdout),
+    ];
     const entriesByPath = new Map(entries.map((entry) => [entry.path, entry]));
     for (const templatePath of TEMPLATE_PATHS) {
       const entry = entriesByPath.get(templatePath);
