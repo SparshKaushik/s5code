@@ -165,7 +165,7 @@ function ConfiguredSettingsRouteScreen() {
   }, [isLoaded, isSignedIn, user?.primaryEmailAddress?.emailAddress]);
 
   const refreshNotifications = useCallback(async () => {
-    if (process.env.EXPO_OS !== "ios") {
+    if (Platform.OS !== "ios" && Platform.OS !== "android") {
       setNotificationStatus("unsupported");
       return;
     }
@@ -230,10 +230,7 @@ function ConfiguredSettingsRouteScreen() {
       // Permission alone is not enough: the switch stays off until the relay
       // registration succeeds, so tell the user the truth about which happened.
       if (getAgentAwarenessRegistrationStatus() === "registered") {
-        Alert.alert(
-          "Notifications enabled",
-          "Live Activity notifications are enabled for this device.",
-        );
+        Alert.alert("Notifications enabled", "Notifications are enabled for this device.");
       } else {
         Alert.alert(
           "Couldn't finish enabling notifications",
@@ -244,10 +241,7 @@ function ConfiguredSettingsRouteScreen() {
     }
     if (result.value.type === "unsupported") {
       setNotificationStatus("unsupported");
-      Alert.alert(
-        "Notifications unavailable",
-        "Live Activity notifications are only available on iOS.",
-      );
+      Alert.alert("Notifications unavailable", "Notifications are not supported on this device.");
       return;
     }
     setNotificationStatus("disabled");
@@ -362,7 +356,7 @@ function ConfiguredSettingsRouteScreen() {
 
       Alert.alert(
         "Disable notifications",
-        "Notification permission is controlled by iOS. Open Settings to disable notifications for S5 Code.",
+        "Notification permission is controlled by your device. Open Settings to disable notifications for S5 Code.",
         [
           { text: "Cancel", style: "cancel" },
           { text: "Open Settings", onPress: () => void Linking.openSettings() },
@@ -479,7 +473,7 @@ function ConfiguredSettingsRouteScreen() {
             }
             // Only reads as on when this device is actually registered with the
             // relay; otherwise notifications cannot be delivered regardless of
-            // the local iOS permission.
+            // the local notification permission.
             value={
               agentAwarenessPushAvailable && notificationStatus === "enabled" && deviceRegistered
             }
@@ -488,6 +482,7 @@ function ConfiguredSettingsRouteScreen() {
           <SettingsSwitchRow
             disabled={
               !agentAwarenessPushAvailable ||
+              Platform.OS !== "ios" ||
               !isLoaded ||
               liveActivityStatus === "checking" ||
               liveActivityStatus === "linking"
@@ -498,6 +493,7 @@ function ConfiguredSettingsRouteScreen() {
             // registration the relay needs to push updates has succeeded.
             value={
               agentAwarenessPushAvailable &&
+              Platform.OS === "ios" &&
               (liveActivityStatus === "enabled" || liveActivityStatus === "linking") &&
               deviceRegistered
             }
