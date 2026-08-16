@@ -30,6 +30,13 @@ jobs:
       APP_VARIANT: preview
       NODE_OPTIONS: --max-old-space-size=8192
       MOBILE_VERSION_POLICY: fingerprint
+      # Public build-time identifiers (same values as release.yml, deploy-web.yml,
+      # and mobile-eas-production.yml) so preview dev-client builds also render
+      # the T3 Connect Settings UI and notification switches instead of
+      # silently falling back to the no-cloud-config screen.
+      T3CODE_CLERK_PUBLISHABLE_KEY: pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA
+      T3CODE_CLERK_JWT_TEMPLATE: s5-relay
+      T3CODE_RELAY_URL: https://relay.s5code.dpdns.org
     steps:
       - id: expo-token
         name: Check for EXPO_TOKEN

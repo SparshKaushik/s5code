@@ -66,6 +66,15 @@ jobs:
       NODE_OPTIONS: --max-old-space-size=8192
       EAS_PROJECT_ID: ${{ vars.EAS_PROJECT_ID }}
       EAS_OWNER: ${{ vars.EAS_OWNER }}
+      # Public build-time identifiers (same values as release.yml and
+      # deploy-web.yml). `eas env:pull production` below only pulls whatever is
+      # configured as an actual EAS project environment variable, which this
+      # fork's EAS project does not set for these — so they must come from
+      # here or the Settings screen and notifications silently fall back to
+      # the no-cloud-config UI (see apps/mobile/src/features/cloud/publicConfig.ts).
+      T3CODE_CLERK_PUBLISHABLE_KEY: pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA
+      T3CODE_CLERK_JWT_TEMPLATE: s5-relay
+      T3CODE_RELAY_URL: https://relay.s5code.dpdns.org
     steps:
       - id: expo-token
         name: Check release configuration
