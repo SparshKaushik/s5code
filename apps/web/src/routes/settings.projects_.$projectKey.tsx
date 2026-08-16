@@ -4,7 +4,7 @@ import { ProjectSettingsPanel } from "../components/settings/ProjectSettingsPane
 
 function SettingsProjectDetailRoute() {
   const { projectKey } = Route.useParams();
-  return <ProjectSettingsPanel selectedProjectKey={projectKey} />;
+  return <ProjectSettingsPanel projectKey={projectKey} />;
 }
 
 export const Route = createFileRoute("/settings/projects_/$projectKey")({

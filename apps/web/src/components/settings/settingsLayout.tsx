@@ -161,7 +161,7 @@ export function SettingsRow({
   ...rowProps
 }: Omit<ComponentPropsWithoutRef<"div">, "title"> & {
   title: ReactNode;
-  description: ReactNode;
+  description?: ReactNode;
   status?: ReactNode;
   resetAction?: ReactNode;
   control?: ReactNode;

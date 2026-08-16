@@ -1860,6 +1860,7 @@ export const make = Effect.gen(function* () {
           pullRequest,
           branch: details.branch ?? pullRequest.headBranch,
           worktreePath: null,
+          isOnPullRequestHead: true,
         };
       }
 
@@ -1923,6 +1924,7 @@ export const make = Effect.gen(function* () {
           pullRequest,
           branch: localPullRequestBranch,
           worktreePath: existingBranchBeforeFetch.worktreePath,
+          isOnPullRequestHead: false,
         };
       }
       if (existingBranchBeforeFetchPath === rootWorktreePath) {
@@ -1953,6 +1955,7 @@ export const make = Effect.gen(function* () {
           pullRequest,
           branch: localPullRequestBranch,
           worktreePath: existingBranchAfterFetch.worktreePath,
+          isOnPullRequestHead: false,
         };
       }
       if (existingBranchAfterFetchPath === rootWorktreePath) {
@@ -1976,6 +1979,7 @@ export const make = Effect.gen(function* () {
         pullRequest,
         branch: worktree.worktree.refName,
         worktreePath: worktree.worktree.path,
+        isOnPullRequestHead: true,
       };
     }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
   });

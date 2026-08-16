@@ -253,7 +253,7 @@ function ProjectSettingsBreadcrumb({ projectKey }: { projectKey: string }) {
   );
 }
 
-export function ProjectSettingsPanel({ projectKey }: { projectKey: string }) {
+export function ProjectSettingsPanel({ projectKey }: { projectKey: string | null }) {
   const groups = useSettingsProjectGroups();
   const navigate = useNavigate();
 
