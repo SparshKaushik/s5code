@@ -16,12 +16,14 @@ import * as TestClock from "effect/testing/TestClock";
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
 import * as DesktopEnvironment from "../app/DesktopEnvironment.ts";
+import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronUpdater from "../electron/ElectronUpdater.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
+import * as MacUnsignedUpdateInstall from "./MacUnsignedUpdateInstall.ts";
 
 interface UpdatesHarnessOptions {
   readonly checkForUpdates?: Effect.Effect<
@@ -32,6 +34,12 @@ interface UpdatesHarnessOptions {
   readonly setDisableDifferentialDownload?: Effect.Effect<void>;
   readonly stopBackend?: Effect.Effect<void>;
   readonly quitAndInstall?: Effect.Effect<void, ElectronUpdater.ElectronUpdaterQuitAndInstallError>;
+  readonly squirrelCompatibleSignature?: boolean;
+  readonly unsignedMacInstall?: Effect.Effect<
+    void,
+    MacUnsignedUpdateInstall.MacUnsignedUpdateInstallError
+  >;
+  readonly appPath?: string;
   readonly env?: Record<string, string | undefined>;
 }
 
@@ -44,6 +52,12 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
   let backendStartCount = 0;
   let destroyAllCount = 0;
   let revealOrCreateMainCount = 0;
+  let quitAndInstallCount = 0;
+  let appQuitCount = 0;
+  const bundleReplaceCalls: Array<{
+    readonly downloadedZipPath: string;
+    readonly appPath: string;
+  }> = [];
   const feedUrls: ElectronUpdater.ElectronUpdaterFeedUrl[] = [];
   const listeners = new Map<string, Set<(...args: readonly unknown[]) => void>>();
   const sentStates: DesktopUpdateState[] = [];
@@ -88,7 +102,10 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       checkCount += 1;
     }).pipe(Effect.andThen(options.checkForUpdates ?? Effect.void)),
     downloadUpdate: Effect.void,
-    quitAndInstall: () => options.quitAndInstall ?? Effect.void,
+    quitAndInstall: () =>
+      Effect.sync(() => {
+        quitAndInstallCount += 1;
+      }).pipe(Effect.andThen(options.quitAndInstall ?? Effect.void)),
     on: (eventName, listener) =>
       Effect.acquireRelease(
         Effect.sync(() => {
@@ -162,7 +179,7 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     platform: "darwin",
     processArch: "x64",
     appVersion: "1.2.3",
-    appPath: "/repo",
+    appPath: options.appPath ?? "/repo",
     isPackaged: true,
     resourcesPath: "/missing/resources",
     runningUnderArm64Translation: false,
@@ -197,6 +214,42 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
       } satisfies DesktopAppSettings.DesktopAppSettings["Service"])
     : DesktopAppSettings.layer;
 
+  const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
+    metadata: Effect.die("unexpected metadata read"),
+    name: Effect.succeed("S5 Code"),
+    whenReady: Effect.void,
+    quit: Effect.sync(() => {
+      appQuitCount += 1;
+    }),
+    exit: () => Effect.void,
+    relaunch: () => Effect.void,
+    setPath: () => Effect.void,
+    setName: () => Effect.void,
+    setAboutPanelOptions: () => Effect.void,
+    setAppUserModelId: () => Effect.void,
+    getAppMetrics: Effect.succeed([]),
+    isDefaultProtocolClient: () => Effect.succeed(false),
+    setAsDefaultProtocolClient: () => Effect.succeed(true),
+    setDesktopName: () => Effect.void,
+    setDockIcon: () => Effect.void,
+    appendCommandLineSwitch: () => Effect.void,
+    onBeforeQuitForUpdate: () => Effect.void,
+    removeCommandLineSwitch: () => Effect.void,
+    on: () => Effect.void,
+  } satisfies ElectronApp.ElectronApp["Service"]);
+
+  const macUnsignedUpdateInstallLayer = Layer.succeed(
+    MacUnsignedUpdateInstall.MacUnsignedUpdateInstall,
+    {
+      usesSquirrelCompatibleSignature: () =>
+        Effect.succeed(options.squirrelCompatibleSignature ?? true),
+      installDownloadedZip: (input) =>
+        Effect.sync(() => {
+          bundleReplaceCalls.push(input);
+        }).pipe(Effect.andThen(options.unsignedMacInstall ?? Effect.void)),
+    } satisfies MacUnsignedUpdateInstall.MacUnsignedUpdateInstall["Service"],
+  );
+
   const layer = DesktopUpdates.layer.pipe(
     Layer.provideMerge(updaterLayer),
     Layer.provideMerge(windowLayer),
@@ -204,6 +257,8 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     Layer.provideMerge(backendLayer),
     Layer.provideMerge(DesktopState.layer),
     Layer.provideMerge(settingsLayer),
+    Layer.provideMerge(electronAppLayer),
+    Layer.provideMerge(macUnsignedUpdateInstallLayer),
     Layer.provideMerge(
       DesktopConfig.layerTest({
         T3CODE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
@@ -224,6 +279,9 @@ function makeHarness(options: UpdatesHarnessOptions = {}) {
     backendStartCount: () => backendStartCount,
     destroyAllCount: () => destroyAllCount,
     revealOrCreateMainCount: () => revealOrCreateMainCount,
+    quitAndInstallCount: () => quitAndInstallCount,
+    appQuitCount: () => appQuitCount,
+    bundleReplaceCalls: () => bundleReplaceCalls,
     listenerCount: () =>
       Array.from(listeners.values()).reduce(
         (total, eventListeners) => total + eventListeners.size,
@@ -608,6 +666,102 @@ describe("DesktopUpdates", () => {
         const failedState = yield* updates.getState;
         assert.equal(failedState.status, "downloaded");
         assert.equal(failedState.errorContext, "install");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("replaces the app bundle for unsigned macOS updates instead of using Squirrel", () => {
+    const harness = makeHarness({
+      squirrelCompatibleSignature: false,
+      appPath: "/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar",
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-downloaded", {
+          version: "1.2.4",
+          downloadedFile: "/tmp/S5-Code-1.2.4-arm64.zip",
+        });
+        yield* flushCallbacks;
+
+        const result = yield* updates.install;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+        assert.equal(harness.quitAndInstallCount(), 0);
+        assert.equal(harness.appQuitCount(), 1);
+        assert.deepEqual(harness.bundleReplaceCalls(), [
+          {
+            downloadedZipPath: "/tmp/S5-Code-1.2.4-arm64.zip",
+            appPath: "/Applications/S5 Code (Alpha).app",
+          },
+        ]);
+        assert.equal(harness.backendStartCount(), 0);
+        assert.isTrue(yield* Ref.get(desktopState.quitting));
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("recovers when unsigned macOS bundle replacement cannot be staged", () => {
+    const cause = new Error("replacement helper failed to start");
+    const harness = makeHarness({
+      squirrelCompatibleSignature: false,
+      appPath: "/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar",
+      unsignedMacInstall: Effect.fail(
+        new MacUnsignedUpdateInstall.MacUnsignedUpdateInstallError({
+          operation: "replace",
+          cause,
+        }),
+      ),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const desktopState = yield* DesktopState.DesktopState;
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-downloaded", {
+          version: "1.2.4",
+          downloadedFile: "/tmp/S5-Code-1.2.4-arm64.zip",
+        });
+        yield* flushCallbacks;
+
+        const result = yield* updates.install;
+        assert.isTrue(result.accepted);
+        assert.isFalse(result.completed);
+        assert.isFalse(yield* Ref.get(desktopState.quitting));
+        assert.equal(harness.appQuitCount(), 0);
+        assert.equal(harness.backendStartCount(), 1);
+        assert.equal(harness.revealOrCreateMainCount(), 1);
+
+        const failedState = yield* updates.getState;
+        assert.equal(failedState.status, "downloaded");
+        assert.equal(failedState.errorContext, "install");
+        assert.equal(failedState.message, "Unsigned macOS update replace failed.");
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
+  it.effect("still uses Squirrel when the running macOS app is Developer ID signed", () => {
+    const harness = makeHarness({ squirrelCompatibleSignature: true });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-downloaded", {
+          version: "1.2.4",
+          downloadedFile: "/tmp/S5-Code-1.2.4-arm64.zip",
+        });
+        yield* flushCallbacks;
+
+        const result = yield* updates.install;
+        assert.isTrue(result.accepted);
+        assert.equal(harness.quitAndInstallCount(), 1);
+        assert.equal(harness.appQuitCount(), 0);
+        assert.deepEqual(harness.bundleReplaceCalls(), []);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });

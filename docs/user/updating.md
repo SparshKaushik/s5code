@@ -13,6 +13,18 @@ You may see the warning in either of these places:
 Dismissing the conversation warning only hides that reminder for those two versions. It does not
 update the server, and the version difference remains visible in Connections.
 
+## Desktop App Updates
+
+The desktop app downloads the release package for its current channel and asks you to install it.
+Installing an update stops local backends and briefly closes the app before reopening the new
+version.
+
+On macOS, Developer ID-signed builds use the native updater. Ad-hoc signed development and alpha
+builds use the same downloaded ZIP but replace the app bundle directly, so they can update without
+an Apple Developer certificate. Keep the app in a user-writable location such as `/Applications`.
+If replacement cannot start, S5 Code restores the current app, restarts its backends, and leaves the
+update available to retry.
+
 ## Before You Update
 
 Let active agent work and terminal commands finish first. Updating restarts the server, so the
