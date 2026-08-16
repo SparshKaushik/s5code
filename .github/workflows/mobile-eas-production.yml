@@ -165,26 +165,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # --build-profile, not --environment: eas-cli has a known bug
-          # (expo/eas-cli#3870) where --environment logs a stray
-          # "Using environment: ..." line to real stdout before the JSON
-          # redirect is installed, corrupting --json output for jq. The
-          # "production" build profile in eas.json maps to the same EAS
-          # environment, so this is equivalent here.
-          fingerprint_json="$(eas fingerprint:generate \
-            --platform android \
-            --build-profile production \
-            --json \
-            --non-interactive)"
-          fingerprint_hash="$(jq -r '.hash' <<<"$fingerprint_json")"
-          echo "fingerprint=$fingerprint_hash" >> "$GITHUB_OUTPUT"
-
-          # The previous release's fingerprint.txt (if any) is this repo's own
-          # record of what native build shipped, since eas build --local never
-          # registers in `eas build:list`. OTA-only releases attach no
-          # fingerprint.txt, so walk releases newest-first and use the most
-          # recent one that recorded a fingerprint; this keeps consecutive
-          # JS-only releases on the OTA path instead of forcing a rebuild.
+          # The previous release's fingerprint.txt is this repo's own record of
+          # what native build shipped, since eas build --local never registers
+          # in `eas build:list`. OTA-only releases attach no fingerprint.txt, so
+          # walk releases newest-first and use the most recent recorded build.
           release_tags="$(gh release list \
             --repo "${{ github.repository }}" \
             --exclude-drafts \
@@ -205,22 +189,53 @@ jobs:
             fi
           done <<<"$release_tags"
 
+          # MOBILE_VERSION is part of Expo's native fingerprint because it is
+          # the appVersion runtime boundary. Always fingerprint with the version
+          # of the binary being compared or built; the value pulled from EAS may
+          # belong to a different release.
+          fingerprint_for_version() {
+            local mobile_version="$1"
+            local fingerprint_json
+
+            # --build-profile, not --environment: eas-cli has a known bug
+            # (expo/eas-cli#3870) where --environment writes a stray status line
+            # to stdout before JSON redirection is installed.
+            fingerprint_json="$(MOBILE_VERSION="$mobile_version" eas fingerprint:generate \
+              --platform android \
+              --build-profile production \
+              --json \
+              --non-interactive)"
+            jq -r '.hash' <<<"$fingerprint_json"
+          }
+
           if [ -z "$previous_tag" ]; then
-            echo "mode=build" >> "$GITHUB_OUTPUT"
-            echo "mobile_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+            build_fingerprint="$(fingerprint_for_version "$RELEASE_VERSION")"
+            {
+              echo "fingerprint=$build_fingerprint"
+              echo "mode=build"
+              echo "mobile_version=$RELEASE_VERSION"
+            } >> "$GITHUB_OUTPUT"
             echo "No release with a recorded fingerprint exists; building $RELEASE_VERSION." >> "$GITHUB_STEP_SUMMARY"
             exit 0
           fi
 
           previous_version="${previous_tag#v}"
+          comparison_fingerprint="$(fingerprint_for_version "$previous_version")"
 
-          if [ "$previous_fingerprint" = "$fingerprint_hash" ]; then
-            echo "mode=update" >> "$GITHUB_OUTPUT"
-            echo "mobile_version=$previous_version" >> "$GITHUB_OUTPUT"
+          if [ "$previous_fingerprint" = "$comparison_fingerprint" ]; then
+            {
+              echo "fingerprint=$comparison_fingerprint"
+              echo "mode=update"
+              echo "mobile_version=$previous_version"
+            } >> "$GITHUB_OUTPUT"
             echo "Android fingerprint matches $previous_tag; publishing OTA for mobile $previous_version." >> "$GITHUB_STEP_SUMMARY"
           else
-            echo "mode=build" >> "$GITHUB_OUTPUT"
-            echo "mobile_version=$RELEASE_VERSION" >> "$GITHUB_OUTPUT"
+            build_fingerprint="$(fingerprint_for_version "$RELEASE_VERSION")"
+            {
+              echo "fingerprint=$build_fingerprint"
+              echo "mode=build"
+              echo "mobile_version=$RELEASE_VERSION"
+            } >> "$GITHUB_OUTPUT"
             echo "Android fingerprint differs from $previous_tag; building unified release $RELEASE_VERSION." >> "$GITHUB_STEP_SUMMARY"
           fi
 

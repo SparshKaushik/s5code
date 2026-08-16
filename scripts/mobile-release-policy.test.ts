@@ -30,13 +30,23 @@ describe("mobile release policy", () => {
     expect(mobileWorkflow).toContain("Compare fingerprint with latest release");
     expect(mobileWorkflow).toContain("eas fingerprint:generate");
     expect(mobileWorkflow).toContain("eas build \\\n            --local");
-    expect(mobileWorkflow).toContain('echo "mode=update" >> "$GITHUB_OUTPUT"');
-    expect(mobileWorkflow).toContain('echo "mode=build" >> "$GITHUB_OUTPUT"');
+    expect(mobileWorkflow).toContain('echo "mode=update"');
+    expect(mobileWorkflow).toContain('echo "mode=build"');
     // OTA-only releases attach no fingerprint.txt, so the decision walks
     // releases newest-first (.[].tagName) and uses the most recent one that
     // recorded a fingerprint, rather than rebuilding after every OTA.
     expect(mobileWorkflow).toContain("sort_by(.createdAt) | reverse | .[].tagName");
     expect(mobileWorkflow).toContain("while IFS= read -r tag");
+    // appVersion participates in Expo's native fingerprint. Compare with the
+    // previous binary's version, but record a new build's fingerprint using
+    // the release version that is actually injected into that binary.
+    expect(mobileWorkflow).toContain(
+      'comparison_fingerprint="$(fingerprint_for_version "$previous_version")"',
+    );
+    expect(mobileWorkflow).toContain(
+      'build_fingerprint="$(fingerprint_for_version "$RELEASE_VERSION")"',
+    );
+    expect(mobileWorkflow).toContain('MOBILE_VERSION="$mobile_version" eas fingerprint:generate');
     expect(mobileWorkflow).toContain(
       "MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}",
     );
