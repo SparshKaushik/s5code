@@ -32,6 +32,11 @@ describe("mobile release policy", () => {
     expect(mobileWorkflow).toContain("eas build \\\n            --local");
     expect(mobileWorkflow).toContain('echo "mode=update" >> "$GITHUB_OUTPUT"');
     expect(mobileWorkflow).toContain('echo "mode=build" >> "$GITHUB_OUTPUT"');
+    // OTA-only releases attach no fingerprint.txt, so the decision walks
+    // releases newest-first (.[].tagName) and uses the most recent one that
+    // recorded a fingerprint, rather than rebuilding after every OTA.
+    expect(mobileWorkflow).toContain("sort_by(.createdAt) | reverse | .[].tagName");
+    expect(mobileWorkflow).toContain("while IFS= read -r tag");
     expect(mobileWorkflow).toContain(
       "MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}",
     );
