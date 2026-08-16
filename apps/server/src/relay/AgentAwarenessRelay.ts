@@ -141,8 +141,8 @@ function deliveryStats(
     readonly ok: boolean;
     readonly queued?: boolean | undefined;
     readonly kind: string;
-    readonly apnsStatus?: number | null;
-    readonly apnsReason?: string | null;
+    readonly deliveryStatus?: number | null;
+    readonly deliveryReason?: string | null;
   }>,
 ) {
   let queued = 0;
@@ -162,7 +162,9 @@ function deliveryStats(
       continue;
     }
     failed += 1;
-    failedReasons.push(`${delivery.apnsStatus ?? "transport"}:${delivery.apnsReason ?? "unknown"}`);
+    failedReasons.push(
+      `${delivery.deliveryStatus ?? "transport"}:${delivery.deliveryReason ?? "unknown"}`,
+    );
   }
 
   return {

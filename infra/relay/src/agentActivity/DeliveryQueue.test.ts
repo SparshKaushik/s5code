@@ -7,7 +7,7 @@ import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
 
 import * as RelayConfiguration from "../Config.ts";
-import * as ApnsDeliveryQueue from "./ApnsDeliveryQueue.ts";
+import * as DeliveryQueue from "./DeliveryQueue.ts";
 
 const config: RelayConfiguration.RelayConfiguration["Service"] = {
   relayIssuer: "https://relay.example.com",
@@ -18,17 +18,23 @@ const config: RelayConfiguration.RelayConfiguration["Service"] = {
     bundleId: "com.t3tools.test",
     environment: "sandbox",
   },
+  fcm: {
+    projectId: "test-project",
+    clientEmail: "firebase-adminsdk@test.iam.gserviceaccount.com",
+    privateKey: Redacted.make("not-a-private-key"),
+    tokenUri: "https://oauth2.googleapis.com/token",
+  },
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",
-  apnsDeliveryJobSigningSecret: Redacted.make("apns-job-secret"),
+  deliveryJobSigningSecret: Redacted.make("apns-job-secret"),
   cloudMintPrivateKey: Redacted.make("cloud-private-key"),
   cloudMintPublicKey: "cloud-public-key",
   managedEndpointBaseDomain: undefined,
   managedEndpointNamespace: undefined,
 };
 
-describe("ApnsDeliveryQueue", () => {
+describe("DeliveryQueue", () => {
   it.effect("does not require the deployment RuntimeContext when building the Worker layer", () => {
     const sent: unknown[] = [];
     const sender: Cloudflare.Queues.WriteQueueClient = {
@@ -40,16 +46,17 @@ describe("ApnsDeliveryQueue", () => {
       sendBatch: () => Effect.die("batch queue binding is not used"),
     };
     const runtimeContext = {} as Alchemy.BaseRuntimeContext;
-    const layer = ApnsDeliveryQueue.layerCloudflareQueues(sender, runtimeContext).pipe(
+    const layer = DeliveryQueue.layerCloudflareQueues(sender, runtimeContext).pipe(
       Layer.provide(NodeCryptoLayer.layer),
       Layer.provide(RelayConfiguration.layer(config)),
     );
 
     return Effect.gen(function* () {
-      const queue = yield* ApnsDeliveryQueue.ApnsDeliveryQueue;
+      const queue = yield* DeliveryQueue.DeliveryQueue;
       yield* queue.enqueuePushNotification({
         userId: "user-1",
         deviceId: "device-1",
+        channel: "apns",
         token: "push-token",
         notification: {
           title: "Thread",
@@ -70,22 +77,23 @@ describe("ApnsDeliveryQueue", () => {
       message: cause.message,
       cause,
     });
-    const layer = ApnsDeliveryQueue.layer.pipe(
+    const layer = DeliveryQueue.layer.pipe(
       Layer.provide(NodeCryptoLayer.layer),
       Layer.provide(RelayConfiguration.layer(config)),
       Layer.provide(
-        Layer.succeed(ApnsDeliveryQueue.ApnsDeliveryQueueSender, {
+        Layer.succeed(DeliveryQueue.DeliveryQueueSender, {
           send: () => Effect.fail(senderCause),
         }),
       ),
     );
 
     return Effect.gen(function* () {
-      const queue = yield* ApnsDeliveryQueue.ApnsDeliveryQueue;
+      const queue = yield* DeliveryQueue.DeliveryQueue;
       const error = yield* Effect.flip(
         queue.enqueuePushNotification({
           userId: "user-1",
           deviceId: "device-1",
+          channel: "apns",
           token: "push-token",
           notification: {
             title: "Thread",
@@ -98,7 +106,7 @@ describe("ApnsDeliveryQueue", () => {
       );
 
       expect(error).toMatchObject({
-        _tag: "ApnsDeliveryQueueSendError",
+        _tag: "DeliveryQueueSendError",
         operation: "send",
         jobId: expect.any(String),
         kind: "push_notification",
@@ -108,7 +116,7 @@ describe("ApnsDeliveryQueue", () => {
       });
       expect(senderCause.cause).toBe(cause);
       expect(error.message).toBe(
-        "Failed to enqueue APNs push notification delivery during send for device device-1.",
+        "Failed to enqueue push notification delivery during send for device device-1.",
       );
     }).pipe(Effect.provide(layer));
   });

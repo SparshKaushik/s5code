@@ -66,13 +66,14 @@ export class LiveActivityDeliveryMarkPersistenceError extends Schema.TaggedError
 export interface DeviceRow {
   readonly user_id: string;
   readonly device_id: string;
-  readonly platform: "ios";
-  readonly ios_major_version: number;
+  readonly platform: "ios" | "android";
+  readonly ios_major_version: number | null;
   readonly app_version: string | null;
   readonly bundle_id: string | null;
   readonly aps_environment: "sandbox" | "production" | null;
   readonly push_token: string | null;
   readonly push_to_start_token: string | null;
+  readonly fcm_token: string | null;
   readonly preferences_json: string;
 }
 
@@ -117,6 +118,7 @@ export class LiveActivities extends Context.Service<
       readonly userId: string;
       readonly deviceId: string;
       readonly kind: RelayDeliveryKind;
+      readonly channel?: "apns" | "fcm";
       readonly invalidatedAt: string;
     }) => Effect.Effect<void, LiveActivityDeliveryMarkPersistenceError>;
   }
@@ -202,6 +204,7 @@ export const make = Effect.gen(function* () {
           aps_environment: relayMobileDevices.apsEnvironment,
           push_token: relayMobileDevices.pushToken,
           push_to_start_token: relayMobileDevices.pushToStartToken,
+          fcm_token: relayMobileDevices.fcmToken,
           preferences_json: relayMobileDevices.preferencesJson,
           activity_push_token: relayLiveActivities.activityPushToken,
           remote_start_queued_at: relayLiveActivities.remoteStartQueuedAt,
@@ -404,7 +407,7 @@ export const make = Effect.gen(function* () {
             yield* db
               .update(relayMobileDevices)
               .set({
-                pushToken: null,
+                ...(input.channel === "fcm" ? { fcmToken: null } : { pushToken: null }),
                 updatedAt: input.invalidatedAt,
               })
               .where(

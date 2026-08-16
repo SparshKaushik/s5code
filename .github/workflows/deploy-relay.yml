@@ -1,12 +1,14 @@
 name: Deploy T3 Connect relay
 
-# Self-hosted relay deployment for the S5 Code fork (Neon-backed, no APNs).
+# Self-hosted relay deployment for the S5 Code fork (Neon-backed).
 # Mirrors upstream `pingdotgg/t3code`{.github/workflows/deploy-relay.yml} but
-# replaces hosted PlanetScale with a Neon `DATABASE_URL` and drops the optional
-# Apple/APNs keys (push notifications are disabled on this relay). Vars and
-# secrets are read from the `production` GitHub Environment; Cloudflare and
-# Axiom account credentials may live there or at the repository level (Actions
-# falls back to repo-level for `vars.*` / `secrets.*`).
+# replaces hosted PlanetScale with a Neon `DATABASE_URL`. Apple/APNs and
+# Firebase/FCM push credentials are both optional (see infra/relay/README.md);
+# when absent for a given provider, that provider's mobile notifications are
+# disabled but the relay still deploys. Vars and secrets are read from the
+# `production` GitHub Environment; Cloudflare and Axiom account credentials
+# may live there or at the repository level (Actions falls back to repo-level
+# for `vars.*` / `secrets.*`).
 #
 #   DB migrations are NOT run here: the schema must be applied to Neon
 #   out-of-band with `drizzle-kit migrate` against the same DATABASE_URL (see
@@ -42,6 +44,12 @@ jobs:
       CLERK_PUBLISHABLE_KEY: ${{ vars.CLERK_PUBLISHABLE_KEY }}
       CLERK_JWT_AUDIENCE: ${{ vars.CLERK_JWT_AUDIENCE }}
       CLERK_JWT_TEMPLATE: ${{ vars.CLERK_JWT_TEMPLATE }}
+      APNS_ENVIRONMENT: ${{ vars.APNS_ENVIRONMENT }}
+      APNS_TEAM_ID: ${{ vars.APNS_TEAM_ID }}
+      APNS_KEY_ID: ${{ vars.APNS_KEY_ID }}
+      APNS_BUNDLE_ID: ${{ vars.APNS_BUNDLE_ID }}
+      FCM_PROJECT_ID: ${{ vars.FCM_PROJECT_ID }}
+      FCM_CLIENT_EMAIL: ${{ vars.FCM_CLIENT_EMAIL }}
       ALCHEMY_TELEMETRY_DISABLED: "1"
     steps:
       - name: Checkout
@@ -81,6 +89,8 @@ jobs:
           AXIOM_TOKEN: ${{ secrets.AXIOM_TOKEN }}
           CLERK_SECRET_KEY: ${{ secrets.CLERK_SECRET_KEY }}
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
+          FCM_PRIVATE_KEY: ${{ secrets.FCM_PRIVATE_KEY }}
 
       - name: Publish relay deploy commit status
         uses: actions/github-script@v8

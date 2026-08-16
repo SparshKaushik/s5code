@@ -17,19 +17,17 @@ import {
   HttpClientResponse,
 } from "effect/unstable/http";
 
-import {
-  makeApnsDeliveryJobPayload,
-  signApnsDeliveryJob,
-  type SignedApnsDeliveryJob,
-} from "./apnsDeliveryJobs.ts";
+import { makeDeliveryJobPayload, signDeliveryJob, type SignedDeliveryJob } from "./deliveryJobs.ts";
 import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
-import * as ApnsDeliveryQueue from "./ApnsDeliveryQueue.ts";
+import * as DeliveryQueue from "./DeliveryQueue.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
-import * as ApnsDeliveries from "./ApnsDeliveries.ts";
+import * as Deliveries from "./Deliveries.ts";
 import * as ApnsClient from "./ApnsClient.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
+import * as FcmClient from "./FcmClient.ts";
+import * as FcmProviderTokens from "./FcmProviderTokens.ts";
 
 const config = RelayConfiguration.RelayConfiguration.of({
   relayIssuer: "https://relay.example.test",
@@ -40,7 +38,13 @@ const config = RelayConfiguration.RelayConfiguration.of({
     privateKey: Redacted.make("not-a-private-key"),
     bundleId: "com.t3tools.t3code.dev",
   },
-  apnsDeliveryJobSigningSecret: Redacted.make("job-signing-secret"),
+  fcm: {
+    projectId: "test-project",
+    clientEmail: "firebase-adminsdk@test.iam.gserviceaccount.com",
+    privateKey: Redacted.make("not-a-private-key"),
+    tokenUri: "https://oauth2.googleapis.com/token",
+  },
+  deliveryJobSigningSecret: Redacted.make("job-signing-secret"),
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",
@@ -61,6 +65,12 @@ const signingConfig = RelayConfiguration.RelayConfiguration.of({
   apns: {
     ...config.apns,
     privateKey: Redacted.make(apnsSigningKeyPair.privateKey),
+  },
+  fcm: {
+    projectId: "test-project",
+    clientEmail: "firebase-adminsdk@test.iam.gserviceaccount.com",
+    privateKey: Redacted.make("not-a-private-key"),
+    tokenUri: "https://oauth2.googleapis.com/token",
   },
 });
 
@@ -133,6 +143,7 @@ const target: LiveActivities.TargetRow = {
   aps_environment: null,
   push_token: null,
   push_to_start_token: "start-token",
+  fcm_token: null,
   preferences_json: enabledPreferences,
   activity_push_token: "activity-token",
   remote_start_queued_at: null,
@@ -145,7 +156,7 @@ const target: LiveActivities.TargetRow = {
 function makeLayer(input: {
   readonly attempts: Array<DeliveryAttempts.DeliveryAttemptInput>;
   readonly sourceJobClaims?: ReadonlyMap<string, DeliveryAttempts.DeliverySourceJobClaimResult>;
-  readonly queuedJobs?: Array<SignedApnsDeliveryJob>;
+  readonly queuedJobs?: Array<SignedDeliveryJob>;
   readonly queuedStarts?: Array<
     Parameters<LiveActivities.LiveActivities["Service"]["markStartQueued"]>[0]
   >;
@@ -171,10 +182,12 @@ function makeLayer(input: {
     request: HttpClientRequest.HttpClientRequest,
   ) => Effect.Effect<HttpClientResponse.HttpClientResponse>;
 }) {
-  return ApnsDeliveries.layer.pipe(
+  return Deliveries.layer.pipe(
     Layer.provide(ApnsClient.layer),
     Layer.provide(ApnsProviderTokens.layer),
-    Layer.provide(ApnsDeliveryQueue.layer.pipe(Layer.provide(NodeCryptoLayer.layer))),
+    Layer.provide(FcmClient.layer),
+    Layer.provide(FcmProviderTokens.layer),
+    Layer.provide(DeliveryQueue.layer.pipe(Layer.provide(NodeCryptoLayer.layer))),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(AgentActivityRows.AgentActivityRows, {
@@ -193,7 +206,7 @@ function makeLayer(input: {
               ) ?? null,
             ),
         } satisfies AgentActivityRows.AgentActivityRows["Service"]),
-        Layer.succeed(ApnsDeliveryQueue.ApnsDeliveryQueueSender, {
+        Layer.succeed(DeliveryQueue.DeliveryQueueSender, {
           send: (body) =>
             Effect.sync(() => {
               input.queuedJobs?.push(body);
@@ -252,16 +265,16 @@ function makeLayer(input: {
   );
 }
 
-describe("ApnsDeliveries", () => {
+describe("Deliveries", () => {
   it.effect("never starts an activity remotely when no update token is registered", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
     const queuedStarts: Array<
       Parameters<LiveActivities.LiveActivities["Service"]["markStartQueued"]>[0]
     > = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -286,10 +299,10 @@ describe("ApnsDeliveries", () => {
 
   it.effect("ends the armed card when nothing remains to show", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       // Within the freshly-armed grace window an empty aggregate delivers
       // nothing: the environment's first publish may still be in flight.
       const graced = yield* deliveries.sendForTarget({
@@ -326,10 +339,10 @@ describe("ApnsDeliveries", () => {
 
   it.effect("does not queue a remote start when Live Activities are disabled", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -350,10 +363,10 @@ describe("ApnsDeliveries", () => {
 
   it.effect("does not queue a duplicate remote start while a start is already queued", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -374,7 +387,7 @@ describe("ApnsDeliveries", () => {
 
   it.effect("queues bounded Live Activity aggregate payloads", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
     const longTitle = "x".repeat(300);
     const inputAggregate: RelayAgentActivityAggregateState = {
       ...aggregate,
@@ -393,7 +406,7 @@ describe("ApnsDeliveries", () => {
     };
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       yield* deliveries.sendForTarget({
         target,
         aggregate: inputAggregate,
@@ -413,10 +426,10 @@ describe("ApnsDeliveries", () => {
 
   it.effect("queues Live Activity jobs with the device's APNs routing", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -446,7 +459,8 @@ describe("ApnsDeliveries", () => {
   it.effect("sends signed jobs to the device's APNs environment and bundle topic", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     const requests: Array<HttpClientRequest.HttpClientRequest> = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_update",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -458,8 +472,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-routing-1",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -469,7 +483,7 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.ok).toBe(true);
@@ -493,7 +507,7 @@ describe("ApnsDeliveries", () => {
     "suppresses all deliveries when the aggregate is unchanged while a row awaits input",
     () => {
       const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-      const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+      const queuedJobs: Array<SignedDeliveryJob> = [];
       const waitingAggregate: RelayAgentActivityAggregateState = {
         ...aggregate,
         activities: [
@@ -507,7 +521,7 @@ describe("ApnsDeliveries", () => {
       const waitingAggregateJson = JSON.stringify(waitingAggregate);
 
       return Effect.gen(function* () {
-        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const deliveries = yield* Deliveries.Deliveries;
         const result = yield* deliveries.sendForTarget({
           target: {
             ...target,
@@ -532,7 +546,7 @@ describe("ApnsDeliveries", () => {
     "queues an update inside the throttle window when a changed aggregate awaits input",
     () => {
       const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-      const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+      const queuedJobs: Array<SignedDeliveryJob> = [];
       const waitingAggregate: RelayAgentActivityAggregateState = {
         ...aggregate,
         activities: [
@@ -546,7 +560,7 @@ describe("ApnsDeliveries", () => {
       const previousAggregateJson = JSON.stringify(aggregate);
 
       return Effect.gen(function* () {
-        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const deliveries = yield* Deliveries.Deliveries;
         const result = yield* deliveries.sendForTarget({
           target: {
             ...target,
@@ -576,7 +590,7 @@ describe("ApnsDeliveries", () => {
     "throttles updates for changed aggregates with stable counts and no pending attention",
     () => {
       const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-      const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+      const queuedJobs: Array<SignedDeliveryJob> = [];
       const changedAggregate: RelayAgentActivityAggregateState = {
         ...aggregate,
         updatedAt: "1970-01-01T00:00:04.000Z",
@@ -584,7 +598,7 @@ describe("ApnsDeliveries", () => {
       const previousAggregateJson = JSON.stringify(aggregate);
 
       return Effect.gen(function* () {
-        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const deliveries = yield* Deliveries.Deliveries;
         const result = yield* deliveries.sendForTarget({
           target: {
             ...target,
@@ -603,10 +617,10 @@ describe("ApnsDeliveries", () => {
 
   it.effect("queues an end for an active Live Activity when Live Activities are disabled", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -635,7 +649,7 @@ describe("ApnsDeliveries", () => {
     "queues an alert while ending an active Live Activity when only Live Activities are disabled",
     () => {
       const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-      const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+      const queuedJobs: Array<SignedDeliveryJob> = [];
       const inputAggregate: RelayAgentActivityAggregateState = {
         ...aggregate,
         activities: [
@@ -648,7 +662,7 @@ describe("ApnsDeliveries", () => {
       };
 
       return Effect.gen(function* () {
-        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const deliveries = yield* Deliveries.Deliveries;
         const result = yield* deliveries.sendForTarget({
           target: {
             ...target,
@@ -694,7 +708,7 @@ describe("ApnsDeliveries", () => {
 
   it.effect("does not queue alert pushes when notification permission is disabled", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
     const inputAggregate: RelayAgentActivityAggregateState = {
       ...aggregate,
       activities: [
@@ -707,7 +721,7 @@ describe("ApnsDeliveries", () => {
     };
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -737,7 +751,7 @@ describe("ApnsDeliveries", () => {
     "queues a push notification for approval and input states when no Live Activity delivery is available",
     () => {
       const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-      const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+      const queuedJobs: Array<SignedDeliveryJob> = [];
       const inputAggregate: RelayAgentActivityAggregateState = {
         ...aggregate,
         activities: [
@@ -750,7 +764,7 @@ describe("ApnsDeliveries", () => {
       };
 
       return Effect.gen(function* () {
-        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const deliveries = yield* Deliveries.Deliveries;
         const result = yield* deliveries.sendForTarget({
           target: {
             ...target,
@@ -789,10 +803,10 @@ describe("ApnsDeliveries", () => {
 
   it.effect("does not queue a push notification when a thread starts working", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -813,7 +827,7 @@ describe("ApnsDeliveries", () => {
 
   it.effect("queues bounded alert notification payloads", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const queuedJobs: Array<SignedApnsDeliveryJob> = [];
+    const queuedJobs: Array<SignedDeliveryJob> = [];
     const longTitle = "x".repeat(300);
     const inputAggregate: RelayAgentActivityAggregateState = {
       ...aggregate,
@@ -830,7 +844,7 @@ describe("ApnsDeliveries", () => {
     };
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       yield* deliveries.sendForTarget({
         target: {
           ...target,
@@ -855,13 +869,13 @@ describe("ApnsDeliveries", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const error = yield* Effect.flip(deliveries.processSignedJob({ invalid: true }));
 
       expect(error).toMatchObject({
-        _tag: "ApnsDeliveryJobQueuePayloadInvalid",
+        _tag: "DeliveryJobQueuePayloadInvalid",
         receivedType: "object",
-        message: "Invalid APNs delivery queue job with object payload.",
+        message: "Invalid delivery queue job with object payload.",
       });
       expect(error.cause).toMatchObject({ _tag: "SchemaError" });
     }).pipe(Effect.provide(makeLayer({ attempts })));
@@ -872,7 +886,8 @@ describe("ApnsDeliveries", () => {
     const clearedStarts: Array<
       Parameters<LiveActivities.LiveActivities["Service"]["clearStartQueued"]>[0]
     > = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_start",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -882,13 +897,13 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-start-1",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       // The start was decided from an aggregate that a newer terminal publish
@@ -896,13 +911,13 @@ describe("ApnsDeliveries", () => {
       expect(result).toMatchObject({
         kind: "live_activity_start",
         ok: true,
-        apnsStatus: null,
+        deliveryStatus: null,
       });
       expect(attempts).toMatchObject([
         {
           kind: "live_activity_start",
           sourceJobId: "job-start-1",
-          apnsReason: "Stale APNs start job skipped.",
+          deliveryReason: "Stale start job skipped.",
         },
       ]);
       expect(clearedStarts).toMatchObject([{ userId: target.user_id, deviceId: target.device_id }]);
@@ -911,18 +926,19 @@ describe("ApnsDeliveries", () => {
 
   it.effect("processes signed jobs through APNs and records attempts", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const transportErrors: Array<ApnsDeliveries.ApnsDeliveryTransportError> = [];
+    const transportErrors: Array<Deliveries.DeliveryTransportError> = [];
     const logger = Logger.make(({ fiber }) => {
       const annotation = fiber.getRef(References.CurrentLogAnnotations).error;
       if (!Redacted.isRedacted(annotation)) {
         return;
       }
       const error = Redacted.value(annotation);
-      if (ApnsDeliveries.isApnsDeliveryTransportError(error)) {
+      if (Deliveries.isDeliveryTransportError(error)) {
         transportErrors.push(error);
       }
     });
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_update",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -932,13 +948,13 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-1",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.kind).toBe("live_activity_update");
@@ -956,7 +972,7 @@ describe("ApnsDeliveries", () => {
         deviceId: target.device_id,
         kind: "live_activity_update",
         sourceJobId: "job-1",
-        apnsErrorTag: "ApnsJwtSigningError",
+        transportErrorTag: "ApnsJwtSigningError",
         requestStage: null,
       });
       expect(error.cause).toBeInstanceOf(ApnsClient.ApnsJwtSigningError);
@@ -977,7 +993,8 @@ describe("ApnsDeliveries", () => {
 
   it.effect("processes signed push notification jobs through APNs and records attempts", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -994,20 +1011,20 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-push-1",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
       Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 })));
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.kind).toBe("push_notification");
       expect(result.ok).toBe(true);
-      expect(result.apnsStatus).toBe(200);
+      expect(result.deliveryStatus).toBe(200);
       expect(attempts).toMatchObject([
         {
           kind: "push_notification",
@@ -1016,7 +1033,7 @@ describe("ApnsDeliveries", () => {
           environmentId: "env",
           threadId: "thread",
           deviceId: target.device_id,
-          apnsStatus: 200,
+          deliveryStatus: 200,
         },
       ]);
     }).pipe(
@@ -1039,7 +1056,8 @@ describe("ApnsDeliveries", () => {
   it.effect("skips duplicate signed queue jobs before calling APNs", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     let executeCount = 0;
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1056,8 +1074,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-push-duplicate",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1067,14 +1085,14 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result).toMatchObject({
         kind: "push_notification",
         ok: true,
-        apnsStatus: null,
-        apnsReason: "Duplicate APNs delivery job skipped.",
+        deliveryStatus: null,
+        deliveryReason: "Duplicate delivery job skipped.",
       });
       expect(executeCount).toBe(0);
       expect(attempts).toEqual([]);
@@ -1093,7 +1111,8 @@ describe("ApnsDeliveries", () => {
   it.effect("skips stale signed Live Activity jobs when the registered token changed", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     let executeCount = 0;
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_update",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1103,8 +1122,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-update-stale-token",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1114,14 +1133,14 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result).toMatchObject({
         kind: "live_activity_update",
         ok: true,
-        apnsStatus: null,
-        apnsReason: "Stale APNs delivery job skipped.",
+        deliveryStatus: null,
+        deliveryReason: "Stale delivery job skipped.",
       });
       expect(executeCount).toBe(0);
       expect(attempts).toMatchObject([
@@ -1129,7 +1148,7 @@ describe("ApnsDeliveries", () => {
           kind: "live_activity_update",
           sourceJobId: "job-update-stale-token",
           token: "stale-activity-token",
-          apnsReason: "Stale APNs delivery job skipped.",
+          deliveryReason: "Stale delivery job skipped.",
         },
       ]);
     }).pipe(
@@ -1146,7 +1165,8 @@ describe("ApnsDeliveries", () => {
   it.effect("skips stale signed push notification jobs when the device token changed", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     let executeCount = 0;
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1163,8 +1183,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-push-stale-token",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1174,14 +1194,14 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result).toMatchObject({
         kind: "push_notification",
         ok: true,
-        apnsStatus: null,
-        apnsReason: "Stale APNs delivery job skipped.",
+        deliveryStatus: null,
+        deliveryReason: "Stale delivery job skipped.",
       });
       expect(executeCount).toBe(0);
       expect(attempts).toMatchObject([
@@ -1189,7 +1209,7 @@ describe("ApnsDeliveries", () => {
           kind: "push_notification",
           sourceJobId: "job-push-stale-token",
           token: "stale-device-token",
-          apnsReason: "Stale APNs delivery job skipped.",
+          deliveryReason: "Stale delivery job skipped.",
         },
       ]);
     }).pipe(
@@ -1226,7 +1246,8 @@ describe("ApnsDeliveries", () => {
         },
       ],
     };
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_update",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1237,8 +1258,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-update-superseded-by-running",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1248,20 +1269,20 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result).toMatchObject({
         kind: "live_activity_update",
         ok: true,
-        apnsStatus: null,
-        apnsReason: "Stale APNs delivery job skipped.",
+        deliveryStatus: null,
+        deliveryReason: "Stale delivery job skipped.",
       });
       expect(executeCount).toBe(0);
       expect(attempts).toMatchObject([
         {
           sourceJobId: "job-update-superseded-by-running",
-          apnsReason: "Stale agent activity state skipped.",
+          deliveryReason: "Stale agent activity state skipped.",
         },
       ]);
     }).pipe(
@@ -1287,7 +1308,8 @@ describe("ApnsDeliveries", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     let executeCount = 0;
     const completedAt = "1970-01-01T00:00:01.000Z";
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1306,8 +1328,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-push-superseded-by-running",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1317,20 +1339,20 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result).toMatchObject({
         kind: "push_notification",
         ok: true,
-        apnsStatus: null,
-        apnsReason: "Stale APNs delivery job skipped.",
+        deliveryStatus: null,
+        deliveryReason: "Stale delivery job skipped.",
       });
       expect(executeCount).toBe(0);
       expect(attempts).toMatchObject([
         {
           sourceJobId: "job-push-superseded-by-running",
-          apnsReason: "Stale agent activity state skipped.",
+          deliveryReason: "Stale agent activity state skipped.",
         },
       ]);
     }).pipe(
@@ -1356,7 +1378,8 @@ describe("ApnsDeliveries", () => {
   it.effect("retries signed queue jobs that are already claimed but not completed", () => {
     const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
     let executeCount = 0;
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1373,8 +1396,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-push-in-flight",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1384,12 +1407,12 @@ describe("ApnsDeliveries", () => {
       });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* Effect.exit(deliveries.processSignedJob(signed));
 
       expect(result._tag).toBe("Failure");
       if (result._tag === "Failure") {
-        expect(result.cause.toString()).toContain("ApnsDeliveryJobClaimInFlight");
+        expect(result.cause.toString()).toContain("DeliveryJobClaimInFlight");
       }
       expect(executeCount).toBe(0);
       expect(attempts).toEqual([]);
@@ -1410,7 +1433,8 @@ describe("ApnsDeliveries", () => {
     const invalidatedTokens: Array<
       Parameters<LiveActivities.LiveActivities["Service"]["invalidateDeliveryToken"]>[0]
     > = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "push_notification",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1427,8 +1451,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-push-bad-token",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1440,13 +1464,13 @@ describe("ApnsDeliveries", () => {
       );
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.kind).toBe("push_notification");
       expect(result.ok).toBe(false);
-      expect(result.apnsStatus).toBe(400);
-      expect(result.apnsReason).toBe("BadDeviceToken");
+      expect(result.deliveryStatus).toBe(400);
+      expect(result.deliveryReason).toBe("BadDeviceToken");
       expect(invalidatedTokens).toMatchObject([
         {
           userId: target.user_id,
@@ -1477,7 +1501,8 @@ describe("ApnsDeliveries", () => {
     const clearedStarts: Array<
       Parameters<LiveActivities.LiveActivities["Service"]["clearStartQueued"]>[0]
     > = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_start",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1487,13 +1512,13 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-start-1",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.kind).toBe("live_activity_start");
@@ -1520,7 +1545,8 @@ describe("ApnsDeliveries", () => {
     const invalidatedTokens: Array<
       Parameters<LiveActivities.LiveActivities["Service"]["invalidateDeliveryToken"]>[0]
     > = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_start",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1530,8 +1556,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-start-bad-token",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1543,13 +1569,13 @@ describe("ApnsDeliveries", () => {
       );
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.kind).toBe("live_activity_start");
       expect(result.ok).toBe(false);
-      expect(result.apnsStatus).toBe(400);
-      expect(result.apnsReason).toBe("BadDeviceToken");
+      expect(result.deliveryStatus).toBe(400);
+      expect(result.deliveryReason).toBe("BadDeviceToken");
       expect(invalidatedTokens).toMatchObject([
         {
           userId: target.user_id,
@@ -1575,7 +1601,8 @@ describe("ApnsDeliveries", () => {
     const invalidatedTokens: Array<
       Parameters<LiveActivities.LiveActivities["Service"]["invalidateDeliveryToken"]>[0]
     > = [];
-    const payload = makeApnsDeliveryJobPayload({
+    const payload = makeDeliveryJobPayload({
+      channel: "apns",
       kind: "live_activity_update",
       userId: target.user_id,
       deviceId: target.device_id,
@@ -1585,8 +1612,8 @@ describe("ApnsDeliveries", () => {
       expiresAt: "1970-01-01T00:10:00.000Z",
       jobId: "job-update-unregistered",
     });
-    const signed = signApnsDeliveryJob({
-      secret: config.apnsDeliveryJobSigningSecret,
+    const signed = signDeliveryJob({
+      secret: config.deliveryJobSigningSecret,
       payload,
     });
     const execute = (request: HttpClientRequest.HttpClientRequest) =>
@@ -1598,13 +1625,13 @@ describe("ApnsDeliveries", () => {
       );
 
     return Effect.gen(function* () {
-      const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+      const deliveries = yield* Deliveries.Deliveries;
       const result = yield* deliveries.processSignedJob(signed);
 
       expect(result.kind).toBe("live_activity_update");
       expect(result.ok).toBe(false);
-      expect(result.apnsStatus).toBe(410);
-      expect(result.apnsReason).toBe("Unregistered");
+      expect(result.deliveryStatus).toBe(410);
+      expect(result.deliveryReason).toBe("Unregistered");
       expect(invalidatedTokens).toMatchObject([
         {
           userId: target.user_id,
@@ -1637,7 +1664,7 @@ describe("live activity alert decisions", () => {
   };
 
   it("alerts when a thread newly enters an attention phase", () => {
-    const alert = ApnsDeliveries.alertForAttentionTransition({
+    const alert = Deliveries.alertForAttentionTransition({
       previousAggregate: aggregate,
       nextAggregate: {
         ...aggregate,
@@ -1656,7 +1683,7 @@ describe("live activity alert decisions", () => {
       activities: [...aggregate.activities, attentionRow],
     };
     expect(
-      ApnsDeliveries.alertForAttentionTransition({
+      Deliveries.alertForAttentionTransition({
         previousAggregate: withAttention,
         nextAggregate: withAttention,
         preferences,
@@ -1666,7 +1693,7 @@ describe("live activity alert decisions", () => {
 
   it("stays silent without a delivered baseline so replays cannot buzz", () => {
     expect(
-      ApnsDeliveries.alertForAttentionTransition({
+      Deliveries.alertForAttentionTransition({
         previousAggregate: null,
         nextAggregate: { ...aggregate, activities: [attentionRow] },
         preferences,
@@ -1676,7 +1703,7 @@ describe("live activity alert decisions", () => {
 
   it("honors the per-event notification switch for attention alerts", () => {
     expect(
-      ApnsDeliveries.alertForAttentionTransition({
+      Deliveries.alertForAttentionTransition({
         previousAggregate: aggregate,
         nextAggregate: {
           ...aggregate,
@@ -1696,7 +1723,7 @@ describe("live activity alert decisions", () => {
       phase: "waiting_for_input" as const,
       status: "Input",
     };
-    const alert = ApnsDeliveries.alertForAttentionTransition({
+    const alert = Deliveries.alertForAttentionTransition({
       previousAggregate: aggregate,
       nextAggregate: {
         ...aggregate,
@@ -1718,15 +1745,15 @@ describe("live activity alert decisions", () => {
       activities: [{ ...aggregate.activities[0]!, phase: "completed" as const, status: "Done" }],
     };
     expect(
-      ApnsDeliveries.alertForTerminalAggregate({ aggregate: terminalAggregate, preferences }),
+      Deliveries.alertForTerminalAggregate({ aggregate: terminalAggregate, preferences }),
     ).toEqual({ title: "Thread", body: "Done: Project" });
     expect(
-      ApnsDeliveries.alertForTerminalAggregate({
+      Deliveries.alertForTerminalAggregate({
         aggregate: terminalAggregate,
         preferences: { ...preferences, notifyOnCompletion: false },
       }),
     ).toBeNull();
-    expect(ApnsDeliveries.alertForTerminalAggregate({ aggregate: null, preferences })).toBeNull();
+    expect(Deliveries.alertForTerminalAggregate({ aggregate: null, preferences })).toBeNull();
   });
 
   it("alerts when a previously active thread finishes mid-flight", () => {
@@ -1741,7 +1768,7 @@ describe("live activity alert decisions", () => {
       activities: [attentionRow, doneRow],
     };
     expect(
-      ApnsDeliveries.alertForNewlyTerminal({
+      Deliveries.alertForNewlyTerminal({
         previousAggregate: aggregate,
         nextAggregate: next,
         preferences,
@@ -1750,7 +1777,7 @@ describe("live activity alert decisions", () => {
     ).toEqual({ title: "Thread", body: "Done: Project" });
     // The completion switch mutes it.
     expect(
-      ApnsDeliveries.alertForNewlyTerminal({
+      Deliveries.alertForNewlyTerminal({
         previousAggregate: aggregate,
         nextAggregate: next,
         preferences: { ...preferences, notifyOnCompletion: false },
@@ -1759,7 +1786,7 @@ describe("live activity alert decisions", () => {
     ).toBeNull();
     // No baseline means no transition to ring on.
     expect(
-      ApnsDeliveries.alertForNewlyTerminal({
+      Deliveries.alertForNewlyTerminal({
         previousAggregate: null,
         nextAggregate: next,
         preferences,
@@ -1768,7 +1795,7 @@ describe("live activity alert decisions", () => {
     ).toBeNull();
     // A Done row that was already terminal (or absent) before stays silent.
     expect(
-      ApnsDeliveries.alertForNewlyTerminal({
+      Deliveries.alertForNewlyTerminal({
         previousAggregate: next,
         nextAggregate: next,
         preferences,
@@ -1776,7 +1803,7 @@ describe("live activity alert decisions", () => {
       }),
     ).toBeNull();
     expect(
-      ApnsDeliveries.alertForNewlyTerminal({
+      Deliveries.alertForNewlyTerminal({
         previousAggregate: { ...aggregate, activities: [attentionRow] },
         nextAggregate: next,
         preferences,

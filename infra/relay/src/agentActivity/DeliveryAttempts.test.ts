@@ -32,8 +32,8 @@ describe("DeliveryAttempts", () => {
         kind: "live_activity_update",
         sourceJobId: "job-1",
         token: "apns-token",
-        apnsStatus: 200,
-        apnsId: "apns-id",
+        deliveryStatus: 200,
+        providerMessageId: "apns-id",
       });
 
       expect(insertedValues).toHaveLength(1);
@@ -45,8 +45,8 @@ describe("DeliveryAttempts", () => {
         kind: "live_activity_update",
         sourceJobId: "job-1",
         tokenSuffix: "ns-token",
-        apnsStatus: 200,
-        apnsId: "apns-id",
+        deliveryStatus: 200,
+        providerMessageId: "apns-id",
       });
     }).pipe(
       Effect.provide(
@@ -98,7 +98,7 @@ describe("DeliveryAttempts", () => {
         kind: "push_notification",
         sourceJobId: "job-1",
         tokenSuffix: "ns-token",
-        apnsStatus: null,
+        deliveryStatus: null,
       });
     }).pipe(
       Effect.provide(
@@ -126,9 +126,9 @@ describe("DeliveryAttempts", () => {
               Effect.succeed([
                 {
                   createdAt: "2026-05-26T00:00:00.000Z",
-                  apnsStatus: 200,
-                  apnsReason: null,
-                  apnsId: null,
+                  deliveryStatus: 200,
+                  deliveryReason: null,
+                  providerMessageId: null,
                   transportError: null,
                 },
               ]),
@@ -176,9 +176,9 @@ describe("DeliveryAttempts", () => {
               Effect.succeed([
                 {
                   createdAt: "2999-01-01T00:00:00.000Z",
-                  apnsStatus: null,
-                  apnsReason: null,
-                  apnsId: null,
+                  deliveryStatus: null,
+                  deliveryReason: null,
+                  providerMessageId: null,
                   transportError: null,
                 },
               ]),
@@ -227,9 +227,9 @@ describe("DeliveryAttempts", () => {
               Effect.succeed([
                 {
                   createdAt: "1969-12-31T23:00:00.000Z",
-                  apnsStatus: null,
-                  apnsReason: null,
-                  apnsId: null,
+                  deliveryStatus: null,
+                  deliveryReason: null,
+                  providerMessageId: null,
                   transportError: null,
                 },
               ]),
@@ -296,18 +296,18 @@ describe("DeliveryAttempts", () => {
       const attempts = yield* DeliveryAttempts.DeliveryAttempts;
       yield* attempts.completeSourceJob({
         sourceJobId: "job-1",
-        apnsStatus: 410,
-        apnsReason: "Unregistered",
-        apnsId: "apns-id",
+        deliveryStatus: 410,
+        deliveryReason: "Unregistered",
+        providerMessageId: "apns-id",
       });
 
       expect(whereClauses).toHaveLength(1);
       expect(updatedValues).toEqual([
         {
           createdAt: expect.any(String),
-          apnsStatus: 410,
-          apnsReason: "Unregistered",
-          apnsId: "apns-id",
+          deliveryStatus: 410,
+          deliveryReason: "Unregistered",
+          providerMessageId: "apns-id",
           transportError: null,
         },
       ]);
@@ -366,7 +366,7 @@ describe("DeliveryAttempts", () => {
         }),
       );
       const completionError = yield* Effect.flip(
-        attempts.completeSourceJob({ sourceJobId: "job-3", apnsStatus: 500 }),
+        attempts.completeSourceJob({ sourceJobId: "job-3", deliveryStatus: 500 }),
       );
 
       expect(recordError).toMatchObject({

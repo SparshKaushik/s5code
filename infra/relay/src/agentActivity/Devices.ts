@@ -18,7 +18,12 @@ export class DeviceRegistrationPersistenceError extends Schema.TaggedErrorClass<
   {
     userId: Schema.String,
     deviceId: Schema.String,
-    stage: Schema.Literals(["claim-push-token", "claim-push-to-start-token", "upsert-device"]),
+    stage: Schema.Literals([
+      "claim-push-token",
+      "claim-push-to-start-token",
+      "claim-fcm-token",
+      "upsert-device",
+    ]),
     cause: Schema.Defect(),
   },
 ) {
@@ -120,6 +125,23 @@ export const make = Effect.gen(function* () {
             ),
           );
       }
+      if (registration.fcmToken) {
+        yield* db
+          .update(relayMobileDevices)
+          .set({ fcmToken: null, updatedAt })
+          .where(eq(relayMobileDevices.fcmToken, registration.fcmToken))
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new DeviceRegistrationPersistenceError({
+                  userId: input.userId,
+                  deviceId: registration.deviceId,
+                  stage: "claim-fcm-token",
+                  cause,
+                }),
+            ),
+          );
+      }
 
       yield* db
         .insert(relayMobileDevices)
@@ -128,12 +150,13 @@ export const make = Effect.gen(function* () {
           deviceId: registration.deviceId,
           label: registration.label,
           platform: registration.platform,
-          iosMajorVersion: registration.iosMajorVersion,
+          iosMajorVersion: registration.iosMajorVersion ?? null,
           appVersion: registration.appVersion ?? null,
           bundleId: registration.bundleId ?? null,
           apsEnvironment: registration.apsEnvironment ?? null,
           pushToken: registration.pushToken ?? null,
           pushToStartToken: registration.pushToStartToken ?? null,
+          fcmToken: registration.fcmToken ?? null,
           preferencesJson: registration.preferences,
           createdAt: updatedAt,
           updatedAt,
@@ -143,7 +166,7 @@ export const make = Effect.gen(function* () {
           set: {
             platform: registration.platform,
             label: registration.label,
-            iosMajorVersion: registration.iosMajorVersion,
+            iosMajorVersion: registration.iosMajorVersion ?? null,
             appVersion: registration.appVersion ?? null,
             // Preserve routing from newer app builds when an older build
             // re-registers without these fields.
@@ -157,6 +180,7 @@ export const make = Effect.gen(function* () {
                 excluded.push_to_start_token,
                 ${relayMobileDevices.pushToStartToken}
               )`,
+            fcmToken: sql`coalesce(excluded.fcm_token, ${relayMobileDevices.fcmToken})`,
             preferencesJson: registration.preferences,
             updatedAt,
           },

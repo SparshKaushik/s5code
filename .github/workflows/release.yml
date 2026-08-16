@@ -526,4 +526,9 @@ jobs:
         if: steps.release-apk.outputs.present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: gh release upload "${{ needs.preflight.outputs.tag }}" release-assets/*.apk --clobber
+        run: |
+          # fingerprint.txt records the Android native fingerprint this APK was
+          # built from, so the next release's mobile-eas-production job can
+          # decide OTA-vs-build without relying on EAS's cloud build history
+          # (which `eas build --local` never populates).
+          gh release upload "${{ needs.preflight.outputs.tag }}" release-assets/*.apk release-assets/fingerprint.txt --clobber

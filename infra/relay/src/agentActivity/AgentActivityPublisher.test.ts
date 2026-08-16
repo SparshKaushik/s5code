@@ -7,7 +7,7 @@ import * as AgentActivityRows from "./AgentActivityRows.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
-import * as ApnsDeliveries from "./ApnsDeliveries.ts";
+import * as Deliveries from "./Deliveries.ts";
 
 const state: RelayAgentActivityState = {
   environmentId: "env" as RelayAgentActivityState["environmentId"],
@@ -32,6 +32,7 @@ function target(deviceId: string): LiveActivities.TargetRow {
     aps_environment: null,
     push_token: null,
     push_to_start_token: "start-token",
+    fcm_token: null,
     preferences_json: "{}",
     activity_push_token: null,
     remote_start_queued_at: null,
@@ -91,9 +92,9 @@ function makeEnvironmentLinks(
   };
 }
 
-function makeApnsDeliveries(
-  overrides: Partial<ApnsDeliveries.ApnsDeliveries["Service"]> = {},
-): ApnsDeliveries.ApnsDeliveries["Service"] {
+function makeDeliveries(
+  overrides: Partial<Deliveries.Deliveries["Service"]> = {},
+): Deliveries.Deliveries["Service"] {
   return {
     sendForTarget: () => Effect.succeed(null),
     sendPushNotificationForTarget: () => Effect.succeed(null),
@@ -102,27 +103,27 @@ function makeApnsDeliveries(
         deviceId: "device",
         kind: "live_activity_start",
         ok: true,
-        apnsStatus: 200,
-        apnsReason: null,
-        apnsId: "apns-id",
+        deliveryStatus: 200,
+        deliveryReason: null,
+        providerMessageId: "apns-id",
       }),
     sendPushNotification: () =>
       Effect.succeed({
         deviceId: "device",
         kind: "push_notification",
         ok: true,
-        apnsStatus: 200,
-        apnsReason: null,
-        apnsId: "apns-id",
+        deliveryStatus: 200,
+        deliveryReason: null,
+        providerMessageId: "apns-id",
       }),
     processSignedJob: () =>
       Effect.succeed({
         deviceId: "device",
         kind: "live_activity_start",
         ok: true,
-        apnsStatus: 200,
-        apnsReason: null,
-        apnsId: "apns-id",
+        deliveryStatus: 200,
+        deliveryReason: null,
+        providerMessageId: "apns-id",
       }),
     ...overrides,
   };
@@ -137,15 +138,14 @@ describe("AgentActivityPublisher", () => {
       remote_start_queued_at: null,
       remote_started_at: "1970-01-01T00:00:01.000Z",
     };
-    const sent: Array<Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendForTarget"]>[0]> =
-      [];
+    const sent: Array<Parameters<Deliveries.Deliveries["Service"]["sendForTarget"]>[0]> = [];
     const deliveryResult: RelayDeliveryResult = {
       deviceId: "device-1",
       kind: "live_activity_update",
       ok: true,
-      apnsStatus: null,
-      apnsReason: null,
-      apnsId: "queued",
+      deliveryStatus: null,
+      deliveryReason: null,
+      providerMessageId: "queued",
     };
 
     return Effect.gen(function* () {
@@ -169,8 +169,8 @@ describe("AgentActivityPublisher", () => {
                   }),
                 ),
                 Layer.succeed(
-                  ApnsDeliveries.ApnsDeliveries,
-                  makeApnsDeliveries({
+                  Deliveries.Deliveries,
+                  makeDeliveries({
                     sendForTarget: (input) =>
                       Effect.sync(() => {
                         sent.push(input);
@@ -207,9 +207,9 @@ describe("AgentActivityPublisher", () => {
       deviceId: "device-1",
       kind: "live_activity_start",
       ok: true,
-      apnsStatus: 200,
-      apnsReason: null,
-      apnsId: "apns-id",
+      deliveryStatus: 200,
+      deliveryReason: null,
+      providerMessageId: "apns-id",
     };
     const sentTargets: Array<string> = [];
     const deliveryLookups: Array<{
@@ -265,8 +265,8 @@ describe("AgentActivityPublisher", () => {
                   }),
                 ),
                 Layer.succeed(
-                  ApnsDeliveries.ApnsDeliveries,
-                  makeApnsDeliveries({
+                  Deliveries.Deliveries,
+                  makeDeliveries({
                     sendForTarget: (input) =>
                       Effect.sync(() => {
                         sentTargets.push(input.target.device_id);
@@ -307,9 +307,8 @@ describe("AgentActivityPublisher", () => {
       headline: "Done",
       updatedAt: "1970-01-01T00:00:10.000Z",
     };
-    const sentAggregates: Array<
-      Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendForTarget"]>[0]
-    > = [];
+    const sentAggregates: Array<Parameters<Deliveries.Deliveries["Service"]["sendForTarget"]>[0]> =
+      [];
     const upserts: Array<Parameters<AgentActivityRows.AgentActivityRows["Service"]["upsert"]>[0]> =
       [];
 
@@ -353,8 +352,8 @@ describe("AgentActivityPublisher", () => {
                   }),
                 ),
                 Layer.succeed(
-                  ApnsDeliveries.ApnsDeliveries,
-                  makeApnsDeliveries({
+                  Deliveries.Deliveries,
+                  makeDeliveries({
                     sendForTarget: (input) =>
                       Effect.sync(() => {
                         sentAggregates.push(input);
@@ -362,9 +361,9 @@ describe("AgentActivityPublisher", () => {
                           deviceId: input.target.device_id,
                           kind: "live_activity_end",
                           ok: true,
-                          apnsStatus: null,
-                          apnsReason: null,
-                          apnsId: "queued",
+                          deliveryStatus: null,
+                          deliveryReason: null,
+                          providerMessageId: "queued",
                         };
                       }),
                   }),
@@ -412,11 +411,10 @@ describe("AgentActivityPublisher", () => {
       phase: "waiting_for_input",
       headline: "Needs input",
     };
-    const liveAggregates: Array<
-      Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendForTarget"]>[0]
-    > = [];
+    const liveAggregates: Array<Parameters<Deliveries.Deliveries["Service"]["sendForTarget"]>[0]> =
+      [];
     const pushAggregates: Array<
-      Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendPushNotificationForTarget"]>[0]
+      Parameters<Deliveries.Deliveries["Service"]["sendPushNotificationForTarget"]>[0]
     > = [];
 
     return Effect.gen(function* () {
@@ -466,8 +464,8 @@ describe("AgentActivityPublisher", () => {
                   }),
                 ),
                 Layer.succeed(
-                  ApnsDeliveries.ApnsDeliveries,
-                  makeApnsDeliveries({
+                  Deliveries.Deliveries,
+                  makeDeliveries({
                     sendForTarget: (input) =>
                       Effect.sync(() => {
                         liveAggregates.push(input);
@@ -481,9 +479,9 @@ describe("AgentActivityPublisher", () => {
                           kind: "push_notification",
                           ok: true,
                           queued: true,
-                          apnsStatus: null,
-                          apnsReason: null,
-                          apnsId: null,
+                          deliveryStatus: null,
+                          deliveryReason: null,
+                          providerMessageId: null,
                         };
                       }),
                   }),
@@ -525,10 +523,10 @@ describe("AgentActivityPublisher", () => {
         headline: "Needs approval",
       };
       const liveAggregates: Array<
-        Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendForTarget"]>[0]
+        Parameters<Deliveries.Deliveries["Service"]["sendForTarget"]>[0]
       > = [];
       const pushAggregates: Array<
-        Parameters<ApnsDeliveries.ApnsDeliveries["Service"]["sendPushNotificationForTarget"]>[0]
+        Parameters<Deliveries.Deliveries["Service"]["sendPushNotificationForTarget"]>[0]
       > = [];
 
       return Effect.gen(function* () {
@@ -585,8 +583,8 @@ describe("AgentActivityPublisher", () => {
                     }),
                   ),
                   Layer.succeed(
-                    ApnsDeliveries.ApnsDeliveries,
-                    makeApnsDeliveries({
+                    Deliveries.Deliveries,
+                    makeDeliveries({
                       sendForTarget: (input) =>
                         Effect.sync(() => {
                           liveAggregates.push(input);
@@ -600,9 +598,9 @@ describe("AgentActivityPublisher", () => {
                             kind: "push_notification",
                             ok: true,
                             queued: true,
-                            apnsStatus: null,
-                            apnsReason: null,
-                            apnsId: null,
+                            deliveryStatus: null,
+                            deliveryReason: null,
+                            providerMessageId: null,
                           };
                         }),
                     }),

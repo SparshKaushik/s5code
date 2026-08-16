@@ -1,0 +1,67 @@
+{
+  "project_info": {
+    "project_number": "658468887698",
+    "project_id": "s5code",
+    "storage_bucket": "s5code.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:658468887698:android:6ff26f9fa75bacc234da4b",
+        "android_client_info": {
+          "package_name": "club.touchtech.s5code"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAb93YUYzLVKAzzHY9MKdUcIkbjvX2d1Fg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:658468887698:android:c2649cf5bec27a7b34da4b",
+        "android_client_info": {
+          "package_name": "club.touchtech.s5code.dev"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAb93YUYzLVKAzzHY9MKdUcIkbjvX2d1Fg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:658468887698:android:9b50b6065c0ac96f34da4b",
+        "android_client_info": {
+          "package_name": "club.touchtech.s5code.preview"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyAb93YUYzLVKAzzHY9MKdUcIkbjvX2d1Fg"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

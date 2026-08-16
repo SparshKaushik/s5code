@@ -62,4 +62,12 @@ describe("mobile client presentation", () => {
     expect(mobileClientPlatformLabel(device({ appVersion: null }))).toBe("iOS 18");
     expect(mobileClientUpdatedAtLabel("not-a-date")).toBe("Update time unavailable");
   });
+
+  it("labels Android clients without an iOS version", () => {
+    expect(
+      mobileClientPlatformLabel(
+        device({ platform: "android", iosMajorVersion: null, appVersion: "2.0.0" }),
+      ),
+    ).toBe("Android · S5 Code 2.0.0");
+  });
 });
