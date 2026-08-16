@@ -63,6 +63,11 @@ import * as DesktopWindow from "./window/DesktopWindow.ts";
 import * as DesktopWslBackend from "./wsl/DesktopWslBackend.ts";
 import * as DesktopWslEnvironment from "./wsl/DesktopWslEnvironment.ts";
 
+// Electron can emit `ready` while asynchronous Effect layers are still being
+// acquired. Register custom scheme privileges at module bootstrap so Clerk and
+// the renderer always observe them before `ready`.
+ElectronProtocol.registerDesktopSchemePrivilegesSync();
+
 const desktopEnvironmentLayer = Layer.unwrap(
   Effect.gen(function* () {
     const metadata = yield* Effect.service(ElectronApp.ElectronApp).pipe(
@@ -205,8 +210,8 @@ const desktopApplicationRuntimeLayer = desktopApplicationLayer.pipe(
   Layer.provideMerge(electronLayer),
 );
 
-// Acquire strict pre-ready setup before Clerk, whose userData resolution can
-// yield and let Electron emit ready.
+// Acquire platform command-line setup before Clerk, whose userData resolution
+// can yield and let Electron emit ready.
 const desktopRuntimeLayer = desktopClerkLayer.pipe(
   Layer.flatMap((clerkContext) =>
     desktopApplicationRuntimeLayer.pipe(Layer.provideMerge(Layer.succeedContext(clerkContext))),

@@ -3,15 +3,20 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { handleMock, netFetchMock, unhandleMock } = vi.hoisted(() => ({
+const { handleMock, netFetchMock, registerSchemesMock, unhandleMock } = vi.hoisted(() => ({
   handleMock: vi.fn(),
   netFetchMock: vi.fn(),
+  registerSchemesMock: vi.fn(),
   unhandleMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   net: { fetch: netFetchMock },
-  protocol: { handle: handleMock, unhandle: unhandleMock },
+  protocol: {
+    handle: handleMock,
+    registerSchemesAsPrivileged: registerSchemesMock,
+    unhandle: unhandleMock,
+  },
 }));
 
 import * as ElectronProtocol from "./ElectronProtocol.ts";
@@ -20,7 +25,37 @@ describe("ElectronProtocol", () => {
   beforeEach(() => {
     handleMock.mockReset();
     netFetchMock.mockReset();
+    registerSchemesMock.mockReset();
     unhandleMock.mockReset();
+  });
+
+  it("registers both desktop schemes synchronously", () => {
+    ElectronProtocol.registerDesktopSchemePrivilegesSync();
+
+    assert.deepEqual(registerSchemesMock.mock.calls, [
+      [
+        [
+          {
+            scheme: "s5code",
+            privileges: {
+              standard: true,
+              secure: true,
+              supportFetchAPI: true,
+              corsEnabled: true,
+            },
+          },
+          {
+            scheme: "s5code-dev",
+            privileges: {
+              standard: true,
+              secure: true,
+              supportFetchAPI: true,
+              corsEnabled: true,
+            },
+          },
+        ],
+      ],
+    ]);
   });
 
   it.effect("proxies the stable renderer origin to the current app server", () =>

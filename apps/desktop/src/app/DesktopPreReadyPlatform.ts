@@ -10,7 +10,6 @@ import * as Electron from "electron";
 import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import * as DesktopEarlyElectronStartup from "./DesktopEarlyElectronStartup.ts";
-import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 
 export interface DesktopPreReadyCommandLineReader {
   readonly hasSwitch: (switchName: string) => boolean;
@@ -66,9 +65,6 @@ export const make = Effect.gen(function* () {
   });
 }).pipe(Effect.withSpan("desktop.electron.configureBeforeReady"));
 
-// Keep Electron's strict pre-ready setup isolated so later runtime layers cannot
-// observe app readiness before scheme privileges and command-line switches exist.
-export const layer = Layer.mergeAll(
-  ElectronProtocol.layerSchemePrivileges,
-  Layer.effect(DesktopPreReadyElectronOptions, make),
-);
+// Keep Electron's platform-specific command-line setup isolated so Clerk
+// cannot begin initialization before it completes.
+export const layer = Layer.effect(DesktopPreReadyElectronOptions, make);
