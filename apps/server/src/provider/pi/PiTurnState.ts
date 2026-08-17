@@ -298,6 +298,31 @@ export function piContentBlocks(content: unknown): ReadonlyArray<PiAssistantCont
   });
 }
 
+/**
+ * Accumulated output text of a pi tool result or partial result.
+ *
+ * pi's `tool_execution_update` carries `partialResult` with the *accumulated*
+ * output so far (not a delta), and `tool_execution_end` carries the final
+ * `result` in the same `{ content, details }` shape. Both are read through the
+ * same content-block normalizer used for assistant messages, so the text is
+ * the concatenation of their text blocks.
+ */
+export function piToolOutputText(result: unknown): string {
+  if (!isPiObjectRecord(result)) return "";
+  return piAssistantText(piContentBlocks(result.content));
+}
+
+/**
+ * Delta to emit for a `tool_execution_update`.
+ *
+ * pi appends, so the delta is the suffix past the previously-seen text. A
+ * non-prefix (truncated or restarted buffer) falls back to the whole
+ * accumulated text so no output is silently dropped.
+ */
+export function piToolOutputDelta(previous: string, accumulated: string): string {
+  return accumulated.startsWith(previous) ? accumulated.slice(previous.length) : accumulated;
+}
+
 export interface PiUsageSnapshot {
   readonly usedTokens: number;
   readonly inputTokens?: number;

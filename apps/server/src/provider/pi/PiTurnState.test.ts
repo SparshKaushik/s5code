@@ -11,6 +11,8 @@ import {
   piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
+  piToolOutputDelta,
+  piToolOutputText,
   piTurnHasAssistantText,
   piTurnStateFromStopReason,
   piUsageSnapshot,
@@ -66,6 +68,38 @@ describe("piToolItemDetail", () => {
     expect(piToolItemDetail("patchtodo", { id: 2, priority: "high" })).toBe("#2 high");
     expect(piToolItemDetail("read_todo", {})).toBeUndefined();
     expect(piToolItemDetail("todowrite", { todos: [] })).toBeUndefined();
+  });
+});
+
+describe("piToolOutputText", () => {
+  it("concatenates the text blocks of a tool result's content", () => {
+    expect(
+      piToolOutputText({
+        content: [
+          { type: "text", text: "total 48\n" },
+          { type: "text", text: "src/\n" },
+        ],
+        details: {},
+      }),
+    ).toBe("total 48\nsrc/\n");
+  });
+
+  it("returns nothing for a result without content or a non-object result", () => {
+    expect(piToolOutputText(undefined)).toBe("");
+    expect(piToolOutputText({ details: {} })).toBe("");
+    expect(piToolOutputText("loose string")).toBe("");
+  });
+});
+
+describe("piToolOutputDelta", () => {
+  it("emits only the suffix past the previously-seen accumulated text", () => {
+    expect(piToolOutputDelta("", "total 48\n")).toBe("total 48\n");
+    expect(piToolOutputDelta("total 48\n", "total 48\nsrc/\n")).toBe("src/\n");
+    expect(piToolOutputDelta("total 48\n", "total 48\n")).toBe("");
+  });
+
+  it("falls back to the whole text when the buffer is not a strict prefix", () => {
+    expect(piToolOutputDelta("old output", "fresh output")).toBe("fresh output");
   });
 });
 
