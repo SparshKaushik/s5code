@@ -39,6 +39,9 @@ describe("mobile release policy", () => {
     expect(mobileWorkflow).toContain("while IFS= read -r tag");
     expect(mobileWorkflow).toContain('git checkout --quiet "$previous_tag"');
     expect(mobileWorkflow).toContain("pnpm install --filter=@t3tools/mobile... --frozen-lockfile");
+    // The decision step already runs from apps/mobile, so switching revisions must not descend
+    // into a second apps/mobile path before generating the base fingerprint.
+    expect(mobileWorkflow).not.toContain("cd apps/mobile\n            MOBILE_VERSION");
     expect(mobileWorkflow).toContain("npx expo-updates fingerprint:generate");
     expect(mobileWorkflow).toContain('MOBILE_VERSION="$previous_version"');
     expect(mobileWorkflow).toContain('head_fingerprint="$(jq -r');
