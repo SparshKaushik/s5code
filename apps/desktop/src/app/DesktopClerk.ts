@@ -221,6 +221,7 @@ export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolea
   return createClerkBridge({
     storage: storage({ path: stateDir }),
     passkeys: true,
+    manageRendererSchemePrivileges: false,
     renderer: {
       scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
       host: ElectronProtocol.DESKTOP_HOST,

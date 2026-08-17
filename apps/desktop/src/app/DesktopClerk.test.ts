@@ -162,6 +162,7 @@ describe("DesktopClerk", () => {
           {
             storage: storageAdapter,
             passkeys: true,
+            manageRendererSchemePrivileges: false,
             renderer: { scheme: "s5code-dev", host: "app" },
           },
         ],
@@ -295,6 +296,7 @@ describe("DesktopClerk", () => {
         {
           storage: storageAdapter,
           passkeys: true,
+          manageRendererSchemePrivileges: false,
           renderer: { scheme, host: "app" },
         },
       ],

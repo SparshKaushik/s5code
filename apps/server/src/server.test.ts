@@ -1581,6 +1581,27 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  for (const desktopOrigin of [
+    "s5code://app",
+    "s5code-dev://app",
+    "t3code://app",
+    "t3code-dev://app",
+  ]) {
+    it.effect(`echoes the packaged desktop origin ${desktopOrigin} on descriptor responses`, () =>
+      Effect.gen(function* () {
+        yield* buildAppUnderTest();
+
+        const url = yield* getHttpServerUrl("/.well-known/t3/environment");
+        const response = yield* fetchEffect(url, {
+          headers: { origin: desktopOrigin },
+        });
+
+        assert.equal(response.status, 200);
+        assertBrowserApiCorsResponseHeaders(response.headers, { origin: desktopOrigin });
+      }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+    );
+  }
+
   it.effect("reports unauthenticated session state without requiring auth", () =>
     Effect.gen(function* () {
       yield* buildAppUnderTest();

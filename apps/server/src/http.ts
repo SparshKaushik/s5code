@@ -6,9 +6,11 @@ import {
 } from "@t3tools/contracts";
 import { isDevProxiedPath } from "@t3tools/shared/devProxy";
 import { decodeOtlpTraceRecords } from "@t3tools/shared/observability";
+import * as Context from "effect/Context";
 import * as Data from "effect/Data";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
+import * as Headers from "effect/unstable/http/Headers";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
@@ -42,12 +44,12 @@ import { browserApiCorsAllowedHeaders, browserApiCorsAllowedMethods } from "./ht
 
 const OTLP_TRACES_PROXY_PATH = "/api/observability/v1/traces";
 const LOOPBACK_HOSTNAMES = new Set(["127.0.0.1", "::1", "localhost"]);
-const DESKTOP_RENDERER_ORIGINS = [
+const DESKTOP_RENDERER_ORIGINS = new Set([
   "s5code://app",
   "s5code-dev://app",
   "t3code://app",
   "t3code-dev://app",
-];
+]);
 export const httpCompressionLayer = HttpRouter.middleware(HttpMiddleware.compression(), {
   global: true,
 });
@@ -56,24 +58,54 @@ export const browserApiCorsLayer = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
     const devOrigin = config.devUrl?.origin;
-    // Dev uses credentialed requests from Vite or the Electron custom origin, so both must be
-    // explicit. Packaged desktop omits credentials and uses Effect's default wildcard origin.
+    // Dev uses credentialed requests from Vite or the Electron custom origin, so every allowed
+    // origin must be explicit. Packaged web requests remain wildcard-compatible. Chromium treats
+    // custom-scheme renderers as credentialed CORS clients even when fetch omits credentials, so
+    // packaged servers must echo those known origins rather than returning `*`.
     //
-    // T3CODE_DEV_ALLOWED_ORIGINS covers dev servers reached from a second
-    // origin — a tailnet name, a LAN IP, a phone. Browser dev normally proxies
-    // through Vite and is same-origin (no preflight at all), so this is a
-    // safety net for the desktop renderer and any direct-to-backend caller.
-    return HttpRouter.cors({
+    // T3CODE_DEV_ALLOWED_ORIGINS covers dev servers reached from a second origin — a tailnet name,
+    // a LAN IP, or a phone. Browser dev normally proxies through Vite and is same-origin.
+    const cors = HttpMiddleware.cors({
       ...(devOrigin
         ? {
             allowedOrigins: [devOrigin, ...DESKTOP_RENDERER_ORIGINS, ...config.devAllowedOrigins],
             credentials: true,
           }
-        : {}),
+        : {
+            allowedOrigins: (origin: string) => DESKTOP_RENDERER_ORIGINS.has(origin),
+          }),
       allowedMethods: browserApiCorsAllowedMethods,
       allowedHeaders: browserApiCorsAllowedHeaders,
       maxAge: 600,
     });
+
+    if (devOrigin !== undefined) {
+      return HttpRouter.middleware(cors, { global: true });
+    }
+
+    // Effect's CORS middleware applies ordinary response headers in a pre-response hook. Some
+    // packaged server adapters bypass that hook, while their OPTIONS path still works. Set the
+    // response header directly as a fallback without replacing an origin already added upstream.
+    return HttpRouter.middleware(
+      (httpEffect) =>
+        Effect.withFiber((fiber) => {
+          const request = Context.getUnsafe(fiber.context, HttpServerRequest.HttpServerRequest);
+          return cors(httpEffect).pipe(
+            Effect.map((response) => {
+              if (Option.isSome(Headers.get(response.headers, "access-control-allow-origin"))) {
+                return response;
+              }
+              const origin = request.headers.origin;
+              return HttpServerResponse.setHeader(
+                response,
+                "access-control-allow-origin",
+                origin !== undefined && DESKTOP_RENDERER_ORIGINS.has(origin) ? origin : "*",
+              );
+            }),
+          );
+        }),
+      { global: true },
+    );
   }),
 );
 
