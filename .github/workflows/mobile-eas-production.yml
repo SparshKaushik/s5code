@@ -9,9 +9,11 @@ name: Mobile EAS Production
 # signing keystore EAS manages remotely for the "production" profile
 # (credentialsSource defaults to "remote" in eas.json, downloaded here over
 # EXPO_TOKEN auth). `eas build --local` builds are not recorded in EAS's build
-# history, so build-vs-OTA fingerprint comparison uses this repo's own GitHub
-# Release history (a `fingerprint.txt` asset on the previous release) instead
-# of `eas build:list`.
+# history, so build-vs-OTA comparison uses this repo's GitHub Release history
+# (`fingerprint.txt` identifies releases that shipped a native build) and
+# compares that release tag's Expo fingerprint with the current release ref.
+# This mirrors upstream T3 Code's native fingerprint check, which computes the
+# base and head hashes on one runner with each revision's dependencies installed.
 on:
   workflow_call:
     inputs:
@@ -176,7 +178,6 @@ jobs:
             --jq 'sort_by(.createdAt) | reverse | .[].tagName')"
 
           previous_tag=""
-          previous_fingerprint=""
           while IFS= read -r tag; do
             fp="$(gh release download "$tag" \
               --repo "${{ github.repository }}" \
@@ -184,34 +185,15 @@ jobs:
               --output - 2>/dev/null || true)"
             if [ -n "$fp" ]; then
               previous_tag="$tag"
-              previous_fingerprint="$fp"
               break
             fi
           done <<<"$release_tags"
 
-          # MOBILE_VERSION is part of Expo's native fingerprint because it is
-          # the appVersion runtime boundary. Always fingerprint with the version
-          # of the binary being compared or built; the value pulled from EAS may
-          # belong to a different release.
-          fingerprint_for_version() {
-            local mobile_version="$1"
-            local fingerprint_json
-
-            # --build-profile, not --environment: eas-cli has a known bug
-            # (expo/eas-cli#3870) where --environment writes a stray status line
-            # to stdout before JSON redirection is installed.
-            fingerprint_json="$(MOBILE_VERSION="$mobile_version" eas fingerprint:generate \
-              --platform android \
-              --build-profile production \
-              --json \
-              --non-interactive)"
-            jq -r '.hash' <<<"$fingerprint_json"
-          }
-
+          # Release history identifies the last native runtime that shipped. Compare that tag's
+          # Expo fingerprint with the release ref on the same runner, reinstalling each revision's
+          # dependencies before hashing exactly as upstream's native-change check does.
           if [ -z "$previous_tag" ]; then
-            build_fingerprint="$(fingerprint_for_version "$RELEASE_VERSION")"
             {
-              echo "fingerprint=$build_fingerprint"
               echo "mode=build"
               echo "mobile_version=$RELEASE_VERSION"
             } >> "$GITHUB_OUTPUT"
@@ -220,23 +202,57 @@ jobs:
           fi
 
           previous_version="${previous_tag#v}"
-          comparison_fingerprint="$(fingerprint_for_version "$previous_version")"
+          mkdir -p "$RUNNER_TEMP/fp/head" "$RUNNER_TEMP/fp/base"
 
-          if [ "$previous_fingerprint" = "$comparison_fingerprint" ]; then
+          # Match upstream's native-change check: compute both fingerprints on this runner, then
+          # reinstall the base revision's dependencies before fingerprinting it. Comparing a
+          # released hash with a newer checkout is invalid because Expo fingerprints monorepo
+          # workspace inputs, platform-specific dependencies, and the package-manager version.
+          MOBILE_VERSION="$previous_version" npx expo-updates fingerprint:generate \
+            --platform android > "$RUNNER_TEMP/fp/head/android.json"
+
+          git checkout --quiet "$previous_tag"
+          pnpm install --filter=@t3tools/mobile... --frozen-lockfile
+          (
+            cd apps/mobile
+            MOBILE_VERSION="$previous_version" npx expo-updates fingerprint:generate \
+              --platform android > "$RUNNER_TEMP/fp/base/android.json"
+          )
+
+          git checkout --quiet "${{ inputs.release_ref }}"
+          pnpm install --filter=@t3tools/mobile... --frozen-lockfile
+
+          head_fingerprint="$(jq -r '.hash' "$RUNNER_TEMP/fp/head/android.json")"
+          base_fingerprint="$(jq -r '.hash' "$RUNNER_TEMP/fp/base/android.json")"
+
+          if [ "$base_fingerprint" = "$head_fingerprint" ]; then
             {
-              echo "fingerprint=$comparison_fingerprint"
               echo "mode=update"
               echo "mobile_version=$previous_version"
             } >> "$GITHUB_OUTPUT"
-            echo "Android fingerprint matches $previous_tag; publishing OTA for mobile $previous_version." >> "$GITHUB_STEP_SUMMARY"
+            echo "Android fingerprint is unchanged from $previous_tag (\`$head_fingerprint\`); publishing OTA for mobile $previous_version." >> "$GITHUB_STEP_SUMMARY"
           else
-            build_fingerprint="$(fingerprint_for_version "$RELEASE_VERSION")"
+            build_fingerprint="$(MOBILE_VERSION="$RELEASE_VERSION" npx expo-updates fingerprint:generate \
+              --platform android | jq -r '.hash')"
             {
               echo "fingerprint=$build_fingerprint"
               echo "mode=build"
               echo "mobile_version=$RELEASE_VERSION"
             } >> "$GITHUB_OUTPUT"
-            echo "Android fingerprint differs from $previous_tag; building unified release $RELEASE_VERSION." >> "$GITHUB_STEP_SUMMARY"
+            {
+              echo "Android fingerprint changed from $previous_tag; building unified release $RELEASE_VERSION."
+              echo
+              echo "- Base: \`$base_fingerprint\`"
+              echo "- Head: \`$head_fingerprint\`"
+              echo
+              jq -r -n \
+                --slurpfile h "$RUNNER_TEMP/fp/head/android.json" \
+                --slurpfile b "$RUNNER_TEMP/fp/base/android.json" '
+                  ($b[0].sources | map({ (.filePath // .id): .hash }) | add // {}) as $bm
+                  | $h[0].sources[]
+                  | select($bm[(.filePath // .id)] != .hash)
+                  | "- \(.type): `\(.filePath // .id)`"'
+            } >> "$GITHUB_STEP_SUMMARY"
           fi
 
       - name: Sync release mobile version to EAS

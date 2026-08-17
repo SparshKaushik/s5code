@@ -91,10 +91,12 @@ The native lint task runs SwiftLint for Swift plus ktlint and detekt for Kotlin.
 
 Preview CI uses Expo fingerprinting with the `preview:dev` profile to reuse an existing compatible build when possible, or start a new internal EAS build when native runtime inputs change.
 
-Production releases are owned by `.github/workflows/release.yml`. For each unified release, CI compares the current Android fingerprint with the latest finished production build:
+Production releases are owned by `.github/workflows/release.yml`. For each unified release, CI compares mobile native inputs with the latest release that shipped a production build:
 
-- A match publishes an OTA update with that build's existing mobile version.
-- A mismatch injects the unified release version and creates a new production APK.
+- No native-input changes publishes an OTA update with that build's existing mobile version.
+- Native-input changes inject the unified release version, create a new production APK, and record its Expo fingerprint.
+
+Expo fingerprints include monorepo workspace metadata, so CI computes both the release tag and current release-ref fingerprints on the same Linux runner. It reinstalls each revision's mobile dependency graph before hashing, matching upstream T3 Code's native-change workflow and avoiding comparisons between an old hash and a newer checkout.
 
 The production runtime policy is `appVersion`, so an OTA can only reach the binary version CI checked. Do not put a release version in `app.config.ts` or bump the mobile package version in a commit. The config omits `version` until `MOBILE_VERSION` is supplied by CI. EAS keeps Android `versionCode` remote and auto-increments it for native builds.
 
