@@ -66,6 +66,20 @@ function sanitizeDeepLink(value: string): string {
 export function sanitizeAgentActivityAggregateRow(
   row: RelayAgentActivityAggregateRow,
 ): RelayAgentActivityAggregateRow {
+  if (row.planProgress) {
+    return {
+      ...row,
+      projectTitle: truncateText(row.projectTitle, MAX_SUMMARY_TEXT_LENGTH),
+      threadTitle: truncateText(row.threadTitle, MAX_SUMMARY_TEXT_LENGTH),
+      modelTitle: truncateText(row.modelTitle, MAX_SUMMARY_TEXT_LENGTH),
+      status: truncateText(row.status, MAX_STATUS_TEXT_LENGTH),
+      deepLink: sanitizeDeepLink(row.deepLink),
+      planProgress: {
+        ...row.planProgress,
+        step: truncateText(row.planProgress.step, MAX_SUMMARY_TEXT_LENGTH),
+      },
+    };
+  }
   return {
     ...row,
     projectTitle: truncateText(row.projectTitle, MAX_SUMMARY_TEXT_LENGTH),

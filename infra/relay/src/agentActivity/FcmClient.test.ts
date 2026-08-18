@@ -2,6 +2,7 @@ import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientError from "effect/unstable/http/HttpClientError";
 import * as HttpClientResponse from "effect/unstable/http/HttpClientResponse";
@@ -57,6 +58,54 @@ describe("FcmClient", () => {
           },
         },
       });
+    }).pipe(
+      Effect.provide(
+        FcmClient.layer.pipe(Layer.provide(stubProviderTokens), Layer.provide(deadHttpClient)),
+      ),
+    ),
+  );
+
+  it.effect("builds a compact Android Live Update data message", () =>
+    Effect.gen(function* () {
+      const fcm = yield* FcmClient.FcmClient;
+      const payload = yield* fcm.encodeAndroidLiveUpdatePayload({
+        generationId: "generation-1",
+        eventAt: "2026-08-15T00:00:01.000Z",
+        aggregate: {
+          title: "S5 Code",
+          subtitle: "Agent work in progress",
+          activeCount: 1,
+          updatedAt: "2026-08-15T00:00:00.000Z",
+          activities: [
+            {
+              environmentId: "env" as never,
+              threadId: "thread" as never,
+              projectTitle: "Project",
+              threadTitle: "Thread",
+              modelTitle: "gpt-5.4",
+              phase: "running",
+              status: "Working",
+              updatedAt: "2026-08-15T00:00:00.000Z",
+              deepLink: "/threads/env/thread",
+              planProgress: { step: "Build APK", completedSteps: 2, totalSteps: 4 },
+            },
+          ],
+        },
+      });
+      const request = fcm.makeAndroidLiveUpdateRequest({ token: "fcm-token", payload });
+
+      expect(request.payload).toMatchObject({
+        message: {
+          token: "fcm-token",
+          data: { t3Type: "android_live_update" },
+          android: { priority: "HIGH", ttl: "600s", collapseKey: "agent-live-update" },
+        },
+      });
+      const payloadText = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))(
+        request.payload,
+      );
+      expect(payloadText).not.toContain('"notification"');
+      expect(payloadText.length).toBeLessThan(4096);
     }).pipe(
       Effect.provide(
         FcmClient.layer.pipe(Layer.provide(stubProviderTokens), Layer.provide(deadHttpClient)),

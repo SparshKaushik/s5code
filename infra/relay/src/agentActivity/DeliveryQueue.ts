@@ -64,6 +64,13 @@ export class DeliveryQueue extends Context.Service<
       readonly aggregate: DeliveryJobPayload["aggregate"];
       readonly alert?: DeliveryJobPayload["alert"];
     }) => Effect.Effect<RelayDeliveryResult, DeliveryQueueError>;
+    readonly enqueueAndroidLiveUpdate: (input: {
+      readonly userId: string;
+      readonly deviceId: string;
+      readonly token: string;
+      readonly generationId: string;
+      readonly aggregate: DeliveryJobPayload["aggregate"];
+    }) => Effect.Effect<RelayDeliveryResult, DeliveryQueueError>;
     readonly enqueuePushNotification: (input: {
       readonly channel: DeliveryChannel;
       readonly userId: string;
@@ -140,6 +147,62 @@ export const make = Effect.gen(function* () {
         providerMessageId: null,
       };
     }),
+    enqueueAndroidLiveUpdate: Effect.fn("relay.delivery_queue.enqueue_android_live_update")(
+      function* (input) {
+        const now = yield* DateTime.now;
+        const jobId = yield* crypto.randomUUIDv4.pipe(
+          Effect.mapError(
+            (cause) =>
+              new DeliveryQueueSendError({
+                operation: "generate-job-id",
+                jobId: null,
+                kind: "android_live_update",
+                userId: input.userId,
+                deviceId: input.deviceId,
+                cause,
+              }),
+          ),
+        );
+        const payload = makeDeliveryJobPayload({
+          kind: "android_live_update",
+          channel: "fcm",
+          userId: input.userId,
+          deviceId: input.deviceId,
+          token: input.token,
+          generationId: input.generationId,
+          aggregate:
+            input.aggregate === null ? null : sanitizeAgentActivityAggregateState(input.aggregate),
+          notification: null,
+          jobId,
+          createdAt: DateTime.formatIso(now),
+          expiresAt: expiresAtForJob(now.epochMilliseconds),
+        });
+        yield* sender
+          .send(signDeliveryJob({ secret: config.deliveryJobSigningSecret, payload }))
+          .pipe(
+            Effect.mapError(
+              (cause) =>
+                new DeliveryQueueSendError({
+                  operation: "send",
+                  jobId,
+                  kind: "android_live_update",
+                  userId: input.userId,
+                  deviceId: input.deviceId,
+                  cause,
+                }),
+            ),
+          );
+        return {
+          deviceId: input.deviceId,
+          kind: "android_live_update" as const,
+          ok: true,
+          queued: true,
+          deliveryStatus: null,
+          deliveryReason: null,
+          providerMessageId: null,
+        };
+      },
+    ),
     enqueuePushNotification: Effect.fn("relay.delivery_queue.enqueue_push_notification")(
       function* (input) {
         yield* Effect.annotateCurrentSpan({

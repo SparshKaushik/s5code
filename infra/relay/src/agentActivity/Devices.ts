@@ -11,7 +11,11 @@ import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 
 import * as RelayDb from "../db.ts";
-import { relayLiveActivities, relayMobileDevices } from "../persistence/schema.ts";
+import {
+  relayAndroidLiveUpdates,
+  relayLiveActivities,
+  relayMobileDevices,
+} from "../persistence/schema.ts";
 
 export class DeviceRegistrationPersistenceError extends Schema.TaggedErrorClass<DeviceRegistrationPersistenceError>()(
   "DeviceRegistrationPersistenceError",
@@ -37,7 +41,7 @@ export class DeviceUnregistrationPersistenceError extends Schema.TaggedErrorClas
   {
     userId: Schema.String,
     deviceId: Schema.String,
-    stage: Schema.Literals(["delete-live-activity", "delete-device"]),
+    stage: Schema.Literals(["delete-live-activity", "delete-android-live-update", "delete-device"]),
     cause: Schema.Defect(),
   },
 ) {
@@ -218,6 +222,25 @@ export const make = Effect.gen(function* () {
                 userId: input.userId,
                 deviceId: input.deviceId,
                 stage: "delete-live-activity",
+                cause,
+              }),
+          ),
+        );
+      yield* db
+        .delete(relayAndroidLiveUpdates)
+        .where(
+          and(
+            eq(relayAndroidLiveUpdates.userId, input.userId),
+            eq(relayAndroidLiveUpdates.deviceId, input.deviceId),
+          ),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new DeviceUnregistrationPersistenceError({
+                userId: input.userId,
+                deviceId: input.deviceId,
+                stage: "delete-android-live-update",
                 cause,
               }),
           ),

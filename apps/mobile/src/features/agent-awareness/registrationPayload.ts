@@ -1,6 +1,7 @@
 import type { RelayDeviceRegistrationRequest } from "@t3tools/contracts/relay";
 
 import type { Preferences } from "../../persistence/mobile-preferences";
+import { supportsAndroidLiveUpdates } from "./androidLiveUpdates";
 import { supportsAgentAwarenessPush } from "./capabilities";
 
 // Development builds are Xcode-signed and receive sandbox APNs tokens;
@@ -41,11 +42,12 @@ export function makeRelayDeviceRegistrationRequest(
   input: RegistrationInput,
 ): RelayDeviceRegistrationRequest {
   const pushAvailable = supportsAgentAwarenessPush();
-  // Live Activities are iOS-only; Android's "agent activity" surface (a
-  // persistent ongoing notification) is a later phase and never reads this
-  // preference today.
   const liveActivitiesEnabled =
-    input.platform === "ios" && pushAvailable && input.preferences.liveActivitiesEnabled !== false;
+    pushAvailable &&
+    ((input.platform === "ios" && input.preferences.liveActivitiesEnabled !== false) ||
+      (input.platform === "android" &&
+        supportsAndroidLiveUpdates() &&
+        input.preferences.androidLiveUpdatesEnabled !== false));
   const preferences = {
     liveActivitiesEnabled,
     notificationsEnabled: pushAvailable && input.notificationsEnabled,

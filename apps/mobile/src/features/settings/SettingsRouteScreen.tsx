@@ -21,12 +21,20 @@ import {
 import { AndroidScreenHeader } from "../../components/AndroidScreenHeader";
 import { AppText as Text } from "../../components/AppText";
 import { supportsAgentAwarenessPush } from "../agent-awareness/capabilities";
+import {
+  canPostAndroidLiveUpdates,
+  dismissAndroidLiveUpdate,
+  openAndroidLiveUpdateSettings,
+  supportsAndroidLiveUpdates,
+} from "../agent-awareness/androidLiveUpdates";
 import { setLiveActivityUpdatesEnabled } from "../agent-awareness/liveActivityPreferences";
 import { requestAgentNotificationPermission } from "../agent-awareness/notificationPermissions";
 import {
   getAgentAwarenessRegistrationStatus,
   refreshAgentAwarenessRegistration,
+  registerArmedAgentAwarenessAndroidLiveUpdate,
   subscribeAgentAwarenessRegistrationStatus,
+  updateAgentAwarenessRegistrationPreferences,
 } from "../agent-awareness/remoteRegistration";
 import { refreshManagedRelayEnvironments } from "../cloud/managedRelayState";
 import { hasCloudPublicConfig, resolveRelayClerkTokenOptions } from "../cloud/publicConfig";
@@ -153,7 +161,9 @@ function ConfiguredSettingsRouteScreen() {
   const [liveActivityStatus, setLiveActivityStatus] = useState<LiveActivityStatus>("checking");
   const deviceRegistered = useDeviceRegistered();
   const liveActivitiesPreferenceEnabled = AsyncResult.isSuccess(preferencesResult)
-    ? preferencesResult.value.liveActivitiesEnabled !== false
+    ? Platform.OS === "android"
+      ? preferencesResult.value.androidLiveUpdatesEnabled !== false
+      : preferencesResult.value.liveActivitiesEnabled !== false
     : true;
 
   const connections = useMemo(() => Object.values(savedConnectionsById), [savedConnectionsById]);
@@ -201,7 +211,11 @@ function ConfiguredSettingsRouteScreen() {
       return;
     }
     setLiveActivityStatus(
-      preferencesResult.value.liveActivitiesEnabled === false ? "disabled" : "enabled",
+      (Platform.OS === "android"
+        ? preferencesResult.value.androidLiveUpdatesEnabled
+        : preferencesResult.value.liveActivitiesEnabled) === false
+        ? "disabled"
+        : "enabled",
     );
   }, [isLoaded, isSignedIn, preferencesResult]);
 
@@ -298,12 +312,16 @@ function ConfiguredSettingsRouteScreen() {
 
     const updateResult = await settleAsyncResult(() =>
       runtime.runPromiseExit(
-        setLiveActivityUpdatesEnabled({
-          enabled: true,
-          previousEnabled: liveActivitiesPreferenceEnabled,
-          clerkToken: tokenResult.value,
-          connections,
-        }),
+        Platform.OS === "android"
+          ? updateAgentAwarenessRegistrationPreferences({
+              androidLiveUpdatesEnabled: true,
+            }).pipe(Effect.tap(() => registerArmedAgentAwarenessAndroidLiveUpdate()))
+          : setLiveActivityUpdatesEnabled({
+              enabled: true,
+              previousEnabled: liveActivitiesPreferenceEnabled,
+              clerkToken: tokenResult.value,
+              connections,
+            }),
       ),
     );
     if (updateResult._tag === "Failure") {
@@ -318,7 +336,11 @@ function ConfiguredSettingsRouteScreen() {
       return;
     }
 
-    savePreferences({ liveActivitiesEnabled: true });
+    savePreferences(
+      Platform.OS === "android"
+        ? { androidLiveUpdatesEnabled: true }
+        : { liveActivitiesEnabled: true },
+    );
     refreshManagedRelayEnvironments();
     setLiveActivityStatus("enabled");
     // The environment link can succeed while this device's own registration
@@ -326,15 +348,17 @@ function ConfiguredSettingsRouteScreen() {
     // Activities are live until the device is actually registered.
     if (getAgentAwarenessRegistrationStatus() === "registered") {
       Alert.alert(
-        "Live Activities enabled",
-        environmentCount > 0
-          ? `${environmentCount} environment${environmentCount === 1 ? "" : "s"} linked for Live Activity updates.`
-          : "Live Activity updates are enabled. Add an environment to start receiving updates.",
+        Platform.OS === "android" ? "Live Updates enabled" : "Live Activities enabled",
+        Platform.OS === "android"
+          ? "Live Updates are enabled for active agent work on this device."
+          : environmentCount > 0
+            ? `${environmentCount} environment${environmentCount === 1 ? "" : "s"} linked for Live Activity updates.`
+            : "Live Activity updates are enabled. Add an environment to start receiving updates.",
       );
     } else {
       Alert.alert(
-        "Couldn't finish enabling Live Activities",
-        "This device could not be registered with T3 Connect, so Live Activities won't appear yet. They'll start once registration succeeds.",
+        "Couldn't finish enabling live updates",
+        "This device could not be registered with T3 Connect, so live updates won't appear yet. They'll start once registration succeeds.",
       );
     }
   }, [
@@ -387,12 +411,16 @@ function ConfiguredSettingsRouteScreen() {
 
           const updateResult = await settleAsyncResult(() =>
             runtime.runPromiseExit(
-              setLiveActivityUpdatesEnabled({
-                enabled: false,
-                previousEnabled: liveActivitiesPreferenceEnabled,
-                clerkToken: token,
-                connections,
-              }),
+              Platform.OS === "android"
+                ? updateAgentAwarenessRegistrationPreferences({
+                    androidLiveUpdatesEnabled: false,
+                  }).pipe(Effect.tap(() => Effect.sync(dismissAndroidLiveUpdate)))
+                : setLiveActivityUpdatesEnabled({
+                    enabled: false,
+                    previousEnabled: liveActivitiesPreferenceEnabled,
+                    clerkToken: token,
+                    connections,
+                  }),
             ),
           );
           if (updateResult._tag === "Failure") {
@@ -402,7 +430,11 @@ function ConfiguredSettingsRouteScreen() {
             });
             return;
           }
-          savePreferences({ liveActivitiesEnabled: false });
+          savePreferences(
+            Platform.OS === "android"
+              ? { androidLiveUpdatesEnabled: false }
+              : { liveActivitiesEnabled: false },
+          );
           refreshManagedRelayEnvironments();
         })();
         return;
@@ -481,24 +513,37 @@ function ConfiguredSettingsRouteScreen() {
           />
           <SettingsSwitchRow
             disabled={
-              !agentAwarenessPushAvailable ||
-              Platform.OS !== "ios" ||
+              (Platform.OS === "ios" && !agentAwarenessPushAvailable) ||
+              (Platform.OS === "android" && !supportsAndroidLiveUpdates()) ||
+              (Platform.OS !== "ios" && Platform.OS !== "android") ||
               !isLoaded ||
               liveActivityStatus === "checking" ||
               liveActivityStatus === "linking"
             }
             icon="bolt.circle"
-            label="Live Activity Updates"
+            label={Platform.OS === "android" ? "Live Updates" : "Live Activity Updates"}
             // Same gate: a saved preference is meaningless until the device
             // registration the relay needs to push updates has succeeded.
             value={
-              agentAwarenessPushAvailable &&
-              Platform.OS === "ios" &&
+              (Platform.OS === "ios"
+                ? agentAwarenessPushAvailable
+                : supportsAndroidLiveUpdates()) &&
               (liveActivityStatus === "enabled" || liveActivityStatus === "linking") &&
               deviceRegistered
             }
             onValueChange={handleLiveActivitiesChange}
           />
+          {Platform.OS === "android" &&
+          supportsAndroidLiveUpdates() &&
+          liveActivitiesPreferenceEnabled &&
+          !canPostAndroidLiveUpdates() ? (
+            <SettingsRow
+              icon="gearshape"
+              label="Live Update Promotion"
+              value="Standard only"
+              onPress={openAndroidLiveUpdateSettings}
+            />
+          ) : null}
         </SettingsSection>
 
         <GeneralSettingsSection />

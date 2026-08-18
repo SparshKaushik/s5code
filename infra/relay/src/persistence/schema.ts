@@ -61,6 +61,21 @@ export const relayLiveActivities = pgTable(
   ],
 );
 
+export const relayAndroidLiveUpdates = pgTable(
+  "relay_android_live_updates",
+  {
+    userId: varchar("user_id", { length: 255 }).notNull(),
+    deviceId: varchar("device_id", { length: 255 }).notNull(),
+    generationId: varchar("generation_id", { length: 255 }).notNull(),
+    armedAt: varchar("armed_at", { length: 64 }).notNull(),
+    lastAggregateJson: jsonb("last_aggregate_json").$type<RelayAgentActivityAggregateState>(),
+    lastDeliveryAt: varchar("last_delivery_at", { length: 64 }),
+    createdAt: varchar("created_at", { length: 64 }).notNull(),
+    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
+  },
+  (table) => [primaryKey({ columns: [table.userId, table.deviceId] })],
+);
+
 export const relayEnvironmentLinks = pgTable(
   "relay_environment_links",
   {

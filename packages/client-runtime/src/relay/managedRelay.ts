@@ -18,10 +18,12 @@ import {
   RelayGetEnvironmentStatusEndpoint,
   RelayJwtSubjectTokenType,
   type RelayAgentActivitySnapshotResponse,
+  type RelayAndroidLiveUpdateRegistrationRequest,
   type RelayLiveActivityRegistrationRequest,
   RelayMobileRegistrationScope,
   type RelayOkResponse,
   type RelayPublicClientId,
+  RelayRegisterAndroidLiveUpdateEndpoint,
   RelayRegisterDeviceEndpoint,
   RelayAgentActivitySnapshotEndpoint,
   RelayRegisterLiveActivityEndpoint,
@@ -92,6 +94,7 @@ export const ManagedRelayRequestAction = Schema.Literals([
   "get relay environment status",
   "connect relay environment",
   "register relay mobile device",
+  "register relay Android Live Update",
   "unregister relay mobile device",
   "register relay live activity",
   "read relay agent activity snapshot",
@@ -108,6 +111,7 @@ export const ManagedRelayRequestActivity = Schema.Literals([
   "Relay environment status request",
   "Relay environment connection",
   "Relay mobile device registration",
+  "Relay Android Live Update registration",
   "Relay mobile device unregistration",
   "Relay Live Activity registration",
   "Relay agent activity snapshot",
@@ -294,6 +298,10 @@ export class ManagedRelayClient extends Context.Service<
       readonly clerkToken: string;
       readonly payload: RelayLiveActivityRegistrationRequest;
     }) => Effect.Effect<RelayOkResponse, ManagedRelayClientError>;
+    readonly registerAndroidLiveUpdate?: (input: {
+      readonly clerkToken: string;
+      readonly payload: RelayAndroidLiveUpdateRegistrationRequest;
+    }) => Effect.Effect<RelayOkResponse, ManagedRelayClientError>;
     readonly getAgentActivitySnapshot: (input: {
       readonly clerkToken: string;
     }) => Effect.Effect<RelayAgentActivitySnapshotResponse, ManagedRelayClientError>;
@@ -417,6 +425,7 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
     registerDevice: unavailable("clientRuntime.managedRelay.registerDevice"),
     unregisterDevice: unavailable("clientRuntime.managedRelay.unregisterDevice"),
     registerLiveActivity: unavailable("clientRuntime.managedRelay.registerLiveActivity"),
+    registerAndroidLiveUpdate: unavailable("clientRuntime.managedRelay.registerAndroidLiveUpdate"),
     getAgentActivitySnapshot: unavailable("clientRuntime.managedRelay.getAgentActivitySnapshot"),
     resetTokenCache: Effect.void.pipe(
       Effect.withSpan("clientRuntime.managedRelay.resetTokenCache"),
@@ -468,6 +477,10 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
     getAgentActivitySnapshot: (): DpopProofTarget => ({
       method: RelayAgentActivitySnapshotEndpoint.method,
       url: urlBuilder.mobile.getAgentActivitySnapshot(),
+    }),
+    registerAndroidLiveUpdate: (): DpopProofTarget => ({
+      method: RelayRegisterAndroidLiveUpdateEndpoint.method,
+      url: urlBuilder.mobile.registerAndroidLiveUpdate(),
     }),
     registerLiveActivity: (): DpopProofTarget => ({
       method: RelayRegisterLiveActivityEndpoint.method,
@@ -887,6 +900,28 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
         );
       },
       Effect.withSpan("clientRuntime.managedRelay.getAgentActivitySnapshot"),
+      withRelayClientTracing,
+    ),
+    registerAndroidLiveUpdate: Effect.fnUntraced(
+      function* (input) {
+        return yield* mobileRegistrationRequest(
+          {
+            clerkToken: input.clerkToken,
+            target: dpopProofTargets.registerAndroidLiveUpdate(),
+          },
+          (authorization) =>
+            client.mobile
+              .registerAndroidLiveUpdate({
+                headers: dpopHeaders(authorization),
+                payload: input.payload,
+              })
+              .pipe(
+                Effect.mapError(relayRequestError("register relay Android Live Update")),
+                timeoutRelayRequest("Relay Android Live Update registration"),
+              ),
+        );
+      },
+      Effect.withSpan("clientRuntime.managedRelay.registerAndroidLiveUpdate"),
       withRelayClientTracing,
     ),
     registerLiveActivity: Effect.fnUntraced(

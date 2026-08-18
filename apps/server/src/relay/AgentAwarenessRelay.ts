@@ -86,6 +86,7 @@ export function shouldPublishAgentAwarenessEvent(event: OrchestrationEvent): boo
         event.payload.activity.kind === "provider.approval.respond.failed" ||
         event.payload.activity.kind === "user-input.requested" ||
         event.payload.activity.kind === "user-input.resolved" ||
+        event.payload.activity.kind === "turn.plan.updated" ||
         event.payload.activity.kind === "runtime.error"
       );
     default:

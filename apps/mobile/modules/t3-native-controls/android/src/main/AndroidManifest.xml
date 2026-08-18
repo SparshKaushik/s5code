@@ -1,1 +1,21 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android" />
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+  xmlns:tools="http://schemas.android.com/tools">
+  <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
+
+  <application>
+    <receiver
+      android:name="expo.modules.t3nativecontrols.AndroidLiveUpdateDismissReceiver"
+      android:exported="false" />
+    <service
+      android:name="expo.modules.notifications.service.ExpoFirebaseMessagingService"
+      tools:node="remove"
+      tools:selector="expo.modules.notifications" />
+    <service
+      android:name="expo.modules.t3nativecontrols.T3FirebaseMessagingService"
+      android:exported="false">
+      <intent-filter android:priority="1">
+        <action android:name="com.google.firebase.MESSAGING_EVENT" />
+      </intent-filter>
+    </service>
+  </application>
+</manifest>

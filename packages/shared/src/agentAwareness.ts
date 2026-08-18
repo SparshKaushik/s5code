@@ -25,6 +25,11 @@ export interface AgentAwarenessState {
   readonly modelTitle: string;
   readonly updatedAt: string;
   readonly deepLink: string;
+  readonly planProgress?: {
+    readonly step: string;
+    readonly completedSteps: number;
+    readonly totalSteps: number;
+  } | null;
 }
 
 export interface ProjectThreadAwarenessInput {
@@ -40,6 +45,7 @@ export interface ProjectThreadAwarenessInput {
     | "updatedAt"
     | "hasPendingApprovals"
     | "hasPendingUserInput"
+    | "planProgress"
   >;
 }
 
@@ -71,6 +77,7 @@ export function projectThreadAwareness(
     modelTitle: thread.modelSelection.model,
     updatedAt: thread.updatedAt,
     deepLink: buildAgentAwarenessDeepLink({ environmentId, threadId: thread.id }),
+    ...(phase === "running" && thread.planProgress ? { planProgress: thread.planProgress } : {}),
   };
 }
 

@@ -7,6 +7,38 @@ class T3NativeControlsModule : Module() {
   override fun definition() = ModuleDefinition {
     Name("T3NativeControls")
 
+    Function("canPostAndroidLiveUpdates") {
+      AndroidLiveUpdateNotifications.canPostPromoted(
+        requireNotNull(appContext.reactContext).applicationContext,
+      )
+    }
+
+    Function("getArmedAndroidLiveUpdateGeneration") {
+      AndroidLiveUpdateNotifications.currentGeneration(
+        requireNotNull(appContext.reactContext).applicationContext,
+      )
+    }
+
+    Function("armAndroidLiveUpdate") { generationId: String, seedJson: String ->
+      AndroidLiveUpdateNotifications.arm(
+        requireNotNull(appContext.reactContext).applicationContext,
+        generationId,
+        seedJson,
+      )
+    }
+
+    Function("dismissAndroidLiveUpdate") {
+      AndroidLiveUpdateNotifications.dismiss(
+        requireNotNull(appContext.reactContext).applicationContext,
+      )
+    }
+
+    Function("openAndroidLiveUpdateSettings") {
+      AndroidLiveUpdateNotifications.openSettings(
+        requireNotNull(appContext.reactContext).applicationContext,
+      )
+    }
+
     Function("getShowcasePairingUrl") {
       appContext.currentActivity?.intent?.getStringExtra("showcasePairingUrl")
     }

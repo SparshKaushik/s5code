@@ -180,6 +180,61 @@ describe("deliveryJobs", () => {
     ).toEqual(liveActivityPayload);
   });
 
+  it("accepts Android Live Update update and end jobs", () => {
+    const payload = makeDeliveryJobPayload({
+      channel: "fcm",
+      kind: "android_live_update",
+      userId: "user-1",
+      deviceId: "device-android",
+      token: "fcm-token",
+      generationId: "generation-1",
+      aggregate,
+      createdAt: "2026-05-25T00:00:00.000Z",
+      expiresAt: "2026-05-25T00:05:00.000Z",
+      jobId: "job-android-live",
+    });
+    const endPayload = { ...payload, jobId: "job-android-end", aggregate: null };
+
+    expect(
+      verifySignedDeliveryJob({
+        secret,
+        job: signDeliveryJob({ secret, payload }),
+        nowMs: 0,
+      }),
+    ).toEqual(payload);
+    expect(
+      verifySignedDeliveryJob({
+        secret,
+        job: signDeliveryJob({ secret, payload: endPayload }),
+        nowMs: 0,
+      }),
+    ).toEqual(endPayload);
+  });
+
+  it("rejects Android Live Update jobs without a generation", () => {
+    const payload = makeDeliveryJobPayload({
+      channel: "fcm",
+      kind: "android_live_update",
+      userId: "user-1",
+      deviceId: "device-android",
+      token: "fcm-token",
+      aggregate,
+      createdAt: "2026-05-25T00:00:00.000Z",
+      expiresAt: "2026-05-25T00:05:00.000Z",
+      jobId: "job-android-invalid",
+    });
+
+    expect(
+      verifySignedDeliveryJob({
+        secret,
+        job: signDeliveryJob({ secret, payload }),
+        nowMs: 0,
+      }),
+    ).toMatchObject({
+      _tag: "DeliveryJobQueuePayloadInvalid",
+    });
+  });
+
   it("rejects jobs with invalid or overlong time windows", () => {
     const basePayload = makeDeliveryJobPayload({
       channel: "apns",

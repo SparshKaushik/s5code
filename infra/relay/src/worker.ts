@@ -38,6 +38,7 @@ import { ManagedEndpointZone, RelayApiZone, RelayDeploymentConfig } from "./zone
 import { makeRelayTraceLayer, RelayObservability } from "./observability.ts";
 import * as DeliveryAttempts from "./agentActivity/DeliveryAttempts.ts";
 import * as AgentActivityRows from "./agentActivity/AgentActivityRows.ts";
+import * as AndroidLiveUpdates from "./agentActivity/AndroidLiveUpdates.ts";
 import * as Devices from "./agentActivity/Devices.ts";
 import * as DpopProofs from "./auth/DpopProofs.ts";
 import * as RelayTokens from "./auth/RelayTokens.ts";
@@ -267,8 +268,9 @@ export const ApiLive = Api.make(
       Layer.provideMerge(
         DeliveryQueue.layerCloudflareQueues(deliveryQueueSender, alchemyRuntimeContext),
       ),
-      Layer.provideMerge(AgentActivityRows.layer),
-      Layer.provideMerge(Devices.layer),
+      Layer.provideMerge(
+        Layer.mergeAll(AgentActivityRows.layer, AndroidLiveUpdates.layer, Devices.layer),
+      ),
       Layer.provideMerge(EnvironmentCredentials.layer),
       Layer.provideMerge(
         Layer.mergeAll(

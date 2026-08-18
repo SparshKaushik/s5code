@@ -1,5 +1,6 @@
 import type {
   RelayAgentActivitySnapshotResponse,
+  RelayAndroidLiveUpdateRegistrationRequest,
   RelayDeviceRegistrationRequest,
   RelayLiveActivityRegistrationRequest,
 } from "@t3tools/contracts/relay";
@@ -7,8 +8,10 @@ import * as DateTime from "effect/DateTime";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 
 import * as AgentActivityRows from "./AgentActivityRows.ts";
+import * as AndroidLiveUpdates from "./AndroidLiveUpdates.ts";
 import * as Devices from "./Devices.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
@@ -16,6 +19,7 @@ import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
 export type MobileRegistrationError =
   | Devices.DeviceRegistrationPersistenceError
   | Devices.DeviceUnregistrationPersistenceError
+  | AndroidLiveUpdates.AndroidLiveUpdatePersistenceError
   | LiveActivities.LiveActivityRegistrationPersistenceError
   | AgentActivityRows.AgentActivityRowListPersistenceError;
 
@@ -30,6 +34,10 @@ export class MobileRegistrations extends Context.Service<
       readonly userId: string;
       readonly payload: RelayLiveActivityRegistrationRequest;
     }) => Effect.Effect<{ readonly ok: true }, MobileRegistrationError>;
+    readonly registerAndroidLiveUpdate: (input: {
+      readonly userId: string;
+      readonly payload: RelayAndroidLiveUpdateRegistrationRequest;
+    }) => Effect.Effect<{ readonly ok: true }, MobileRegistrationError>;
     readonly unregisterDevice: (input: {
       readonly userId: string;
       readonly deviceId: string;
@@ -43,6 +51,7 @@ export class MobileRegistrations extends Context.Service<
 export const make = Effect.gen(function* () {
   const rows = yield* AgentActivityRows.AgentActivityRows;
   const devices = yield* Devices.Devices;
+  const androidLiveUpdates = yield* Effect.serviceOption(AndroidLiveUpdates.AndroidLiveUpdates);
   const liveActivities = yield* LiveActivities.LiveActivities;
   const publisher = yield* AgentActivityPublisher.AgentActivityPublisher;
 
@@ -68,6 +77,38 @@ export const make = Effect.gen(function* () {
         );
       return { ok: true as const };
     }),
+    registerAndroidLiveUpdate: Effect.fn("relay.mobile_registrations.register_android_live_update")(
+      function* (input) {
+        yield* Effect.annotateCurrentSpan({
+          "relay.mobile.device_id": input.payload.deviceId,
+          "relay.mobile.platform": "android",
+        });
+        if (
+          Option.isNone(androidLiveUpdates) ||
+          publisher.replayForAndroidLiveUpdateRegistration === undefined
+        ) {
+          return { ok: true as const };
+        }
+        yield* androidLiveUpdates.value.register({
+          userId: input.userId,
+          registration: input.payload,
+        });
+        yield* publisher
+          .replayForAndroidLiveUpdateRegistration({
+            userId: input.userId,
+            deviceId: input.payload.deviceId,
+          })
+          .pipe(
+            Effect.tapError((error) =>
+              Effect.logWarning("Android Live Update registration replay failed", {
+                errorTag: error._tag,
+              }),
+            ),
+            Effect.ignore,
+          );
+        return { ok: true as const };
+      },
+    ),
     registerLiveActivity: Effect.fn("relay.mobile_registrations.register_live_activity")(
       function* (input) {
         yield* Effect.annotateCurrentSpan({

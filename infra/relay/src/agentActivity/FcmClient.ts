@@ -7,17 +7,22 @@ import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 
 import type { FcmCredentials } from "../Config.ts";
-import type { NotificationPayload } from "./deliveryJobs.ts";
 import {
-  FcmAccessTokenRequestError,
-  FcmProviderTokens,
-  type FcmAccessTokenError,
-} from "./FcmProviderTokens.ts";
+  RelayAgentActivityAggregateState,
+  type RelayAgentActivityAggregateState as RelayAgentActivityAggregateStateType,
+} from "@t3tools/contracts/relay";
+import type { NotificationPayload } from "./deliveryJobs.ts";
+import { FcmAccessTokenRequestError, FcmProviderTokens } from "./FcmProviderTokens.ts";
 import { FcmJwtEncodingError, FcmJwtSigningError } from "./fcmJwt.ts";
 
 export { FcmJwtEncodingError, FcmJwtSigningError } from "./fcmJwt.ts";
 
 interface FcmPushNotificationRequest {
+  readonly token: string;
+  readonly payload: unknown;
+}
+
+interface FcmAndroidLiveUpdateRequest {
   readonly token: string;
   readonly payload: unknown;
 }
@@ -32,7 +37,7 @@ export interface FcmDeliveryResult {
 export class FcmHttpRequestError extends Schema.TaggedErrorClass<FcmHttpRequestError>()(
   "FcmHttpRequestError",
   {
-    requestKind: Schema.Literals(["push-notification"]),
+    requestKind: Schema.Literals(["push-notification", "android-live-update"]),
     projectId: Schema.String,
     tokenSuffix: Schema.String,
     stage: Schema.Literals(["send", "read-response"]),
@@ -132,13 +137,61 @@ function makePushNotificationRequest(input: {
   };
 }
 
+const FcmAndroidLiveUpdatePayload = Schema.Struct({
+  type: Schema.Literal("agent_activity_live_update"),
+  version: Schema.Literal(1),
+  event: Schema.Literals(["update", "end"]),
+  generationId: Schema.String,
+  eventAt: Schema.String,
+  aggregate: Schema.NullOr(RelayAgentActivityAggregateState),
+});
+const decodeFcmAndroidLiveUpdatePayload = Schema.decodeUnknownEffect(FcmAndroidLiveUpdatePayload);
+const encodeFcmAndroidLiveUpdatePayload = Schema.encodeEffect(
+  Schema.fromJsonString(FcmAndroidLiveUpdatePayload),
+);
+
+const MAX_FCM_DATA_PAYLOAD_BYTES = 4_096;
+
+function makeAndroidLiveUpdateRequest(input: {
+  readonly token: string;
+  readonly payload: string;
+}): FcmAndroidLiveUpdateRequest {
+  if (new TextEncoder().encode(input.payload).byteLength > MAX_FCM_DATA_PAYLOAD_BYTES) {
+    throw new RangeError("Android Live Update FCM payload exceeds 4096 bytes.");
+  }
+  return {
+    token: input.token,
+    payload: {
+      message: {
+        token: input.token,
+        data: {
+          t3Type: "android_live_update",
+          liveUpdate: input.payload,
+        },
+        android: {
+          priority: "HIGH",
+          ttl: "600s",
+          collapseKey: "agent-live-update",
+        },
+      },
+    },
+  };
+}
+
 export class FcmClient extends Context.Service<
   FcmClient,
   {
     readonly makePushNotificationRequest: typeof makePushNotificationRequest;
+    readonly makeAndroidLiveUpdateRequest: typeof makeAndroidLiveUpdateRequest;
+    readonly encodeAndroidLiveUpdatePayload: (input: {
+      readonly generationId: string;
+      readonly eventAt: string;
+      readonly aggregate: RelayAgentActivityAggregateStateType | null;
+    }) => Effect.Effect<string, Schema.SchemaError>;
     readonly sendPushNotificationRequest: (input: {
       readonly credentials: FcmCredentials;
-      readonly request: FcmPushNotificationRequest;
+      readonly request: FcmPushNotificationRequest | FcmAndroidLiveUpdateRequest;
+      readonly requestKind?: "push-notification" | "android-live-update";
       readonly issuedAtUnixSeconds: number;
     }) => Effect.Effect<FcmDeliveryResult, FcmError>;
   }
@@ -150,7 +203,8 @@ export const make = Effect.gen(function* () {
 
   const sendPushNotificationRequest: FcmClient["Service"]["sendPushNotificationRequest"] =
     Effect.fn("relay.fcm.send_push_notification_request")(function* (input) {
-      yield* Effect.annotateCurrentSpan({ "relay.fcm.event": "push_notification" });
+      const requestKind = input.requestKind ?? "push-notification";
+      yield* Effect.annotateCurrentSpan({ "relay.fcm.event": requestKind });
       const accessToken = yield* providerTokens.getAccessToken({
         credentials: input.credentials,
         issuedAtUnixSeconds: input.issuedAtUnixSeconds,
@@ -166,7 +220,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (cause) =>
             new FcmHttpRequestError({
-              requestKind: "push-notification",
+              requestKind,
               projectId: input.credentials.projectId,
               tokenSuffix: input.request.token.slice(-8),
               stage: "send",
@@ -179,7 +233,7 @@ export const make = Effect.gen(function* () {
         Effect.mapError(
           (cause) =>
             new FcmHttpRequestError({
-              requestKind: "push-notification",
+              requestKind,
               projectId: input.credentials.projectId,
               tokenSuffix: input.request.token.slice(-8),
               stage: "read-response",
@@ -204,6 +258,16 @@ export const make = Effect.gen(function* () {
 
   return FcmClient.of({
     makePushNotificationRequest,
+    makeAndroidLiveUpdateRequest,
+    encodeAndroidLiveUpdatePayload: (input) =>
+      decodeFcmAndroidLiveUpdatePayload({
+        type: "agent_activity_live_update",
+        version: 1,
+        event: input.aggregate === null ? "end" : "update",
+        generationId: input.generationId,
+        eventAt: input.eventAt,
+        aggregate: input.aggregate,
+      }).pipe(Effect.flatMap(encodeFcmAndroidLiveUpdatePayload)),
     sendPushNotificationRequest,
   });
 });

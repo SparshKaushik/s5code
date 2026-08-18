@@ -98,6 +98,19 @@ export const RelayDeviceUnregistrationParams = Schema.Struct({
 });
 export type RelayDeviceUnregistrationParams = typeof RelayDeviceUnregistrationParams.Type;
 
+export const RelayAgentActivityPlanProgress = Schema.Struct({
+  step: TrimmedNonEmptyString,
+  completedSteps: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
+  totalSteps: Schema.Int.check(Schema.isGreaterThan(0)),
+}).check(
+  Schema.makeFilter((progress) =>
+    progress.completedSteps <= progress.totalSteps
+      ? undefined
+      : { path: ["completedSteps"], issue: "completedSteps must not exceed totalSteps" },
+  ),
+);
+export type RelayAgentActivityPlanProgress = typeof RelayAgentActivityPlanProgress.Type;
+
 export const RelayAgentActivityState = Schema.Struct({
   environmentId: EnvironmentId,
   threadId: ThreadId,
@@ -109,6 +122,7 @@ export const RelayAgentActivityState = Schema.Struct({
   modelTitle: TrimmedNonEmptyString,
   updatedAt: TrimmedNonEmptyString,
   deepLink: TrimmedNonEmptyString,
+  planProgress: Schema.optional(Schema.NullOr(RelayAgentActivityPlanProgress)),
 });
 export type RelayAgentActivityState = typeof RelayAgentActivityState.Type;
 
@@ -122,6 +136,7 @@ export const RelayAgentActivityAggregateRow = Schema.Struct({
   status: TrimmedNonEmptyString,
   updatedAt: TrimmedNonEmptyString,
   deepLink: TrimmedNonEmptyString,
+  planProgress: Schema.optional(Schema.NullOr(RelayAgentActivityPlanProgress)),
 });
 export type RelayAgentActivityAggregateRow = typeof RelayAgentActivityAggregateRow.Type;
 
@@ -839,6 +854,7 @@ export const RelayDeliveryKind = Schema.Literals([
   "live_activity_start",
   "live_activity_update",
   "live_activity_end",
+  "android_live_update",
   "push_notification",
 ]);
 export type RelayDeliveryKind = typeof RelayDeliveryKind.Type;
@@ -902,6 +918,24 @@ export const RelayRegisterDeviceEndpoint = HttpApiEndpoint.post(
   },
 ).annotate(OpenApi.Summary, "Register or update a mobile device");
 
+export const RelayAndroidLiveUpdateRegistrationRequest = Schema.Struct({
+  deviceId: TrimmedNonEmptyString,
+  generationId: TrimmedNonEmptyString,
+});
+export type RelayAndroidLiveUpdateRegistrationRequest =
+  typeof RelayAndroidLiveUpdateRegistrationRequest.Type;
+
+export const RelayRegisterAndroidLiveUpdateEndpoint = HttpApiEndpoint.post(
+  "registerAndroidLiveUpdate",
+  "/v1/mobile/android-live-updates",
+  {
+    headers: RelayDpopRequestHeaders,
+    payload: RelayAndroidLiveUpdateRegistrationRequest,
+    success: RelayOkResponse,
+    error: RelayAuthAndInternalErrors,
+  },
+).annotate(OpenApi.Summary, "Register an Android Live Update target");
+
 export const RelayRegisterLiveActivityEndpoint = HttpApiEndpoint.post(
   "registerLiveActivity",
   "/v1/mobile/live-activities",
@@ -945,11 +979,12 @@ export const RelayUnregisterDeviceEndpoint = HttpApiEndpoint.delete(
 export const RelayMobileGroup = HttpApiGroup.make("mobile")
   .add(
     RelayRegisterDeviceEndpoint,
+    RelayRegisterAndroidLiveUpdateEndpoint,
     RelayRegisterLiveActivityEndpoint,
     RelayAgentActivitySnapshotEndpoint,
     RelayUnregisterDeviceEndpoint,
   )
-  .annotate(OpenApi.Description, "Mobile push-notification and Live Activity registration.")
+  .annotate(OpenApi.Description, "Mobile push-notification and live-update registration.")
   .middleware(RelayDpopClientAuth);
 
 export const RelayClientGroup = HttpApiGroup.make("client")

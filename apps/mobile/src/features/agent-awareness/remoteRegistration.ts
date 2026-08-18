@@ -1,5 +1,6 @@
 import { type LiveActivity } from "expo-widgets";
 import Constants from "expo-constants";
+import * as Crypto from "expo-crypto";
 import * as Notifications from "expo-notifications";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -31,6 +32,13 @@ import {
 } from "../../persistence/imperative";
 import AgentActivity, { type AgentActivityProps } from "../../widgets/AgentActivity";
 import { resolveCloudPublicConfig } from "../cloud/publicConfig";
+import {
+  armAndroidLiveUpdate,
+  dismissAndroidLiveUpdate,
+  ensureAndroidLiveUpdateGeneration,
+  getArmedAndroidLiveUpdateGeneration,
+  supportsAndroidLiveUpdates,
+} from "./androidLiveUpdates";
 import { supportsAgentAwarenessPush } from "./capabilities";
 import { makeRelayDeviceRegistrationRequest, resolveApsEnvironment } from "./registrationPayload";
 
@@ -43,6 +51,7 @@ const AgentAwarenessOperation = Schema.Literals([
   "read-device-registration-relay-token",
   "read-device-unregistration-relay-token",
   "read-live-activity-registration-relay-token",
+  "read-android-live-update-registration-relay-token",
   "load-device-registration-identifier",
   "load-device-registration-preferences",
   "load-device-unregistration-identifier",
@@ -162,6 +171,16 @@ function canRegisterRemoteLiveActivities(): boolean {
   return Platform.OS === "ios";
 }
 
+function canRegisterAndroidLiveUpdates(): boolean {
+  return supportsAndroidLiveUpdates();
+}
+
+function shouldRegisterAndroidLiveUpdate(): Promise<boolean> {
+  return loadPreferences()
+    .then((preferences) => preferences.androidLiveUpdatesEnabled !== false)
+    .catch(() => false);
+}
+
 // Push notifications (not the Live Activity lock-screen surface) work on both
 // platforms: iOS via APNs, Android via FCM.
 function canRegisterPushNotifications(): boolean {
@@ -234,6 +253,7 @@ export function setAgentAwarenessRelayTokenProvider(
     // Without a signed-in user the relay can no longer update or end these
     // activities, so they would sit orphaned on the lock screen.
     endLocalLiveActivities("live activity cleanup after cloud sign-out failed");
+    dismissAndroidLiveUpdate();
     setRegistrationStatus("unknown");
     // Sign-out is the only thing that invalidates a stored registration, so the
     // next sign-in re-registers.
@@ -245,8 +265,10 @@ export function setAgentAwarenessRelayTokenProvider(
   ensurePushTokenListener();
   ensureAppStateListener();
   runRegistrationInBackground(
-    refreshActiveLiveActivityRemoteRegistration(),
-    "active live activity registration after cloud sign-in failed",
+    Platform.OS === "android"
+      ? registerAndroidLiveUpdateWithRelay()
+      : refreshActiveLiveActivityRemoteRegistration(),
+    "active live-update registration after cloud sign-in failed",
   );
   if (isExistingIdentity) {
     // Same account re-activating (e.g. Clerk token refresh) normally needs no
@@ -333,7 +355,10 @@ function nativePushTokenRegistration(observedPushToken?: string) {
 }
 
 const relayToken = (
-  operation: "read-device-registration-relay-token" | "read-live-activity-registration-relay-token",
+  operation:
+    | "read-device-registration-relay-token"
+    | "read-live-activity-registration-relay-token"
+    | "read-android-live-update-registration-relay-token",
 ) =>
   Effect.gen(function* () {
     const provider = relayTokenProvider;
@@ -499,6 +524,10 @@ export function armAgentAwarenessLiveActivityForLocalWork(input: {
   readonly threadTitle: string;
   readonly projectTitle: string;
 }): void {
+  if (Platform.OS === "android") {
+    armAgentAwarenessAndroidLiveUpdate(input);
+    return;
+  }
   if (!canRegisterRemoteLiveActivities() || !relayTokenProvider) {
     return;
   }
@@ -573,6 +602,35 @@ function readAgentActivitySnapshot(): Effect.Effect<
       }),
     ),
   );
+}
+
+function registerAndroidLiveUpdateWithRelay(
+  generationId?: string | null,
+): Effect.Effect<boolean, unknown, ManagedRelay.ManagedRelayClient> {
+  return Effect.gen(function* () {
+    if (!canRegisterAndroidLiveUpdates() || !readRelayConfig()) return false;
+    const enabled = yield* Effect.promise(shouldRegisterAndroidLiveUpdate);
+    if (!enabled) return false;
+    const armedGeneration = generationId ?? getArmedAndroidLiveUpdateGeneration();
+    if (!armedGeneration) return false;
+    const token = yield* relayToken("read-android-live-update-registration-relay-token");
+    if (!token) return false;
+    const deviceId = yield* Effect.tryPromise({
+      try: () => loadOrCreateAgentAwarenessDeviceId(),
+      catch: (cause) =>
+        new AgentAwarenessOperationError({
+          operation: "load-live-activity-registration-identifier",
+          cause,
+        }),
+    });
+    const client = yield* ManagedRelay.ManagedRelayClient;
+    if (!client.registerAndroidLiveUpdate) return false;
+    yield* client.registerAndroidLiveUpdate({
+      clerkToken: token,
+      payload: { deviceId, generationId: armedGeneration },
+    });
+    return true;
+  });
 }
 
 function registerLiveActivityWithRelay(
@@ -828,8 +886,10 @@ function ensureAppStateListener(): void {
       return;
     }
     runRegistrationInBackground(
-      refreshActiveLiveActivityRemoteRegistration(),
-      "active live activity reconciliation after app foreground failed",
+      Platform.OS === "android"
+        ? registerAndroidLiveUpdateWithRelay()
+        : refreshActiveLiveActivityRemoteRegistration(),
+      "active live-update reconciliation after app foreground failed",
     );
   });
 }
@@ -859,8 +919,10 @@ export function registerAgentAwarenessConnection(connection: SavedRemoteConnecti
   ensureAppStateListener();
   enqueueDeviceRegistration({}, "device registration failed");
   runRegistrationInBackground(
-    refreshActiveLiveActivityRemoteRegistration(),
-    "active live activity registration after environment connection failed",
+    Platform.OS === "android"
+      ? registerAndroidLiveUpdateWithRelay()
+      : refreshActiveLiveActivityRemoteRegistration(),
+    "active live-update registration after environment connection failed",
   );
 }
 
@@ -882,6 +944,33 @@ export function unregisterAllAgentAwarenessConnections(): void {
     clearTimeout(activeLiveActivityRegistrationRetry);
     activeLiveActivityRegistrationRetry = null;
   }
+}
+
+export function registerArmedAgentAwarenessAndroidLiveUpdate(): Effect.Effect<
+  void,
+  unknown,
+  ManagedRelay.ManagedRelayClient
+> {
+  const generationId = ensureAndroidLiveUpdateGeneration();
+  return registerAndroidLiveUpdateWithRelay(generationId).pipe(Effect.asVoid);
+}
+
+export function armAgentAwarenessAndroidLiveUpdate(input: {
+  readonly threadTitle: string;
+  readonly projectTitle: string;
+}): void {
+  if (!canRegisterAndroidLiveUpdates() || !relayTokenProvider) return;
+  void loadPreferences()
+    .catch(() => null)
+    .then((preferences) => {
+      if (preferences?.androidLiveUpdatesEnabled === false) return;
+      const generationId = Crypto.randomUUID();
+      armAndroidLiveUpdate(generationId, input);
+      runRegistrationInBackground(
+        registerAndroidLiveUpdateWithRelay(generationId),
+        "Android Live Update arming failed",
+      );
+    });
 }
 
 export function refreshAgentAwarenessRegistration(): Effect.Effect<

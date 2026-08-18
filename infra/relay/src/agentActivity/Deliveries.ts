@@ -38,6 +38,7 @@ import {
   type DeliveryJobVerificationError,
 } from "./deliveryJobs.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
+import * as AndroidLiveUpdates from "./AndroidLiveUpdates.ts";
 import * as DeliveryAttempts from "./DeliveryAttempts.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
@@ -91,6 +92,7 @@ export type DeliveryError =
   | DeliveryJobVerificationError
   | DeliveryJobClaimInFlight
   | DeliveryAttempts.DeliveryAttemptRecordPersistenceError
+  | AndroidLiveUpdates.AndroidLiveUpdatePersistenceError
   | LiveActivities.LiveActivityTargetListPersistenceError
   | LiveActivities.LiveActivityDeliveryMarkPersistenceError;
 
@@ -313,6 +315,15 @@ function shouldUpdateLiveActivity(input: {
   // new start land in the same window, activeCount is unchanged and the Done
   // transition (and its alert) would otherwise be suppressed.
   if (newlyTerminalRows(input.previousAggregate, input.nextAggregate).length > 0) {
+    return true;
+  }
+  const previousPrimary = input.previousAggregate.activities[0];
+  const nextPrimary = input.nextAggregate.activities[0];
+  if (
+    previousPrimary?.threadId !== nextPrimary?.threadId ||
+    JSON.stringify(previousPrimary?.planProgress ?? null) !==
+      JSON.stringify(nextPrimary?.planProgress ?? null)
+  ) {
     return true;
   }
   const lastDeliveryAtMs =
@@ -667,6 +678,8 @@ function expectedCurrentToken(input: {
     case "live_activity_update":
     case "live_activity_end":
       return input.target.activity_push_token;
+    case "android_live_update":
+      return input.channel === "fcm" ? input.target.fcm_token : null;
     case "push_notification":
       return input.channel === "fcm" ? input.target.fcm_token : input.target.push_token;
   }
@@ -740,9 +753,21 @@ export class Deliveries extends Context.Service<
       readonly target: LiveActivities.TargetRow;
       readonly aggregate: RelayAgentActivityAggregateState | null;
     }) => Effect.Effect<RelayDeliveryResult | null, DeliveryError>;
+    readonly sendAndroidLiveUpdateForTarget?: (input: {
+      readonly target: AndroidLiveUpdates.AndroidLiveUpdateTargetRow;
+      readonly aggregate: RelayAgentActivityAggregateState | null;
+      readonly nowMs: number;
+    }) => Effect.Effect<RelayDeliveryResult | null, DeliveryError>;
     readonly sendLiveActivity: (
       input: SendLiveActivityDeliveryInput,
     ) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
+    readonly sendAndroidLiveUpdate?: (input: {
+      readonly target: AndroidLiveUpdates.AndroidLiveUpdateTargetRow;
+      readonly token: string;
+      readonly generationId: string;
+      readonly sourceJobId?: string | null;
+      readonly aggregate: RelayAgentActivityAggregateState | null;
+    }) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
     readonly processSignedJob: (body: unknown) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
     readonly sendPushNotification: (input: {
       readonly channel: DeliveryChannel;
@@ -756,6 +781,7 @@ export class Deliveries extends Context.Service<
 
 export const make = Effect.gen(function* () {
   const attempts = yield* DeliveryAttempts.DeliveryAttempts;
+  const androidLiveUpdates = yield* Effect.serviceOption(AndroidLiveUpdates.AndroidLiveUpdates);
   const liveActivities = yield* LiveActivities.LiveActivities;
   const deliveryQueue = yield* DeliveryQueue.DeliveryQueue;
   const config = yield* RelayConfiguration.RelayConfiguration;
@@ -1188,6 +1214,161 @@ export const make = Effect.gen(function* () {
     };
   });
 
+  const sendAndroidLiveUpdate: Deliveries["Service"]["sendAndroidLiveUpdate"] = Effect.fn(
+    "relay.deliveries.send_android_live_update",
+  )(function* (input) {
+    const now = yield* DateTime.now;
+    if (input.sourceJobId) {
+      const claim = yield* attempts.claimSourceJob({
+        userId: input.target.user_id,
+        environmentId: null,
+        threadId: null,
+        deviceId: input.target.device_id,
+        kind: "android_live_update",
+        sourceJobId: input.sourceJobId,
+        token: input.token,
+      });
+      if (claim === "completed") {
+        return duplicateJobResult({
+          deviceId: input.target.device_id,
+          kind: "android_live_update",
+        });
+      }
+      if (claim === "in_flight") {
+        return yield* new DeliveryJobClaimInFlight({ sourceJobId: input.sourceJobId });
+      }
+      const currentTarget = Option.isSome(androidLiveUpdates)
+        ? yield* androidLiveUpdates.value.getTarget({
+            userId: input.target.user_id,
+            deviceId: input.target.device_id,
+          })
+        : null;
+      if (
+        currentTarget === null ||
+        currentTarget.fcm_token !== input.token ||
+        currentTarget.generation_id !== input.generationId
+      ) {
+        yield* attempts.completeSourceJob({
+          sourceJobId: input.sourceJobId,
+          deliveryReason: "Stale Android Live Update job skipped.",
+        });
+        return staleJobResult({
+          deviceId: input.target.device_id,
+          kind: "android_live_update",
+        });
+      }
+      if (
+        input.aggregate !== null &&
+        !(yield* aggregateRowsAreCurrent({
+          userId: input.target.user_id,
+          aggregate: input.aggregate,
+        }))
+      ) {
+        yield* attempts.completeSourceJob({
+          sourceJobId: input.sourceJobId,
+          deliveryReason: "Stale agent activity state skipped.",
+        });
+        return staleJobResult({
+          deviceId: input.target.device_id,
+          kind: "android_live_update",
+        });
+      }
+    }
+    const liveUpdatePayload = yield* fcm
+      .encodeAndroidLiveUpdatePayload({
+        generationId: input.generationId,
+        eventAt: DateTime.formatIso(now),
+        aggregate: input.aggregate,
+      })
+      .pipe(Effect.orDie);
+    const result = yield* fcm
+      .sendPushNotificationRequest({
+        credentials: config.fcm,
+        requestKind: "android-live-update",
+        request: fcm.makeAndroidLiveUpdateRequest({
+          token: input.token,
+          payload: liveUpdatePayload,
+        }),
+        issuedAtUnixSeconds: Math.floor(now.epochMilliseconds / 1_000),
+      })
+      .pipe(
+        Effect.map(fcmDeliveryResult),
+        Effect.catchTags({
+          FcmJwtEncodingError: (cause) =>
+            recoverDeliveryTransportError(
+              {
+                deviceId: input.target.device_id,
+                kind: "android_live_update",
+                sourceJobId: input.sourceJobId ?? null,
+                channel: "fcm",
+              },
+              cause,
+            ),
+          FcmJwtSigningError: (cause) =>
+            recoverDeliveryTransportError(
+              {
+                deviceId: input.target.device_id,
+                kind: "android_live_update",
+                sourceJobId: input.sourceJobId ?? null,
+                channel: "fcm",
+              },
+              cause,
+            ),
+          FcmAccessTokenRequestError: (cause) =>
+            recoverDeliveryTransportError(
+              {
+                deviceId: input.target.device_id,
+                kind: "android_live_update",
+                sourceJobId: input.sourceJobId ?? null,
+                channel: "fcm",
+              },
+              cause,
+            ),
+          FcmHttpRequestError: (cause) =>
+            recoverDeliveryTransportError(
+              {
+                deviceId: input.target.device_id,
+                kind: "android_live_update",
+                sourceJobId: input.sourceJobId ?? null,
+                channel: "fcm",
+              },
+              cause,
+            ),
+        }),
+      );
+    if (!result.ok && isPermanentFcmTokenFailure(result)) {
+      yield* liveActivities.invalidateDeliveryToken({
+        userId: input.target.user_id,
+        deviceId: input.target.device_id,
+        kind: "android_live_update",
+        channel: "fcm",
+        invalidatedAt: DateTime.formatIso(now),
+      });
+    }
+    if (input.sourceJobId) {
+      yield* attempts.completeSourceJob({
+        sourceJobId: input.sourceJobId,
+        ...deliveryAttemptOutcome(result),
+      });
+    }
+    if (result.ok && Option.isSome(androidLiveUpdates)) {
+      yield* androidLiveUpdates.value.markDelivery({
+        userId: input.target.user_id,
+        deviceId: input.target.device_id,
+        aggregate: input.aggregate,
+        deliveredAt: DateTime.formatIso(now),
+      });
+    }
+    return {
+      deviceId: input.target.device_id,
+      kind: "android_live_update" as const,
+      ok: result.ok,
+      deliveryStatus: result.status === 0 ? null : result.status,
+      deliveryReason: result.reason ?? null,
+      providerMessageId: result.providerMessageId,
+    };
+  });
+
   const processSignedJob: Deliveries["Service"]["processSignedJob"] = Effect.fn(
     "relay.deliveries.process_signed_job",
   )(function* (body) {
@@ -1256,6 +1437,32 @@ export const make = Effect.gen(function* () {
             aggregate: payload.aggregate,
             alert: payload.alert ?? null,
           });
+        case "android_live_update":
+          if (!payload.generationId) {
+            return Effect.fail(
+              new DeliveryJobQueuePayloadInvalid({
+                receivedType: "android live update without generation",
+                cause: "generationId is required",
+              }),
+            );
+          }
+          return sendAndroidLiveUpdate({
+            target: {
+              user_id: payload.target.userId,
+              device_id: payload.target.deviceId,
+              platform: "android",
+              fcm_token: payload.target.token,
+              preferences_json: "{}",
+              generation_id: payload.generationId,
+              armed_at: payload.createdAt,
+              last_aggregate_json: null,
+              last_delivery_at: null,
+            },
+            token: payload.target.token,
+            generationId: payload.generationId,
+            sourceJobId: payload.jobId,
+            aggregate: payload.aggregate,
+          });
         case "push_notification":
           if (payload.notification === null) {
             return Effect.fail(
@@ -1283,7 +1490,40 @@ export const make = Effect.gen(function* () {
   });
 
   return Deliveries.of({
+    sendAndroidLiveUpdateForTarget: Effect.fnUntraced(function* (input) {
+      if (input.target.platform !== "android" || !input.target.fcm_token) {
+        return null;
+      }
+      const preferences = parsePreferences(input.target.preferences_json);
+      const aggregate = preferences?.liveActivitiesEnabled === false ? null : input.aggregate;
+      if (aggregate === null) {
+        const armedAt = Option.match(DateTime.make(input.target.armed_at), {
+          onNone: () => null,
+          onSome: (value) => value.epochMilliseconds,
+        });
+        if (armedAt !== null && input.nowMs - armedAt < FRESHLY_ARMED_GRACE_MS) {
+          return null;
+        }
+      } else if (
+        !shouldUpdateLiveActivity({
+          previousAggregate: parseAggregate(input.target.last_aggregate_json),
+          nextAggregate: aggregate,
+          lastDeliveryAt: input.target.last_delivery_at,
+          nowMs: input.nowMs,
+        })
+      ) {
+        return null;
+      }
+      return yield* deliveryQueue.enqueueAndroidLiveUpdate({
+        userId: input.target.user_id,
+        deviceId: input.target.device_id,
+        token: input.target.fcm_token,
+        generationId: input.target.generation_id,
+        aggregate,
+      });
+    }),
     sendLiveActivity,
+    sendAndroidLiveUpdate,
     sendPushNotification,
     processSignedJob,
     sendPushNotificationForTarget: Effect.fnUntraced(function* (input) {

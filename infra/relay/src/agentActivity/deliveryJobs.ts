@@ -18,6 +18,7 @@ const DeliveryKindSchema = Schema.Literals([
   "live_activity_start",
   "live_activity_update",
   "live_activity_end",
+  "android_live_update",
   "push_notification",
 ]);
 
@@ -78,6 +79,9 @@ export const DeliveryJobPayload = Schema.Struct({
   }),
   aggregate: Schema.NullOr(RelayAgentActivityAggregateState),
   notification: Schema.NullOr(NotificationPayload),
+  // Android generations prevent delayed queue jobs from updating a newer
+  // locally-armed surface. Optional for backward compatibility with old jobs.
+  generationId: Schema.optional(Schema.String),
   // Optional so jobs queued by older relay builds still decode.
   alert: Schema.optional(Schema.NullOr(LiveActivityAlert)),
   createdAt: Schema.String,
@@ -125,6 +129,15 @@ export class DeliveryJobLiveActivityNotificationUnexpected extends Schema.Tagged
 ) {
   override get message(): string {
     return `${this.kind.replaceAll("_", " ")} job ${this.jobId} must not carry a push notification payload.`;
+  }
+}
+
+export class DeliveryJobAndroidLiveUpdateNotificationUnexpected extends Schema.TaggedErrorClass<DeliveryJobAndroidLiveUpdateNotificationUnexpected>()(
+  "DeliveryJobAndroidLiveUpdateNotificationUnexpected",
+  DeliveryJobContext,
+) {
+  override get message(): string {
+    return `Android Live Update job ${this.jobId} must not carry a push notification payload.`;
   }
 }
 
@@ -216,6 +229,7 @@ export const DeliveryJobInvalid = Schema.Union([
   DeliveryJobQueuePayloadInvalid,
   DeliveryJobLiveActivityAggregateMissing,
   DeliveryJobLiveActivityNotificationUnexpected,
+  DeliveryJobAndroidLiveUpdateNotificationUnexpected,
   DeliveryJobPushNotificationMissing,
   DeliveryJobPushNotificationAggregateUnexpected,
   DeliveryJobCreatedAtInvalid,
@@ -254,6 +268,7 @@ export function makeDeliveryJobPayload(input: {
   readonly apsEnvironment?: "sandbox" | "production" | null | undefined;
   readonly aggregate: DeliveryJobPayload["aggregate"];
   readonly notification?: NotificationPayload | null;
+  readonly generationId?: string | undefined;
   readonly alert?: LiveActivityAlert | null | undefined;
   readonly createdAt: string;
   readonly expiresAt: string;
@@ -273,6 +288,7 @@ export function makeDeliveryJobPayload(input: {
     },
     aggregate: input.aggregate,
     notification: input.notification ?? null,
+    ...(input.generationId ? { generationId: input.generationId } : {}),
     // Omitted (not null) when absent so signatures stay identical to jobs from
     // relay builds that predate the field.
     ...(input.alert ? { alert: input.alert } : {}),
@@ -311,6 +327,21 @@ function validatePayloadShape(payload: DeliveryJobPayload): DeliveryJobInvalid |
         return new DeliveryJobLiveActivityNotificationUnexpected({
           jobId: payload.jobId,
           kind: payload.kind,
+          userId: payload.target.userId,
+          deviceId: payload.target.deviceId,
+        });
+      }
+      return null;
+    case "android_live_update":
+      if (!payload.generationId) {
+        return new DeliveryJobQueuePayloadInvalid({
+          receivedType: "android live update without generation",
+          cause: "generationId is required",
+        });
+      }
+      if (payload.notification !== null) {
+        return new DeliveryJobAndroidLiveUpdateNotificationUnexpected({
+          jobId: payload.jobId,
           userId: payload.target.userId,
           deviceId: payload.target.deviceId,
         });

@@ -53,6 +53,7 @@ import { normalizeRelayIssuer } from "@t3tools/shared/relayJwt";
 
 import * as DeliveryAttempts from "../agentActivity/DeliveryAttempts.ts";
 import * as AgentActivityRows from "../agentActivity/AgentActivityRows.ts";
+import * as AndroidLiveUpdates from "../agentActivity/AndroidLiveUpdates.ts";
 import * as Devices from "../agentActivity/Devices.ts";
 import * as DpopProofs from "../auth/DpopProofs.ts";
 import * as RelayTokens from "../auth/RelayTokens.ts";
@@ -481,6 +482,18 @@ export const mobileApi = HttpApiBuilder.group(
             expectedAccessToken: token,
           }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
           return yield* registrations.registerDevice({ userId, payload });
+        }, mapRelayCommonApiErrors("invalid_dpop")),
+      )
+      .handle(
+        "registerAndroidLiveUpdate",
+        Effect.fn("relay.api.mobile.registerAndroidLiveUpdate")(function* (args) {
+          const { payload } = args;
+          const { userId, token } = yield* RelayClientPrincipal;
+          const proofKeyThumbprint = yield* requireDpopPrincipalScope("mobile:registration");
+          yield* requireDpopThumbprint(proofKeyThumbprint, {
+            expectedAccessToken: token,
+          }).pipe(Effect.provideService(DpopProofs.DpopProofReplay, dpopProofs));
+          return yield* registrations.registerAndroidLiveUpdate({ userId, payload });
         }, mapRelayCommonApiErrors("invalid_dpop")),
       )
       .handle(
@@ -920,6 +933,12 @@ export const serverApi = HttpApiBuilder.group(
               reason: "internal_error",
               traceId,
             }),
+          DeliveryJobAndroidLiveUpdateNotificationUnexpected: (_error, traceId) =>
+            new RelayInternalError({
+              code: "internal_error",
+              reason: "internal_error",
+              traceId,
+            }),
           DeliveryJobPushNotificationMissing: (_error, traceId) =>
             new RelayInternalError({
               code: "internal_error",
@@ -1009,6 +1028,7 @@ const RelayCommonPersistenceError = Schema.Union([
   Devices.DeviceRegistrationPersistenceError,
   Devices.DeviceUnregistrationPersistenceError,
   Devices.DeviceListPersistenceError,
+  AndroidLiveUpdates.AndroidLiveUpdatePersistenceError,
   LiveActivities.LiveActivityRegistrationPersistenceError,
   EnvironmentLinks.EnvironmentLinkUserListPersistenceError,
   EnvironmentLinks.EnvironmentPublicKeyListPersistenceError,

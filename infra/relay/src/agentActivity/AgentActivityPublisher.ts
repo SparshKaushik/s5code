@@ -19,6 +19,7 @@ import {
 
 export { isExpiredAgentActivityState } from "./agentActivityPayloads.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
+import * as AndroidLiveUpdates from "./AndroidLiveUpdates.ts";
 import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as Deliveries from "./Deliveries.ts";
@@ -27,6 +28,7 @@ export type AgentActivityPublishError =
   | AgentActivityRows.AgentActivityRowUpsertPersistenceError
   | AgentActivityRows.AgentActivityRowDeletePersistenceError
   | AgentActivityRows.AgentActivityRowListPersistenceError
+  | AndroidLiveUpdates.AndroidLiveUpdatePersistenceError
   | EnvironmentLinks.EnvironmentLinkUserListPersistenceError
   | LiveActivities.LiveActivityTargetListPersistenceError
   | Deliveries.DeliveryError;
@@ -44,11 +46,16 @@ export class AgentActivityPublisher extends Context.Service<
       readonly userId: string;
       readonly deviceId: string;
     }) => Effect.Effect<RelayDeliveryResult | null, AgentActivityPublishError>;
+    readonly replayForAndroidLiveUpdateRegistration?: (input: {
+      readonly userId: string;
+      readonly deviceId: string;
+    }) => Effect.Effect<RelayDeliveryResult | null, AgentActivityPublishError>;
   }
 >()("t3code-relay/agentActivity/AgentActivityPublisher") {}
 
 export const make = Effect.gen(function* () {
   const rows = yield* AgentActivityRows.AgentActivityRows;
+  const androidLiveUpdates = yield* Effect.serviceOption(AndroidLiveUpdates.AndroidLiveUpdates);
   const links = yield* EnvironmentLinks.EnvironmentLinks;
   const liveActivities = yield* LiveActivities.LiveActivities;
   const deliveries = yield* Deliveries.Deliveries;
@@ -77,6 +84,10 @@ export const make = Effect.gen(function* () {
           })
         : null;
     const targets = yield* liveActivities.listTargets({ userId: input.deliveryUser.userId });
+    const androidTargets = yield* Option.match(androidLiveUpdates, {
+      onNone: () => Effect.succeed([]),
+      onSome: (service) => service.listTargets({ userId: input.deliveryUser.userId }),
+    });
     const deliveriesByTarget = yield* Effect.forEach(
       targets,
       (target) =>
@@ -98,10 +109,52 @@ export const make = Effect.gen(function* () {
         ),
       { concurrency: 4 },
     );
-    return deliveriesByTarget.flat();
+    const androidDeliveries = yield* Effect.forEach(
+      androidTargets,
+      (target) => {
+        if (!target.fcm_token || deliveries.sendAndroidLiveUpdateForTarget === undefined) {
+          return Effect.succeed(null);
+        }
+        return deliveries.sendAndroidLiveUpdateForTarget({
+          target,
+          aggregate: liveActivityAggregate,
+          nowMs: input.nowMs,
+        });
+      },
+      { concurrency: 4 },
+    );
+    return [...deliveriesByTarget.flat(), ...androidDeliveries];
   });
 
   return AgentActivityPublisher.of({
+    replayForAndroidLiveUpdateRegistration: Effect.fn(
+      "relay.agent_activity_publisher.replay_for_android_live_update_registration",
+    )(function* (input) {
+      const activeStates = yield* rows.listForUser({ userId: input.userId });
+      const targets = yield* Option.match(androidLiveUpdates, {
+        onNone: () => Effect.succeed([]),
+        onSome: (service) => service.listTargets({ userId: input.userId }),
+      });
+      const target = targets.find((row) => row.device_id === input.deviceId) ?? null;
+      if (
+        target === null ||
+        target.fcm_token === null ||
+        deliveries.sendAndroidLiveUpdateForTarget === undefined
+      ) {
+        return null;
+      }
+      const now = yield* DateTime.now;
+      const aggregate = makeAggregateState({
+        activeStates,
+        terminalState: null,
+        nowMs: now.epochMilliseconds,
+      });
+      return yield* deliveries.sendAndroidLiveUpdateForTarget({
+        target,
+        aggregate,
+        nowMs: now.epochMilliseconds,
+      });
+    }),
     replayForLiveActivityRegistration: Effect.fn(
       "relay.agent_activity_publisher.replay_for_live_activity_registration",
     )(function* (input) {
@@ -213,6 +266,7 @@ function aggregateRowForState(state: RelayAgentActivityState) {
     status: statusForPhase(state.phase),
     updatedAt: state.updatedAt,
     deepLink: state.deepLink,
+    ...(state.planProgress ? { planProgress: state.planProgress } : {}),
   };
 }
 
