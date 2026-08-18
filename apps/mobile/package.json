@@ -88,6 +88,7 @@
     "expo-image": "~56.0.11",
     "expo-image-picker": "~56.0.18",
     "expo-linking": "~56.0.14",
+    "expo-modules-core": "56.0.17",
     "expo-network": "~56.0.5",
     "expo-notifications": "~56.0.18",
     "expo-paste-input": "^0.1.15",

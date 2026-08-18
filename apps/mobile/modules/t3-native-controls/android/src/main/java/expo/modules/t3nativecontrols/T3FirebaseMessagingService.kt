@@ -50,26 +50,35 @@ object AndroidLiveUpdateNotifications {
       .putString(KEY_GENERATION, generationId)
       .remove(KEY_EVENT_AT)
       .apply()
-    val aggregate = JSONObject().apply {
-      put("title", "S5 Code")
-      put("subtitle", "Agent work in progress")
-      put("activeCount", 1)
-      put("updatedAt", Instant.now().toString())
-      put("activities", JSONArray().put(JSONObject().apply {
-        put("threadTitle", seed.optString("threadTitle", "Agent work"))
-        put("projectTitle", seed.optString("projectTitle", "S5 Code"))
-        put("phase", "starting")
-        put("status", "Connecting")
-        put("deepLink", "/")
-      }))
-    }
+    val aggregate =
+      JSONObject().apply {
+        put("title", "S5 Code")
+        put("subtitle", "Agent work in progress")
+        put("activeCount", 1)
+        put("updatedAt", Instant.now().toString())
+        put(
+          "activities",
+          JSONArray().put(
+            JSONObject().apply {
+              put("threadTitle", seed.optString("threadTitle", "Agent work"))
+              put("projectTitle", seed.optString("projectTitle", "S5 Code"))
+              put("phase", "starting")
+              put("status", "Connecting")
+              put("deepLink", "/")
+            },
+          ),
+        )
+      }
     post(context, aggregate)
   }
 
   fun receive(context: Context, payloadJson: String?) {
     if (Build.VERSION.SDK_INT < 36 || payloadJson.isNullOrBlank()) return
     val payload = runCatching { JSONObject(payloadJson) }.getOrNull() ?: return
-    if (payload.optString("type") != "agent_activity_live_update" || payload.optInt("version") != 1) {
+    if (
+      payload.optString("type") != "agent_activity_live_update" ||
+      payload.optInt("version") != 1
+    ) {
       return
     }
     val generationId = payload.optString("generationId")
@@ -98,19 +107,25 @@ object AndroidLiveUpdateNotifications {
       context.getSystemService(NotificationManager::class.java).canPostPromotedNotifications()
 
   fun openSettings(context: Context) {
-    val intent = Intent(
-      if (Build.VERSION.SDK_INT >= 36) Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS
-      else Settings.ACTION_APP_NOTIFICATION_SETTINGS,
-    ).apply {
+    val intent =
+      Intent(
+        if (Build.VERSION.SDK_INT >= 36) {
+          Settings.ACTION_APP_NOTIFICATION_PROMOTION_SETTINGS
+        } else {
+          Settings.ACTION_APP_NOTIFICATION_SETTINGS
+        },
+      ).apply {
       data = Uri.parse("package:${context.packageName}")
       putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
       addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
     }
     runCatching { context.startActivity(intent) }.onFailure {
-      context.startActivity(Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
-        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-      })
+      context.startActivity(
+        Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+          putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+          addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        },
+      )
     }
   }
 
@@ -184,18 +199,23 @@ object AndroidLiveUpdateNotifications {
           Notification.ProgressStyle.Segment(1).setColor(Color.rgb(120, 120, 128))
         },
       )
-      style.setProgressPoints((0 until visualSteps).map { position ->
-        val color = when {
-          position < visualProgress -> Color.rgb(52, 199, 89)
-          position == visualProgress -> Color.rgb(0, 99, 155)
-          else -> Color.rgb(142, 142, 147)
-        }
-        Notification.ProgressStyle.Point(position).setColor(color)
-      })
+      style.setProgressPoints(
+        (0 until visualSteps).map { position ->
+          val color =
+            when {
+              position < visualProgress -> Color.rgb(52, 199, 89)
+              position == visualProgress -> Color.rgb(0, 99, 155)
+              else -> Color.rgb(142, 142, 147)
+            }
+          Notification.ProgressStyle.Point(position).setColor(color)
+        },
+      )
     }
 
-    val iconId = context.resources.getIdentifier("notification_icon", "drawable", context.packageName)
-      .takeIf { it != 0 } ?: context.applicationInfo.icon
+    val iconId =
+      context.resources
+        .getIdentifier("notification_icon", "drawable", context.packageName)
+        .takeIf { it != 0 } ?: context.applicationInfo.icon
     val deleteIntent = PendingIntent.getBroadcast(
       context,
       NOTIFICATION_ID,
@@ -214,9 +234,11 @@ object AndroidLiveUpdateNotifications {
       .setShowWhen(false)
       .setContentIntent(contentIntent)
       .setDeleteIntent(deleteIntent)
-      .addExtras(android.os.Bundle().apply {
-        putBoolean(Notification.EXTRA_REQUEST_PROMOTED_ONGOING, true)
-      })
+      .addExtras(
+        android.os.Bundle().apply {
+          putBoolean(Notification.EXTRA_REQUEST_PROMOTED_ONGOING, true)
+        },
+      )
       .build()
     manager.notify(NOTIFICATION_ID, notification)
   }

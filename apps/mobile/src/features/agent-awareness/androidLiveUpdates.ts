@@ -1,5 +1,5 @@
 import * as Crypto from "expo-crypto";
-import { requireOptionalNativeModule } from "expo";
+import { requireOptionalNativeModule } from "expo-modules-core";
 import { Platform } from "react-native";
 
 export interface AndroidLiveUpdateSeed {

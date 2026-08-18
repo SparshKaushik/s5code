@@ -80,6 +80,10 @@ vi.mock("../../widgets/AgentActivity", () => ({
   },
 }));
 
+vi.mock("expo-modules-core", () => ({
+  requireOptionalNativeModule: vi.fn(() => null),
+}));
+
 vi.mock("expo-notifications", () => ({
   addPushTokenListener: vi.fn(() => ({ remove: vi.fn() })),
   getDevicePushTokenAsync: vi.fn(() => Promise.resolve({ type: "ios", data: "apns-token" })),
