@@ -115,10 +115,10 @@ object AndroidLiveUpdateNotifications {
           Settings.ACTION_APP_NOTIFICATION_SETTINGS
         },
       ).apply {
-      data = Uri.parse("package:${context.packageName}")
-      putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
-      addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-    }
+        data = Uri.parse("package:${context.packageName}")
+        putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+      }
     runCatching { context.startActivity(intent) }.onFailure {
       context.startActivity(
         Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
@@ -236,7 +236,7 @@ object AndroidLiveUpdateNotifications {
       .setDeleteIntent(deleteIntent)
       .addExtras(
         android.os.Bundle().apply {
-          putBoolean(Notification.EXTRA_REQUEST_PROMOTED_ONGOING, true)
+          putBoolean("android.requestPromotedOngoing", true)
         },
       )
       .build()
