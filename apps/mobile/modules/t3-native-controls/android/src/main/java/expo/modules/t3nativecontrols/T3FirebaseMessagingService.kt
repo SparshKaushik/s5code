@@ -72,6 +72,7 @@ object AndroidLiveUpdateNotifications {
     post(context, aggregate)
   }
 
+  @Suppress("ReturnCount")
   fun receive(context: Context, payloadJson: String?) {
     if (Build.VERSION.SDK_INT < 36 || payloadJson.isNullOrBlank()) return
     val payload = runCatching { JSONObject(payloadJson) }.getOrNull() ?: return
@@ -132,6 +133,7 @@ object AndroidLiveUpdateNotifications {
   private fun preferences(context: Context) =
     context.getSharedPreferences(PREFERENCES, Context.MODE_PRIVATE)
 
+  @Suppress("ReturnCount")
   private fun isNewerEvent(context: Context, eventAt: String): Boolean {
     val previous = preferences(context).getString(KEY_EVENT_AT, null) ?: return true
     val nextInstant = runCatching { Instant.parse(eventAt) }.getOrNull() ?: return false
@@ -139,6 +141,7 @@ object AndroidLiveUpdateNotifications {
     return nextInstant.isAfter(previousInstant)
   }
 
+  @Suppress("CyclomaticComplexMethod", "LongMethod", "ReturnCount")
   private fun post(context: Context, aggregate: JSONObject) {
     if (Build.VERSION.SDK_INT < 36) return
     val manager = context.getSystemService(NotificationManager::class.java)
