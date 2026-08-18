@@ -88,6 +88,8 @@ import {
   piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
+  piToolOutputDelta,
+  piToolOutputText,
   piTurnHasAssistantText,
   piTurnStateFromStopReason,
   piUsageSnapshot,
@@ -145,6 +147,12 @@ interface PiSessionContext {
    * the args remembered at `tool_execution_start`.
    */
   readonly pendingToolArgs: Map<string, unknown>;
+  /**
+   * Accumulated tool output text by pi tool-call id. pi's
+   * `tool_execution_update` carries the *whole* output so far, so the delta to
+   * stream is the suffix past the previously-seen text.
+   */
+  readonly pendingToolOutput: Map<string, string>;
   /** Latest plan steps, so a `patchtodo` result doesn't clear the plan. */
   lastPlanFingerprint: string | undefined;
   /** Turn ids already interrupted; a late `agent_end` must not resurrect them. */
@@ -759,6 +767,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
             yield* closeOpenAssistantSegment(context, turnId, raw);
           }
           context.pendingToolArgs.set(event.toolCallId, event.args);
+          const detail = piToolItemDetail(event.toolName, event.args);
           yield* emit({
             ...(yield* buildEventBase({
               threadId: context.threadId,
@@ -771,8 +780,29 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
               itemType: piToolItemType(event.toolName),
               status: "inProgress",
               ...(event.toolName ? { title: event.toolName } : {}),
+              ...(detail !== undefined && detail.length > 0 ? { detail } : {}),
               ...(event.args !== undefined ? { data: event.args } : {}),
             },
+          });
+          return;
+        }
+
+        case "tool_execution_update": {
+          if (event.toolCallId === undefined) return;
+          const accumulated = piToolOutputText(event.partialResult);
+          const previous = context.pendingToolOutput.get(event.toolCallId) ?? "";
+          const delta = piToolOutputDelta(previous, accumulated);
+          context.pendingToolOutput.set(event.toolCallId, accumulated);
+          if (delta.length === 0) return;
+          yield* emit({
+            ...(yield* buildEventBase({
+              threadId: context.threadId,
+              turnId,
+              itemId: event.toolCallId,
+              raw,
+            })),
+            type: "content.delta",
+            payload: { streamKind: "command_output", delta },
           });
           return;
         }
@@ -781,6 +811,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
           if (event.toolCallId === undefined) return;
           const args = context.pendingToolArgs.get(event.toolCallId);
           context.pendingToolArgs.delete(event.toolCallId);
+          context.pendingToolOutput.delete(event.toolCallId);
           const detail = piToolItemDetail(event.toolName, args);
           yield* emit({
             ...(yield* buildEventBase({
@@ -1120,6 +1151,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         pendingExtensionUi: new Map(),
         sessionApprovedTools: new Set(),
         pendingToolArgs: new Map(),
+        pendingToolOutput: new Map(),
         lastPlanFingerprint: undefined,
         interruptedTurnIds: new Set(),
         agentRunTurnIds: new Set(),
