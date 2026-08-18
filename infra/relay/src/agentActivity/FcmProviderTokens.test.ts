@@ -59,6 +59,36 @@ describe("FcmProviderTokens", () => {
     }).pipe(Effect.provide(layer));
   });
 
+  it.effect("accepts service-account PEM keys with escaped line breaks", () => {
+    FcmProviderTokens.__resetFcmProviderTokenCacheForTest();
+    const httpClient = HttpClient.make((request) =>
+      Effect.succeed(
+        jsonResponse(request, {
+          access_token: "access-token-escaped-key",
+          expires_in: 3600,
+          token_type: "Bearer",
+        }),
+      ),
+    );
+    const escapedCredentials: FcmCredentials = {
+      ...credentials,
+      privateKey: Redacted.make(fcmPrivateKey.replace(/\n/gu, "\\n")),
+    };
+    const layer = FcmProviderTokens.layer.pipe(
+      Layer.provide(Layer.succeed(HttpClient.HttpClient, httpClient)),
+    );
+
+    return Effect.gen(function* () {
+      const tokens = yield* FcmProviderTokens.FcmProviderTokens;
+      const token = yield* tokens.getAccessToken({
+        credentials: escapedCredentials,
+        issuedAtUnixSeconds: 0,
+      });
+      expect(token).toBe("access-token-escaped-key");
+      FcmProviderTokens.__resetFcmProviderTokenCacheForTest();
+    }).pipe(Effect.provide(layer));
+  });
+
   it.effect("reuses a cached access token within the isolate", () => {
     FcmProviderTokens.__resetFcmProviderTokenCacheForTest();
     let requestCount = 0;

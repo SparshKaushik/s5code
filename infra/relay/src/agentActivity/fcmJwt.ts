@@ -103,7 +103,10 @@ export const makeFcmAccessTokenJwt = Effect.fn("relay.fcm.make_access_token_jwt"
     ),
   );
 
-  const privateKey = Redacted.value(input.privateKey);
+  // Secret managers and environment variables commonly preserve PEM line
+  // breaks as the two characters `\\n`. Node's key parser expects actual
+  // newlines, so normalize both representations before signing.
+  const privateKey = Redacted.value(input.privateKey).replace(/\\n/gu, "\n");
   const header = Encoding.encodeBase64Url(headerJson);
   const payload = Encoding.encodeBase64Url(payloadJson);
   const signingInput = `${header}.${payload}`;
