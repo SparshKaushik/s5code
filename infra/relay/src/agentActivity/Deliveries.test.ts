@@ -23,6 +23,7 @@ import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as DeliveryQueue from "./DeliveryQueue.ts";
 import * as AgentActivityRows from "./AgentActivityRows.ts";
+import * as AndroidLiveUpdates from "./AndroidLiveUpdates.ts";
 import * as Deliveries from "./Deliveries.ts";
 import * as ApnsClient from "./ApnsClient.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
@@ -170,6 +171,7 @@ function makeLayer(input: {
     Parameters<LiveActivities.LiveActivities["Service"]["invalidateDeliveryToken"]>[0]
   >;
   readonly currentTargets?: ReadonlyArray<LiveActivities.TargetRow>;
+  readonly currentAndroidTargets?: ReadonlyArray<AndroidLiveUpdates.AndroidLiveUpdateTargetRow>;
   readonly config?: RelayConfiguration.RelayConfiguration["Service"];
   // Live agent-activity rows returned by delivery-time state rechecks.
   // Defaults to the fixture row so queued updates match unless a test is
@@ -235,6 +237,17 @@ function makeLayer(input: {
                 Object.assign(attempt, completion);
               }
             }),
+        }),
+        Layer.succeed(AndroidLiveUpdates.AndroidLiveUpdates, {
+          register: () => Effect.void,
+          listTargets: () => Effect.succeed(input.currentAndroidTargets ?? []),
+          getTarget: ({ userId, deviceId }) =>
+            Effect.succeed(
+              (input.currentAndroidTargets ?? []).find(
+                (current) => current.user_id === userId && current.device_id === deviceId,
+              ) ?? null,
+            ),
+          markDelivery: () => Effect.void,
         }),
         Layer.succeed(LiveActivities.LiveActivities, {
           register: () => Effect.void,
@@ -1220,6 +1233,83 @@ describe("Deliveries", () => {
             {
               ...target,
               push_token: "current-device-token",
+            },
+          ],
+          config: signingConfig,
+          execute,
+        }),
+      ),
+    );
+  });
+
+  it.effect("skips a queued Android plan update superseded without a new thread timestamp", () => {
+    const attempts: Array<DeliveryAttempts.DeliveryAttemptInput> = [];
+    let executeCount = 0;
+    const staleAggregate: RelayAgentActivityAggregateState = {
+      ...aggregate,
+      activities: [
+        {
+          ...aggregate.activities[0]!,
+          planProgress: { step: "Second", completedSteps: 1, totalSteps: 4 },
+        },
+      ],
+    };
+    const payload = makeDeliveryJobPayload({
+      channel: "fcm",
+      kind: "android_live_update",
+      userId: target.user_id,
+      deviceId: target.device_id,
+      token: "fcm-token",
+      generationId: "generation-1",
+      aggregate: staleAggregate,
+      createdAt: "1970-01-01T00:00:00.000Z",
+      expiresAt: "1970-01-01T00:10:00.000Z",
+      jobId: "job-android-stale-plan",
+    });
+    const signed = signDeliveryJob({ secret: config.deliveryJobSigningSecret, payload });
+    const execute = (request: HttpClientRequest.HttpClientRequest) =>
+      Effect.sync(() => {
+        executeCount += 1;
+        return HttpClientResponse.fromWeb(request, new Response("", { status: 200 }));
+      });
+
+    return Effect.gen(function* () {
+      const deliveries = yield* Deliveries.Deliveries;
+      const result = yield* deliveries.processSignedJob(signed);
+
+      expect(result).toMatchObject({
+        kind: "android_live_update",
+        ok: true,
+        deliveryReason: "Stale delivery job skipped.",
+      });
+      expect(executeCount).toBe(0);
+      expect(attempts).toMatchObject([
+        {
+          sourceJobId: "job-android-stale-plan",
+          deliveryReason: "Stale agent activity state skipped.",
+        },
+      ]);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          attempts,
+          currentAndroidTargets: [
+            {
+              user_id: target.user_id,
+              device_id: target.device_id,
+              platform: "android",
+              fcm_token: "fcm-token",
+              preferences_json: enabledPreferences,
+              generation_id: "generation-1",
+              armed_at: "1970-01-01T00:00:00.000Z",
+              last_aggregate_json: null,
+              last_delivery_at: null,
+            },
+          ],
+          activityStates: [
+            {
+              ...state,
+              planProgress: { step: "Fourth", completedSteps: 3, totalSteps: 4 },
             },
           ],
           config: signingConfig,

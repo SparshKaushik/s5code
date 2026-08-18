@@ -98,13 +98,17 @@ describe("FcmClient", () => {
         message: {
           token: "fcm-token",
           data: { t3Type: "android_live_update" },
-          android: { priority: "HIGH", ttl: "600s", collapseKey: "agent-live-update" },
+          android: { priority: "HIGH", ttl: "600s" },
         },
       });
+      expect(
+        (request.payload as { message: { android: unknown } }).message.android,
+      ).not.toHaveProperty("collapseKey");
       const payloadText = yield* Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown))(
         request.payload,
       );
       expect(payloadText).not.toContain('"notification"');
+      expect(payloadText).not.toContain('"collapseKey"');
       expect(payloadText.length).toBeLessThan(4096);
     }).pipe(
       Effect.provide(

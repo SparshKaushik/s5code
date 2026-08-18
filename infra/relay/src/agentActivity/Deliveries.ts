@@ -766,6 +766,7 @@ export class Deliveries extends Context.Service<
       readonly token: string;
       readonly generationId: string;
       readonly sourceJobId?: string | null;
+      readonly eventAt?: string;
       readonly aggregate: RelayAgentActivityAggregateState | null;
     }) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
     readonly processSignedJob: (body: unknown) => Effect.Effect<RelayDeliveryResult, DeliveryError>;
@@ -863,7 +864,9 @@ export const make = Effect.gen(function* () {
           return (
             current !== undefined &&
             current.phase === row.phase &&
-            current.updatedAt === row.updatedAt
+            current.updatedAt === row.updatedAt &&
+            JSON.stringify(current.planProgress ?? null) ===
+              JSON.stringify(row.planProgress ?? null)
           );
         });
       }),
@@ -1277,7 +1280,7 @@ export const make = Effect.gen(function* () {
     const liveUpdatePayload = yield* fcm
       .encodeAndroidLiveUpdatePayload({
         generationId: input.generationId,
-        eventAt: DateTime.formatIso(now),
+        eventAt: input.eventAt ?? DateTime.formatIso(now),
         aggregate: input.aggregate,
       })
       .pipe(Effect.orDie);
@@ -1461,6 +1464,7 @@ export const make = Effect.gen(function* () {
             token: payload.target.token,
             generationId: payload.generationId,
             sourceJobId: payload.jobId,
+            eventAt: payload.createdAt,
             aggregate: payload.aggregate,
           });
         case "push_notification":

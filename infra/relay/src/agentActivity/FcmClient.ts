@@ -171,7 +171,10 @@ function makeAndroidLiveUpdateRequest(input: {
         android: {
           priority: "HIGH",
           ttl: "600s",
-          collapseKey: "agent-live-update",
+          // Live Updates are ordered state transitions, not interchangeable
+          // refreshes. Omitting collapseKey makes this a non-collapsible FCM
+          // message so Connecting, plan progress, and Done cannot replace one
+          // another while the device is briefly unreachable.
         },
       },
     },
