@@ -1,5 +1,5 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
-import { useColorScheme } from "react-native";
+import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
 
 export const PROVIDER_ORDER: readonly UsageProviderKind[] = ["codex", "claude", "cursor", "pi"];
 
@@ -11,7 +11,7 @@ export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
 };
 
 export function useProviderColors(): Record<UsageProviderKind, string> {
-  const scheme = useColorScheme();
+  const { themeAppearance: scheme } = useAppearancePreferences();
   return {
     claude: "#d97757",
     codex: scheme === "dark" ? "#e6e6e6" : "#3c3c43",

@@ -1,5 +1,5 @@
-import { useColorScheme } from "react-native";
 import { Defs, G, Path, Rect, Svg, ClipPath } from "react-native-svg";
+import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 
 type ProviderIconProps = {
   readonly provider: string | null | undefined;
@@ -97,7 +97,8 @@ function CodexMark(props: { readonly size: number; readonly isDarkMode: boolean 
 }
 
 export function ProviderIcon(props: ProviderIconProps) {
-  const isDarkMode = useColorScheme() === "dark";
+  const { themeAppearance } = useAppearancePreferences();
+  const isDarkMode = themeAppearance === "dark";
   const size = props.size ?? 16;
 
   switch (props.provider) {

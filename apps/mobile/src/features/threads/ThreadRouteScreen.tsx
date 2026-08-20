@@ -353,7 +353,7 @@ function ThreadRouteContent(
   const threadActionProgress = useThreadActionProgress(threadActionProgressTarget);
 
   /* ─── Session rewind (experimental, server-gated) ───────────────── */
-  const rewind = useSelectedThreadRewind({ threadBusy: composer.activeThreadBusy });
+  const rewind = useSelectedThreadRewind({ threadBusy: composer.activeWorkStartedAt !== null });
   const rewindMenuModel = useMemo(
     () => ({ available: rewind.available, rows: rewind.rows, onStep: rewind.step }),
     [rewind.available, rewind.rows, rewind.step],
@@ -819,7 +819,6 @@ function ThreadRouteContent(
           connectionStateLabel={routeConnectionState}
           threadSyncStatus={selectedThreadDetailState.status}
           loadEarlier={loadEarlierTurns}
-          activeThreadBusy={composer.activeThreadBusy}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
