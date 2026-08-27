@@ -13,13 +13,15 @@
  *     tools enabled lets the model burn turns on them before answering.
  *
  * `prompt` returns as soon as pi accepts the work, so completion is detected
- * from the `agent_end` event rather than the command response.
+ * from the session-level `agent_settled` event rather than the command response
+ * or a low-level `agent_end` that may precede automatic compaction/retry.
  *
  * @module provider/pi/PiOneShot
  */
 import type { PiSettings } from "@t3tools/contracts";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
+import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { ChildProcessSpawner } from "effect/unstable/process";
@@ -77,19 +79,24 @@ export const runPiOneShotPrompt = (
       },
     });
 
-    const finished = yield* Deferred.make<string | undefined>();
+    const finished = yield* Deferred.make<void>();
+    const lastAgentEndText = yield* Ref.make<string | undefined>(undefined);
     yield* connection.incoming.pipe(
-      Stream.runForEach((incoming) =>
-        incoming._tag === "Event" && incoming.event.type === "agent_end"
-          ? Deferred.succeed(finished, lastAssistantTextFromAgentEnd(incoming.event.messages)).pipe(
-              Effect.asVoid,
-            )
-          : Effect.void,
-      ),
+      Stream.runForEach((incoming) => {
+        if (incoming._tag !== "Event") {
+          return Effect.void;
+        }
+        if (incoming.event.type === "agent_end") {
+          return Ref.set(lastAgentEndText, lastAssistantTextFromAgentEnd(incoming.event.messages));
+        }
+        return incoming.event.type === "agent_settled"
+          ? Deferred.succeed(finished, undefined).pipe(Effect.asVoid)
+          : Effect.void;
+      }),
       Effect.ignore,
       Effect.forkScoped,
     );
-    // A pi exit before `agent_end` would otherwise hang this fiber forever.
+    // A pi exit before `agent_settled` would otherwise hang this fiber forever.
     yield* connection.awaitExit.pipe(
       Effect.flatMap(() => Deferred.succeed(finished, undefined)),
       Effect.ignore,
@@ -105,7 +112,8 @@ export const runPiOneShotPrompt = (
     }
     yield* connection.request("prompt", { message: input.prompt });
 
-    const streamedText = yield* Deferred.await(finished);
+    yield* Deferred.await(finished);
+    const streamedText = yield* Ref.get(lastAgentEndText);
     if (streamedText !== undefined && streamedText.trim().length > 0) {
       return streamedText;
     }
