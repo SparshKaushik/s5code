@@ -1,5 +1,5 @@
 /**
- * PiRpcSchemas — wire schemas for the subset of `pi --mode rpc` we consume.
+ * PiRpcSchemas: wire schemas for the subset of `pi --mode rpc` we consume.
  *
  * pi's RPC surface is large and evolves; decoding it wholesale would make the
  * adapter fail on a pi upgrade that adds a field. Every schema here is
@@ -32,9 +32,10 @@ export function parsePiThinkingLevel(value: string | undefined): PiThinkingLevel
 }
 
 /**
- * One entry from `get_available_models`. `thinkingLevelMap` is pi's per-model
- * mapping from our canonical level names to provider-specific values; its keys
- * are the authoritative set of levels that model accepts.
+ * One entry from `get_available_models`. `thinkingLevelMap` maps canonical
+ * level names to provider-specific values. Missing core-level keys use Pi's
+ * defaults, `null` marks a level as unsupported, and `xhigh` and `max` require
+ * explicit mappings.
  */
 export const PiModel = Schema.Struct({
   id: Schema.String,
