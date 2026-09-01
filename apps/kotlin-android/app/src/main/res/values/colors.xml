@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Mirrors the Compose scheme's `surface`, so the launch window and the
+         first composed frame are the same colour and there is no flash. -->
+    <color name="window_background">#FFF8F9FF</color>
+
+    <!-- Launcher icon field. The raster mipmaps bake this same colour. -->
+    <color name="launcher_background">#FF00639B</color>
+
+    <!-- Splash wordmark, tinted to the scheme's primary. -->
+    <color name="splash_icon_tint">#FF00639B</color>
+</resources>
