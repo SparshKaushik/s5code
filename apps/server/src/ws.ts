@@ -64,7 +64,6 @@ import { RpcSerialization, RpcServer } from "effect/unstable/rpc";
 
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointMaintenance from "./checkpointing/CheckpointMaintenance.ts";
-import * as RewindService from "./rewind/RewindService.ts";
 import * as ServerConfig from "./config.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -363,7 +362,6 @@ const makeWsRpcLayer = (
       const orchestrationEngine = yield* OrchestrationEngine.OrchestrationEngineService;
       const checkpointDiffQuery = yield* CheckpointDiffQuery.CheckpointDiffQuery;
       const checkpointMaintenance = yield* CheckpointMaintenance.CheckpointMaintenance;
-      const rewind = yield* RewindService.RewindService;
       const keybindings = yield* Keybindings.Keybindings;
       const externalLauncher = yield* ExternalLauncher.ExternalLauncher;
       const remoteOpenTargets = yield* RemoteOpenTargets.RemoteOpenTargets;
@@ -2047,18 +2045,6 @@ const makeWsRpcLayer = (
             review.getDiffFileContents(input),
             { "rpc.aggregate": "review" },
           ),
-        [WS_METHODS.rewindGetStatus]: (input) =>
-          observeRpcEffect(WS_METHODS.rewindGetStatus, rewind.getStatus(input.threadId), {
-            "rpc.aggregate": "rewind",
-          }),
-        [WS_METHODS.rewindUndo]: (input) =>
-          observeRpcEffect(WS_METHODS.rewindUndo, rewind.undo(input.threadId), {
-            "rpc.aggregate": "rewind",
-          }),
-        [WS_METHODS.rewindRedo]: (input) =>
-          observeRpcEffect(WS_METHODS.rewindRedo, rewind.redo(input.threadId), {
-            "rpc.aggregate": "rewind",
-          }),
         [WS_METHODS.checkpointMaintenanceGetUsage]: () =>
           observeRpcEffect(
             WS_METHODS.checkpointMaintenanceGetUsage,

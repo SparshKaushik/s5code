@@ -103,9 +103,9 @@
       "types": "./src/state/review.ts",
       "default": "./src/state/review.ts"
     },
-    "./state/rewind": {
-      "types": "./src/state/rewind.ts",
-      "default": "./src/state/rewind.ts"
+    "./state/checkpointMaintenance": {
+      "types": "./src/state/checkpointMaintenance.ts",
+      "default": "./src/state/checkpointMaintenance.ts"
     },
     "./state/runtime": {
       "types": "./src/state/runtime.ts",

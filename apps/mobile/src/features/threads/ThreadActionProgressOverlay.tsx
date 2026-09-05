@@ -15,7 +15,7 @@ const OVERLAY_LAYOUT_TRANSITION = LinearTransition.duration(220);
 const AnimatedLiquidGlassView = Animated.createAnimatedComponent(LiquidGlassView);
 
 /**
- * Floating banner for the selected thread's git actions and rewind steps.
+ * Floating banner for the selected thread's git actions.
  * One overlay per thread: both flows publish into the same notification
  * channel, so they can never overlap.
  */

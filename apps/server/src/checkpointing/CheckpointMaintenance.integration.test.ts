@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off
 /**
- * End-to-end checkpoint maintenance against real git repositories, the real
- * projection query, and real rewind shadow stores.
+ * End-to-end checkpoint maintenance against real git repositories and the real
+ * projection query.
  *
  * The pure eviction rules are covered in `CheckpointMaintenance.test.ts`; this
  * file exists for the properties that only hold against real git: which refs
@@ -23,11 +23,8 @@ import * as CheckpointMaintenanceLayer from "./CheckpointMaintenance.ts";
 import * as CheckpointStore from "./CheckpointStore.ts";
 import { checkpointRefForThreadTurn } from "./Utils.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "../orchestration/Layers/ProjectionSnapshotQuery.ts";
-import { RewindEntryRepositoryLive } from "../persistence/Layers/RewindEntries.ts";
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import * as RepositoryIdentityResolver from "../project/RepositoryIdentityResolver.ts";
-import * as RewindService from "../rewind/RewindService.ts";
-import * as RewindStore from "../rewind/RewindStore.ts";
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as ThreadBackgroundLiveness from "../orchestration/ThreadBackgroundLiveness.ts";
@@ -40,7 +37,6 @@ const VcsDriverTestLayer = VcsDriverRegistry.layer.pipe(Layer.provide(VcsProcess
 
 const makeTestLayer = (
   overrides: {
-    readonly sessionRewindEnabled?: boolean;
     readonly deleteOnThreadDelete?: boolean;
     readonly maxAgeDays?: number | null;
     readonly maxTotalMegabytes?: number | null;
@@ -48,9 +44,6 @@ const makeTestLayer = (
   } = {},
 ) =>
   CheckpointMaintenanceLayer.layer.pipe(
-    Layer.provideMerge(RewindService.layer),
-    Layer.provideMerge(RewindStore.layer),
-    Layer.provideMerge(RewindEntryRepositoryLive),
     Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverTestLayer))),
     Layer.provideMerge(
       OrchestrationProjectionSnapshotQueryLive.pipe(
@@ -61,7 +54,6 @@ const makeTestLayer = (
     Layer.provideMerge(
       ServerSettings.layerTest({
         experimental: {
-          sessionRewindEnabled: overrides.sessionRewindEnabled ?? true,
           checkpointRetention: {
             deleteOnThreadDelete: overrides.deleteOnThreadDelete ?? true,
             maxAgeDays: overrides.maxAgeDays === undefined ? null : overrides.maxAgeDays,
@@ -377,13 +369,11 @@ describe("CheckpointMaintenance (integration)", () => {
   });
 
   it.layer(makeTestLayer())("thread deletion", (it) => {
-    it.effect("forgetThread removes that thread's refs and rewind store only", () =>
+    it.effect("forgetThread removes that thread's refs only", () =>
       Effect.gen(function* () {
         const fs = yield* FileSystem.FileSystem;
         const maintenance = yield* CheckpointMaintenance;
         const checkpointStore = yield* CheckpointStore.CheckpointStore;
-        const rewind = yield* RewindService.RewindService;
-        const rewindStore = yield* RewindStore.RewindStore;
         const workspace = yield* fs.makeTempDirectoryScoped({ prefix: "maintenance-forget-" });
         yield* initRepository(workspace);
 
@@ -407,29 +397,11 @@ describe("CheckpointMaintenance (integration)", () => {
           });
         }
 
-        // Give the target thread a rewind store with one captured turn.
-        yield* rewind.beginTurn({ threadId: targetThreadId, cwd: workspace });
-        yield* fs.writeFileString(NodePath.join(workspace, "rewound.txt"), "after\n");
-        yield* rewind.captureTurn({
-          threadId: targetThreadId,
-          turnId: TurnId.make("turn-forget"),
-          cwd: workspace,
-          userMessageId: null,
-          assistantMessageId: null,
-          prompt: "edit",
-        });
-        const storePath = yield* rewindStore.storePath(
-          yield* rewindStore.storeIdForThread(targetThreadId),
-        );
-        expect(yield* fs.exists(storePath)).toBe(true);
-
         yield* maintenance.forgetThread({ threadId: targetThreadId, cwd: workspace });
 
         expect(
           (yield* checkpointStore.listCheckpointRefs(workspace)).map((r) => r.checkpointRef),
         ).toEqual([checkpointRefForThreadTurn(otherThreadId, 0)]);
-        expect(yield* fs.exists(storePath)).toBe(false);
-        expect((yield* rewind.getStatus(targetThreadId)).undo).toBeNull();
       }),
     );
 

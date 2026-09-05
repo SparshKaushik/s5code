@@ -11,8 +11,8 @@ export function useVcsActionState(target: VcsActionTarget): VcsActionState {
 }
 
 /**
- * Transient banner state for a completed thread-level action (git action,
- * session rewind step). One channel, so two actions can never stack banners.
+ * Transient banner state for a completed thread-level action (git action).
+ * One channel, so two actions can never stack banners.
  */
 export interface ThreadActionResultNotification {
   readonly type: "success" | "error";

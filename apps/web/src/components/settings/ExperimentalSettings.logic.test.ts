@@ -37,30 +37,23 @@ describe("formatStorageBytes", () => {
 });
 
 describe("summarizeCheckpointUsage", () => {
-  it("counts entries, refs, and rewind stores separately", () => {
+  it("counts entries and refs", () => {
     const summary = summarizeCheckpointUsage({
       generatedAt: "2026-01-01T00:00:00.000Z",
       entries: [
         entry(),
         entry({ threadId: ThreadId.make("thread-2"), orphaned: true, refCount: 2 }),
-        entry({
-          kind: "rewind-store",
-          threadId: ThreadId.make("thread-3"),
-          refCount: 0,
-          location: "/state/rewind/abc",
-        }),
       ],
-      totalBytes: 3 * MEGABYTE,
+      totalBytes: 2 * MEGABYTE,
       orphanedBytes: MEGABYTE,
     });
 
     expect(summary).toEqual({
-      totalBytesLabel: "3.0 MB",
+      totalBytesLabel: "2.0 MB",
       orphanedBytesLabel: "1.0 MB",
-      entryCount: 3,
+      entryCount: 2,
       orphanedCount: 1,
       refCount: 5,
-      rewindStoreCount: 1,
     });
   });
 });
@@ -101,7 +94,7 @@ describe("formatCleanupResultDescription", () => {
     ).toBe("Removed 2 entries and 5 checkpoints, reclaiming 2.0 MB.");
   });
 
-  it("omits the checkpoint clause for rewind-only removals", () => {
+  it("omits the checkpoint clause when no checkpoints were removed", () => {
     expect(
       formatCleanupResultDescription({
         removedEntryCount: 1,

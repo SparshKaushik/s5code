@@ -11,6 +11,7 @@
 import * as Migrator from "effect/unstable/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { ensureExpectedSchema } from "./SchemaEnsure.ts";
 
@@ -52,10 +53,9 @@ import Migration0034 from "./Migrations/034_ProjectionThreadsSnoozed.ts";
 import Migration0035 from "./Migrations/035_ProjectionThreadTitleRegeneration.ts";
 import Migration0036 from "./Migrations/036_ProjectionThreadsPinned.ts";
 import Migration0037 from "./Migrations/037_ProjectionTurnsKeysetIndex.ts";
-import Migration0038 from "./Migrations/038_RewindEntries.ts";
-import Migration0039 from "./Migrations/039_ProjectionThreadsPinOrderKey.ts";
-import Migration0040 from "./Migrations/040_ProjectionProjectsDefaultThreadEnvMode.ts";
-import Migration0041 from "./Migrations/041_ProjectionProjectFaviconPath.ts";
+import Migration0038 from "./Migrations/038_ProjectionThreadsPinOrderKey.ts";
+import Migration0039 from "./Migrations/039_ProjectionProjectsDefaultThreadEnvMode.ts";
+import Migration0040 from "./Migrations/040_ProjectionProjectFaviconPath.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -105,10 +105,9 @@ export const migrationEntries = [
   [35, "ProjectionThreadTitleRegeneration", Migration0035],
   [36, "ProjectionThreadsPinned", Migration0036],
   [37, "ProjectionTurnsKeysetIndex", Migration0037],
-  [38, "RewindEntries", Migration0038],
-  [39, "ProjectionThreadsPinOrderKey", Migration0039],
-  [40, "ProjectionProjectsDefaultThreadEnvMode", Migration0040],
-  [41, "ProjectionProjectFaviconPath", Migration0041],
+  [38, "ProjectionThreadsPinOrderKey", Migration0038],
+  [39, "ProjectionProjectsDefaultThreadEnvMode", Migration0039],
+  [40, "ProjectionProjectFaviconPath", Migration0040],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -133,6 +132,83 @@ export interface RunMigrationsOptions {
 }
 
 /**
+ * Recover legacy migration history and remove discontinued rewind state.
+ *
+ * In earlier S5 Code fork releases:
+ * - Migration 38 was inserted as RewindEntries, shifting upstream 38–40 to 39–41.
+ * - Earlier builds also had migration 35 recorded as RewindEntries.
+ *
+ * If a database has RewindEntries in effect_sql_migrations, the migrator would
+ * see latestMigrationId as 41 and skip future migrations (such as 41).
+ *
+ * This recovery aligns the migration table back with upstream (38, 39, 40)
+ * and drops the discontinued rewind_entries table and its indexes.
+ */
+export const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* () {
+  const sql = yield* SqlClient.SqlClient;
+
+  const tables = yield* sql<{ readonly name: string }>`
+    SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'effect_sql_migrations'
+  `;
+  if (tables.length === 0) {
+    return;
+  }
+
+  const rows = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+    SELECT migration_id, name FROM effect_sql_migrations
+  `;
+  const hasRewindEntries = rows.some((r) => r.name === "RewindEntries");
+  if (!hasRewindEntries) {
+    return;
+  }
+
+  const nameById = new Map(rows.map((r) => [r.migration_id, r.name]));
+
+  yield* sql.withTransaction(
+    Effect.gen(function* () {
+      yield* sql`
+        DELETE FROM effect_sql_migrations WHERE name = 'RewindEntries'
+      `;
+
+      // If migration 38 was RewindEntries, migrations 39-41 were shifted by +1
+      // and need to be shifted back to 38-40. For older ID-35 databases,
+      // migrations 38-40 are already recorded with upstream IDs, so no shift is applied.
+      if (nameById.get(38) === "RewindEntries") {
+        if (nameById.get(39) === "ProjectionThreadsPinOrderKey") {
+          yield* sql`
+            UPDATE effect_sql_migrations
+            SET migration_id = 38
+            WHERE migration_id = 39 AND name = 'ProjectionThreadsPinOrderKey'
+          `;
+        }
+
+        if (nameById.get(40) === "ProjectionProjectsDefaultThreadEnvMode") {
+          yield* sql`
+            UPDATE effect_sql_migrations
+            SET migration_id = 39
+            WHERE migration_id = 40 AND name = 'ProjectionProjectsDefaultThreadEnvMode'
+          `;
+        }
+
+        if (nameById.get(41) === "ProjectionProjectFaviconPath") {
+          yield* sql`
+            UPDATE effect_sql_migrations
+            SET migration_id = 40
+            WHERE migration_id = 41 AND name = 'ProjectionProjectFaviconPath'
+          `;
+        }
+      }
+
+      yield* sql`
+        DROP TABLE IF EXISTS rewind_entries
+      `;
+    }),
+  );
+
+  yield* Effect.log("Recovered legacy fork migrations and cleaned up rewind schema");
+});
+
+/**
  * Run all pending migrations.
  *
  * Creates the migrations tracking table (effect_sql_migrations) if it doesn't exist,
@@ -145,6 +221,9 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
+  if (toMigrationInclusive === undefined) {
+    yield* recoverLegacyMigrations();
+  }
   const executedMigrations = yield* run({ loader: makeMigrationLoader(toMigrationInclusive) });
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
   yield* migrations.length === 0

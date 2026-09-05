@@ -21,7 +21,6 @@ export interface CheckpointUsageSummary {
   readonly entryCount: number;
   readonly orphanedCount: number;
   readonly refCount: number;
-  readonly rewindStoreCount: number;
 }
 
 export function summarizeCheckpointUsage(usage: CheckpointStorageUsage): CheckpointUsageSummary {
@@ -31,7 +30,6 @@ export function summarizeCheckpointUsage(usage: CheckpointStorageUsage): Checkpo
     entryCount: usage.entries.length,
     orphanedCount: usage.entries.filter((entry) => entry.orphaned).length,
     refCount: usage.entries.reduce((total, entry) => total + entry.refCount, 0),
-    rewindStoreCount: usage.entries.filter((entry) => entry.kind === "rewind-store").length,
   };
 }
 
@@ -54,7 +52,7 @@ export function describeCleanupScope(scope: CheckpointCleanupScope): {
         label: "Clean up deleted threads",
         confirmTitle: "Remove checkpoint data for deleted threads?",
         confirmDescription:
-          "Deletes hidden checkpoint commits and rewind snapshots that belong to threads you already deleted. Existing threads keep everything.",
+          "Deletes hidden checkpoint commits that belong to threads you already deleted. Existing threads keep everything.",
         destructive: false,
       };
     case "retention-policy":
@@ -68,9 +66,9 @@ export function describeCleanupScope(scope: CheckpointCleanupScope): {
     case "all":
       return {
         label: "Delete all checkpoint data",
-        confirmTitle: "Delete every checkpoint and rewind snapshot?",
+        confirmTitle: "Delete every checkpoint commit?",
         confirmDescription:
-          "Removes all hidden checkpoint commits and rewind snapshots, including for threads you are still working on. Those threads lose undo and revert. Your branches, tags, commits, and working tree are untouched.",
+          "Removes all hidden checkpoint commits, including for threads you are still working on. Those threads lose revert. Your branches, tags, commits, and working tree are untouched.",
         destructive: true,
       };
   }

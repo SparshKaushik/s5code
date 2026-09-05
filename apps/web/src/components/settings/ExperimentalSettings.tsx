@@ -17,7 +17,7 @@ import {
 import { usePrimarySettings, useUpdatePrimarySettings } from "../../hooks/useSettings";
 import { usePrimaryEnvironment } from "../../state/environments";
 import { useEnvironmentQuery } from "../../state/query";
-import { checkpointMaintenanceEnvironment } from "../../state/rewind";
+import { checkpointMaintenanceEnvironment } from "../../state/checkpointMaintenance";
 import { useAtomCommand } from "../../state/use-atom-command";
 import {
   AlertDialog,
@@ -120,7 +120,7 @@ function CheckpointStorageSection() {
     >
       <SettingsRow
         title="Space used"
-        description="Hidden checkpoint commits inside your repositories plus rewind snapshots kept in S5 Code state. Your branches, tags, and commits are never counted or touched."
+        description="Hidden checkpoint commits inside your repositories. Your branches, tags, and commits are never counted or touched."
         status={
           error !== null ? (
             <span className="text-destructive">{error}</span>
@@ -133,9 +133,9 @@ function CheckpointStorageSection() {
           ) : (
             `${summary.totalBytesLabel} across ${summary.entryCount} ${
               summary.entryCount === 1 ? "entry" : "entries"
-            } (${summary.refCount} checkpoints, ${summary.rewindStoreCount} rewind ${
-              summary.rewindStoreCount === 1 ? "store" : "stores"
-            }). ${summary.orphanedBytesLabel} belongs to ${summary.orphanedCount} deleted ${
+            } (${summary.refCount} ${summary.refCount === 1 ? "checkpoint" : "checkpoints"}). ${
+              summary.orphanedBytesLabel
+            } belongs to ${summary.orphanedCount} deleted ${
               summary.orphanedCount === 1 ? "thread" : "threads"
             }.`
           )
@@ -253,7 +253,7 @@ function CheckpointRetentionSection() {
     <SettingsSection title="Checkpoint retention">
       <SettingsRow
         title="Delete with the thread"
-        description="When you delete a thread, immediately remove its hidden checkpoints and rewind snapshots. Turn this off to keep the history for later inspection."
+        description="When you delete a thread, immediately remove its hidden checkpoints. Turn this off to keep the history for later inspection."
         control={
           <Switch
             checked={retention.deleteOnThreadDelete}
@@ -320,28 +320,8 @@ function CheckpointRetentionSection() {
 }
 
 export function ExperimentalSettingsPanel() {
-  const sessionRewindEnabled = usePrimarySettings(
-    (settings) => settings.experimental.sessionRewindEnabled,
-  );
-  const updateSettings = useUpdatePrimarySettings();
-
   return (
     <SettingsPageContainer>
-      <SettingsSection title="Experimental features">
-        <SettingsRow
-          title="Session rewind"
-          description="Adds undo and redo to a thread. Each turn's file changes are snapshotted into a shadow Git store kept outside your repository, so undo restores only the files that turn touched and never rewrites your history. Existing turns stay unrewindable; capture starts with the next turn."
-          control={
-            <Switch
-              checked={sessionRewindEnabled}
-              onCheckedChange={(checked) =>
-                updateSettings({ experimental: { sessionRewindEnabled: Boolean(checked) } })
-              }
-              aria-label="Enable session rewind"
-            />
-          }
-        />
-      </SettingsSection>
       <CheckpointRetentionSection />
       <CheckpointStorageSection />
     </SettingsPageContainer>
