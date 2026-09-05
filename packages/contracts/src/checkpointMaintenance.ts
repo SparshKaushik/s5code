@@ -1,10 +1,8 @@
 /**
  * Checkpoint maintenance — inspect and reclaim checkpoint storage.
  *
- * Two kinds of state were originally covered:
- *
- *   - **Checkpoint refs**: `refs/t3/checkpoints/<thread>/turn/<n>` commits
- *     written into each project repository by the built-in checkpoint flow.
+ * Covers hidden `refs/t3/checkpoints/<thread>/turn/<n>` commits written into
+ * each project repository by the built-in checkpoint flow.
  *
  * Nothing here ever touches a user branch, tag, stash, or remote ref.
  *

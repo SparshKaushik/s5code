@@ -157,8 +157,8 @@ export const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(func
   const rows = yield* sql<{ readonly migration_id: number; readonly name: string }>`
     SELECT migration_id, name FROM effect_sql_migrations
   `;
-  const rewindRow = rows.find((r) => r.name === "RewindEntries");
-  if (!rewindRow) {
+  const hasRewindEntries = rows.some((r) => r.name === "RewindEntries");
+  if (!hasRewindEntries) {
     return;
   }
 
