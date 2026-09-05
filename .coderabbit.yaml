@@ -1,0 +1,38 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+
+reviews:
+  profile: "chill"
+  request_changes_workflow: false
+  high_level_summary: true
+  poem: false
+  review_status: true
+  collapse_walkthrough: false
+  auto_review:
+    enabled: true
+    auto_incremental_review: true
+    drafts: false
+    base_branches:
+      - "main"
+    ignore_title_keywords:
+      - "WIP"
+      - "[skip review]"
+      - "[ci-skip]"
+  path_filters:
+    - "!**/.repos/**"
+    - "!**/.t3/**"
+    - "!**/pnpm-lock.yaml"
+    - "!**/node_modules/**"
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Follow the project conventions outlined in AGENTS.md:
+        - Complexity belongs at the adapter boundary. Orchestration stays pure, UI stays dumb.
+        - Inferred types over annotations. Never introduce `any`.
+        - Performance matters: flag continuously repainting animations or unnecessary WebSocket payloads.
+        - Avoid nitpicks on formatting or style (CI linters handle that). Focus on correctness, logic bugs, data loss risks, and security issues.
+        - Be concise and actionable.
+
+chat:
+  auto_reply: true
