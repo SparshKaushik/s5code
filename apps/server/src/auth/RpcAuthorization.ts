@@ -100,11 +100,6 @@ export const RPC_REQUIRED_SCOPES = {
   [WS_METHODS.vcsInit]: AuthOrchestrationOperateScope,
   [WS_METHODS.reviewGetDiffPreview]: AuthReviewWriteScope,
   [WS_METHODS.reviewGetDiffFileContents]: AuthReviewWriteScope,
-  // Rewind reads are read-scope; undo/redo write to the workspace and so
-  // require the same operate scope as dispatching a turn.
-  [WS_METHODS.rewindGetStatus]: AuthOrchestrationReadScope,
-  [WS_METHODS.rewindUndo]: AuthOrchestrationOperateScope,
-  [WS_METHODS.rewindRedo]: AuthOrchestrationOperateScope,
   [WS_METHODS.checkpointMaintenanceGetUsage]: AuthOrchestrationReadScope,
   [WS_METHODS.checkpointMaintenanceCleanup]: AuthOrchestrationOperateScope,
   [WS_METHODS.terminalOpen]: AuthTerminalOperateScope,

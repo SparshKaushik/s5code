@@ -7,8 +7,8 @@ rules that keep future syncs cheap and safe.
 ## The one rule that matters
 
 **Prioritize fork-specific features, then layer upstream features and fixes on
-top.** The fork is a rebrand plus a set of product features (rewind,
-compaction, usage tags, self-hosted relay, binary self-update). A sync must
+top.** The fork is a rebrand plus a set of product features (compaction,
+usage tags, self-hosted relay, binary self-update). A sync must
 never silently drop any of them, and must not re-introduce upstream work that
 the fork deliberately removed.
 
@@ -54,13 +54,13 @@ Conflicts fall into three buckets:
 
 The server's SQLite migrations live in
 `apps/server/src/persistence/Migrations/` and are keyed by a numeric ID in
-`Migrations.ts`. The fork inserted `038_RewindEntries` and shifted upstream's
-`038–040` to `039–041`.
+`Migrations.ts`. Migrations 001–040 are in sync with upstream `t3code`
+(the previous experimental `038_RewindEntries` migration was removed, and
+automatic recovery realigns existing user databases).
 
-**Rule:** the fork's migration IDs are authoritative. When upstream ships a new
-migration whose ID collides with (or precedes) the fork's, renumber the
-_incoming_ migration to `+1` past the fork's highest ID, and update
-`Migrations.ts` accordingly. Never renumber the fork's own migrations.
+**Rule:** when upstream ships new migrations, adopt their numeric IDs when
+cleanly tracking upstream. Any new fork-specific migrations should use `+1`
+past the highest ID.
 
 The relay migrations in `infra/relay/migrations/postgres/` are timestamped and
 do not collide; leave them alone.
@@ -72,8 +72,6 @@ These are the things a sync must never regress. Grep for them after a merge:
 - **Rebrand** — `s5code://` scheme, `~/.s5code` home dir, `app.s5code.touchtech.club`,
   self-hosted Clerk/relay URLs, "S5 Code" copy. Files: `apps/desktop`,
   `apps/mobile/app.config.ts`, `apps/web/index.html`, `packages/shared/src/devHome.ts`.
-- **Rewind** — `packages/contracts/src/rewind.ts`, `apps/server/src/rewind/`,
-  migration `038_RewindEntries`, `WS_METHODS.rewind*`.
 - **Compaction** — `/compact` command (pi harness).
 - **Usage tags** — `UsageModelAlias`, `UsageCatalogModelId`, `userTagged` cost
   source, `pi`/`cursor` provider kinds, `UsagePricer`. Files:
@@ -92,8 +90,6 @@ These upstream files were removed on purpose. A sync that re-adds them is a bug:
 - `apps/mobile/src/components/T3Wordmark.tsx` (rebrand).
 - `apps/mobile/src/features/threads/GitActionProgressOverlay.tsx`.
 - `infra/relay/src/dbConfig.ts` (+ test) — fork's relay rewrite.
-- Migrations `038_ProjectionThreadsPinOrderKey`, `039_ProjectionProjectsDefaultThreadEnvMode`,
-  `040_ProjectionProjectFaviconPath` — the fork renumbered these to `039–041`.
 
 ## The pull-request feature
 

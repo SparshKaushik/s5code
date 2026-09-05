@@ -662,8 +662,7 @@ export const DEFAULT_CHECKPOINT_RETENTION_MEGABYTES: CheckpointRetentionMegabyte
  * Checkpoint storage retention. `null` on either limit disables that limit.
  *
  * Cleanup only ever considers checkpoint state S5 Code created itself:
- * hidden `refs/t3/checkpoints` refs inside project repositories and
- * per-thread shadow-git rewind stores under the server state directory.
+ * hidden `refs/t3/checkpoints` refs inside project repositories.
  * Refs belonging to threads that still exist are only removed by the age
  * and size limits; refs for deleted threads are always removed.
  */
@@ -691,12 +690,6 @@ export type CheckpointRetentionSettings = typeof CheckpointRetentionSettings.Typ
  * settings and is shared by every connected client.
  */
 export const ExperimentalSettings = Schema.Struct({
-  /**
-   * Session rewind: per-turn undo/redo backed by shadow-git snapshots kept
-   * outside the project repository. Off by default; enabling it starts
-   * capturing snapshots on the next turn (earlier turns stay unrewindable).
-   */
-  sessionRewindEnabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   checkpointRetention: CheckpointRetentionSettings.pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
@@ -972,7 +965,6 @@ export const ServerSettingsPatch = Schema.Struct({
   ),
   experimental: Schema.optionalKey(
     Schema.Struct({
-      sessionRewindEnabled: Schema.optionalKey(Schema.Boolean),
       checkpointRetention: Schema.optionalKey(
         Schema.Struct({
           deleteOnThreadDelete: Schema.optionalKey(Schema.Boolean),

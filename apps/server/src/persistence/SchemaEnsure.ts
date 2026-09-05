@@ -82,43 +82,11 @@ export const ensureExpectedSchema = Effect.fn("ensureExpectedSchema")(function* 
     healed.push("projection_projects.favicon_path");
   }
 
-  if (!objects.has("rewind_entries")) {
+  if (objects.has("rewind_entries")) {
     yield* sql`
-      CREATE TABLE IF NOT EXISTS rewind_entries (
-        thread_id TEXT NOT NULL,
-        turn_id TEXT NOT NULL,
-        sequence INTEGER NOT NULL,
-        store_id TEXT NOT NULL,
-        cwd TEXT NOT NULL,
-        user_message_id TEXT,
-        assistant_message_id TEXT,
-        prompt TEXT NOT NULL,
-        before_tree TEXT NOT NULL,
-        after_tree TEXT NOT NULL,
-        files_json TEXT NOT NULL,
-        state TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        PRIMARY KEY (thread_id, turn_id)
-      )
+      DROP TABLE IF EXISTS rewind_entries
     `;
-    healed.push("rewind_entries");
-  }
-
-  if (!objects.has("idx_rewind_entries_thread_sequence")) {
-    yield* sql`
-      CREATE INDEX IF NOT EXISTS idx_rewind_entries_thread_sequence
-      ON rewind_entries(thread_id, sequence)
-    `;
-    healed.push("idx_rewind_entries_thread_sequence");
-  }
-
-  if (!objects.has("idx_rewind_entries_store")) {
-    yield* sql`
-      CREATE INDEX IF NOT EXISTS idx_rewind_entries_store
-      ON rewind_entries(store_id)
-    `;
-    healed.push("idx_rewind_entries_store");
+    healed.push("drop rewind_entries");
   }
 
   if (!objects.has("idx_projection_turns_thread_keyset")) {

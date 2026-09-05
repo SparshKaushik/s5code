@@ -34,7 +34,49 @@ const sqliteObjectNames = Effect.fn("sqliteObjectNames")(function* () {
   return new Set(rows.map((row) => row.name));
 });
 
-describe("SchemaEnsure", () => {
+describe("SchemaEnsure and Migration Recovery", () => {
+  it.effect(
+    "recovers legacy fork migrations (38=RewindEntries, 39..41 shifted) to match upstream 38..40 and drops rewind table",
+    () =>
+      provideSqlite(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+
+          yield* runMigrations({ toMigrationInclusive: 37 });
+          yield* sql`
+            CREATE TABLE rewind_entries (
+              thread_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              PRIMARY KEY (thread_id, turn_id)
+            )
+          `;
+          yield* sql`
+            INSERT INTO effect_sql_migrations (migration_id, name)
+            VALUES
+              (38, 'RewindEntries'),
+              (39, 'ProjectionThreadsPinOrderKey'),
+              (40, 'ProjectionProjectsDefaultThreadEnvMode'),
+              (41, 'ProjectionProjectFaviconPath')
+          `;
+
+          yield* runMigrations();
+
+          const migrations = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+            SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 38 ORDER BY migration_id ASC
+          `;
+
+          assert.deepEqual(migrations, [
+            { migration_id: 38, name: "ProjectionThreadsPinOrderKey" },
+            { migration_id: 39, name: "ProjectionProjectsDefaultThreadEnvMode" },
+            { migration_id: 40, name: "ProjectionProjectFaviconPath" },
+          ]);
+
+          const objects = yield* sqliteObjectNames();
+          assert.ok(!objects.has("rewind_entries"));
+        }),
+      ),
+  );
+
   it.effect(
     "heals title regeneration columns when migration 35 was recorded as RewindEntries",
     () =>
@@ -87,9 +129,7 @@ describe("SchemaEnsure", () => {
         assert.ok(threads.has("pin_order_key"));
         assert.ok(projects.has("default_thread_env_mode"));
         assert.ok(projects.has("favicon_path"));
-        assert.ok(objects.has("rewind_entries"));
-        assert.ok(objects.has("idx_rewind_entries_thread_sequence"));
-        assert.ok(objects.has("idx_rewind_entries_store"));
+        assert.ok(!objects.has("rewind_entries"));
         assert.ok(objects.has("idx_projection_turns_thread_keyset"));
       }),
     ),

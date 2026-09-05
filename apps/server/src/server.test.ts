@@ -105,7 +105,6 @@ import { makeRoutesLayer } from "./server.ts";
 import { isThreadDetailEvent, resolveAvailableEditorsForConfig } from "./ws.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointMaintenance from "./checkpointing/CheckpointMaintenance.ts";
-import * as RewindService from "./rewind/RewindService.ts";
 import * as GitManager from "./git/GitManager.ts";
 import * as Keybindings from "./keybindings.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
@@ -407,7 +406,6 @@ const buildAppUnderTest = (options?: {
     projectionSnapshotQuery?: Partial<ProjectionSnapshotQuery.ProjectionSnapshotQuery["Service"]>;
     checkpointDiffQuery?: Partial<CheckpointDiffQuery.CheckpointDiffQuery["Service"]>;
     checkpointMaintenance?: Partial<CheckpointMaintenance.CheckpointMaintenance["Service"]>;
-    rewindService?: Partial<RewindService.RewindService["Service"]>;
     browserTraceCollector?: Partial<BrowserTraceCollector.BrowserTraceCollector["Service"]>;
     serverLifecycleEvents?: Partial<ServerLifecycleEvents.ServerLifecycleEvents["Service"]>;
     serverRuntimeStartup?: Partial<ServerRuntimeStartup.ServerRuntimeStartup["Service"]>;
@@ -860,28 +858,6 @@ const buildAppUnderTest = (options?: {
             forgetThread: () => Effect.succeed(0),
             sweepIfConfigured: () => Effect.void,
             ...options?.layers?.checkpointMaintenance,
-          }),
-          Layer.mock(RewindService.RewindService)({
-            isEnabled: Effect.succeed(false),
-            beginTurn: () => Effect.succeed(null),
-            captureTurn: () => Effect.succeed(Option.none()),
-            getStatus: (threadId) => Effect.succeed(RewindService.unavailableStatus(threadId)),
-            undo: (threadId) =>
-              Effect.succeed({
-                outcome: "unavailable" as const,
-                restoredFiles: [],
-                prompt: null,
-                status: RewindService.unavailableStatus(threadId),
-              }),
-            redo: (threadId) =>
-              Effect.succeed({
-                outcome: "unavailable" as const,
-                restoredFiles: [],
-                prompt: null,
-                status: RewindService.unavailableStatus(threadId),
-              }),
-            forgetThread: () => Effect.succeed(0),
-            ...options?.layers?.rewindService,
           }),
         ),
       ),

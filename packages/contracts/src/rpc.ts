@@ -61,14 +61,6 @@ import {
   CheckpointStorageUsage,
 } from "./checkpointMaintenance.ts";
 import {
-  REWIND_WS_METHODS,
-  RewindError,
-  RewindGetStatusInput,
-  RewindStatus,
-  RewindStepInput,
-  RewindStepResult,
-} from "./rewind.ts";
-import {
   ClientOrchestrationCommand,
   ORCHESTRATION_WS_METHODS,
   OrchestrationDispatchCommandError,
@@ -251,11 +243,6 @@ export const WS_METHODS = {
   // Review methods
   reviewGetDiffPreview: "review.getDiffPreview",
   reviewGetDiffFileContents: "review.getDiffFileContents",
-
-  // Session rewind (experimental)
-  rewindGetStatus: REWIND_WS_METHODS.getStatus,
-  rewindUndo: REWIND_WS_METHODS.undo,
-  rewindRedo: REWIND_WS_METHODS.redo,
 
   // Checkpoint storage maintenance
   checkpointMaintenanceGetUsage: CHECKPOINT_MAINTENANCE_WS_METHODS.getUsage,
@@ -1020,24 +1007,6 @@ export const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeReso
   stream: true,
 });
 
-export const WsRewindGetStatusRpc = Rpc.make(WS_METHODS.rewindGetStatus, {
-  payload: RewindGetStatusInput,
-  success: RewindStatus,
-  error: Schema.Union([RewindError, EnvironmentAuthorizationError]),
-});
-
-export const WsRewindUndoRpc = Rpc.make(WS_METHODS.rewindUndo, {
-  payload: RewindStepInput,
-  success: RewindStepResult,
-  error: Schema.Union([RewindError, EnvironmentAuthorizationError]),
-});
-
-export const WsRewindRedoRpc = Rpc.make(WS_METHODS.rewindRedo, {
-  payload: RewindStepInput,
-  success: RewindStepResult,
-  error: Schema.Union([RewindError, EnvironmentAuthorizationError]),
-});
-
 export const WsCheckpointMaintenanceGetUsageRpc = Rpc.make(
   WS_METHODS.checkpointMaintenanceGetUsage,
   {
@@ -1120,9 +1089,6 @@ export const WsRpcGroup = RpcGroup.make(
   WsVcsInitRpc,
   WsReviewGetDiffPreviewRpc,
   WsReviewGetDiffFileContentsRpc,
-  WsRewindGetStatusRpc,
-  WsRewindUndoRpc,
-  WsRewindRedoRpc,
   WsCheckpointMaintenanceGetUsageRpc,
   WsCheckpointMaintenanceCleanupRpc,
   WsTerminalOpenRpc,

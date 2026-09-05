@@ -15,11 +15,12 @@ Two independent recoveries:
    - Copy missing files from `.t3/userdata` into `.s5code/userdata` without overwriting existing dest files. Write the marker. Do not delete `~/.t3`.
    - If `.s5code/userdata/state.sqlite` already exists, leave it (schema ensure handles collisions).
 
-2. **Server schema ensure** (after a full `runMigrations()`, before serving)
-   - Declarative checklist of additive objects from migrations 35–41 (columns, tables, indexes).
+2. **Server schema ensure & migration recovery** (in `runMigrations()`)
+   - Pre-migration recovery: detect legacy `RewindEntries` row (IDs 35 or 38). Shift 39->38, 40->39, 41->40 so the migration tracking table is 1..40 matching upstream `t3code`. Drop discontinued `rewind_entries` table.
+   - Post-migration declarative checklist of additive objects from migrations 35–40 (columns, indexes).
    - Create anything missing (`ALTER TABLE … ADD COLUMN`, `CREATE TABLE/INDEX IF NOT EXISTS`).
-   - Never drop, rename, change types, or backfill from events.
-   - Skip the ensure pass when `toMigrationInclusive` is set so incremental migration tests stay valid.
+   - Never drop or rename active application tables/columns.
+   - Skip recovery and ensure passes when `toMigrationInclusive` is set so incremental migration tests stay valid.
    - Log healed object names. Fail startup only if heal SQL fails.
 
 ## Out of scope

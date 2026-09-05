@@ -1,13 +1,10 @@
 /**
  * Checkpoint maintenance — inspect and reclaim checkpoint storage.
  *
- * Two kinds of state are covered, both created by S5 Code and invisible to
- * normal git usage:
+ * Two kinds of state were originally covered:
  *
  *   - **Checkpoint refs**: `refs/t3/checkpoints/<thread>/turn/<n>` commits
  *     written into each project repository by the built-in checkpoint flow.
- *   - **Rewind stores**: per-thread shadow git directories under the server
- *     state directory, used by the session rewind experiment.
  *
  * Nothing here ever touches a user branch, tag, stash, or remote ref.
  *
@@ -29,21 +26,21 @@ export const CHECKPOINT_MAINTENANCE_WS_METHODS = {
  */
 export const CHECKPOINT_REFS_PREFIX = "refs/t3/checkpoints";
 
-export const CheckpointStorageKind = Schema.Literals(["checkpoint-refs", "rewind-store"]);
+export const CheckpointStorageKind = Schema.Literals(["checkpoint-refs"]);
 export type CheckpointStorageKind = typeof CheckpointStorageKind.Type;
 
 /**
  * One reclaimable unit: all checkpoint refs for a thread inside one
- * repository, or one thread's rewind store.
+ * repository.
  */
 export const CheckpointStorageEntry = Schema.Struct({
   kind: CheckpointStorageKind,
   threadId: Schema.NullOr(ThreadId),
   /** Human label for the UI: thread title, or the repository path. */
   label: TrimmedNonEmptyString,
-  /** Repository or shadow-store path this entry lives in. */
+  /** Repository path this entry lives in. */
   location: TrimmedNonEmptyString,
-  /** Refs for `checkpoint-refs`; always 0 for `rewind-store`. */
+  /** Refs for `checkpoint-refs`. */
   refCount: NonNegativeInt,
   bytes: NonNegativeInt,
   /** Newest checkpoint timestamp in this entry, when it can be determined. */
@@ -70,8 +67,8 @@ export type CheckpointMaintenanceGetUsageInput = typeof CheckpointMaintenanceGet
  * - `orphaned`: only entries whose thread is gone. Always safe.
  * - `retention-policy`: apply the configured age and size limits, plus
  *   orphans. Never removes the newest entry for a live thread.
- * - `all`: every checkpoint ref and rewind store, including live threads.
- *   Callers must confirm this in the UI; it disables undo and revert for
+ * - `all`: every checkpoint ref, including live threads.
+ *   Callers must confirm this in the UI; it disables revert for
  *   existing threads.
  */
 export const CheckpointCleanupScope = Schema.Literals(["orphaned", "retention-policy", "all"]);

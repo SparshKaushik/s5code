@@ -35,9 +35,6 @@ import * as OpenCodeRuntime from "./provider/opencodeRuntime.ts";
 import * as CheckpointDiffQuery from "./checkpointing/CheckpointDiffQuery.ts";
 import * as CheckpointMaintenance from "./checkpointing/CheckpointMaintenance.ts";
 import * as CheckpointStore from "./checkpointing/CheckpointStore.ts";
-import * as RewindService from "./rewind/RewindService.ts";
-import * as RewindStore from "./rewind/RewindStore.ts";
-import { RewindEntryRepositoryLive } from "./persistence/Layers/RewindEntries.ts";
 import { pullRequestHttpApiLayer } from "./pullRequest/http.ts";
 import * as PullRequestProviderRegistry from "./pullRequest/PullRequestProviderRegistry.ts";
 import * as PullRequestService from "./pullRequest/PullRequestService.ts";
@@ -324,18 +321,7 @@ const CheckpointingLayerLive = Layer.empty.pipe(
   Layer.provideMerge(CheckpointStore.layer.pipe(Layer.provide(VcsDriverRegistryLayerLive))),
 );
 
-// Session rewind and checkpoint maintenance share the shadow-store and
-// rewind-entry repository, so they are composed together: maintenance has to
-// see the same stores rewind writes in order to report and reclaim them.
-const RewindLayerLive = Layer.empty.pipe(
-  Layer.provideMerge(RewindService.layer),
-  Layer.provideMerge(RewindStore.layer),
-  Layer.provideMerge(RewindEntryRepositoryLive),
-  Layer.provideMerge(VcsProcess.layer),
-);
-
-const CheckpointingAndRewindLayerLive = CheckpointMaintenance.layer.pipe(
-  Layer.provideMerge(RewindLayerLive),
+const CheckpointingAndMaintenanceLayerLive = CheckpointMaintenance.layer.pipe(
   Layer.provideMerge(CheckpointingLayerLive),
 );
 
@@ -390,7 +376,7 @@ const ProviderRuntimeLayerLive = ProviderSessionReaperLive.pipe(
 const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // Core Services
   Layer.provideMerge(ServerSettingsLayerLive),
-  Layer.provideMerge(CheckpointingAndRewindLayerLive),
+  Layer.provideMerge(CheckpointingAndMaintenanceLayerLive),
   Layer.provideMerge(SourceControlProviderRegistryLayerLive),
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),

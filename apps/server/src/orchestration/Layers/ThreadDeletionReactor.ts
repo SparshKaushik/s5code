@@ -64,7 +64,7 @@ const make = Effect.gen(function* () {
     });
 
   /**
-   * Remove the thread's hidden checkpoint refs and rewind store.
+   * Remove the thread's hidden checkpoint refs.
    *
    * Gated on `deleteOnThreadDelete` so operators who want checkpoint history
    * to outlive threads (for forensic diffing) can keep it. The workspace is
