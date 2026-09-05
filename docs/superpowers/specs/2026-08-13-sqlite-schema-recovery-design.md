@@ -16,7 +16,7 @@ Two independent recoveries:
    - If `.s5code/userdata/state.sqlite` already exists, leave it (schema ensure handles collisions).
 
 2. **Server schema ensure & migration recovery** (in `runMigrations()`)
-   - Pre-migration recovery: detect legacy `RewindEntries` row (IDs 35 or 38). Shift 39->38, 40->39, 41->40 so the migration tracking table is 1..40 matching upstream `t3code`. Drop discontinued `rewind_entries` table.
+   - Pre-migration recovery: detect legacy `RewindEntries` row. When migration 38 was `RewindEntries`, shift 39->38, 40->39, 41->40 so the migration tracking table is 1..40 matching upstream `t3code`. For older layout 35, remove `RewindEntries` without shifting 38..40. Drop discontinued `rewind_entries` table.
    - Post-migration declarative checklist of additive objects from migrations 35–40 (columns, indexes).
    - Create anything missing (`ALTER TABLE … ADD COLUMN`, `CREATE TABLE/INDEX IF NOT EXISTS`).
    - Never drop or rename active application tables/columns.

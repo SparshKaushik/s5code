@@ -78,6 +78,45 @@ describe("SchemaEnsure and Migration Recovery", () => {
   );
 
   it.effect(
+    "recovers ID-35 RewindEntries layout without corrupting existing upstream IDs 38..40",
+    () =>
+      provideSqlite(
+        Effect.gen(function* () {
+          const sql = yield* SqlClient.SqlClient;
+
+          yield* runMigrations({ toMigrationInclusive: 34 });
+          yield* sql`
+            INSERT INTO effect_sql_migrations (migration_id, name)
+            VALUES
+              (35, 'RewindEntries'),
+              (36, 'ProjectionThreadsPinned'),
+              (37, 'ProjectionTurnsKeysetIndex'),
+              (38, 'ProjectionThreadsPinOrderKey'),
+              (39, 'ProjectionProjectsDefaultThreadEnvMode'),
+              (40, 'ProjectionProjectFaviconPath')
+          `;
+
+          yield* runMigrations();
+
+          const migrations = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+            SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 35 ORDER BY migration_id ASC
+          `;
+
+          assert.deepEqual(migrations, [
+            { migration_id: 36, name: "ProjectionThreadsPinned" },
+            { migration_id: 37, name: "ProjectionTurnsKeysetIndex" },
+            { migration_id: 38, name: "ProjectionThreadsPinOrderKey" },
+            { migration_id: 39, name: "ProjectionProjectsDefaultThreadEnvMode" },
+            { migration_id: 40, name: "ProjectionProjectFaviconPath" },
+          ]);
+
+          const objects = yield* sqliteObjectNames();
+          assert.ok(!objects.has("rewind_entries"));
+        }),
+      ),
+  );
+
+  it.effect(
     "heals title regeneration columns when migration 35 was recorded as RewindEntries",
     () =>
       provideSqlite(

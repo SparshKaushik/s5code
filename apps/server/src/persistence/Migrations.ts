@@ -170,28 +170,33 @@ export const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(func
         DELETE FROM effect_sql_migrations WHERE name = 'RewindEntries'
       `;
 
-      if (nameById.get(39) === "ProjectionThreadsPinOrderKey") {
-        yield* sql`
-          UPDATE effect_sql_migrations
-          SET migration_id = 38
-          WHERE migration_id = 39 AND name = 'ProjectionThreadsPinOrderKey'
-        `;
-      }
+      // If migration 38 was RewindEntries, migrations 39-41 were shifted by +1
+      // and need to be shifted back to 38-40. For older ID-35 databases,
+      // migrations 38-40 are already recorded with upstream IDs, so no shift is applied.
+      if (nameById.get(38) === "RewindEntries") {
+        if (nameById.get(39) === "ProjectionThreadsPinOrderKey") {
+          yield* sql`
+            UPDATE effect_sql_migrations
+            SET migration_id = 38
+            WHERE migration_id = 39 AND name = 'ProjectionThreadsPinOrderKey'
+          `;
+        }
 
-      if (nameById.get(40) === "ProjectionProjectsDefaultThreadEnvMode") {
-        yield* sql`
-          UPDATE effect_sql_migrations
-          SET migration_id = 39
-          WHERE migration_id = 40 AND name = 'ProjectionProjectsDefaultThreadEnvMode'
-        `;
-      }
+        if (nameById.get(40) === "ProjectionProjectsDefaultThreadEnvMode") {
+          yield* sql`
+            UPDATE effect_sql_migrations
+            SET migration_id = 39
+            WHERE migration_id = 40 AND name = 'ProjectionProjectsDefaultThreadEnvMode'
+          `;
+        }
 
-      if (nameById.get(41) === "ProjectionProjectFaviconPath") {
-        yield* sql`
-          UPDATE effect_sql_migrations
-          SET migration_id = 40
-          WHERE migration_id = 41 AND name = 'ProjectionProjectFaviconPath'
-        `;
+        if (nameById.get(41) === "ProjectionProjectFaviconPath") {
+          yield* sql`
+            UPDATE effect_sql_migrations
+            SET migration_id = 40
+            WHERE migration_id = 41 AND name = 'ProjectionProjectFaviconPath'
+          `;
+        }
       }
 
       yield* sql`

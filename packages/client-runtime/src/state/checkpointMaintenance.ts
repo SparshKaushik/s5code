@@ -31,8 +31,13 @@ export function createCheckpointMaintenanceEnvironmentAtoms<R, E>(
       scheduler: createAtomCommandScheduler(),
       concurrency: {
         mode: "singleFlight" as const,
-        key: ({ environmentId, input }: { environmentId: string; input: { scope: string } }) =>
-          JSON.stringify([environmentId, input.scope]),
+        key: ({
+          environmentId,
+          input,
+        }: {
+          environmentId: string;
+          input: { scope: string; dryRun?: boolean };
+        }) => JSON.stringify([environmentId, input.scope, input.dryRun === true]),
       },
     }),
   };
