@@ -46,6 +46,7 @@ private val DRIVER_DISPLAY_NAMES =
         "cursor" to "Cursor",
         "grok" to "Grok",
         "opencode" to "OpenCode",
+        "antigravity" to "Antigravity",
         // pi brands itself lowercase; title-casing would render "Pi".
         "pi" to "pi",
     )

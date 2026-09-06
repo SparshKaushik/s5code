@@ -9,6 +9,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
 import club.touchtech.s5code.kotlin.transport.wire.TitleRegenerationDto
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -95,5 +96,31 @@ class ThreadSummaryProjectionTest {
             )
 
         assertFalse(summary.titleRegenerating)
+    }
+
+    @Test
+    fun `linked pull request on shell projects to pullRequest`() {
+        val summary =
+            threadSummaryFrom(
+                EnvironmentId("env"),
+                ThreadShellDto(
+                    id = "thread",
+                    projectId = "project",
+                    title = "PR Thread",
+                    linkedPullRequest =
+                        club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto(
+                            projectId = "project",
+                            repository = "org/repo",
+                            number = 42,
+                            url = "https://github.com/org/repo/pull/42",
+                        ),
+                ),
+                { ProviderInstance(it, "codex") },
+                0L,
+            )
+
+        assertNotNull(summary.pullRequest)
+        assertEquals(42, summary.pullRequest?.number)
+        assertEquals("#42", summary.pullRequest?.title)
     }
 }

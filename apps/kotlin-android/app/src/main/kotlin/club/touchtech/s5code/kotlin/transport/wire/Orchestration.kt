@@ -121,6 +121,16 @@ data class ThreadShellDto(
     /** working | monitoring, or absent for none. */
     val backgroundLiveness: String? = null,
     val planProgress: PlanProgressDto? = null,
+    val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
+    val unsettledAt: String? = null,
+)
+
+@Serializable
+data class ThreadLinkedPullRequestDto(
+    val projectId: String = "",
+    val repository: String = "",
+    val number: Int = 0,
+    val url: String = "",
 )
 
 @Serializable

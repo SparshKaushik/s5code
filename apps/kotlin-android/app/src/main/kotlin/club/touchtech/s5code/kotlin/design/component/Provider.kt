@@ -12,17 +12,22 @@ import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.drawscope.DrawScope
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.vector.PathParser
+import androidx.compose.ui.res.imageResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.Dp
+import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
+import club.touchtech.s5code.kotlin.R
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import kotlin.math.min
+import kotlin.math.roundToInt
 
 /** Official provider vector marks, ported from the React Native client. */
 @Composable
@@ -35,6 +40,12 @@ fun S5ProviderMark(
 ) {
     val kind = remember(provider.driver) { providerMarkKind(provider.driver) }
     val paths = remember(kind) { geometryFor(kind)?.paths?.map(::parsedPath).orEmpty() }
+    val antigravityBitmap =
+        if (kind == ProviderMarkKind.Antigravity) {
+            ImageBitmap.imageResource(R.drawable.provider_antigravity)
+        } else {
+            null
+        }
     val description = contentDescription
     Canvas(
         modifier
@@ -51,20 +62,31 @@ fun S5ProviderMark(
             ProviderMarkKind.Codex -> drawGeometry(CODEX, paths, tint)
             ProviderMarkKind.OpenCode -> drawOpenCodeMark(tint)
             ProviderMarkKind.Pi -> drawPiMark(paths)
+            ProviderMarkKind.Antigravity -> {
+                if (antigravityBitmap != null) {
+                    drawImage(
+                        image = antigravityBitmap,
+                        dstSize = IntSize(this.size.width.roundToInt(), this.size.height.roundToInt()),
+                    )
+                } else {
+                    drawGenericMark(tint)
+                }
+            }
             ProviderMarkKind.Generic -> drawGenericMark(tint)
         }
     }
 }
 
-private enum class ProviderMarkKind { Claude, Cursor, Grok, OpenCode, Codex, Pi, Generic }
+private enum class ProviderMarkKind { Claude, Cursor, Grok, OpenCode, Codex, Antigravity, Pi, Generic }
 
 private fun providerMarkKind(driver: String): ProviderMarkKind =
-    when (driver) {
-        "claudeAgent", "claude" -> ProviderMarkKind.Claude
+    when (driver.lowercase()) {
+        "claudeagent", "claude" -> ProviderMarkKind.Claude
         "cursor" -> ProviderMarkKind.Cursor
         "grok" -> ProviderMarkKind.Grok
         "opencode" -> ProviderMarkKind.OpenCode
         "codex" -> ProviderMarkKind.Codex
+        "antigravity" -> ProviderMarkKind.Antigravity
         "pi" -> ProviderMarkKind.Pi
         else -> ProviderMarkKind.Generic
     }

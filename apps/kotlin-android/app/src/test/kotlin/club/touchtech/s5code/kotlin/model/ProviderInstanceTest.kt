@@ -22,6 +22,7 @@ class ProviderInstanceTest {
         assertEquals("Cursor", formatProviderDriverName("cursor"))
         assertEquals("Grok", formatProviderDriverName("grok"))
         assertEquals("OpenCode", formatProviderDriverName("opencode"))
+        assertEquals("Antigravity", formatProviderDriverName("antigravity"))
     }
 
     @Test
