@@ -1304,7 +1304,6 @@ class LiveWorkspaceGateway(
         // consulted on the opening path, but it is required then, so it is always
         // sent. `restartIfNotRunning` is what makes reopening a thread whose shell
         // exited give a live prompt rather than a dead transcript.
-        val emulator = TerminalEmulator(rows = rows)
         val rawHistory = StringBuilder()
         var title = "Terminal"
         var cwd = ""
@@ -1334,8 +1333,6 @@ class LiveWorkspaceGateway(
                         "snapshot",
                         "restarted" -> {
                             val snapshot = event.snapshot ?: return@collect
-                            emulator.reset()
-                            emulator.feed(snapshot.history)
                             rawHistory.clear()
                             rawHistory.append(snapshot.history)
                             title = snapshot.label.ifBlank { "Terminal" }
@@ -1345,13 +1342,11 @@ class LiveWorkspaceGateway(
                         }
                         "output" -> {
                             val data = event.data.orEmpty()
-                            emulator.feed(data)
                             rawHistory.append(data)
                             if (status == TerminalStatus.Closed) status = TerminalStatus.Running
                             error = null
                         }
                         "cleared" -> {
-                            emulator.reset()
                             rawHistory.clear()
                             error = null
                         }
@@ -1372,7 +1367,7 @@ class LiveWorkspaceGateway(
                             cwd = cwd,
                             status = status,
                             buffer = rawHistory.toString(),
-                            lines = emulator.snapshot(),
+                            lines = emptyList(),
                             error = error,
                         )
                     )
