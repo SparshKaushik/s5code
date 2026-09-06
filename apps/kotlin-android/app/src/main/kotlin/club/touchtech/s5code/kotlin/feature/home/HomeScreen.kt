@@ -24,6 +24,7 @@ import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.Bedtime
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.EditNote
@@ -36,9 +37,11 @@ import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -53,13 +56,16 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
+import club.touchtech.s5code.kotlin.data.cacheSizeLabel
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -100,6 +106,7 @@ import club.touchtech.s5code.kotlin.model.ThreadSort
 import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
+import club.touchtech.s5code.kotlin.platform.updates.AppUpdateStatus
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -142,6 +149,8 @@ fun HomeScreen(
     val pendingRequests by store.workspace.pendingRequests.collectAsStateWithLifecycle()
     val paired by store.paired.collectAsStateWithLifecycle()
     val sessionRestored by store.sessionRestored.collectAsStateWithLifecycle()
+    val updateStatus by store.updates.status.collectAsStateWithLifecycle()
+    val context = LocalContext.current
 
     var searchVisible by rememberSaveable { mutableStateOf(false) }
     var sortMenuOpen by remember { mutableStateOf(false) }
@@ -418,6 +427,53 @@ fun HomeScreen(
                         ),
                     verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
                 ) {
+                    when (val update = updateStatus) {
+                        is AppUpdateStatus.Available -> {
+                            item(key = "home-app-update-notice") {
+                                Box(Modifier.animateItem()) {
+                                    HomeUpdateNotice(
+                                        title = "Update available: ${update.release.title}",
+                                        subtitle = "Version ${update.release.version} · ${cacheSizeLabel(update.release.apkSizeBytes)}",
+                                        actionLabel = "Download",
+                                        onAction = { store.updates.downloadUpdate(update.release) },
+                                        onDismiss = { store.updates.dismiss() },
+                                    )
+                                }
+                            }
+                        }
+
+                        is AppUpdateStatus.Downloading -> {
+                            item(key = "home-app-update-notice") {
+                                Box(Modifier.animateItem()) {
+                                    HomeUpdateNotice(
+                                        title = "Downloading update… ${(update.progress * 100).toInt()}%",
+                                        subtitle = "${cacheSizeLabel(update.bytesDownloaded)} of ${cacheSizeLabel(update.totalBytes)}",
+                                        actionLabel = null,
+                                        onAction = null,
+                                        onDismiss = null,
+                                        progress = update.progress,
+                                    )
+                                }
+                            }
+                        }
+
+                        is AppUpdateStatus.ReadyToInstall -> {
+                            item(key = "home-app-update-notice") {
+                                Box(Modifier.animateItem()) {
+                                    HomeUpdateNotice(
+                                        title = "Update ready to install",
+                                        subtitle = update.release.apkName,
+                                        actionLabel = "Install",
+                                        onAction = { store.updates.installUpdate(context, update.apkFile) },
+                                        onDismiss = { store.updates.dismiss() },
+                                    )
+                                }
+                            }
+                        }
+
+                        else -> Unit
+                    }
+
                     items(items, key = { it.key }) { item ->
                         Box(Modifier.animateItem()) {
                         when (item) {
@@ -894,3 +950,70 @@ private fun QueuedRow(item: HomeListItem.Queued, resolveProjectIconUrl: suspend 
  */
 private const val HOME_SKELETON_ROWS = 6
 private const val SEARCH_DEBOUNCE_MILLIS = 250L
+
+@Composable
+private fun HomeUpdateNotice(
+    title: String,
+    subtitle: String,
+    actionLabel: String?,
+    onAction: (() -> Unit)?,
+    onDismiss: (() -> Unit)?,
+    progress: Float? = null,
+) {
+    S5Card(tone = S5CardTone.Hero, modifier = Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(S5Theme.spacing.medium),
+            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        Icons.Rounded.SystemUpdate,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Column {
+                        Text(title, style = MaterialTheme.typography.labelLargeEmphasized)
+                        Text(
+                            subtitle,
+                            style = S5Theme.code.inlineTechnical,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (onDismiss != null) {
+                    S5IconButton(
+                        icon = Icons.Rounded.Close,
+                        label = "Dismiss update notice",
+                        onClick = onDismiss,
+                    )
+                }
+            }
+
+            if (progress != null) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.extraSmall),
+                )
+            } else if (actionLabel != null && onAction != null) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                    S5Button(
+                        text = actionLabel,
+                        icon = Icons.Rounded.Download,
+                        onClick = onAction,
+                        style = S5ButtonStyle.Filled,
+                    )
+                }
+            }
+        }
+    }
+}

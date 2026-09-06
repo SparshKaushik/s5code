@@ -55,6 +55,7 @@ import club.touchtech.s5code.kotlin.platform.notifications.AndroidLiveUpdateNoti
 import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationCoordinator
 import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationStatus
 import club.touchtech.s5code.kotlin.platform.notifications.PushRuntime
+import club.touchtech.s5code.kotlin.platform.updates.AppUpdateManager
 import club.touchtech.s5code.kotlin.transport.DirectEnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.EnvironmentHttp
 import club.touchtech.s5code.kotlin.transport.PairingClient
@@ -218,6 +219,14 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             },
         )
 
+    /** In-app self-updater querying GitHub releases directly. */
+    val updates =
+        AppUpdateManager(
+            context = application,
+            client = client,
+            scope = viewModelScope,
+        )
+
     private val _preferences = MutableStateFlow(Preferences())
     val preferences: StateFlow<Preferences> = _preferences.asStateFlow()
 
@@ -346,6 +355,8 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             observeDraftProviderAvailability()
             restoreAndDrainOutbox()
             pushRegistration.start()
+            // Check for app updates in the background on launch
+            updates.checkForUpdates()
         }
     }
 
