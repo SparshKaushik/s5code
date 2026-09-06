@@ -22,7 +22,7 @@ internal data class TerminalFrame(
   companion object {
     private const val MAGIC = 0x54563354
     private const val VERSION = 1
-    private const val HEADER_BYTES = 32
+    private const val HEADER_BYTES = 30
     private const val CELL_HEADER_BYTES = 12
 
     @Suppress("ReturnCount")

@@ -3,7 +3,7 @@ package club.touchtech.s5code.kotlin.data
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.State
-import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import kotlinx.coroutines.CancellationException
@@ -36,8 +36,7 @@ sealed interface Remote<out T> {
  */
 @Composable
 fun <T> rememberRemote(vararg keys: Any?, load: suspend () -> T): State<Remote<T>> {
-    val attempt = remember(*keys) { mutableStateOf(0) }
-    return produceState<Remote<T>>(Remote.Loading, keys = arrayOf(*keys, attempt.value)) {
+    return produceState<Remote<T>>(Remote.Loading, keys = keys) {
         value = Remote.Loading
         value =
             try {
@@ -60,9 +59,9 @@ fun <T> rememberRetryableRemote(
     vararg keys: Any?,
     load: suspend () -> T,
 ): Pair<State<Remote<T>>, () -> Unit> {
-    val attempt = remember(*keys) { mutableStateOf(0) }
+    val attempt = remember(*keys) { mutableIntStateOf(0) }
     val state =
-        produceState<Remote<T>>(Remote.Loading, keys = arrayOf(*keys, attempt.value)) {
+        produceState<Remote<T>>(Remote.Loading, keys = arrayOf(*keys, attempt.intValue)) {
             value = Remote.Loading
             value =
                 try {
@@ -73,5 +72,5 @@ fun <T> rememberRetryableRemote(
                     Remote.Failed(cause.message ?: "That read failed.")
                 }
         }
-    return state to { attempt.value += 1 }
+    return state to { attempt.intValue += 1 }
 }
