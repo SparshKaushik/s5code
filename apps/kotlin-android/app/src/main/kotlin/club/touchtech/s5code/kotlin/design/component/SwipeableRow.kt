@@ -78,13 +78,6 @@ fun S5SwipeableRow(
     val state =
         rememberSwipeToDismissBoxState(
             positionalThreshold = { distance -> distance * SWIPE_ACTION_THRESHOLD },
-            confirmValueChange = { value ->
-                when (value) {
-                    SwipeToDismissBoxValue.EndToStart -> end != null
-                    SwipeToDismissBoxValue.StartToEnd -> start != null
-                    SwipeToDismissBoxValue.Settled -> true
-                }
-            }
         )
 
     // One tactile detent when the drag crosses or leaves the commit threshold.
@@ -105,20 +98,32 @@ fun S5SwipeableRow(
             }
     }
 
-    // Fire on settle, then reset. Running the action inside confirmValueChange
-    // would run it during the gesture's own state write, which is what makes a
-    // list mutate underneath the drag it was started by.
+    // If the available actions change (e.g. thread status changed from Snoozed to
+    // Active, or row was rebound in LazyColumn), force the box back to Settled so
+    // it cannot remain dismissed off-screen with a stale action background.
+    LaunchedEffect(end?.label, start?.label) {
+        if (state.currentValue != SwipeToDismissBoxValue.Settled) {
+            state.snapTo(SwipeToDismissBoxValue.Settled)
+        }
+    }
+
+    // Fire on commit, then reset immediately. Snapping back to Settled before
+    // invoking onAction ensures the row is already resting at 0-offset when the
+    // list re-partitions or animates the item across shelves, preventing the card
+    // from remaining stuck off-screen.
     LaunchedEffect(state.currentValue) {
         when (state.currentValue) {
             SwipeToDismissBoxValue.EndToStart -> {
                 haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                end?.onAction?.invoke()
-                state.reset()
+                val action = end?.onAction
+                state.snapTo(SwipeToDismissBoxValue.Settled)
+                action?.invoke()
             }
             SwipeToDismissBoxValue.StartToEnd -> {
                 haptics.performHapticFeedback(HapticFeedbackType.Confirm)
-                start?.onAction?.invoke()
-                state.reset()
+                val action = start?.onAction
+                state.snapTo(SwipeToDismissBoxValue.Settled)
+                action?.invoke()
             }
             SwipeToDismissBoxValue.Settled -> Unit
         }

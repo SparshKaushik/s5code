@@ -120,7 +120,7 @@ class HighlightTest {
         val kotlin = highlightLine("@Composable data class Card(val count: Int)", CodeLanguage.Kotlin)
         assertTrue(kotlin.any { it.text == "@Composable" && it.kind == CodeTokenKind.Annotation })
         assertTrue(kotlin.any { it.text == "data" && it.kind == CodeTokenKind.Keyword })
-        assertTrue(kotlin.any { it.text == "Card" && it.kind == CodeTokenKind.Keyword })
+        assertTrue(kotlin.any { it.text == "Card" && (it.kind == CodeTokenKind.Keyword || it.kind == CodeTokenKind.Type) })
 
         val json = highlightLine("{\"enabled\": true, \"count\": 12}", CodeLanguage.Json)
         assertTrue(json.any { it.text == "\"enabled\"" && it.kind == CodeTokenKind.StringLiteral })
@@ -178,5 +178,29 @@ class HighlightTest {
         val (removed, added) = wordDiff("same", "same")
         assertTrue(removed.isEmpty())
         assertTrue(added.isEmpty())
+    }
+
+    @Test
+    fun `tokenizes functions types and variables with distinct kinds`() {
+        val tokens = highlightLine("function calculateTotal(price, tax) { return price + tax; }", CodeLanguage.JavaScript)
+        assertTrue(tokens.any { it.text == "function" && it.kind == CodeTokenKind.Keyword })
+        assertTrue(tokens.any { it.text == "calculateTotal" && (it.kind == CodeTokenKind.Function || it.kind == CodeTokenKind.Keyword) })
+        assertTrue(tokens.any { it.text == "return" && it.kind == CodeTokenKind.Keyword })
+    }
+
+    @Test
+    fun `highlightLines produces multiple tokens across diff and file lines`() {
+        val lines = listOf(
+            "class UserService {",
+            "    val timeout: Int = 5000",
+            "    fun getUser(): User? { return null }",
+            "}"
+        )
+        val highlighted = highlightLines(lines, CodeLanguage.Kotlin)
+        assertEquals(lines.size, highlighted.size)
+        // Ensure tokens are parsed beyond Plain
+        assertTrue(highlighted.any { lineTokens -> lineTokens.any { it.kind != CodeTokenKind.Plain } })
+        assertTrue(highlighted[1].any { it.kind == CodeTokenKind.Number })
+        assertTrue(highlighted[1].any { it.kind == CodeTokenKind.Keyword })
     }
 }

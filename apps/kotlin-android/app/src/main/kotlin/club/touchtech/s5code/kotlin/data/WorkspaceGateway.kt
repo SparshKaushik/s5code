@@ -188,7 +188,12 @@ interface WorkspaceGateway {
 
     suspend fun setSettled(environmentId: EnvironmentId, id: ThreadId, settled: Boolean)
 
-    suspend fun setSnoozed(environmentId: EnvironmentId, id: ThreadId, snoozed: Boolean)
+    suspend fun setSnoozed(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        snoozed: Boolean,
+        untilIso: String? = null,
+    )
 
     suspend fun deleteThread(environmentId: EnvironmentId, id: ThreadId)
 

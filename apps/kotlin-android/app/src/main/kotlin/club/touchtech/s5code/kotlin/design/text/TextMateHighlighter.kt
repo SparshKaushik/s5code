@@ -58,9 +58,14 @@ object TextMateHighlighter {
                         if (line.isEmpty()) emptyList() else result.tokens.toCodeTokens(line)
                     }
                 }
-            } catch (_: Exception) {
+            } catch (e: Exception) {
                 // A malformed or engine-incompatible grammar must not break a
                 // transcript/file render or poison later attempts.
+                try {
+                    android.util.Log.w("TextMateHighlighter", "Failed to tokenize for scope $scope", e)
+                } catch (_: Throwable) {
+                    // Running in pure JVM unit test environment
+                }
                 grammarCache.remove(scope)
                 null
             }
@@ -129,6 +134,9 @@ object TextMateHighlighter {
             scopes.any { scope -> scope.isStringScope() } -> CodeTokenKind.StringLiteral
             scopes.any { scope -> scope.isAnnotationScope() } -> CodeTokenKind.Annotation
             scopes.any { scope -> scope.isNumberScope() } -> CodeTokenKind.Number
+            scopes.any { scope -> scope.isFunctionScope() } -> CodeTokenKind.Function
+            scopes.any { scope -> scope.isTypeScope() } -> CodeTokenKind.Type
+            scopes.any { scope -> scope.isVariableScope() } -> CodeTokenKind.Variable
             scopes.any { scope -> scope.isKeywordScope() } -> CodeTokenKind.Keyword
             scopes.any { scope -> scope.isPunctuationScope() } -> CodeTokenKind.Punctuation
             else -> CodeTokenKind.Plain
@@ -153,19 +161,34 @@ object TextMateHighlighter {
             startsWith("constant.language") ||
             startsWith("constant.character")
 
+    private fun String.isFunctionScope() =
+        startsWith("entity.name.function") ||
+            startsWith("support.function") ||
+            contains(".function-call")
+
+    private fun String.isTypeScope() =
+        startsWith("entity.name.type") ||
+            startsWith("entity.name.class") ||
+            startsWith("support.type") ||
+            startsWith("support.class")
+
+    private fun String.isVariableScope() =
+        startsWith("variable.parameter") ||
+            startsWith("variable.other.readwrite") ||
+            startsWith("variable.other.property") ||
+            contains("object-literal.key")
+
     private fun String.isKeywordScope() =
         startsWith("keyword") ||
             startsWith("storage") ||
             startsWith("entity.name.tag") ||
-            startsWith("entity.name.type") ||
-            startsWith("entity.name.function") ||
-            startsWith("support.type") ||
-            startsWith("support.function") ||
+            startsWith("support.class.component") ||
             startsWith("variable.language")
 
     private fun String.isPunctuationScope() =
         startsWith("punctuation") ||
             startsWith("meta.brace") ||
+            startsWith("meta.delimiter") ||
             startsWith("keyword.operator")
 
     private const val MAX_COMPILED_GRAMMARS = 8

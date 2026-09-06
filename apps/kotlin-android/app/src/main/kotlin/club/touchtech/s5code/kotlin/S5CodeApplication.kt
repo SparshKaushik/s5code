@@ -31,7 +31,15 @@ class S5CodeApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
-        TextMateHighlighter.install(assets::open)
+        TextMateHighlighter.install { path ->
+            try {
+                assets.open(path)
+            } catch (_: Exception) {
+                javaClass.classLoader?.getResourceAsStream("assets/$path")
+                    ?: javaClass.classLoader?.getResourceAsStream(path)
+                    ?: throw java.io.FileNotFoundException("Asset not found: $path")
+            }
+        }
         createNotificationChannels(this)
         val firebaseConfigured = S5Firebase.initialize(this)
         PushRuntime.initialize(this, firebaseConfigured)

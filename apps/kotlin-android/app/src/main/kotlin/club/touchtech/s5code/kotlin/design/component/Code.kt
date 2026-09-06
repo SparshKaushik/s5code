@@ -1,15 +1,14 @@
 package club.touchtech.s5code.kotlin.design.component
 
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
-import androidx.compose.runtime.getValue
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
+import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.withStyle
 import club.touchtech.s5code.kotlin.design.text.CodeLanguage
@@ -17,13 +16,14 @@ import club.touchtech.s5code.kotlin.design.text.CodeTokenKind
 import club.touchtech.s5code.kotlin.design.text.codeLanguageOf
 import club.touchtech.s5code.kotlin.design.text.highlightLine
 import club.touchtech.s5code.kotlin.design.text.highlightLines
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
 
-/** Token colors, derived from the active scheme so both themes stay readable. */
+/** Token colors, derived from the Pierre Shiki palette so code is vibrant in both themes. */
 @Immutable
 data class S5CodeColors(
     val keyword: Color,
+    val function: Color,
+    val type: Color,
+    val variable: Color,
     val string: Color,
     val number: Color,
     val comment: Color,
@@ -33,16 +33,33 @@ data class S5CodeColors(
 
 @Composable
 fun codeColors(): S5CodeColors {
-    val scheme = MaterialTheme.colorScheme
-    return remember(scheme) {
-        S5CodeColors(
-            keyword = scheme.primary,
-            string = scheme.tertiary,
-            number = scheme.secondary,
-            comment = scheme.onSurfaceVariant,
-            annotation = scheme.tertiary,
-            punctuation = scheme.onSurfaceVariant,
-        )
+    val dark = isSystemInDarkTheme()
+    return remember(dark) {
+        if (dark) {
+            S5CodeColors(
+                keyword = Color(0xFFFF678D),
+                function = Color(0xFF9D6AFB),
+                type = Color(0xFFD568EA),
+                variable = Color(0xFFFFA359),
+                string = Color(0xFF5ECC71),
+                number = Color(0xFF68CDF2),
+                comment = Color(0xFF84848A),
+                annotation = Color(0xFF9D6AFB),
+                punctuation = Color(0xFF8E8E95),
+            )
+        } else {
+            S5CodeColors(
+                keyword = Color(0xFFFC2B73),
+                function = Color(0xFF7B43F8),
+                type = Color(0xFFC635E4),
+                variable = Color(0xFFD47628),
+                string = Color(0xFF199F43),
+                number = Color(0xFF1CA1C7),
+                comment = Color(0xFF84848A),
+                annotation = Color(0xFF7B43F8),
+                punctuation = Color(0xFF79797F),
+            )
+        }
     }
 }
 
@@ -73,19 +90,9 @@ fun rememberHighlightedLines(lines: List<String>, language: String?): List<Annot
 @Composable
 fun rememberHighlightedLines(lines: List<String>, language: CodeLanguage): List<AnnotatedString> {
     val colors = codeColors()
-    val highlighted by
-        produceState(
-            initialValue = remember(lines) { lines.map(::AnnotatedString) },
-            lines,
-            language,
-            colors,
-        ) {
-            value =
-                withContext(Dispatchers.Default) {
-                    highlightLines(lines, language).map { highlight(it, colors) }
-                }
-        }
-    return highlighted
+    return remember(lines, language, colors) {
+        highlightLines(lines, language).map { highlight(it, colors) }
+    }
 }
 
 private fun highlight(line: String, language: CodeLanguage, colors: S5CodeColors): AnnotatedString =
@@ -97,9 +104,12 @@ private fun highlight(tokens: List<club.touchtech.s5code.kotlin.design.text.Code
             val style =
                 when (token.kind) {
                     CodeTokenKind.Keyword -> SpanStyle(colors.keyword, fontWeight = FontWeight.SemiBold)
+                    CodeTokenKind.Function -> SpanStyle(colors.function)
+                    CodeTokenKind.Type -> SpanStyle(colors.type)
+                    CodeTokenKind.Variable -> SpanStyle(colors.variable)
                     CodeTokenKind.StringLiteral -> SpanStyle(colors.string)
                     CodeTokenKind.Number -> SpanStyle(colors.number)
-                    CodeTokenKind.Comment -> SpanStyle(colors.comment)
+                    CodeTokenKind.Comment -> SpanStyle(colors.comment, fontStyle = FontStyle.Italic)
                     CodeTokenKind.Annotation -> SpanStyle(colors.annotation)
                     CodeTokenKind.Punctuation -> SpanStyle(colors.punctuation)
                     CodeTokenKind.Plain -> SpanStyle()

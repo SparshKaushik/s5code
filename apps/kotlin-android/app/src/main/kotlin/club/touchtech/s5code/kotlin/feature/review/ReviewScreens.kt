@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
@@ -45,10 +46,12 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.app.AppStore
@@ -331,8 +334,22 @@ private fun ReviewFileCard(
                 }
             } else {
                 val lines = remember(file.hunks) { file.hunks.flatMap { it.lines } }
-                val highlightedLines = rememberHighlightedLines(lines.map { it.text }, language)
+                val lineTexts = remember(lines) { lines.map { it.text } }
+                val highlightedLines = rememberHighlightedLines(lineTexts, language)
                 val wordRanges = remember(lines) { reviewWordDiffRanges(lines) }
+                val diffHorizontalScroll = rememberScrollState()
+                val textMeasurer = rememberTextMeasurer()
+                val codeStyle = S5Theme.code.code
+                val charWidthPx =
+                    remember(textMeasurer, codeStyle) {
+                        textMeasurer.measure("M", codeStyle).size.width
+                    }
+                val density = LocalDensity.current
+                val maxChars = remember(lines) { lines.maxOfOrNull { it.text.length } ?: 0 }
+                val maxCodeWidthDp =
+                    remember(maxChars, charWidthPx, density) {
+                        with(density) { (maxChars * charWidthPx).toDp() }
+                    }
                 Column(Modifier.padding(bottom = S5Theme.spacing.small)) {
                     var lineIndex = 0
                     file.hunks.forEach { hunk ->
@@ -348,14 +365,18 @@ private fun ReviewFileCard(
                                             vertical = S5Theme.spacing.tiny,
                                         ),
                             )
-                            val scroll = rememberScrollState()
                             hunk.lines.forEach { line ->
                                 val currentLineIndex = lineIndex++
                                 val selected =
                                     selectedTarget != null &&
                                         currentLineIndex in selectedTarget.normalizedStart..selectedTarget.normalizedEnd
                                 val anchor = rangeAnchorIndex == currentLineIndex
-                                val annotated = highlightedLines[currentLineIndex]
+                                val annotated =
+                                    if (currentLineIndex < highlightedLines.size) {
+                                        highlightedLines[currentLineIndex]
+                                    } else {
+                                        AnnotatedString(line.text)
+                                    }
                                 val wordHighlightColor =
                                     MaterialTheme.colorScheme.onSurface.copy(alpha = 0.16f)
                                 val rendered =
@@ -386,53 +407,66 @@ private fun ReviewFileCard(
                                             onClick = { onLineTap(lines, currentLineIndex) },
                                             onLongClick = { onLineLongPress(lines, currentLineIndex) },
                                         )
-                                        .horizontalScroll(scroll)
-                                        .padding(horizontal = S5Theme.spacing.small),
+                                        .padding(horizontal = S5Theme.spacing.small, vertical = 1.dp),
                                     verticalAlignment = Alignment.CenterVertically,
                                 ) {
-                                    Text(
-                                        (line.oldNo?.toString() ?: "").padStart(4),
-                                        style = S5Theme.code.codeSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    )
-                                    Text(
-                                        (line.newNo?.toString() ?: "").padStart(4),
-                                        style = S5Theme.code.codeSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        modifier = Modifier.padding(start = S5Theme.spacing.tiny),
-                                    )
-                                    Icon(
-                                        when (line.kind) {
-                                            DiffLineKind.Added -> Icons.Rounded.AddCircleOutline
-                                            DiffLineKind.Removed -> Icons.Rounded.RemoveCircleOutline
-                                            DiffLineKind.Context -> Icons.Rounded.Difference
-                                        },
-                                        contentDescription =
-                                            when (line.kind) {
-                                                DiffLineKind.Added -> "Added line"
-                                                DiffLineKind.Removed -> "Removed line"
-                                                DiffLineKind.Context -> null
-                                            },
-                                        modifier =
-                                            Modifier.padding(horizontal = S5Theme.spacing.tiny).size(12.dp),
-                                        tint =
-                                            when (line.kind) {
-                                                DiffLineKind.Added -> S5Theme.status.added
-                                                DiffLineKind.Removed -> S5Theme.status.removed
-                                                DiffLineKind.Context ->
-                                                    MaterialTheme.colorScheme.surfaceContainerLow
-                                            },
-                                    )
-                                    if (anchor) {
+                                    Row(
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        modifier = Modifier.padding(end = S5Theme.spacing.small),
+                                    ) {
                                         Text(
-                                            "range start",
-                                            style = MaterialTheme.typography.labelSmall,
-                                            color = MaterialTheme.colorScheme.primary,
-                                            fontWeight = FontWeight.Bold,
-                                            modifier = Modifier.padding(end = S5Theme.spacing.tiny),
+                                            (line.oldNo?.toString() ?: "").padStart(4),
+                                            style = S5Theme.code.codeSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        Text(
+                                            (line.newNo?.toString() ?: "").padStart(4),
+                                            style = S5Theme.code.codeSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.padding(start = S5Theme.spacing.tiny),
+                                        )
+                                        Icon(
+                                            when (line.kind) {
+                                                DiffLineKind.Added -> Icons.Rounded.AddCircleOutline
+                                                DiffLineKind.Removed -> Icons.Rounded.RemoveCircleOutline
+                                                DiffLineKind.Context -> Icons.Rounded.Difference
+                                            },
+                                            contentDescription =
+                                                when (line.kind) {
+                                                    DiffLineKind.Added -> "Added line"
+                                                    DiffLineKind.Removed -> "Removed line"
+                                                    DiffLineKind.Context -> null
+                                                },
+                                            modifier =
+                                                Modifier.padding(horizontal = S5Theme.spacing.tiny).size(12.dp),
+                                            tint =
+                                                when (line.kind) {
+                                                    DiffLineKind.Added -> S5Theme.status.added
+                                                    DiffLineKind.Removed -> S5Theme.status.removed
+                                                    DiffLineKind.Context ->
+                                                        MaterialTheme.colorScheme.surfaceContainerLow
+                                                },
+                                        )
+                                        if (anchor) {
+                                            Text(
+                                                "range start",
+                                                style = MaterialTheme.typography.labelSmall,
+                                                color = MaterialTheme.colorScheme.primary,
+                                                fontWeight = FontWeight.Bold,
+                                                modifier = Modifier.padding(end = S5Theme.spacing.tiny),
+                                            )
+                                        }
+                                    }
+                                    Box(
+                                        Modifier.weight(1f).horizontalScroll(diffHorizontalScroll)
+                                    ) {
+                                        Text(
+                                            rendered,
+                                            style = S5Theme.code.code,
+                                            softWrap = false,
+                                            modifier = Modifier.defaultMinSize(minWidth = maxCodeWidthDp),
                                         )
                                     }
-                                    Text(rendered, style = S5Theme.code.code, softWrap = false)
                                 }
                             }
                         }

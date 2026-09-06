@@ -95,4 +95,12 @@ class CommandsTest {
         assertEquals(2, options.size)
         assertTrue(options.any { it.jsonObject["id"]?.jsonPrimitive?.content == "reasoningEffort" })
     }
+
+    @Test
+    fun `snooze command carries explicit wake timestamp`() {
+        val command = Commands.snooze("thread-1", "2026-09-03T18:00:00Z")
+        assertEquals("thread.snooze", command.getValue("type").jsonPrimitive.content)
+        assertEquals("thread-1", command.getValue("threadId").jsonPrimitive.content)
+        assertEquals("2026-09-03T18:00:00Z", command.getValue("snoozedUntil").jsonPrimitive.content)
+    }
 }
