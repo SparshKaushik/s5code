@@ -1020,10 +1020,11 @@ describe("Deliveries", () => {
         activity_push_token: "second-token",
       };
       const jobs = [target, secondTarget].map((device) =>
-        signApnsDeliveryJob({
-          secret: signingConfig.apnsDeliveryJobSigningSecret,
-          payload: makeApnsDeliveryJobPayload({
+        signDeliveryJob({
+          secret: signingConfig.deliveryJobSigningSecret,
+          payload: makeDeliveryJobPayload({
             kind: "live_activity_update",
+            channel: "apns",
             userId: device.user_id,
             deviceId: device.device_id,
             token: device.activity_push_token!,
@@ -1049,7 +1050,7 @@ describe("Deliveries", () => {
               ),
       });
       const batch = yield* Effect.gen(function* () {
-        const deliveries = yield* ApnsDeliveries.ApnsDeliveries;
+        const deliveries = yield* Deliveries.Deliveries;
         yield* Stream.fromIterable(jobs).pipe(
           Stream.runForEach((job) =>
             deliveries.processSignedJob(job).pipe(
@@ -1073,9 +1074,9 @@ describe("Deliveries", () => {
       expect(attempts).toMatchObject([
         {
           sourceJobId: "job-timeout-device-1",
-          apnsReason: expect.stringContaining("request failed"),
+          deliveryReason: expect.stringContaining("request failed"),
         },
-        { sourceJobId: "job-timeout-device-2", apnsStatus: 200 },
+        { sourceJobId: "job-timeout-device-2", deliveryStatus: 200 },
       ]);
       expect(markedDeliveries).toMatchObject([{ deviceId: "device-2" }]);
     }),
