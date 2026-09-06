@@ -504,7 +504,7 @@ export function UsagePage() {
                                 <span className="flex items-center gap-2">
                                   <ProviderMark provider={model.provider} className="size-3.5" />
                                   <span className="truncate">{model.model}</span>
-                                  {model.apiProvider.length > 0 ? (
+                                  {model.apiProvider && model.apiProvider.length > 0 ? (
                                     <span className="shrink-0 text-xs text-muted-foreground">
                                       via {model.apiProvider}
                                     </span>

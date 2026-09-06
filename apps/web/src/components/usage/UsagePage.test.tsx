@@ -37,7 +37,10 @@ vi.mock("react", async (importOriginal) => {
 });
 
 vi.mock("../../env", () => ({ isElectron: false }));
-vi.mock("../../state/usage", () => ({ useUsage: testState.useUsage }));
+vi.mock("../../state/usage", () => ({
+  useUsage: testState.useUsage,
+  useUsageModelSearch: vi.fn(() => ({ models: [], isPending: false })),
+}));
 vi.mock("../ui/button", () => ({ Button: "button" }));
 vi.mock("../ui/scroll-area", () => ({ ScrollArea: "div" }));
 vi.mock("../ui/select", () => ({
@@ -81,6 +84,7 @@ const modelTotals = Object.freeze([
   {
     model: "expensive-model",
     provider: "claude" as const,
+    apiProvider: "",
     costUsd: 10,
     totalTokens: 100,
     records: 1,
@@ -89,6 +93,7 @@ const modelTotals = Object.freeze([
   {
     model: "token-heavy-model",
     provider: "codex" as const,
+    apiProvider: "",
     costUsd: 5,
     totalTokens: 1_000,
     records: 1,
@@ -97,6 +102,7 @@ const modelTotals = Object.freeze([
   {
     model: "token-heavy-cheaper-model",
     provider: "codex" as const,
+    apiProvider: "",
     costUsd: 1,
     totalTokens: 1_000,
     records: 1,

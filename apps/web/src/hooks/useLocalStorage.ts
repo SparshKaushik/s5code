@@ -30,7 +30,9 @@ const fallbackStorage: Storage = (() => {
 })();
 
 const getStorage = (): Storage =>
-  typeof window !== "undefined" ? window.localStorage : fallbackStorage;
+  typeof window !== "undefined" && typeof window.localStorage !== "undefined"
+    ? window.localStorage
+    : fallbackStorage;
 
 const read = (key: string) => {
   try {
