@@ -13,7 +13,12 @@
  *
  * @module usagePricing
  */
-import type { UsageCostSource, UsageModelAlias, UsageTokenTotals } from "@t3tools/contracts";
+import type {
+  UsageCostSource,
+  UsageModelAlias,
+  UsageModelPriceOverride,
+  UsageTokenTotals,
+} from "@t3tools/contracts";
 
 import {
   EMPTY_CATALOG,
@@ -41,6 +46,25 @@ export interface ModelRate {
 
 export type RateTable = ReadonlyMap<string, ModelRate>;
 
+/** Custom IDs keep their case, provider prefix, and variant suffix. */
+export function createOverrideRateTable(
+  overrides: Readonly<Record<string, UsageModelPriceOverride>>,
+): RateTable {
+  return new Map(
+    Object.entries(overrides).map(([model, prices]) => [
+      model.trim(),
+      {
+        inputCostPerToken: prices.inputCostPerMillionTokens / 1_000_000,
+        outputCostPerToken: prices.outputCostPerMillionTokens / 1_000_000,
+        cacheReadCostPerToken:
+          (prices.cacheReadCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
+        cacheCreationCostPerToken:
+          (prices.cacheWriteCostPerMillionTokens ?? prices.inputCostPerMillionTokens) / 1_000_000,
+      },
+    ]),
+  );
+}
+
 /** Raw shape of one LiteLLM entry, narrowed to the fields we read. */
 interface LiteLlmEntry {
   readonly input_cost_per_token?: unknown;
@@ -59,6 +83,9 @@ function finiteNumber(value: unknown): number | null {
  * Entries without both an input and an output rate are dropped: a half-priced
  * model would silently under-report cost, which is worse than reporting the
  * model as unpriced.
+ *
+ * Entries keep their full normalized key; a bare name is aliased only when no
+ * canonical entry exists and every qualified entry has the same rate.
  */
 export function parseRateTable(document: unknown): RateTable {
   const table = new Map<string, ModelRate>();
@@ -71,7 +98,9 @@ export function parseRateTable(document: unknown): RateTable {
     const output = finiteNumber(entry.output_cost_per_token);
     if (input === null || output === null) continue;
 
-    table.set(normalizeModelName(name), {
+    const key = normalizeRateKey(name);
+    if (key.length === 0) continue;
+    table.set(key, {
       inputCostPerToken: input,
       outputCostPerToken: output,
       // Anthropic bills cache reads at a discount and cache writes at a
@@ -81,20 +110,52 @@ export function parseRateTable(document: unknown): RateTable {
       cacheCreationCostPerToken: finiteNumber(entry.cache_creation_input_token_cost) ?? input,
     });
   }
+
+  // `null` marks a bare name claimed at conflicting rates: no alias for it.
+  const aliasCandidates = new Map<string, ModelRate | null>();
+  for (const [key, rate] of table) {
+    const alias = bareModelName(key);
+    if (alias.length === 0 || alias === key || table.has(alias)) continue;
+    const held = aliasCandidates.get(alias);
+    if (held === undefined) {
+      aliasCandidates.set(alias, rate);
+    } else if (held !== null && !sameRate(held, rate)) {
+      aliasCandidates.set(alias, null);
+    }
+  }
+  for (const [alias, rate] of aliasCandidates) {
+    if (rate !== null) table.set(alias, rate);
+  }
+
   return table;
 }
 
+function sameRate(a: ModelRate, b: ModelRate): boolean {
+  return (
+    a.inputCostPerToken === b.inputCostPerToken &&
+    a.outputCostPerToken === b.outputCostPerToken &&
+    a.cacheReadCostPerToken === b.cacheReadCostPerToken &&
+    a.cacheCreationCostPerToken === b.cacheCreationCostPerToken
+  );
+}
+
+function normalizeRateKey(model: string): string {
+  return model.trim().toLowerCase();
+}
+
+function bareModelName(key: string): string {
+  const slash = key.lastIndexOf("/");
+  return slash === -1 ? key : key.slice(slash + 1);
+}
+
 /**
- * Canonicalises a model name for lookup.
- *
- * Strips a `provider/` prefix (LiteLLM publishes both `claude-opus-5` and
- * `anthropic/claude-opus-5`) and lowercases, since transcripts are inconsistent
- * about casing.
+ * Drops a bracketed variant suffix such as `claude-fable-5-1[1m]`, which
+ * Claude Code writes for the 1M context tier. The rate table only knows the
+ * base name, and we price at the base tier anyway.
  */
-export function normalizeModelName(model: string): string {
-  const trimmed = model.trim().toLowerCase();
-  const slash = trimmed.lastIndexOf("/");
-  return slash === -1 ? trimmed : trimmed.slice(slash + 1);
+function stripVariantSuffix(key: string): string {
+  const bracket = key.indexOf("[");
+  return bracket === -1 ? key : key.slice(0, bracket);
 }
 
 /**
@@ -114,9 +175,10 @@ const UNPRICEABLE_MODELS = new Set([
 ]);
 
 export function lookupRate(table: RateTable, model: string): ModelRate | null {
-  const normalized = normalizeModelName(model);
-  if (normalized.length === 0 || UNPRICEABLE_MODELS.has(normalized)) return null;
-  return table.get(normalized) ?? null;
+  const key = stripVariantSuffix(normalizeRateKey(model));
+  const bareName = bareModelName(key);
+  if (bareName.length === 0 || UNPRICEABLE_MODELS.has(bareName)) return null;
+  return table.get(key) ?? null;
 }
 
 export interface PricedUsage {
@@ -128,7 +190,7 @@ export interface PricedUsage {
    * The UI shows this so a user can see which guess we made and correct it, and
    * so tagged rows can be labelled by what they were tagged as.
    */
-  readonly pricedAs: string | null;
+  readonly pricedAs?: string | null;
 }
 
 function applyRate(rate: ModelRate, totals: UsageTokenTotals): number {
@@ -140,6 +202,31 @@ function applyRate(rate: ModelRate, totals: UsageTokenTotals): number {
     totals.cacheCreationTokens * rate.cacheCreationCostPerToken +
     totals.outputTokens * rate.outputCostPerToken
   );
+}
+
+/**
+ * Prices a bucket's tokens.
+ *
+ * `reasoningTokens` is intentionally not charged separately: it is already
+ * counted inside `outputTokens`.
+ */
+export function priceUsage(
+  table: RateTable,
+  model: string,
+  totals: UsageTokenTotals,
+  reportedCostUsd: number | null,
+  overrides?: RateTable,
+): PricedUsage {
+  const override = overrides?.get(model.trim());
+  if (override === undefined && reportedCostUsd !== null && Number.isFinite(reportedCostUsd)) {
+    return { costUsd: reportedCostUsd, costSource: "providerReported" };
+  }
+
+  const rate = override ?? lookupRate(table, model);
+  if (rate === null) return { costUsd: 0, costSource: "unpriced" };
+
+  const costUsd = applyRate(rate, totals);
+  return { costUsd, costSource: "modelPriced" };
 }
 
 /**
@@ -157,6 +244,7 @@ export interface UsagePricerOptions {
   /** models.dev, used for pi and for every user tag. */
   readonly catalog: ModelCatalog;
   readonly aliases: readonly UsageModelAlias[];
+  readonly priceOverrides?: RateTable | undefined;
 }
 
 /**
@@ -171,10 +259,12 @@ export class UsagePricer {
   readonly #rates: RateTable;
   readonly #catalog: ModelCatalog;
   readonly #aliasEntries = new Map<string, CatalogEntry>();
+  readonly #overrides: RateTable | undefined;
 
   constructor(options: UsagePricerOptions) {
     this.#rates = options.rates;
     this.#catalog = options.catalog;
+    this.#overrides = options.priceOverrides;
     for (const alias of options.aliases) {
       const entry = resolveCatalogModel(this.#catalog, alias.catalogModelId);
       // A tag pointing at a catalog entry this environment's snapshot does not
@@ -194,6 +284,11 @@ export class UsagePricer {
   #resolve(
     record: UsageRecord,
   ): { rate: ModelRate; source: UsageCostSource; pricedAs: string | null } | null {
+    const override = this.#overrides?.get(record.model.trim());
+    if (override !== undefined) {
+      return { rate: override, source: "modelPriced", pricedAs: null };
+    }
+
     const tagged = this.#aliasEntries.get(
       modelAliasKey(record.provider, record.apiProvider, record.model),
     );
@@ -213,7 +308,12 @@ export class UsagePricer {
   }
 
   price(record: UsageRecord): PricedUsage {
-    if (record.reportedCostUsd !== null && Number.isFinite(record.reportedCostUsd)) {
+    const override = this.#overrides?.get(record.model.trim());
+    if (
+      override === undefined &&
+      record.reportedCostUsd !== null &&
+      Number.isFinite(record.reportedCostUsd)
+    ) {
       return {
         costUsd: record.reportedCostUsd,
         costSource: "providerReported",
@@ -246,4 +346,15 @@ export class UsagePricer {
 /** A pricer that prices nothing, for tests and for a cold rate fetch. */
 export function emptyPricer(): UsagePricer {
   return new UsagePricer({ rates: new Map(), catalog: EMPTY_CATALOG, aliases: [] });
+}
+
+export function cacheSavingsUsd(
+  table: RateTable,
+  model: string,
+  totals: UsageTokenTotals,
+  overrides?: RateTable,
+): number {
+  const rate = overrides?.get(model.trim()) ?? lookupRate(table, model);
+  if (rate === null) return 0;
+  return totals.cachedInputTokens * (rate.inputCostPerToken - rate.cacheReadCostPerToken);
 }

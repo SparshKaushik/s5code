@@ -9,6 +9,7 @@
     <meta name="theme-color" content="#0a0a0a" />
     <link rel="icon" href="/favicon.ico" sizes="48x48" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/manifest.webmanifest" />
     <script>
       (() => {
         const LIGHT_BACKGROUND = "#ffffff";
@@ -37,7 +38,7 @@
           light: {
             background: "oklch(0.982446 0.010114 325.653)",
             foreground: "oklch(0.325698 0.116116 325.037)",
-            accent: "oklch(0.627287 0.207248 358.772)",
+            accent: "oklch(0.591646 0.217985 0.584)",
             chrome: "oklch(0.982446 0.010114 325.653)",
           },
           dark: {
@@ -54,7 +55,7 @@
             light: {
               background: "oklch(0.982446 0.010114 325.653)",
               foreground: "oklch(0.325698 0.116116 325.037)",
-              accent: "oklch(0.627287 0.207248 358.772)",
+              accent: "oklch(0.591646 0.217985 0.584)",
               chrome: "oklch(0.982446 0.010114 325.653)",
             },
             dark: {
@@ -451,6 +452,30 @@
         height: 64px;
         object-fit: contain;
       }
+
+      #boot-error {
+        display: grid;
+        justify-items: center;
+        gap: 16px;
+        max-width: 600px;
+        padding: 24px;
+        text-align: center;
+      }
+
+      #boot-error p {
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      #boot-error button {
+        padding: 8px 16px;
+        border: 1px solid currentColor;
+        border-radius: 4px;
+        background: transparent;
+        color: inherit;
+        font: inherit;
+        cursor: pointer;
+      }
     </style>
     <title>S5 Code (Alpha)</title>
   </head>
@@ -462,6 +487,6 @@
         </div>
       </div>
     </div>
-    <script type="module" src="/src/main.tsx"></script>
+    <script type="module" src="/src/bootstrap.ts"></script>
   </body>
 </html>

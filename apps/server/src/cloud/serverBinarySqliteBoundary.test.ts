@@ -7,10 +7,7 @@ import { expect, it } from "@effect/vitest";
 
 const SOURCE_ROOT = NodePath.resolve(NodeURL.fileURLToPath(new URL("..", import.meta.url)));
 
-const ALLOWED_STATIC_NODE_SQLITE_FILES = new Set([
-  "persistence/NodeSqliteClient.ts",
-  "usage/usageCursorNodeSqlite.ts",
-]);
+const ALLOWED_STATIC_NODE_SQLITE_FILES = new Set(["usage/usageCursorNodeSqlite.ts"]);
 
 const STATIC_IMPORT_RE =
   /(?:import\s+(?:[\s\S]*?\s+from\s+)?|export\s+[\s\S]*?\s+from\s+)["']node:sqlite["']|require\s*\(\s*["']node:sqlite["']\s*\)/;

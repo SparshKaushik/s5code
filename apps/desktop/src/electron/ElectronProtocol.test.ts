@@ -42,6 +42,7 @@ describe("ElectronProtocol", () => {
               secure: true,
               supportFetchAPI: true,
               corsEnabled: true,
+              stream: true,
             },
           },
           {
@@ -51,6 +52,7 @@ describe("ElectronProtocol", () => {
               secure: true,
               supportFetchAPI: true,
               corsEnabled: true,
+              stream: true,
             },
           },
         ],
@@ -260,6 +262,7 @@ describe("ElectronProtocol", () => {
       "http:",
       "https:",
     ]);
+    assert.deepEqual(directives["media-src"], ["'self'", "t3code:", "blob:", "http:", "https:"]);
     assert.deepEqual(directives["font-src"], ["'self'", "t3code:", "data:"]);
   });
 });

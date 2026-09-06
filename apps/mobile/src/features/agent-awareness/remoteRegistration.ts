@@ -21,6 +21,8 @@ import {
 
 import type { SavedRemoteConnection } from "../../lib/connection";
 import { runtime } from "../../lib/runtime";
+import { appAtomRegistry } from "../../state/atom-registry";
+import { environmentServerConfigsAtom } from "../../state/server";
 import type { Preferences } from "../../persistence/mobile-preferences";
 import {
   clearAgentAwarenessRegistrationRecord,
@@ -145,16 +147,6 @@ export function mergeAgentAwarenessRegistrationPreferences(
   override: Partial<Preferences> | undefined,
 ): Preferences {
   return { ...stored, ...override };
-}
-
-export function normalizeAgentAwarenessRelayBaseUrl(
-  value: string | null | undefined,
-): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return trimmed.replace(/\/+$/g, "");
 }
 
 function readRelayConfig(): { readonly url: string } | null {
@@ -515,12 +507,26 @@ function unregisterDeviceWithRelay(input: {
   });
 }
 
+// The environment descriptor advertises whether agent-activity publishes
+// currently leave that server (`capabilities.agentActivityPublishing`). Only
+// an explicit false skips the seed card: older servers omit the capability
+// but may still publish.
+function environmentPublishesAgentActivity(environmentId: EnvironmentId): boolean {
+  return (
+    appAtomRegistry.get(environmentServerConfigsAtom).get(environmentId)?.environment.capabilities
+      .agentActivityPublishing !== false
+  );
+}
+
 // Arms the lock-screen card the moment the user starts agent work from this
 // phone, while the app is still foregrounded and the fresh activity's token
 // can be registered immediately. The seeded row is a best-effort placeholder;
 // the relay's registration replay repaints it with the authoritative
-// aggregate within seconds. No-ops when a card is already armed.
+// aggregate within seconds. No-ops when a card is already armed, and skips
+// environments that report publishing disabled — the seed would sit on
+// "Connecting" forever with no update ever arriving to repaint or end it.
 export function armAgentAwarenessLiveActivityForLocalWork(input: {
+  readonly environmentId: EnvironmentId;
   readonly threadTitle: string;
   readonly projectTitle: string;
 }): void {
@@ -529,6 +535,12 @@ export function armAgentAwarenessLiveActivityForLocalWork(input: {
     return;
   }
   if (!canRegisterRemoteLiveActivities() || !relayTokenProvider) {
+    return;
+  }
+  if (!environmentPublishesAgentActivity(input.environmentId)) {
+    logRegistrationDebug("live activity arming skipped; environment does not publish", {
+      environmentId: input.environmentId,
+    });
     return;
   }
   void loadPreferences()
@@ -972,7 +984,6 @@ export function armAgentAwarenessAndroidLiveUpdate(input: {
       );
     });
 }
-
 export function refreshAgentAwarenessRegistration(): Effect.Effect<
   void,
   never,

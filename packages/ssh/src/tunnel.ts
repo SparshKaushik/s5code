@@ -49,12 +49,13 @@ import {
   SshReadinessError,
 } from "./errors.ts";
 
-export const DEFAULT_REMOTE_PORT = 3773;
+const DEFAULT_REMOTE_PORT = 3773;
 const REMOTE_PORT_SCAN_WINDOW = 200;
 const SSH_READY_TIMEOUT_MS = 20_000;
 const SSH_READY_PROBE_TIMEOUT_MS = 1_000;
 const TUNNEL_SHUTDOWN_TIMEOUT_MS = 2_000;
-const REMOTE_READY_TIMEOUT_MS = 15_000;
+const REMOTE_READY_TIMEOUT_MS = 60_000;
+const REMOTE_LAUNCH_TIMEOUT_MS = 90_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
 
 export interface RemoteT3RunnerOptions {
@@ -208,7 +209,7 @@ function buildRemoteNodeEngineCheckScript(): string {
 (${remoteNodeEngineCheckMain.toString()})();`;
 }
 
-export function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): string {
+function normalizeSshErrorMessage(stderr: string, fallbackMessage: string): string {
   const cleaned = stderr.trim();
   return cleaned.length > 0 ? cleaned : fallbackMessage;
 }
@@ -269,7 +270,7 @@ function tryPort(port) {
 })().catch(() => process.exit(1));
 `;
 
-export const REMOTE_WAIT_READY_SCRIPT = `const http = require("node:http");
+const REMOTE_WAIT_READY_SCRIPT = `const http = require("node:http");
 const port = Number.parseInt(process.argv[2] ?? "", 10);
 const timeoutMs = Number.parseInt(process.argv[3] ?? "", 10);
 const probeTimeoutMs = Number.parseInt(process.argv[4] ?? "", 10);
@@ -317,7 +318,7 @@ function probe() {
 })().catch(() => process.exit(1));
 `;
 
-export const REMOTE_NODE_ENV_SCRIPT = `prepend_path_if_dir() {
+const REMOTE_NODE_ENV_SCRIPT = `prepend_path_if_dir() {
   if [ -d "$1" ]; then
     case ":$PATH:" in
       *":$1:"*) ;;
@@ -410,7 +411,7 @@ ensure_remote_node_path() {
 }
 `;
 
-export const REMOTE_RUNNER_SCRIPT = `#!/bin/sh
+const REMOTE_RUNNER_SCRIPT = `#!/bin/sh
 set -eu
 @@T3_NODE_ENV_SCRIPT@@
 ensure_remote_node_path || true
@@ -425,17 +426,37 @@ fi
 if command -v t3 >/dev/null 2>&1; then
   exec t3 "$@"
 fi
+# npm extracts a package before it runs the native builds of its dependencies,
+# so a failed build (t3 depends on node-pty, which needs a C toolchain) leaves
+# the npx cache without a t3 executable. \`npx --yes\` then exits 0 without
+# running anything at all, which the caller only ever sees as a server that
+# never becomes ready. Resolve the CLI once up front so that install failure is
+# reported here, with npm's own output on stderr.
+require_installed_t3_cli() {
+  if ! T3_CLI_PATH="$("$@" -- sh -c 'command -v t3')"; then
+    printf 'Remote host could not install %s. See npm output above for the cause.\\n' @@T3_PACKAGE_SPEC@@ >&2
+    return 1
+  fi
+  if [ -n "$T3_CLI_PATH" ]; then
+    return 0
+  fi
+  printf 'Remote host installed %s but npm produced no t3 executable, which usually means a native dependency (node-pty) failed to build. Install a C toolchain on the remote host (Debian/Ubuntu: build-essential, Fedora/RHEL: gcc-c++ make, macOS: xcode-select --install) and try again.\\n' @@T3_PACKAGE_SPEC@@ >&2
+  return 1
+}
+# The launcher records this PID, so exec the CLI without an npm wrapper process.
 if command -v npx >/dev/null 2>&1; then
-  exec npx --yes @@T3_PACKAGE_SPEC@@ "$@"
+  require_installed_t3_cli npx --yes --package @@T3_PACKAGE_SPEC@@ || exit 1
+  exec "$T3_CLI_PATH" "$@"
 fi
 if command -v npm >/dev/null 2>&1; then
-  exec npm exec --yes @@T3_PACKAGE_SPEC@@ -- "$@"
+  require_installed_t3_cli npm exec --yes --package @@T3_PACKAGE_SPEC@@ || exit 1
+  exec "$T3_CLI_PATH" "$@"
 fi
 printf 'Remote host is missing the t3 CLI and could not install @@T3_PACKAGE_SPEC@@ because node/npm/npx are unavailable on PATH. Install Node or configure a supported version manager for non-interactive shells.\\n' >&2
 exit 1
 `;
 
-export const REMOTE_LAUNCH_SCRIPT = `set -eu
+const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
 STATE_DIR="$HOME/.t3/ssh-launch/$STATE_KEY"
@@ -580,7 +601,11 @@ if [ -z "$REMOTE_PORT" ]; then
   printf 'managed\\n' >"$MANAGED_FILE"
   if ! wait_ready "@@T3_READY_TIMEOUT_MS@@"; then
     printf 'Remote T3 server did not become ready on 127.0.0.1:%s.\\n' "$REMOTE_PORT" >&2
-    tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
+    if [ -s "$LOG_FILE" ]; then
+      tail -n 80 "$LOG_FILE" >&2 2>/dev/null || true
+    else
+      printf 'It wrote nothing to %s, so it exited before producing any output.\\n' "$LOG_FILE" >&2
+    fi
     kill "$REMOTE_PID" 2>/dev/null || true
     wait_for_pid_exit "$REMOTE_PID"
     rm -f "$PID_FILE" "$PORT_FILE" "$MANAGED_FILE"
@@ -590,7 +615,7 @@ fi
 printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGED:-managed}"
 `;
 
-export const REMOTE_PAIRING_SCRIPT = `set -eu
+const REMOTE_PAIRING_SCRIPT = `set -eu
 STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
 DEFAULT_SERVER_HOME="$HOME/.t3"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
@@ -603,7 +628,7 @@ PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 "$RUNNER_FILE" auth pairing create --base-dir "$PAIRING_BASE_DIR" --json
 `;
 
-export const REMOTE_STOP_SCRIPT = `set -eu
+const REMOTE_STOP_SCRIPT = `set -eu
 STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
@@ -703,8 +728,9 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
       stateKey: remoteStateKey(target),
     });
     const result = yield* runSshCommand(target, {
-      remoteCommandArgs: ["sh", "-s", "--", remoteStateKey(target)],
+      remoteCommandArgs: ["sh", "-l", "-s", "--", remoteStateKey(target)],
       stdin: buildRemoteLaunchScript(runner),
+      timeoutMs: REMOTE_LAUNCH_TIMEOUT_MS,
       ...(input?.authSecret === undefined ? {} : { authSecret: input.authSecret }),
       ...(input?.batchMode === undefined ? {} : { batchMode: input.batchMode }),
       ...(input?.interactiveAuth === undefined ? {} : { interactiveAuth: input.interactiveAuth }),
@@ -797,7 +823,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
   };
 });
 
-export const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
+const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
   target: DesktopSshEnvironmentTarget,
   input?: SshAuthOptions,
 ): Effect.fn.Return<

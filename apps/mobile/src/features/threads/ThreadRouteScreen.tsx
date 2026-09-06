@@ -58,17 +58,11 @@ import {
   useThreadGitCenterHeaderItems,
   useThreadGitRightHeaderItems,
 } from "./ThreadGitControls";
-import {
-  AndroidThreadRewindMenu,
-  renderRewindToolbarMenu,
-  rewindHeaderItem,
-} from "./ThreadRewindControls";
 import { GitOverviewSheet } from "./git/GitOverviewSheet";
 import { useAtomCommand } from "../../state/use-atom-command";
 import { useSelectedThreadGitActions } from "../../state/use-selected-thread-git-actions";
 import { useSelectedThreadGitState } from "../../state/use-selected-thread-git-state";
 import { useSelectedThreadRequests } from "../../state/use-selected-thread-requests";
-import { useSelectedThreadRewind } from "../../state/use-selected-thread-rewind";
 import { useSelectedThreadWorktree } from "../../state/use-selected-thread-worktree";
 import { useThreadComposerState } from "../../state/use-thread-composer-state";
 import { threadEnvironment } from "../../state/threads";
@@ -166,8 +160,9 @@ export function ThreadRouteScreen(props: ThreadRouteScreenProps) {
 
   // Render the full thread chrome (header, feed, composer) as soon as the
   // thread SHELL is known — no blocking on message detail. The feed shows a
-  // loading placeholder while messages fetch, and the composer's connection
-  // pill reports connecting/reconnecting/syncing status.
+  // loading placeholder while messages fetch, the floating pill above the
+  // composer reports loading/syncing, and the composer's connection pill
+  // reports connecting/reconnecting status.
   if (selectedThread !== null && selectedThreadKey === routeThreadKey) {
     return <ThreadRouteContent {...props} selectedThreadDetailState={selectedThreadDetailState} />;
   }
@@ -351,13 +346,6 @@ function ThreadRouteContent(
     [selectedThread?.environmentId, selectedThreadCwd],
   );
   const threadActionProgress = useThreadActionProgress(threadActionProgressTarget);
-
-  /* ─── Session rewind (experimental, server-gated) ───────────────── */
-  const rewind = useSelectedThreadRewind({ threadBusy: composer.activeThreadBusy });
-  const rewindMenuModel = useMemo(
-    () => ({ available: rewind.available, rows: rewind.rows, onStep: rewind.step }),
-    [rewind.available, rewind.rows, rewind.step],
-  );
 
   const handleOpenGitInspector = useCallback(() => {
     if (!fileInspector.supported) {
@@ -653,17 +641,8 @@ function ThreadRouteContent(
   };
   const threadGitCenterHeaderItems = useThreadGitCenterHeaderItems(threadGitControlProps);
   const threadGitRightHeaderItems = useThreadGitRightHeaderItems(threadGitControlProps);
-  // Rewind leads the trailing group in both layouts: it acts on the thread
-  // itself, while the git/files/terminal items open other surfaces.
-  const rewindItem = useMemo(() => rewindHeaderItem(rewindMenuModel), [rewindMenuModel]);
-  const threadCenterHeaderItems = useMemo<NativeHeaderItems>(
-    () => (rewindItem ? [rewindItem, ...threadGitCenterHeaderItems] : threadGitCenterHeaderItems),
-    [rewindItem, threadGitCenterHeaderItems],
-  );
-  const compactRightHeaderItems = useMemo<NativeHeaderItems>(
-    () => (rewindItem ? [rewindItem, ...threadGitRightHeaderItems] : threadGitRightHeaderItems),
-    [rewindItem, threadGitRightHeaderItems],
-  );
+  const threadCenterHeaderItems = threadGitCenterHeaderItems;
+  const compactRightHeaderItems = threadGitRightHeaderItems;
   const splitLeftHeaderItems = useMemo<NativeHeaderItems>(
     () => [
       {
@@ -788,11 +767,7 @@ function ThreadRouteContent(
   const serverConfig = routeEnvironmentRuntime?.serverConfig ?? null;
   const renderThreadRouteBody = (showActionControls: boolean) => (
     <>
-      <ThreadGitControls
-        {...threadGitControlProps}
-        leadingToolbarItems={renderRewindToolbarMenu(rewindMenuModel)}
-        showActionControls={showActionControls}
-      />
+      <ThreadGitControls {...threadGitControlProps} showActionControls={showActionControls} />
 
       <ThreadActionProgressOverlay
         progress={threadActionProgress}
@@ -808,6 +783,7 @@ function ThreadRouteContent(
           environmentLabel={selectedEnvironmentConnection?.environmentLabel ?? null}
           selectedThreadFeed={composer.selectedThreadFeed}
           activeWorkStartedAt={composer.activeWorkStartedAt}
+          isCompacting={composer.isCompacting}
           activePendingApproval={requests.activePendingApproval}
           respondingApprovalId={requests.respondingApprovalId}
           activePendingUserInput={requests.activePendingUserInput}
@@ -819,7 +795,6 @@ function ThreadRouteContent(
           connectionStateLabel={routeConnectionState}
           threadSyncStatus={selectedThreadDetailState.status}
           loadEarlier={loadEarlierTurns}
-          activeThreadBusy={composer.activeThreadBusy}
           environmentId={selectedThread.environmentId}
           projectWorkspaceRoot={selectedThreadProject?.workspaceRoot ?? null}
           threadCwd={selectedThreadCwd}
@@ -828,7 +803,8 @@ function ThreadRouteContent(
           usesAutomaticContentInsets={usesNativeHeaderGlass}
           onOpenConnectionEditor={handleOpenConnectionEditor}
           onChangeDraftMessage={composer.onChangeDraftMessage}
-          onPickDraftImages={composer.onPickDraftImages}
+          onPickDraftMedia={composer.onPickDraftMedia}
+          onPickDraftFiles={composer.onPickDraftFiles}
           onNativePasteImages={composer.onNativePasteImages}
           onRemoveDraftImage={composer.onRemoveDraftImage}
           serverConfig={serverConfig}
@@ -892,7 +868,6 @@ function ThreadRouteContent(
           subtitle={headerSubtitle}
           onBack={layout.usesSplitView ? undefined : () => navigation.goBack()}
           actions={androidHeaderActions}
-          trailing={<AndroidThreadRewindMenu model={rewindMenuModel} />}
         />
       ) : null}
 

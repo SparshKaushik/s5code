@@ -42,39 +42,57 @@ describe("parsePiModelSlug", () => {
 });
 
 describe("piModelThinkingLevels", () => {
-  it("uses the model's own thinkingLevelMap keys", () => {
+  it("uses Pi defaults for unmapped core levels", () => {
     expect(
       piModelThinkingLevels(
         model({
           id: "claude-opus-5",
           provider: "kiro",
           reasoning: true,
-          thinkingLevelMap: { off: "disabled", low: "low", high: "high" },
+          thinkingLevelMap: { off: "off", low: "low", high: "high" },
         }),
       ),
-    ).toEqual(["off", "low", "high"]);
+    ).toEqual(["off", "minimal", "low", "medium", "high"]);
   });
 
-  it("drops map keys that are not canonical levels", () => {
+  it("removes null-mapped levels and ignores unknown map keys", () => {
     expect(
       piModelThinkingLevels(
         model({
           id: "m",
           provider: "p",
-          thinkingLevelMap: { low: "low", bogus: "x" },
+          reasoning: true,
+          thinkingLevelMap: { off: null, bogus: "x" },
         }),
       ),
-    ).toEqual(["low"]);
+    ).toEqual(["minimal", "low", "medium", "high"]);
   });
 
-  it("offers no levels for a non-reasoning model with no map", () => {
-    expect(piModelThinkingLevels(model({ id: "gpt-5-6-sol", provider: "kiro" }))).toEqual([]);
+  it("offers extended levels only when Pi maps them explicitly", () => {
+    expect(
+      piModelThinkingLevels(
+        model({
+          id: "m",
+          provider: "p",
+          reasoning: true,
+          thinkingLevelMap: { xhigh: "xhigh", max: null },
+        }),
+      ),
+    ).toEqual(["off", "minimal", "low", "medium", "high", "xhigh"]);
   });
 
-  it("falls back to a basic ladder for a reasoning model with no map", () => {
+  it("offers no levels for a non-reasoning model", () => {
+    expect(
+      piModelThinkingLevels(
+        model({ id: "gpt-5-6-sol", provider: "kiro", thinkingLevelMap: { low: "low" } }),
+      ),
+    ).toEqual([]);
+  });
+
+  it("uses Pi's default ladder for a reasoning model with no map", () => {
     expect(
       piModelThinkingLevels(model({ id: "grok-4.3", provider: "xai", reasoning: true })),
-    ).toEqual(["off", "low", "medium", "high"]);
+    ).toEqual(["off", "minimal", "low", "medium", "high"]);
   });
 });
 
@@ -84,12 +102,40 @@ describe("piModelCapabilities", () => {
     expect(capabilities.optionDescriptors).toEqual([]);
   });
 
+  it("offers Gemini 3.7 Flash minimal through high when Pi disables Off", () => {
+    const capabilities = piModelCapabilities(
+      model({
+        id: "gemini-3.7-flash",
+        provider: "google-vertex",
+        reasoning: true,
+        thinkingLevelMap: { off: null },
+      }),
+    );
+    const descriptor = capabilities.optionDescriptors?.[0];
+
+    expect(descriptor).toMatchObject({
+      id: PI_THINKING_OPTION_ID,
+      type: "select",
+      currentValue: "medium",
+    });
+    if (descriptor?.type !== "select") {
+      throw new Error("Expected Gemini thinking to be a select option");
+    }
+    expect(descriptor.options).toEqual([
+      { id: "minimal", label: "Minimal" },
+      { id: "low", label: "Low" },
+      { id: "medium", label: "Medium", isDefault: true },
+      { id: "high", label: "High" },
+    ]);
+  });
+
   it("defaults to medium when the model supports it", () => {
     const capabilities = piModelCapabilities(
       model({
         id: "claude-opus-5",
         provider: "kiro",
-        thinkingLevelMap: { off: 1, low: 1, medium: 1, high: 1 },
+        reasoning: true,
+        thinkingLevelMap: { off: "off", low: "low", medium: "medium", high: "high" },
       }),
     );
     const descriptor = capabilities.optionDescriptors?.[0];
@@ -100,7 +146,12 @@ describe("piModelCapabilities", () => {
 
   it("falls back to the highest offered level when medium is unavailable", () => {
     const capabilities = piModelCapabilities(
-      model({ id: "m", provider: "p", thinkingLevelMap: { off: 1, low: 1 } }),
+      model({
+        id: "m",
+        provider: "p",
+        reasoning: true,
+        thinkingLevelMap: { off: "off", medium: null, high: null },
+      }),
     );
     expect(capabilities.optionDescriptors?.[0]?.currentValue).toBe("low");
   });

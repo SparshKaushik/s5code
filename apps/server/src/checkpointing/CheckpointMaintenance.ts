@@ -1,12 +1,10 @@
 /**
  * CheckpointMaintenance — report and reclaim checkpoint storage.
  *
- * Covers both stores S5 Code creates and nothing else:
+ * Covers stores S5 Code creates and nothing else:
  *
  *   - hidden `refs/t3/checkpoints/**` commits inside each project repository
- *     (built-in checkpoint/revert), and
- *   - per-thread shadow git stores under the server state directory (session
- *     rewind experiment).
+ *     (built-in checkpoint/revert).
  *
  * Safety rules that are enforced here rather than left to callers:
  *
@@ -41,8 +39,6 @@ import * as Schema from "effect/Schema";
 import * as CheckpointStore from "./CheckpointStore.ts";
 import { parseCheckpointRef } from "./Utils.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { RewindEntryRepository } from "../persistence/Services/RewindEntries.ts";
-import * as RewindStore from "../rewind/RewindStore.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 
 const BYTES_PER_MEGABYTE = 1024 * 1024;
@@ -147,7 +143,7 @@ export function selectRetentionEvictions(input: {
 export class CheckpointMaintenance extends Context.Service<
   CheckpointMaintenance,
   {
-    /** Current checkpoint storage footprint across projects and rewind stores. */
+    /** Current checkpoint storage footprint across projects. */
     readonly getUsage: () => Effect.Effect<CheckpointStorageUsage, CheckpointMaintenanceError>;
 
     readonly cleanup: (
@@ -182,22 +178,17 @@ const toMaintenanceError = (operation: string) => (cause: unknown) =>
 export const make = Effect.gen(function* () {
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
-  const rewindRepository = yield* RewindEntryRepository;
-  const rewindStore = yield* RewindStore.RewindStore;
   const serverSettings = yield* ServerSettingsService;
-  const path = yield* Path.Path;
 
   const nowIso = Effect.map(DateTime.now, DateTime.formatIso);
 
   const listLiveThreads = Effect.fn("CheckpointMaintenance.listLiveThreads")(function* () {
     const owners = yield* projectionSnapshotQuery.listThreadCheckpointOwners();
-    return owners.map(
-      (owner): LiveThread => ({
-        threadId: owner.threadId,
-        title: owner.title,
-        cwd: owner.worktreePath ?? owner.workspaceRoot,
-      }),
-    );
+    return owners.map((owner): LiveThread => ({
+      threadId: owner.threadId,
+      title: owner.title,
+      cwd: owner.worktreePath ?? owner.workspaceRoot,
+    }));
   });
 
   /**
@@ -266,46 +257,12 @@ export const make = Effect.gen(function* () {
     return entries;
   });
 
-  const collectRewindStoreEntries = Effect.fn("CheckpointMaintenance.collectRewindStoreEntries")(
-    function* (liveThreads: ReadonlyArray<LiveThread>) {
-      const threadById = new Map(liveThreads.map((thread) => [thread.threadId, thread]));
-      const [summaries, usage] = yield* Effect.all([
-        rewindRepository.listStoreSummaries(),
-        rewindStore.listUsage(),
-      ]);
-      const summaryByStoreId = new Map(summaries.map((summary) => [summary.storeId, summary]));
-
-      return usage.map((store): CheckpointStorageEntry => {
-        const summary = summaryByStoreId.get(store.storeId);
-        const thread = summary ? threadById.get(summary.threadId) : undefined;
-        return {
-          kind: "rewind-store",
-          threadId: summary?.threadId ?? null,
-          label:
-            thread?.title ??
-            (summary === undefined
-              ? `Unlinked rewind store (${store.storeId})`
-              : `Deleted thread (${summary.threadId})`),
-          location: store.path,
-          refCount: 0,
-          bytes: store.bytes,
-          updatedAt: summary?.updatedAt ?? null,
-          // A store with no rows is unreachable by undo/redo, so it is
-          // orphaned regardless of whether its thread still exists.
-          orphaned: thread === undefined,
-        };
-      });
-    },
-  );
-
   const buildUsage = Effect.fn("CheckpointMaintenance.buildUsage")(function* () {
     const liveThreads = yield* listLiveThreads();
-    const [refEntries, rewindEntries, generatedAt] = yield* Effect.all([
+    const [entries, generatedAt] = yield* Effect.all([
       collectCheckpointRefEntries(liveThreads),
-      collectRewindStoreEntries(liveThreads),
       nowIso,
     ]);
-    const entries = [...refEntries, ...rewindEntries];
     return {
       generatedAt,
       entries,
@@ -323,30 +280,18 @@ export const make = Effect.gen(function* () {
   const removeEntry = Effect.fn("CheckpointMaintenance.removeEntry")(function* (
     entry: CheckpointStorageEntry,
   ) {
-    if (entry.kind === "checkpoint-refs") {
-      const refs = yield* checkpointStore
-        .listCheckpointRefs(entry.location)
-        .pipe(Effect.orElseSucceed(() => []));
-      const targets = refs
-        .filter((ref) => parseCheckpointRef(ref.checkpointRef)?.threadId === entry.threadId)
-        .map((ref) => ref.checkpointRef);
-      if (targets.length === 0) {
-        return;
-      }
-      yield* checkpointStore
-        .deleteCheckpointRefs({ cwd: entry.location, checkpointRefs: targets })
-        .pipe(Effect.ignore);
+    const refs = yield* checkpointStore
+      .listCheckpointRefs(entry.location)
+      .pipe(Effect.orElseSucceed(() => []));
+    const targets = refs
+      .filter((ref) => parseCheckpointRef(ref.checkpointRef)?.threadId === entry.threadId)
+      .map((ref) => ref.checkpointRef);
+    if (targets.length === 0) {
       return;
     }
-
-    // The store id is the directory name; `Path.basename` keeps this correct
-    // on Windows, where `location` uses backslashes.
-    const storeId = path.basename(entry.location);
-    if (storeId.length === 0) {
-      return;
-    }
-    yield* rewindStore.deleteStore(storeId).pipe(Effect.ignore);
-    yield* rewindRepository.deleteByStoreId({ storeId }).pipe(Effect.ignore);
+    yield* checkpointStore
+      .deleteCheckpointRefs({ cwd: entry.location, checkpointRefs: targets })
+      .pipe(Effect.ignore);
   });
 
   const resolvePolicy = Effect.fn("CheckpointMaintenance.resolvePolicy")(function* () {
@@ -417,15 +362,6 @@ export const make = Effect.gen(function* () {
       }
     }
 
-    const storeId = yield* rewindStore
-      .storeIdForThread(input.threadId)
-      .pipe(Effect.orElseSucceed(() => null));
-    if (storeId !== null) {
-      reclaimedBytes += yield* rewindStore.deleteStore(storeId).pipe(Effect.orElseSucceed(() => 0));
-      yield* rewindRepository.deleteByStoreId({ storeId }).pipe(Effect.ignore);
-    }
-    yield* rewindRepository.deleteByThreadId({ threadId: input.threadId }).pipe(Effect.ignore);
-
     return reclaimedBytes;
   });
 
@@ -456,3 +392,29 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(CheckpointMaintenance, make);
+
+const emptyUsage: CheckpointStorageUsage = {
+  generatedAt: "1970-01-01T00:00:00.000Z",
+  entries: [],
+  totalBytes: 0,
+  orphanedBytes: 0,
+};
+
+const emptyCleanupResult: CheckpointCleanupResult = {
+  scope: "all",
+  dryRun: false,
+  removedEntries: [],
+  removedRefCount: 0,
+  reclaimedBytes: 0,
+  usage: emptyUsage,
+};
+
+export const layerTest = Layer.succeed(
+  CheckpointMaintenance,
+  CheckpointMaintenance.of({
+    getUsage: () => Effect.succeed(emptyUsage),
+    cleanup: () => Effect.succeed(emptyCleanupResult),
+    forgetThread: () => Effect.succeed(0),
+    sweepIfConfigured: () => Effect.void,
+  }),
+);

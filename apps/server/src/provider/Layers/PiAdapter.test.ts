@@ -1,8 +1,21 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
+import * as NodeURL from "node:url";
+
+import { PiSettings, ProviderDriverKind, ThreadId } from "@t3tools/contracts";
+import * as Deferred from "effect/Deferred";
+import * as Effect from "effect/Effect";
+import * as Fiber from "effect/Fiber";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
+import * as Stream from "effect/Stream";
 import { describe, expect, it } from "@effect/vitest";
 
-import * as Effect from "effect/Effect";
-
+import { ServerConfig } from "../../config.ts";
+import type { PiExtensionUiRequest } from "../pi/PiRpcSchemas.ts";
 import {
+  makePiAdapter,
   parsePiCompactCommand,
   piApprovalRequestType,
   piApprovalToolName,
@@ -11,7 +24,10 @@ import {
   piShouldReportCompaction,
   piShouldSettleTurnAfterPrompt,
 } from "./PiAdapter.ts";
-import type { PiExtensionUiRequest } from "../pi/PiRpcSchemas.ts";
+
+const __dirname = NodePath.dirname(NodeURL.fileURLToPath(import.meta.url));
+const piCompactionMockPeerPath = NodePath.join(__dirname, "../testFixtures/piCompactionMockPeer");
+const decodePiSettings = Schema.decodeSync(PiSettings);
 
 const request = (
   overrides: Partial<PiExtensionUiRequest> & Pick<PiExtensionUiRequest, "id" | "method">,
@@ -185,7 +201,7 @@ describe("piShouldSettleTurnAfterPrompt", () => {
     }),
   );
 
-  it.effect("leaves a real prompt alone, since its agent_end closes the turn", () =>
+  it.effect("leaves a real prompt alone, since agent_settled closes the turn", () =>
     Effect.gen(function* () {
       expect((yield* check({ sawAgentStart: true })).decision).toBe(false);
     }),
@@ -222,6 +238,55 @@ describe("piShouldSettleTurnAfterPrompt", () => {
       expect((yield* check({ hasPendingDialog: true })).probed).toBe(false);
       expect((yield* check({ isSteer: true })).probed).toBe(false);
       expect((yield* check({})).probed).toBe(true);
+    }),
+  );
+});
+
+const piAdapterTestLayer = ServerConfig.layerTest(process.cwd(), {
+  prefix: "t3code-pi-adapter-test-",
+}).pipe(Layer.provideMerge(NodeServices.layer));
+
+it.layer(piAdapterTestLayer)("PiAdapter lifecycle", (it) => {
+  it.effect("waits for agent_settled across automatic compaction and continuation", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("pi-auto-compaction-continuation");
+      const adapter = yield* makePiAdapter(
+        decodePiSettings({ binaryPath: piCompactionMockPeerPath }),
+      );
+      const events: Array<{ readonly type: string }> = [];
+      const settled = yield* Deferred.make<void>();
+      const eventsFiber = yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => {
+          events.push(event);
+        }).pipe(
+          Effect.andThen(
+            event.type === "turn.completed" ? Deferred.succeed(settled, undefined) : Effect.void,
+          ),
+        ),
+      ).pipe(Effect.forkChild);
+
+      yield* adapter.startSession({
+        threadId,
+        provider: ProviderDriverKind.make("pi"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId, input: "overflow then continue", attachments: [] });
+      yield* Deferred.await(settled);
+      yield* Fiber.interrupt(eventsFiber);
+
+      const types = events.map((event) => event.type);
+      const completionIndex = types.indexOf("turn.completed");
+      expect(completionIndex).toBeGreaterThan(types.indexOf("thread.state.changed"));
+      expect(completionIndex).toBeGreaterThan(types.indexOf("item.completed"));
+      expect(types.filter((type) => type === "turn.completed")).toHaveLength(1);
+
+      const sessions = yield* adapter.listSessions();
+      const session = sessions.find((candidate) => candidate.threadId === threadId);
+      expect(session?.status).toBe("ready");
+      expect(session?.activeTurnId).toBeUndefined();
+
+      yield* adapter.stopSession(threadId);
     }),
   );
 });

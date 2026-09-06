@@ -8,7 +8,6 @@ import {
   piContentBlocks,
   piContentStreamKind,
   piOpenAssistantSegment,
-  piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
   piToolOutputDelta,
@@ -142,17 +141,6 @@ describe("piTurnStateFromStopReason", () => {
     expect(piTurnStateFromStopReason("stop")).toBe("completed");
     expect(piTurnStateFromStopReason("length")).toBe("completed");
     expect(piTurnStateFromStopReason(undefined)).toBe("completed");
-  });
-});
-
-describe("piShouldSettleTurnOnAgentEnd", () => {
-  it("defers settling when pi will retry the failed model call", () => {
-    expect(piShouldSettleTurnOnAgentEnd(true)).toBe(false);
-  });
-
-  it("settles a normal terminal agent_end, including a final failed retry", () => {
-    expect(piShouldSettleTurnOnAgentEnd(undefined)).toBe(true);
-    expect(piShouldSettleTurnOnAgentEnd(false)).toBe(true);
   });
 });
 

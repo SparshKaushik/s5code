@@ -208,16 +208,20 @@ jobs:
           # reinstall the base revision's dependencies before fingerprinting it. Comparing a
           # released hash with a newer checkout is invalid because Expo fingerprints monorepo
           # workspace inputs, platform-specific dependencies, and the package-manager version.
+          # Clone the base revision into a separate directory so the release checkout's node_modules
+          # is never downgraded or partially pruned.
           MOBILE_VERSION="$previous_version" npx expo-updates fingerprint:generate \
             --platform android > "$RUNNER_TEMP/fp/head/android.json"
 
-          git checkout --quiet "$previous_tag"
-          pnpm install --filter=@t3tools/mobile... --frozen-lockfile
-          MOBILE_VERSION="$previous_version" npx expo-updates fingerprint:generate \
-            --platform android > "$RUNNER_TEMP/fp/base/android.json"
-
-          git checkout --quiet "${{ inputs.release_ref }}"
-          pnpm install --filter=@t3tools/mobile... --frozen-lockfile
+          git clone --quiet --branch "$previous_tag" "$GITHUB_WORKSPACE" "$RUNNER_TEMP/base-repo"
+          (
+            cd "$RUNNER_TEMP/base-repo"
+            pnpm install --filter=@t3tools/mobile... --frozen-lockfile
+            cd apps/mobile
+            MOBILE_VERSION="$previous_version" npx expo-updates fingerprint:generate \
+              --platform android > "$RUNNER_TEMP/fp/base/android.json"
+          )
+          rm -rf "$RUNNER_TEMP/base-repo"
 
           head_fingerprint="$(jq -r '.hash' "$RUNNER_TEMP/fp/head/android.json")"
           base_fingerprint="$(jq -r '.hash' "$RUNNER_TEMP/fp/base/android.json")"
@@ -259,6 +263,7 @@ jobs:
           EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
           MOBILE_VERSION: ${{ steps.release-decision.outputs.mobile_version }}
         run: |
+          npx expo config --json > /dev/null
           eas env:set production \
             --name MOBILE_VERSION \
             --value "$MOBILE_VERSION" \

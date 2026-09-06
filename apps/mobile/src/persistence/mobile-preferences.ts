@@ -6,6 +6,7 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import type { SidebarProjectGroupingMode } from "@t3tools/contracts";
+import { MOBILE_THEME_IDS, type MobileThemeId, type MobileThemeMode } from "../lib/mobileTheme";
 
 import * as MobileDatabase from "./mobile-database";
 import * as MobileSecureStorage from "./mobile-secure-storage";
@@ -17,6 +18,10 @@ const PREFERENCES_FALLBACK_KEY = "t3code.preferences.fallback";
 export interface Preferences {
   readonly liveActivitiesEnabled?: boolean;
   readonly androidLiveUpdatesEnabled?: boolean;
+  readonly themeId?: MobileThemeId;
+  readonly lightThemeId?: MobileThemeId;
+  readonly darkThemeId?: MobileThemeId;
+  readonly themeMode?: MobileThemeMode;
   readonly baseFontSize?: number;
   readonly terminalFontSize?: number | null;
   readonly markdownFontSize?: number;
@@ -27,7 +32,6 @@ export interface Preferences {
   /** @deprecated Kept temporarily so older OTA bundles retain the selected mode. */
   readonly projectGroupingEnabled?: boolean;
   readonly projectGroupingMode?: SidebarProjectGroupingMode;
-  readonly autoSettleOnMerge?: boolean;
   /**
    * Device-local mirror of the web `legacySidebarEnabled` setting. Mobile has
    * no client-settings sync, so the legacy grouped thread list is opted into
@@ -38,6 +42,9 @@ export interface Preferences {
   readonly legacyThreadListEnabled?: boolean;
   /** Device-local counterpart of desktop's `planModeEnabled` legacy flag. */
   readonly planModeEnabled?: boolean;
+  /** Fresh keys reset both shelves to collapsed when users update. */
+  readonly threadListSettledShelfExpanded?: boolean;
+  readonly threadListSnoozedShelfExpanded?: boolean;
 }
 
 export class MobilePreferencesLoadError extends Schema.TaggedErrorClass<MobilePreferencesLoadError>()(
@@ -81,6 +88,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   const preferences: {
     liveActivitiesEnabled?: boolean;
     androidLiveUpdatesEnabled?: boolean;
+    themeId?: MobileThemeId;
+    lightThemeId?: MobileThemeId;
+    darkThemeId?: MobileThemeId;
+    themeMode?: MobileThemeMode;
     baseFontSize?: number;
     terminalFontSize?: number | null;
     markdownFontSize?: number;
@@ -90,9 +101,10 @@ function sanitizePreferences(parsed: Preferences): Preferences {
     collapsedProjectGroups?: readonly string[];
     projectGroupingEnabled?: boolean;
     projectGroupingMode?: SidebarProjectGroupingMode;
-    autoSettleOnMerge?: boolean;
     legacyThreadListEnabled?: boolean;
     planModeEnabled?: boolean;
+    threadListSettledShelfExpanded?: boolean;
+    threadListSnoozedShelfExpanded?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -100,6 +112,31 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.androidLiveUpdatesEnabled === "boolean") {
     preferences.androidLiveUpdatesEnabled = parsed.androidLiveUpdatesEnabled;
+  }
+  if (
+    typeof parsed.themeId === "string" &&
+    (MOBILE_THEME_IDS as readonly string[]).includes(parsed.themeId)
+  ) {
+    preferences.themeId = parsed.themeId as MobileThemeId;
+  }
+  if (
+    typeof parsed.lightThemeId === "string" &&
+    (MOBILE_THEME_IDS as readonly string[]).includes(parsed.lightThemeId)
+  ) {
+    preferences.lightThemeId = parsed.lightThemeId as MobileThemeId;
+  }
+  if (
+    typeof parsed.darkThemeId === "string" &&
+    (MOBILE_THEME_IDS as readonly string[]).includes(parsed.darkThemeId)
+  ) {
+    preferences.darkThemeId = parsed.darkThemeId as MobileThemeId;
+  }
+  if (
+    parsed.themeMode === "system" ||
+    parsed.themeMode === "light" ||
+    parsed.themeMode === "dark"
+  ) {
+    preferences.themeMode = parsed.themeMode;
   }
   if (typeof parsed.baseFontSize === "number") preferences.baseFontSize = parsed.baseFontSize;
   if (typeof parsed.terminalFontSize === "number" || parsed.terminalFontSize === null) {
@@ -132,14 +169,17 @@ function sanitizePreferences(parsed: Preferences): Preferences {
   ) {
     preferences.projectGroupingMode = parsed.projectGroupingMode;
   }
-  if (typeof parsed.autoSettleOnMerge === "boolean") {
-    preferences.autoSettleOnMerge = parsed.autoSettleOnMerge;
-  }
   if (typeof parsed.legacyThreadListEnabled === "boolean") {
     preferences.legacyThreadListEnabled = parsed.legacyThreadListEnabled;
   }
   if (typeof parsed.planModeEnabled === "boolean") {
     preferences.planModeEnabled = parsed.planModeEnabled;
+  }
+  if (typeof parsed.threadListSettledShelfExpanded === "boolean") {
+    preferences.threadListSettledShelfExpanded = parsed.threadListSettledShelfExpanded;
+  }
+  if (typeof parsed.threadListSnoozedShelfExpanded === "boolean") {
+    preferences.threadListSnoozedShelfExpanded = parsed.threadListSnoozedShelfExpanded;
   }
   return preferences;
 }

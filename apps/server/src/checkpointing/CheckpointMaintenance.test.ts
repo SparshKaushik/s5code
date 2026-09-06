@@ -70,28 +70,6 @@ describe("selectRetentionEvictions", () => {
     ).toEqual([older]);
   });
 
-  it("treats checkpoint refs and the rewind store for one thread as separate units", () => {
-    const threadId = ThreadId.make("thread-both");
-    const refs = entry({ threadId, label: "refs", updatedAt: isoDaysAgo(90) });
-    const store = entry({
-      threadId,
-      kind: "rewind-store",
-      label: "store",
-      location: "/state/rewind/abc",
-      refCount: 0,
-      updatedAt: isoDaysAgo(90),
-    });
-
-    // Each kind protects its own newest entry, so neither is evicted here.
-    expect(
-      selectRetentionEvictions({
-        entries: [refs, store],
-        policy: { maxAgeMs: 30 * DAY_MS, maxTotalBytes: null },
-        nowMs: NOW_MS,
-      }),
-    ).toEqual([]);
-  });
-
   it("evicts oldest-first until the size budget is met", () => {
     const oldest = entry({
       threadId: ThreadId.make("thread-a"),

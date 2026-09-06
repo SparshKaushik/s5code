@@ -18,5 +18,5 @@ dependencies {
   implementation project(':expo-modules-core')
   implementation 'androidx.core:core-ktx:1.17.0'
   implementation 'com.google.firebase:firebase-messaging:25.0.1'
-  implementation 'host.exp.exponent:expo.modules.notifications:56.0.18'
+  implementation 'host.exp.exponent:expo.modules.notifications:57.0.15'
 }

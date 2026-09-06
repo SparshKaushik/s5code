@@ -4,8 +4,10 @@
  * One long-lived pi process per thread. pi's RPC mode is a persistent session:
  * `prompt` starts work and returns immediately on *acceptance*, while the real
  * progress arrives as agent events. So `sendTurn` opens the turn, fires
- * `prompt`, and lets the event pump close the turn on `agent_end` — treating
- * the `prompt` response as completion would settle every turn instantly.
+ * `prompt`, and lets the event pump close the turn on `agent_settled` — pi's
+ * session-level boundary after retries, compaction, and queued continuations.
+ * Treating either the `prompt` response or low-level `agent_end` as completion
+ * would settle a turn while pi can still be running.
  *
  * Notable pi-specific behavior this adapter has to absorb:
  *
@@ -85,7 +87,6 @@ import {
   piCloseAssistantSegment,
   piContentBlocks,
   piContentStreamKind,
-  piShouldSettleTurnOnAgentEnd,
   piToolItemDetail,
   piToolItemType,
   piToolOutputDelta,
@@ -163,12 +164,10 @@ interface PiSessionContext {
    * `agent_end` and nothing but us can close their turn.
    */
   readonly agentRunTurnIds: Set<TurnId>;
-  /**
-   * Turns whose `agent_end` reported `willRetry: true`, meaning pi is about to
-   * continue the same turn with a fresh run after a transient provider error.
-   * The turn must not be settled until that retry run ends (or is aborted).
-   */
-  readonly retryPendingTurnIds: Set<TurnId>;
+  /** True while pi is between low-level runs (retry or compaction). */
+  betweenAgentRuns: boolean;
+  /** Latest low-level run messages, retained until `agent_settled`. */
+  lastAgentMessages: unknown;
   stopped: boolean;
 }
 
@@ -222,7 +221,7 @@ export function piExtensionUiQuestions(
  *
  * pi answers `prompt` for an extension command (`/repos`, `/diff`) only after
  * the command's handler returns, and such a command never starts an agent run,
- * so no `agent_end` is coming to close the turn. A steer belongs to a turn
+ * so no `agent_settled` is coming to close the turn. A steer belongs to a turn
  * someone else owns, an open dialog means the handler is still waiting on the
  * user, and a live agent run closes itself.
  *
@@ -605,7 +604,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       context.activeTurnId = undefined;
       context.interruptedTurnIds.delete(turnId);
       context.agentRunTurnIds.delete(turnId);
-      context.retryPendingTurnIds.delete(turnId);
+      context.betweenAgentRuns = false;
+      context.lastAgentMessages = undefined;
 
       yield* updateSession(context, { status: "ready" }, { clearActiveTurnId: true });
 
@@ -871,33 +871,38 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         case "agent_start": {
           // Records that this turn has a real agent run behind it, so an
           // extension command that never starts one can be settled instead of
-          // waiting for an `agent_end` that will never arrive.
+          // waiting for an `agent_settled` that will never arrive.
           if (turnId !== undefined) {
             context.agentRunTurnIds.add(turnId);
-            // A retry's fresh run is now executing; the turn is no longer
-            // waiting on the pending-retry settle skip from `agent_end`.
-            context.retryPendingTurnIds.delete(turnId);
+            // A continuation's fresh run is now executing; it is no longer
+            // between low-level runs.
+            context.betweenAgentRuns = false;
           }
           return;
         }
 
         case "agent_end": {
           if (turnId === undefined) return;
+          // `agent_end` closes one low-level run, not the session-level turn.
+          // Pi may still auto-retry, compact and continue, or drain messages
+          // queued by extensions. Keep the latest payload for final text and
+          // stop-reason recovery, then settle only at `agent_settled`.
+          context.lastAgentMessages = event.messages;
+          context.betweenAgentRuns = true;
+          return;
+        }
+
+        case "agent_settled": {
+          if (turnId === undefined) return;
           if (context.interruptedTurnIds.has(turnId)) {
             context.interruptedTurnIds.delete(turnId);
             yield* settleTurn(context, turnId, { kind: "cancelled" }, raw);
             return;
           }
-          // pi retries transient provider errors (e.g. 5xx) by continuing the
-          // same turn with a fresh agent run. The agent_end for the failed
-          // attempt carries `willRetry: true`; settling here would mark the
-          // turn failed before the retry runs, even when the retry completes.
-          // Wait for the final agent_end (willRetry unset/false) instead.
-          if (!piShouldSettleTurnOnAgentEnd(event.willRetry)) {
-            context.retryPendingTurnIds.add(turnId);
-            return;
-          }
-          const messages = Array.isArray(event.messages) ? event.messages : [];
+
+          const messages = Array.isArray(context.lastAgentMessages)
+            ? context.lastAgentMessages
+            : [];
           const last = messages[messages.length - 1];
           const stopReason =
             isRecord(last) && typeof last.stopReason === "string" ? last.stopReason : undefined;
@@ -1155,7 +1160,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
         lastPlanFingerprint: undefined,
         interruptedTurnIds: new Set(),
         agentRunTurnIds: new Set(),
-        retryPendingTurnIds: new Set(),
+        betweenAgentRuns: false,
+        lastAgentMessages: undefined,
         stopped: false,
       };
       sessions.set(input.threadId, context);
@@ -1231,8 +1237,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
      *
      * `/compact` never executes through `prompt`, and it does not start an
      * agent run, so this opens a turn, awaits the compaction result, and
-     * settles the turn itself rather than waiting for an `agent_end` that will
-     * never arrive. The event pump still reports the compaction via the
+     * settles the turn itself rather than waiting for an `agent_settled` that
+     * will never arrive. The event pump still reports the compaction via the
      * `compaction_end` event's `thread.state.changed` transition.
      */
     const sendCompactTurn = Effect.fn("sendCompactTurn")(function* (
@@ -1364,8 +1370,8 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
         // pi answers `prompt` for an extension command (`/repos`, `/diff`) only
         // after the command's handler returns, and such a command never starts
-        // an agent run. With no `agent_end` coming, close the turn here or the
-        // UI spins forever.
+        // an agent run. With no `agent_settled` coming, close the turn here or
+        // the UI spins forever.
         if (
           yield* piShouldSettleTurnAfterPrompt({
             isSteer: steeringTurnId !== undefined,
@@ -1443,7 +1449,7 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
       const context = yield* requireContext(threadId);
       const targetTurnId = turnId ?? context.activeTurnId;
       if (targetTurnId !== undefined) {
-        // Remember the interrupt so the `agent_end` that follows reports a
+        // Remember the interrupt so the `agent_settled` that follows reports a
         // cancellation instead of a normal completion.
         context.interruptedTurnIds.add(targetTurnId);
       }
@@ -1464,15 +1470,12 @@ export function makePiAdapter(piSettings: PiSettings, options?: PiAdapterLiveOpt
 
       // `turn.aborted` is informational; only `turn.completed` clears the
       // thread's active turn. A turn with an agent run behind it gets that from
-      // the `agent_end` the abort triggers. An extension command has no run, so
-      // it would hang here — close it now.
-      // The same holds when the abort lands during pi's retry backoff: the
-      // failed attempt's `agent_end` already came (with `willRetry: true`), so
-      // no further `agent_end` will arrive to settle this turn.
-      if (
-        !context.agentRunTurnIds.has(targetTurnId) ||
-        context.retryPendingTurnIds.has(targetTurnId)
-      ) {
+      // the `agent_settled` the abort triggers. An extension command has no run,
+      // so it would hang here — close it now.
+      // The same holds between low-level runs: abort can cancel retry backoff
+      // or compaction before another run exists to emit `agent_settled`, so
+      // close it directly.
+      if (!context.agentRunTurnIds.has(targetTurnId) || context.betweenAgentRuns) {
         yield* settleTurn(context, targetTurnId, { kind: "cancelled" });
       }
     });

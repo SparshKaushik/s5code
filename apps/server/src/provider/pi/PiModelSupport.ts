@@ -1,15 +1,15 @@
 /**
- * PiModelSupport — model slug encoding and capability derivation for pi.
+ * PiModelSupport: model slug encoding and capability derivation for pi.
  *
  * pi identifies a model by a `(provider, modelId)` pair, and `set_model` takes
  * both. S5 Code's `ModelSelection.model` is a single slug, so we encode the
- * pair as `provider/modelId` and split on the *first* separator only — several
+ * pair as `provider/modelId` and split on the *first* separator only. Several
  * pi providers ship ids that themselves contain a slash (`cline-pass/glm-5.2`).
  *
- * Thinking levels are per-model: pi publishes a `thinkingLevelMap` whose keys
- * are exactly the levels that model accepts. An empty or absent map means the
- * model takes no thinking level, so we omit the option entirely instead of
- * offering a control that would fail on `set_thinking_level`.
+ * Thinking levels are per-model. Pi's `thinkingLevelMap` selectively maps
+ * canonical levels to provider-specific values. Missing core levels use Pi's
+ * defaults, `null` marks a level as unsupported, and `xhigh` and `max` require
+ * an explicit mapping. Models without reasoning support omit the control.
  *
  * @module provider/pi/PiModelSupport
  */
@@ -20,8 +20,17 @@ import { parsePiThinkingLevel, type PiModel, type PiThinkingLevel } from "./PiRp
 
 export const PI_THINKING_OPTION_ID = "thinking";
 
-/** Levels offered when a model declares reasoning support without a level map. */
-const IMPLICIT_THINKING_LEVELS: ReadonlyArray<PiThinkingLevel> = ["off", "low", "medium", "high"];
+/** Pi's built-in reasoning levels, enabled unless a model explicitly disables one. */
+const DEFAULT_THINKING_LEVELS: ReadonlyArray<PiThinkingLevel> = [
+  "off",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+];
+
+/** Pi exposes these extended levels only when a model maps them explicitly. */
+const EXPLICIT_THINKING_LEVELS: ReadonlyArray<PiThinkingLevel> = ["xhigh", "max"];
 
 const THINKING_LEVEL_LABELS: Record<PiThinkingLevel, string> = {
   off: "Off",
@@ -40,7 +49,7 @@ export interface PiModelRef {
   readonly modelId: string;
 }
 
-/** `provider/modelId` — the slug shape stored in `ModelSelection.model`. */
+/** `provider/modelId`, the slug shape stored in `ModelSelection.model`. */
 export function piModelSlug(model: PiModelRef): string {
   return `${model.provider}/${model.modelId}`;
 }
@@ -63,16 +72,16 @@ export function parsePiModelSlug(slug: string | undefined): PiModelRef | undefin
   };
 }
 
-/** Thinking levels a model accepts, in canonical order. */
+/** Thinking levels a reasoning model accepts, in Pi's canonical order. */
 export function piModelThinkingLevels(model: PiModel): ReadonlyArray<PiThinkingLevel> {
-  const mapped = Object.keys(model.thinkingLevelMap ?? {}).flatMap((key) => {
-    const level = parsePiThinkingLevel(key);
-    return level ? [level] : [];
+  if (model.reasoning !== true) return [];
+
+  const levels = [...DEFAULT_THINKING_LEVELS, ...EXPLICIT_THINKING_LEVELS];
+  return levels.filter((level) => {
+    const mapped = model.thinkingLevelMap?.[level];
+    if (mapped === null) return false;
+    return !EXPLICIT_THINKING_LEVELS.includes(level) || mapped !== undefined;
   });
-  if (mapped.length > 0) {
-    return mapped;
-  }
-  return model.reasoning === true ? IMPLICIT_THINKING_LEVELS : [];
 }
 
 export function piModelCapabilities(model: PiModel): ModelCapabilities {
