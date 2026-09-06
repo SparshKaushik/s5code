@@ -50,6 +50,9 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.AnnotatedString
+import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -390,6 +393,18 @@ fun FilePreviewScreen(
                 val loaded = file.value
                 val language = remember(loaded.path) { codeLanguageOfPath(loaded.path) }
                 val highlightedLines = rememberHighlightedLines(loaded.lines, language)
+                val textMeasurer = rememberTextMeasurer()
+                val codeStyle = S5Theme.code.code
+                val charWidthPx =
+                    remember(textMeasurer, codeStyle) {
+                        textMeasurer.measure("M", codeStyle).size.width
+                    }
+                val density = LocalDensity.current
+                val maxChars = remember(loaded) { loaded.lines.maxOfOrNull { it.length } ?: 0 }
+                val maxCodeWidthDp =
+                    remember(maxChars, charWidthPx, density) {
+                        with(density) { (maxChars * charWidthPx).toDp() }
+                    }
                 Column(Modifier.fillMaxSize().padding(padding)) {
                     if (loaded.truncated) {
                         S5Notice(
@@ -409,23 +424,42 @@ fun FilePreviewScreen(
                             contentPadding = PaddingValues(vertical = S5Theme.spacing.small),
                         ) {
                             items(loaded.lines.size, key = { it }) { index ->
-                                val annotated = highlightedLines[index]
+                                val annotated =
+                                    if (index < highlightedLines.size) {
+                                        highlightedLines[index]
+                                    } else {
+                                        AnnotatedString(loaded.lines[index])
+                                    }
                                 Row(
                                     Modifier.fillMaxWidth()
-                                        .then(if (wrap) Modifier else Modifier.horizontalScroll(scroll))
-                                        .padding(horizontal = S5Theme.spacing.small),
+                                        .padding(horizontal = S5Theme.spacing.small, vertical = 1.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
                                 ) {
                                     Text(
                                         "${index + 1}".padStart(4),
                                         style = S5Theme.code.codeSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        modifier = Modifier.padding(end = S5Theme.spacing.small),
                                     )
-                                    Text(
-                                        annotated,
-                                        style = S5Theme.code.code,
-                                        softWrap = wrap,
-                                        modifier = Modifier.padding(start = S5Theme.spacing.small),
-                                    )
+                                    if (wrap) {
+                                        Text(
+                                            annotated,
+                                            style = S5Theme.code.code,
+                                            softWrap = true,
+                                            modifier = Modifier.weight(1f),
+                                        )
+                                    } else {
+                                        Box(
+                                            Modifier.weight(1f).horizontalScroll(scroll)
+                                        ) {
+                                            Text(
+                                                annotated,
+                                                style = S5Theme.code.code,
+                                                softWrap = false,
+                                                modifier = Modifier.defaultMinSize(minWidth = maxCodeWidthDp),
+                                            )
+                                        }
+                                    }
                                 }
                             }
                         }

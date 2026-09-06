@@ -9,6 +9,9 @@ package club.touchtech.s5code.kotlin.design.text
 enum class CodeTokenKind {
     Plain,
     Keyword,
+    Function,
+    Type,
+    Variable,
     StringLiteral,
     Number,
     Comment,

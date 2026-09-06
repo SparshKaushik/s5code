@@ -930,9 +930,14 @@ class LiveWorkspaceGateway(
         }
     }
 
-    override suspend fun setSnoozed(environmentId: EnvironmentId, id: ThreadId, snoozed: Boolean) {
+    override suspend fun setSnoozed(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        snoozed: Boolean,
+        untilIso: String?,
+    ) {
         if (snoozed) {
-            dispatch(environmentId, Commands.snooze(id.value, tomorrowMorningIso()))
+            dispatch(environmentId, Commands.snooze(id.value, untilIso ?: tomorrowMorningIso()))
         } else {
             dispatch(environmentId, Commands.lifecycleByUser("thread.unsnooze", id.value))
         }

@@ -2,6 +2,8 @@ package club.touchtech.s5code.kotlin.design.component
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.ArrowBack
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuGroup
@@ -12,9 +14,14 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 
 /** One entry in an S5 overflow/selection menu. */
@@ -26,6 +33,7 @@ data class S5MenuOption(
     val selected: Boolean = false,
     val enabled: Boolean = true,
     val destructive: Boolean = false,
+    val children: List<S5MenuOption> = emptyList(),
 )
 
 /**
@@ -54,46 +62,112 @@ fun S5OverflowMenu(
     onExpandedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
+    var currentSubmenu by remember(expanded) { mutableStateOf<S5MenuOption?>(null) }
+
     Box(modifier) {
         S5IconButton(icon = icon, label = label, onClick = { onExpandedChange(!expanded) })
         DropdownMenu(
             expanded = expanded,
-            onDismissRequest = { onExpandedChange(false) },
+            onDismissRequest = {
+                currentSubmenu = null
+                onExpandedChange(false)
+            },
             containerColor = Color.Transparent,
             tonalElevation = 0.dp,
             shadowElevation = 0.dp,
             border = null,
         ) {
             MenuGroupSurface {
-                options.forEachIndexed { index, option ->
-                    val itemColors =
-                        if (option.destructive) {
-                            // Destructive entries were previously indistinguishable
-                            // from the rest, so the flag did nothing.
-                            MenuDefaults.selectableItemColors(
-                                containerColor = Color.Transparent,
-                                textColor = MaterialTheme.colorScheme.error,
-                                leadingIconColor = MaterialTheme.colorScheme.error,
-                            )
-                        } else {
-                            MenuDefaults.selectableItemColors(containerColor = Color.Transparent)
-                        }
+                val activeMenu = currentSubmenu
+                if (activeMenu != null) {
+                    val count = activeMenu.children.size + 1
                     DropdownMenuItem(
-                        selected = option.selected,
-                        enabled = option.enabled,
-                        onClick = {
-                            onExpandedChange(false)
-                            onSelect(option.id)
+                        selected = false,
+                        onClick = { currentSubmenu = null },
+                        text = { Text(activeMenu.label, fontWeight = FontWeight.SemiBold) },
+                        shapes = MenuDefaults.itemShape(index = 0, count = count),
+                        colors = MenuDefaults.selectableItemColors(containerColor = Color.Transparent),
+                        leadingIcon = {
+                            Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Back")
                         },
-                        text = { Text(option.label) },
-                        shapes = MenuDefaults.itemShape(index = index, count = options.size),
-                        colors = itemColors,
-                        leadingIcon = option.icon?.let { { Icon(it, contentDescription = null) } },
-                        selectedLeadingIcon = {
-                            Icon(Icons.Rounded.Check, contentDescription = null)
-                        },
-                        supportingText = option.supporting?.let { { Text(it) } },
                     )
+                    activeMenu.children.forEachIndexed { index, child ->
+                        val childColors =
+                            if (child.destructive) {
+                                MenuDefaults.selectableItemColors(
+                                    containerColor = Color.Transparent,
+                                    textColor = MaterialTheme.colorScheme.error,
+                                    leadingIconColor = MaterialTheme.colorScheme.error,
+                                )
+                            } else {
+                                MenuDefaults.selectableItemColors(containerColor = Color.Transparent)
+                            }
+                        DropdownMenuItem(
+                            selected = child.selected,
+                            enabled = child.enabled,
+                            onClick = {
+                                currentSubmenu = null
+                                onExpandedChange(false)
+                                onSelect(child.id)
+                            },
+                            text = { Text(child.label) },
+                            shapes = MenuDefaults.itemShape(index = index + 1, count = count),
+                            colors = childColors,
+                            leadingIcon = child.icon?.let { { Icon(it, contentDescription = null) } },
+                            selectedLeadingIcon = {
+                                Icon(Icons.Rounded.Check, contentDescription = null)
+                            },
+                            supportingText = child.supporting?.let { { Text(it) } },
+                        )
+                    }
+                } else {
+                    options.forEachIndexed { index, option ->
+                        val itemColors =
+                            if (option.destructive) {
+                                // Destructive entries were previously indistinguishable
+                                // from the rest, so the flag did nothing.
+                                MenuDefaults.selectableItemColors(
+                                    containerColor = Color.Transparent,
+                                    textColor = MaterialTheme.colorScheme.error,
+                                    leadingIconColor = MaterialTheme.colorScheme.error,
+                                )
+                            } else {
+                                MenuDefaults.selectableItemColors(containerColor = Color.Transparent)
+                            }
+                        val hasChildren = option.children.isNotEmpty()
+                        val trailingContent: (@Composable () -> Unit)? =
+                            if (hasChildren) {
+                                {
+                                    Icon(
+                                        Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                        contentDescription = null,
+                                    )
+                                }
+                            } else {
+                                null
+                            }
+                        DropdownMenuItem(
+                            selected = option.selected,
+                            enabled = option.enabled,
+                            onClick = {
+                                if (hasChildren) {
+                                    currentSubmenu = option
+                                } else {
+                                    onExpandedChange(false)
+                                    onSelect(option.id)
+                                }
+                            },
+                            text = { Text(option.label) },
+                            shapes = MenuDefaults.itemShape(index = index, count = options.size),
+                            colors = itemColors,
+                            leadingIcon = option.icon?.let { { Icon(it, contentDescription = null) } },
+                            selectedLeadingIcon = {
+                                Icon(Icons.Rounded.Check, contentDescription = null)
+                            },
+                            trailingContent = trailingContent,
+                            supportingText = option.supporting?.let { { Text(it) } },
+                        )
+                    }
                 }
             }
         }

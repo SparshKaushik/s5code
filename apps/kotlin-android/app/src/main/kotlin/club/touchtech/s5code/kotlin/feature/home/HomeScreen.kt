@@ -44,6 +44,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -545,74 +546,76 @@ fun HomeScreen(
                                         snoozeSupported =
                                             environment?.capabilities?.threadSnooze == true,
                                     )
-                                S5SwipeableRow(
-                                    endAction =
-                                        swipes.end?.let { action ->
-                                            swipeActionFor(action) {
-                                                launchThreadAction(item.thread, action.command)
-                                            }
-                                        },
-                                    startAction =
-                                        swipes.start?.let { action ->
-                                            swipeActionFor(action) {
-                                                launchThreadAction(item.thread, action.command)
-                                            }
-                                        },
-                                ) {
-                                    ThreadRow(
-                                        thread = item.thread,
-                                        project = item.project,
-                                        environmentLabel = item.environmentLabel,
-                                        draftPreview = item.draftPreview,
-                                        searchMatch = item.searchMatch,
-                                        searchQuery = home.query,
-                                        resolveProjectIconUrl = store.workspace::projectIconUrl,
-                                        onClick = {
-                                            onOpenThread(
-                                                item.thread.environmentId.value,
-                                                threadKey,
-                                            )
-                                        },
-                                        trailing = {
-                                            val titleRegenerationSupported =
-                                                environment
-                                                    ?.capabilities
-                                                    ?.threadTitleRegeneration == true
-                                            S5OverflowMenu(
-                                                icon = Icons.Rounded.MoreVert,
-                                                label = "Thread actions",
-                                                expanded = rowMenuFor == threadKey,
-                                                onExpandedChange = { open ->
-                                                    rowMenuFor = if (open) threadKey else null
-                                                },
-                                                options =
-                                                    threadMenuOptions(
-                                                        thread = item.thread,
-                                                        titleRegenerationSupported =
-                                                            titleRegenerationSupported,
-                                                    ),
-                                                onSelect = { action ->
-                                                    val runAction = {
-                                                        launchThreadAction(item.thread, action)
-                                                    }
-                                                    if (action == "delete") {
-                                                        confirmController.show(
-                                                            S5ConfirmDialogRequest(
-                                                                title = "Delete thread?",
-                                                                message =
-                                                                    "\"${item.thread.title}\" and its local thread history will be permanently deleted.",
-                                                                confirmText = "Delete",
-                                                                destructive = true,
-                                                                onConfirm = runAction,
+                                key(item.thread.status) {
+                                    S5SwipeableRow(
+                                        endAction =
+                                            swipes.end?.let { action ->
+                                                swipeActionFor(action) {
+                                                    launchThreadAction(item.thread, action.command)
+                                                }
+                                            },
+                                        startAction =
+                                            swipes.start?.let { action ->
+                                                swipeActionFor(action) {
+                                                    launchThreadAction(item.thread, action.command)
+                                                }
+                                            },
+                                    ) {
+                                        ThreadRow(
+                                            thread = item.thread,
+                                            project = item.project,
+                                            environmentLabel = item.environmentLabel,
+                                            draftPreview = item.draftPreview,
+                                            searchMatch = item.searchMatch,
+                                            searchQuery = home.query,
+                                            resolveProjectIconUrl = store.workspace::projectIconUrl,
+                                            onClick = {
+                                                onOpenThread(
+                                                    item.thread.environmentId.value,
+                                                    threadKey,
+                                                )
+                                            },
+                                            trailing = {
+                                                val titleRegenerationSupported =
+                                                    environment
+                                                        ?.capabilities
+                                                        ?.threadTitleRegeneration == true
+                                                S5OverflowMenu(
+                                                    icon = Icons.Rounded.MoreVert,
+                                                    label = "Thread actions",
+                                                    expanded = rowMenuFor == threadKey,
+                                                    onExpandedChange = { open ->
+                                                        rowMenuFor = if (open) threadKey else null
+                                                    },
+                                                    options =
+                                                        threadMenuOptions(
+                                                            thread = item.thread,
+                                                            titleRegenerationSupported =
+                                                                titleRegenerationSupported,
+                                                        ),
+                                                    onSelect = { action ->
+                                                        val runAction = {
+                                                            launchThreadAction(item.thread, action)
+                                                        }
+                                                        if (action == "delete") {
+                                                            confirmController.show(
+                                                                S5ConfirmDialogRequest(
+                                                                    title = "Delete thread?",
+                                                                    message =
+                                                                        "\"${item.thread.title}\" and its local thread history will be permanently deleted.",
+                                                                    confirmText = "Delete",
+                                                                    destructive = true,
+                                                                    onConfirm = runAction,
+                                                                )
                                                             )
-                                                        )
-                                                    } else {
-                                                        runAction()
-                                                    }
-                                                },
-                                            )
-                                        },
-                                    )
+                                                        } else {
+                                                            runAction()
+                                                        }
+                                                    },
+                                                )
+                                            },
+                                        )
+                                    }
                                 }
                             }
                         }
@@ -679,6 +682,7 @@ private fun swipeActionFor(action: ThreadSwipeAction, onAction: () -> Unit): S5S
 internal fun threadMenuOptions(
     thread: ThreadSummary,
     titleRegenerationSupported: Boolean,
+    snoozePresets: List<SnoozePreset> = resolveSnoozePresets(),
 ): List<S5MenuOption> {
     return buildList {
         add(
@@ -688,13 +692,37 @@ internal fun threadMenuOptions(
                 icon = Icons.Rounded.PushPin,
             )
         )
-        add(
-            S5MenuOption(
-                id = "snooze",
-                label = if (thread.status == ThreadStatus.Snoozed) "Unsnooze" else "Snooze",
-                icon = Icons.Rounded.Bedtime,
+        if (thread.status == ThreadStatus.Snoozed) {
+            add(
+                S5MenuOption(
+                    id = "unsnooze",
+                    label = "Unsnooze",
+                    icon = Icons.Rounded.Bedtime,
+                )
             )
-        )
+        } else {
+            val canSnooze = threadSnoozable(thread)
+            add(
+                S5MenuOption(
+                    id = "snooze",
+                    label = "Snooze",
+                    icon = Icons.Rounded.Bedtime,
+                    enabled = canSnooze,
+                    children =
+                        if (canSnooze) {
+                            snoozePresets.map { preset ->
+                                S5MenuOption(
+                                    id = "snooze:${preset.snoozedUntilIso}",
+                                    label = preset.label,
+                                    supporting = preset.whenLabel,
+                                )
+                            }
+                        } else {
+                            emptyList()
+                        },
+                )
+            )
+        }
         add(
             S5MenuOption(
                 id = "settle",
@@ -732,13 +760,18 @@ private suspend fun performThreadAction(
     pinned: Boolean,
     status: ThreadStatus,
 ) {
-    when (action) {
-        "pin" -> store.workspace.setPinned(environmentId, id, !pinned)
-        "snooze" -> store.workspace.setSnoozed(environmentId, id, status != ThreadStatus.Snoozed)
-        "settle" -> store.workspace.setSettled(environmentId, id, status != ThreadStatus.Settled)
-        "regenerate-title" -> store.workspace.regenerateTitle(environmentId, id)
-        "archive" -> store.workspace.setArchived(environmentId, id, true)
-        "delete" -> store.workspace.deleteThread(environmentId, id)
+    when {
+        action == "pin" -> store.workspace.setPinned(environmentId, id, !pinned)
+        action.startsWith("snooze:") -> {
+            val untilIso = action.removePrefix("snooze:")
+            store.workspace.setSnoozed(environmentId, id, true, untilIso)
+        }
+        action == "snooze" -> store.workspace.setSnoozed(environmentId, id, status != ThreadStatus.Snoozed)
+        action == "unsnooze" -> store.workspace.setSnoozed(environmentId, id, false)
+        action == "settle" -> store.workspace.setSettled(environmentId, id, status != ThreadStatus.Settled)
+        action == "regenerate-title" -> store.workspace.regenerateTitle(environmentId, id)
+        action == "archive" -> store.workspace.setArchived(environmentId, id, true)
+        action == "delete" -> store.workspace.deleteThread(environmentId, id)
     }
 }
 
