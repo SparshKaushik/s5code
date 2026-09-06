@@ -281,8 +281,6 @@ jobs:
 
   mobile_native_static_analysis:
     name: Mobile Native Static Analysis
-  mobile_native_static_analysis:
-    name: Mobile Native Static Analysis
     needs: mobile_native_changes
     # Skip only on an explicit "no": a gate job that failed or errored leaves the
     # output empty, and that must run the lint rather than silently skip it.
