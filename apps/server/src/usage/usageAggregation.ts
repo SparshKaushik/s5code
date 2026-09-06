@@ -187,7 +187,8 @@ export class UsageAggregator {
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;
     if (priced.costSource === "userTagged") bucket.userTaggedRecords += 1;
-    if (priced.pricedAs !== null) bucket.pricedAs = priced.pricedAs;
+    if (priced.pricedAs !== null && priced.pricedAs !== undefined)
+      bucket.pricedAs = priced.pricedAs;
     if (record.sessionId.length > 0) bucket.sessions.add(record.sessionId);
     return true;
   }

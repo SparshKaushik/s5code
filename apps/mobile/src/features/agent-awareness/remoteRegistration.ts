@@ -149,16 +149,6 @@ export function mergeAgentAwarenessRegistrationPreferences(
   return { ...stored, ...override };
 }
 
-export function normalizeAgentAwarenessRelayBaseUrl(
-  value: string | null | undefined,
-): string | null {
-  const trimmed = value?.trim();
-  if (!trimmed) {
-    return null;
-  }
-  return trimmed.replace(/\/+$/g, "");
-}
-
 function readRelayConfig(): { readonly url: string } | null {
   const relayUrl = resolveCloudPublicConfig().relay.url;
   if (!relayUrl) {
@@ -994,7 +984,6 @@ export function armAgentAwarenessAndroidLiveUpdate(input: {
       );
     });
 }
-
 export function refreshAgentAwarenessRegistration(): Effect.Effect<
   void,
   never,

@@ -1,13 +1,14 @@
 /**
  * UsageService - scans provider transcripts and returns priced usage buckets.
  *
- * The scan reads the provider CLIs' own session files rather than T3 Code's
- * orchestration projections, so usage covers turns driven outside T3 Code too.
- * This is the approach `ccusage` takes.
+ * The scan reads the provider CLIs' own session files (Claude Code, Codex, and
+ * Grok Build) rather than T3 Code's orchestration projections, so usage covers
+ * turns driven outside T3 Code too. This is the approach `ccusage` takes.
  *
  * Transcripts are append-only, so parsed records are memoised per file by
  * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
- * scans only reparse files that changed.
+ * scans only reparse files that changed, and a file that merely grew resumes
+ * from its cached parse position so only the appended bytes are read.
  *
  * @module UsageService
  */
@@ -15,9 +16,12 @@ import * as NodeOS from "node:os";
 
 import {
   USAGE_CONTRACT_VERSION,
+  type ServerSettings as ServerSettingsValue,
   type UsageCatalogModel,
   type UsageModelSearchInput,
   type UsageModelSearchResult,
+  type UsagePricing,
+  type UsageProviderKind,
   type UsageSource,
   type UsageSummary,
   type UsageSummaryInput,
@@ -28,19 +32,21 @@ import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
+import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
+import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
+import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveClaudeHomePath } from "../provider/Drivers/ClaudeHome.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-import { expandHomePath } from "../pathExpansion.ts";
 import {
   CURSOR_USAGE_MAX_PAGES,
   CURSOR_USAGE_PAGE_SIZE,
@@ -53,14 +59,19 @@ import {
   type CursorUsagePage,
 } from "./usageCursor.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
-import type { TranscriptUsageProvider, UsageRecord } from "./usageTranscripts.ts";
+import type { UsageRecord } from "./usageTranscripts.ts";
 import {
   EMPTY_CATALOG,
   parseModelCatalog,
   searchCatalog,
   type ModelCatalog,
 } from "./usageModelCatalog.ts";
-import { parseRateTable, UsagePricer, type RateTable } from "./usagePricing.ts";
+import {
+  createOverrideRateTable,
+  parseRateTable,
+  UsagePricer,
+  type RateTable,
+} from "./usagePricing.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -89,6 +100,9 @@ const MODEL_SEARCH_LIMIT = 50;
 
 /** Rates move rarely; a day-old table keeps the page working offline. */
 const RATES_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** An explicit refresh ignores the TTL, but not a table fetched this recently. */
+const RATES_REFRESH_FLOOR_MS = 60 * 1000;
 
 /**
  * Files are filtered by mtime before opening. The slack covers a session whose
@@ -124,8 +138,17 @@ export class UsageService extends Context.Service<
     readonly searchModels: (
       input: UsageModelSearchInput,
     ) => Effect.Effect<UsageModelSearchResult, UsageReadError>;
+    /** Refetches the rate table ahead of its TTL. See `ensureRates`. */
+    readonly refreshRates: Effect.Effect<UsagePricing>;
   }
 >()("t3/usage/UsageService") {}
+
+const EMPTY_PRICING: UsagePricing = {
+  status: "unavailable",
+  source: LITELLM_RATES_URL,
+  fetchedAt: null,
+  knownModels: 0,
+};
 
 /** Empty summary, for suites that only need the RPC surface to resolve. */
 export const layerTest = Layer.succeed(
@@ -140,15 +163,11 @@ export const layerTest = Layer.succeed(
         untilDay: input.untilDay,
         buckets: [],
         sources: [],
-        pricing: {
-          status: "unavailable",
-          source: LITELLM_RATES_URL,
-          fetchedAt: null,
-          knownModels: 0,
-        },
+        pricing: EMPTY_PRICING,
         scanDurationMs: 0,
       }),
     searchModels: () => Effect.succeed({ models: [] }),
+    refreshRates: Effect.succeed(EMPTY_PRICING),
   }),
 );
 
@@ -259,17 +278,31 @@ export const make = Effect.gen(function* () {
     );
   });
 
+  // One fetch at a time. A burst of refreshes from several clients waits on
+  // the first fetch and then sees a table young enough to skip its own.
+  const ratesLock = yield* Semaphore.make(1);
+
+  const pricing = (): UsagePricing => ({
+    status: ratesStatus,
+    source: LITELLM_RATES_URL,
+    fetchedAt:
+      ratesFetchedAtMs === null ? null : DateTime.formatIso(DateTime.makeUnsafe(ratesFetchedAtMs)),
+    knownModels: rates.size,
+  });
+
   /**
    * Loads the LiteLLM rate table, preferring a fresh copy and falling back to
    * the on-disk snapshot. With neither, every model reports as unpriced rather
-   * than the page failing.
+   * than the page failing. `force` refetches inside the TTL so a model that
+   * LiteLLM added since the last fetch gets priced now.
    */
-  const ensureRates = Effect.fn("UsageService.ensureRates")(function* () {
+  const loadRates = Effect.fn("UsageService.loadRates")(function* (force: boolean) {
     const now = yield* Clock.currentTimeMillis;
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
+    const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
+    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
     if (ratesFetchedAtMs === null) yield* loadCachedRates();
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < RATES_TTL_MS) return;
+    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
     const fetched = yield* fetchRates();
     if (fetched === null) {
@@ -307,6 +340,13 @@ export const make = Effect.gen(function* () {
     yield* persistRates(catalogCachePath, now, fetched.document);
   });
 
+  const ensureRates = (force: boolean) => ratesLock.withPermit(loadRates(force));
+
+  const refreshRates = ensureRates(true).pipe(
+    Effect.map(pricing),
+    Effect.withSpan("UsageService.refreshRates"),
+  );
+
   /**
    * Claude's config dir is the home itself when overridden, but a default
    * install nests transcripts under `~/.claude/projects`. Probe both.
@@ -320,12 +360,6 @@ export const make = Effect.gen(function* () {
       return nestedExists ? nested : path.join(homePath, "projects");
     });
 
-  /**
-   * pi's agent directory, which holds `sessions/` alongside its settings and
-   * credentials. Mirrors `PiLaunch.makePiEnvironment`: the configured
-   * `agentDirPath` is what a spawned pi would see as `PI_CODING_AGENT_DIR`, and
-   * `~/.pi/agent` is pi's own default.
-   */
   const resolvePiAgentDir = (piSettings: { readonly agentDirPath: string }): string => {
     const agentDirPath = piSettings.agentDirPath.trim();
     return agentDirPath.length > 0
@@ -333,31 +367,41 @@ export const make = Effect.gen(function* () {
       : path.join(NodeOS.homedir(), ".pi", "agent");
   };
 
-  /** Resolves transcript directories. Cursor is fetched separately from its account-wide API. */
-  const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* () {
-    // A settings failure must surface as an error: swallowing it here would
-    // present "zero usage from every provider" as a valid answer.
-    const settings = yield* settingsService.getSettings.pipe(
-      Effect.catchCause(
-        (cause) =>
-          new UsageReadError({
-            reason: "scanFailed",
-            // Bounded description; the squashed failure travels as the cause.
-            // Squashed, not the Cause tree: a full tree in a Defect field is
-            // the unbounded wire payload the bounded detail exists to avoid.
-            detail: "Server settings could not be read.",
-            cause: Cause.squash(cause),
-          }),
-      ),
-    );
+  // A settings failure must not silently discard custom rates or transcript homes.
+  const readSettings = settingsService.getSettings.pipe(
+    Effect.catchCause(
+      (cause) =>
+        new UsageReadError({
+          reason: "scanFailed",
+          detail: "Server settings could not be read.",
+          cause: Cause.squash(cause),
+        }),
+    ),
+  );
 
+  /** Resolves the transcript directory for each provider. */
+  const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
+    settings: ServerSettingsValue,
+  ) {
     const claudeHome = yield* resolveClaudeHomePath(settings.providers.claudeAgent);
     const claudeDir = yield* resolveClaudeTranscriptDir(claudeHome);
     const codexLayout = yield* resolveCodexHomeLayout(settings.providers.codex);
+    // Grok Settings only expose the binary path; home is `$GROK_HOME` or `~/.grok`.
+    // Empty/whitespace GROK_HOME must fall back: coalescing alone would scan cwd.
+    const grokHomeEnv = hostEnvironment["GROK_HOME"]?.trim() ?? "";
+    const grokHome =
+      grokHomeEnv.length > 0
+        ? path.resolve(expandHomePath(grokHomeEnv))
+        : path.join(NodeOS.homedir(), ".grok");
 
     return [
       { provider: "claude" as const, dir: claudeDir },
       { provider: "codex" as const, dir: path.join(codexLayout.sharedHomePath, "sessions") },
+      {
+        provider: "grok" as const,
+        dir: path.join(grokHome, "sessions"),
+        fileName: "updates.jsonl",
+      },
       {
         provider: "pi" as const,
         dir: path.join(resolvePiAgentDir(settings.providers.pi), "sessions"),
@@ -397,12 +441,19 @@ export const make = Effect.gen(function* () {
     );
   });
 
-  /** Parses one transcript, reusing the cached result when it is unchanged. */
+  /**
+   * Parses one transcript, reusing the cached result when it is unchanged.
+   *
+   * A file that only grew re-parses from the cached position, so an actively
+   * written multi-hundred-megabyte rollout costs its appended bytes per scan
+   * rather than a full re-read. The reader verifies the position's guard bytes
+   * and silently restarts from byte 0 when they no longer match.
+   */
   const readFileRecords = (
     filePath: string,
     size: number,
     mtimeMs: number,
-    provider: TranscriptUsageProvider,
+    provider: UsageProviderKind,
   ): Effect.Effect<readonly UsageRecord[]> =>
     Effect.gen(function* () {
       const cached = fileCache.get(filePath);
@@ -414,20 +465,44 @@ export const make = Effect.gen(function* () {
         cached.mtimeMs === mtimeMs &&
         cached.provider === provider
       ) {
-        return cached.records;
+        return cached.tailRecords.length === 0
+          ? cached.records
+          : [...cached.records, ...cached.tailRecords];
       }
 
-      const parsed = yield* Effect.promise(() => readTranscriptRecords(filePath, provider));
+      // Only a strictly grown file may resume. Same size with a new mtime, or
+      // a shrunken file, means rewritten content; re-parse it whole.
+      const resumeFrom =
+        cached !== undefined && cached.provider === provider && size > cached.size
+          ? cached.position
+          : undefined;
+
+      const parsed = yield* Effect.promise(() =>
+        readTranscriptRecords(filePath, provider, resumeFrom),
+      );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
       if (parsed === null) return [];
-      // Stored already de-duplicated within the file, which is 99% of all
-      // duplicates. The aggregator still runs the cross-file dedupe pass.
-      const records = dedupeWithinFile(parsed);
 
-      fileCache.set(filePath, { size, mtimeMs, provider, records });
+      // Stored already de-duplicated within the file, which is 99% of all
+      // duplicates. The aggregator still runs the cross-file dedupe pass. One
+      // seen set spans the cached base, the new lines, and the tail so a
+      // resumed parse dedupes exactly like a full one.
+      const base = parsed.resumed && cached !== undefined ? cached.records : [];
+      const seen = new Set<string>();
+      const records = dedupeWithinFile([...base, ...parsed.records], seen);
+      const tailRecords = dedupeWithinFile(parsed.tailRecords, seen);
+
+      fileCache.set(filePath, {
+        size,
+        mtimeMs,
+        provider,
+        records,
+        tailRecords,
+        position: parsed.position,
+      });
       cacheDirty = true;
-      return records;
+      return tailRecords.length === 0 ? records : [...records, ...tailRecords];
     });
 
   const readCursorUsage = Effect.fn("UsageService.readCursorUsage")(
@@ -570,7 +645,53 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
+  /** One provider directory's walk and parse, before rates are involved. */
+  interface ScannedDir {
+    readonly provider: UsageProviderKind;
+    readonly dir: string;
+    readonly volumeId: string;
+    /** Parsed records per file, or `null` when the directory does not exist. */
+    readonly files:
+      | readonly { readonly path: string; readonly records: readonly UsageRecord[] }[]
+      | null;
+  }
+
+  const collectDirs = Effect.fn("UsageService.collectDirs")(function* (
+    windowStartMs: number,
+    settings: ServerSettingsValue,
+  ) {
+    // The home resolvers ask for `Path` themselves; satisfy them from the
+    // instance we already hold so the scan stays context-free.
+    const dirs = yield* resolveTranscriptDirs(settings).pipe(
+      Effect.provideService(Path.Path, path),
+    );
+    const scanned: ScannedDir[] = [];
+    for (const { provider, dir, fileName } of dirs) {
+      const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+      const exists = yield* fileSystem
+        .exists(dir)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      if (!exists) {
+        scanned.push({ provider, dir, volumeId, files: null });
+        continue;
+      }
+      const files = yield* Effect.promise(() =>
+        listTranscriptFiles(dir, windowStartMs, fileName === undefined ? undefined : { fileName }),
+      );
+      const parsedFiles: { path: string; records: readonly UsageRecord[] }[] = [];
+      for (const file of files) {
+        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
+        parsedFiles.push({ path: file.path, records });
+      }
+      scanned.push({ provider, dir, volumeId, files: parsedFiles });
+    }
+    return scanned;
+  });
+
+  const scanSummary = Effect.fn("UsageService.scanSummary")(function* (
+    input: UsageSummaryInput,
+    settings: ServerSettingsValue,
+  ) {
     if (input.sinceDay > input.untilDay) {
       return yield* new UsageReadError({
         reason: "invalidWindow",
@@ -603,14 +724,12 @@ export const make = Effect.gen(function* () {
     }
 
     const startedAtMs = yield* Clock.currentTimeMillis;
-    yield* ensureRates();
-    yield* ensureCatalog();
+    if (input.modelAliases.length > 0) {
+      yield* ensureCatalog();
+    }
     yield* ensureScanCacheLoaded;
 
     const hostId = NodeOS.hostname();
-    // The home resolvers ask for `Path` themselves; satisfy them from the
-    // instance we already hold so `readSummary` stays context-free.
-    const dirs = yield* resolveTranscriptDirs().pipe(Effect.provideService(Path.Path, path));
     const windowStart = DateTime.make(`${input.sinceDay}T00:00:00Z`);
     if (Option.isNone(windowStart)) {
       return yield* new UsageReadError({
@@ -621,11 +740,24 @@ export const make = Effect.gen(function* () {
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
 
+    // Pricing only matters once records are aggregated, so the rate table
+    // loads while transcripts stream instead of gating them: a cold rates
+    // fetch on a slow network no longer delays the scan by its own timeout.
+    const [, scannedDirs] = yield* Effect.all(
+      [ensureRates(false), collectDirs(windowStartMs, settings)],
+      { concurrency: 2 },
+    );
+
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
-      pricer: new UsagePricer({ rates, catalog, aliases: input.modelAliases }),
+      pricer: new UsagePricer({
+        rates,
+        catalog,
+        aliases: input.modelAliases,
+        priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
+      }),
       resolution: input.resolution ?? "day",
       ...hourlyWindow,
     });
@@ -642,13 +774,8 @@ export const make = Effect.gen(function* () {
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
 
-    for (const { provider, dir } of dirs) {
-      const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
-      const exists = yield* fileSystem
-        .exists(dir)
-        .pipe(Effect.catchCause(() => Effect.succeed(false)));
-
-      if (!exists) {
+    for (const { provider, dir, volumeId, files } of scannedDirs) {
+      if (files === null) {
         sources.push({
           fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
           status: "missing",
@@ -662,7 +789,6 @@ export const make = Effect.gen(function* () {
       }
 
       walkedRoots.push(dir);
-      const files = yield* Effect.promise(() => listTranscriptFiles(dir, windowStartMs));
       let scannedFiles = 0;
       let skippedFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
@@ -671,13 +797,12 @@ export const make = Effect.gen(function* () {
 
       for (const file of files) {
         livePaths.add(file.path);
-        const records = yield* readFileRecords(file.path, file.size, file.mtimeMs, provider);
-        if (records.length === 0) {
+        if (file.records.length === 0) {
           skippedFiles += 1;
           continue;
         }
         scannedFiles += 1;
-        for (const record of records) {
+        for (const record of file.records) {
           // Only sessions that contributed in-window count: the mtime slack
           // admits boundary files whose records fall outside the range.
           if (aggregator.add(record) && record.sessionId.length > 0) {
@@ -718,14 +843,15 @@ export const make = Effect.gen(function* () {
       untilDay: input.untilDay,
       buckets: aggregated.buckets,
       sources,
-      pricing: {
-        // Two tables, one figure: a page that priced half its rows from a stale
-        // snapshot has stale pricing, so the weaker of the two wins.
-        status: weakerPricingStatus(ratesStatus, catalogStatus),
-        source: `${LITELLM_RATES_URL} + ${MODELS_DEV_CATALOG_URL}`,
-        fetchedAt: formatOldestFetch(ratesFetchedAtMs, catalogFetchedAtMs),
-        knownModels: rates.size + catalog.size,
-      },
+      pricing:
+        input.modelAliases.length > 0 && catalogFetchedAtMs !== null
+          ? {
+              status: weakerPricingStatus(ratesStatus, catalogStatus),
+              source: `${LITELLM_RATES_URL} + ${MODELS_DEV_CATALOG_URL}`,
+              fetchedAt: formatOldestFetch(ratesFetchedAtMs, catalogFetchedAtMs),
+              knownModels: rates.size + catalog.size,
+            }
+          : pricing(),
       scanDurationMs: Math.max(0, finishedAtMs - startedAtMs),
     } satisfies UsageSummary;
   });
@@ -748,7 +874,59 @@ export const make = Effect.gen(function* () {
     } satisfies UsageModelSearchResult;
   });
 
-  return { readSummary, searchModels } as const;
+  /**
+   * In-flight scans by window and custom prices, so concurrent identical requests (the usage
+   * page open on two clients at once) share one scan instead of racing over
+   * the same corpus twice.
+   */
+  const inflightScans = new Map<string, Deferred.Deferred<UsageSummary, UsageReadError>>();
+
+  const scanKey = (
+    input: UsageSummaryInput,
+    priceOverrides: ServerSettingsValue["usagePriceOverrides"],
+  ): string =>
+    JSON.stringify([
+      input.timeZone,
+      input.sinceDay,
+      input.untilDay,
+      input.resolution ?? "day",
+      input.sinceTime ?? null,
+      input.untilTime ?? null,
+      priceOverrides,
+      input.modelAliases,
+    ]);
+
+  const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
+    const settings = yield* readSettings;
+    const key = scanKey(input, settings.usagePriceOverrides);
+    const deferred = yield* Effect.uninterruptible(
+      Effect.gen(function* () {
+        const existing = inflightScans.get(key);
+        if (existing !== undefined) return existing;
+
+        // Enrollment and detached-fiber creation must be atomic. Otherwise a
+        // canceled first caller can leave a Deferred with no scan to finish it.
+        const created = Deferred.makeUnsafe<UsageSummary, UsageReadError>();
+        inflightScans.set(key, created);
+        // Detached so one departing client cannot tear the scan out from under
+        // the fibers awaiting it; a finished scan warms the cache either way.
+        yield* scanSummary(input, settings).pipe(
+          Effect.onExit((exit) =>
+            Effect.sync(() => inflightScans.delete(key)).pipe(
+              Effect.andThen(Deferred.done(created, exit)),
+            ),
+          ),
+          Effect.forkDetach,
+        );
+        return created;
+      }),
+    );
+    // Waiting stays interruptible. The detached scan continues for other
+    // callers and still warms the cache if this caller leaves.
+    return yield* Deferred.await(deferred);
+  });
+
+  return { readSummary, searchModels, refreshRates } as const;
 });
 
 const PRICING_STATUS_RANK: Record<UsageSummary["pricing"]["status"], number> = {

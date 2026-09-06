@@ -184,13 +184,11 @@ export const make = Effect.gen(function* () {
 
   const listLiveThreads = Effect.fn("CheckpointMaintenance.listLiveThreads")(function* () {
     const owners = yield* projectionSnapshotQuery.listThreadCheckpointOwners();
-    return owners.map(
-      (owner): LiveThread => ({
-        threadId: owner.threadId,
-        title: owner.title,
-        cwd: owner.worktreePath ?? owner.workspaceRoot,
-      }),
-    );
+    return owners.map((owner): LiveThread => ({
+      threadId: owner.threadId,
+      title: owner.title,
+      cwd: owner.worktreePath ?? owner.workspaceRoot,
+    }));
   });
 
   /**
@@ -394,3 +392,29 @@ export const make = Effect.gen(function* () {
 });
 
 export const layer = Layer.effect(CheckpointMaintenance, make);
+
+const emptyUsage: CheckpointStorageUsage = {
+  generatedAt: "1970-01-01T00:00:00.000Z",
+  entries: [],
+  totalBytes: 0,
+  orphanedBytes: 0,
+};
+
+const emptyCleanupResult: CheckpointCleanupResult = {
+  scope: "all",
+  dryRun: false,
+  removedEntries: [],
+  removedRefCount: 0,
+  reclaimedBytes: 0,
+  usage: emptyUsage,
+};
+
+export const layerTest = Layer.succeed(
+  CheckpointMaintenance,
+  CheckpointMaintenance.of({
+    getUsage: () => Effect.succeed(emptyUsage),
+    cleanup: () => Effect.succeed(emptyCleanupResult),
+    forgetThread: () => Effect.succeed(0),
+    sweepIfConfigured: () => Effect.void,
+  }),
+);

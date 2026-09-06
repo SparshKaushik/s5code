@@ -1,4 +1,5 @@
-import { Defs, G, Path, Rect, Svg, ClipPath } from "react-native-svg";
+import { Image } from "expo-image";
+import { ClipPath, Defs, G, Path, Rect, Svg } from "react-native-svg";
 import { useAppearancePreferences } from "../features/settings/appearance/AppearancePreferencesProvider";
 
 type ProviderIconProps = {
@@ -13,6 +14,16 @@ type ProviderIconProps = {
  * one place. Codex is the fallback for unknown drivers, which is what a fork's
  * custom driver gets.
  */
+
+function AntigravityMark(props: { readonly size: number }) {
+  return (
+    <Image
+      source={require("../../assets/antigravity.png")}
+      style={{ width: props.size, height: props.size }}
+      contentFit="contain"
+    />
+  );
+}
 
 function ClaudeMark(props: { readonly size: number }) {
   return (
@@ -102,6 +113,8 @@ export function ProviderIcon(props: ProviderIconProps) {
   const size = props.size ?? 16;
 
   switch (props.provider) {
+    case "antigravity":
+      return <AntigravityMark size={size} />;
     case "claudeAgent":
     case "claude":
       return <ClaudeMark size={size} />;

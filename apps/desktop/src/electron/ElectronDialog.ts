@@ -90,7 +90,6 @@ export const ElectronDialogError = Schema.Union([
   ElectronDialogShowErrorBoxError,
 ]);
 export type ElectronDialogError = typeof ElectronDialogError.Type;
-export const isElectronDialogError = Schema.is(ElectronDialogError);
 
 export interface ElectronDialogPickFolderInput {
   readonly owner: Option.Option<Electron.BrowserWindow>;
@@ -101,6 +100,7 @@ export interface ElectronDialogPickFilesInput {
   readonly owner: Option.Option<Electron.BrowserWindow>;
   readonly defaultPath: Option.Option<string>;
   readonly filters: readonly Electron.FileFilter[];
+  readonly multiple: boolean;
 }
 
 export interface ElectronDialogConfirmInput {
@@ -169,7 +169,7 @@ export const make = ElectronDialog.of({
     });
     const defaultPath = Option.getOrNull(input.defaultPath);
     const openDialogOptions: Electron.OpenDialogOptions = {
-      properties: ["openFile", "multiSelections"],
+      properties: input.multiple ? ["openFile", "multiSelections"] : ["openFile"],
       filters: [...input.filters],
       ...(defaultPath === null ? {} : { defaultPath }),
     };

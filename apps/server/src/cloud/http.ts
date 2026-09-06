@@ -85,6 +85,7 @@ import {
 import * as CliTokenManager from "./CliTokenManager.ts";
 import { getOrCreateEnvironmentKeyPairFromSecretStore } from "./environmentKeys.ts";
 import { traceRelayRequest } from "./traceRelayRequest.ts";
+import { filterRelayResponse, relayRequestError } from "./relayResponse.ts";
 
 const CLOUD_MINT_NONCE_PREFIX = "cloud-mint-nonce-";
 const CLOUD_MINT_JTI_PREFIX = "cloud-mint-jti-";
@@ -528,25 +529,9 @@ const relayClientRequest = <A>(
     HttpClientRequest.bearerToken(input.token),
     HttpClientRequest.bodyJson(input.payload),
     Effect.flatMap(dependencies.httpClient.execute),
-    Effect.flatMap((response) =>
-      Effect.gen(function* () {
-        if (response.status >= 200 && response.status < 300) {
-          return yield* HttpClientResponse.schemaBodyJson(input.schema)(response);
-        }
-        const body = yield* response.text.pipe(Effect.orElseSucceed(() => ""));
-        const detail = body.trim().length > 0 ? `: ${body.trim().slice(0, 500)}` : "";
-        return yield* new EnvironmentHttpInternalServerError({
-          message: `T3 Connect relay request failed: StatusCode: non 2xx status code (${String(response.status)} POST ${input.url})${detail}`,
-        });
-      }),
-    ),
-    Effect.mapError((cause) =>
-      isEnvironmentHttpInternalServerError(cause)
-        ? cause
-        : new EnvironmentHttpInternalServerError({
-            message: `T3 Connect relay request failed: ${String(cause)}`,
-          }),
-    ),
+    Effect.flatMap(filterRelayResponse),
+    Effect.flatMap(HttpClientResponse.schemaBodyJson(input.schema)),
+    Effect.mapError(relayRequestError),
     withRelayClientTracing,
   );
 
@@ -733,7 +718,7 @@ export const releaseManagedTunnelOnShutdown = Effect.fn(
   ).pipe(
     HttpClientRequest.bearerToken(token.value.accessToken),
     dependencies.httpClient.execute,
-    Effect.flatMap(HttpClientResponse.filterStatusOk),
+    Effect.flatMap(filterRelayResponse),
     Effect.flatMap(HttpClientResponse.schemaBodyJson(RelayOkResponse)),
     withRelayClientTracing,
   );

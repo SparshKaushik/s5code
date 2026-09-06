@@ -15,6 +15,7 @@
  * @module provider/Layers/PiProvider
  */
 import {
+  type CustomModelSetting,
   type ModelCapabilities,
   type PiSettings,
   type ServerProvider,
@@ -64,7 +65,7 @@ const VERSION_PROBE_TIMEOUT_MS = 8_000;
 const CATALOG_PROBE_TIMEOUT_MS = 45_000;
 
 function piModelsFromSettings(
-  customModels: ReadonlyArray<string> | undefined,
+  customModels: ReadonlyArray<CustomModelSetting> | undefined,
   discovered: ReadonlyArray<ServerProviderModel> = [],
 ): ReadonlyArray<ServerProviderModel> {
   return providerModelsFromSettings(discovered, customModels ?? [], EMPTY_CAPABILITIES);

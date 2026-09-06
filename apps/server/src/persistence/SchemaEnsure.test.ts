@@ -3,9 +3,9 @@ import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "./Migrations.ts";
-import * as NodeSqliteClient from "./NodeSqliteClient.ts";
+import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
-const provideSqlite = <A, E, R>(effect: Effect.Effect<A, E, R | SqlClient.SqlClient>) =>
+const provideSqlite = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
   effect.pipe(Effect.provide(NodeSqliteClient.layerMemory()));
 
 const threadColumnNames = Effect.fn("threadColumnNames")(function* () {
@@ -62,7 +62,7 @@ describe("SchemaEnsure and Migration Recovery", () => {
           yield* runMigrations();
 
           const migrations = yield* sql<{ readonly migration_id: number; readonly name: string }>`
-            SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 38 ORDER BY migration_id ASC
+            SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id BETWEEN 38 AND 40 ORDER BY migration_id ASC
           `;
 
           assert.deepEqual(migrations, [
@@ -99,7 +99,7 @@ describe("SchemaEnsure and Migration Recovery", () => {
           yield* runMigrations();
 
           const migrations = yield* sql<{ readonly migration_id: number; readonly name: string }>`
-            SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id >= 35 ORDER BY migration_id ASC
+            SELECT migration_id, name FROM effect_sql_migrations WHERE migration_id BETWEEN 35 AND 40 ORDER BY migration_id ASC
           `;
 
           assert.deepEqual(migrations, [

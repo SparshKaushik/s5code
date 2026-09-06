@@ -65,6 +65,8 @@ export interface ThreadActionProgress {
   readonly prUrl?: string;
 }
 
+export type GitActionProgress = ThreadActionProgress;
+
 const EMPTY_PROGRESS: ThreadActionProgress = {
   phase: "idle",
   label: null,
