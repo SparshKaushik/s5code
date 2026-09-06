@@ -90,6 +90,10 @@ vi.mock("../../widgets/AgentActivity", () => ({
   },
 }));
 
+vi.mock("expo", () => ({
+  requireOptionalNativeModule: vi.fn(() => null),
+}));
+
 vi.mock("expo-modules-core", () => ({
   requireOptionalNativeModule: vi.fn(() => null),
 }));
