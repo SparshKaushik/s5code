@@ -12,7 +12,7 @@ const { autoUpdaterMock } = vi.hoisted(() => ({
     disableDifferentialDownload: false,
     fullChangelog: false,
     checkForUpdates: vi.fn(() => Promise.resolve(null)),
-    downloadUpdate: vi.fn(() => Promise.resolve([])),
+    downloadUpdate: vi.fn<() => Promise<string[]>>(() => Promise.resolve([])),
     on: vi.fn(),
     quitAndInstall: vi.fn(),
     removeListener: vi.fn(),
@@ -75,6 +75,16 @@ describe("ElectronUpdater", () => {
       assert.strictEqual(error.cause, cause);
       assert.equal(error.message, "Electron updater failed to check for updates on channel beta.");
       assert.notInclude(error.message, cause.message);
+    }).pipe(Effect.provide(ElectronUpdater.layer)),
+  );
+
+  it.effect("returns downloaded file paths", () =>
+    Effect.gen(function* () {
+      const downloadedFiles = ["/tmp/S5-Code-1.2.4-arm64.zip"];
+      autoUpdaterMock.downloadUpdate.mockResolvedValueOnce(downloadedFiles);
+      const updater = yield* ElectronUpdater.ElectronUpdater;
+
+      assert.deepEqual(yield* updater.downloadUpdate, downloadedFiles);
     }).pipe(Effect.provide(ElectronUpdater.layer)),
   );
 

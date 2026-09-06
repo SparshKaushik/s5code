@@ -1,8 +1,9 @@
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
 import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
 
 import {
   canCheckForUpdate,
+  confirmDesktopUpdateInstall,
   getArm64IntelBuildWarningDescription,
   getDesktopUpdateActionError,
   getDesktopUpdateButtonTooltip,
@@ -115,6 +116,17 @@ describe("desktop update button state", () => {
       canRetry: true,
     };
     expect(resolveDesktopUpdateButtonAction(state)).toBe("none");
+  });
+
+  it("confirms through the desktop bridge before installing", async () => {
+    const confirm = vi.fn().mockResolvedValue(true);
+    const state = {
+      availableVersion: "1.1.0",
+      downloadedVersion: "1.1.0",
+    };
+
+    await expect(confirmDesktopUpdateInstall({ confirm }, state)).resolves.toBe(true);
+    expect(confirm).toHaveBeenCalledWith(getDesktopUpdateInstallConfirmationMessage(state));
   });
 
   it("disables the button while downloading", () => {

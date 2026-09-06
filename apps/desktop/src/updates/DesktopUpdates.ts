@@ -35,11 +35,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as IpcChannels from "../ipc/channels.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
-import {
-  MacUnsignedUpdateInstall,
-  MacUnsignedUpdateInstallError,
-  resolveMacAppBundlePath,
-} from "./MacUnsignedUpdateInstall.ts";
+import { MacUnsignedUpdateInstall, resolveMacAppBundlePath } from "./MacUnsignedUpdateInstall.ts";
 import { normalizeDesktopUpdateReleaseNotes } from "./releaseNotes.ts";
 import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 import {
@@ -495,11 +491,16 @@ export const make = Effect.gen(function* () {
 
     return yield* Effect.gen(function* () {
       yield* setState(reduceDesktopUpdateStateOnDownloadStart(state));
+      yield* Ref.set(downloadedUpdateFileRef, Option.none());
       yield* electronUpdater.setDisableDifferentialDownload(
         isArm64HostRunningIntelBuild(environment.runtimeInfo),
       );
       yield* logUpdaterInfo("downloading update");
-      yield* electronUpdater.downloadUpdate;
+      const downloadedFiles = yield* electronUpdater.downloadUpdate;
+      const downloadedFile = downloadedFiles.find((file) => file.trim().length > 0);
+      if (downloadedFile !== undefined) {
+        yield* Ref.set(downloadedUpdateFileRef, Option.some(downloadedFile));
+      }
       return { accepted: true, completed: true };
     }).pipe(
       Effect.catchTags({
@@ -946,13 +947,13 @@ export const make = Effect.gen(function* () {
       Effect.flatMap(
         Effect.fn("desktop.updates.applyUpdateDownloaded")(function* (info) {
           const state = yield* Ref.get(updateStateRef);
-          yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
-          yield* Ref.set(
-            downloadedUpdateFileRef,
-            Option.fromNullishOr(info.downloadedFile?.trim()).pipe(
-              Option.filter((downloadedFile) => downloadedFile.length > 0),
-            ),
+          const eventDownloadedFile = Option.fromNullishOr(info.downloadedFile?.trim()).pipe(
+            Option.filter((downloadedFile) => downloadedFile.length > 0),
           );
+          if (Option.isSome(eventDownloadedFile)) {
+            yield* Ref.set(downloadedUpdateFileRef, eventDownloadedFile);
+          }
+          yield* setState(reduceDesktopUpdateStateOnDownloadComplete(state, info.version));
           yield* logUpdaterInfo("update downloaded", { version: info.version });
         }),
       ),

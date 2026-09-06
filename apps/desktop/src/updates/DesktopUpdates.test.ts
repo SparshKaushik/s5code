@@ -660,6 +660,40 @@ describe("DesktopUpdates", () => {
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
   });
 
+  it.effect("replaces an unsigned macOS app from the download result path", () => {
+    const downloadedFile = "/tmp/S5-Code-1.2.4-arm64.zip";
+    const harness = makeHarness({
+      squirrelCompatibleSignature: false,
+      appPath: "/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar",
+      downloadUpdate: Effect.succeed([downloadedFile]),
+    });
+
+    return Effect.scoped(
+      Effect.gen(function* () {
+        const updates = yield* DesktopUpdates.DesktopUpdates;
+        yield* updates.configure;
+        harness.emit("update-available", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const download = yield* updates.download;
+        assert.isTrue(download.completed);
+        harness.emit("update-downloaded", { version: "1.2.4" });
+        yield* flushCallbacks;
+
+        const install = yield* updates.install;
+        assert.isTrue(install.accepted);
+        assert.equal(harness.quitAndInstalls(), 0);
+        assert.equal(harness.appQuitCount(), 1);
+        assert.deepEqual(harness.bundleReplaceCalls(), [
+          {
+            downloadedZipPath: downloadedFile,
+            appPath: "/Applications/S5 Code (Alpha).app",
+          },
+        ]);
+      }),
+    ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
+  });
+
   it.effect("replaces the app bundle for unsigned macOS updates instead of using Squirrel", () => {
     const harness = makeHarness({
       squirrelCompatibleSignature: false,

@@ -1,4 +1,8 @@
-import type { DesktopUpdateActionResult, DesktopUpdateState } from "@t3tools/contracts";
+import type {
+  DesktopBridge,
+  DesktopUpdateActionResult,
+  DesktopUpdateState,
+} from "@t3tools/contracts";
 import { isWindowsPlatform } from "../lib/utils";
 
 export type DesktopUpdateButtonAction = "download" | "install" | "none";
@@ -107,6 +111,16 @@ export function getDesktopUpdateInstallConfirmationMessage(
     ? "\n\nOn Windows, S5 Code may remain closed for several minutes while the update installs, and no installer window may appear. S5 Code will reopen automatically when installation finishes."
     : "";
   return `Install update${version ? ` ${version}` : ""} and restart S5 Code?\n\nAny running tasks will be interrupted. Make sure you're ready before continuing.${windowsInstallWarning}`;
+}
+
+/** Update installation is desktop-owned, so its confirmation must remain
+ * available even when the renderer's themed confirmation host is unavailable. */
+export function confirmDesktopUpdateInstall(
+  bridge: Pick<DesktopBridge, "confirm">,
+  state: Pick<DesktopUpdateState, "availableVersion" | "downloadedVersion">,
+  platform = "",
+): Promise<boolean> {
+  return bridge.confirm(getDesktopUpdateInstallConfirmationMessage(state, platform));
 }
 
 export function getDesktopUpdateActionError(result: DesktopUpdateActionResult): string | null {
