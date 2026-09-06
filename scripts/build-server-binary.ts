@@ -13,6 +13,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
+import { createRequire } from "node:module";
 
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
@@ -41,6 +42,15 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
  *
  *   `--bytecode` cannot be combined with `--splitting` (bun fails with
  *   "Failed to generate bytecode"), so it is deliberately not used.
+ *
+ * The fff native library IS embedded, as a bun asset. It has to be: every file
+ * listing and path search dlopens `libfff_c`, and `@ff-labs/fff-node` locates it
+ * by resolving its own platform package out of `node_modules` relative to its own
+ * `import.meta.url` — which inside a compiled binary is `/$bunfs/root/...`, with
+ * no `node_modules` above it and none on the host. Without the asset the server
+ * boots, serves threads and terminals, and shows an empty file tree on every
+ * client, with the reason only in its log. See
+ * apps/server/src/workspace/FffNativeLibrary.ts for the extraction at startup.
  *
  * The web client is NOT embedded. Bun's `--asset` flag (the only way to embed a
  * directory tree at a stable path) ships in Bun 1.4; on 1.3.x it is silently
@@ -177,6 +187,59 @@ const runCommand = Effect.fn("runCommand")(function* (
   }
 });
 
+/**
+ * Absolute path of the `libfff_c` shared library for one build target.
+ *
+ * Resolved from the install location rather than with `require.resolve`:
+ * `@ff-labs/fff-node`'s exports map has no `./package.json` entry and no CJS
+ * main, so neither `require.resolve` nor `import.meta.resolve` can name the
+ * package directory. Its own optional platform dependencies resolve normally
+ * once we are standing in it.
+ *
+ * The *target's* library, not the host's: release CI cross-compiles, and an
+ * arm64 binary carrying an x64 `.so` fails at dlopen with a message about file
+ * format that points nowhere near the real cause.
+ *
+ * A failure here fails the build. A binary missing the library looks healthy and
+ * has no file tree, which is the silent degradation this embed exists to end.
+ */
+const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
+  repoRoot: string,
+  arch: keyof typeof archToTarget,
+): Effect.fn.Return<string, ServerBinaryBuildError, FileSystem.FileSystem | Path.Path> {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const packageName = `@ff-labs/fff-bin-linux-${arch}-gnu`;
+  const missing = (detail: string) =>
+    new ServerBinaryBuildError({ kind: "missing-fff-library", detail });
+
+  const packageDirectory = yield* fs
+    .realPath(path.join(repoRoot, "apps/server/node_modules/@ff-labs/fff-node"))
+    .pipe(
+      Effect.mapError((cause) =>
+        missing(`@ff-labs/fff-node is not installed under apps/server. (${String(cause)})`),
+      ),
+    );
+
+  const resolved = yield* Effect.try({
+    try: () =>
+      createRequire(path.join(packageDirectory, "package.json")).resolve(
+        `${packageName}/package.json`,
+      ),
+    catch: (cause) =>
+      missing(
+        `Could not resolve ${packageName}. pnpm only installs the platform binaries allowed by \`supportedArchitectures\` in pnpm-workspace.yaml, so \`vp i\` on a host that allows linux-${arch} is what provides it. (${String(cause)})`,
+      ),
+  });
+
+  const libraryPath = path.join(path.dirname(resolved), "libfff_c.so");
+  const exists = yield* fs.exists(libraryPath).pipe(Effect.orElseSucceed(() => false));
+  if (!exists) {
+    return yield* missing(`Resolved the ${packageName} package but ${libraryPath} does not exist.`);
+  }
+  return libraryPath;
+});
+
 const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (input: {
   readonly arch: Option.Option<string>;
   readonly outputDir: Option.Option<string>;
@@ -250,6 +313,8 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
 
   yield* fs.makeDirectory(options.outputDir, { recursive: true });
 
+  const fffLibraryPath = yield* resolveFffLibraryPath(repoRoot, options.arch);
+
   // --splitting is required (see the module comment): it keeps the Node SQLite
   // driver in a lazily-loaded chunk so its top-level `node:sqlite` import is
   // never hoisted into the entry, which would kill the binary at startup.
@@ -268,6 +333,9 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     `--define=process.env.T3CODE_SERVER_BINARY_REPO="${options.releaseRepo}"`,
     "--minify",
     "./bin.mjs",
+    // Extra entry points that are not JS become embedded assets, readable at
+    // runtime through `Bun.embeddedFiles`.
+    fffLibraryPath,
   ];
 
   yield* Effect.log(
@@ -296,6 +364,15 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
   // instead would be useless, since bun's own runtime already contains strings
   // like "bun-linux-x64".
   const compiled = yield* fs.readFile(outfile);
+  // The asset is only useful if it is actually in there. Bun names embedded
+  // files `libfff_c-<hash>.so`, and the un-hashed stem survives in the manifest,
+  // so its absence means the extra entry point was ignored rather than embedded.
+  if (!containsBytes(compiled, "libfff_c")) {
+    return yield* new ServerBinaryBuildError({
+      kind: "fff-library-not-embedded",
+      detail: `\`${fffLibraryPath}\` did not end up embedded in ${outfile}, so the server would run with no file tree. Check that this bun version treats non-JS entry points as assets.`,
+    });
+  }
   for (const name of ["T3CODE_SERVER_BINARY_TARGET", "T3CODE_SERVER_BINARY_REPO"] as const) {
     if (containsBytes(compiled, name)) {
       return yield* new ServerBinaryBuildError({

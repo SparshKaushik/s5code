@@ -1,5 +1,5 @@
 diff --git a/dist/src/binary.js b/dist/src/binary.js
-index ee181aef5007e4bf34a49479c089ca30f73a320b..327e2c55c83cc4c50d396a3109190ef10af75ca7 100644
+index ee181aef5007e4bf34a49479c089ca30f73a320b..a60c699ee2f06dd2ec346693c3db2048078198fb 100644
 --- a/dist/src/binary.js
 +++ b/dist/src/binary.js
 @@ -7,7 +7,7 @@
@@ -11,18 +11,16 @@ index ee181aef5007e4bf34a49479c089ca30f73a320b..327e2c55c83cc4c50d396a3109190ef1
  import { fileURLToPath } from "node:url";
  import { getLibFilename, getNpmPackageName } from "./platform.js";
  /**
-@@ -46,6 +46,16 @@ function getPackageDir() {
+@@ -46,6 +46,14 @@ function getPackageDir() {
      // Fallback: assume we're one level deep in src/
      return dirname(currentDir);
  }
 +function resolveUnpackedAsarPath(binaryPath) {
-+    const pathSegments = binaryPath.split(sep);
-+    const asarIndex = pathSegments.findLastIndex((segment) => segment.endsWith(".asar"));
-+    if (asarIndex === -1) {
++    const asarSegment = `${sep}app.asar${sep}`;
++    if (!binaryPath.includes(asarSegment)) {
 +        return binaryPath;
 +    }
-+    pathSegments[asarIndex] = `${pathSegments[asarIndex]}.unpacked`;
-+    const unpackedPath = pathSegments.join(sep);
++    const unpackedPath = binaryPath.replace(asarSegment, `${sep}app.asar.unpacked${sep}`);
 +    return existsSync(unpackedPath) ? unpackedPath : binaryPath;
 +}
  /**
@@ -37,3 +35,19 @@ index ee181aef5007e4bf34a49479c089ca30f73a320b..327e2c55c83cc4c50d396a3109190ef1
          }
      }
      catch {
+@@ -110,6 +118,15 @@ function isDevWorkspace() {
+  * @returns Absolute path to the library, or null if not found
+  */
+ export function findBinary() {
++    // T3 Code: an explicit path wins over every heuristic below. A compiled
++    // single-file server binary has no node_modules to resolve from (its
++    // `import.meta.url` is inside bun's virtual filesystem) and cannot dlopen out
++    // of that filesystem either, so it extracts the library to a real path and
++    // points us at it. See apps/server/src/workspace/FffNativeLibrary.ts.
++    const overridePath = process.env.T3CODE_FFF_NATIVE_LIB_PATH;
++    if (overridePath && existsSync(overridePath)) {
++        return overridePath;
++    }
+     if (isDevWorkspace()) {
+         // 1. Local bin/ directory (populated by `make prepare-node`)
+         const binPath = join(getPackageDir(), "bin", getLibFilename());

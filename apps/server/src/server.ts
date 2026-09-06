@@ -80,6 +80,7 @@ import * as NativeAppIconResolver from "./assets/NativeAppIconResolver.ts";
 import * as ProjectFaviconResolver from "./project/ProjectFaviconResolver.ts";
 import * as T3ProjectFileLoader from "./project/T3ProjectFileLoader.ts";
 import * as RepositoryIdentityResolver from "./project/RepositoryIdentityResolver.ts";
+import { ensureFffNativeLibrary } from "./workspace/FffNativeLibrary.ts";
 import * as WorkspaceEntries from "./workspace/WorkspaceEntries.ts";
 import * as WorkspaceFileSystem from "./workspace/WorkspaceFileSystem.ts";
 import * as WorkspacePaths from "./workspace/WorkspacePaths.ts";
@@ -575,6 +576,10 @@ export const makeServerLayer = Layer.unwrap(
     const launcherLayer = ServiceLauncherClient.layer;
 
     yield* fixPath();
+    // Before any workspace index is created: the file tree, composer path search,
+    // and content search all dlopen libfff_c, which a compiled single-file binary
+    // cannot resolve on its own. See workspace/FffNativeLibrary.ts.
+    yield* ensureFffNativeLibrary({ baseDir: config.baseDir });
 
     const httpListeningLayer = Layer.effectDiscard(
       Effect.gen(function* () {
