@@ -59,10 +59,6 @@ data class SemVer(
     }
 
     companion object {
-        private val SEMVER_REGEX = Regex(
-            """^(?:[a-zA-Z_-]*v?)?(\d+)\.(\d+)\.(\d+)(?:-([0-9a-zA-Z.-]+))?(?:\+([0-9a-zA-Z.-]+))?$"""
-        )
-
         /**
          * Parses a version string or release tag into a [SemVer].
          *
@@ -78,20 +74,17 @@ data class SemVer(
                 .removePrefix("V")
                 .removeSuffix("-debug")
 
-            val match = SEMVER_REGEX.matchEntire(trimmed) ?: return null
-            val major = match.groupValues[1].toIntOrNull() ?: return null
-            val minor = match.groupValues[2].toIntOrNull() ?: return null
-            val patch = match.groupValues[3].toIntOrNull() ?: return null
-            val pre = match.groupValues.getOrNull(4)?.takeIf { it.isNotEmpty() }
-            val build = match.groupValues.getOrNull(5)?.takeIf { it.isNotEmpty() }
+            val withoutBuild = trimmed.substringBefore('+')
+            val build = if ('+' in trimmed) trimmed.substringAfter('+').takeIf { it.isNotEmpty() } else null
+            val mainParts = withoutBuild.split('-', limit = 2)
+            val pre = mainParts.getOrNull(1)?.takeIf { it.isNotEmpty() }
+            val numbers = mainParts[0].split('.')
+            if (numbers.size != 3) return null
+            val major = numbers[0].toIntOrNull() ?: return null
+            val minor = numbers[1].toIntOrNull() ?: return null
+            val patch = numbers[2].toIntOrNull() ?: return null
 
-            return SemVer(
-                major = major,
-                minor = minor,
-                patch = patch,
-                preRelease = pre,
-                buildMetadata = build,
-            )
+            return SemVer(major, minor, patch, pre, build)
         }
     }
 }

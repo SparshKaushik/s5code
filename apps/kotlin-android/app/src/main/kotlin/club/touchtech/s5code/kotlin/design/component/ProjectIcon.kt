@@ -21,9 +21,9 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import androidx.collection.LruCache
 import club.touchtech.s5code.kotlin.model.Project
 import coil3.compose.AsyncImage
-import java.util.LinkedHashMap
 
 /**
  * Project favicon with signed-URL resolution, decode state, and a bounded memory
@@ -80,13 +80,15 @@ fun S5ProjectIcon(
 /** Small bounded LRU. URL keys include the server's content revision. */
 private object ProjectFaviconMemoryCache {
     private const val MAX_ENTRIES = 96
-    private val urls = BoundedLruCache<String, String?>(MAX_ENTRIES)
+    private val urls = BoundedLruCache<String, String>(MAX_ENTRIES)
     private val bitmaps = BoundedLruCache<String, Bitmap>(MAX_ENTRIES)
 
     @Synchronized fun url(key: String?): String? = key?.let(urls::get)
 
     @Synchronized fun rememberUrl(key: String?, value: String?) {
-        if (key != null) urls[key] = value
+        if (key != null) {
+            if (value != null) urls.put(key, value) else urls.remove(key)
+        }
     }
 
     @Synchronized fun bitmap(key: String?): Bitmap? = key?.let(bitmaps::get)
@@ -99,13 +101,13 @@ private object ProjectFaviconMemoryCache {
     @Synchronized
     fun rememberDrawable(key: String?, image: coil3.Image) {
         if (key == null) return
-        (image as? coil3.BitmapImage)?.bitmap?.let { bitmaps[key] = it }
+        (image as? coil3.BitmapImage)?.bitmap?.let { bitmaps.put(key, it) }
     }
 }
 
 /** Access-ordered and independently testable so the UI cache can never grow with history. */
-internal class BoundedLruCache<K, V>(private val maximumSize: Int) :
-    LinkedHashMap<K, V>(maximumSize, 0.75f, true) {
-    override fun removeEldestEntry(eldest: MutableMap.MutableEntry<K, V>?): Boolean =
-        size > maximumSize
+internal class BoundedLruCache<K : Any, V : Any>(maximumSize: Int) : LruCache<K, V>(maximumSize) {
+    operator fun contains(key: K): Boolean = get(key) != null
+    operator fun set(key: K, value: V) { put(key, value) }
+    val size: Int get() = size()
 }

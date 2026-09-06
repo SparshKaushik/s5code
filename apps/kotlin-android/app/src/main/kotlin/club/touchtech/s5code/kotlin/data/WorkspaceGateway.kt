@@ -268,8 +268,8 @@ interface WorkspaceGateway {
         environmentId: EnvironmentId,
         id: ThreadId,
         terminalId: String = DEFAULT_TERMINAL_ID,
-        cols: Int = TerminalEmulator.DEFAULT_COLS,
-        rows: Int = TerminalEmulator.DEFAULT_ROWS,
+        cols: Int = DEFAULT_TERMINAL_COLS,
+        rows: Int = DEFAULT_TERMINAL_ROWS,
     ): Flow<TerminalSession>
 
     /**

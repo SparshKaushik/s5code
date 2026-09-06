@@ -73,107 +73,85 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
             S5RowGroup(title = "Account and connections") {
-                val rows =
-                    listOf(
-                        Row4(
-                            Icons.Rounded.Person,
-                            "S5 account",
-                            when (val current = account) {
-                                CloudAccountState.Unconfigured -> "Not available"
-                                CloudAccountState.Loading -> ""
-                                is CloudAccountState.SignedIn -> current.label
-                                is CloudAccountState.SignedOut -> "Not signed in"
-                            },
-                            Routes.SettingsAccount,
-                        ),
-                        Row4(
-                            Icons.Rounded.Hub,
-                            "Environments",
-                            "${environments.size} paired",
-                            Routes.SettingsEnvironments,
-                        ),
-                    )
-                rows.forEachIndexed { index, row ->
-                    S5SettingsRow(
-                        icon = row.icon,
-                        label = row.label,
-                        value = row.value,
-                        onClick = { onOpen(row.route) },
-                        position = rowPosition(index, rows.size),
-                    )
-                }
+                val accountLabel =
+                    when (val current = account) {
+                        CloudAccountState.Unconfigured -> "Not available"
+                        CloudAccountState.Loading -> ""
+                        is CloudAccountState.SignedIn -> current.label
+                        is CloudAccountState.SignedOut -> "Not signed in"
+                    }
+                S5SettingsRow(
+                    icon = Icons.Rounded.Person,
+                    label = "S5 account",
+                    value = accountLabel,
+                    onClick = { onOpen(Routes.SettingsAccount) },
+                    position = rowPosition(0, 2),
+                )
+                S5SettingsRow(
+                    icon = Icons.Rounded.Hub,
+                    label = "Environments",
+                    value = "${environments.size} paired",
+                    onClick = { onOpen(Routes.SettingsEnvironments) },
+                    position = rowPosition(1, 2),
+                )
             }
 
             S5RowGroup(title = "Appearance and behavior") {
-                val rows =
-                    listOf(
-                        Row4(
-                            Icons.Rounded.Palette,
-                            "Appearance",
-                            preferences.themeMode.name,
-                            Routes.SettingsAppearance,
-                        ),
-                        Row4(
-                            Icons.Rounded.Workspaces,
-                            "Project grouping",
-                            preferences.projectGrouping.label,
-                            Routes.SettingsProjectGrouping,
-                        ),
-                    )
-                rows.forEachIndexed { index, row ->
-                    S5SettingsRow(
-                        icon = row.icon,
-                        label = row.label,
-                        value = row.value,
-                        onClick = { onOpen(row.route) },
-                        position = rowPosition(index, rows.size),
-                    )
-                }
+                S5SettingsRow(
+                    icon = Icons.Rounded.Palette,
+                    label = "Appearance",
+                    value = preferences.themeMode.name,
+                    onClick = { onOpen(Routes.SettingsAppearance) },
+                    position = rowPosition(0, 2),
+                )
+                S5SettingsRow(
+                    icon = Icons.Rounded.Workspaces,
+                    label = "Project grouping",
+                    value = preferences.projectGrouping.label,
+                    onClick = { onOpen(Routes.SettingsProjectGrouping) },
+                    position = rowPosition(1, 2),
+                )
             }
 
             S5RowGroup(title = "Notifications") {
-                val rows =
-                    listOf(
-                        Row4(
-                            Icons.Rounded.Notifications,
-                            "Notifications",
-                            if (preferences.notifyApprovals) "On" else "Off",
-                            Routes.SettingsNotifications,
-                        ),
-                        Row4(
-                            Icons.Rounded.Bolt,
-                            "Live Updates",
-                            if (preferences.liveUpdatesEnabled) "On" else "Off",
-                            Routes.SettingsLiveUpdates,
-                        ),
-                    )
-                rows.forEachIndexed { index, row ->
-                    S5SettingsRow(
-                        icon = row.icon,
-                        label = row.label,
-                        value = row.value,
-                        onClick = { onOpen(row.route) },
-                        position = rowPosition(index, rows.size),
-                    )
-                }
+                S5SettingsRow(
+                    icon = Icons.Rounded.Notifications,
+                    label = "Notifications",
+                    value = if (preferences.notifyApprovals) "On" else "Off",
+                    onClick = { onOpen(Routes.SettingsNotifications) },
+                    position = rowPosition(0, 2),
+                )
+                S5SettingsRow(
+                    icon = Icons.Rounded.Bolt,
+                    label = "Live Updates",
+                    value = if (preferences.liveUpdatesEnabled) "On" else "Off",
+                    onClick = { onOpen(Routes.SettingsLiveUpdates) },
+                    position = rowPosition(1, 2),
+                )
             }
 
             S5RowGroup(title = "Data") {
-                val rows =
-                    listOf(
-                        Row4(Icons.Rounded.Analytics, "Usage", null, Routes.Usage),
-                        Row4(Icons.Rounded.Archive, "Archived threads", null, Routes.Archive),
-                        Row4(Icons.Rounded.Storage, "Client storage", null, Routes.SettingsClientStorage),
-                    )
-                rows.forEachIndexed { index, row ->
-                    S5SettingsRow(
-                        icon = row.icon,
-                        label = row.label,
-                        value = row.value,
-                        onClick = { onOpen(row.route) },
-                        position = rowPosition(index, rows.size),
-                    )
-                }
+                S5SettingsRow(
+                    icon = Icons.Rounded.Analytics,
+                    label = "Usage",
+                    value = null,
+                    onClick = { onOpen(Routes.Usage) },
+                    position = rowPosition(0, 3),
+                )
+                S5SettingsRow(
+                    icon = Icons.Rounded.Archive,
+                    label = "Archived threads",
+                    value = null,
+                    onClick = { onOpen(Routes.Archive) },
+                    position = rowPosition(1, 3),
+                )
+                S5SettingsRow(
+                    icon = Icons.Rounded.Storage,
+                    label = "Client storage",
+                    value = null,
+                    onClick = { onOpen(Routes.SettingsClientStorage) },
+                    position = rowPosition(2, 3),
+                )
             }
 
             Box(Modifier.padding(S5Theme.spacing.gutter)) {
@@ -328,10 +306,3 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
         }
     }
 }
-
-private data class Row4(
-    val icon: androidx.compose.ui.graphics.vector.ImageVector,
-    val label: String,
-    val value: String?,
-    val route: String,
-)

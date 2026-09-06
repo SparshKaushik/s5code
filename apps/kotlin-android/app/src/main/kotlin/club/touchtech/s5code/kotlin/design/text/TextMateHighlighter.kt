@@ -1,11 +1,11 @@
 package club.touchtech.s5code.kotlin.design.text
 
+import androidx.collection.LruCache
 import dev.textmate.grammar.Grammar
 import dev.textmate.grammar.raw.GrammarReader
 import dev.textmate.grammar.tokenize.StateStack
 import dev.textmate.regex.JoniOnigLib
 import java.io.InputStream
-import java.util.LinkedHashMap
 
 /**
  * Process-wide TextMate grammar registry. The engine is installed once by the
@@ -21,23 +21,14 @@ object TextMateHighlighter {
     private val lock = Any()
     private val onigLib = JoniOnigLib()
     private var assetReader: ((String) -> InputStream)? = null
-    private val rawGrammarCache =
-        object : LinkedHashMap<String, dev.textmate.grammar.raw.RawGrammar>(MAX_RAW_GRAMMARS, 0.75f, true) {
-            override fun removeEldestEntry(
-                eldest: MutableMap.MutableEntry<String, dev.textmate.grammar.raw.RawGrammar>?,
-            ): Boolean = size > MAX_RAW_GRAMMARS
-        }
-    private val grammarCache =
-        object : LinkedHashMap<String, Grammar>(MAX_COMPILED_GRAMMARS, 0.75f, true) {
-            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, Grammar>?): Boolean =
-                size > MAX_COMPILED_GRAMMARS
-        }
+    private val rawGrammarCache = LruCache<String, dev.textmate.grammar.raw.RawGrammar>(MAX_RAW_GRAMMARS)
+    private val grammarCache = LruCache<String, Grammar>(MAX_COMPILED_GRAMMARS)
 
     fun install(openAsset: (String) -> InputStream) {
         synchronized(lock) {
             assetReader = openAsset
-            rawGrammarCache.clear()
-            grammarCache.clear()
+            rawGrammarCache.evictAll()
+            grammarCache.evictAll()
         }
     }
 
@@ -49,7 +40,7 @@ object TextMateHighlighter {
         val reader = assetReader ?: return null
         return synchronized(lock) {
             try {
-                val grammar = grammarCache[scope] ?: loadGrammar(scope, reader)?.also { grammarCache[scope] = it }
+                val grammar = grammarCache[scope] ?: loadGrammar(scope, reader)?.also { grammarCache.put(scope, it) }
                 grammar?.let { loaded ->
                     var state: StateStack? = null
                     lines.map { line ->
@@ -74,8 +65,8 @@ object TextMateHighlighter {
 
     internal fun resetForTest() {
         synchronized(lock) {
-            grammarCache.clear()
-            rawGrammarCache.clear()
+            grammarCache.evictAll()
+            rawGrammarCache.evictAll()
             assetReader = null
         }
     }
@@ -100,7 +91,7 @@ object TextMateHighlighter {
 
     private fun loadRawGrammar(scope: String, reader: (String) -> InputStream) =
         rawGrammarCache[scope] ?: GRAMMAR_ASSETS[scope]?.let { path ->
-            reader(path).use(GrammarReader::readGrammar).also { rawGrammarCache[scope] = it }
+            reader(path).use(GrammarReader::readGrammar).also { rawGrammarCache.put(scope, it) }
         }
 
     private fun List<dev.textmate.grammar.Token>.toCodeTokens(line: String): List<CodeToken> {
