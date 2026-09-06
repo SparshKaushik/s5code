@@ -14,6 +14,8 @@ import club.touchtech.s5code.kotlin.model.PlanStepState
 import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.PullRequestRef
+import club.touchtech.s5code.kotlin.model.PullRequestState
 import club.touchtech.s5code.kotlin.model.ProviderOptionChoice
 import club.touchtech.s5code.kotlin.model.ProviderOptionDescriptor
 import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
@@ -235,6 +237,14 @@ fun threadSummaryFrom(
         // excerpt on a working thread is the "stale label" the repo's guidance
         // calls out.
         lastError = shell.session?.lastError?.takeIf { status == ThreadStatus.Failed },
+        pullRequest =
+            shell.linkedPullRequest?.let { pr ->
+                PullRequestRef(
+                    number = pr.number,
+                    state = PullRequestState.Open,
+                    title = "#${pr.number}",
+                )
+            },
         archived = isArchived(shell),
         // Only a running turn gets an elapsed label. A finished turn's duration is
         // history, and a row that keeps counting is the "lying spinner" the repo's
