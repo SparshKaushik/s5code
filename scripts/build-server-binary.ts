@@ -13,7 +13,7 @@ import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { Command, Flag } from "effect/unstable/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/unstable/process";
-import { createRequire } from "node:module";
+import * as NodeModule from "node:module";
 
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
@@ -223,7 +223,7 @@ const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
 
   const resolved = yield* Effect.try({
     try: () =>
-      createRequire(path.join(packageDirectory, "package.json")).resolve(
+      NodeModule.createRequire(path.join(packageDirectory, "package.json")).resolve(
         `${packageName}/package.json`,
       ),
     catch: (cause) =>
