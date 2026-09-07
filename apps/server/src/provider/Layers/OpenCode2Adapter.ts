@@ -36,6 +36,9 @@ import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
+import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { ServerConfig } from "../../config.ts";
+
 import type { ProviderAdapterError } from "../Errors.ts";
 import {
   ProviderAdapterRequestError,
@@ -70,6 +73,8 @@ interface OpenCode2SessionContext {
   hasSubagents: boolean;
   subagents: Map<string, SubagentState>;
   pendingInboxItems: Set<string>;
+  turnToMessageId: Map<TurnId, string>;
+  messageIds: Array<string>;
 }
 
 export interface OpenCode2AdapterLiveOptions {
@@ -79,9 +84,10 @@ export interface OpenCode2AdapterLiveOptions {
 export function makeOpenCode2Adapter(
   hostHandle: OpenCode2HostHandle,
   options?: OpenCode2AdapterLiveOptions,
-): Effect.Effect<ProviderAdapterShape<ProviderAdapterError>, never, Crypto.Crypto> {
+): Effect.Effect<ProviderAdapterShape<ProviderAdapterError>, never, Crypto.Crypto | ServerConfig> {
   return Effect.gen(function* () {
     const crypto = yield* Crypto.Crypto;
+    const serverConfig = yield* ServerConfig;
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("opencode2");
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessionsByThreadId = new Map<ThreadId, OpenCode2SessionContext>();
@@ -186,6 +192,14 @@ export function makeOpenCode2Adapter(
             if (!threadId || !parentContext) return;
 
             const turnId = parentContext.activeTurnId ?? TurnId.make("turn-initial");
+
+            const observedMessageId = data.assistantMessageID ?? data.messageID;
+            if (typeof observedMessageId === "string" && observedMessageId.length > 0) {
+              parentContext.turnToMessageId.set(turnId, observedMessageId);
+              if (!parentContext.messageIds.includes(observedMessageId)) {
+                parentContext.messageIds.push(observedMessageId);
+              }
+            }
 
             // Handle Subagent Lifecycle (Capability 2)
             if (isChildSession) {
@@ -525,6 +539,8 @@ export function makeOpenCode2Adapter(
           hasSubagents: false,
           subagents: new Map(),
           pendingInboxItems: new Set(),
+          turnToMessageId: new Map(),
+          messageIds: [],
         };
 
         sessionsByThreadId.set(input.threadId, context);
@@ -569,6 +585,21 @@ export function makeOpenCode2Adapter(
 
         const delivery = input.delivery ?? "steer";
 
+        const files = input.attachments
+          ? input.attachments
+              .filter((a) => a.type === "file" || a.type === "image")
+              .map((attachment) => {
+                const filePath = resolveAttachmentPath({
+                  attachmentsDir: serverConfig.attachmentsDir,
+                  attachment,
+                });
+                return {
+                  uri: `file://${filePath}`,
+                  name: attachment.name,
+                };
+              })
+          : undefined;
+
         yield* Effect.tryPromise({
           try: async () => {
             await hostHandle.client.session.prompt({
@@ -577,6 +608,7 @@ export function makeOpenCode2Adapter(
               delivery,
               ...(selectedVariant ? { variant: selectedVariant } : {}),
               ...(selectedAgent ? { agent: selectedAgent } : {}),
+              ...(files && files.length > 0 ? { files } : {}),
             });
           },
           catch: (cause) =>
@@ -639,7 +671,7 @@ export function makeOpenCode2Adapter(
     const forkThread = (
       sourceThreadId: ThreadId,
       targetThreadId: ThreadId,
-      _boundaryTurnId: TurnId,
+      boundaryTurnId: TurnId,
     ): Effect.Effect<{ resumeCursor?: unknown }, ProviderAdapterError> =>
       Effect.gen(function* () {
         const sourceContext = sessionsByThreadId.get(sourceThreadId);
@@ -650,11 +682,18 @@ export function makeOpenCode2Adapter(
           });
         }
 
+        const boundaryMessageId = boundaryTurnId
+          ? sourceContext.turnToMessageId.get(boundaryTurnId)
+          : undefined;
+        const boundary = boundaryMessageId
+          ? { type: "through" as const, messageID: boundaryMessageId }
+          : { type: "before" as const, messageID: "latest" };
+
         const forked = yield* Effect.tryPromise({
           try: () =>
             hostHandle.client.session.fork({
               sessionID: sourceContext.sessionId,
-              boundary: { type: "before", messageID: "latest" },
+              boundary,
             }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -674,6 +713,8 @@ export function makeOpenCode2Adapter(
           hasSubagents: false,
           subagents: new Map(),
           pendingInboxItems: new Set(),
+          turnToMessageId: new Map(),
+          messageIds: [],
         };
 
         sessionsByThreadId.set(targetThreadId, targetContext);
@@ -740,7 +781,7 @@ export function makeOpenCode2Adapter(
 
     const rollbackThread = (
       threadId: ThreadId,
-      _numTurns: number,
+      numTurns: number,
     ): Effect.Effect<ProviderThreadSnapshot, ProviderAdapterError> =>
       Effect.gen(function* () {
         const context = sessionsByThreadId.get(threadId);
@@ -751,11 +792,16 @@ export function makeOpenCode2Adapter(
           });
         }
 
+        const targetMessageId =
+          context.messageIds.length >= numTurns
+            ? context.messageIds[context.messageIds.length - numTurns]
+            : "latest";
+
         yield* Effect.tryPromise({
           try: async () => {
             await hostHandle.client.session.revert.stage({
               sessionID: context.sessionId,
-              messageID: "latest",
+              messageID: targetMessageId ?? "latest",
               files: false,
             });
             await hostHandle.client.session.revert.commit({
@@ -837,6 +883,9 @@ export function makeOpenCode2Adapter(
         const context = sessionsByThreadId.get(threadId);
         if (!context) return;
 
+        if (context.activeTurnStatus === "running") {
+          yield* interruptTurn(threadId).pipe(Effect.ignore);
+        }
         sessionsByThreadId.delete(threadId);
         threadIdBySessionId.delete(context.sessionId);
       });
@@ -879,6 +928,11 @@ export function makeOpenCode2Adapter(
 
     const stopAll = (): Effect.Effect<void, ProviderAdapterError> =>
       Effect.gen(function* () {
+        for (const [threadId, ctx] of sessionsByThreadId.entries()) {
+          if (ctx.activeTurnStatus === "running") {
+            yield* interruptTurn(threadId).pipe(Effect.ignore);
+          }
+        }
         sessionsByThreadId.clear();
         threadIdBySessionId.clear();
         yield* Fiber.interrupt(pumpFiber);

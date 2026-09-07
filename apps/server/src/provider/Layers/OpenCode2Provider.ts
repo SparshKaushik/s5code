@@ -230,6 +230,7 @@ export function checkOpenCode2ProviderStatus(
           agents: (agentsRes as { data?: unknown[] }).data ?? [],
           commands: (commandsRes as { data?: unknown[] }).data ?? [],
           skills: (skillsRes as { data?: unknown[] }).data ?? [],
+          failed: false,
         };
       },
       catch: (cause) =>
@@ -245,6 +246,7 @@ export function checkOpenCode2ProviderStatus(
         agents: [],
         commands: [],
         skills: [],
+        failed: true,
       })),
     );
 
@@ -316,8 +318,11 @@ export function checkOpenCode2ProviderStatus(
         probe: {
           installed: true,
           version: "2.0.0-preview",
-          status: "ready",
+          status: inventory.failed ? "warning" : "ready",
           auth: { status: "unknown" },
+          ...(inventory.failed
+            ? { message: "Could not reach OpenCode 2 host to discover models and tools." }
+            : {}),
         },
       }),
       supportsConversationRollback: true,

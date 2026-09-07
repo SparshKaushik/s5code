@@ -55,27 +55,31 @@ export const makeOpenCode2TextGeneration = (
     const parsedModel = parseModelSlug(input.modelSelection.model);
     const selectedVariant = getModelSelectionStringOptionValue(input.modelSelection, "variant");
 
-    // Attempt direct generate.text first
+    // Attempt direct generate.text first, then fallback to ephemeral session
     const generatedTextResult = yield* Effect.tryPromise({
       try: async () => {
         if (typeof hostHandle.client.generate?.text === "function") {
-          const res = await hostHandle.client.generate.text({
-            prompt: input.prompt,
-            ...(parsedModel
-              ? {
-                  model: {
-                    id: parsedModel.modelID,
-                    providerID: parsedModel.providerID,
-                    ...(selectedVariant ? { variant: selectedVariant } : {}),
-                  },
-                }
-              : {}),
-          });
-          const text =
-            (res as { text?: string; output?: string })?.text ??
-            (res as { output?: string })?.output;
-          if (typeof text === "string" && text.trim().length > 0) {
-            return text.trim();
+          try {
+            const res = await hostHandle.client.generate.text({
+              prompt: input.prompt,
+              ...(parsedModel
+                ? {
+                    model: {
+                      id: parsedModel.modelID,
+                      providerID: parsedModel.providerID,
+                      ...(selectedVariant ? { variant: selectedVariant } : {}),
+                    },
+                  }
+                : {}),
+            });
+            const text =
+              (res as { text?: string; output?: string })?.text ??
+              (res as { output?: string })?.output;
+            if (typeof text === "string" && text.trim().length > 0) {
+              return text.trim();
+            }
+          } catch {
+            // Direct generation failed; fall through to temporary session fallback
           }
         }
         // Fallback: create an ephemeral session, prompt it, and remove it
@@ -88,6 +92,15 @@ export const makeOpenCode2TextGeneration = (
             sessionID: session.id,
             text: input.prompt,
             delivery: "steer",
+            ...(parsedModel
+              ? {
+                  model: {
+                    id: parsedModel.modelID,
+                    providerID: parsedModel.providerID,
+                  },
+                }
+              : {}),
+            ...(selectedVariant ? { variant: selectedVariant } : {}),
           });
           // Retrieve response text from prompt result or session log
           const parts =

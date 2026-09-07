@@ -11,9 +11,16 @@ import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
+import * as Layer from "effect/Layer";
 
+import { ServerConfig } from "../../config.ts";
 import { makeOpenCode2Adapter } from "./OpenCode2Adapter.ts";
 import { type OpenCode2ClientFacade, type OpenCode2HostHandle } from "../OpenCode2Host.ts";
+
+const testLayer = Layer.merge(
+  NodeServices.layer,
+  ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(Layer.provide(NodeServices.layer)),
+);
 
 function createMockHost() {
   const buffer: Array<{ type: string; data?: any }> = [];
@@ -179,7 +186,7 @@ describe("OpenCode2Adapter", () => {
 
       const completed = yield* waitForEvent((e) => e.type === "turn.completed");
       expect((completed.payload as any).state).toBe("completed");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("translates child session events into rich subagent tasks and rolls up tokens", () =>
@@ -270,7 +277,7 @@ describe("OpenCode2Adapter", () => {
 
       const turnCompleted = yield* waitForEvent((e) => e.type === "turn.completed");
       expect((turnCompleted.payload as any).state).toBe("completed");
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("handles permissions and form input requests and replies cleanly", () =>
@@ -349,7 +356,7 @@ describe("OpenCode2Adapter", () => {
         formID: "form-456",
         answer: { env: "production" },
       });
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("supports durable inbox cancellation, delivery changing, and session forks", () =>
@@ -401,6 +408,6 @@ describe("OpenCode2Adapter", () => {
 
       // Verify forked session is registered and usable
       expect(yield* adapter.hasSession(targetThreadId)).toBe(true);
-    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });
