@@ -41,6 +41,9 @@ export default mergeConfig(
       sourcemap: true,
       clean: true,
       shims: true,
+      alias: {
+        "jsonc-parser": "jsonc-parser/lib/esm/main.js",
+      },
       deps: {
         // Both halves are required. `alwaysBundle` forces the JS dependencies in
         // (declared deps are external by default, which is what this change is

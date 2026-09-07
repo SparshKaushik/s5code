@@ -26,6 +26,25 @@ function ensureCommonJsGlobals(): void {
   if (typeof (globalThis as any).__dirname === "undefined") {
     (globalThis as any).__dirname = import.meta.dirname ?? "";
   }
+  // OpenCode uses createRequire(import.meta.url).resolve(...) at module-evaluation time
+  // for WASM and PTY assets. In a bundled environment (such as Electron or Rolldown),
+  // these external paths cannot be resolved relative to the bundle chunk.
+  // Setting default environment variables prevents require.resolve from throwing.
+  if (process.env.OPENCODE_TREE_SITTER_WASM_PATH === undefined) {
+    process.env.OPENCODE_TREE_SITTER_WASM_PATH = "";
+  }
+  if (process.env.OPENCODE_TREE_SITTER_BASH_WASM_PATH === undefined) {
+    process.env.OPENCODE_TREE_SITTER_BASH_WASM_PATH = "";
+  }
+  if (process.env.OPENCODE_TREE_SITTER_POWERSHELL_WASM_PATH === undefined) {
+    process.env.OPENCODE_TREE_SITTER_POWERSHELL_WASM_PATH = "";
+  }
+  if (process.env.OPENCODE_PHOTON_WASM_PATH === undefined) {
+    process.env.OPENCODE_PHOTON_WASM_PATH = "";
+  }
+  if (process.env.OPENCODE_NODE_PTY_PATH === undefined) {
+    process.env.OPENCODE_NODE_PTY_PATH = "node-pty";
+  }
 }
 
 ensureCommonJsGlobals();

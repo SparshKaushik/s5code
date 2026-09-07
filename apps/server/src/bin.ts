@@ -8,6 +8,21 @@ if (typeof (globalThis as any).__filename === "undefined") {
 if (typeof (globalThis as any).__dirname === "undefined") {
   (globalThis as any).__dirname = import.meta.dirname ?? "";
 }
+if (process.env.OPENCODE_TREE_SITTER_WASM_PATH === undefined) {
+  process.env.OPENCODE_TREE_SITTER_WASM_PATH = "";
+}
+if (process.env.OPENCODE_TREE_SITTER_BASH_WASM_PATH === undefined) {
+  process.env.OPENCODE_TREE_SITTER_BASH_WASM_PATH = "";
+}
+if (process.env.OPENCODE_TREE_SITTER_POWERSHELL_WASM_PATH === undefined) {
+  process.env.OPENCODE_TREE_SITTER_POWERSHELL_WASM_PATH = "";
+}
+if (process.env.OPENCODE_PHOTON_WASM_PATH === undefined) {
+  process.env.OPENCODE_PHOTON_WASM_PATH = "";
+}
+if (process.env.OPENCODE_NODE_PTY_PATH === undefined) {
+  process.env.OPENCODE_NODE_PTY_PATH = "node-pty";
+}
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
