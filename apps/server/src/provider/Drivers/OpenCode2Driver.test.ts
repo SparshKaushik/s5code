@@ -1,3 +1,4 @@
+// @effect-diagnostics preferSchemaOverJson:off
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
@@ -92,6 +93,69 @@ describe("OpenCode2Driver", () => {
         expect(hostHandle.isRemote).toBe(false);
         expect(typeof (globalThis as any).__filename).toBe("string");
         expect(typeof (globalThis as any).__dirname).toBe("string");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect(
+    "discovers models, agents, slash commands, and skills from workspace configuration",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+        // Write an opencode.json configuring providers and models
+        yield* fileSystem.writeFileString(
+          path.join(tempDir, "opencode.json"),
+          JSON.stringify({
+            providers: {
+              "custom-llm": {
+                name: "Custom LLM Provider",
+                models: {
+                  "fast-model": {},
+                  "smart-model": {},
+                },
+              },
+            },
+          }),
+        );
+
+        const hostHandle = yield* makeOpenCode2Host({
+          instanceId: ProviderInstanceId.make("opencode2-discovery-test"),
+          config: {
+            enabled: true,
+            serverUrl: "",
+            serverPassword: "",
+            databasePath: path.join(tempDir, "sessions.db"),
+            customModels: [],
+          },
+          defaultDirectory: tempDir,
+          stateDir: tempDir,
+        });
+
+        const snapshot = yield* checkOpenCode2ProviderStatus(
+          hostHandle,
+          {
+            enabled: true,
+            serverUrl: "",
+            serverPassword: "",
+            databasePath: path.join(tempDir, "sessions.db"),
+            customModels: [],
+          },
+          tempDir,
+        );
+
+        const modelSlugs = snapshot.models.map((m) => m.slug);
+        expect(modelSlugs).toContain("custom-llm/fast-model");
+        expect(modelSlugs).toContain("custom-llm/smart-model");
+
+        const fastModel = snapshot.models.find((m) => m.slug === "custom-llm/fast-model");
+        expect(fastModel?.subProvider).toBe("Custom LLM Provider");
+        expect(fastModel?.capabilities?.optionDescriptors?.length).toBeGreaterThan(0);
+
+        // Verify agents and slash commands are discovered
+        expect(snapshot.slashCommands.length).toBeGreaterThan(0);
+        expect(snapshot.slashCommands.map((c) => c.name)).toContain("compact");
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });
