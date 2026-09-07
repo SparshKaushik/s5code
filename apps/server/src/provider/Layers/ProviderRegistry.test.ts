@@ -2518,6 +2518,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsModule.layerTest(), Te
                 "cursor",
                 "grok",
                 "opencode",
+                "opencode2",
                 "pi",
               ]);
               assert.strictEqual(cursorProvider?.enabled, false);
