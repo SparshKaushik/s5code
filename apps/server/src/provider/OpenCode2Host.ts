@@ -11,7 +11,6 @@
  * @module provider/OpenCode2Host
  */
 import { OpenCode as OpenCodeClient } from "@opencode-ai/client-v2";
-import { OpenCode as OpenCodeSdk } from "@opencode-ai/sdk-v2";
 import { OpenCode2Settings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -90,15 +89,17 @@ export function makeOpenCode2Host(
 
     const host = yield* Effect.acquireRelease(
       Effect.tryPromise({
-        try: () =>
-          OpenCodeSdk.create({
+        try: async () => {
+          const { OpenCode: OpenCodeSdk } = await import("@opencode-ai/sdk-v2");
+          return await OpenCodeSdk.create({
             database: { path: databasePath },
             instances: {
               default: {
                 directory: options.defaultDirectory,
               },
             },
-          }),
+          });
+        },
         catch: (cause) =>
           new ProviderDriverError({
             driver: ProviderDriverKind.make("opencode2"),

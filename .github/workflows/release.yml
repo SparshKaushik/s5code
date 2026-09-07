@@ -609,7 +609,7 @@ jobs:
           # Pinned: the compiled binary embeds this exact Bun runtime, so a
           # floating version would silently change what ships. Bun 1.4 adds
           # `--asset`, which is what would let the web client be embedded.
-          version: "1.3.13"
+          bun-version: "1.3.13"
 
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
