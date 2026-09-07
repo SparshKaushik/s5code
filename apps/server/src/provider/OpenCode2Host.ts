@@ -99,6 +99,15 @@ export function makeOpenCode2Host(
     }
 
     // Embedded in-process SDK mode
+    if (typeof (globalThis as any).Bun !== "undefined") {
+      return yield* new ProviderDriverError({
+        driver: ProviderDriverKind.make("opencode2"),
+        instanceId: options.instanceId,
+        detail:
+          "Embedded OpenCode 2 host requires Node.js (node:sqlite is unavailable in Bun standalone binary). Configure a remote serverUrl to connect to OpenCode 2.",
+      });
+    }
+
     const databasePath =
       options.config.databasePath.trim().length > 0
         ? options.config.databasePath.trim()
