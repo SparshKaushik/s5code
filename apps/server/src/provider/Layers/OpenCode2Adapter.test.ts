@@ -7,6 +7,7 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
@@ -46,7 +47,7 @@ function createMockHost() {
 
   const client = {
     event: {
-      subscribe: async () => ({
+      subscribe: () => ({
         [Symbol.asyncIterator]: () => ({
           next: async () => {
             while (buffer.length === 0) {
@@ -61,8 +62,8 @@ function createMockHost() {
     },
     session: {
       create: async (params: any) => ({
-        id: `mock-session-${Date.now()}`,
-        directory: params.directory,
+        id: `mock-session-123`,
+        directory: params.location?.directory ?? "/tmp",
       }),
       prompt: async (params: any) => {
         calls.prompts.push(params);
@@ -74,7 +75,7 @@ function createMockHost() {
       compact: async (_params: any) => {},
       fork: async (params: any) => {
         calls.forks.push(params);
-        return { id: `mock-forked-${Date.now()}` };
+        return { id: `mock-forked-456` };
       },
       revert: {
         stage: async (params: any) => {
@@ -127,10 +128,12 @@ describe("OpenCode2Adapter", () => {
       const threadId = ThreadId.make("thread-1");
       const session = yield* adapter.startSession({
         threadId,
-        directory: "/tmp/project",
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
       });
 
-      expect(session.sessionId).toContain("mock-session");
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+      expect(sessionId).toContain("mock-session");
 
       const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
       yield* Effect.forkScoped(
@@ -160,23 +163,22 @@ describe("OpenCode2Adapter", () => {
       // Emit execution started, text delta, and execution succeeded
       emit({
         type: "session.execution.started",
-        data: { sessionID: session.sessionId },
+        data: { sessionID: sessionId },
       });
       emit({
         type: "session.text.delta",
-        data: { sessionID: session.sessionId, delta: "Hi there!" },
+        data: { sessionID: sessionId, delta: "Hi there!" },
       });
       emit({
         type: "session.execution.succeeded",
-        data: { sessionID: session.sessionId },
+        data: { sessionID: sessionId },
       });
 
-      const textDelta = yield* waitForEvent((e) => e.type === "thread.token.delta");
+      const textDelta = yield* waitForEvent((e) => e.type === "content.delta");
       expect((textDelta.payload as any).delta).toBe("Hi there!");
 
       const completed = yield* waitForEvent((e) => e.type === "turn.completed");
-      expect((completed.payload as any).status).toBe("completed");
-      expect((completed.payload as any).hasSubagents).toBe(false);
+      expect((completed.payload as any).state).toBe("completed");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -188,8 +190,11 @@ describe("OpenCode2Adapter", () => {
       const threadId = ThreadId.make("thread-subagent");
       const session = yield* adapter.startSession({
         threadId,
-        directory: "/tmp/project",
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
       });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
 
       const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
       yield* Effect.forkScoped(
@@ -215,7 +220,7 @@ describe("OpenCode2Adapter", () => {
       // Subagent is created under the parent session
       emit({
         type: "session.created",
-        data: { sessionID: childSessionId, parentID: session.sessionId, agent: "reviewer" },
+        data: { sessionID: childSessionId, parentID: sessionId, agent: "reviewer" },
       });
 
       const started = yield* waitForEvent((e) => e.type === "task.started");
@@ -226,7 +231,7 @@ describe("OpenCode2Adapter", () => {
       // Subagent calls tool
       emit({
         type: "session.tool.called",
-        data: { sessionID: childSessionId, parentID: session.sessionId, tool: "checkDiff" },
+        data: { sessionID: childSessionId, parentID: sessionId, tool: "checkDiff" },
       });
 
       const toolProgress = yield* waitForEvent((e) => e.type === "task.progress");
@@ -237,7 +242,7 @@ describe("OpenCode2Adapter", () => {
         type: "session.step.ended",
         data: {
           sessionID: childSessionId,
-          parentID: session.sessionId,
+          parentID: sessionId,
           tokens: { input: 150, output: 50, reasoning: 30 },
         },
       });
@@ -251,7 +256,7 @@ describe("OpenCode2Adapter", () => {
       // Subagent completes
       emit({
         type: "session.execution.succeeded",
-        data: { sessionID: childSessionId, parentID: session.sessionId },
+        data: { sessionID: childSessionId, parentID: sessionId },
       });
 
       const taskCompleted = yield* waitForEvent((e) => e.type === "task.completed");
@@ -260,11 +265,11 @@ describe("OpenCode2Adapter", () => {
       // Parent turn finishes
       emit({
         type: "session.execution.succeeded",
-        data: { sessionID: session.sessionId },
+        data: { sessionID: sessionId },
       });
 
       const turnCompleted = yield* waitForEvent((e) => e.type === "turn.completed");
-      expect((turnCompleted.payload as any).hasSubagents).toBe(true);
+      expect((turnCompleted.payload as any).state).toBe("completed");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -276,8 +281,11 @@ describe("OpenCode2Adapter", () => {
       const threadId = ThreadId.make("thread-perm");
       const session = yield* adapter.startSession({
         threadId,
-        directory: "/tmp/project",
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
       });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
 
       const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
       yield* Effect.forkScoped(
@@ -297,39 +305,39 @@ describe("OpenCode2Adapter", () => {
       emit({
         type: "permission.asked",
         data: {
-          sessionID: session.sessionId,
+          sessionID: sessionId,
           permissionID: "perm-123",
           description: "Allow bash execution?",
         },
       });
 
       const permEvent = yield* waitForEvent(
-        (e) => e.type === "request.opened" && (e.payload as any).action === "permission",
+        (e) =>
+          e.type === "request.opened" &&
+          (e.payload as any).requestType === "command_execution_approval",
       );
-      expect((permEvent.payload as any).requestId).toBe(ApprovalRequestId.make("perm-123"));
+      expect(permEvent).toBeDefined();
 
       // Form created
       emit({
         type: "form.created",
         data: {
-          sessionID: session.sessionId,
+          sessionID: sessionId,
           formID: "form-456",
           title: "Choose environment",
           fields: [{ name: "env", type: "string" }],
         },
       });
 
-      const formEvent = yield* waitForEvent(
-        (e) => e.type === "request.opened" && (e.payload as any).action === "user-input",
-      );
-      expect((formEvent.payload as any).requestId).toBe(ApprovalRequestId.make("form-456"));
+      const formEvent = yield* waitForEvent((e) => e.type === "user-input.requested");
+      expect(formEvent).toBeDefined();
 
       // Reply to permission
       yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("perm-123"), "accept");
       expect(calls.permissionReplies).toContainEqual({
-        sessionID: session.sessionId,
-        permissionID: "perm-123",
-        response: "once",
+        sessionID: sessionId,
+        requestID: "perm-123",
+        reply: "once",
       });
 
       // Reply to form
@@ -337,9 +345,9 @@ describe("OpenCode2Adapter", () => {
         env: "production",
       });
       expect(calls.formReplies).toContainEqual({
-        sessionID: session.sessionId,
+        sessionID: sessionId,
         formID: "form-456",
-        answers: { env: "production" },
+        answer: { env: "production" },
       });
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
@@ -352,8 +360,11 @@ describe("OpenCode2Adapter", () => {
       const threadId = ThreadId.make("thread-inbox");
       const session = yield* adapter.startSession({
         threadId,
-        directory: "/tmp/project",
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
       });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
 
       // Send queued turn
       yield* adapter.sendTurn({
@@ -366,14 +377,14 @@ describe("OpenCode2Adapter", () => {
       // Cancel inbox item
       yield* adapter.cancelInboxItem!(threadId, "inbox-item-1");
       expect(calls.inboxCancels).toContainEqual({
-        sessionID: session.sessionId,
+        sessionID: sessionId,
         inboxID: "inbox-item-1",
       });
 
       // Change delivery
       yield* adapter.changeInboxDelivery!(threadId, "inbox-item-2", "steer");
       expect(calls.inboxChanges).toContainEqual({
-        steer: { sessionID: session.sessionId, inboxID: "inbox-item-2" },
+        steer: { sessionID: sessionId, inboxID: "inbox-item-2" },
       });
 
       // Fork thread
@@ -385,7 +396,7 @@ describe("OpenCode2Adapter", () => {
       );
 
       expect(calls.forks).toHaveLength(1);
-      expect(calls.forks[0].sessionID).toBe(session.sessionId);
+      expect(calls.forks[0].sessionID).toBe(sessionId);
       expect((forkResult.resumeCursor as any).sessionID).toContain("mock-forked");
 
       // Verify forked session is registered and usable

@@ -16,6 +16,7 @@ import { OpenCode2Settings, ProviderDriverKind, ProviderInstanceId } from "@t3to
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import type * as Scope from "effect/Scope";
 
 import { ProviderDriverError } from "./Errors.ts";
 
@@ -38,7 +39,11 @@ export interface MakeOpenCode2HostOptions {
 
 export function makeOpenCode2Host(
   options: MakeOpenCode2HostOptions,
-): Effect.Effect<OpenCode2HostHandle, ProviderDriverError, FileSystem.FileSystem | Path.Path> {
+): Effect.Effect<
+  OpenCode2HostHandle,
+  ProviderDriverError,
+  FileSystem.FileSystem | Path.Path | Scope.Scope
+> {
   return Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
@@ -52,7 +57,7 @@ export function makeOpenCode2Host(
       }
 
       const client = OpenCodeClient.make({
-        url: serverUrl,
+        baseUrl: serverUrl,
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
       }) as OpenCode2ClientFacade;
 
@@ -102,7 +107,7 @@ export function makeOpenCode2Host(
             cause,
           }),
       }),
-      (h) =>
+      (h: any) =>
         Effect.promise(async () => {
           try {
             await h.close();

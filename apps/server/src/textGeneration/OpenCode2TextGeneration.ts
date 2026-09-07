@@ -15,7 +15,7 @@ import { extractJsonObject } from "@t3tools/shared/schemaJson";
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { OpenCode2HostHandle } from "../provider/OpenCode2Host.ts";
+import type { OpenCode2HostHandle } from "../provider/OpenCode2Host.ts";
 import * as TextGeneration from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -80,7 +80,7 @@ export const makeOpenCode2TextGeneration = (
         }
         // Fallback: create an ephemeral session, prompt it, and remove it
         const session = await hostHandle.client.session.create({
-          directory: input.cwd,
+          location: { directory: input.cwd },
           title: `T3 Text Gen: ${input.operation}`,
         });
         try {

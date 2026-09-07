@@ -7,6 +7,7 @@
 import {
   type ModelCapabilities,
   type OpenCode2Settings,
+  ProviderDriverKind,
   type ServerProviderModel,
   type ServerProviderSkill,
   type ServerProviderSlashCommand,
@@ -21,6 +22,7 @@ import {
   providerModelsFromSettings,
   type ServerProviderDraft,
 } from "../providerSnapshot.ts";
+import { ProviderDriverError } from "../Errors.ts";
 import { type OpenCode2HostHandle } from "../OpenCode2Host.ts";
 
 const OPENCODE2_PRESENTATION = {
@@ -109,23 +111,55 @@ export function openCode2CapabilitiesForModel(input: {
   });
 }
 
+const DEFAULT_OPENCODE2_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+  optionDescriptors: [
+    {
+      id: "variant",
+      label: "Reasoning",
+      type: "select",
+      options: [
+        { id: "low", label: "Low" },
+        { id: "medium", label: "Medium", isDefault: true },
+        { id: "high", label: "High" },
+        { id: "xhigh", label: "Extra High" },
+      ],
+      currentValue: "medium",
+    },
+    {
+      id: "agent",
+      label: "Agent",
+      type: "select",
+      options: [
+        { id: "build", label: "Build", isDefault: true },
+        { id: "plan", label: "Plan" },
+      ],
+      currentValue: "build",
+    },
+  ],
+});
+
 export function makePendingOpenCode2Provider(
   config: OpenCode2Settings,
 ): Effect.Effect<ServerProviderDraft> {
   return Effect.gen(function* () {
     const now = yield* DateTime.now;
+    const checkedAt = now.pipe(DateTime.formatIso);
     return {
       ...buildServerProvider({
         presentation: OPENCODE2_PRESENTATION,
         enabled: config.enabled,
-        checkedAt: now,
-        models: providerModelsFromSettings(config.customModels),
+        checkedAt,
+        models: providerModelsFromSettings(
+          [],
+          config.customModels,
+          DEFAULT_OPENCODE2_MODEL_CAPABILITIES,
+        ),
         slashCommands: [COMPACT_SLASH_COMMAND],
         skills: [],
         probe: {
           installed: true,
           version: "2.0.0-preview",
-          status: config.enabled ? "ready" : "disabled",
+          status: "ready",
           auth: { status: "unknown" },
         },
       }),
@@ -145,20 +179,25 @@ export function checkOpenCode2ProviderStatus(
 ): Effect.Effect<ServerProviderDraft> {
   return Effect.gen(function* () {
     const now = yield* DateTime.now;
+    const checkedAt = now.pipe(DateTime.formatIso);
 
     if (!config.enabled) {
       return {
         ...buildServerProvider({
           presentation: OPENCODE2_PRESENTATION,
           enabled: false,
-          checkedAt: now,
-          models: providerModelsFromSettings(config.customModels),
+          checkedAt,
+          models: providerModelsFromSettings(
+            [],
+            config.customModels,
+            DEFAULT_OPENCODE2_MODEL_CAPABILITIES,
+          ),
           slashCommands: [COMPACT_SLASH_COMMAND],
           skills: [],
           probe: {
             installed: true,
             version: "2.0.0-preview",
-            status: "disabled",
+            status: "ready",
             auth: { status: "unknown" },
           },
         }),
@@ -193,7 +232,13 @@ export function checkOpenCode2ProviderStatus(
           skills: (skillsRes as { data?: unknown[] }).data ?? [],
         };
       },
-      catch: (cause) => cause,
+      catch: (cause) =>
+        new ProviderDriverError({
+          driver: ProviderDriverKind.make("opencode2"),
+          instanceId: hostHandle.instanceId,
+          detail: String(cause),
+          cause,
+        }),
     }).pipe(
       Effect.orElseSucceed(() => ({
         models: [],
@@ -227,8 +272,12 @@ export function checkOpenCode2ProviderStatus(
       }),
     }));
 
-    const customModels = providerModelsFromSettings(config.customModels);
-    const models = probedModels.length > 0 ? [...probedModels, ...customModels] : customModels;
+    const customModels = providerModelsFromSettings(
+      probedModels,
+      config.customModels,
+      DEFAULT_OPENCODE2_MODEL_CAPABILITIES,
+    );
+    const models = customModels;
 
     const slashCommands: Array<ServerProviderSlashCommand> = [
       COMPACT_SLASH_COMMAND,
@@ -260,7 +309,7 @@ export function checkOpenCode2ProviderStatus(
       ...buildServerProvider({
         presentation: OPENCODE2_PRESENTATION,
         enabled: true,
-        checkedAt: now,
+        checkedAt,
         models,
         slashCommands,
         skills,

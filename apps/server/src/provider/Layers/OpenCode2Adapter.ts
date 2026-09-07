@@ -8,6 +8,7 @@
  */
 import {
   ApprovalRequestId,
+  EventId,
   ModelSelection,
   ProviderApprovalDecision,
   ProviderDriverKind,
@@ -19,19 +20,24 @@ import {
   ProviderSessionStartInput,
   ProviderTurnStartResult,
   ProviderUserInputAnswers,
+  RuntimeItemId,
+  RuntimeRequestId,
   RuntimeTaskId,
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
 import { getModelSelectionStringOptionValue } from "@t3tools/shared/model";
+import * as Clock from "effect/Clock";
+import * as Crypto from "effect/Crypto";
+import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 
+import type { ProviderAdapterError } from "../Errors.ts";
 import {
-  ProviderAdapterError,
   ProviderAdapterRequestError,
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
@@ -73,25 +79,84 @@ export interface OpenCode2AdapterLiveOptions {
 export function makeOpenCode2Adapter(
   hostHandle: OpenCode2HostHandle,
   options?: OpenCode2AdapterLiveOptions,
-): Effect.Effect<ProviderAdapterShape<ProviderAdapterError>, never, never> {
+): Effect.Effect<ProviderAdapterShape<ProviderAdapterError>, never, Crypto.Crypto> {
   return Effect.gen(function* () {
+    const crypto = yield* Crypto.Crypto;
     const boundInstanceId = options?.instanceId ?? ProviderInstanceId.make("opencode2");
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessionsByThreadId = new Map<ThreadId, OpenCode2SessionContext>();
     const threadIdBySessionId = new Map<string, ThreadId>();
 
+    const randomUUIDv4 = crypto.randomUUIDv4.pipe(
+      Effect.mapError(
+        (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "crypto/randomUUIDv4",
+            detail: "Failed to generate runtime identifier.",
+            cause,
+          }),
+      ),
+    );
+
+    const buildEventBase = (input: {
+      readonly threadId: ThreadId;
+      readonly turnId?: TurnId | undefined;
+      readonly itemId?: string | undefined;
+      readonly requestId?: string | undefined;
+      readonly raw?: unknown;
+    }) =>
+      Effect.all({
+        eventId: randomUUIDv4.pipe(Effect.map(EventId.make)),
+        createdAt: DateTime.now.pipe(Effect.map(DateTime.formatIso)),
+      }).pipe(
+        Effect.map(({ eventId, createdAt }) => ({
+          eventId,
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          threadId: input.threadId,
+          createdAt,
+          ...(input.turnId ? { turnId: input.turnId } : {}),
+          ...(input.itemId ? { itemId: RuntimeItemId.make(input.itemId) } : {}),
+          ...(input.requestId ? { requestId: RuntimeRequestId.make(input.requestId) } : {}),
+          ...(input.raw !== undefined
+            ? {
+                raw: {
+                  source: "opencode2.sdk.event" as const,
+                  payload: input.raw,
+                },
+              }
+            : {}),
+        })),
+      );
+
+    const emit = (event: ProviderRuntimeEvent) =>
+      Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
+
     // Start background event pump from hostHandle.client.event.subscribe()
     const pumpFiber = yield* Effect.gen(function* () {
-      const asyncIterable = yield* Effect.tryPromise({
+      const asyncIterable = yield* Effect.try({
         try: () => hostHandle.client.event.subscribe(),
-        catch: () => null,
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "event.subscribe",
+            detail: `Failed to subscribe: ${String(cause)}`,
+            cause,
+          }),
       }).pipe(Effect.orElseSucceed(() => null));
 
       if (!asyncIterable) return;
 
       yield* Stream.fromAsyncIterable(
         asyncIterable as AsyncIterable<{ type: string; data?: any }>,
-        (err) => err,
+        (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "event.stream",
+            detail: String(cause),
+            cause,
+          }),
       ).pipe(
         Stream.runForEach((rawEvent) =>
           Effect.gen(function* () {
@@ -138,10 +203,9 @@ export function makeOpenCode2Adapter(
                 parentContext.subagents.set(sessionId, subagent);
                 parentContext.hasSubagents = true;
 
-                yield* Queue.offer(runtimeEventQueue, {
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                   type: "task.started",
-                  threadId,
-                  turnId,
                   payload: {
                     taskId,
                     description: `Subagent: ${subagent.name}`,
@@ -149,16 +213,15 @@ export function makeOpenCode2Adapter(
                     agentKind: "agent",
                     agentId: sessionId,
                   },
-                } as ProviderRuntimeEvent);
+                });
               }
 
               if (subagent) {
                 if (eventType === "session.tool.called") {
                   subagent.lastToolName = data.tool;
-                  yield* Queue.offer(runtimeEventQueue, {
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                     type: "task.progress",
-                    threadId,
-                    turnId,
                     payload: {
                       taskId: subagent.taskId,
                       description: `Subagent ${subagent.name} running`,
@@ -168,17 +231,16 @@ export function makeOpenCode2Adapter(
                       agentKind: "agent",
                       agentId: sessionId,
                     },
-                  } as ProviderRuntimeEvent);
+                  });
                 } else if (eventType === "session.step.ended") {
                   const tokens = data.tokens ?? {};
                   subagent.cumulativeInputTokens += tokens.input ?? 0;
                   subagent.cumulativeOutputTokens += tokens.output ?? 0;
                   subagent.cumulativeReasoningTokens += tokens.reasoning ?? 0;
 
-                  yield* Queue.offer(runtimeEventQueue, {
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                     type: "task.progress",
-                    threadId,
-                    turnId,
                     payload: {
                       taskId: subagent.taskId,
                       description: `Subagent ${subagent.name} step ended`,
@@ -195,16 +257,15 @@ export function makeOpenCode2Adapter(
                       agentKind: "agent",
                       agentId: sessionId,
                     },
-                  } as ProviderRuntimeEvent);
+                  });
                 } else if (
                   eventType === "session.execution.succeeded" ||
                   eventType === "session.execution.failed"
                 ) {
                   const succeeded = eventType === "session.execution.succeeded";
-                  yield* Queue.offer(runtimeEventQueue, {
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                     type: "task.completed",
-                    threadId,
-                    turnId,
                     payload: {
                       taskId: subagent.taskId,
                       status: succeeded ? "completed" : "failed",
@@ -219,7 +280,7 @@ export function makeOpenCode2Adapter(
                       agentKind: "agent",
                       agentId: sessionId,
                     },
-                  } as ProviderRuntimeEvent);
+                  });
                   parentContext.subagents.delete(sessionId);
                 }
               }
@@ -235,102 +296,110 @@ export function makeOpenCode2Adapter(
 
               case "session.text.delta": {
                 if (typeof data.delta === "string" && data.delta.length > 0) {
-                  yield* Queue.offer(runtimeEventQueue, {
-                    type: "thread.token.delta",
-                    threadId,
-                    turnId,
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                    type: "content.delta",
                     payload: {
+                      streamKind: "assistant_text",
                       delta: data.delta,
                     },
-                  } as ProviderRuntimeEvent);
+                  });
                 }
                 break;
               }
 
               case "session.reasoning.delta": {
                 if (typeof data.delta === "string" && data.delta.length > 0) {
-                  yield* Queue.offer(runtimeEventQueue, {
-                    type: "thread.reasoning.delta",
-                    threadId,
-                    turnId,
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                    type: "content.delta",
                     payload: {
+                      streamKind: "reasoning_text",
                       delta: data.delta,
                     },
-                  } as ProviderRuntimeEvent);
+                  });
                 }
                 break;
               }
 
               case "session.tool.called": {
-                yield* Queue.offer(runtimeEventQueue, {
-                  type: "tool.called",
-                  threadId,
-                  turnId,
+                const callId = data.callID ?? data.id ?? `call-${yield* Clock.currentTimeMillis}`;
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
+                  type: "item.started",
                   payload: {
-                    callId: data.callID ?? data.id ?? `call-${Date.now()}`,
-                    toolName: data.tool ?? "unknown_tool",
-                    input: data.input ?? {},
+                    itemType: "command_execution",
+                    title: data.tool ?? "tool",
+                    ...(typeof data.input === "string" ? { detail: data.input } : {}),
                   },
-                } as ProviderRuntimeEvent);
+                });
                 break;
               }
 
               case "session.tool.success": {
-                yield* Queue.offer(runtimeEventQueue, {
-                  type: "tool.completed",
-                  threadId,
-                  turnId,
+                const callId = data.callID ?? data.id ?? `call-${yield* Clock.currentTimeMillis}`;
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
+                  type: "item.completed",
                   payload: {
-                    callId: data.callID ?? data.id ?? `call-${Date.now()}`,
-                    toolName: data.tool ?? "unknown_tool",
-                    output: data.output ?? {},
-                    status: "success",
+                    itemType: "command_execution",
+                    status: "completed",
+                    title: data.tool ?? "tool",
+                    ...(typeof data.output === "string" ? { detail: data.output } : {}),
                   },
-                } as ProviderRuntimeEvent);
+                });
                 break;
               }
 
               case "session.tool.failed": {
-                yield* Queue.offer(runtimeEventQueue, {
-                  type: "tool.completed",
-                  threadId,
-                  turnId,
+                const callId = data.callID ?? data.id ?? `call-${yield* Clock.currentTimeMillis}`;
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
+                  type: "item.completed",
                   payload: {
-                    callId: data.callID ?? data.id ?? `call-${Date.now()}`,
-                    toolName: data.tool ?? "unknown_tool",
-                    error: data.error?.message ?? "Tool execution failed",
+                    itemType: "command_execution",
                     status: "failed",
+                    title: data.tool ?? "tool",
+                    detail: data.error?.message ?? "Tool failed",
                   },
-                } as ProviderRuntimeEvent);
+                });
                 break;
               }
 
               case "permission.asked": {
-                yield* Queue.offer(runtimeEventQueue, {
+                const requestId =
+                  data.permissionID ?? data.id ?? `perm-${yield* Clock.currentTimeMillis}`;
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, requestId, raw: rawEvent })),
                   type: "request.opened",
-                  threadId,
-                  turnId,
                   payload: {
-                    requestId: ApprovalRequestId.make(data.permissionID ?? data.id),
-                    action: "permission",
-                    description: data.description ?? `Permission requested: ${data.pattern ?? "*"}`,
+                    requestType: "command_execution_approval",
+                    options: [
+                      { decision: "accept", label: "Allow once" },
+                      { decision: "acceptAlways", label: "Allow always" },
+                      { decision: "decline", label: "Deny" },
+                    ],
+                    detail: data.description ?? "Permission requested",
                   },
-                } as ProviderRuntimeEvent);
+                });
                 break;
               }
 
               case "form.created": {
-                yield* Queue.offer(runtimeEventQueue, {
-                  type: "request.opened",
-                  threadId,
-                  turnId,
+                const requestId =
+                  data.formID ?? data.id ?? `form-${yield* Clock.currentTimeMillis}`;
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, requestId, raw: rawEvent })),
+                  type: "user-input.requested",
                   payload: {
-                    requestId: ApprovalRequestId.make(data.formID ?? data.id),
-                    action: "user-input",
-                    description: data.title ?? "Input requested",
-                    fields: data.fields ?? [],
+                    questions: (data.fields ?? []).map((f: any) => ({
+                      id: f.name,
+                      prompt: f.title ?? f.name,
+                      allowCustomAnswer: true,
+                      options: [],
+                    })),
                   },
-                } as ProviderRuntimeEvent);
+                });
                 break;
               }
 
@@ -350,41 +419,40 @@ export function makeOpenCode2Adapter(
 
               case "session.execution.succeeded": {
                 parentContext.activeTurnStatus = "idle";
-                yield* Queue.offer(runtimeEventQueue, {
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                   type: "turn.completed",
-                  threadId,
-                  turnId,
                   payload: {
-                    status: "completed",
-                    hasSubagents: parentContext.hasSubagents,
+                    state: "completed",
                   },
-                } as ProviderRuntimeEvent);
+                });
                 parentContext.activeTurnId = null;
                 break;
               }
 
               case "session.execution.failed": {
                 parentContext.activeTurnStatus = "failed";
-                yield* Queue.offer(runtimeEventQueue, {
-                  type: "turn.failed",
-                  threadId,
-                  turnId,
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                  type: "turn.completed",
                   payload: {
-                    error: data.error?.message ?? "Turn execution failed",
+                    state: "failed",
+                    errorMessage: data.error?.message ?? "Turn execution failed",
                   },
-                } as ProviderRuntimeEvent);
+                });
                 parentContext.activeTurnId = null;
                 break;
               }
 
               case "session.execution.interrupted": {
                 parentContext.activeTurnStatus = "interrupted";
-                yield* Queue.offer(runtimeEventQueue, {
-                  type: "turn.interrupted",
-                  threadId,
-                  turnId,
-                  payload: {},
-                } as ProviderRuntimeEvent);
+                yield* emit({
+                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                  type: "turn.completed",
+                  payload: {
+                    state: "cancelled",
+                  },
+                });
                 parentContext.activeTurnId = null;
                 break;
               }
@@ -410,12 +478,20 @@ export function makeOpenCode2Adapter(
       input: ProviderSessionStartInput,
     ): Effect.Effect<ProviderSession, ProviderAdapterError> =>
       Effect.gen(function* () {
+        const now = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+        const cwd = input.cwd ?? process.cwd();
         const existing = sessionsByThreadId.get(input.threadId);
         if (existing) {
           return {
+            provider: PROVIDER,
+            providerInstanceId: boundInstanceId,
+            status: "ready" as const,
+            runtimeMode: input.runtimeMode ?? "full-access",
             threadId: input.threadId,
-            sessionId: existing.sessionId,
+            cwd,
             resumeCursor: { sessionID: existing.sessionId, durableSeq: 0 },
+            createdAt: now,
+            updatedAt: now,
           };
         }
 
@@ -426,7 +502,7 @@ export function makeOpenCode2Adapter(
           const session = yield* Effect.tryPromise({
             try: () =>
               hostHandle.client.session.create({
-                directory: input.directory,
+                location: { directory: cwd },
                 title: `T3 Session: ${input.threadId}`,
               }),
             catch: (cause) =>
@@ -443,7 +519,7 @@ export function makeOpenCode2Adapter(
         const context: OpenCode2SessionContext = {
           threadId: input.threadId,
           sessionId,
-          directory: input.directory,
+          directory: cwd,
           activeTurnId: null,
           activeTurnStatus: "idle",
           hasSubagents: false,
@@ -455,9 +531,15 @@ export function makeOpenCode2Adapter(
         threadIdBySessionId.set(sessionId, input.threadId);
 
         return {
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          status: "ready" as const,
+          runtimeMode: input.runtimeMode ?? "full-access",
           threadId: input.threadId,
-          sessionId,
+          cwd,
           resumeCursor: { sessionID: sessionId, durableSeq: 0 },
+          createdAt: now,
+          updatedAt: now,
         };
       });
 
@@ -473,7 +555,8 @@ export function makeOpenCode2Adapter(
           });
         }
 
-        const turnId = TurnId.make(`turn-${Date.now()}`);
+        const nowMillis = yield* Clock.currentTimeMillis;
+        const turnId = TurnId.make(`turn-${nowMillis}`);
         context.activeTurnId = turnId;
         context.activeTurnStatus = "running";
 
@@ -710,8 +793,8 @@ export function makeOpenCode2Adapter(
           try: () =>
             hostHandle.client.permission.reply({
               sessionID: context.sessionId,
-              permissionID: requestId,
-              response,
+              requestID: requestId,
+              reply: response,
             }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -737,7 +820,7 @@ export function makeOpenCode2Adapter(
             hostHandle.client.form.reply({
               sessionID: context.sessionId,
               formID: requestId,
-              answers: answers as Record<string, any>,
+              answer: answers as Record<string, string | number | boolean | ReadonlyArray<string>>,
             }),
           catch: (cause) =>
             new ProviderAdapterRequestError({
@@ -759,13 +842,20 @@ export function makeOpenCode2Adapter(
       });
 
     const listSessions = (): Effect.Effect<ReadonlyArray<ProviderSession>> =>
-      Effect.succeed(
-        Array.from(sessionsByThreadId.values()).map((ctx) => ({
+      Effect.gen(function* () {
+        const now = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+        return Array.from(sessionsByThreadId.values()).map((ctx) => ({
+          provider: PROVIDER,
+          providerInstanceId: boundInstanceId,
+          status: ctx.activeTurnStatus === "running" ? ("running" as const) : ("ready" as const),
+          runtimeMode: "full-access" as const,
           threadId: ctx.threadId,
-          sessionId: ctx.sessionId,
+          cwd: ctx.directory,
           resumeCursor: { sessionID: ctx.sessionId, durableSeq: 0 },
-        })),
-      );
+          createdAt: now,
+          updatedAt: now,
+        }));
+      });
 
     const hasSession = (threadId: ThreadId): Effect.Effect<boolean> =>
       Effect.succeed(sessionsByThreadId.has(threadId));

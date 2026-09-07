@@ -13,6 +13,8 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
 
+import type * as Crypto from "effect/Crypto";
+import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
@@ -41,6 +43,8 @@ const decodeOpenCode2Settings = Schema.decodeSync(OpenCode2Settings);
 const DRIVER_KIND = ProviderDriverKind.make("opencode2");
 
 export type OpenCode2DriverEnv =
+  | BackgroundPolicy.BackgroundPolicy
+  | Crypto.Crypto
   | FileSystem.FileSystem
   | HttpClient.HttpClient
   | Path.Path
@@ -59,7 +63,13 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig;
       const serverSettings = yield* ServerSettingsService;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const rawEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(rawEnv)) {
+        if (value !== undefined) {
+          processEnv[key] = value;
+        }
+      }
 
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
@@ -101,6 +111,18 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
       const snapshot = yield* makeManagedServerProvider<
         ProviderSnapshotSettings<OpenCode2Settings>
       >({
+        resolveMaintenance: () =>
+          Effect.succeed({
+            provider: DRIVER_KIND,
+            packageName: "@opencode-ai/sdk-v2",
+            canUpdate: false,
+            status: "current" as const,
+            update: null,
+            latestVersion: null,
+            currentVersion: "2.0.0-preview",
+            checkedAt: null,
+            message: null,
+          }),
         getSettings: snapshotSettings.getSettings,
         streamSettings: snapshotSettings.streamSettings,
         haveSettingsChanged: haveProviderSnapshotSettingsChanged,
