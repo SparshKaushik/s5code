@@ -181,6 +181,7 @@ afterEach(async () => {
   renderer?.cleanUp();
   pool?.terminate();
   await Promise.all(terminationPromises);
+  await new Promise((resolve) => setImmediate(resolve));
   vi.unstubAllGlobals();
 });
 
