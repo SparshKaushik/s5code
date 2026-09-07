@@ -21,6 +21,7 @@
     "plugins": [
       {
         "name": "@effect/language-service",
+        "allowedDuplicatedPackages": ["effect"],
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
         "diagnosticSeverity": {
           "importFromBarrel": "error",

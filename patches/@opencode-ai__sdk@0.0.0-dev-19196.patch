@@ -1,0 +1,135 @@
+diff --git a/dist/effect/index.js b/dist/effect/index.js
+index e122a8ac98c19b29c18e949a9eb8847da7cc02aa..eabd9488408123454e876e49476542e3e474413e 100644
+--- a/dist/effect/index.js
++++ b/dist/effect/index.js
+@@ -1,4 +1,4 @@
+-export * as OpenCode from "./opencode";
+-export * as Tool from "./tool";
++export * as OpenCode from "./opencode.js";
++export * as Tool from "./tool.js";
+ export { ClientError } from "@opencode-ai/client/effect";
+ export * from "../contracts";
+diff --git a/dist/effect/opencode.js b/dist/effect/opencode.js
+index 524db6345e483db10f9e7e036f67cbb2bd18fb6b..3ddfb3348530c25cdcb3884d75bd5936510ee869 100644
+--- a/dist/effect/opencode.js
++++ b/dist/effect/opencode.js
+@@ -1,4 +1,4 @@
+-export * as OpenCode from "./opencode";
++export * as OpenCode from "./opencode.js";
+ import { OpenCode } from "@opencode-ai/client/effect";
+ import { Context, Effect, Layer } from "effect";
+ import { FetchHttpClient, HttpClient } from "effect/unstable/http";
+diff --git a/dist/effect/workerd.js b/dist/effect/workerd.js
+index 5e9d178bcfe9ef7ecbf531fa1e87e28325fb4c4a..7859c8e6e40bbd9910c5eeed88c6e7d2be6fcd45 100644
+--- a/dist/effect/workerd.js
++++ b/dist/effect/workerd.js
+@@ -1,7 +1,7 @@
+-export * as OpenCodeWorkerd from "./workerd";
++export * as OpenCodeWorkerd from "./workerd.js";
+ import { Layer } from "effect";
+ import { WorkerdProfile } from "../internal/workerd";
+-import { OpenCode } from "./opencode";
++import { OpenCode } from "./opencode.js";
+ export const create = ({ log, workspaceProviders, instances, ...options }) => {
+   const profile = WorkerdProfile.make(options);
+   return OpenCode.create({ ...profile.options, log, workspaceProviders, instances }, { overrides: profile.replacements });
+diff --git a/dist/index.js b/dist/index.js
+index a5d3f58c78a2e380f516513e48e05c674c435f7c..044b4aa610aca0eb5684d96659d3ec28b56b998a 100644
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,4 +1,4 @@
+-export * as OpenCode from "./opencode";
+-export * as Tool from "./tool";
++export * as OpenCode from "./opencode.js";
++export * as Tool from "./tool.js";
+ export { ClientError } from "@opencode-ai/client";
+-export * from "./contracts";
++export * from "./contracts.js";
+diff --git a/dist/internal/fetch.js b/dist/internal/fetch.js
+index 3d1c81effcc0d50a55c6a7aa494ad0bfb1c73646..0fba2ed6740f20f2a14fd0728b58a37d04d1e620 100644
+--- a/dist/internal/fetch.js
++++ b/dist/internal/fetch.js
+@@ -1,4 +1,4 @@
+-export * as OwnedFetch from "./fetch";
++export * as OwnedFetch from "./fetch.js";
+ export function make(handler, dispose) {
+   const requests = new Set, shutdown = new AbortController, closed = Error("OpenCode host is closed");
+   let closePromise;
+diff --git a/dist/internal/host.js b/dist/internal/host.js
+index b9f2b6b0554bdfbaf7b58e3031c1587a01446ccb..05ad4f2609879ce7697e3282d856539df2762941 100644
+--- a/dist/internal/host.js
++++ b/dist/internal/host.js
+@@ -1,4 +1,4 @@
+-export * as EmbeddedHost from "./host";
++export * as EmbeddedHost from "./host.js";
+ import { SdkPlugins } from "@opencode-ai/core/plugin/sdk";
+ import { SessionRestart } from "@opencode-ai/core/session/execution/restart";
+ import { Workspace } from "@opencode-ai/core/workspace";
+@@ -7,8 +7,8 @@ import { createEmbeddedRoutes } from "@opencode-ai/server/routes";
+ import { Context, Effect, Layer, ManagedRuntime, Scope } from "effect";
+ import { HttpEffect, HttpRouter, HttpServer, HttpServerRequest } from "effect/unstable/http";
+ import { context, layer } from "../logging";
+-import { OwnedFetch } from "./fetch";
+-import { SdkInstances } from "./instances";
++import { OwnedFetch } from "./fetch.js";
++import { SdkInstances } from "./instances.js";
+ export const create = Effect.fn("EmbeddedHost.create")(function* (options = {}, embed = {}) {
+   const { log, workspaceProviders, instances, ...server } = options, selector = instances ? SdkInstances.provide(instances, yield* Effect.context()) : void 0, runtime = ManagedRuntime.make(createEmbeddedRoutes({
+     ...server,
+diff --git a/dist/internal/instances.js b/dist/internal/instances.js
+index 6a0df6bd00cddd3828b72e18f3abe4a19812b26f..b0612d90875d353c917440ce8cae666ca38f66aa 100644
+--- a/dist/internal/instances.js
++++ b/dist/internal/instances.js
+@@ -1,4 +1,4 @@
+-export * as SdkInstances from "./instances";
++export * as SdkInstances from "./instances.js";
+ import { Instance } from "@opencode-ai/core/instance";
+ import { LocationServiceMap } from "@opencode-ai/core/location-service-map";
+ import { Plugin } from "@opencode-ai/core/plugin";
+diff --git a/dist/internal/workerd.js b/dist/internal/workerd.js
+index d9dd2b6273b9c64b7cf69383e489c3ceb1355630..ba7fe2c158b4de234137cbe954065972cd428d4e 100644
+--- a/dist/internal/workerd.js
++++ b/dist/internal/workerd.js
+@@ -1,4 +1,4 @@
+-export * as WorkerdProfile from "./workerd";
++export * as WorkerdProfile from "./workerd.js";
+ import { ServerWorkerd } from "@opencode-ai/server/workerd";
+ export function make({ config, ...options }) {
+   const server = {
+diff --git a/dist/opencode.js b/dist/opencode.js
+index 7c2e9b06e30f28f49dbfcb5d96b0785f467c9cda..b1df4f863bfb1e1b2358592830c7a18d7b3e935e 100644
+--- a/dist/opencode.js
++++ b/dist/opencode.js
+@@ -1,2 +1,2 @@
+-import { PromiseSdk } from "./promise";
++import { PromiseSdk } from "./promise.js";
+ export const create = (options = {}) => PromiseSdk.create(options);
+diff --git a/dist/promise.js b/dist/promise.js
+index c5389af244efaf3ed8a5d295347d443f801f2ecf..9b3116963f8a439fd68710c704d933f45f2e9dee 100644
+--- a/dist/promise.js
++++ b/dist/promise.js
+@@ -1,8 +1,8 @@
+-export * as PromiseSdk from "./promise";
++export * as PromiseSdk from "./promise.js";
+ import { OpenCode } from "@opencode-ai/client";
+ import { Session } from "@opencode-ai/schema/session";
+ import { Effect, Schema } from "effect";
+-import { EmbeddedHost } from "./internal/host";
++import { EmbeddedHost } from "./internal/host.js";
+ export async function create(options = {}, embed = {}) {
+   const { plugins, instances, ...hostOptions } = options, host = await Effect.runPromise(EmbeddedHost.create({
+     ...hostOptions,
+diff --git a/dist/workerd.js b/dist/workerd.js
+index 39b9dc9ea6b3b0723183104d078d5a847de234ef..8071ba4838269745ba9c0a2ea647ed996288c8b6 100644
+--- a/dist/workerd.js
++++ b/dist/workerd.js
+@@ -1,6 +1,6 @@
+-export * as OpenCodeWorkerd from "./workerd";
+-import { WorkerdProfile } from "./internal/workerd";
+-import { PromiseSdk } from "./promise";
++export * as OpenCodeWorkerd from "./workerd.js";
++import { WorkerdProfile } from "./internal/workerd.js";
++import { PromiseSdk } from "./promise.js";
+ export const create = ({ log, plugins, instances, ...options }) => {
+   const profile = WorkerdProfile.make(options);
+   return PromiseSdk.create({ ...profile.options, log, plugins, instances }, { overrides: profile.replacements });

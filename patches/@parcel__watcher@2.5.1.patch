@@ -1,0 +1,17 @@
+diff --git a/package.json b/package.json
+index dc415008f911238362f641bd424a7803275fc1f8..297f74b0fb2f51a4a7cee0637a1efbb6bdd638a4 100644
+--- a/package.json
++++ b/package.json
+@@ -3,6 +3,12 @@
+   "version": "2.5.1",
+   "main": "index.js",
+   "types": "index.d.ts",
++  "exports": {
++    ".": "./index.js",
++    "./wrapper": "./wrapper.js",
++    "./package.json": "./package.json",
++    "./*": "./*"
++  },
+   "repository": {
+     "type": "git",
+     "url": "https://github.com/parcel-bundler/watcher.git"

@@ -1,0 +1,471 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import { describe, expect, it } from "@effect/vitest";
+import {
+  ApprovalRequestId,
+  ProviderInstanceId,
+  ProviderRuntimeEvent,
+  ThreadId,
+  TurnId,
+} from "@t3tools/contracts";
+import * as Clock from "effect/Clock";
+import * as Effect from "effect/Effect";
+import * as Queue from "effect/Queue";
+import * as Stream from "effect/Stream";
+import * as Layer from "effect/Layer";
+
+import { ServerConfig } from "../../config.ts";
+import { makeOpenCode2Adapter } from "./OpenCode2Adapter.ts";
+import { type OpenCode2ClientFacade, type OpenCode2HostHandle } from "../OpenCode2Host.ts";
+
+const testLayer = Layer.merge(
+  NodeServices.layer,
+  ServerConfig.layerTest(process.cwd(), process.cwd()).pipe(Layer.provide(NodeServices.layer)),
+);
+
+function createMockHost() {
+  const buffer: Array<{ type: string; data?: any }> = [];
+  const waiters: Array<() => void> = [];
+
+  const emit = (event: { type: string; data?: any }) => {
+    buffer.push(event);
+    const w = waiters.shift();
+    if (w) w();
+  };
+
+  const calls: {
+    prompts: Array<any>;
+    interrupts: Array<any>;
+    forks: Array<any>;
+    inboxCancels: Array<any>;
+    inboxChanges: Array<any>;
+    permissionReplies: Array<any>;
+    formReplies: Array<any>;
+    reverts: Array<any>;
+  } = {
+    prompts: [],
+    interrupts: [],
+    forks: [],
+    inboxCancels: [],
+    inboxChanges: [],
+    permissionReplies: [],
+    formReplies: [],
+    reverts: [],
+  };
+
+  const client = {
+    event: {
+      subscribe: () => ({
+        [Symbol.asyncIterator]: () => ({
+          next: async () => {
+            while (buffer.length === 0) {
+              await new Promise<void>((resolve) => {
+                waiters.push(resolve);
+              });
+            }
+            return { done: false, value: buffer.shift()! };
+          },
+        }),
+      }),
+    },
+    session: {
+      create: async (params: any) => ({
+        id: `mock-session-123`,
+        directory: params.location?.directory ?? "/tmp",
+      }),
+      prompt: async (params: any) => {
+        calls.prompts.push(params);
+        return { id: "prompt-1" };
+      },
+      interrupt: async (params: any) => {
+        calls.interrupts.push(params);
+      },
+      compact: async (_params: any) => {},
+      fork: async (params: any) => {
+        calls.forks.push(params);
+        return { id: `mock-forked-456` };
+      },
+      revert: {
+        stage: async (params: any) => {
+          calls.reverts.push({ stage: params });
+        },
+        commit: async (params: any) => {
+          calls.reverts.push({ commit: params });
+        },
+      },
+      inbox: {
+        cancel: async (params: any) => {
+          calls.inboxCancels.push(params);
+        },
+        steer: async (params: any) => {
+          calls.inboxChanges.push({ steer: params });
+        },
+        queue: async (params: any) => {
+          calls.inboxChanges.push({ queue: params });
+        },
+      },
+    },
+    permission: {
+      reply: async (params: any) => {
+        calls.permissionReplies.push(params);
+      },
+    },
+    form: {
+      reply: async (params: any) => {
+        calls.formReplies.push(params);
+      },
+    },
+  } as unknown as OpenCode2ClientFacade;
+
+  const handle: OpenCode2HostHandle = {
+    instanceId: ProviderInstanceId.make("opencode2-test"),
+    client,
+    isRemote: false,
+    databasePath: null,
+  };
+
+  return { handle, emit, calls };
+}
+
+describe("OpenCode2Adapter", () => {
+  it.effect("starts session, sends turn, and streams text deltas and turn completion", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-1");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+      expect(sessionId).toContain("mock-session");
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Send turn
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Hello OpenCode",
+        delivery: "steer",
+      });
+
+      expect(calls.prompts).toHaveLength(1);
+      expect(calls.prompts[0].text).toBe("Hello OpenCode");
+      expect(calls.prompts[0].delivery).toBe("steer");
+
+      // Emit execution started, text delta, and execution succeeded
+      emit({
+        type: "session.execution.started",
+        data: { sessionID: sessionId },
+      });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, delta: "Hi there!" },
+      });
+      emit({
+        type: "session.execution.succeeded",
+        data: { sessionID: sessionId },
+      });
+
+      const textDelta = yield* waitForEvent((e) => e.type === "content.delta");
+      expect((textDelta.payload as any).delta).toBe("Hi there!");
+
+      const completed = yield* waitForEvent((e) => e.type === "turn.completed");
+      expect((completed.payload as any).state).toBe("completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("translates child session events into rich subagent tasks and rolls up tokens", () =>
+    Effect.gen(function* () {
+      const { handle, emit } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-subagent");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Run reviewer",
+      });
+
+      const childSessionId = "child-session-99";
+
+      // Subagent is created under the parent session
+      emit({
+        type: "session.created",
+        data: { sessionID: childSessionId, parentID: sessionId, agent: "reviewer" },
+      });
+
+      const started = yield* waitForEvent((e) => e.type === "task.started");
+      expect((started.payload as any).taskType).toBe("subagent");
+      expect((started.payload as any).agentKind).toBe("agent");
+      expect((started.payload as any).description).toBe("Subagent: reviewer");
+
+      // Subagent calls tool
+      emit({
+        type: "session.tool.called",
+        data: { sessionID: childSessionId, parentID: sessionId, tool: "checkDiff" },
+      });
+
+      const toolProgress = yield* waitForEvent((e) => e.type === "task.progress");
+      expect((toolProgress.payload as any).lastToolName).toBe("checkDiff");
+
+      // Subagent finishes step with token metrics
+      emit({
+        type: "session.step.ended",
+        data: {
+          sessionID: childSessionId,
+          parentID: sessionId,
+          tokens: { input: 150, output: 50, reasoning: 30 },
+        },
+      });
+
+      const tokenProgress = yield* waitForEvent(
+        (e) => e.type === "task.progress" && (e.payload as any).typedUsage,
+      );
+      expect((tokenProgress.payload as any).typedUsage.totalTokens).toBe(200);
+      expect((tokenProgress.payload as any).typedUsage.reasoningOutputTokens).toBe(30);
+
+      // Subagent completes
+      emit({
+        type: "session.execution.succeeded",
+        data: { sessionID: childSessionId, parentID: sessionId },
+      });
+
+      const taskCompleted = yield* waitForEvent((e) => e.type === "task.completed");
+      expect((taskCompleted.payload as any).status).toBe("completed");
+
+      // Parent turn finishes
+      emit({
+        type: "session.execution.succeeded",
+        data: { sessionID: sessionId },
+      });
+
+      const turnCompleted = yield* waitForEvent((e) => e.type === "turn.completed");
+      expect((turnCompleted.payload as any).state).toBe("completed");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("handles permissions and form input requests and replies cleanly", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-perm");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Permission asked
+      emit({
+        type: "permission.asked",
+        data: {
+          sessionID: sessionId,
+          permissionID: "perm-123",
+          description: "Allow bash execution?",
+        },
+      });
+
+      const permEvent = yield* waitForEvent(
+        (e) =>
+          e.type === "request.opened" &&
+          (e.payload as any).requestType === "command_execution_approval",
+      );
+      expect(permEvent).toBeDefined();
+
+      // Form created
+      emit({
+        type: "form.created",
+        data: {
+          sessionID: sessionId,
+          formID: "form-456",
+          title: "Choose environment",
+          fields: [{ name: "env", type: "string" }],
+        },
+      });
+
+      const formEvent = yield* waitForEvent((e) => e.type === "user-input.requested");
+      expect(formEvent).toBeDefined();
+
+      // Reply to permission
+      yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("perm-123"), "accept");
+      expect(calls.permissionReplies).toContainEqual({
+        sessionID: sessionId,
+        requestID: "perm-123",
+        reply: "once",
+      });
+
+      // Reply to form
+      yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("form-456"), {
+        env: "production",
+      });
+      expect(calls.formReplies).toContainEqual({
+        sessionID: sessionId,
+        formID: "form-456",
+        answer: { env: "production" },
+      });
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("supports durable inbox cancellation, delivery changing, and session forks", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-inbox");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const turnResult = yield* adapter.sendTurn({
+        threadId,
+        input: "Queue this task",
+        delivery: "queue",
+      });
+      expect(calls.prompts[0].delivery).toBe("queue");
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Record a message for this turn
+      emit({
+        type: "session.text.delta",
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: "msg-123",
+          delta: "queued ack",
+        },
+      });
+
+      yield* waitForEvent((e) => e.type === "content.delta");
+
+      // Cancel inbox item
+      yield* adapter.cancelInboxItem!(threadId, "inbox-item-1");
+      expect(calls.inboxCancels).toContainEqual({
+        sessionID: sessionId,
+        inboxID: "inbox-item-1",
+      });
+
+      // Change delivery
+      yield* adapter.changeInboxDelivery!(threadId, "inbox-item-2", "steer");
+      expect(calls.inboxChanges).toContainEqual({
+        steer: { sessionID: sessionId, inboxID: "inbox-item-2" },
+      });
+
+      // Fork thread with mapped turn
+      const targetThreadId = ThreadId.make("thread-forked-target");
+      const forkResult = yield* adapter.forkThread!(threadId, targetThreadId, turnResult.turnId);
+
+      expect(calls.forks).toHaveLength(1);
+      expect(calls.forks[0].sessionID).toBe(sessionId);
+      expect(calls.forks[0].boundary).toEqual({
+        type: "through",
+        messageID: "msg-123",
+      });
+      expect((forkResult.resumeCursor as any).sessionID).toContain("mock-forked");
+
+      // Verify forked session is registered and usable
+      expect(yield* adapter.hasSession(targetThreadId)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects attachments when connected to a remote OpenCode host", () =>
+    Effect.gen(function* () {
+      const { handle } = createMockHost();
+      (handle as any).isRemote = true;
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-remote-attachments");
+      yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const exit = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "Process image",
+          attachments: [
+            {
+              type: "file",
+              id: "att-1" as any,
+              name: "file.txt",
+              mimeType: "text/plain",
+              sizeBytes: 100,
+            },
+          ],
+        })
+        .pipe(Effect.exit);
+
+      expect(exit._tag).toBe("Failure");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+});
