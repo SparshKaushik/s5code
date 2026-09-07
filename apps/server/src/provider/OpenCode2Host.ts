@@ -99,23 +99,33 @@ export function makeOpenCode2Host(
     }
 
     // Embedded in-process SDK mode
-    const databasePath =
-      options.config.databasePath.trim().length > 0
-        ? options.config.databasePath.trim()
-        : path.join(options.stateDir, "opencode2", options.instanceId, "sessions.db");
+    const customDatabasePath = options.config.databasePath.trim();
+    const hasCustomDb = customDatabasePath.length > 0;
+    const effectiveDatabasePath = hasCustomDb ? customDatabasePath : "opencode.db";
 
-    const databaseDir = path.dirname(databasePath);
-    yield* fileSystem.makeDirectory(databaseDir, { recursive: true }).pipe(
-      Effect.mapError(
-        (cause) =>
-          new ProviderDriverError({
-            driver: ProviderDriverKind.make("opencode2"),
-            instanceId: options.instanceId,
-            detail: `Failed to create OpenCode 2 database directory at '${databaseDir}': ${cause.message}`,
-            cause,
-          }),
-      ),
-    );
+    if (hasCustomDb) {
+      const databaseDir = path.dirname(effectiveDatabasePath);
+      yield* fileSystem.makeDirectory(databaseDir, { recursive: true }).pipe(
+        Effect.mapError(
+          (cause) =>
+            new ProviderDriverError({
+              driver: ProviderDriverKind.make("opencode2"),
+              instanceId: options.instanceId,
+              detail: `Failed to create OpenCode 2 database directory at '${databaseDir}': ${cause.message}`,
+              cause,
+            }),
+        ),
+      );
+    }
+
+    // Apply instance environment variables so in-process SDK sees them in process.env
+    if (options.environment) {
+      for (const [key, value] of Object.entries(options.environment)) {
+        if (value !== undefined && value.length > 0) {
+          process.env[key] = value;
+        }
+      }
+    }
 
     const host = yield* Effect.acquireRelease(
       Effect.tryPromise({
@@ -123,7 +133,7 @@ export function makeOpenCode2Host(
           ensureCommonJsGlobals();
           const { OpenCode: OpenCodeSdk } = await import("@opencode-ai/sdk-v2");
           return await OpenCodeSdk.create({
-            database: { path: databasePath },
+            database: { path: effectiveDatabasePath },
             instances: {
               default: {
                 directory: options.defaultDirectory,
@@ -135,7 +145,7 @@ export function makeOpenCode2Host(
           new ProviderDriverError({
             driver: ProviderDriverKind.make("opencode2"),
             instanceId: options.instanceId,
-            detail: `Failed to initialize embedded OpenCode 2 host at '${databasePath}': ${String(cause)}`,
+            detail: `Failed to initialize embedded OpenCode 2 host at '${effectiveDatabasePath}': ${String(cause)}`,
             cause,
           }),
       }),
@@ -153,7 +163,7 @@ export function makeOpenCode2Host(
       instanceId: options.instanceId,
       client: host as unknown as OpenCode2ClientFacade,
       isRemote: false,
-      databasePath,
+      databasePath: hasCustomDb ? effectiveDatabasePath : null,
     } satisfies OpenCode2HostHandle;
   });
 }

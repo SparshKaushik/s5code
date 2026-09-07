@@ -158,4 +158,32 @@ describe("OpenCode2Driver", () => {
         expect(snapshot.slashCommands.map((c) => c.name)).toContain("compact");
       }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect("applies instance environment to process.env and defaults to shared opencode.db", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+      const hostHandle = yield* makeOpenCode2Host({
+        instanceId: ProviderInstanceId.make("opencode2-env-test"),
+        config: {
+          enabled: true,
+          serverUrl: "",
+          serverPassword: "",
+          databasePath: "",
+          customModels: [],
+        },
+        defaultDirectory: tempDir,
+        stateDir: tempDir,
+        environment: {
+          TEST_OPENCODE2_INJECTED_KEY: "test-injected-value",
+        },
+      });
+
+      expect(hostHandle.isRemote).toBe(false);
+      expect(hostHandle.databasePath).toBeNull();
+      expect(process.env.TEST_OPENCODE2_INJECTED_KEY).toBe("test-injected-value");
+      delete process.env.TEST_OPENCODE2_INJECTED_KEY;
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
