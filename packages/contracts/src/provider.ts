@@ -78,6 +78,7 @@ export const ProviderSendTurnInput = Schema.Struct({
   ),
   modelSelection: Schema.optional(ModelSelection),
   interactionMode: Schema.optional(ProviderInteractionMode),
+  delivery: Schema.optional(Schema.Literals(["steer", "queue"])),
 });
 export type ProviderSendTurnInput = typeof ProviderSendTurnInput.Type;
 

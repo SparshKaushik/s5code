@@ -199,6 +199,9 @@ export const ServerProvider = Schema.Struct({
   showInteractionModeToggle: Schema.optional(Schema.Boolean),
   requiresNewThreadForModelChange: Schema.optional(Schema.Boolean),
   supportsConversationRollback: Schema.optional(Schema.Boolean),
+  supportsConversationFork: Schema.optional(Schema.Boolean),
+  supportsInboxSteering: Schema.optional(Schema.Boolean),
+  supportsInboxQueueing: Schema.optional(Schema.Boolean),
   supportsTextGeneration: Schema.optional(Schema.Boolean),
   setup: Schema.optional(
     Schema.Struct({

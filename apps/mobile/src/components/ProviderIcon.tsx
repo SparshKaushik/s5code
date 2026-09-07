@@ -123,6 +123,7 @@ export function ProviderIcon(props: ProviderIconProps) {
     case "grok":
       return <GrokMark size={size} isDarkMode={isDarkMode} />;
     case "opencode":
+    case "opencode2":
       return <OpenCodeMark size={size} isDarkMode={isDarkMode} />;
     case "pi":
       return <PiMark size={size} />;

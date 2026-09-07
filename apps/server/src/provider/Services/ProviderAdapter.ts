@@ -37,6 +37,9 @@ export interface ProviderAdapterCapabilities {
   readonly promptlessTurnContinuation?: boolean;
   /** False when native conversation history cannot be rewound. */
   readonly supportsConversationRollback?: boolean;
+  readonly supportsConversationFork?: boolean;
+  readonly supportsInboxSteering?: boolean;
+  readonly supportsInboxQueueing?: boolean;
 }
 
 export interface ProviderThreadTurnSnapshot {
@@ -125,6 +128,29 @@ export interface ProviderAdapterShape<TError> {
     threadId: ThreadId,
     numTurns: number,
   ) => Effect.Effect<ProviderThreadSnapshot, TError>;
+
+  /**
+   * Fork a provider thread from a historical boundary.
+   */
+  readonly forkThread?: (
+    sourceThreadId: ThreadId,
+    targetThreadId: ThreadId,
+    boundaryTurnId: TurnId,
+  ) => Effect.Effect<{ resumeCursor?: unknown }, TError>;
+
+  /**
+   * Cancel a pending inbox item.
+   */
+  readonly cancelInboxItem?: (threadId: ThreadId, inboxId: string) => Effect.Effect<void, TError>;
+
+  /**
+   * Change delivery mode for a pending inbox item.
+   */
+  readonly changeInboxDelivery?: (
+    threadId: ThreadId,
+    inboxId: string,
+    delivery: "steer" | "queue",
+  ) => Effect.Effect<void, TError>;
 
   /**
    * Upload a thread to the provider when the adapter supports feedback.
