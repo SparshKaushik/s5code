@@ -15,6 +15,17 @@ const { createClerkBridgeMock, storageAdapter, storageMock } = vi.hoisted(() => 
   storageMock: vi.fn(),
 }));
 
+const { registerSchemesAsPrivilegedMock } = vi.hoisted(() => ({
+  registerSchemesAsPrivilegedMock: vi.fn(),
+}));
+
+vi.mock("electron", () => ({
+  protocol: {
+    registerSchemesAsPrivileged: registerSchemesAsPrivilegedMock,
+  },
+  session: {},
+}));
+
 vi.mock("@clerk/electron", () => ({
   createClerkBridge: createClerkBridgeMock,
 }));
@@ -26,6 +37,7 @@ vi.mock("@clerk/electron/storage", () => ({
 import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import * as Electron from "electron";
 import * as ElectronApp from "../electron/ElectronApp.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
@@ -299,6 +311,25 @@ describe("DesktopClerk", () => {
         },
       ],
     ]);
+    storageMock.mockClear();
+    createClerkBridgeMock.mockClear();
+  });
+
+  it("suppresses the SDK duplicate scheme registration after app ready", () => {
+    const bridge = { cleanup: vi.fn(), isPrimaryInstance: true };
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue(bridge);
+    registerSchemesAsPrivilegedMock.mockImplementation(() => {
+      throw new Error("protocol.registerSchemesAsPrivileged should be called before app is ready");
+    });
+    const before = Electron.protocol.registerSchemesAsPrivileged;
+
+    assert.equal(DesktopClerk.createDesktopClerkBridge("/tmp/t3-state", false), bridge);
+
+    // The late duplicate registration never reaches Electron, and the
+    // original is restored for later callers.
+    assert.equal(registerSchemesAsPrivilegedMock.mock.calls.length, 0);
+    assert.strictEqual(Electron.protocol.registerSchemesAsPrivileged, before);
     storageMock.mockClear();
     createClerkBridgeMock.mockClear();
   });

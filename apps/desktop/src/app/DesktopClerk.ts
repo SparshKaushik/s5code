@@ -218,14 +218,44 @@ export function installClerkDesktopOriginFilter(
 }
 
 export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
-  return createClerkBridge({
-    storage: storage({ path: stateDir }),
-    passkeys: true,
-    renderer: {
-      scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
-      host: ElectronProtocol.DESKTOP_HOST,
-    },
-  });
+  // Custom scheme privileges are registered synchronously at process
+  // bootstrap (see registerDesktopSchemePrivilegesSync in main.ts), because
+  // Electron requires registerSchemesAsPrivileged before `ready`. The Clerk
+  // SDK re-registers the same scheme when `renderer` is passed, but the
+  // bridge is created during async layer acquisition — after `ready` — so
+  // the SDK's duplicate registration throws and kills startup. Suppress the
+  // duplicate; the privileges it would register are already in place.
+  const protocol = (
+    Electron as unknown as {
+      protocol?: {
+        registerSchemesAsPrivileged: (...args: ReadonlyArray<unknown>) => unknown;
+      };
+    }
+  ).protocol;
+  if (typeof protocol?.registerSchemesAsPrivileged !== "function") {
+    return createClerkBridge({
+      storage: storage({ path: stateDir }),
+      passkeys: true,
+      renderer: {
+        scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+        host: ElectronProtocol.DESKTOP_HOST,
+      },
+    });
+  }
+  const originalRegisterSchemesAsPrivileged = protocol.registerSchemesAsPrivileged;
+  protocol.registerSchemesAsPrivileged = () => undefined;
+  try {
+    return createClerkBridge({
+      storage: storage({ path: stateDir }),
+      passkeys: true,
+      renderer: {
+        scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+        host: ElectronProtocol.DESKTOP_HOST,
+      },
+    });
+  } finally {
+    protocol.registerSchemesAsPrivileged = originalRegisterSchemesAsPrivileged;
+  }
 }
 
 export const make = Effect.gen(function* () {
