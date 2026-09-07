@@ -19,6 +19,17 @@ import type * as Scope from "effect/Scope";
 
 import { ProviderDriverError } from "./Errors.ts";
 
+function ensureCommonJsGlobals(): void {
+  if (typeof (globalThis as any).__filename === "undefined") {
+    (globalThis as any).__filename = import.meta.filename ?? "";
+  }
+  if (typeof (globalThis as any).__dirname === "undefined") {
+    (globalThis as any).__dirname = import.meta.dirname ?? "";
+  }
+}
+
+ensureCommonJsGlobals();
+
 export type OpenCode2ClientFacade = ReturnType<typeof OpenCodeClient.make>;
 
 export interface OpenCode2HostHandle {
@@ -90,6 +101,7 @@ export function makeOpenCode2Host(
     const host = yield* Effect.acquireRelease(
       Effect.tryPromise({
         try: async () => {
+          ensureCommonJsGlobals();
           const { OpenCode: OpenCodeSdk } = await import("@opencode-ai/sdk-v2");
           return await OpenCodeSdk.create({
             database: { path: databasePath },

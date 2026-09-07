@@ -1,3 +1,14 @@
+// CommonJS dependencies bundled or loaded inside an ES module environment
+// (such as TypeScript, write-file-atomic, or @opencode-ai packages) expect
+// __filename and __dirname to be defined. In ESM under Node 22+, referencing
+// them can trigger ERR_AMBIGUOUS_MODULE_SYNTAX if top-level await is present.
+if (typeof (globalThis as any).__filename === "undefined") {
+  (globalThis as any).__filename = import.meta.filename ?? "";
+}
+if (typeof (globalThis as any).__dirname === "undefined") {
+  (globalThis as any).__dirname = import.meta.dirname ?? "";
+}
+
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";

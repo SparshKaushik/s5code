@@ -63,4 +63,35 @@ describe("OpenCode2Driver", () => {
       expect(snapshot.supportsInboxQueueing).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect(
+    "ensures __filename and __dirname are defined on globalThis when initializing host",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+        // Explicitly delete globals to simulate pure ESM scope
+        delete (globalThis as any).__filename;
+        delete (globalThis as any).__dirname;
+
+        const hostHandle = yield* makeOpenCode2Host({
+          instanceId: ProviderInstanceId.make("opencode2-shims-test"),
+          config: {
+            enabled: true,
+            serverUrl: "",
+            serverPassword: "",
+            databasePath: path.join(tempDir, "sessions.db"),
+            customModels: [],
+          },
+          defaultDirectory: tempDir,
+          stateDir: tempDir,
+        });
+
+        expect(hostHandle.isRemote).toBe(false);
+        expect(typeof (globalThis as any).__filename).toBe("string");
+        expect(typeof (globalThis as any).__dirname).toBe("string");
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });
