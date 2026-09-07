@@ -68,6 +68,7 @@ interface OpenCode2SessionContext {
   readonly threadId: ThreadId;
   readonly sessionId: string;
   readonly directory: string;
+  readonly createdAt: string;
   activeTurnId: TurnId | null;
   activeTurnStatus: "idle" | "running" | "interrupted" | "failed";
   hasSubagents: boolean;
@@ -504,13 +505,14 @@ export function makeOpenCode2Adapter(
             threadId: input.threadId,
             cwd,
             resumeCursor: { sessionID: existing.sessionId, durableSeq: 0 },
-            createdAt: now,
+            createdAt: existing.createdAt,
             updatedAt: now,
           };
         }
 
         const resumeSessionId = (input.resumeCursor as { sessionID?: string })?.sessionID;
         let sessionId = resumeSessionId;
+        let createdAt = now;
 
         if (!sessionId) {
           const session = yield* Effect.tryPromise({
@@ -528,12 +530,16 @@ export function makeOpenCode2Adapter(
               }),
           });
           sessionId = session.id;
+          if ((session as any).time?.created) {
+            createdAt = DateTime.makeUnsafe((session as any).time.created).pipe(DateTime.formatIso);
+          }
         }
 
         const context: OpenCode2SessionContext = {
           threadId: input.threadId,
           sessionId,
           directory: cwd,
+          createdAt,
           activeTurnId: null,
           activeTurnStatus: "idle",
           hasSubagents: false,
@@ -554,7 +560,7 @@ export function makeOpenCode2Adapter(
           threadId: input.threadId,
           cwd,
           resumeCursor: { sessionID: sessionId, durableSeq: 0 },
-          createdAt: now,
+          createdAt,
           updatedAt: now,
         };
       });
@@ -584,6 +590,14 @@ export function makeOpenCode2Adapter(
           : undefined;
 
         const delivery = input.delivery ?? "steer";
+
+        if (hostHandle.isRemote && input.attachments && input.attachments.length > 0) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.prompt",
+            detail: "Attachments are not supported when connecting to a remote OpenCode server.",
+          });
+        }
 
         const files = input.attachments
           ? input.attachments
@@ -685,6 +699,15 @@ export function makeOpenCode2Adapter(
         const boundaryMessageId = boundaryTurnId
           ? sourceContext.turnToMessageId.get(boundaryTurnId)
           : undefined;
+
+        if (boundaryTurnId && !boundaryMessageId) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.fork",
+            detail: `Cannot fork at turn '${boundaryTurnId}': message mapping is not available for this turn.`,
+          });
+        }
+
         const boundary = boundaryMessageId
           ? { type: "through" as const, messageID: boundaryMessageId }
           : { type: "before" as const, messageID: "latest" };
@@ -704,17 +727,40 @@ export function makeOpenCode2Adapter(
             }),
         });
 
+        const now = yield* DateTime.now.pipe(Effect.map(DateTime.formatIso));
+        let forkedCreatedAt = now;
+        if ((forked as any).time?.created) {
+          forkedCreatedAt = DateTime.makeUnsafe((forked as any).time.created).pipe(
+            DateTime.formatIso,
+          );
+        }
+
+        const forkedTurnToMessageId = new Map<TurnId, string>();
+        const forkedMessageIds: Array<string> = [];
+        for (const msgId of sourceContext.messageIds) {
+          forkedMessageIds.push(msgId);
+          if (boundaryMessageId && msgId === boundaryMessageId) {
+            break;
+          }
+        }
+        for (const [tId, mId] of sourceContext.turnToMessageId.entries()) {
+          if (forkedMessageIds.includes(mId)) {
+            forkedTurnToMessageId.set(tId, mId);
+          }
+        }
+
         const targetContext: OpenCode2SessionContext = {
           threadId: targetThreadId,
           sessionId: forked.id,
           directory: sourceContext.directory,
+          createdAt: forkedCreatedAt,
           activeTurnId: null,
           activeTurnStatus: "idle",
           hasSubagents: false,
           subagents: new Map(),
           pendingInboxItems: new Set(),
-          turnToMessageId: new Map(),
-          messageIds: [],
+          turnToMessageId: forkedTurnToMessageId,
+          messageIds: forkedMessageIds,
         };
 
         sessionsByThreadId.set(targetThreadId, targetContext);
@@ -789,6 +835,14 @@ export function makeOpenCode2Adapter(
           return yield* new ProviderAdapterSessionNotFoundError({
             provider: PROVIDER,
             threadId,
+          });
+        }
+
+        if (numTurns > context.messageIds.length) {
+          return yield* new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.revert",
+            detail: `Cannot rollback ${numTurns} turn(s): only ${context.messageIds.length} message(s) are recorded.`,
           });
         }
 
@@ -901,7 +955,7 @@ export function makeOpenCode2Adapter(
           threadId: ctx.threadId,
           cwd: ctx.directory,
           resumeCursor: { sessionID: ctx.sessionId, durableSeq: 0 },
-          createdAt: now,
+          createdAt: ctx.createdAt,
           updatedAt: now,
         }));
       });

@@ -361,7 +361,7 @@ describe("OpenCode2Adapter", () => {
 
   it.effect("supports durable inbox cancellation, delivery changing, and session forks", () =>
     Effect.gen(function* () {
-      const { handle, calls } = createMockHost();
+      const { handle, emit, calls } = createMockHost();
       const adapter = yield* makeOpenCode2Adapter(handle);
 
       const threadId = ThreadId.make("thread-inbox");
@@ -373,13 +373,38 @@ describe("OpenCode2Adapter", () => {
 
       const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
 
-      // Send queued turn
-      yield* adapter.sendTurn({
+      const turnResult = yield* adapter.sendTurn({
         threadId,
         input: "Queue this task",
         delivery: "queue",
       });
       expect(calls.prompts[0].delivery).toBe("queue");
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Record a message for this turn
+      emit({
+        type: "session.text.delta",
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: "msg-123",
+          delta: "queued ack",
+        },
+      });
+
+      yield* waitForEvent((e) => e.type === "content.delta");
 
       // Cancel inbox item
       yield* adapter.cancelInboxItem!(threadId, "inbox-item-1");
@@ -394,20 +419,53 @@ describe("OpenCode2Adapter", () => {
         steer: { sessionID: sessionId, inboxID: "inbox-item-2" },
       });
 
-      // Fork thread
+      // Fork thread with mapped turn
       const targetThreadId = ThreadId.make("thread-forked-target");
-      const forkResult = yield* adapter.forkThread!(
-        threadId,
-        targetThreadId,
-        TurnId.make("turn-1"),
-      );
+      const forkResult = yield* adapter.forkThread!(threadId, targetThreadId, turnResult.turnId);
 
       expect(calls.forks).toHaveLength(1);
       expect(calls.forks[0].sessionID).toBe(sessionId);
+      expect(calls.forks[0].boundary).toEqual({
+        type: "through",
+        messageID: "msg-123",
+      });
       expect((forkResult.resumeCursor as any).sessionID).toContain("mock-forked");
 
       // Verify forked session is registered and usable
       expect(yield* adapter.hasSession(targetThreadId)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rejects attachments when connected to a remote OpenCode host", () =>
+    Effect.gen(function* () {
+      const { handle } = createMockHost();
+      (handle as any).isRemote = true;
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-remote-attachments");
+      yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      const exit = yield* adapter
+        .sendTurn({
+          threadId,
+          input: "Process image",
+          attachments: [
+            {
+              type: "file",
+              id: "att-1" as any,
+              name: "file.txt",
+              mimeType: "text/plain",
+              sizeBytes: 100,
+            },
+          ],
+        })
+        .pipe(Effect.exit);
+
+      expect(exit._tag).toBe("Failure");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });
