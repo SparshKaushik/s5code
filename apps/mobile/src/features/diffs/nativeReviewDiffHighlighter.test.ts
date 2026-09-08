@@ -149,10 +149,8 @@ describe("highlightNativeReviewDiffVisibleRows", () => {
       commentText: "Review note",
     };
 
-    const [withComment, contiguous] = await Promise.all([
-      highlight([openingRow, commentRow, closingRow, trailingRow]),
-      highlight([openingRow, closingRow, trailingRow]),
-    ]);
+    const withComment = await highlight([openingRow, commentRow, closingRow, trailingRow]);
+    const contiguous = await highlight([openingRow, closingRow, trailingRow]);
 
     expect(withComment.tokensByRowId).toEqual(contiguous.tokensByRowId);
   });
@@ -183,10 +181,8 @@ describe("highlightNativeReviewDiffVisibleRows", () => {
       trailingRow,
     ];
 
-    const [highlighted, standalone] = await Promise.all([
-      highlight(rows, new Set(["template-close"])),
-      highlight([trailingRow]),
-    ]);
+    const highlighted = await highlight(rows, new Set(["template-close"]));
+    const standalone = await highlight([trailingRow]);
 
     expect(highlighted.tokensByRowId[trailingRow.id]).toEqual(
       standalone.tokensByRowId[trailingRow.id],
