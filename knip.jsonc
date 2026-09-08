@@ -17,6 +17,7 @@
         "src/service-launcher.ts!",
         "scripts/cli.ts",
         "src/provider/testFixtures/*.mjs",
+        "src/provider/*Compat.ts",
       ],
       // Native msgpack acceleration and the Vite+ web build prerequisite.
       "ignoreDependencies": ["msgpackr-extract", "@t3tools/web"],

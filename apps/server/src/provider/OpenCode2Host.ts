@@ -76,13 +76,29 @@ export function makeOpenCode2Host(
   return Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
+
+    // Apply instance environment variables so in-process SDK and client sees them in process.env
+    if (options.environment) {
+      for (const [key, value] of Object.entries(options.environment)) {
+        if (value !== undefined && value.length > 0) {
+          process.env[key] = value;
+        }
+      }
+    }
+
     const isRemote = options.config.serverUrl.trim().length > 0;
 
     if (isRemote) {
       const serverUrl = options.config.serverUrl.trim();
       const headers: Record<string, string> = {};
       if (options.config.serverPassword.trim().length > 0) {
-        headers.authorization = `Bearer ${options.config.serverPassword.trim()}`;
+        const pass = options.config.serverPassword.trim();
+        if (pass.startsWith("Basic ") || pass.startsWith("Bearer ")) {
+          headers.authorization = pass;
+        } else {
+          const cred = pass.includes(":") ? pass : `opencode:${pass}`;
+          headers.authorization = `Basic ${Buffer.from(cred).toString("base64")}`;
+        }
       }
 
       const client = OpenCodeClient.make({
@@ -96,6 +112,41 @@ export function makeOpenCode2Host(
         isRemote: true,
         databasePath: null,
       } satisfies OpenCode2HostHandle;
+    }
+
+    // When serverUrl is omitted and no explicit databasePath is configured,
+    // check if an active local OpenCode 2 background service is running.
+    if (!options.config.databasePath.trim()) {
+      const discoveredEndpoint = yield* Effect.tryPromise({
+        try: async () => {
+          const { discover } = await import("@opencode-ai/client-v2/service");
+          return await discover();
+        },
+        catch: () => undefined,
+      }).pipe(Effect.orElseSucceed(() => undefined));
+
+      if (discoveredEndpoint?.url) {
+        const authHeaders: Record<string, string> = {};
+        if (discoveredEndpoint.auth) {
+          authHeaders.authorization =
+            "Basic " +
+            Buffer.from(
+              `${discoveredEndpoint.auth.username}:${discoveredEndpoint.auth.password}`,
+            ).toString("base64");
+        }
+
+        const client = OpenCodeClient.make({
+          baseUrl: discoveredEndpoint.url,
+          ...(Object.keys(authHeaders).length > 0 ? { headers: authHeaders } : {}),
+        }) as OpenCode2ClientFacade;
+
+        return {
+          instanceId: options.instanceId,
+          client,
+          isRemote: false,
+          databasePath: null,
+        } satisfies OpenCode2HostHandle;
+      }
     }
 
     // Embedded in-process SDK mode
@@ -116,15 +167,6 @@ export function makeOpenCode2Host(
             }),
         ),
       );
-    }
-
-    // Apply instance environment variables so in-process SDK sees them in process.env
-    if (options.environment) {
-      for (const [key, value] of Object.entries(options.environment)) {
-        if (value !== undefined && value.length > 0) {
-          process.env[key] = value;
-        }
-      }
     }
 
     const host = yield* Effect.acquireRelease(

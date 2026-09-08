@@ -32,6 +32,7 @@ const OPENCODE2_PRESENTATION = {
 } as const;
 
 export function titleCaseSlug(value: string): string {
+  if (value.toLowerCase() === "openai") return "OpenAI";
   const segments: Array<string> = [];
   for (const segment of value.split(/[-_/]+/)) {
     if (segment.length > 0) {
@@ -41,6 +42,33 @@ export function titleCaseSlug(value: string): string {
   return segments.join(" ");
 }
 
+export function formatVariantLabel(value: string): string {
+  switch (value.toLowerCase()) {
+    case "xhigh":
+      return "Extra High";
+    case "none":
+      return "None";
+    default:
+      return titleCaseSlug(value);
+  }
+}
+
+export function parseModelVariants(rawVariants: unknown): Array<{ id: string }> | undefined {
+  if (!Array.isArray(rawVariants)) return undefined;
+  const result: Array<{ id: string }> = [];
+  for (const item of rawVariants) {
+    if (typeof item === "string" && item.trim().length > 0) {
+      result.push({ id: item.trim() });
+    } else if (item && typeof item === "object" && typeof (item as any).id === "string") {
+      const id = (item as any).id.trim();
+      if (id.length > 0) {
+        result.push({ id });
+      }
+    }
+  }
+  return result.length > 0 ? result : undefined;
+}
+
 function inferDefaultVariant(
   providerID: string,
   variants: ReadonlyArray<string>,
@@ -48,28 +76,36 @@ function inferDefaultVariant(
   if (variants.length === 1) {
     return variants[0];
   }
-  if (providerID === "anthropic" || providerID.startsWith("google")) {
-    return variants.includes("high") ? "high" : undefined;
+  if (providerID === "anthropic" || providerID.startsWith("google") || providerID === "kiro") {
+    return variants.includes("high")
+      ? "high"
+      : variants.includes("medium")
+        ? "medium"
+        : (variants.find((v) => v !== "none") ?? variants[0]);
   }
   if (providerID === "openai" || providerID === "opencode") {
-    return variants.includes("medium") ? "medium" : variants.includes("high") ? "high" : undefined;
+    return variants.includes("medium")
+      ? "medium"
+      : variants.includes("high")
+        ? "high"
+        : (variants.find((v) => v !== "none") ?? variants[0]);
   }
-  return variants[0];
+  return variants.find((v) => v !== "none") ?? variants[0];
 }
 
 export function openCode2CapabilitiesForModel(input: {
   readonly providerID: string;
-  readonly variants?: ReadonlyArray<{ name: string }> | undefined;
+  readonly variants?: ReadonlyArray<{ id: string }> | undefined;
   readonly agents: ReadonlyArray<{ name: string; mode?: string; hidden?: boolean }>;
 }): ModelCapabilities {
-  const rawVariantValues = (input.variants ?? []).map((v) => v.name);
+  const rawVariantValues = (input.variants ?? []).map((v) => v.id);
   const variantValues =
     rawVariantValues.length > 0 ? rawVariantValues : ["low", "medium", "high", "xhigh"];
   const defaultVariant = inferDefaultVariant(input.providerID, variantValues);
   const variantOptions = variantValues.map((value) =>
     defaultVariant === value
-      ? { id: value, label: titleCaseSlug(value), isDefault: true as const }
-      : { id: value, label: titleCaseSlug(value) },
+      ? { id: value, label: formatVariantLabel(value), isDefault: true as const }
+      : { id: value, label: formatVariantLabel(value) },
   );
 
   const primaryAgents = input.agents.filter(
@@ -242,7 +278,7 @@ export function checkOpenCode2ProviderStatus(
           name: string;
           providerID: string;
           subProvider?: string;
-          variants?: Array<{ name: string }>;
+          variants?: Array<{ id: string }>;
         }> = [];
 
         for (const model of (modelsRes as { data?: any[] }).data ?? []) {
@@ -250,12 +286,14 @@ export function checkOpenCode2ProviderStatus(
             const providerID = model.providerID || model.id.split("/")[0] || "opencode";
             const subProvider =
               providerNames.get(providerID) || (providerID ? titleCaseSlug(providerID) : undefined);
+            const slug = model.id.includes("/") ? model.id : `${providerID}/${model.id}`;
+            const variants = parseModelVariants(model.variants);
             models.push({
-              id: model.id,
+              id: slug,
               name: model.name || titleCaseSlug(model.id),
               providerID,
-              subProvider,
-              variants: model.variants,
+              ...(subProvider ? { subProvider } : {}),
+              ...(variants ? { variants } : {}),
             });
           }
         }
@@ -297,7 +335,7 @@ export function checkOpenCode2ProviderStatus(
         name: string;
         providerID: string;
         subProvider?: string;
-        variants?: Array<{ name: string }>;
+        variants?: Array<{ id: string }>;
       }>
     ).map((model) => ({
       slug: model.id,
