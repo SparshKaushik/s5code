@@ -211,8 +211,11 @@ export function checkOpenCode2ProviderStatus(
 
     const inventory = yield* Effect.tryPromise({
       try: async () => {
-        const [modelsRes, agentsRes, commandsRes, skillsRes, configRes] = await Promise.all([
+        const [modelsRes, providersRes, agentsRes, commandsRes, skillsRes] = await Promise.all([
           hostHandle.client.model
+            .list({ location: { directory: cwd } })
+            .catch(() => ({ data: [] })),
+          hostHandle.client.provider
             .list({ location: { directory: cwd } })
             .catch(() => ({ data: [] })),
           hostHandle.client.agent
@@ -224,12 +227,17 @@ export function checkOpenCode2ProviderStatus(
           hostHandle.client.skill
             .list({ location: { directory: cwd } })
             .catch(() => ({ data: [] })),
-          (hostHandle.client as any).config
-            ?.get?.({ location: { directory: cwd } })
-            .catch(() => []) ?? [],
         ]);
 
-        const discoveredModels: Array<{
+        const providerNames = new Map<string, string>();
+        for (const prov of (providersRes as { data?: Array<{ id?: string; name?: string }> })
+          .data ?? []) {
+          if (prov?.id && prov?.name) {
+            providerNames.set(prov.id, prov.name);
+          }
+        }
+
+        const models: Array<{
           id: string;
           name: string;
           providerID: string;
@@ -237,62 +245,23 @@ export function checkOpenCode2ProviderStatus(
           variants?: Array<{ name: string }>;
         }> = [];
 
-        const seenSlugs = new Set<string>();
-
-        // 1. Models from host model.list()
         for (const model of (modelsRes as { data?: any[] }).data ?? []) {
           if (model?.id) {
-            seenSlugs.add(model.id);
-            discoveredModels.push({
+            const providerID = model.providerID || model.id.split("/")[0] || "opencode";
+            const subProvider =
+              providerNames.get(providerID) || (providerID ? titleCaseSlug(providerID) : undefined);
+            models.push({
               id: model.id,
               name: model.name || titleCaseSlug(model.id),
-              providerID: model.providerID || model.id.split("/")[0] || "opencode",
+              providerID,
+              subProvider,
               variants: model.variants,
             });
           }
         }
 
-        // 2. Models from OpenCode configuration documents (opencode.json)
-        const configDocs = Array.isArray(configRes) ? configRes : [];
-        for (const doc of configDocs) {
-          if (doc?.type === "document" && doc.info) {
-            const info = doc.info;
-            if (typeof info.model === "string" && info.model.trim().length > 0) {
-              const slug = info.model.trim();
-              if (!seenSlugs.has(slug)) {
-                seenSlugs.add(slug);
-                discoveredModels.push({
-                  id: slug,
-                  name: slug.split("/").pop() || slug,
-                  providerID: slug.split("/")[0] || "opencode",
-                });
-              }
-            }
-            if (info.providers && typeof info.providers === "object") {
-              for (const [providerId, provConfig] of Object.entries(info.providers)) {
-                const provObj = provConfig as { name?: string; models?: Record<string, unknown> };
-                const subProvider = provObj?.name || titleCaseSlug(providerId);
-                if (provObj?.models && typeof provObj.models === "object") {
-                  for (const modelKey of Object.keys(provObj.models)) {
-                    const slug = modelKey.includes("/") ? modelKey : `${providerId}/${modelKey}`;
-                    if (!seenSlugs.has(slug)) {
-                      seenSlugs.add(slug);
-                      discoveredModels.push({
-                        id: slug,
-                        name: modelKey.split("/").pop() || modelKey,
-                        providerID: providerId,
-                        subProvider,
-                      });
-                    }
-                  }
-                }
-              }
-            }
-          }
-        }
-
         return {
-          models: discoveredModels,
+          models,
           agents: (agentsRes as { data?: unknown[] }).data ?? [],
           commands: (commandsRes as { data?: unknown[] }).data ?? [],
           skills: (skillsRes as { data?: unknown[] }).data ?? [],
