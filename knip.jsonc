@@ -20,7 +20,9 @@
         "src/provider/*Compat.ts",
       ],
       // Native msgpack acceleration and the Vite+ web build prerequisite.
-      "ignoreDependencies": ["msgpackr-extract", "@t3tools/web"],
+      // sdk-v2 remains packaged for backwards-compatible installations, but OpenCode 2
+      // now communicates exclusively through the out-of-process client service.
+      "ignoreDependencies": ["msgpackr-extract", "@opencode-ai/sdk-v2", "@t3tools/web"],
     },
     "apps/desktop": {
       // Electron loads these bundles by filename rather than importing them.

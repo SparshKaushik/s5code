@@ -1,8 +1,8 @@
 /**
  * OpenCode2Driver — `ProviderDriver` for OpenCode 2.
  *
- * Bundles `snapshot`, `adapter`, and `textGeneration` using the embedded
- * SDK host (or remote client) per provider instance.
+ * Bundles `snapshot`, `adapter`, and `textGeneration` using an OpenCode
+ * HTTP service client per provider instance.
  *
  * @module provider/Drivers/OpenCode2Driver
  */
@@ -114,7 +114,7 @@ export const OpenCode2Driver: ProviderDriver<OpenCode2Settings, OpenCode2DriverE
         resolveMaintenance: () =>
           Effect.succeed({
             provider: DRIVER_KIND,
-            packageName: "@opencode-ai/sdk-v2",
+            packageName: "@opencode-ai/client-v2",
             canUpdate: false,
             status: "current" as const,
             update: null,

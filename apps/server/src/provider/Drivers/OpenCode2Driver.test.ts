@@ -5,10 +5,23 @@ import { ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { vi } from "vite-plus/test";
 
 import { OpenCode2Driver } from "./OpenCode2Driver.ts";
 import { makeOpenCode2Host } from "../OpenCode2Host.ts";
 import { checkOpenCode2ProviderStatus } from "../Layers/OpenCode2Provider.ts";
+
+const localService = vi.hoisted(() => ({
+  ensure: vi.fn(async () => ({
+    url: "http://127.0.0.1:1",
+    auth: { type: "basic" as const, username: "opencode", password: "test-password" },
+  })),
+}));
+
+vi.mock("@opencode-ai/client-v2/service", () => ({
+  ensure: localService.ensure,
+  headers: () => ({ authorization: "Basic test-credentials" }),
+}));
 
 describe("OpenCode2Driver", () => {
   it("exports correct driver metadata and defaults", () => {
@@ -22,7 +35,7 @@ describe("OpenCode2Driver", () => {
     expect(defaultConfig.databasePath).toBe("");
   });
 
-  it.effect("instantiates host and probes provider snapshot in embedded mode", () =>
+  it.effect("creates an HTTP client for the out-of-process local service", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
@@ -63,37 +76,6 @@ describe("OpenCode2Driver", () => {
       expect(snapshot.supportsInboxSteering).toBe(true);
       expect(snapshot.supportsInboxQueueing).toBe(true);
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
-  );
-
-  it.effect(
-    "ensures __filename and __dirname are defined on globalThis when initializing host",
-    () =>
-      Effect.gen(function* () {
-        const fileSystem = yield* FileSystem.FileSystem;
-        const path = yield* Path.Path;
-        const tempDir = yield* fileSystem.makeTempDirectoryScoped();
-
-        // Explicitly delete globals to simulate pure ESM scope
-        delete (globalThis as any).__filename;
-        delete (globalThis as any).__dirname;
-
-        const hostHandle = yield* makeOpenCode2Host({
-          instanceId: ProviderInstanceId.make("opencode2-shims-test"),
-          config: {
-            enabled: true,
-            serverUrl: "",
-            serverPassword: "",
-            databasePath: path.join(tempDir, "sessions.db"),
-            customModels: [],
-          },
-          defaultDirectory: tempDir,
-          stateDir: tempDir,
-        });
-
-        expect(hostHandle.isRemote).toBe(false);
-        expect(typeof (globalThis as any).__filename).toBe("string");
-        expect(typeof (globalThis as any).__dirname).toBe("string");
-      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.effect("discovers agents, slash commands, and skills via OpenCode 2 client APIs", () =>
@@ -167,6 +149,9 @@ describe("OpenCode2Driver", () => {
       expect(hostHandle.isRemote).toBe(false);
       expect(hostHandle.databasePath).toBeNull();
       expect(process.env.TEST_OPENCODE2_INJECTED_KEY).toBe("test-injected-value");
+      expect(localService.ensure).toHaveBeenCalledWith({
+        env: { TEST_OPENCODE2_INJECTED_KEY: "test-injected-value" },
+      });
       delete process.env.TEST_OPENCODE2_INJECTED_KEY;
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
