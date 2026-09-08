@@ -134,11 +134,6 @@ export function makeOpenCode2Host(
           const { OpenCode: OpenCodeSdk } = await import("@opencode-ai/sdk-v2");
           return await OpenCodeSdk.create({
             database: { path: effectiveDatabasePath },
-            instances: {
-              default: {
-                directory: options.defaultDirectory,
-              },
-            },
           });
         },
         catch: (cause) =>
