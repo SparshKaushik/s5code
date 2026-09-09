@@ -330,12 +330,14 @@ export function makeOpenCode2Adapter(
         type: "user-input.requested" as const,
         payload: {
           questions: fields.map((f: any) => ({
-            id: f.key ?? f.name,
-            prompt: f.title ?? f.key ?? f.name,
+            id: String(f.key ?? f.name ?? "field"),
+            header: String(f.title ?? f.key ?? f.name ?? "Input"),
+            question: String(f.description ?? f.title ?? f.key ?? f.name ?? "Please answer"),
             allowCustomAnswer: f.custom !== false,
             options: (Array.isArray(f.options) ? f.options : []).map((o: any) => ({
-              value: o.value,
-              label: o.label ?? o.value,
+              label: String(o.label ?? o.value ?? ""),
+              description: String(o.description ?? ""),
+              value: String(o.value ?? o.label ?? ""),
             })),
           })),
         },
@@ -867,17 +869,20 @@ export function makeOpenCode2Adapter(
           });
         }
         if (selectedAgent) {
+          // OpenCode 2 agent IDs are lowercase (e.g. "build", "plan"). If a UI selection
+          // or persisted model option passes a title-cased name like "Build", normalize it.
+          const agentId = selectedAgent.toLowerCase();
           yield* Effect.tryPromise({
             try: () =>
               hostHandle.client.session.switchAgent({
                 sessionID: context.sessionId,
-                agent: selectedAgent,
+                agent: agentId,
               }),
             catch: (cause) =>
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
                 method: "session.switchAgent",
-                detail: `Failed to switch OpenCode 2 agent to '${selectedAgent}': ${openCodeClientErrorMessage(cause)}`,
+                detail: `Failed to switch OpenCode 2 agent to '${agentId}': ${openCodeClientErrorMessage(cause)}`,
                 cause,
               }),
           });

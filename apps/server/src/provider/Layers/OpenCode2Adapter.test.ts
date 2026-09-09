@@ -360,8 +360,11 @@ describe("OpenCode2Adapter", () => {
       const questions = (formEvent.payload as any).questions;
       expect(questions).toHaveLength(1);
       expect(questions[0].id).toBe("env");
-      expect(questions[0].prompt).toBe("Environment");
-      expect(questions[0].options).toEqual([{ value: "production", label: "Production" }]);
+      expect(questions[0].header).toBe("Environment");
+      expect(questions[0].question).toBe("Environment");
+      expect(questions[0].options).toEqual([
+        { label: "Production", description: "", value: "production" },
+      ]);
 
       // Reply to permission
       yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("perm-123"), "accept");
@@ -480,7 +483,7 @@ describe("OpenCode2Adapter", () => {
           model: "zhipu/glm-5.3",
           options: [
             { id: "variant", value: "high" },
-            { id: "agent", value: "build" },
+            { id: "agent", value: "Build" },
           ],
         } as any,
       });

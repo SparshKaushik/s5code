@@ -99,4 +99,23 @@ describe("openCode2CapabilitiesForModel", () => {
     expect(parseModelVariants(undefined)).toBeUndefined();
     expect(parseModelVariants([])).toBeUndefined();
   });
+
+  it("normalizes agent options to lowercase identifiers", () => {
+    const capabilities = openCode2CapabilitiesForModel({
+      providerID: "opencode",
+      agents: [
+        { id: "build", name: "Build", mode: "primary" },
+        { id: "plan", name: "Plan", mode: "primary" },
+      ],
+    });
+
+    const agentDesc = capabilities.optionDescriptors?.find(
+      (d): d is SelectProviderOptionDescriptor => d.id === "agent" && d.type === "select",
+    );
+    expect(agentDesc?.currentValue).toBe("build");
+    expect(agentDesc?.options).toEqual([
+      { id: "build", label: "Build", isDefault: true },
+      { id: "plan", label: "Plan" },
+    ]);
+  });
 });

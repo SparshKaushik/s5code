@@ -96,7 +96,7 @@ function inferDefaultVariant(
 export function openCode2CapabilitiesForModel(input: {
   readonly providerID: string;
   readonly variants?: ReadonlyArray<{ id: string }> | undefined;
-  readonly agents: ReadonlyArray<{ name: string; mode?: string; hidden?: boolean }>;
+  readonly agents: ReadonlyArray<{ id?: string; name: string; mode?: string; hidden?: boolean }>;
 }): ModelCapabilities {
   const rawVariantValues = (input.variants ?? []).map((v) => v.id);
   const variantValues =
@@ -108,16 +108,21 @@ export function openCode2CapabilitiesForModel(input: {
       : { id: value, label: formatVariantLabel(value) },
   );
 
+  const getAgentId = (agent: { id?: string; name: string }) => agent.id || agent.name.toLowerCase();
+  const getAgentLabel = (agent: { id?: string; name: string }) =>
+    agent.name || titleCaseSlug(agent.id || "");
+
   const primaryAgents = input.agents.filter(
     (agent) => !agent.hidden && (agent.mode === "primary" || agent.mode === "all"),
   );
-  const defaultAgent =
-    primaryAgents.find((a) => a.name === "build")?.name ?? primaryAgents[0]?.name;
-  const agentOptions = primaryAgents.map((agent) =>
-    defaultAgent === agent.name
-      ? { id: agent.name, label: titleCaseSlug(agent.name), isDefault: true as const }
-      : { id: agent.name, label: titleCaseSlug(agent.name) },
-  );
+  const defaultAgentId =
+    primaryAgents.map(getAgentId).find((id) => id === "build") ??
+    (primaryAgents[0] ? getAgentId(primaryAgents[0]) : undefined);
+  const agentOptions = primaryAgents.map((agent) => {
+    const id = getAgentId(agent);
+    const label = getAgentLabel(agent);
+    return id === defaultAgentId ? { id, label, isDefault: true as const } : { id, label };
+  });
 
   return createModelCapabilities({
     optionDescriptors: [
@@ -139,7 +144,7 @@ export function openCode2CapabilitiesForModel(input: {
               label: "Agent",
               type: "select" as const,
               options: agentOptions,
-              ...(defaultAgent ? { currentValue: defaultAgent } : {}),
+              ...(defaultAgentId ? { currentValue: defaultAgentId } : {}),
             },
           ]
         : []),
