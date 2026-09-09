@@ -150,6 +150,7 @@ describe("OpenCode2Driver", () => {
       expect(hostHandle.databasePath).toBeNull();
       expect(process.env.TEST_OPENCODE2_INJECTED_KEY).toBe("test-injected-value");
       expect(localService.ensure).toHaveBeenCalledWith({
+        command: ["opencode2", "serve", "--service"],
         env: { TEST_OPENCODE2_INJECTED_KEY: "test-injected-value" },
       });
       delete process.env.TEST_OPENCODE2_INJECTED_KEY;

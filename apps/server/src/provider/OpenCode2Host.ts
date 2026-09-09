@@ -2,7 +2,7 @@
  * OpenCode2Host — manages the HTTP client for an OpenCode 2 instance.
  *
  * When `serverUrl` is empty, the OpenCode client service helper discovers or starts an
- * out-of-process `opencode serve --service` daemon. The OpenCode SDK is never loaded into
+ * out-of-process `opencode2 serve --service` daemon. The OpenCode SDK is never loaded into
  * the S5 Code server process.
  *
  * @module provider/OpenCode2Host
@@ -75,6 +75,7 @@ export function makeOpenCode2Host(
       try: async () => {
         const service = await import("@opencode-ai/client-v2/service");
         const endpoint = await service.ensure({
+          command: ["opencode2", "serve", "--service"],
           ...(options.environment ? { env: options.environment } : {}),
         });
         return { endpoint, headers: service.headers(endpoint) };
@@ -85,7 +86,7 @@ export function makeOpenCode2Host(
           instanceId: options.instanceId,
           detail:
             "Failed to connect to or start the local OpenCode 2 service. " +
-            "Install the OpenCode CLI and ensure `opencode` is available on PATH.",
+            "Install the OpenCode 2 CLI and ensure `opencode2` is available on PATH.",
           cause,
         }),
     });
