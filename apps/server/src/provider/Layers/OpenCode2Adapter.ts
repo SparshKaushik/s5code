@@ -70,16 +70,146 @@ interface OpenCode2SessionContext {
   readonly directory: string;
   readonly createdAt: string;
   activeTurnId: TurnId | null;
+  /** Most recent turn seen on this session; late events after a turn closes
+   * still belong to it and must not spawn a phantom turn. */
+  lastTurnId: TurnId | null;
   activeTurnStatus: "idle" | "running" | "interrupted" | "failed";
   hasSubagents: boolean;
   subagents: Map<string, SubagentState>;
   pendingInboxItems: Set<string>;
+  /** Permission/form requests remember the session that owns them on the
+   * OpenCode side: subagents ask through their own child session, and the
+   * reply endpoint rejects a session mismatch with "Permission request not
+   * found". */
+  requestSessionIdByRequestId: Map<string, string>;
+  /** v2 tool events carry no tool name; `session.tool.input.started` does. */
+  toolCallByCallId: Map<string, { name: string; input?: unknown }>;
   turnToMessageId: Map<TurnId, string>;
   messageIds: Array<string>;
 }
 
 export interface OpenCode2AdapterLiveOptions {
   readonly instanceId?: ProviderInstanceId;
+}
+
+const eventCallId = (data: Record<string, unknown>): string | undefined =>
+  typeof data.callID === "string" ? data.callID : typeof data.id === "string" ? data.id : undefined;
+
+function toToolLifecycleItemType(
+  toolName: string,
+): "command_execution" | "file_change" | "web_search" | "mcp_tool_call" | "dynamic_tool_call" {
+  const normalized = toolName.toLowerCase();
+  if (normalized === "todowrite" || normalized === "todoread") {
+    return "dynamic_tool_call";
+  }
+  if (
+    normalized.includes("bash") ||
+    normalized.includes("shell") ||
+    normalized.includes("command")
+  ) {
+    return "command_execution";
+  }
+  if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("patch")) {
+    return "file_change";
+  }
+  if (normalized.includes("web")) {
+    return "web_search";
+  }
+  if (normalized.includes("mcp")) {
+    return "mcp_tool_call";
+  }
+  return "dynamic_tool_call";
+}
+
+/** Human summary for a tool call title, from the tool's input object. */
+function summarizeToolCallInput(toolName: string, input: unknown): string | undefined {
+  const record =
+    input !== null && typeof input === "object" && !Array.isArray(input)
+      ? (input as Record<string, unknown>)
+      : {};
+  const firstString = (...keys: string[]): string | undefined => {
+    for (const key of keys) {
+      const value = record[key];
+      if (typeof value === "string" && value.trim().length > 0) return value.trim();
+    }
+    return undefined;
+  };
+  const normalized = toolName.toLowerCase();
+  if (normalized.includes("bash") || normalized.includes("shell")) {
+    return firstString("command", "script", "cmd");
+  }
+  if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("patch")) {
+    return firstString("filePath", "file_path", "path", "file");
+  }
+  if (normalized.includes("read")) {
+    return firstString("filePath", "file_path", "path", "file");
+  }
+  if (normalized.includes("grep") || normalized.includes("glob")) {
+    return firstString("pattern", "query");
+  }
+  if (normalized.includes("webfetch")) {
+    return firstString("url");
+  }
+  if (normalized.includes("task") || normalized.includes("agent")) {
+    return firstString("description", "prompt");
+  }
+  return (
+    firstString(
+      "description",
+      "command",
+      "url",
+      "filePath",
+      "file_path",
+      "path",
+      "pattern",
+      "query",
+    ) ?? undefined
+  );
+}
+
+/** Flattens a v2 tool success `content` array into its text output. */
+function toolContentText(content: unknown): string | undefined {
+  if (!Array.isArray(content)) return undefined;
+  const text = content
+    .map((entry) =>
+      entry &&
+      typeof entry === "object" &&
+      (entry as any).type === "text" &&
+      typeof (entry as any).text === "string"
+        ? ((entry as any).text as string)
+        : null,
+    )
+    .filter((entry): entry is string => entry !== null)
+    .join("\n")
+    .trim();
+  return text.length > 0 ? text : undefined;
+}
+
+function structuredErrorMessage(error: unknown): string | undefined {
+  if (error && typeof error === "object") {
+    const message = (error as any).message;
+    if (typeof message === "string" && message.trim().length > 0) return message.trim();
+  }
+  if (typeof error === "string" && error.trim().length > 0) return error.trim();
+  return undefined;
+}
+
+/** OpenCode client errors often stringify as "[object Object]"; dig for the message. */
+function openCodeClientErrorMessage(cause: unknown): string {
+  return (
+    structuredErrorMessage(cause) ?? structuredErrorMessage((cause as any)?.cause) ?? String(cause)
+  );
+}
+
+function parseModelSlug(slug: string): { providerID: string; modelID: string } | null {
+  const slash = slug.indexOf("/");
+  if (slash <= 0 || slash === slug.length - 1) {
+    return null;
+  }
+  return {
+    providerID: slug.slice(0, slash),
+    modelID: slug.slice(slash + 1),
+  };
 }
 
 export function makeOpenCode2Adapter(
@@ -93,6 +223,8 @@ export function makeOpenCode2Adapter(
     const runtimeEventQueue = yield* Queue.unbounded<ProviderRuntimeEvent>();
     const sessionsByThreadId = new Map<ThreadId, OpenCode2SessionContext>();
     const threadIdBySessionId = new Map<string, ThreadId>();
+    /** Child (subagent) sessions; their events fold into the parent thread. */
+    const childSessionIds = new Set<string>();
 
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
@@ -108,7 +240,7 @@ export function makeOpenCode2Adapter(
 
     const buildEventBase = (input: {
       readonly threadId: ThreadId;
-      readonly turnId?: TurnId | undefined;
+      readonly turnId?: TurnId | null | undefined;
       readonly itemId?: string | undefined;
       readonly requestId?: string | undefined;
       readonly raw?: unknown;
@@ -140,6 +272,76 @@ export function makeOpenCode2Adapter(
     const emit = (event: ProviderRuntimeEvent) =>
       Queue.offer(runtimeEventQueue, event).pipe(Effect.asVoid);
 
+    const buildPermissionRequestEvent = Effect.fn("buildPermissionRequestEvent")(function* (
+      context: OpenCode2SessionContext,
+      data: Record<string, any>,
+      rawEvent: unknown,
+      threadId: ThreadId,
+      turnId: TurnId | null,
+    ) {
+      const requestId =
+        (typeof data.id === "string" && data.id) ||
+        (typeof data.permissionID === "string" && data.permissionID) ||
+        `perm-${yield* Clock.currentTimeMillis}`;
+      // The owning session replies, not necessarily the root one: subagents
+      // ask through their own child session and OpenCode rejects a reply
+      // whose session does not own the request.
+      if (typeof data.sessionID === "string" && data.sessionID.length > 0) {
+        context.requestSessionIdByRequestId.set(requestId, data.sessionID);
+      }
+      const action = typeof data.action === "string" ? data.action : "action";
+      const resources = Array.isArray(data.resources)
+        ? data.resources.filter((r: unknown): r is string => typeof r === "string")
+        : [];
+      return {
+        ...(yield* buildEventBase({ threadId, turnId, requestId, raw: rawEvent })),
+        type: "request.opened" as const,
+        payload: {
+          requestType: "command_execution_approval" as const,
+          options: [
+            { decision: "accept" as const, label: "Allow once" },
+            { decision: "acceptAlways" as const, label: "Allow always" },
+            { decision: "decline" as const, label: "Deny" },
+          ],
+          detail:
+            (typeof data.message === "string" && data.message) || [action, ...resources].join(" "),
+        },
+      } satisfies ProviderRuntimeEvent;
+    });
+
+    const buildFormRequestEvent = Effect.fn("buildFormRequestEvent")(function* (
+      context: OpenCode2SessionContext,
+      data: Record<string, any>,
+      rawEvent: unknown,
+      threadId: ThreadId,
+      turnId: TurnId | null,
+    ) {
+      const form = (data.form ?? {}) as Record<string, any>;
+      const requestId =
+        (typeof form.id === "string" && form.id) ||
+        (typeof data.formID === "string" && data.formID) ||
+        `form-${yield* Clock.currentTimeMillis}`;
+      if (typeof form.sessionID === "string" && form.sessionID.length > 0) {
+        context.requestSessionIdByRequestId.set(requestId, form.sessionID);
+      }
+      const fields = Array.isArray(form.fields) ? form.fields : [];
+      return {
+        ...(yield* buildEventBase({ threadId, turnId, requestId, raw: rawEvent })),
+        type: "user-input.requested" as const,
+        payload: {
+          questions: fields.map((f: any) => ({
+            id: f.key ?? f.name,
+            prompt: f.title ?? f.key ?? f.name,
+            allowCustomAnswer: f.custom !== false,
+            options: (Array.isArray(f.options) ? f.options : []).map((o: any) => ({
+              value: o.value,
+              label: o.label ?? o.value,
+            })),
+          })),
+        },
+      } satisfies ProviderRuntimeEvent;
+    });
+
     // Start background event pump from hostHandle.client.event.subscribe()
     const pumpFiber = yield* Effect.gen(function* () {
       const asyncIterable = yield* Effect.try({
@@ -169,13 +371,16 @@ export function makeOpenCode2Adapter(
           Effect.gen(function* () {
             const eventType = rawEvent.type;
             const data = rawEvent.data ?? {};
-            const sessionId: string | undefined = data.sessionID;
+            // `form.created` nests everything under `data.form`; permission
+            // and session events carry a top-level sessionID.
+            const sessionId: string | undefined =
+              data.sessionID ?? data.form?.sessionID ?? data.info?.id;
 
             if (!sessionId) return;
 
             // Check if this event belongs to a root session or a child session
             let threadId = threadIdBySessionId.get(sessionId);
-            let isChildSession = false;
+            let isChildSession = threadId !== undefined && childSessionIds.has(sessionId);
             let parentContext: OpenCode2SessionContext | undefined;
 
             if (!threadId) {
@@ -185,6 +390,10 @@ export function makeOpenCode2Adapter(
                 threadId = threadIdBySessionId.get(parentSessionId)!;
                 parentContext = sessionsByThreadId.get(threadId);
                 isChildSession = true;
+                // Route the child session directly from now on: later events
+                // it owns (e.g. permission.asked) carry no parentID.
+                childSessionIds.add(sessionId);
+                threadIdBySessionId.set(sessionId, threadId);
               }
             } else {
               parentContext = sessionsByThreadId.get(threadId);
@@ -192,7 +401,41 @@ export function makeOpenCode2Adapter(
 
             if (!threadId || !parentContext) return;
 
-            const turnId = parentContext.activeTurnId ?? TurnId.make("turn-initial");
+            const turnId =
+              parentContext.activeTurnId ??
+              // Events that trail a closed turn (out-of-order tool results,
+              // steers) belong to that turn. Attributing them to a synthetic
+              // turn makes the UI fold them into a bogus second response.
+              parentContext.lastTurnId ??
+              null;
+
+            // v2 tool events carry no tool name; input.started does.
+            if (eventType === "session.tool.input.started") {
+              const callId = eventCallId(data);
+              if (callId && typeof data.name === "string") {
+                parentContext.toolCallByCallId.set(callId, { name: data.name });
+              }
+            }
+
+            // Approval requests must surface even when no turn is associated
+            // (e.g. replying to a pending request recovered after a server
+            // restart), so they skip the turn guard below.
+            if (eventType === "permission.asked" || eventType === "form.created") {
+              const requested =
+                eventType === "permission.asked"
+                  ? yield* buildPermissionRequestEvent(
+                      parentContext,
+                      data,
+                      rawEvent,
+                      threadId,
+                      turnId,
+                    )
+                  : yield* buildFormRequestEvent(parentContext, data, rawEvent, threadId, turnId);
+              yield* emit(requested);
+              return;
+            }
+
+            if (!turnId) return;
 
             const observedMessageId = data.assistantMessageID ?? data.messageID;
             if (typeof observedMessageId === "string" && observedMessageId.length > 0) {
@@ -210,7 +453,7 @@ export function makeOpenCode2Adapter(
                 subagent = {
                   childSessionId: sessionId,
                   taskId,
-                  name: data.agent ?? "assistant",
+                  name: data.agent ?? data.info?.agent ?? "assistant",
                   cumulativeInputTokens: 0,
                   cumulativeOutputTokens: 0,
                   cumulativeReasoningTokens: 0,
@@ -233,7 +476,12 @@ export function makeOpenCode2Adapter(
 
               if (subagent) {
                 if (eventType === "session.tool.called") {
-                  subagent.lastToolName = data.tool;
+                  const callId = eventCallId(data);
+                  const tracked = callId ? parentContext.toolCallByCallId.get(callId) : undefined;
+                  subagent.lastToolName =
+                    (typeof data.tool === "string" ? data.tool : undefined) ??
+                    tracked?.name ??
+                    subagent.lastToolName;
                   yield* emit({
                     ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                     type: "task.progress",
@@ -338,85 +586,80 @@ export function makeOpenCode2Adapter(
               }
 
               case "session.tool.called": {
-                const callId = data.callID ?? data.id ?? `call-${yield* Clock.currentTimeMillis}`;
+                const callId = eventCallId(data) ?? `call-${yield* Clock.currentTimeMillis}`;
+                const tracked = parentContext.toolCallByCallId.get(callId);
+                const toolName =
+                  (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
+                const input = data.input ?? tracked?.input;
+                if (tracked && data.input !== undefined) {
+                  tracked.input = data.input;
+                }
+                const inputSummary = summarizeToolCallInput(toolName, input);
+                const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.started",
                   payload: {
-                    itemType: "command_execution",
-                    title: data.tool ?? "tool",
-                    ...(typeof data.input === "string" ? { detail: data.input } : {}),
+                    itemType,
+                    title: inputSummary ?? toolName,
+                    data: {
+                      tool: toolName,
+                      toolName,
+                      ...(itemType === "command_execution" && inputSummary !== undefined
+                        ? { command: inputSummary }
+                        : {}),
+                    },
                   },
                 });
                 break;
               }
 
               case "session.tool.success": {
-                const callId = data.callID ?? data.id ?? `call-${yield* Clock.currentTimeMillis}`;
+                const callId = eventCallId(data) ?? `call-${yield* Clock.currentTimeMillis}`;
+                const tracked = parentContext.toolCallByCallId.get(callId);
+                const toolName =
+                  (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
+                const inputSummary = summarizeToolCallInput(toolName, tracked?.input);
+                parentContext.toolCallByCallId.delete(callId);
+                const output = toolContentText(data.content);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.completed",
                   payload: {
-                    itemType: "command_execution",
+                    itemType: toToolLifecycleItemType(toolName),
                     status: "completed",
-                    title: data.tool ?? "tool",
-                    ...(typeof data.output === "string" ? { detail: data.output } : {}),
+                    title: inputSummary ?? toolName,
+                    ...(output ? { detail: output } : {}),
+                    data: { tool: toolName, toolName },
                   },
                 });
                 break;
               }
 
               case "session.tool.failed": {
-                const callId = data.callID ?? data.id ?? `call-${yield* Clock.currentTimeMillis}`;
+                const callId = eventCallId(data) ?? `call-${yield* Clock.currentTimeMillis}`;
+                const tracked = parentContext.toolCallByCallId.get(callId);
+                const toolName =
+                  (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
+                parentContext.toolCallByCallId.delete(callId);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.completed",
                   payload: {
-                    itemType: "command_execution",
+                    itemType: toToolLifecycleItemType(toolName),
                     status: "failed",
-                    title: data.tool ?? "tool",
-                    detail: data.error?.message ?? "Tool failed",
+                    title: summarizeToolCallInput(toolName, tracked?.input) ?? toolName,
+                    detail: structuredErrorMessage(data.error) ?? "Tool failed",
+                    data: { tool: toolName, toolName },
                   },
                 });
                 break;
               }
 
-              case "permission.asked": {
-                const requestId =
-                  data.permissionID ?? data.id ?? `perm-${yield* Clock.currentTimeMillis}`;
-                yield* emit({
-                  ...(yield* buildEventBase({ threadId, turnId, requestId, raw: rawEvent })),
-                  type: "request.opened",
-                  payload: {
-                    requestType: "command_execution_approval",
-                    options: [
-                      { decision: "accept", label: "Allow once" },
-                      { decision: "acceptAlways", label: "Allow always" },
-                      { decision: "decline", label: "Deny" },
-                    ],
-                    detail: data.description ?? "Permission requested",
-                  },
-                });
+              case "permission.asked":
+              case "form.created":
+                // Handled above: approval requests skip the turn guard.
                 break;
-              }
-
-              case "form.created": {
-                const requestId =
-                  data.formID ?? data.id ?? `form-${yield* Clock.currentTimeMillis}`;
-                yield* emit({
-                  ...(yield* buildEventBase({ threadId, turnId, requestId, raw: rawEvent })),
-                  type: "user-input.requested",
-                  payload: {
-                    questions: (data.fields ?? []).map((f: any) => ({
-                      id: f.name,
-                      prompt: f.title ?? f.name,
-                      allowCustomAnswer: true,
-                      options: [],
-                    })),
-                  },
-                });
-                break;
-              }
 
               case "session.inbox.delivered": {
                 if (data.inboxID) {
@@ -434,6 +677,8 @@ export function makeOpenCode2Adapter(
 
               case "session.execution.succeeded": {
                 parentContext.activeTurnStatus = "idle";
+                parentContext.lastTurnId = turnId;
+                parentContext.toolCallByCallId.clear();
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                   type: "turn.completed",
@@ -447,12 +692,14 @@ export function makeOpenCode2Adapter(
 
               case "session.execution.failed": {
                 parentContext.activeTurnStatus = "failed";
+                parentContext.lastTurnId = turnId;
+                parentContext.toolCallByCallId.clear();
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                   type: "turn.completed",
                   payload: {
                     state: "failed",
-                    errorMessage: data.error?.message ?? "Turn execution failed",
+                    errorMessage: structuredErrorMessage(data.error) ?? "Turn execution failed",
                   },
                 });
                 parentContext.activeTurnId = null;
@@ -461,6 +708,8 @@ export function makeOpenCode2Adapter(
 
               case "session.execution.interrupted": {
                 parentContext.activeTurnStatus = "interrupted";
+                parentContext.lastTurnId = turnId;
+                parentContext.toolCallByCallId.clear();
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
                   type: "turn.completed",
@@ -541,10 +790,13 @@ export function makeOpenCode2Adapter(
           directory: cwd,
           createdAt,
           activeTurnId: null,
+          lastTurnId: null,
           activeTurnStatus: "idle",
           hasSubagents: false,
           subagents: new Map(),
           pendingInboxItems: new Set(),
+          requestSessionIdByRequestId: new Map(),
+          toolCallByCallId: new Map(),
           turnToMessageId: new Map(),
           messageIds: [],
         };
@@ -580,6 +832,7 @@ export function makeOpenCode2Adapter(
         const nowMillis = yield* Clock.currentTimeMillis;
         const turnId = TurnId.make(`turn-${nowMillis}`);
         context.activeTurnId = turnId;
+        context.lastTurnId = turnId;
         context.activeTurnStatus = "running";
 
         const selectedVariant = input.modelSelection
@@ -588,6 +841,47 @@ export function makeOpenCode2Adapter(
         const selectedAgent = input.modelSelection
           ? getModelSelectionStringOptionValue(input.modelSelection, "agent")
           : undefined;
+
+        // `session.prompt` carries no model field; the session's model (and
+        // agent) must be switched explicitly before the turn is admitted.
+        const modelSlug = input.modelSelection?.model;
+        const parsedModel = modelSlug ? parseModelSlug(modelSlug) : null;
+        if (parsedModel) {
+          yield* Effect.tryPromise({
+            try: () =>
+              hostHandle.client.session.switchModel({
+                sessionID: context.sessionId,
+                model: {
+                  id: parsedModel.modelID,
+                  providerID: parsedModel.providerID,
+                  ...(selectedVariant ? { variant: selectedVariant } : {}),
+                },
+              }),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session.switchModel",
+                detail: `Failed to switch OpenCode 2 model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
+                cause,
+              }),
+          });
+        }
+        if (selectedAgent) {
+          yield* Effect.tryPromise({
+            try: () =>
+              hostHandle.client.session.switchAgent({
+                sessionID: context.sessionId,
+                agent: selectedAgent,
+              }),
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session.switchAgent",
+                detail: `Failed to switch OpenCode 2 agent to '${selectedAgent}': ${openCodeClientErrorMessage(cause)}`,
+                cause,
+              }),
+          });
+        }
 
         const delivery = input.delivery ?? "steer";
 
@@ -620,8 +914,6 @@ export function makeOpenCode2Adapter(
               sessionID: context.sessionId,
               text: input.input ?? "",
               delivery,
-              ...(selectedVariant ? { variant: selectedVariant } : {}),
-              ...(selectedAgent ? { agent: selectedAgent } : {}),
               ...(files && files.length > 0 ? { files } : {}),
             });
           },
@@ -755,10 +1047,13 @@ export function makeOpenCode2Adapter(
           directory: sourceContext.directory,
           createdAt: forkedCreatedAt,
           activeTurnId: null,
+          lastTurnId: null,
           activeTurnStatus: "idle",
           hasSubagents: false,
           subagents: new Map(),
           pendingInboxItems: new Set(),
+          requestSessionIdByRequestId: new Map(),
+          toolCallByCallId: new Map(),
           turnToMessageId: forkedTurnToMessageId,
           messageIds: forkedMessageIds,
         };
@@ -889,10 +1184,17 @@ export function makeOpenCode2Adapter(
         const response =
           decision === "accept" ? "once" : decision === "acceptAlways" ? "always" : "reject";
 
+        // Subagents ask through their own child session; replying with the
+        // root session's id makes OpenCode reject with "Permission request
+        // not found".
+        const askingSessionId =
+          context.requestSessionIdByRequestId.get(requestId) ?? context.sessionId;
+        context.requestSessionIdByRequestId.delete(requestId);
+
         yield* Effect.tryPromise({
           try: () =>
             hostHandle.client.permission.reply({
-              sessionID: context.sessionId,
+              sessionID: askingSessionId,
               requestID: requestId,
               reply: response,
             }),
@@ -900,7 +1202,7 @@ export function makeOpenCode2Adapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "permission.reply",
-              detail: `Failed to reply to permission: ${String(cause)}`,
+              detail: `Failed to reply to permission: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -915,10 +1217,14 @@ export function makeOpenCode2Adapter(
         const context = sessionsByThreadId.get(threadId);
         if (!context) return;
 
+        const askingSessionId =
+          context.requestSessionIdByRequestId.get(requestId) ?? context.sessionId;
+        context.requestSessionIdByRequestId.delete(requestId);
+
         yield* Effect.tryPromise({
           try: () =>
             hostHandle.client.form.reply({
-              sessionID: context.sessionId,
+              sessionID: askingSessionId,
               formID: requestId,
               answer: answers as Record<string, string | number | boolean | ReadonlyArray<string>>,
             }),
@@ -926,7 +1232,7 @@ export function makeOpenCode2Adapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "form.reply",
-              detail: `Failed to reply to form: ${String(cause)}`,
+              detail: `Failed to reply to form: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });

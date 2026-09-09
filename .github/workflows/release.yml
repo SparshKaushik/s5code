@@ -5,9 +5,6 @@ on:
     tags:
       - "v*.*.*"
       - "!v*-nightly.*"
-  schedule:
-    # Off minute zero: GitHub delays scheduled runs most at the top of the hour.
-    - cron: "38 */3 * * *"
   workflow_dispatch:
     inputs:
       channel:
@@ -23,14 +20,14 @@ on:
         required: false
         type: string
 
-# Serialize nightlies (scheduled and manual) so overlapping runs cannot build
+# Serialize nightlies (manual) so overlapping runs cannot build
 # the same commit twice or publish out of order. Stable tag releases get their
 # own group so a nightly never blocks them. Running publishers are never
 # canceled, and queue: max keeps every pending run instead of the default
 # newest-wins single slot, so a queued stable tag can never be silently
 # dropped. Queued nightlies with no new commits skip via check_changes.
 concurrency:
-  group: release-${{ (github.event_name == 'schedule' || inputs.channel == 'nightly') && 'nightly' || 'stable' }}
+  group: release-${{ inputs.channel == 'nightly' && 'nightly' || 'stable' }}
   cancel-in-progress: false
   queue: max
 
@@ -83,7 +80,7 @@ jobs:
           NIGHTLY_SHA: ${{ github.sha }}
           NIGHTLY_RUN_NUMBER: ${{ github.run_number }}
         run: |
-          if [[ ("${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-stable}" == "nightly") || "${GITHUB_EVENT_NAME}" == "schedule" ]]; then
+          if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" && "${DISPATCH_CHANNEL:-stable}" == "nightly" ]]; then
             nightly_date="$(date -u -d "$NIGHTLY_DATE" +%Y%m%d)"
 
             node scripts/resolve-nightly-release.ts \

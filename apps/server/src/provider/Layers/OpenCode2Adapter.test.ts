@@ -41,6 +41,8 @@ function createMockHost() {
     permissionReplies: Array<any>;
     formReplies: Array<any>;
     reverts: Array<any>;
+    switchModels: Array<any>;
+    switchAgents: Array<any>;
   } = {
     prompts: [],
     interrupts: [],
@@ -50,6 +52,8 @@ function createMockHost() {
     permissionReplies: [],
     formReplies: [],
     reverts: [],
+    switchModels: [],
+    switchAgents: [],
   };
 
   const client = {
@@ -72,6 +76,12 @@ function createMockHost() {
         id: `mock-session-123`,
         directory: params.location?.directory ?? "/tmp",
       }),
+      switchModel: async (params: any) => {
+        calls.switchModels.push(params);
+      },
+      switchAgent: async (params: any) => {
+        calls.switchAgents.push(params);
+      },
       prompt: async (params: any) => {
         calls.prompts.push(params);
         return { id: "prompt-1" };
@@ -325,19 +335,33 @@ describe("OpenCode2Adapter", () => {
       );
       expect(permEvent).toBeDefined();
 
-      // Form created
+      // Form created (v2 nests the form under `data.form`)
       emit({
         type: "form.created",
         data: {
-          sessionID: sessionId,
-          formID: "form-456",
-          title: "Choose environment",
-          fields: [{ name: "env", type: "string" }],
+          form: {
+            id: "form-456",
+            sessionID: sessionId,
+            title: "Choose environment",
+            fields: [
+              {
+                key: "env",
+                type: "string",
+                title: "Environment",
+                custom: true,
+                options: [{ value: "production", label: "Production" }],
+              },
+            ],
+          },
         },
       });
 
       const formEvent = yield* waitForEvent((e) => e.type === "user-input.requested");
-      expect(formEvent).toBeDefined();
+      const questions = (formEvent.payload as any).questions;
+      expect(questions).toHaveLength(1);
+      expect(questions[0].id).toBe("env");
+      expect(questions[0].prompt).toBe("Environment");
+      expect(questions[0].options).toEqual([{ value: "production", label: "Production" }]);
 
       // Reply to permission
       yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("perm-123"), "accept");
@@ -433,6 +457,233 @@ describe("OpenCode2Adapter", () => {
 
       // Verify forked session is registered and usable
       expect(yield* adapter.hasSession(targetThreadId)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("switches the session model and agent from the model selection before prompting", () =>
+    Effect.gen(function* () {
+      const { handle, calls } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-model");
+      yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Hello",
+        modelSelection: {
+          instanceId: "opencode2",
+          model: "zhipu/glm-5.3",
+          options: [
+            { id: "variant", value: "high" },
+            { id: "agent", value: "build" },
+          ],
+        } as any,
+      });
+
+      expect(calls.switchModels).toEqual([
+        {
+          sessionID: "mock-session-123",
+          model: { id: "glm-5.3", providerID: "zhipu", variant: "high" },
+        },
+      ]);
+      expect(calls.switchAgents).toEqual([{ sessionID: "mock-session-123", agent: "build" }]);
+      expect(calls.prompts).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("replies to a permission asked by a subagent's child session", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-child-perm");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+      const childSessionId = "ses_child_1";
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Register the child session under the parent. Subagents only run
+      // inside a turn, so send one first.
+      yield* adapter.sendTurn({ threadId, input: "run reviewer" });
+
+      emit({
+        type: "session.created",
+        data: { sessionID: childSessionId, parentID: sessionId, agent: "reviewer" },
+      });
+      yield* waitForEvent((e) => e.type === "task.started");
+
+      // The child session owns the permission request
+      emit({
+        type: "permission.asked",
+        data: {
+          id: "per_child_1",
+          sessionID: childSessionId,
+          action: "shell",
+          resources: ["rm -rf /"],
+          message: "Allow shell command?",
+        },
+      });
+
+      const permEvent = yield* waitForEvent((e) => e.type === "request.opened");
+      expect((permEvent.payload as any).detail).toBe("Allow shell command?");
+
+      yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("per_child_1"), "accept");
+      expect(calls.permissionReplies).toEqual([
+        { sessionID: childSessionId, requestID: "per_child_1", reply: "once" },
+      ]);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("carries tool names from input.started into tool items and titles them by input", () =>
+    Effect.gen(function* () {
+      const { handle, emit } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-tool-names");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "list files" });
+
+      emit({
+        type: "session.tool.input.started",
+        data: { sessionID: sessionId, assistantMessageID: "msg-1", callID: "call-1", name: "bash" },
+      });
+      emit({
+        type: "session.tool.called",
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: "msg-1",
+          callID: "call-1",
+          input: { command: "ls -la" },
+          executed: true,
+        },
+      });
+      emit({
+        type: "session.tool.success",
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: "msg-1",
+          callID: "call-1",
+          content: [{ type: "text", text: "file-a\nfile-b" }],
+          executed: true,
+        },
+      });
+
+      const started = yield* waitForEvent((e) => e.type === "item.started");
+      expect((started.payload as any).title).toBe("ls -la");
+      expect((started.payload as any).itemType).toBe("command_execution");
+      expect((started.payload as any).data.tool).toBe("bash");
+      expect((started.payload as any).data.command).toBe("ls -la");
+      expect(started.turnId).not.toBeNull();
+
+      const completed = yield* waitForEvent((e) => e.type === "item.completed");
+      expect((completed.payload as any).status).toBe("completed");
+      expect((completed.payload as any).title).toBe("ls -la");
+      expect((completed.payload as any).detail).toBe("file-a\nfile-b");
+      expect((completed.payload as any).data.tool).toBe("bash");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("attributes late events after a completed turn to that turn, not a synthetic one", () =>
+    Effect.gen(function* () {
+      const { handle, emit } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-stragglers");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "do work" });
+
+      emit({
+        type: "session.tool.input.started",
+        data: { sessionID: sessionId, assistantMessageID: "msg-1", callID: "call-1", name: "bash" },
+      });
+      emit({
+        type: "session.tool.called",
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: "msg-1",
+          callID: "call-1",
+          input: { command: "git status" },
+          executed: true,
+        },
+      });
+      emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+
+      const completed = yield* waitForEvent((e) => e.type === "turn.completed");
+      const settledTurnId = completed.turnId;
+
+      // A tool result trailing the closed turn stays on that turn.
+      emit({
+        type: "session.tool.success",
+        data: {
+          sessionID: sessionId,
+          assistantMessageID: "msg-1",
+          callID: "call-1",
+          content: [{ type: "text", text: "clean" }],
+          executed: true,
+        },
+      });
+
+      const lateItem = yield* waitForEvent((e) => e.type === "item.completed");
+      expect(lateItem.turnId).toBe(settledTurnId);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
