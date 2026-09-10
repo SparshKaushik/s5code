@@ -71,6 +71,22 @@ function createMockHost() {
         }),
       }),
     },
+    model: {
+      list: async () => ({
+        data: [
+          {
+            id: "glm-5.3",
+            providerID: "zhipu",
+            variants: [{ id: "high" }, { id: "medium" }],
+          },
+          {
+            id: "Qwen3.8-27B",
+            providerID: "hetzner",
+            variants: [],
+          },
+        ],
+      }),
+    },
     session: {
       create: async (params: any) => ({
         id: `mock-session-123`,
@@ -495,6 +511,43 @@ describe("OpenCode2Adapter", () => {
         },
       ]);
       expect(calls.switchAgents).toEqual([{ sessionID: "mock-session-123", agent: "build" }]);
+      expect(calls.prompts).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("omits variant when target model does not support variants", () =>
+    Effect.gen(function* () {
+      const { handle, calls } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+
+      const threadId = ThreadId.make("thread-model-no-variant");
+      yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+
+      // Even if variant 'high' is present in model selection options,
+      // it must not be sent to OpenCode 2 for models with no variants.
+      yield* adapter.sendTurn({
+        threadId,
+        input: "Hello",
+        modelSelection: {
+          instanceId: "opencode2",
+          model: "hetzner/Qwen3.8-27B",
+          options: [
+            { id: "variant", value: "high" },
+            { id: "agent", value: "build" },
+          ],
+        } as any,
+      });
+
+      expect(calls.switchModels).toEqual([
+        {
+          sessionID: "mock-session-123",
+          model: { id: "Qwen3.8-27B", providerID: "hetzner" },
+        },
+      ]);
       expect(calls.prompts).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );

@@ -73,6 +73,9 @@ function inferDefaultVariant(
   providerID: string,
   variants: ReadonlyArray<string>,
 ): string | undefined {
+  if (variants.length === 0) {
+    return undefined;
+  }
   if (variants.length === 1) {
     return variants[0];
   }
@@ -99,8 +102,7 @@ export function openCode2CapabilitiesForModel(input: {
   readonly agents: ReadonlyArray<{ id?: string; name: string; mode?: string; hidden?: boolean }>;
 }): ModelCapabilities {
   const rawVariantValues = (input.variants ?? []).map((v) => v.id);
-  const variantValues =
-    rawVariantValues.length > 0 ? rawVariantValues : ["low", "medium", "high", "xhigh"];
+  const variantValues = rawVariantValues;
   const defaultVariant = inferDefaultVariant(input.providerID, variantValues);
   const variantOptions = variantValues.map((value) =>
     defaultVariant === value

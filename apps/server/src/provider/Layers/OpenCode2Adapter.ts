@@ -225,6 +225,56 @@ export function makeOpenCode2Adapter(
     const threadIdBySessionId = new Map<string, ThreadId>();
     /** Child (subagent) sessions; their events fold into the parent thread. */
     const childSessionIds = new Set<string>();
+    const supportedVariantsByModelKey = new Map<string, Set<string>>();
+
+    const getSupportedVariantsForModel = (
+      directory: string,
+      providerID: string,
+      modelID: string,
+    ): Effect.Effect<Set<string>> =>
+      Effect.gen(function* () {
+        if (typeof hostHandle.client.model?.list !== "function") {
+          return new Set<string>();
+        }
+
+        const key = `${providerID}/${modelID}`.toLowerCase();
+        const cached = supportedVariantsByModelKey.get(key);
+        if (cached !== undefined) return cached;
+
+        const modelsRes = yield* Effect.tryPromise({
+          try: () => hostHandle.client.model.list({ location: { directory } }),
+          catch: () => ({ data: [] as unknown[] }),
+        }).pipe(Effect.orElseSucceed(() => ({ data: [] as unknown[] })));
+
+        for (const item of (modelsRes as { data?: any[] }).data ?? []) {
+          if (item?.id) {
+            const pId = String(
+              item.providerID || item.id.split("/")[0] || "opencode",
+            ).toLowerCase();
+            const mId = String(item.modelID || item.id.split("/").pop() || item.id).toLowerCase();
+            const fullSlug = `${pId}/${mId}`;
+            const rawId = String(item.id).toLowerCase();
+            const variants = new Set<string>();
+            if (Array.isArray(item.variants)) {
+              for (const v of item.variants) {
+                const vid = typeof v === "string" ? v : v?.id;
+                if (typeof vid === "string" && vid.trim().length > 0) {
+                  variants.add(vid.trim());
+                }
+              }
+            }
+            supportedVariantsByModelKey.set(fullSlug, variants);
+            supportedVariantsByModelKey.set(mId, variants);
+            supportedVariantsByModelKey.set(rawId, variants);
+          }
+        }
+
+        return (
+          supportedVariantsByModelKey.get(key) ??
+          supportedVariantsByModelKey.get(modelID.toLowerCase()) ??
+          new Set<string>()
+        );
+      });
 
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
       Effect.mapError(
@@ -849,24 +899,47 @@ export function makeOpenCode2Adapter(
         const modelSlug = input.modelSelection?.model;
         const parsedModel = modelSlug ? parseModelSlug(modelSlug) : null;
         if (parsedModel) {
-          yield* Effect.tryPromise({
-            try: () =>
-              hostHandle.client.session.switchModel({
-                sessionID: context.sessionId,
-                model: {
-                  id: parsedModel.modelID,
-                  providerID: parsedModel.providerID,
-                  ...(selectedVariant ? { variant: selectedVariant } : {}),
-                },
-              }),
-            catch: (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session.switchModel",
-                detail: `Failed to switch OpenCode 2 model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
-                cause,
-              }),
-          });
+          const supportedVariants = yield* getSupportedVariantsForModel(
+            context.directory,
+            parsedModel.providerID,
+            parsedModel.modelID,
+          );
+          // Only pass a variant if the target model actually supports it in its catalog.
+          // Passing an unsupported variant (e.g. "high" on Qwen3.8-27B or models without
+          // variants) makes OpenCode 2 fail with 'Variant unavailable'.
+          const validVariant =
+            selectedVariant && supportedVariants.has(selectedVariant) ? selectedVariant : undefined;
+
+          const switchModelWith = (variant?: string) =>
+            Effect.tryPromise({
+              try: () =>
+                hostHandle.client.session.switchModel({
+                  sessionID: context.sessionId,
+                  model: {
+                    id: parsedModel.modelID,
+                    providerID: parsedModel.providerID,
+                    ...(variant ? { variant } : {}),
+                  },
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session.switchModel",
+                  detail: `Failed to switch OpenCode 2 model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
+                  cause,
+                }),
+            });
+
+          if (validVariant) {
+            yield* switchModelWith(validVariant).pipe(
+              Effect.catchIf(
+                (err) => err.detail.toLowerCase().includes("variant unavailable"),
+                () => switchModelWith(undefined),
+              ),
+            );
+          } else {
+            yield* switchModelWith(undefined);
+          }
         }
         if (selectedAgent) {
           // OpenCode 2 agent IDs are lowercase (e.g. "build", "plan"). If a UI selection

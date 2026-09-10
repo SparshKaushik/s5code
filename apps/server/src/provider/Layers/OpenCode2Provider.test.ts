@@ -118,4 +118,15 @@ describe("openCode2CapabilitiesForModel", () => {
       { id: "plan", label: "Plan" },
     ]);
   });
+
+  it("omits variant option descriptor when model has no variants", () => {
+    const capabilities = openCode2CapabilitiesForModel({
+      providerID: "hetzner",
+      variants: [],
+      agents: [{ id: "build", name: "Build", mode: "primary" }],
+    });
+
+    const variantDesc = capabilities.optionDescriptors?.find((d) => d.id === "variant");
+    expect(variantDesc).toBeUndefined();
+  });
 });
