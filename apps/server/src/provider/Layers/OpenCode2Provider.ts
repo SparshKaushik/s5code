@@ -293,7 +293,9 @@ export function checkOpenCode2ProviderStatus(
             const providerID = model.providerID || model.id.split("/")[0] || "opencode";
             const subProvider =
               providerNames.get(providerID) || (providerID ? titleCaseSlug(providerID) : undefined);
-            const slug = model.id.includes("/") ? model.id : `${providerID}/${model.id}`;
+            const slug = model.id.startsWith(`${providerID}/`)
+              ? model.id
+              : `${providerID}/${model.id}`;
             const variants = parseModelVariants(model.variants);
             models.push({
               id: slug,

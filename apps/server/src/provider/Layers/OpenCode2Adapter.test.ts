@@ -84,6 +84,11 @@ function createMockHost() {
             providerID: "hetzner",
             variants: [],
           },
+          {
+            id: "z-ai/glm-5.3-flash",
+            providerID: "cline",
+            variants: [],
+          },
         ],
       }),
     },
@@ -550,6 +555,41 @@ describe("OpenCode2Adapter", () => {
       ]);
       expect(calls.prompts).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "resolves models with slashed IDs like z-ai/glm-5.3-flash to their correct provider",
+    () =>
+      Effect.gen(function* () {
+        const { handle, calls } = createMockHost();
+        const adapter = yield* makeOpenCode2Adapter(handle);
+
+        const threadId = ThreadId.make("thread-model-slashed-id");
+        yield* adapter.startSession({
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+
+        // Selection may be 'cline/z-ai/glm-5.3-flash' or 'z-ai/glm-5.3-flash'
+        yield* adapter.sendTurn({
+          threadId,
+          input: "Hello GLM",
+          modelSelection: {
+            instanceId: "opencode2",
+            model: "z-ai/glm-5.3-flash",
+            options: [{ id: "agent", value: "build" }],
+          } as any,
+        });
+
+        expect(calls.switchModels).toEqual([
+          {
+            sessionID: "mock-session-123",
+            model: { id: "z-ai/glm-5.3-flash", providerID: "cline" },
+          },
+        ]);
+        expect(calls.prompts).toHaveLength(1);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("replies to a permission asked by a subagent's child session", () =>

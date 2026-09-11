@@ -225,20 +225,31 @@ export function makeOpenCode2Adapter(
     const threadIdBySessionId = new Map<string, ThreadId>();
     /** Child (subagent) sessions; their events fold into the parent thread. */
     const childSessionIds = new Set<string>();
-    const supportedVariantsByModelKey = new Map<string, Set<string>>();
+    interface OpenCode2CatalogModel {
+      readonly providerID: string;
+      readonly modelID: string;
+      readonly variants: Set<string>;
+    }
+    const modelCatalogCache = new Map<string, OpenCode2CatalogModel>();
 
-    const getSupportedVariantsForModel = (
+    const resolveCatalogModel = (
       directory: string,
-      providerID: string,
-      modelID: string,
-    ): Effect.Effect<Set<string>> =>
+      slug: string,
+    ): Effect.Effect<OpenCode2CatalogModel | null> =>
       Effect.gen(function* () {
+        const normalized = slug.trim().toLowerCase();
         if (typeof hostHandle.client.model?.list !== "function") {
-          return new Set<string>();
+          const parsed = parseModelSlug(slug);
+          return parsed
+            ? {
+                providerID: parsed.providerID,
+                modelID: parsed.modelID,
+                variants: new Set<string>(),
+              }
+            : null;
         }
 
-        const key = `${providerID}/${modelID}`.toLowerCase();
-        const cached = supportedVariantsByModelKey.get(key);
+        const cached = modelCatalogCache.get(normalized);
         if (cached !== undefined) return cached;
 
         const modelsRes = yield* Effect.tryPromise({
@@ -248,11 +259,9 @@ export function makeOpenCode2Adapter(
 
         for (const item of (modelsRes as { data?: any[] }).data ?? []) {
           if (item?.id) {
-            const pId = String(
-              item.providerID || item.id.split("/")[0] || "opencode",
-            ).toLowerCase();
-            const mId = String(item.modelID || item.id.split("/").pop() || item.id).toLowerCase();
-            const fullSlug = `${pId}/${mId}`;
+            const pId = String(item.providerID || item.id.split("/")[0] || "opencode");
+            const mId = String(item.modelID || item.id);
+            const fullSlug = `${pId}/${mId}`.toLowerCase();
             const rawId = String(item.id).toLowerCase();
             const variants = new Set<string>();
             if (Array.isArray(item.variants)) {
@@ -263,17 +272,23 @@ export function makeOpenCode2Adapter(
                 }
               }
             }
-            supportedVariantsByModelKey.set(fullSlug, variants);
-            supportedVariantsByModelKey.set(mId, variants);
-            supportedVariantsByModelKey.set(rawId, variants);
+            const info: OpenCode2CatalogModel = { providerID: pId, modelID: mId, variants };
+            modelCatalogCache.set(fullSlug, info);
+            // Also store under raw item.id (e.g. "z-ai/glm-5.3-flash") so legacy or shortened slugs map
+            // directly to the correct provider ("cline") and modelID ("z-ai/glm-5.3-flash").
+            if (!modelCatalogCache.has(rawId)) {
+              modelCatalogCache.set(rawId, info);
+            }
           }
         }
 
-        return (
-          supportedVariantsByModelKey.get(key) ??
-          supportedVariantsByModelKey.get(modelID.toLowerCase()) ??
-          new Set<string>()
-        );
+        const resolved = modelCatalogCache.get(normalized);
+        if (resolved) return resolved;
+
+        const parsed = parseModelSlug(slug);
+        return parsed
+          ? { providerID: parsed.providerID, modelID: parsed.modelID, variants: new Set<string>() }
+          : null;
       });
 
     const randomUUIDv4 = crypto.randomUUIDv4.pipe(
@@ -897,48 +912,47 @@ export function makeOpenCode2Adapter(
         // `session.prompt` carries no model field; the session's model (and
         // agent) must be switched explicitly before the turn is admitted.
         const modelSlug = input.modelSelection?.model;
-        const parsedModel = modelSlug ? parseModelSlug(modelSlug) : null;
-        if (parsedModel) {
-          const supportedVariants = yield* getSupportedVariantsForModel(
-            context.directory,
-            parsedModel.providerID,
-            parsedModel.modelID,
-          );
-          // Only pass a variant if the target model actually supports it in its catalog.
-          // Passing an unsupported variant (e.g. "high" on Qwen3.8-27B or models without
-          // variants) makes OpenCode 2 fail with 'Variant unavailable'.
-          const validVariant =
-            selectedVariant && supportedVariants.has(selectedVariant) ? selectedVariant : undefined;
+        if (modelSlug) {
+          const catalogModel = yield* resolveCatalogModel(context.directory, modelSlug);
+          if (catalogModel) {
+            // Only pass a variant if the target model actually supports it in its catalog.
+            // Passing an unsupported variant (e.g. "high" on Qwen3.8-27B or models without
+            // variants) makes OpenCode 2 fail with 'Variant unavailable'.
+            const validVariant =
+              selectedVariant && catalogModel.variants.has(selectedVariant)
+                ? selectedVariant
+                : undefined;
 
-          const switchModelWith = (variant?: string) =>
-            Effect.tryPromise({
-              try: () =>
-                hostHandle.client.session.switchModel({
-                  sessionID: context.sessionId,
-                  model: {
-                    id: parsedModel.modelID,
-                    providerID: parsedModel.providerID,
-                    ...(variant ? { variant } : {}),
-                  },
-                }),
-              catch: (cause) =>
-                new ProviderAdapterRequestError({
-                  provider: PROVIDER,
-                  method: "session.switchModel",
-                  detail: `Failed to switch OpenCode 2 model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
-                  cause,
-                }),
-            });
+            const switchModelWith = (variant?: string) =>
+              Effect.tryPromise({
+                try: () =>
+                  hostHandle.client.session.switchModel({
+                    sessionID: context.sessionId,
+                    model: {
+                      id: catalogModel.modelID,
+                      providerID: catalogModel.providerID,
+                      ...(variant ? { variant } : {}),
+                    },
+                  }),
+                catch: (cause) =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "session.switchModel",
+                    detail: `Failed to switch OpenCode 2 model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
+                    cause,
+                  }),
+              });
 
-          if (validVariant) {
-            yield* switchModelWith(validVariant).pipe(
-              Effect.catchIf(
-                (err) => err.detail.toLowerCase().includes("variant unavailable"),
-                () => switchModelWith(undefined),
-              ),
-            );
-          } else {
-            yield* switchModelWith(undefined);
+            if (validVariant) {
+              yield* switchModelWith(validVariant).pipe(
+                Effect.catchIf(
+                  (err) => err.detail.toLowerCase().includes("variant unavailable"),
+                  () => switchModelWith(undefined),
+                ),
+              );
+            } else {
+              yield* switchModelWith(undefined);
+            }
           }
         }
         if (selectedAgent) {
