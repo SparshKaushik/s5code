@@ -198,6 +198,15 @@ describe("OpenCode2Adapter", () => {
       expect(calls.prompts[0].text).toBe("Hello OpenCode");
       expect(calls.prompts[0].delivery).toBe("steer");
 
+      const sessionStarted = yield* waitForEvent((e) => e.type === "session.started");
+      expect((sessionStarted.payload as any).message).toBe("OpenCode 2 session started");
+
+      const threadStarted = yield* waitForEvent((e) => e.type === "thread.started");
+      expect((threadStarted.payload as any).providerThreadId).toBe(sessionId);
+
+      const turnStarted = yield* waitForEvent((e) => e.type === "turn.started");
+      expect(turnStarted.turnId).toBeTruthy();
+
       // Emit execution started, text delta, and execution succeeded
       emit({
         type: "session.execution.started",

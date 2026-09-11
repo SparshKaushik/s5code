@@ -34,6 +34,7 @@ import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
 import * as Queue from "effect/Queue";
+import * as Schedule from "effect/Schedule";
 import * as Stream from "effect/Stream";
 
 import { resolveAttachmentPath } from "../../attachmentStore.ts";
@@ -792,7 +793,10 @@ export function makeOpenCode2Adapter(
         ),
       );
     }).pipe(
+      // The OpenCode service can accept the initial SSE connection before it
+      // is ready to forward session events. Keep this one subscriber alive.
       Effect.orElseSucceed(() => undefined),
+      Effect.repeat(Schedule.spaced("1 second")),
       Effect.forkDetach,
     );
 
@@ -870,6 +874,17 @@ export function makeOpenCode2Adapter(
 
         sessionsByThreadId.set(input.threadId, context);
         threadIdBySessionId.set(sessionId, input.threadId);
+
+        yield* emit({
+          ...(yield* buildEventBase({ threadId: input.threadId })),
+          type: "session.started",
+          payload: { message: "OpenCode 2 session started" },
+        });
+        yield* emit({
+          ...(yield* buildEventBase({ threadId: input.threadId })),
+          type: "thread.started",
+          payload: { providerThreadId: sessionId },
+        });
 
         return {
           provider: PROVIDER,
@@ -999,6 +1014,12 @@ export function makeOpenCode2Adapter(
                 };
               })
           : undefined;
+
+        yield* emit({
+          ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+          type: "turn.started",
+          payload: modelSlug ? { model: modelSlug } : {},
+        });
 
         yield* Effect.tryPromise({
           try: async () => {
