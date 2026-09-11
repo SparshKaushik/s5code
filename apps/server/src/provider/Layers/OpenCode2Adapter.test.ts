@@ -207,6 +207,11 @@ describe("OpenCode2Adapter", () => {
       const turnStarted = yield* waitForEvent((e) => e.type === "turn.started");
       expect(turnStarted.turnId).toBeTruthy();
 
+      const runningSessions = yield* adapter.listSessions();
+      expect(runningSessions).toHaveLength(1);
+      expect(runningSessions[0]?.status).toBe("running");
+      expect(runningSessions[0]?.activeTurnId).toBe(turnStarted.turnId);
+
       // Emit execution started, text delta, and execution succeeded
       emit({
         type: "session.execution.started",
@@ -404,6 +409,15 @@ describe("OpenCode2Adapter", () => {
         reply: "once",
       });
 
+      const resolvedPermEvent = yield* waitForEvent(
+        (e) => e.type === "request.resolved" && e.requestId === "perm-123",
+      );
+      expect(resolvedPermEvent).toBeDefined();
+
+      // Duplicate reply to permission should be a no-op (idempotent)
+      yield* adapter.respondToRequest(threadId, ApprovalRequestId.make("perm-123"), "accept");
+      expect(calls.permissionReplies.filter((r) => r.requestID === "perm-123")).toHaveLength(1);
+
       // Reply to form
       yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("form-456"), {
         env: "production",
@@ -413,6 +427,17 @@ describe("OpenCode2Adapter", () => {
         formID: "form-456",
         answer: { env: "production" },
       });
+
+      const resolvedFormEvent = yield* waitForEvent(
+        (e) => e.type === "user-input.resolved" && e.requestId === "form-456",
+      );
+      expect(resolvedFormEvent).toBeDefined();
+
+      // Duplicate reply to form should also be a no-op
+      yield* adapter.respondToUserInput(threadId, ApprovalRequestId.make("form-456"), {
+        env: "production",
+      });
+      expect(calls.formReplies.filter((r) => r.formID === "form-456")).toHaveLength(1);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 

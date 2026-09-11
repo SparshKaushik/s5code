@@ -83,6 +83,7 @@ interface OpenCode2SessionContext {
    * reply endpoint rejects a session mismatch with "Permission request not
    * found". */
   requestSessionIdByRequestId: Map<string, string>;
+  resolvedRequestIds: Set<string>;
   /** v2 tool events carry no tool name; `session.tool.input.started` does. */
   toolCallByCallId: Map<string, { name: string; input?: unknown }>;
   turnToMessageId: Map<TurnId, string>;
@@ -867,6 +868,7 @@ export function makeOpenCode2Adapter(
           subagents: new Map(),
           pendingInboxItems: new Set(),
           requestSessionIdByRequestId: new Map(),
+          resolvedRequestIds: new Set(),
           toolCallByCallId: new Map(),
           turnToMessageId: new Map(),
           messageIds: [],
@@ -1166,6 +1168,7 @@ export function makeOpenCode2Adapter(
           subagents: new Map(),
           pendingInboxItems: new Set(),
           requestSessionIdByRequestId: new Map(),
+          resolvedRequestIds: new Set(),
           toolCallByCallId: new Map(),
           turnToMessageId: forkedTurnToMessageId,
           messageIds: forkedMessageIds,
@@ -1293,6 +1296,7 @@ export function makeOpenCode2Adapter(
       Effect.gen(function* () {
         const context = sessionsByThreadId.get(threadId);
         if (!context) return;
+        if (context.resolvedRequestIds.has(requestId)) return;
 
         const response =
           decision === "accept" ? "once" : decision === "acceptAlways" ? "always" : "reject";
@@ -1302,7 +1306,6 @@ export function makeOpenCode2Adapter(
         // not found".
         const askingSessionId =
           context.requestSessionIdByRequestId.get(requestId) ?? context.sessionId;
-        context.requestSessionIdByRequestId.delete(requestId);
 
         yield* Effect.tryPromise({
           try: () =>
@@ -1319,6 +1322,23 @@ export function makeOpenCode2Adapter(
               cause,
             }),
         });
+
+        context.requestSessionIdByRequestId.delete(requestId);
+        context.resolvedRequestIds.add(requestId);
+
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId,
+            turnId: context.activeTurnId ?? context.lastTurnId ?? null,
+            requestId,
+            raw: { requestId, decision },
+          })),
+          type: "request.resolved",
+          payload: {
+            requestType: "command_execution_approval",
+            decision,
+          },
+        });
       });
 
     const respondToUserInput = (
@@ -1329,10 +1349,10 @@ export function makeOpenCode2Adapter(
       Effect.gen(function* () {
         const context = sessionsByThreadId.get(threadId);
         if (!context) return;
+        if (context.resolvedRequestIds.has(requestId)) return;
 
         const askingSessionId =
           context.requestSessionIdByRequestId.get(requestId) ?? context.sessionId;
-        context.requestSessionIdByRequestId.delete(requestId);
 
         yield* Effect.tryPromise({
           try: () =>
@@ -1348,6 +1368,22 @@ export function makeOpenCode2Adapter(
               detail: `Failed to reply to form: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
+        });
+
+        context.requestSessionIdByRequestId.delete(requestId);
+        context.resolvedRequestIds.add(requestId);
+
+        yield* emit({
+          ...(yield* buildEventBase({
+            threadId,
+            turnId: context.activeTurnId ?? context.lastTurnId ?? null,
+            requestId,
+            raw: { requestId, answers },
+          })),
+          type: "user-input.resolved",
+          payload: {
+            answers,
+          },
         });
       });
 
@@ -1370,6 +1406,7 @@ export function makeOpenCode2Adapter(
           provider: PROVIDER,
           providerInstanceId: boundInstanceId,
           status: ctx.activeTurnStatus === "running" ? ("running" as const) : ("ready" as const),
+          ...(ctx.activeTurnId ? { activeTurnId: ctx.activeTurnId } : {}),
           runtimeMode: "full-access" as const,
           threadId: ctx.threadId,
           cwd: ctx.directory,
