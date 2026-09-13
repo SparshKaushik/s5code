@@ -1,3 +1,29 @@
+// CommonJS dependencies bundled or loaded inside an ES module environment
+// (such as TypeScript, write-file-atomic, or @opencode-ai packages) expect
+// __filename and __dirname to be defined. In ESM under Node 22+, referencing
+// them can trigger ERR_AMBIGUOUS_MODULE_SYNTAX if top-level await is present.
+if (typeof (globalThis as any).__filename === "undefined") {
+  (globalThis as any).__filename = import.meta.filename ?? "";
+}
+if (typeof (globalThis as any).__dirname === "undefined") {
+  (globalThis as any).__dirname = import.meta.dirname ?? "";
+}
+if (process.env.OPENCODE_TREE_SITTER_WASM_PATH === undefined) {
+  process.env.OPENCODE_TREE_SITTER_WASM_PATH = "";
+}
+if (process.env.OPENCODE_TREE_SITTER_BASH_WASM_PATH === undefined) {
+  process.env.OPENCODE_TREE_SITTER_BASH_WASM_PATH = "";
+}
+if (process.env.OPENCODE_TREE_SITTER_POWERSHELL_WASM_PATH === undefined) {
+  process.env.OPENCODE_TREE_SITTER_POWERSHELL_WASM_PATH = "";
+}
+if (process.env.OPENCODE_PHOTON_WASM_PATH === undefined) {
+  process.env.OPENCODE_PHOTON_WASM_PATH = "";
+}
+if (process.env.OPENCODE_NODE_PTY_PATH === undefined) {
+  process.env.OPENCODE_NODE_PTY_PATH = "node-pty";
+}
+
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
@@ -37,7 +63,7 @@ const connectUnavailableCommand = Command.make("connect", {
   command: Argument.string("command").pipe(Argument.variadic),
 }).pipe(
   Command.withDescription("T3 Connect is unavailable in builds without public configuration."),
-  Command.withHidden,
+  Command.unlisted,
   Command.withHandler(() =>
     Effect.fail(
       new CliError.ShowHelp({

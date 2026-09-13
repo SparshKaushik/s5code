@@ -5,14 +5,26 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import { beforeEach, vi } from "vite-plus/test";
 
-const { appendSwitchMock, getSwitchValueMock, hasSwitchMock } = vi.hoisted(() => ({
+const {
+  appendSwitchMock,
+  getSwitchValueMock,
+  hasSwitchMock,
+  setDesktopNameMock,
+  mkdirSyncMock,
+  writeFileSyncMock,
+} = vi.hoisted(() => ({
   appendSwitchMock: vi.fn(),
   getSwitchValueMock: vi.fn(),
   hasSwitchMock: vi.fn(),
+  setDesktopNameMock: vi.fn(),
+  mkdirSyncMock: vi.fn(),
+  writeFileSyncMock: vi.fn(),
 }));
 
 vi.mock("electron", () => ({
   app: {
+    setDesktopName: setDesktopNameMock,
+    getVersion: () => "0.0.37",
     commandLine: {
       appendSwitch: appendSwitchMock,
       getSwitchValue: getSwitchValueMock,
@@ -24,6 +36,12 @@ vi.mock("electron", () => ({
   },
 }));
 
+vi.mock("node:fs", () => ({
+  readFileSync: () => "{}",
+  mkdirSync: mkdirSyncMock,
+  writeFileSync: writeFileSyncMock,
+}));
+
 import * as DesktopPreReadyPlatform from "./DesktopPreReadyPlatform.ts";
 
 describe("DesktopPreReadyPlatform", () => {
@@ -31,47 +49,75 @@ describe("DesktopPreReadyPlatform", () => {
     appendSwitchMock.mockReset();
     getSwitchValueMock.mockReset();
     hasSwitchMock.mockReset();
+    setDesktopNameMock.mockReset();
+    mkdirSyncMock.mockReset();
+    writeFileSyncMock.mockReset();
   });
 
-  it("reads an explicit Electron command-line switch value", () => {
-    const value = DesktopPreReadyPlatform.readCommandLineSwitchValue(
-      {
-        hasSwitch: (switchName) => switchName === "password-store",
-        getSwitchValue: (switchName) => {
-          assert.equal(switchName, "password-store");
-          return "basic";
-        },
-      },
-      "password-store",
-    );
+  it.effect("preserves an explicit Linux password-store switch", () => {
+    hasSwitchMock.mockImplementation((switchName) => switchName === "password-store");
+    getSwitchValueMock.mockReturnValue(" basic ");
 
-    assert.equal(value, "basic");
+    return Effect.gen(function* () {
+      const options = yield* DesktopPreReadyPlatform.DesktopPreReadyElectronOptions;
+
+      assert.equal(options.linuxPasswordStoreCommandLine, "basic");
+      assert.isFalse(appendSwitchMock.mock.calls.some(([name]) => name === "password-store"));
+    }).pipe(
+      Effect.provide(
+        DesktopPreReadyPlatform.layer.pipe(
+          Layer.provide(Layer.succeed(HostProcessPlatform, "linux")),
+        ),
+      ),
+    );
   });
 
-  it("treats valueless Electron command-line switches as absent", () => {
-    const value = DesktopPreReadyPlatform.readCommandLineSwitchValue(
-      {
-        hasSwitch: () => true,
-        getSwitchValue: () => "",
+  for (const previousEntry of [undefined, 'Exec="/Applications/deleted-previous.AppImage" %U']) {
+    it.effect(
+      `prepares a ${previousEntry ? "stale" : "missing"} Linux desktop entry before startup yields`,
+      () => {
+        vi.stubEnv("VITE_DEV_SERVER_URL", "");
+        vi.stubEnv("XDG_DATA_HOME", "/xdg");
+        vi.stubEnv("APPIMAGE", "/Applications/current.AppImage");
+        getSwitchValueMock.mockReturnValue("");
+        let desktopName = "t3code.desktop";
+        let desktopEntry = previousEntry;
+        setDesktopNameMock.mockImplementation((name: string) => {
+          desktopName = name;
+        });
+        writeFileSyncMock.mockImplementation((path: string, contents: string) => {
+          if (path === "/xdg/applications/com.t3tools.T3Code.desktop") desktopEntry = contents;
+        });
+
+        return Effect.scoped(
+          Effect.gen(function* () {
+            const portalIdentity = Promise.resolve().then(() => ({ desktopName, desktopEntry }));
+            yield* Layer.build(
+              DesktopPreReadyPlatform.layer.pipe(
+                Layer.provide(Layer.succeed(HostProcessPlatform, "linux")),
+              ),
+            );
+            const identity = yield* Effect.promise(() => portalIdentity);
+            assert.equal(identity.desktopName, "com.t3tools.T3Code.desktop");
+            assert.include(identity.desktopEntry ?? "", 'Exec="/Applications/current.AppImage" %U');
+            assert.include(identity.desktopEntry ?? "", "Name=S5 Code (Alpha)");
+            assert.include(identity.desktopEntry ?? "", "MimeType=x-scheme-handler/s5code;");
+          }),
+        ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
       },
-      "password-store",
     );
+  }
 
-    assert.isNull(value);
-  });
+  it.effect("keeps startup available when the early desktop entry cannot be written", () => {
+    getSwitchValueMock.mockReturnValue("");
+    mkdirSyncMock.mockImplementation(() => {
+      throw new Error("read-only filesystem");
+    });
 
-  it("returns null for missing Electron command-line switches", () => {
-    const value = DesktopPreReadyPlatform.readCommandLineSwitchValue(
-      {
-        hasSwitch: () => false,
-        getSwitchValue: () => {
-          throw new Error("Unexpected switch value read.");
-        },
-      },
-      "password-store",
+    return DesktopPreReadyPlatform.make.pipe(
+      Effect.provideService(HostProcessPlatform, "linux"),
+      Effect.asVoid,
     );
-
-    assert.isNull(value);
   });
 
   it.effect("completes platform setup before an asynchronous Clerk-shaped layer", () =>
@@ -114,6 +160,7 @@ describe("DesktopPreReadyPlatform", () => {
       });
       assert.deepEqual(events, ["clerk"]);
       assert.equal(appendSwitchMock.mock.calls.length, 0);
+      assert.equal(setDesktopNameMock.mock.calls.length, 0);
     }),
   );
 });

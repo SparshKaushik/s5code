@@ -10,7 +10,7 @@
 import * as Schema from "effect/Schema";
 
 /** Spawning the `pi` binary failed (missing binary, permissions, cwd). */
-export class PiSpawnError extends Schema.TaggedErrorClass<PiSpawnError>()("PiSpawnError", {
+export class PiSpawnError extends Schema.TaggedError<PiSpawnError>()("PiSpawnError", {
   command: Schema.String,
   cause: Schema.optional(Schema.Defect()),
 }) {
@@ -20,14 +20,11 @@ export class PiSpawnError extends Schema.TaggedErrorClass<PiSpawnError>()("PiSpa
 }
 
 /** stdin/stdout framing broke, or a line was not valid JSON. */
-export class PiTransportError extends Schema.TaggedErrorClass<PiTransportError>()(
-  "PiTransportError",
-  {
-    operation: Schema.String,
-    detail: Schema.optional(Schema.String),
-    cause: Schema.optional(Schema.Defect()),
-  },
-) {
+export class PiTransportError extends Schema.TaggedError<PiTransportError>()("PiTransportError", {
+  operation: Schema.String,
+  detail: Schema.optional(Schema.String),
+  cause: Schema.optional(Schema.Defect()),
+}) {
   override get message(): string {
     return this.detail === undefined
       ? `pi RPC transport error during ${this.operation}.`
@@ -36,7 +33,7 @@ export class PiTransportError extends Schema.TaggedErrorClass<PiTransportError>(
 }
 
 /** The pi process exited. Terminal for the connection. */
-export class PiProcessExitedError extends Schema.TaggedErrorClass<PiProcessExitedError>()(
+export class PiProcessExitedError extends Schema.TaggedError<PiProcessExitedError>()(
   "PiProcessExitedError",
   {
     code: Schema.optional(Schema.Number),
@@ -53,7 +50,7 @@ export class PiProcessExitedError extends Schema.TaggedErrorClass<PiProcessExite
 }
 
 /** pi answered a command with `success: false`. */
-export class PiCommandError extends Schema.TaggedErrorClass<PiCommandError>()("PiCommandError", {
+export class PiCommandError extends Schema.TaggedError<PiCommandError>()("PiCommandError", {
   command: Schema.String,
   detail: Schema.String,
 }) {
@@ -63,7 +60,7 @@ export class PiCommandError extends Schema.TaggedErrorClass<PiCommandError>()("P
 }
 
 /** A command response did not match the schema we expect for it. */
-export class PiDecodeError extends Schema.TaggedErrorClass<PiDecodeError>()("PiDecodeError", {
+export class PiDecodeError extends Schema.TaggedError<PiDecodeError>()("PiDecodeError", {
   command: Schema.String,
   detail: Schema.String,
   cause: Schema.optional(Schema.Defect()),

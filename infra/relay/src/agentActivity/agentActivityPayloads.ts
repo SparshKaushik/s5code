@@ -6,7 +6,7 @@ import type {
 import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
-import type { NotificationPayload } from "./deliveryJobs.ts";
+import type { ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
 
 export function isTerminalPhase(state: RelayAgentActivityState): boolean {
   return state.phase === "completed" || state.phase === "failed";
@@ -22,22 +22,29 @@ export function isTerminalPhase(state: RelayAgentActivityState): boolean {
 const RUNNING_AGENT_ACTIVITY_ROW_TTL_MS = 2 * 60 * 60 * 1_000;
 const WAITING_AGENT_ACTIVITY_ROW_TTL_MS = 24 * 60 * 60 * 1_000;
 
-export function isExpiredAgentActivityState(
-  state: RelayAgentActivityState,
-  nowMs: number,
-): boolean {
+export function agentActivityExpiresAt(
+  state: Pick<RelayAgentActivityState, "phase" | "updatedAt">,
+): number {
   const updatedAtMs = Option.match(DateTime.make(state.updatedAt), {
     onNone: () => Number.NaN,
     onSome: (dt) => dt.epochMilliseconds,
   });
   if (Number.isNaN(updatedAtMs)) {
-    return true;
+    return Number.NaN;
   }
   const ttlMs =
     state.phase === "running" || state.phase === "starting"
       ? RUNNING_AGENT_ACTIVITY_ROW_TTL_MS
       : WAITING_AGENT_ACTIVITY_ROW_TTL_MS;
-  return nowMs - updatedAtMs > ttlMs;
+  return updatedAtMs + ttlMs;
+}
+
+export function isExpiredAgentActivityState(
+  state: RelayAgentActivityState,
+  nowMs: number,
+): boolean {
+  const expiresAt = agentActivityExpiresAt(state);
+  return !Number.isFinite(expiresAt) || nowMs > expiresAt;
 }
 
 const MAX_SUMMARY_TEXT_LENGTH = 120;
@@ -66,20 +73,6 @@ function sanitizeDeepLink(value: string): string {
 export function sanitizeAgentActivityAggregateRow(
   row: RelayAgentActivityAggregateRow,
 ): RelayAgentActivityAggregateRow {
-  if (row.planProgress) {
-    return {
-      ...row,
-      projectTitle: truncateText(row.projectTitle, MAX_SUMMARY_TEXT_LENGTH),
-      threadTitle: truncateText(row.threadTitle, MAX_SUMMARY_TEXT_LENGTH),
-      modelTitle: truncateText(row.modelTitle, MAX_SUMMARY_TEXT_LENGTH),
-      status: truncateText(row.status, MAX_STATUS_TEXT_LENGTH),
-      deepLink: sanitizeDeepLink(row.deepLink),
-      planProgress: {
-        ...row.planProgress,
-        step: truncateText(row.planProgress.step, MAX_SUMMARY_TEXT_LENGTH),
-      },
-    };
-  }
   return {
     ...row,
     projectTitle: truncateText(row.projectTitle, MAX_SUMMARY_TEXT_LENGTH),
@@ -103,13 +96,28 @@ export function sanitizeAgentActivityAggregateState(
   };
 }
 
-export function sanitizeNotificationPayload(
-  notification: NotificationPayload,
-): NotificationPayload {
+export function sanitizeApnsNotificationPayload(
+  notification: ApnsNotificationPayload,
+): ApnsNotificationPayload {
   return {
     ...notification,
     title: truncateText(notification.title, MAX_SUMMARY_TEXT_LENGTH),
     body: truncateText(notification.body, MAX_SUMMARY_TEXT_LENGTH),
     deepLink: sanitizeDeepLink(notification.deepLink),
   };
+}
+
+export function notificationForActivity(
+  row: RelayAgentActivityAggregateRow,
+): ApnsNotificationPayload {
+  const activity = sanitizeAgentActivityAggregateRow(row);
+  return sanitizeApnsNotificationPayload({
+    title: activity.threadTitle,
+    body: `${activity.status}: ${activity.projectTitle}`,
+    environmentId: activity.environmentId,
+    threadId: activity.threadId,
+    deepLink: activity.deepLink,
+    phase: activity.phase,
+    updatedAt: activity.updatedAt,
+  });
 }

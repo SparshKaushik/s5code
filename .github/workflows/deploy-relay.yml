@@ -91,6 +91,7 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           APNS_PRIVATE_KEY: ${{ secrets.APNS_PRIVATE_KEY }}
           FCM_PRIVATE_KEY: ${{ secrets.FCM_PRIVATE_KEY }}
+          FCM_SERVICE_ACCOUNT: ${{ secrets.FCM_SERVICE_ACCOUNT }}
 
       - name: Publish relay deploy commit status
         uses: actions/github-script@v8

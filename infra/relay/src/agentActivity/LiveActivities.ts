@@ -18,7 +18,7 @@ import { and, eq, sql } from "drizzle-orm";
 import * as RelayDb from "../db.ts";
 import { relayLiveActivities, relayMobileDevices } from "../persistence/schema.ts";
 
-export class LiveActivityRegistrationPersistenceError extends Schema.TaggedErrorClass<LiveActivityRegistrationPersistenceError>()(
+export class LiveActivityRegistrationPersistenceError extends Schema.TaggedError<LiveActivityRegistrationPersistenceError>()(
   "LiveActivityRegistrationPersistenceError",
   {
     userId: Schema.String,
@@ -31,7 +31,7 @@ export class LiveActivityRegistrationPersistenceError extends Schema.TaggedError
   }
 }
 
-export class LiveActivityTargetListPersistenceError extends Schema.TaggedErrorClass<LiveActivityTargetListPersistenceError>()(
+export class LiveActivityTargetListPersistenceError extends Schema.TaggedError<LiveActivityTargetListPersistenceError>()(
   "LiveActivityTargetListPersistenceError",
   {
     userId: Schema.String,
@@ -43,7 +43,7 @@ export class LiveActivityTargetListPersistenceError extends Schema.TaggedErrorCl
   }
 }
 
-export class LiveActivityDeliveryMarkPersistenceError extends Schema.TaggedErrorClass<LiveActivityDeliveryMarkPersistenceError>()(
+export class LiveActivityDeliveryMarkPersistenceError extends Schema.TaggedError<LiveActivityDeliveryMarkPersistenceError>()(
   "LiveActivityDeliveryMarkPersistenceError",
   {
     operation: Schema.Literals([
@@ -73,7 +73,6 @@ export interface DeviceRow {
   readonly aps_environment: "sandbox" | "production" | null;
   readonly push_token: string | null;
   readonly push_to_start_token: string | null;
-  readonly fcm_token: string | null;
   readonly preferences_json: string;
 }
 
@@ -118,7 +117,6 @@ export class LiveActivities extends Context.Service<
       readonly userId: string;
       readonly deviceId: string;
       readonly kind: RelayDeliveryKind;
-      readonly channel?: "apns" | "fcm";
       readonly invalidatedAt: string;
     }) => Effect.Effect<void, LiveActivityDeliveryMarkPersistenceError>;
   }
@@ -204,7 +202,6 @@ export const make = Effect.gen(function* () {
           aps_environment: relayMobileDevices.apsEnvironment,
           push_token: relayMobileDevices.pushToken,
           push_to_start_token: relayMobileDevices.pushToStartToken,
-          fcm_token: relayMobileDevices.fcmToken,
           preferences_json: relayMobileDevices.preferencesJson,
           activity_push_token: relayLiveActivities.activityPushToken,
           remote_start_queued_at: relayLiveActivities.remoteStartQueuedAt,
@@ -407,7 +404,7 @@ export const make = Effect.gen(function* () {
             yield* db
               .update(relayMobileDevices)
               .set({
-                ...(input.channel === "fcm" ? { fcmToken: null } : { pushToken: null }),
+                pushToken: null,
                 updatedAt: input.invalidatedAt,
               })
               .where(

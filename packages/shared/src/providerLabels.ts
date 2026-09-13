@@ -19,6 +19,7 @@ const DRIVER_DISPLAY_NAMES: Readonly<Record<string, string>> = {
   cursor: "Cursor",
   grok: "Grok",
   opencode: "OpenCode",
+  opencode2: "OpenCode 2",
   // pi brands itself lowercase; title-casing would render "Pi".
   pi: "pi",
 };

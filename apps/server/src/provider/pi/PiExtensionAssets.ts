@@ -14,7 +14,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-export const PI_RUNTIME_MODE_EXTENSION_FILENAME = "t3-runtime-mode.ts";
+const PI_RUNTIME_MODE_EXTENSION_FILENAME = "t3-runtime-mode.ts";
 
 /**
  * Resolve the runtime-mode extension path, or `undefined` when it is not on

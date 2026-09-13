@@ -1,42 +1,48 @@
 package expo.modules.t3nativecontrols
 
+import android.content.Intent
+import androidx.core.content.FileProvider
+import expo.modules.kotlin.Promise
 import expo.modules.kotlin.modules.Module
 import expo.modules.kotlin.modules.ModuleDefinition
+import java.io.File
+import java.net.URI
 
 class T3NativeControlsModule : Module() {
+  private var filePreviewPromise: Promise? = null
+
+  @Suppress("TooGenericExceptionCaught") // Clear the pending promise before rethrowing.
   override fun definition() = ModuleDefinition {
     Name("T3NativeControls")
 
-    Function("canPostAndroidLiveUpdates") {
-      AndroidLiveUpdateNotifications.canPostPromoted(
-        requireNotNull(appContext.reactContext).applicationContext,
+    AsyncFunction("openFile") { uri: String, mimeType: String, promise: Promise ->
+      check(filePreviewPromise == null) { "A document viewer is already open." }
+      val activity = appContext.currentActivity ?: error("The app is not active.")
+      val file = File(URI(uri)).canonicalFile
+      require(file.isFile) { "The file is no longer available." }
+      val contentUri = FileProvider.getUriForFile(
+        activity,
+        "${activity.packageName}.FileSystemFileProvider",
+        file
       )
+      val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(contentUri, mimeType)
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+      }
+      filePreviewPromise = promise
+      try {
+        activity.startActivityForResult(intent, 7343)
+      } catch (error: Exception) {
+        filePreviewPromise = null
+        throw error
+      }
     }
 
-    Function("getArmedAndroidLiveUpdateGeneration") {
-      AndroidLiveUpdateNotifications.currentGeneration(
-        requireNotNull(appContext.reactContext).applicationContext,
-      )
-    }
-
-    Function("armAndroidLiveUpdate") { generationId: String, seedJson: String ->
-      AndroidLiveUpdateNotifications.arm(
-        requireNotNull(appContext.reactContext).applicationContext,
-        generationId,
-        seedJson,
-      )
-    }
-
-    Function("dismissAndroidLiveUpdate") {
-      AndroidLiveUpdateNotifications.dismiss(
-        requireNotNull(appContext.reactContext).applicationContext,
-      )
-    }
-
-    Function("openAndroidLiveUpdateSettings") {
-      AndroidLiveUpdateNotifications.openSettings(
-        requireNotNull(appContext.reactContext).applicationContext,
-      )
+    OnActivityResult { _, (requestCode) ->
+      if (requestCode == 7343) {
+        filePreviewPromise?.resolve(null)
+        filePreviewPromise = null
+      }
     }
 
     Function("getShowcasePairingUrl") {

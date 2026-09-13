@@ -26,12 +26,6 @@ export type ContextWindowSnapshot = NullableContextWindowUsage & {
   readonly updatedAt: string;
 };
 
-/**
- * Map a provider driver kind to a user-facing display name.
- *
- * Re-exported from the shared table so mobile renders the same names.
- */
-export const formatProviderDisplayName = formatProviderDriverName;
 export function deriveLatestContextWindowSnapshot(
   activities: ReadonlyArray<OrchestrationThreadActivity>,
 ): ContextWindowSnapshot | null {

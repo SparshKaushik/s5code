@@ -19,7 +19,7 @@ import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 
-export class DesktopClerkBridgeInitializationError extends Schema.TaggedErrorClass<DesktopClerkBridgeInitializationError>()(
+export class DesktopClerkBridgeInitializationError extends Schema.TaggedError<DesktopClerkBridgeInitializationError>()(
   "DesktopClerkBridgeInitializationError",
   {
     stateDir: Schema.String,
@@ -32,7 +32,7 @@ export class DesktopClerkBridgeInitializationError extends Schema.TaggedErrorCla
   }
 }
 
-export class DesktopClerkBridgeCleanupError extends Schema.TaggedErrorClass<DesktopClerkBridgeCleanupError>()(
+export class DesktopClerkBridgeCleanupError extends Schema.TaggedError<DesktopClerkBridgeCleanupError>()(
   "DesktopClerkBridgeCleanupError",
   {
     stateDir: Schema.String,
@@ -178,7 +178,7 @@ export function rewriteClerkCorsOrigin(
   return next;
 }
 
-export function installClerkDesktopOriginFilter(
+function installClerkDesktopOriginFilter(
   session: Electron.Session,
   clerkFrontendApiHostname: string | undefined,
 ) {
@@ -218,16 +218,47 @@ export function installClerkDesktopOriginFilter(
 }
 
 export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
-  return createClerkBridge({
-    storage: storage({ path: stateDir }),
-    passkeys: true,
-    renderer: {
-      scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
-      host: ElectronProtocol.DESKTOP_HOST,
-    },
-  });
+  // Custom scheme privileges are registered synchronously at process
+  // bootstrap (see registerDesktopSchemePrivilegesSync in main.ts), because
+  // Electron requires registerSchemesAsPrivileged before `ready`. The Clerk
+  // SDK re-registers the same scheme when `renderer` is passed, but the
+  // bridge is created during async layer acquisition — after `ready` — so
+  // the SDK's duplicate registration throws and kills startup. Suppress the
+  // duplicate; the privileges it would register are already in place.
+  const protocol = (
+    Electron as unknown as {
+      protocol?: {
+        registerSchemesAsPrivileged: (...args: ReadonlyArray<unknown>) => unknown;
+      };
+    }
+  ).protocol;
+  if (typeof protocol?.registerSchemesAsPrivileged !== "function") {
+    return createClerkBridge({
+      storage: storage({ path: stateDir }),
+      passkeys: true,
+      renderer: {
+        scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+        host: ElectronProtocol.DESKTOP_HOST,
+      },
+    });
+  }
+  const originalRegisterSchemesAsPrivileged = protocol.registerSchemesAsPrivileged;
+  protocol.registerSchemesAsPrivileged = () => undefined;
+  try {
+    return createClerkBridge({
+      storage: storage({ path: stateDir }),
+      passkeys: true,
+      renderer: {
+        scheme: ElectronProtocol.getDesktopScheme(isDevelopment),
+        host: ElectronProtocol.DESKTOP_HOST,
+      },
+    });
+  } finally {
+    protocol.registerSchemesAsPrivileged = originalRegisterSchemesAsPrivileged;
+  }
 }
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const electronApp = yield* ElectronApp.ElectronApp;

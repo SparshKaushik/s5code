@@ -1,3 +1,4 @@
+import { RefreshIcon } from "~/components/ui/refresh-icon";
 import {
   AlertTriangleIcon,
   ChevronDownIcon,
@@ -5,14 +6,12 @@ import {
   CopyIcon,
   FolderOpenIcon,
   InfoIcon,
-  RefreshCwIcon,
 } from "lucide-react";
-import { useAtomValue } from "@effect/atom-react";
 import {
   isAtomCommandInterrupted,
   squashAtomCommandFailure,
 } from "@t3tools/client-runtime/state/runtime";
-import { useCallback, useMemo, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   ServerProcessDiagnosticsEntry,
   ServerProcessResourceHistorySummary,
@@ -22,16 +21,12 @@ import * as DateTime from "effect/DateTime";
 import * as Option from "effect/Option";
 
 import { cn } from "../../lib/utils";
+import { ensureLocalApi } from "../../localApi";
 import { resolveAndPersistPreferredEditor } from "../../editorPreferences";
 import { formatRelativeTimeLabel, getRelativeTimeState } from "../../timestampFormat";
 import { useEnvironmentQuery } from "../../state/query";
-import {
-  primaryServerAvailableEditorsAtom,
-  primaryServerObservabilityAtom,
-  serverEnvironment,
-} from "../../state/server";
+import { serverEnvironment } from "../../state/server";
 import { shellEnvironment } from "../../state/shell";
-import { usePrimaryEnvironment } from "../../state/environments";
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { Button } from "../ui/button";
 import { ScrollArea } from "../ui/scroll-area";
@@ -42,6 +37,7 @@ import { ExpandableText } from "./ExpandableText";
 import { ResourceTelemetryDiagnostics } from "./ResourceTelemetryDiagnostics";
 import { SettingsPageContainer, SettingsSection, useRelativeTimeTick } from "./settingsLayout";
 import { useAtomCommand } from "../../state/use-atom-command";
+import { useSettingsScope } from "./SettingsScopeContext";
 
 const NUMBER_FORMAT = new Intl.NumberFormat();
 
@@ -765,7 +761,7 @@ function DiagnosticsRefreshButton({
             onClick={onClick}
             aria-label={label}
           >
-            <RefreshCwIcon className={cn(isPending && "animate-spin")} />
+            <RefreshIcon refreshing={isPending} />
           </Button>
         }
       />
@@ -775,10 +771,12 @@ function DiagnosticsRefreshButton({
 }
 
 export function DiagnosticsSettingsPanel() {
-  const observability = useAtomValue(primaryServerObservabilityAtom);
-  const availableEditors = useAtomValue(primaryServerAvailableEditorsAtom);
-  const primaryEnvironment = usePrimaryEnvironment();
-  const environmentId = primaryEnvironment?.environmentId ?? null;
+  const { environment } = useSettingsScope();
+  // The boundary only mounts this page when the selection resolves to one
+  // connected environment, so the representative is the one to inspect.
+  const environmentId = environment?.environmentId ?? null;
+  const observability = environment?.serverConfig?.observability;
+  const availableEditors = environment?.serverConfig?.availableEditors;
   const signalServerProcess = useAtomCommand(serverEnvironment.signalProcess, {
     reportFailure: false,
   });
@@ -823,6 +821,18 @@ export function DiagnosticsSettingsPanel() {
   const [isOpeningLogsDirectory, setIsOpeningLogsDirectory] = useState(false);
   const [openLogsDirectoryError, setOpenLogsDirectoryError] = useState<string | null>(null);
   const [signalingPid, setSignalingPid] = useState<number | null>(null);
+  const signalingPidRef = useRef<number | null>(null);
+  const environmentIdRef = useRef(environmentId);
+  const processDataRef = useRef(processData);
+  useEffect(() => {
+    processDataRef.current = processData;
+  }, [processData]);
+  useEffect(() => {
+    environmentIdRef.current = environmentId;
+    return () => {
+      environmentIdRef.current = null;
+    };
+  }, [environmentId]);
 
   const openLogsDirectory = useCallback(() => {
     const logsDirectoryPath = observability?.logsDirectoryPath ?? null;
@@ -861,28 +871,55 @@ export function DiagnosticsSettingsPanel() {
   const isInitialLoading = isPending && data === null;
   const isProcessInitialLoading = isProcessPending && processData === null;
   const signalProcess = useCallback(
-    (pid: number, signal: ServerProcessSignal) => {
+    async (pid: number, signal: ServerProcessSignal) => {
+      const targetEnvironmentId = environmentIdRef.current;
+      const process = processDataRef.current?.processes.find((entry) => entry.pid === pid);
+      if (targetEnvironmentId === null || process === undefined) return;
+      if (signalingPidRef.current !== null) return;
+      signalingPidRef.current = pid;
+      setSignalingPid(pid);
+      const clearSignaling = () => {
+        signalingPidRef.current = null;
+        setSignalingPid(null);
+      };
+      if (signal === "SIGKILL") {
+        let confirmed = false;
+        try {
+          confirmed = await ensureLocalApi().dialogs.confirm(
+            `Send SIGKILL to process ${pid}? This cannot be handled by the process.`,
+            { variant: "destructive" },
+          );
+        } catch (error) {
+          clearSignaling();
+          toastManager.add({
+            type: "error",
+            title: "Could not confirm signal",
+            description: error instanceof Error ? error.message : `Failed to send ${signal}.`,
+          });
+          return;
+        }
+        if (!confirmed) {
+          clearSignaling();
+          return;
+        }
+      }
+      if (environmentIdRef.current !== targetEnvironmentId) {
+        clearSignaling();
+        return;
+      }
       if (
-        signal === "SIGKILL" &&
-        !window.confirm(`Send SIGKILL to process ${pid}? This cannot be handled by the process.`)
+        processDataRef.current?.processes.find((entry) => entry.pid === pid)?.startTimeMs !==
+        process.startTimeMs
       ) {
-        return;
-      }
-      if (environmentId === null) {
-        return;
-      }
-      const process = processData?.processes.find((entry) => entry.pid === pid);
-      if (process === undefined) {
+        clearSignaling();
         return;
       }
 
-      setSignalingPid(pid);
-      void (async () => {
+      try {
         const result = await signalServerProcess({
-          environmentId,
+          environmentId: targetEnvironmentId,
           input: { pid, startTimeMs: process.startTimeMs, signal },
         });
-        setSignalingPid(null);
         if (result._tag === "Failure") {
           if (!isAtomCommandInterrupted(result)) {
             const error = squashAtomCommandFailure(result);
@@ -915,9 +952,11 @@ export function DiagnosticsSettingsPanel() {
           return;
         }
         refreshProcesses();
-      })();
+      } finally {
+        clearSignaling();
+      }
     },
-    [environmentId, processData?.processes, refreshProcesses, signalServerProcess],
+    [refreshProcesses, signalServerProcess],
   );
 
   const processDiagnosticsError = processData ? Option.getOrNull(processData.error) : null;
@@ -929,7 +968,7 @@ export function DiagnosticsSettingsPanel() {
 
   return (
     <SettingsPageContainer width="expanded" className="gap-10">
-      <ResourceTelemetryDiagnostics />
+      <ResourceTelemetryDiagnostics environmentId={environmentId} />
 
       <SettingsSection
         title="Live Processes"

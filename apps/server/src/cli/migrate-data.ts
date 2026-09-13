@@ -39,10 +39,10 @@ const resolveLegacyBaseDir = Effect.fn(function* (raw: string | undefined) {
 const SQLITE_FILENAMES = ["state.sqlite", "state.sqlite-wal", "state.sqlite-shm"];
 const COPY_ENTRIES = ["secrets", "settings.json", "saved-environments.json"];
 
-export class MigrateDataError extends Schema.TaggedErrorClass<MigrateDataError>()(
-  "MigrateDataError",
-  { message: Schema.String, suggestion: Schema.String },
-) {}
+export class MigrateDataError extends Schema.TaggedError<MigrateDataError>()("MigrateDataError", {
+  message: Schema.String,
+  suggestion: Schema.String,
+}) {}
 
 const exists = (fs: FileSystem.FileSystem, inputPath: string) =>
   fs.exists(inputPath).pipe(Effect.orElseSucceed(() => false));

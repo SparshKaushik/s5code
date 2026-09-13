@@ -39,30 +39,6 @@ export const PROVIDER_PRESENTATION = {
 /** Stable provider reading order across charts, summaries, tables, and hover rows. */
 export const PROVIDER_ORDER = Object.keys(PROVIDER_PRESENTATION) as UsageProviderKind[];
 
-export const PROVIDER_LABEL: Record<UsageProviderKind, string> = {
-  codex: PROVIDER_PRESENTATION.codex.label,
-  claude: PROVIDER_PRESENTATION.claude.label,
-  cursor: PROVIDER_PRESENTATION.cursor.label,
-  grok: PROVIDER_PRESENTATION.grok.label,
-  pi: PROVIDER_PRESENTATION.pi.label,
-};
-
-export const PROVIDER_COLOR: Record<UsageProviderKind, string> = {
-  codex: PROVIDER_PRESENTATION.codex.color,
-  claude: PROVIDER_PRESENTATION.claude.color,
-  cursor: PROVIDER_PRESENTATION.cursor.color,
-  grok: PROVIDER_PRESENTATION.grok.color,
-  pi: PROVIDER_PRESENTATION.pi.color,
-};
-
-export const PROVIDER_MARK: Record<UsageProviderKind, Icon> = {
-  codex: PROVIDER_PRESENTATION.codex.mark,
-  claude: PROVIDER_PRESENTATION.claude.mark,
-  cursor: PROVIDER_PRESENTATION.cursor.mark,
-  grok: PROVIDER_PRESENTATION.grok.mark,
-  pi: PROVIDER_PRESENTATION.pi.mark,
-};
-
 /** Providers with real activity, independent of the metric currently displayed. */
 export function providersWithUsage(
   totals: readonly {

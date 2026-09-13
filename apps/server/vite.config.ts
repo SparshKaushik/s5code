@@ -1,3 +1,5 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import * as NodePath from "node:path";
 import "vite-plus/test/config";
 import { defineConfig, mergeConfig } from "vite-plus";
 
@@ -36,10 +38,31 @@ export default mergeConfig(
       },
     },
     pack: {
-      entry: ["src/bin.ts"],
+      entry: ["src/bin.ts", "src/claudeHistoryWorker.ts"],
       outDir: "dist",
       sourcemap: true,
       clean: true,
+      shims: true,
+      alias: {
+        "jsonc-parser": "jsonc-parser/lib/esm/main.js",
+        "node:sqlite": NodePath.resolve(import.meta.dirname ?? "", "src/provider/sqliteCompat.ts"),
+        "#runtime-import": NodePath.resolve(
+          import.meta.dirname ?? "",
+          "src/provider/runtimeImportCompat.ts",
+        ),
+        "#plugin-source": NodePath.resolve(
+          import.meta.dirname ?? "",
+          "src/provider/pluginSourceCompat.ts",
+        ),
+        "@opencode-ai/util/dist/runtime/import.node.js": NodePath.resolve(
+          import.meta.dirname ?? "",
+          "src/provider/runtimeImportCompat.ts",
+        ),
+        "@opencode-ai/plugin/dist/source.node.js": NodePath.resolve(
+          import.meta.dirname ?? "",
+          "src/provider/pluginSourceCompat.ts",
+        ),
+      },
       deps: {
         // Both halves are required. `alwaysBundle` forces the JS dependencies in
         // (declared deps are external by default, which is what this change is

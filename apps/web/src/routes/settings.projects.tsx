@@ -1,11 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-
-import { ProjectSettingsPanel } from "../components/settings/ProjectSettingsPanel";
-
-function SettingsProjectsRoute() {
-  return <ProjectSettingsPanel projectKey={null} />;
-}
+import { ProjectsSettings } from "../components/settings/ProjectsSettings";
 
 export const Route = createFileRoute("/settings/projects")({
-  component: SettingsProjectsRoute,
+  component: ProjectsSettings,
 });

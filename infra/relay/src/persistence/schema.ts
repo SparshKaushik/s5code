@@ -23,12 +23,12 @@ export const relayMobileDevices = pgTable(
     label: text("label").notNull().default("iOS device"),
     platform: varchar("platform", { length: 16 }).notNull().$type<"ios" | "android">(),
     iosMajorVersion: integer("ios_major_version"),
+    androidApiLevel: integer("android_api_level"),
     appVersion: varchar("app_version", { length: 64 }),
     bundleId: varchar("bundle_id", { length: 255 }),
     apsEnvironment: varchar("aps_environment", { length: 16 }).$type<"sandbox" | "production">(),
     pushToken: text("push_token"),
     pushToStartToken: text("push_to_start_token"),
-    fcmToken: text("fcm_token"),
     preferencesJson: jsonb("preferences_json").notNull().$type<RelayAgentAwarenessPreferences>(),
     createdAt: varchar("created_at", { length: 64 }).notNull(),
     updatedAt: varchar("updated_at", { length: 64 }).notNull(),
@@ -37,7 +37,6 @@ export const relayMobileDevices = pgTable(
     primaryKey({ columns: [table.userId, table.deviceId] }),
     uniqueIndex("idx_relay_mobile_devices_push_token").on(table.pushToken),
     uniqueIndex("idx_relay_mobile_devices_push_to_start_token").on(table.pushToStartToken),
-    uniqueIndex("idx_relay_mobile_devices_fcm_token").on(table.fcmToken),
   ],
 );
 
@@ -59,21 +58,6 @@ export const relayLiveActivities = pgTable(
     primaryKey({ columns: [table.userId, table.deviceId] }),
     uniqueIndex("idx_relay_live_activities_activity_push_token").on(table.activityPushToken),
   ],
-);
-
-export const relayAndroidLiveUpdates = pgTable(
-  "relay_android_live_updates",
-  {
-    userId: varchar("user_id", { length: 255 }).notNull(),
-    deviceId: varchar("device_id", { length: 255 }).notNull(),
-    generationId: varchar("generation_id", { length: 255 }).notNull(),
-    armedAt: varchar("armed_at", { length: 64 }).notNull(),
-    lastAggregateJson: jsonb("last_aggregate_json").$type<RelayAgentActivityAggregateState>(),
-    lastDeliveryAt: varchar("last_delivery_at", { length: 64 }),
-    createdAt: varchar("created_at", { length: 64 }).notNull(),
-    updatedAt: varchar("updated_at", { length: 64 }).notNull(),
-  },
-  (table) => [primaryKey({ columns: [table.userId, table.deviceId] })],
 );
 
 export const relayEnvironmentLinks = pgTable(
@@ -177,9 +161,9 @@ export const relayDeliveryAttempts = pgTable(
     kind: varchar("kind", { length: 64 }).notNull(),
     sourceJobId: varchar("source_job_id", { length: 64 }),
     tokenSuffix: varchar("token_suffix", { length: 16 }),
-    deliveryStatus: integer("delivery_status"),
-    deliveryReason: text("delivery_reason"),
-    providerMessageId: varchar("provider_message_id", { length: 128 }),
+    apnsStatus: integer("apns_status"),
+    apnsReason: text("apns_reason"),
+    apnsId: varchar("apns_id", { length: 128 }),
     transportError: text("transport_error"),
   },
   (table) => [

@@ -67,7 +67,7 @@ const isFffLibraryAsset = (name: string) =>
  * `Bun.embeddedFiles` only exists under bun and is empty outside a compiled
  * executable, so the two cases collapse into one check.
  */
-export function embeddedFffLibrary(): FffLibraryAsset | undefined {
+function embeddedFffLibrary(): FffLibraryAsset | undefined {
   if (typeof Bun === "undefined") return undefined;
   const files = Bun.embeddedFiles as unknown as ReadonlyArray<FffLibraryAsset> | undefined;
   return files?.find((file) => isFffLibraryAsset(file.name));

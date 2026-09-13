@@ -175,7 +175,7 @@ const toMaintenanceError = (operation: string) => (cause: unknown) =>
         cause,
       });
 
-export const make = Effect.gen(function* () {
+const make = Effect.gen(function* () {
   const checkpointStore = yield* CheckpointStore.CheckpointStore;
   const projectionSnapshotQuery = yield* ProjectionSnapshotQuery;
   const serverSettings = yield* ServerSettingsService;

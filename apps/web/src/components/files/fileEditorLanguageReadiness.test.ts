@@ -115,7 +115,10 @@ afterEach(async () => {
   renderer?.cleanUp();
   pool?.terminate();
   await Promise.all(terminationPromises);
+  await new Promise((resolve) => setImmediate(resolve));
   await disposeHighlighter();
+  // Drain the pool's final state broadcast before removing the animation frame stubs.
+  await new Promise<void>((resolve) => setImmediate(resolve));
   vi.unstubAllGlobals();
 });
 

@@ -1,6 +1,7 @@
+// @effect-diagnostics preferSchemaOverJson:off
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
-import * as Drizzle from "alchemy/Drizzle";
+import * as Drizzle from "alchemy/Drizzle/Postgres";
 import * as Config from "effect/Config";
 import * as DateTime from "effect/DateTime";
 import * as Crypto from "effect/Crypto";
@@ -38,7 +39,6 @@ import { ManagedEndpointZone, RelayApiZone, RelayDeploymentConfig } from "./zone
 import { makeRelayTraceLayer, RelayObservability } from "./observability.ts";
 import * as DeliveryAttempts from "./agentActivity/DeliveryAttempts.ts";
 import * as AgentActivityRows from "./agentActivity/AgentActivityRows.ts";
-import * as AndroidLiveUpdates from "./agentActivity/AndroidLiveUpdates.ts";
 import * as Devices from "./agentActivity/Devices.ts";
 import * as DpopProofs from "./auth/DpopProofs.ts";
 import * as RelayTokens from "./auth/RelayTokens.ts";
@@ -47,15 +47,24 @@ import * as EnvironmentLinks from "./environments/EnvironmentLinks.ts";
 import * as ManagedEndpointAllocations from "./environments/ManagedEndpointAllocations.ts";
 import * as LiveActivities from "./agentActivity/LiveActivities.ts";
 import * as RelayDb from "./db.ts";
-import { RelayDeliveryDeadLetterQueue, RelayDeliveryQueue } from "./queues.ts";
+import {
+  RelayApnsDeliveryDeadLetterQueue,
+  RelayApnsDeliveryQueue,
+  RelayFcmDeliveryQueue,
+  RelayFcmDeliveryDeadLetterQueue,
+} from "./queues.ts";
+import * as WebCrypto from "./WebCrypto.ts";
+import * as FcmAssertionSigner from "./agentActivity/FcmAssertionSigner.ts";
+import * as FcmClient from "./agentActivity/FcmClient.ts";
+import * as FcmDeliveryQueueSender from "./agentActivity/FcmDeliveryQueueSender.ts";
+import * as FcmDeliveries from "./agentActivity/FcmDeliveries.ts";
+import * as FcmDeliveryQueueConsumer from "./agentActivity/FcmDeliveryQueueConsumer.ts";
 import * as RelayConfiguration from "./Config.ts";
 import * as AgentActivityPublisher from "./agentActivity/AgentActivityPublisher.ts";
 import * as ApnsClient from "./agentActivity/ApnsClient.ts";
 import * as ApnsProviderTokens from "./agentActivity/ApnsProviderTokens.ts";
-import * as FcmClient from "./agentActivity/FcmClient.ts";
-import * as FcmProviderTokens from "./agentActivity/FcmProviderTokens.ts";
-import * as DeliveryQueue from "./agentActivity/DeliveryQueue.ts";
-import * as Deliveries from "./agentActivity/Deliveries.ts";
+import * as ApnsDeliveryQueue from "./agentActivity/ApnsDeliveryQueue.ts";
+import * as ApnsDeliveries from "./agentActivity/ApnsDeliveries.ts";
 import * as EnvironmentConnector from "./environments/EnvironmentConnector.ts";
 import * as EnvironmentLinker from "./environments/EnvironmentLinker.ts";
 import * as EnvironmentPublishSignatures from "./environments/EnvironmentPublishSignatures.ts";
@@ -97,7 +106,7 @@ const relayApiLayer = Layer.mergeAll(
 );
 
 const CloudMintKeyPair = Alchemy.KeyPair("CloudMintKeyPair");
-const DeliveryJobSigningSecret = Alchemy.makeRandom("DeliveryJobSigningSecret", {
+const ApnsDeliveryJobSigningSecret = Alchemy.makeRandom("ApnsDeliveryJobSigningSecret", {
   bytes: 32,
 });
 
@@ -120,47 +129,43 @@ export const ApiLive = Api.make(
     // 1. Provision Infrastructure for the Worker to use
     //
     const { relayPublicOrigin, stage } = yield* RelayDeploymentConfig;
-    const deliveryQueue = yield* RelayDeliveryQueue;
-    const deliveryDeadLetterQueue = yield* RelayDeliveryDeadLetterQueue;
+    const apnsDeliveryQueue = yield* RelayApnsDeliveryQueue;
+    const apnsDeliveryDeadLetterQueue = yield* RelayApnsDeliveryDeadLetterQueue;
+    const fcmDeliveryQueue = yield* RelayFcmDeliveryQueue;
+    const fcmDeliveryDeadLetterQueue = yield* RelayFcmDeliveryDeadLetterQueue;
     const cloudMintKeyPair = yield* CloudMintKeyPair;
     const relayApiZone = yield* RelayApiZone;
     const managedEndpointZone = yield* ManagedEndpointZone;
-    const randomDeliveryJobSigningSecret = yield* DeliveryJobSigningSecret;
+    const randomApnsDeliveryJobSigningSecret = yield* ApnsDeliveryJobSigningSecret;
     const observability = yield* RelayObservability;
 
     //
     // 2. Create bindings
     //
-    // APNs is optional. When any required Apple/APNs key is absent the relay
-    // still deploys and serves remote connections; mobile push notifications
-    // and Live Activities are simply disabled. The APNs-only layers and the
-    // delivery-queue consumption below are gated on this flag, and the
-    // RelayConfiguration receives placeholder credentials that are never read
-    // because the delivery path is not built.
-    const apnsEnvironment = yield* Config.schema(
-      RelayConfiguration.ApnsEnvironment,
-      "APNS_ENVIRONMENT",
-    ).pipe(Config.option);
-    const apnsTeamId = yield* Config.string("APNS_TEAM_ID").pipe(Config.option);
-    const apnsKeyId = yield* Config.string("APNS_KEY_ID").pipe(Config.option);
-    const apnsBundleId = yield* Config.string("APNS_BUNDLE_ID").pipe(Config.option);
-    const apnsPrivateKey = yield* Config.redacted("APNS_PRIVATE_KEY").pipe(Config.option);
-    const apnsEnabled =
-      Option.isSome(apnsEnvironment) &&
-      Option.isSome(apnsTeamId) &&
-      Option.isSome(apnsKeyId) &&
-      Option.isSome(apnsBundleId) &&
-      Option.isSome(apnsPrivateKey);
-    // FCM is optional too, mirroring APNs: absent credentials disable Android
-    // push notifications while the relay still deploys and serves remote
-    // connections.
+    const apnsCredentials = yield* RelayConfiguration.resolveApnsCredentials;
+    const fcmServiceAccountDirect = Option.getOrUndefined(
+      Option.filter(
+        yield* Config.option(Config.redacted("FCM_SERVICE_ACCOUNT")),
+        (value) => Redacted.value(value).trim().length > 0,
+      ),
+    );
     const fcmProjectId = yield* Config.string("FCM_PROJECT_ID").pipe(Config.option);
     const fcmClientEmail = yield* Config.string("FCM_CLIENT_EMAIL").pipe(Config.option);
     const fcmPrivateKey = yield* Config.redacted("FCM_PRIVATE_KEY").pipe(Config.option);
-    const fcmEnabled =
-      Option.isSome(fcmProjectId) && Option.isSome(fcmClientEmail) && Option.isSome(fcmPrivateKey);
-    const deliveryJobSigningSecret = yield* randomDeliveryJobSigningSecret;
-    const deliveryQueueSender = yield* Cloudflare.Queues.WriteQueue(deliveryQueue);
+    const fcmServiceAccount =
+      fcmServiceAccountDirect ??
+      (Option.isSome(fcmProjectId) && Option.isSome(fcmClientEmail) && Option.isSome(fcmPrivateKey)
+        ? Redacted.make(
+            JSON.stringify({
+              project_id: fcmProjectId.value,
+              client_email: fcmClientEmail.value,
+              private_key: Redacted.value(fcmPrivateKey.value).replace(/\\n/g, "\n"),
+            }),
+          )
+        : undefined);
+    const apnsDeliveryJobSigningSecret = yield* randomApnsDeliveryJobSigningSecret;
+    const apnsDeliveryQueueSender = yield* Cloudflare.Queues.WriteQueue(apnsDeliveryQueue);
+    const fcmDeliveryQueueSender = yield* Cloudflare.Queues.WriteQueue(fcmDeliveryQueue);
 
     const axiomDatasetName = yield* observability.traces.name;
     const axiomIngestToken = yield* observability.workerIngestToken.token;
@@ -189,39 +194,9 @@ export const ApiLive = Api.make(
     const loadSettings = Effect.gen(function* () {
       return RelayConfiguration.RelayConfiguration.of({
         relayIssuer: relayPublicOrigin,
-        apns: apnsEnabled
-          ? {
-              environment: Option.getOrThrow(apnsEnvironment),
-              teamId: Option.getOrThrow(apnsTeamId),
-              keyId: Option.getOrThrow(apnsKeyId),
-              bundleId: Option.getOrThrow(apnsBundleId),
-              privateKey: Option.getOrThrow(apnsPrivateKey),
-            }
-          : {
-              // Placeholder. Read only when `apnsEnabled`, which selects the
-              // branch above; when disabled the APNs delivery path is not built.
-              environment: "sandbox",
-              teamId: "",
-              keyId: "",
-              bundleId: "",
-              privateKey: Redacted.make(""),
-            },
-        fcm: fcmEnabled
-          ? {
-              projectId: Option.getOrThrow(fcmProjectId),
-              clientEmail: Option.getOrThrow(fcmClientEmail),
-              privateKey: Option.getOrThrow(fcmPrivateKey),
-              tokenUri: "https://oauth2.googleapis.com/token",
-            }
-          : {
-              // Placeholder. Read only when `fcmEnabled`; when disabled the FCM
-              // delivery path is not built.
-              projectId: "",
-              clientEmail: "",
-              privateKey: Redacted.make(""),
-              tokenUri: "https://oauth2.googleapis.com/token",
-            },
-        deliveryJobSigningSecret: yield* deliveryJobSigningSecret,
+        ...(fcmServiceAccount ? { fcmServiceAccount } : {}),
+        apns: apnsCredentials,
+        apnsDeliveryJobSigningSecret: yield* apnsDeliveryJobSigningSecret,
         clerkSecretKey,
         clerkPublishableKey,
         clerkJwtAudience,
@@ -254,23 +229,32 @@ export const ApiLive = Api.make(
         ),
       ),
       Layer.provideMerge(DpopProofs.layer),
-      // APNs services must always be provided: AgentActivityPublisher depends on
-      // Deliveries, and these layers build fine with the placeholder
-      // credentials used when APNs is disabled. Only the delivery-queue
-      // *consumer* below is gated on `apnsEnabled`.
-      Layer.provideMerge(Deliveries.layer),
+      Layer.provideMerge(ApnsDeliveries.layer),
       Layer.provideMerge(
-        Layer.mergeAll(
-          ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer)),
-          FcmClient.layer.pipe(Layer.provideMerge(FcmProviderTokens.layer)),
+        FcmDeliveries.layer.pipe(
+          Layer.provide(
+            Layer.succeed(FcmDeliveryQueueSender.FcmDeliveryQueueSender, {
+              send: (body) =>
+                fcmDeliveryQueueSender
+                  .send(body)
+                  .pipe(Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext)),
+            }),
+          ),
+          Layer.provideMerge(
+            FcmClient.layer.pipe(
+              Layer.provide(FcmAssertionSigner.layer),
+              Layer.provide(
+                Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle }),
+              ),
+            ),
+          ),
         ),
       ),
+      Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
       Layer.provideMerge(
-        DeliveryQueue.layerCloudflareQueues(deliveryQueueSender, alchemyRuntimeContext),
+        ApnsDeliveryQueue.layerCloudflareQueues(apnsDeliveryQueueSender, alchemyRuntimeContext),
       ),
-      Layer.provideMerge(
-        Layer.mergeAll(AgentActivityRows.layer, AndroidLiveUpdates.layer, Devices.layer),
-      ),
+      Layer.provideMerge(Layer.mergeAll(AgentActivityRows.layer, Devices.layer)),
       Layer.provideMerge(EnvironmentCredentials.layer),
       Layer.provideMerge(
         Layer.mergeAll(
@@ -298,33 +282,46 @@ export const ApiLive = Api.make(
       Layer.provide(runtimeLayer),
     );
 
-    if (!apnsEnabled && !fcmEnabled) {
-      yield* Effect.logWarning(
-        "Neither APNs nor FCM configured; mobile notifications and Live Activities disabled",
-      );
-    } else {
+    if (apnsCredentials) {
       yield* Cloudflare.Queues.consumeQueueMessages<unknown>(
-        deliveryQueue,
+        apnsDeliveryQueue,
         {
           batchSize: 10,
           maxRetries: 5,
           maxWaitTime: "5 seconds",
           retryDelay: "30 seconds",
-          deadLetterQueue: deliveryDeadLetterQueue.queueName as unknown as string,
+          deadLetterQueue: apnsDeliveryDeadLetterQueue.queueName as unknown as string,
         },
         (stream) =>
           stream.pipe(
-            Stream.withSpan("relay.delivery_queue.process_batch"),
+            Stream.withSpan("relay.apn_delivery_queue.process_batch"),
             Stream.runForEach((message) =>
-              Deliveries.Deliveries.pipe(
+              ApnsDeliveries.ApnsDeliveries.pipe(
                 Effect.flatMap((deliveries) => deliveries.processSignedJob(message.body)),
-                Effect.withSpan("relay.delivery_queue.process_message"),
+                Effect.withSpan("relay.apn_delivery_queue.process_message"),
               ),
             ),
             Effect.provide(runtimeLayer),
           ),
       );
     }
+
+    yield* Cloudflare.Queues.consumeQueueMessages<unknown>(
+      fcmDeliveryQueue,
+      {
+        batchSize: 10,
+        maxRetries: 5,
+        maxWaitTime: "1 second",
+        retryDelay: "30 seconds",
+        deadLetterQueue: fcmDeliveryDeadLetterQueue.queueName as unknown as string,
+      },
+      (stream) =>
+        stream.pipe(
+          Stream.withSpan("relay.fcm_delivery_queue.process_batch"),
+          Stream.runForEach(FcmDeliveryQueueConsumer.processMessage),
+          Effect.provide(runtimeLayer),
+        ),
+    );
 
     yield* Cloudflare.Workers.cron("*/5 * * * *", () =>
       DpopProofs.DpopProofReplay.pipe(

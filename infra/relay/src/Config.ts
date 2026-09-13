@@ -1,5 +1,8 @@
+import * as Config from "effect/Config";
 import * as Context from "effect/Context";
+import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
 import * as Schema from "effect/Schema";
 
@@ -14,23 +17,73 @@ export interface ApnsCredentials {
   readonly environment: ApnsEnvironment;
 }
 
-export interface FcmCredentials {
-  readonly projectId: string;
-  readonly clientEmail: string;
-  readonly privateKey: Redacted.Redacted<string>;
-  readonly tokenUri: string;
-}
+export const resolveApnsCredentials = Effect.gen(function* () {
+  const apnsEnabled = yield* Config.boolean("APNS_ENABLED").pipe(Config.withDefault(true));
+  if (!apnsEnabled) return null;
+
+  const apnsEnvironmentRaw = Option.getOrUndefined(
+    Option.filter(
+      yield* Config.string("APNS_ENVIRONMENT").pipe(Config.option),
+      (value) => value.trim().length > 0,
+    ),
+  );
+  const apnsEnvironment =
+    apnsEnvironmentRaw === "sandbox" || apnsEnvironmentRaw === "production"
+      ? apnsEnvironmentRaw
+      : undefined;
+  const apnsTeamId = Option.getOrUndefined(
+    Option.filter(
+      yield* Config.string("APNS_TEAM_ID").pipe(Config.option),
+      (value) => value.trim().length > 0,
+    ),
+  );
+  const apnsKeyId = Option.getOrUndefined(
+    Option.filter(
+      yield* Config.string("APNS_KEY_ID").pipe(Config.option),
+      (value) => value.trim().length > 0,
+    ),
+  );
+  const apnsBundleId = Option.getOrUndefined(
+    Option.filter(
+      yield* Config.string("APNS_BUNDLE_ID").pipe(Config.option),
+      (value) => value.trim().length > 0,
+    ),
+  );
+  const apnsPrivateKey = Option.getOrUndefined(
+    Option.filter(
+      yield* Config.redacted("APNS_PRIVATE_KEY").pipe(Config.option),
+      (value) => Redacted.value(value).trim().length > 0,
+    ),
+  );
+
+  if (
+    apnsEnvironment !== undefined &&
+    apnsTeamId !== undefined &&
+    apnsKeyId !== undefined &&
+    apnsBundleId !== undefined &&
+    apnsPrivateKey !== undefined
+  ) {
+    return {
+      environment: apnsEnvironment,
+      teamId: apnsTeamId,
+      keyId: apnsKeyId,
+      bundleId: apnsBundleId,
+      privateKey: apnsPrivateKey,
+    } satisfies ApnsCredentials;
+  }
+  return null;
+});
 
 export class RelayConfiguration extends Context.Service<
   RelayConfiguration,
   {
     readonly relayIssuer: string;
-    readonly apns: ApnsCredentials;
-    readonly fcm: FcmCredentials;
+    readonly apns: ApnsCredentials | null;
+    readonly fcmServiceAccount?: Redacted.Redacted<string>;
     readonly clerkSecretKey: Redacted.Redacted<string>;
     readonly clerkPublishableKey: string;
     readonly clerkJwtAudience: string;
-    readonly deliveryJobSigningSecret: Redacted.Redacted<string>;
+    readonly apnsDeliveryJobSigningSecret: Redacted.Redacted<string>;
     readonly cloudMintPrivateKey: Redacted.Redacted<string>;
     readonly cloudMintPublicKey: string;
     readonly managedEndpointBaseDomain: string | undefined;

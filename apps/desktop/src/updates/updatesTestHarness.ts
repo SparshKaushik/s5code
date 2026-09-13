@@ -131,6 +131,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     focusedMainOrFirst: Effect.succeed(Option.none()),
     setMain: () => Effect.void,
     clearMain: () => Effect.void,
+    prepareReveal: () => Effect.succeed(false),
     reveal: () => Effect.void,
     sendAll: (_channel, state) =>
       Effect.sync(() => {
@@ -179,6 +180,8 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     dispatchMenuAction: () => Effect.void,
     zoomMain: () => Effect.void,
     syncAppearance: Effect.void,
+    prepareCaptureReveal: Effect.void,
+    dispatchSnapShotEvent: () => Effect.void,
   } satisfies DesktopWindow.DesktopWindow["Service"]);
 
   const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {

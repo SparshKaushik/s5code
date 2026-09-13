@@ -143,7 +143,7 @@ export const PiExtensionUiRequest = Schema.Struct({
 export type PiExtensionUiRequest = typeof PiExtensionUiRequest.Type;
 
 /** Dialog methods block the extension and therefore need a response. */
-export const PI_EXTENSION_UI_DIALOG_METHODS = ["select", "confirm", "input", "editor"] as const;
+const PI_EXTENSION_UI_DIALOG_METHODS = ["select", "confirm", "input", "editor"] as const;
 export type PiExtensionUiDialogMethod = (typeof PI_EXTENSION_UI_DIALOG_METHODS)[number];
 
 export function isPiExtensionUiDialogMethod(method: string): method is PiExtensionUiDialogMethod {
