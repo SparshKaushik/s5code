@@ -64,6 +64,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.debounce
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -361,19 +362,17 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Snaps the new-task draft onto a usable agent whenever the catalog says its
-     * current one is not.
-     *
-     * A draft's provider outlives the config that justified it: the default is
-     * `codex`, which a server running only pi does not have, and a restored draft
-     * can name an instance the user has since removed or signed out of. Sending
-     * either is a refusal from the server, so the draft follows the catalog the way
-     * `resolveDefaultableModelSelection` does in the RN client. An empty catalog
-     * changes nothing — nothing is connected yet, which is not evidence the
-     * selection is wrong.
+     * Follows the selected machine's catalog changes to keep the draft pointing at
+     * an agent and model that can actually run on it.
      */
     private fun observeDraftProviderAvailability() {
-        workspace.providerCatalog
+        combine(
+            _draft.map { it.environmentId }.distinctUntilChanged(),
+            workspace.providerCatalogs,
+            workspace.providerCatalog,
+        ) { environmentId, catalogs, globalCatalog ->
+            catalogs[environmentId]?.takeIf { it.isNotEmpty() } ?: globalCatalog
+        }
             .onEach { catalog ->
                 if (catalog.isEmpty()) return@onEach
                 updateDraft { draft ->
@@ -686,10 +685,6 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 }
                 .collect { (environments, threads, queued) ->
                     val connected = environments.filter { it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Connected }.map { it.id }.toSet()
-                    val busy =
-                        threads.filter { it.status == club.touchtech.s5code.kotlin.model.ThreadStatus.Working }
-                            .map { "${it.environmentId.value}/${it.id.value}" }
-                            .toSet()
                     val next =
                         queued.sortedBy { it.delivery.createdAt }.firstOrNull {
                             val creationReady =
@@ -697,8 +692,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                                     project.environmentId == it.environmentId &&
                                         project.id.value == it.creation.projectKey
                                 }
-                            creationReady && it.environmentId in connected &&
-                                (it.creation != null || it.key !in busy)
+                            creationReady && it.environmentId in connected
                         }
                     if (next != null) drainQueuedMessage(next)
                 }
@@ -770,13 +764,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     attempt += 1
                     delay(threadOutboxRetryDelayMillis(attempt))
                     val environment = workspace.environments.value.firstOrNull { it.id == message.environmentId }
-                    val thread = workspace.threads.value.firstOrNull {
-                        it.environmentId == message.environmentId && it.id == message.threadId
-                    }
-                    if (environment?.state != club.touchtech.s5code.kotlin.model.ConnectionState.Connected ||
-                        (message.creation == null &&
-                            thread?.status == club.touchtech.s5code.kotlin.model.ThreadStatus.Working)
-                    ) return
+                    if (environment?.state != club.touchtech.s5code.kotlin.model.ConnectionState.Connected) return
                 }
             }
         }
@@ -942,7 +930,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     fun setProvider(provider: ProviderInstance) =
         updateDraft { draft ->
-            val models = modelsFor(provider)
+            val models = modelsFor(provider, draft.environmentId)
             draft.copy(
                 settings =
                     draft.settings.copy(
@@ -975,11 +963,18 @@ class AppStore(application: Application) : AndroidViewModel(application) {
      * settings sheet renders as "the current selection only" rather than as a
      * provider with no models.
      */
-    fun modelsFor(provider: ProviderInstance): List<String> =
-        workspace.providerCatalog.value
+    fun modelsFor(provider: ProviderInstance, environmentId: EnvironmentId? = null): List<String> {
+        val catalog = if (environmentId != null && environmentId.value.isNotEmpty()) {
+            workspace.providerCatalogs.value[environmentId]
+                ?: emptyList()
+        } else {
+            workspace.providerCatalog.value
+        }
+        return catalog
             .firstOrNull { it.instance.instanceId == provider.instanceId }
             ?.models
             ?: emptyList()
+    }
 
     private companion object {
         const val PERSIST_DEBOUNCE_MILLIS = 400L

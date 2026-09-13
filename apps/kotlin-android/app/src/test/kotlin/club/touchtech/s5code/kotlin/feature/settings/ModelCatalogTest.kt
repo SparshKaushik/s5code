@@ -125,4 +125,11 @@ class ModelCatalogTest {
         assertTrue(!modelMatchesQuery("gpt-5", "Codex", "claude"))
         assertTrue(modelMatchesQuery("anything", "Anything", ""))
     }
+
+    @Test
+    fun `matching agent label with uppercase query returns that agent's whole list`() {
+        val groups = modelSearchResults(catalog, codex, "CLAUDE", ModelSearchScope.AllProviders)
+        assertEquals(listOf("pi", "claudeAgent"), groups.map { it.instance.instanceId })
+        assertEquals(listOf("opus", "sonnet"), groups.last().models)
+    }
 }

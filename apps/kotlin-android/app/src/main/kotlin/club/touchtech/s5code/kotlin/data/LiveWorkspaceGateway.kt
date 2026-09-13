@@ -127,6 +127,7 @@ class LiveWorkspaceGateway(
         val shell: MutableStateFlow<ShellSnapshotDto?>,
         var job: Job? = null,
         var stateJob: Job? = null,
+        var providersJob: Job? = null,
     )
 
     private val sessions = MutableStateFlow<Map<String, Connected>>(emptyMap())
@@ -158,6 +159,11 @@ class LiveWorkspaceGateway(
     private val _providerCatalog = MutableStateFlow<List<ProviderCatalogEntry>>(emptyList())
     override val providerCatalog: StateFlow<List<ProviderCatalogEntry>> =
         _providerCatalog.asStateFlow()
+
+    private val _providerCatalogs =
+        MutableStateFlow<Map<EnvironmentId, List<ProviderCatalogEntry>>>(emptyMap())
+    override val providerCatalogs: StateFlow<Map<EnvironmentId, List<ProviderCatalogEntry>>> =
+        _providerCatalogs.asStateFlow()
 
     /** Live thread details, keyed by environment and thread. */
     private val details = mutableMapOf<String, MutableStateFlow<ThreadDetail?>>()
@@ -227,6 +233,7 @@ class LiveWorkspaceGateway(
         current.filterKeys { it !in savedIds }.forEach { (id, connected) ->
             connected.job?.cancel()
             connected.stateJob?.cancel()
+            connected.providersJob?.cancel()
             connected.session.stop()
             val prefix = "$id/"
             detailJobs.keys.filter { it.startsWith(prefix) }.forEach(::dropDetailSubscription)
@@ -259,6 +266,7 @@ class LiveWorkspaceGateway(
             // them immediately so Home/outbox see reconnecting and connected
             // even before the replacement shell snapshot arrives.
             connected.stateJob = session.state.onEach { publish() }.launchIn(scope)
+            connected.providersJob = session.providers.onEach { publish() }.launchIn(scope)
             // Start the live attempt immediately. The cache read then races only
             // as a fallback and compareAndSet keeps a fresh socket snapshot newer.
             session.start()
@@ -390,41 +398,49 @@ class LiveWorkspaceGateway(
         // actually be accepted for are offered — an unavailable driver, a disabled
         // instance, an uninstalled CLI, or a signed-out account are all refusals, so
         // showing them means offering a row that cannot work.
+        val perEnvironment = mutableMapOf<EnvironmentId, List<ProviderCatalogEntry>>()
+        entries.forEach { (environmentId, connected) ->
+            perEnvironment[EnvironmentId(environmentId)] =
+                buildCatalogEntries(connected.session.providers.value)
+        }
+        _providerCatalogs.value = perEnvironment
         _providerCatalog.value =
-            entries.values
-                .flatMap { it.session.providers.value }
-                .filter { provider ->
-                    provider.enabled &&
-                        provider.installed &&
-                        provider.availability != "unavailable" &&
-                        provider.auth.status != "unauthenticated"
-                }
-                // Two machines running the same instance id offer the union of their
-                // models, because the user picks an agent, not a machine.
-                .groupBy { it.instanceId }
-                .map { (instanceId, providers) ->
-                    val first = providers.first()
-                    val models = providers.flatMap { it.models }
-                    ProviderCatalogEntry(
-                        instance =
-                            ProviderInstance(
-                                instanceId = instanceId,
-                                driver = first.driver,
-                                displayName = first.displayName,
-                            ),
-                        models = models.map { it.slug }.distinct(),
-                        // Per model, because two models of the same provider do not
-                        // offer the same knobs: Claude Opus 5 has a context window
-                        // and Opus 4.8 does not. First wins on a duplicate slug, for
-                        // the same reason the model list dedupes.
-                        optionDescriptors =
-                            models
-                                .associate { it.slug to optionDescriptorsFrom(it.capabilities) }
-                                .filterValues { it.isNotEmpty() },
-                    )
-                }
-                .sortedBy { it.instance.label.lowercase() }
+            buildCatalogEntries(entries.values.flatMap { it.session.providers.value })
     }
+
+    private fun buildCatalogEntries(
+        providers: List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>
+    ): List<ProviderCatalogEntry> =
+        providers
+            .filter { provider ->
+                provider.enabled &&
+                    provider.installed &&
+                    provider.availability != "unavailable" &&
+                    provider.auth.status != "unauthenticated"
+            }
+            .groupBy { it.instanceId }
+            .map { (instanceId, instanceProviders) ->
+                val first = instanceProviders.first()
+                val models = instanceProviders.flatMap { it.models }
+                ProviderCatalogEntry(
+                    instance =
+                        ProviderInstance(
+                            instanceId = instanceId,
+                            driver = first.driver,
+                            displayName = first.displayName,
+                        ),
+                    models = models.map { it.slug }.distinct(),
+                    // Per model, because two models of the same provider do not
+                    // offer the same knobs: Claude Opus 5 has a context window
+                    // and Opus 4.8 does not. First wins on a duplicate slug, for
+                    // the same reason the model list dedupes.
+                    optionDescriptors =
+                        models
+                            .associate { it.slug to optionDescriptorsFrom(it.capabilities) }
+                            .filterValues { it.isNotEmpty() },
+                )
+            }
+            .sortedBy { it.instance.label.lowercase() }
 
     /**
      * Names an instance id from whatever a connected server says about it, falling

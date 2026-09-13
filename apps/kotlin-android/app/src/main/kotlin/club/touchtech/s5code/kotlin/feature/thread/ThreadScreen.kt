@@ -89,6 +89,11 @@ fun ThreadScreen(
     val threadDrafts by store.threadDrafts.collectAsStateWithLifecycle()
     val queuedMessages by store.outbox.collectAsStateWithLifecycle()
     val providerCatalog by store.workspace.providerCatalog.collectAsStateWithLifecycle()
+    val providerCatalogs by store.workspace.providerCatalogs.collectAsStateWithLifecycle()
+    val machineCatalog =
+        remember(env, providerCatalogs, providerCatalog) {
+            providerCatalogs[env]?.takeIf { it.isNotEmpty() } ?: providerCatalog
+        }
     val attachmentError by store.attachmentError.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val copy = rememberClipboardWriter()
@@ -550,8 +555,8 @@ fun ThreadScreen(
     if (settingsOpen) {
         TaskSettingsSheet(
             settings = effectiveSettings,
-            catalog = providerCatalog,
-            modelsFor = store::modelsFor,
+            catalog = machineCatalog,
+            modelsFor = { provider -> store.modelsFor(provider, env) },
             onSettingsChange = { settings ->
                 // Existing-thread settings are composer state in RN. Staging them
                 // keeps the chosen model visible immediately and applies it to the

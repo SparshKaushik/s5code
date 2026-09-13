@@ -49,7 +49,7 @@ fun modelSearchResults(
     query: String,
     scope: ModelSearchScope,
 ): List<ModelGroup> {
-    val needle = query.trim()
+    val needle = query.trim().lowercase()
     val selectedEntry = catalog.firstOrNull { it.instance.instanceId == selected.instanceId }
     if (needle.isEmpty()) {
         val models = selectedEntry?.models.orEmpty()
@@ -64,7 +64,13 @@ fun modelSearchResults(
     return searchable
         .sortedBy { if (it.instance.instanceId == selected.instanceId) 0 else 1 }
         .mapNotNull { entry ->
-            val matches = entry.models.filter { modelMatchesQuery(it, entry.instance.label, needle) }
+            val providerMatches = entry.instance.label.lowercase().contains(needle)
+            val matches =
+                if (providerMatches) {
+                    entry.models
+                } else {
+                    entry.models.filter { it.lowercase().contains(needle) }
+                }
             if (matches.isEmpty()) null else ModelGroup(entry.instance, matches)
         }
 }

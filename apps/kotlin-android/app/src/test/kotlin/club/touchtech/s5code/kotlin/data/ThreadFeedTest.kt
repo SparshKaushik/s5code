@@ -88,6 +88,33 @@ class ThreadFeedTest {
     }
 
     @Test
+    fun `a tool with nested rawOutput command extracts command summary`() {
+        val payload = buildJsonObject {
+            put("itemType", "command_execution")
+            put(
+                "data",
+                buildJsonObject {
+                    put(
+                        "rawOutput",
+                        buildJsonObject {
+                            put("command", "git status --porcelain")
+                        },
+                    )
+                },
+            )
+        }
+        val feed =
+            feedOf(
+                activities =
+                    listOf(
+                        activity("a-1", "tool.completed", "Run command", 1, 0, payload = payload),
+                    ),
+            )
+        val tool = feed.single() as FeedEntry.ToolCall
+        assertEquals("git status --porcelain", tool.summary)
+    }
+
+    @Test
     fun `a tool that completes after a message does not render a second row`() {
         val payload = buildJsonObject {
             put("itemType", "command")

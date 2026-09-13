@@ -251,7 +251,7 @@ fun ThreadComposer(
                     )
                     // Collapsed keeps one action in the pill. If a turn is active
                     // that action remains Stop; focusing expands the composer and
-                    // exposes a separate Queue action beside it.
+                    // exposes a separate Send action beside it.
                     if (!expanded) {
                         SendOrStop(
                             working = working,
@@ -290,7 +290,7 @@ fun ThreadComposer(
                         }
                         S5ComposerAction(
                             icon = Icons.AutoMirrored.Rounded.Send,
-                            label = if (working || queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue message" else "Send message",
+                            label = if (queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue message" else "Send message",
                             onClick = onSend,
                             enabled = canSend,
                         )

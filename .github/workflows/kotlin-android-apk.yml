@@ -1,0 +1,69 @@
+name: Kotlin Android APK
+
+on:
+  push:
+    branches:
+      - kotlin-android-client
+    tags:
+      - "kotlin-android-*"
+  workflow_dispatch:
+    inputs:
+      publish_prerelease:
+        description: "Publish GitHub pre-release"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Kotlin Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Debug APK
+        run: |
+          cd apps/kotlin-android
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Prepare Artifacts
+        run: |
+          mkdir -p dist
+          cp apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk dist/s5code-kotlin-0.1.0-alpha.2-debug.apk
+          cd dist
+          sha256sum s5code-kotlin-0.1.0-alpha.2-debug.apk > s5code-kotlin-0.1.0-alpha.2-debug.apk.sha256
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: s5code-kotlin-0.1.0-alpha.2-debug
+          path: dist/*
+
+      - name: Publish Pre-release
+        if: startsWith(github.ref, 'refs/tags/kotlin-android-') || github.event.inputs.publish_prerelease == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="kotlin-android-v0.1.0-alpha.2-debug"
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          gh release create "$tag" dist/s5code-kotlin-0.1.0-alpha.2-debug.apk dist/s5code-kotlin-0.1.0-alpha.2-debug.apk.sha256 \
+            --title "Kotlin Android client 0.1.0-alpha.2 (debug)" \
+            --notes "Debug build of the native Kotlin/Compose Android client (\`apps/kotlin-android\`), for install and update testing." \
+            --prerelease || \
+          gh release upload "$tag" dist/s5code-kotlin-0.1.0-alpha.2-debug.apk dist/s5code-kotlin-0.1.0-alpha.2-debug.apk.sha256 --clobber

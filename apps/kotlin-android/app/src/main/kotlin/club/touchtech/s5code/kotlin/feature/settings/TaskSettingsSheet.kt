@@ -2,15 +2,16 @@ package club.touchtech.s5code.kotlin.feature.settings
 
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -81,9 +82,37 @@ fun TaskSettingsSheet(
                     ModelSearchScope.ActiveProvider ->
                         listed.filter { it.instanceId == settings.provider.instanceId }
                 }
-            if (visible.any { it.instanceId == settings.provider.instanceId }) visible
-            else visible + settings.provider
+            if (visible.any { it.instanceId == settings.provider.instanceId }) {
+                visible
+            } else if (searchScope == ModelSearchScope.ActiveProvider || visible.isEmpty()) {
+                visible + settings.provider
+            } else {
+                visible
+            }
         }
+
+    val activeProvider =
+        remember(instances, settings.provider) {
+            if (instances.any { it.instanceId == settings.provider.instanceId }) {
+                settings.provider
+            } else {
+                instances.firstOrNull() ?: settings.provider
+            }
+        }
+
+    LaunchedEffect(activeProvider) {
+        if (activeProvider.instanceId != settings.provider.instanceId) {
+            val models = modelsFor(activeProvider)
+            onSettingsChange(
+                settings.copy(
+                    provider = activeProvider,
+                    model = models.firstOrNull() ?: settings.model,
+                    options = emptyList(),
+                )
+            )
+        }
+    }
+
     var query by remember { mutableStateOf("") }
     val groups =
         remember(catalog, settings.provider, query, searchScope) {
@@ -94,6 +123,7 @@ fun TaskSettingsSheet(
         remember(catalog, settings.provider, settings.model, settings.options) {
             providerOptionDescriptors(catalog, settings.provider, settings.model, settings.options)
         }
+
     fun change(id: String, value: ProviderOptionValue) {
         // Null means the catalog moved under the sheet; dropping the tap is better
         // than persisting a value the provider would refuse on the next turn.
@@ -101,6 +131,7 @@ fun TaskSettingsSheet(
             onSettingsChange(settings.copy(options = it))
         }
     }
+
     S5BottomSheet(
         onDismiss = onDismiss,
         title = title,
@@ -110,18 +141,24 @@ fun TaskSettingsSheet(
             (listOf(settings.provider.label) + providerOptionSummaryLabels(descriptors))
                 .joinToString(" · "),
     ) {
-        // Bounded so the sheet stops short of the top: the list is long and a
-        // full-height sheet reads as a page, which is what this replaced.
-        Column(
-            Modifier.fillMaxWidth()
-                .heightIn(max = 560.dp)
-                .verticalScroll(rememberScrollState())
-                .padding(bottom = S5Theme.spacing.large),
-            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+        // LazyColumn ensures even long model lists (hundreds of models) render smoothly
+        // without composition lag or frame drops.
+        LazyColumn(
+            modifier =
+                Modifier.fillMaxWidth()
+                    .heightIn(max = 560.dp),
+            contentPadding = PaddingValues(bottom = S5Theme.spacing.large),
+            verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
-            S5SectionHeader("Agent")
-            SheetGroup {
-                instances.forEachIndexed { index, provider ->
+            item(key = "header_agent", contentType = "header") {
+                S5SectionHeader("Agent")
+            }
+            itemsIndexed(
+                items = instances,
+                key = { _, provider -> "agent_${provider.instanceId}" },
+                contentType = { _, _ -> "agent_row" },
+            ) { index, provider ->
+                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                     S5SelectableRow(
                         label = provider.label,
                         selected = provider.instanceId == settings.provider.instanceId,
@@ -144,39 +181,53 @@ fun TaskSettingsSheet(
                 }
             }
 
-            S5SectionHeader("Model")
-            Box(
-                Modifier.padding(
-                    horizontal = S5Theme.spacing.gutter,
-                    vertical = S5Theme.spacing.tiny,
-                )
-            ) {
-                S5SearchField(
-                    value = query,
-                    onValueChange = { query = it },
-                    placeholder =
-                        when (searchScope) {
-                            ModelSearchScope.AllProviders -> "Find a model"
-                            ModelSearchScope.ActiveProvider ->
-                                "Find a ${settings.provider.label} model"
-                        },
-                )
+            item(key = "header_model", contentType = "header") {
+                S5SectionHeader("Model")
+            }
+            item(key = "search_field", contentType = "search") {
+                Box(
+                    Modifier.padding(
+                        horizontal = S5Theme.spacing.gutter,
+                        vertical = S5Theme.spacing.tiny,
+                    )
+                ) {
+                    S5SearchField(
+                        value = query,
+                        onValueChange = { query = it },
+                        placeholder =
+                            when (searchScope) {
+                                ModelSearchScope.AllProviders -> "Find a model"
+                                ModelSearchScope.ActiveProvider ->
+                                    "Find a ${settings.provider.label} model"
+                            },
+                    )
+                }
             }
             if (groups.isEmpty() && query.isNotBlank()) {
-                Box(Modifier.padding(S5Theme.spacing.gutter)) {
-                    Text(
-                        "No matching models",
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                item(key = "no_matching_models", contentType = "empty") {
+                    Box(Modifier.padding(S5Theme.spacing.gutter)) {
+                        Text(
+                            "No matching models",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
             groups.forEach { group ->
                 // Only labelled once the search spans more than the selected agent:
                 // a single group's heading would repeat the agent row above it.
-                if (groups.size > 1) S5SectionHeader(group.instance.label)
-                SheetGroup {
-                    group.models.forEachIndexed { index, model ->
+                if (groups.size > 1) {
+                    item(key = "header_group_${group.instance.instanceId}", contentType = "header") {
+                        S5SectionHeader(group.instance.label)
+                    }
+                }
+                itemsIndexed(
+                    items = group.models,
+                    key = { _, model -> "model_${group.instance.instanceId}_$model" },
+                    contentType = { _, _ -> "model_row" },
+                ) { index, model ->
+                    Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                         S5SelectableRow(
                             label = model,
                             selected =
@@ -199,14 +250,18 @@ fun TaskSettingsSheet(
                 }
             }
 
-            S5SectionHeader("Mode")
-            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                S5ConnectedButtonGroup(
-                    options = RuntimeMode.entries,
-                    selected = settings.runtimeMode,
-                    onSelect = { onSettingsChange(settings.copy(runtimeMode = it)) },
-                    label = { it.label },
-                )
+            item(key = "header_mode", contentType = "header") {
+                S5SectionHeader("Mode")
+            }
+            item(key = "mode_picker", contentType = "mode") {
+                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                    S5ConnectedButtonGroup(
+                        options = RuntimeMode.entries,
+                        selected = settings.runtimeMode,
+                        onSelect = { onSettingsChange(settings.copy(runtimeMode = it)) },
+                        label = { it.label },
+                    )
+                }
             }
 
             // No "Reasoning effort" heading of our own: the descriptor names itself,
@@ -215,27 +270,35 @@ fun TaskSettingsSheet(
             descriptors.forEach { descriptor ->
                 when (descriptor) {
                     is ProviderOptionDescriptor.Select -> {
-                        S5SectionHeader(descriptor.label)
+                        item(key = "header_desc_${descriptor.id}", contentType = "header") {
+                            S5SectionHeader(descriptor.label)
+                        }
                         // A short set stays a button group, which is one tap. A long
                         // one (Claude ships seven efforts) would shrink to unreadable
                         // slivers, so it becomes rows.
                         if (descriptor.options.size <= MAX_INLINE_OPTION_CHOICES) {
-                            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                                S5ConnectedButtonGroup(
-                                    options = descriptor.options,
-                                    selected =
-                                        descriptor.options.firstOrNull {
-                                            it.id == descriptor.effectiveValue
-                                        } ?: descriptor.options.first(),
-                                    onSelect = {
-                                        change(descriptor.id, ProviderOptionValue.Text(it.id))
-                                    },
-                                    label = { it.label },
-                                )
+                            item(key = "desc_btn_${descriptor.id}", contentType = "desc_btn") {
+                                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                                    S5ConnectedButtonGroup(
+                                        options = descriptor.options,
+                                        selected =
+                                            descriptor.options.firstOrNull {
+                                                it.id == descriptor.effectiveValue
+                                            } ?: descriptor.options.first(),
+                                        onSelect = {
+                                            change(descriptor.id, ProviderOptionValue.Text(it.id))
+                                        },
+                                        label = { it.label },
+                                    )
+                                }
                             }
                         } else {
-                            SheetGroup {
-                                descriptor.options.forEachIndexed { index, choice ->
+                            itemsIndexed(
+                                items = descriptor.options,
+                                key = { _, choice -> "desc_choice_${descriptor.id}_${choice.id}" },
+                                contentType = { _, _ -> "desc_choice" },
+                            ) { index, choice ->
+                                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                                     S5SelectableRow(
                                         label = choice.label,
                                         supporting = choice.description,
@@ -252,24 +315,33 @@ fun TaskSettingsSheet(
                             }
                         }
                     }
-                    is ProviderOptionDescriptor.Toggle ->
-                        SheetGroup {
-                            S5SwitchRow(
-                                icon = null,
-                                label = descriptor.label,
-                                supporting = descriptor.description,
-                                checked = descriptor.currentValue,
-                                onCheckedChange = {
-                                    change(descriptor.id, ProviderOptionValue.Flag(it))
-                                },
-                            )
+                    is ProviderOptionDescriptor.Toggle -> {
+                        item(key = "desc_toggle_${descriptor.id}", contentType = "desc_toggle") {
+                            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                                S5SwitchRow(
+                                    icon = null,
+                                    label = descriptor.label,
+                                    supporting = descriptor.description,
+                                    checked = descriptor.currentValue,
+                                    onCheckedChange = {
+                                        change(descriptor.id, ProviderOptionValue.Flag(it))
+                                    },
+                                )
+                            }
                         }
+                    }
                 }
             }
 
-            S5SectionHeader("Permissions")
-            SheetGroup {
-                ApprovalPolicy.entries.forEachIndexed { index, policy ->
+            item(key = "header_permissions", contentType = "header") {
+                S5SectionHeader("Permissions")
+            }
+            itemsIndexed(
+                items = ApprovalPolicy.entries,
+                key = { _, policy -> "policy_${policy.name}" },
+                contentType = { _, _ -> "policy_row" },
+            ) { index, policy ->
+                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                     S5SelectableRow(
                         label = policy.label,
                         supporting =
@@ -285,16 +357,6 @@ fun TaskSettingsSheet(
                 }
             }
         }
-    }
-}
-
-@Composable
-private fun SheetGroup(content: @Composable () -> Unit) {
-    Column(
-        Modifier.padding(horizontal = S5Theme.spacing.gutter),
-        verticalArrangement = Arrangement.spacedBy(2.dp),
-    ) {
-        content()
     }
 }
 

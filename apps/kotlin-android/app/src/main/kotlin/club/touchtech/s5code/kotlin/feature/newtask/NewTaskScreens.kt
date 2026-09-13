@@ -34,6 +34,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -247,6 +248,18 @@ fun NewTaskDraftScreen(
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val providerCatalog by store.workspace.providerCatalog.collectAsStateWithLifecycle()
+    val providerCatalogs by store.workspace.providerCatalogs.collectAsStateWithLifecycle()
+    val machineCatalog =
+        remember(draft.environmentId, providerCatalogs, providerCatalog, environments) {
+            val scoped = providerCatalogs[draft.environmentId]
+            if (scoped != null && scoped.isNotEmpty()) {
+                scoped
+            } else if (environments.none { it.id == draft.environmentId }) {
+                providerCatalog
+            } else {
+                scoped ?: emptyList()
+            }
+        }
     val scope = rememberCoroutineScope()
     var creating by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<String?>(null) }
@@ -381,11 +394,48 @@ fun NewTaskDraftScreen(
         onDismiss = { previewAttachment = null },
     )
 
+    LaunchedEffect(draft.environmentId, machineCatalog) {
+        if (machineCatalog.isNotEmpty()) {
+            val hasMatchingProvider =
+                machineCatalog.any { it.instance.instanceId == draft.settings.provider.instanceId }
+            if (!hasMatchingProvider) {
+                val first = machineCatalog.first()
+                store.updateDraft {
+                    it.copy(
+                        settings =
+                            it.settings.copy(
+                                provider = first.instance,
+                                model = first.models.firstOrNull() ?: it.settings.model,
+                                options = emptyList(),
+                            )
+                    )
+                }
+            } else {
+                val currentEntry =
+                    machineCatalog.firstOrNull { it.instance.instanceId == draft.settings.provider.instanceId }
+                if (currentEntry != null &&
+                    currentEntry.models.isNotEmpty() &&
+                    draft.settings.model !in currentEntry.models
+                ) {
+                    store.updateDraft {
+                        it.copy(
+                            settings =
+                                it.settings.copy(
+                                    model = currentEntry.models.first(),
+                                    options = emptyList(),
+                                )
+                        )
+                    }
+                }
+            }
+        }
+    }
+
     if (settingsOpen) {
         TaskSettingsSheet(
             settings = draft.settings,
-            catalog = providerCatalog,
-            modelsFor = store::modelsFor,
+            catalog = machineCatalog,
+            modelsFor = { provider -> store.modelsFor(provider, draft.environmentId) },
             onSettingsChange = { settings -> store.updateDraft { it.copy(settings = settings) } },
             onDismiss = { settingsOpen = false },
             // A draft has no context to hand over, so searching every agent is free.

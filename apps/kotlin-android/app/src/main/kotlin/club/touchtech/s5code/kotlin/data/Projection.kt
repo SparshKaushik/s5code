@@ -646,7 +646,7 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
             FeedEntry.ToolCall(
                 id = activity.id,
                 name = activity.summary,
-                summary = payload?.string("command") ?: payload?.string("itemType").orEmpty(),
+                summary = extractToolSummary(payload),
                 detail = payload?.string("detail").orEmpty(),
                 state =
                     when {
@@ -697,6 +697,28 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
 
         else -> null
     }
+}
+
+private fun extractToolSummary(payload: JsonObject?): String {
+    if (payload == null) return ""
+    val directCommand = payload.string("command")
+    if (!directCommand.isNullOrBlank()) return directCommand
+    val data = payload["data"] as? JsonObject
+    val dataCommand = data?.string("command")
+    if (!dataCommand.isNullOrBlank()) return dataCommand
+    val item = data?.get("item") as? JsonObject
+    val itemCommand = item?.string("command")
+    if (!itemCommand.isNullOrBlank()) return itemCommand
+    val itemInput = item?.get("input") as? JsonObject
+    val itemInputCommand = itemInput?.string("command")
+    if (!itemInputCommand.isNullOrBlank()) return itemInputCommand
+    val itemResult = item?.get("result") as? JsonObject
+    val itemResultCommand = itemResult?.string("command")
+    if (!itemResultCommand.isNullOrBlank()) return itemResultCommand
+    val rawOutput = data?.get("rawOutput") as? JsonObject
+    val rawOutputCommand = rawOutput?.string("command")
+    if (!rawOutputCommand.isNullOrBlank()) return rawOutputCommand
+    return payload.string("itemType").orEmpty()
 }
 
 private fun planStepsOf(payload: JsonObject?): List<PlanStep>? {

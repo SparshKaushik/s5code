@@ -90,6 +90,11 @@ interface WorkspaceGateway {
     val providerCatalog: StateFlow<List<ProviderCatalogEntry>>
 
     /**
+     * Provider instances configured per connected environment.
+     */
+    val providerCatalogs: StateFlow<Map<EnvironmentId, List<ProviderCatalogEntry>>>
+
+    /**
      * Slash commands the connected environments advertise for a provider instance,
      * merged. Not suspend: these ride along with the provider config the session
      * already holds, so the composer can filter them while the user types.
