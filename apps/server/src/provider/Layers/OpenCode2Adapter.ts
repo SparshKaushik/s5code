@@ -504,6 +504,29 @@ export function makeOpenCode2Adapter(
               return;
             }
 
+            // Native compaction has no turn, but ProviderService waits for this
+            // terminal event before it can clear the compaction request.
+            if (eventType === "session.compaction.ended") {
+              yield* emit({
+                ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                type: "thread.state.changed",
+                payload: { state: "compacted", detail: data },
+              });
+              return;
+            }
+            if (eventType === "session.compaction.failed") {
+              yield* emit({
+                ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                type: "runtime.error",
+                payload: {
+                  message: structuredErrorMessage(data.error) ?? "Context compaction failed",
+                  class: "provider_error",
+                  detail: data,
+                },
+              });
+              return;
+            }
+
             if (!turnId) return;
 
             const observedMessageId = data.assistantMessageID ?? data.messageID;

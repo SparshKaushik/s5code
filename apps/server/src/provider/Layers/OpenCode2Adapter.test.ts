@@ -817,6 +817,37 @@ describe("OpenCode2Adapter", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("reports native compaction completion without an active turn", () =>
+    Effect.gen(function* () {
+      const { handle, emit } = createMockHost();
+      const adapter = yield* makeOpenCode2Adapter(handle);
+      const threadId = ThreadId.make("thread-compaction");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+      const events = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(events, event)),
+      );
+
+      emit({
+        type: "session.compaction.ended",
+        data: { sessionID: sessionId, reason: "manual", text: "summary", recent: "msg-1" },
+      });
+
+      while (true) {
+        const event = yield* Queue.take(events);
+        if (event.type !== "thread.state.changed") continue;
+        expect((event.payload as any).state).toBe("compacted");
+        expect(event.turnId).toBeUndefined();
+        return;
+      }
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("rejects attachments when connected to a remote OpenCode host", () =>
     Effect.gen(function* () {
       const { handle } = createMockHost();
