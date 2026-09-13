@@ -15,8 +15,14 @@ vi.mock("../../state/presentation", () => ({
 vi.mock("../../state/server", () => ({ serverEnvironment: { refreshProviders: null } }));
 vi.mock("../../state/use-atom-command", () => ({ useAtomCommand: () => state.refreshProviders }));
 vi.mock("../../env", () => ({ isElectron: false }));
-vi.mock("../../hooks/useSettings", () => ({ usePrimarySettings: () => "24h" }));
+vi.mock("../../hooks/useSettings", () => ({
+  usePrimarySettings: () => "24h",
+  useClientSettings: (selector?: (settings: any) => any) =>
+    selector ? selector({ usageModelAliases: [] }) : { usageModelAliases: [] },
+  useUpdateClientSettings: () => () => {},
+}));
 vi.mock("../../state/usage", () => ({
+  useUsageModelSearch: () => ({ models: [], isPending: false }),
   useUsage: () => ({
     merged: mergeUsage([], USAGE_CONTRACT_VERSION),
     environments: [
