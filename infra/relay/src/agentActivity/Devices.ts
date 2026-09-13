@@ -11,23 +11,14 @@ import { and, eq } from "drizzle-orm";
 import { sql } from "drizzle-orm";
 
 import * as RelayDb from "../db.ts";
-import {
-  relayAndroidLiveUpdates,
-  relayLiveActivities,
-  relayMobileDevices,
-} from "../persistence/schema.ts";
+import { relayLiveActivities, relayMobileDevices } from "../persistence/schema.ts";
 
-export class DeviceRegistrationPersistenceError extends Schema.TaggedErrorClass<DeviceRegistrationPersistenceError>()(
+export class DeviceRegistrationPersistenceError extends Schema.TaggedError<DeviceRegistrationPersistenceError>()(
   "DeviceRegistrationPersistenceError",
   {
     userId: Schema.String,
     deviceId: Schema.String,
-    stage: Schema.Literals([
-      "claim-push-token",
-      "claim-push-to-start-token",
-      "claim-fcm-token",
-      "upsert-device",
-    ]),
+    stage: Schema.Literals(["claim-push-token", "claim-push-to-start-token", "upsert-device"]),
     cause: Schema.Defect(),
   },
 ) {
@@ -36,12 +27,12 @@ export class DeviceRegistrationPersistenceError extends Schema.TaggedErrorClass<
   }
 }
 
-export class DeviceUnregistrationPersistenceError extends Schema.TaggedErrorClass<DeviceUnregistrationPersistenceError>()(
+export class DeviceUnregistrationPersistenceError extends Schema.TaggedError<DeviceUnregistrationPersistenceError>()(
   "DeviceUnregistrationPersistenceError",
   {
     userId: Schema.String,
     deviceId: Schema.String,
-    stage: Schema.Literals(["delete-live-activity", "delete-android-live-update", "delete-device"]),
+    stage: Schema.Literals(["delete-live-activity", "delete-device"]),
     cause: Schema.Defect(),
   },
 ) {
@@ -50,7 +41,7 @@ export class DeviceUnregistrationPersistenceError extends Schema.TaggedErrorClas
   }
 }
 
-export class DeviceListPersistenceError extends Schema.TaggedErrorClass<DeviceListPersistenceError>()(
+export class DeviceListPersistenceError extends Schema.TaggedError<DeviceListPersistenceError>()(
   "DeviceListPersistenceError",
   {
     userId: Schema.String,
@@ -129,23 +120,6 @@ export const make = Effect.gen(function* () {
             ),
           );
       }
-      if (registration.fcmToken) {
-        yield* db
-          .update(relayMobileDevices)
-          .set({ fcmToken: null, updatedAt })
-          .where(eq(relayMobileDevices.fcmToken, registration.fcmToken))
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new DeviceRegistrationPersistenceError({
-                  userId: input.userId,
-                  deviceId: registration.deviceId,
-                  stage: "claim-fcm-token",
-                  cause,
-                }),
-            ),
-          );
-      }
 
       yield* db
         .insert(relayMobileDevices)
@@ -155,12 +129,12 @@ export const make = Effect.gen(function* () {
           label: registration.label,
           platform: registration.platform,
           iosMajorVersion: registration.iosMajorVersion ?? null,
+          androidApiLevel: registration.androidApiLevel ?? null,
           appVersion: registration.appVersion ?? null,
           bundleId: registration.bundleId ?? null,
           apsEnvironment: registration.apsEnvironment ?? null,
           pushToken: registration.pushToken ?? null,
           pushToStartToken: registration.pushToStartToken ?? null,
-          fcmToken: registration.fcmToken ?? null,
           preferencesJson: registration.preferences,
           createdAt: updatedAt,
           updatedAt,
@@ -171,6 +145,7 @@ export const make = Effect.gen(function* () {
             platform: registration.platform,
             label: registration.label,
             iosMajorVersion: registration.iosMajorVersion ?? null,
+            androidApiLevel: registration.androidApiLevel ?? null,
             appVersion: registration.appVersion ?? null,
             // Preserve routing from newer app builds when an older build
             // re-registers without these fields.
@@ -184,7 +159,6 @@ export const make = Effect.gen(function* () {
                 excluded.push_to_start_token,
                 ${relayMobileDevices.pushToStartToken}
               )`,
-            fcmToken: sql`coalesce(excluded.fcm_token, ${relayMobileDevices.fcmToken})`,
             preferencesJson: registration.preferences,
             updatedAt,
           },
@@ -227,25 +201,6 @@ export const make = Effect.gen(function* () {
           ),
         );
       yield* db
-        .delete(relayAndroidLiveUpdates)
-        .where(
-          and(
-            eq(relayAndroidLiveUpdates.userId, input.userId),
-            eq(relayAndroidLiveUpdates.deviceId, input.deviceId),
-          ),
-        )
-        .pipe(
-          Effect.mapError(
-            (cause) =>
-              new DeviceUnregistrationPersistenceError({
-                userId: input.userId,
-                deviceId: input.deviceId,
-                stage: "delete-android-live-update",
-                cause,
-              }),
-          ),
-        );
-      yield* db
         .delete(relayMobileDevices)
         .where(
           and(
@@ -272,6 +227,7 @@ export const make = Effect.gen(function* () {
           label: relayMobileDevices.label,
           platform: relayMobileDevices.platform,
           iosMajorVersion: relayMobileDevices.iosMajorVersion,
+          androidApiLevel: relayMobileDevices.androidApiLevel,
           appVersion: relayMobileDevices.appVersion,
           preferences: relayMobileDevices.preferencesJson,
           updatedAt: relayMobileDevices.updatedAt,
@@ -288,6 +244,7 @@ export const make = Effect.gen(function* () {
         label: row.label,
         platform: row.platform,
         iosMajorVersion: row.iosMajorVersion,
+        androidApiLevel: row.androidApiLevel,
         appVersion: row.appVersion,
         notifications: {
           enabled: row.preferences.notificationsEnabled,

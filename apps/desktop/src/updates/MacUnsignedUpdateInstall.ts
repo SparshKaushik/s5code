@@ -9,7 +9,7 @@ import * as Stream from "effect/Stream";
 import { ChildProcess } from "effect/unstable/process";
 import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
 
-export class MacUnsignedUpdateInstallError extends Schema.TaggedErrorClass<MacUnsignedUpdateInstallError>()(
+export class MacUnsignedUpdateInstallError extends Schema.TaggedError<MacUnsignedUpdateInstallError>()(
   "MacUnsignedUpdateInstallError",
   {
     operation: Schema.Literals(["extract", "replace"]),

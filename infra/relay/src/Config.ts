@@ -14,23 +14,16 @@ export interface ApnsCredentials {
   readonly environment: ApnsEnvironment;
 }
 
-export interface FcmCredentials {
-  readonly projectId: string;
-  readonly clientEmail: string;
-  readonly privateKey: Redacted.Redacted<string>;
-  readonly tokenUri: string;
-}
-
 export class RelayConfiguration extends Context.Service<
   RelayConfiguration,
   {
     readonly relayIssuer: string;
-    readonly apns: ApnsCredentials;
-    readonly fcm: FcmCredentials;
+    readonly apns: ApnsCredentials | null;
+    readonly fcmServiceAccount?: Redacted.Redacted<string>;
     readonly clerkSecretKey: Redacted.Redacted<string>;
     readonly clerkPublishableKey: string;
     readonly clerkJwtAudience: string;
-    readonly deliveryJobSigningSecret: Redacted.Redacted<string>;
+    readonly apnsDeliveryJobSigningSecret: Redacted.Redacted<string>;
     readonly cloudMintPrivateKey: Redacted.Redacted<string>;
     readonly cloudMintPublicKey: string;
     readonly managedEndpointBaseDomain: string | undefined;

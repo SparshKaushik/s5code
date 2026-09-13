@@ -1,5 +1,12 @@
 import * as Cloudflare from "alchemy/Cloudflare";
 
-export const RelayDeliveryDeadLetterQueue = Cloudflare.Queues.Queue("RelayDeliveryDeadLetterQueue");
+export const RelayApnsDeliveryDeadLetterQueue = Cloudflare.Queues.Queue(
+  "RelayApnsDeliveryDeadLetterQueue",
+);
 
-export const RelayDeliveryQueue = Cloudflare.Queues.Queue("RelayDeliveryQueue");
+export const RelayApnsDeliveryQueue = Cloudflare.Queues.Queue("RelayApnsDeliveryQueue");
+
+export const RelayFcmDeliveryQueue = Cloudflare.Queues.Queue("RelayFcmDeliveryQueue");
+export const RelayFcmDeliveryDeadLetterQueue = Cloudflare.Queues.Queue(
+  "RelayFcmDeliveryDeadLetterQueue",
+);

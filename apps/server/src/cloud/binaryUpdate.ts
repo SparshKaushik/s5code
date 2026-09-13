@@ -32,7 +32,7 @@ const VALIDATE_TIMEOUT = Duration.seconds(30);
 /** How the replacement image gets to run. */
 export type ServerBinaryRestartMethod = "systemd" | "self-exec";
 
-export class ServerBinaryUpdateError extends Schema.TaggedErrorClass<ServerBinaryUpdateError>()(
+export class ServerBinaryUpdateError extends Schema.TaggedError<ServerBinaryUpdateError>()(
   "ServerBinaryUpdateError",
   {
     step: Schema.Literals([

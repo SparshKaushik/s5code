@@ -38,7 +38,10 @@ const FALLBACK_SCALE_STEPS = [0.75, 0.55] as const;
 const HEIC_IMAGE_MIME_TYPE = /^image\/hei(?:c|f)$/i;
 const HEIC_IMAGE_EXTENSION = /\.(?:heic|heif)$/i;
 
+type ImageSize = { width: number; height: number };
+
 export interface CompressedStashImage {
+  imageSize?: ImageSize;
   dataUrl: string;
   mimeType: string;
   sizeBytes: number;
@@ -57,7 +60,7 @@ export type CompressStashImageResult =
   | { ok: false; reason: ImageCompressionFailureReason };
 
 export type CompressImageFileResult =
-  | { ok: true; file: File; recompressed: boolean }
+  | { ok: true; file: File; recompressed: boolean; imageSize?: ImageSize }
   | { ok: false; reason: ImageCompressionFailureReason };
 
 /** Finder and some browsers omit the MIME type when dragging HEIC photos. */
@@ -170,7 +173,7 @@ function dataUrlByteLength(dataUrl: string): number {
 }
 
 /** Base64 payload of a data URL decoded back into a `File`. */
-function dataUrlToFile(dataUrl: string, name: string, mimeType: string): File {
+export function dataUrlToFile(dataUrl: string, name: string, mimeType: string): File {
   const payload = dataUrl.slice(dataUrl.indexOf(",") + 1);
   const binary = atob(payload);
   const bytes = new Uint8Array(binary.length);
@@ -225,34 +228,35 @@ function createCanvas(width: number, height: number): Canvas2D | null {
  * and it keeps alpha, so screenshots with transparency survive intact.
  * Browsers that can't encode it silently fall back to JPEG.
  */
-async function encodeToDataUrl(
+async function encodeCanvas(
   canvas: OffscreenCanvas | HTMLCanvasElement,
   quality: number,
   mimeType: string,
-): Promise<{ dataUrl: string; mimeType: string } | null> {
+  budgetChars: number,
+): Promise<{ dataUrl: string | null; mimeType: string } | null> {
   if (typeof HTMLCanvasElement !== "undefined" && canvas instanceof HTMLCanvasElement) {
     const dataUrl = canvas.toDataURL(mimeType, quality);
     // toDataURL silently returns a PNG when the requested type is unsupported.
     if (!dataUrl.startsWith(`data:${mimeType}`)) return null;
-    return { dataUrl, mimeType };
+    return { dataUrl: dataUrl.length <= budgetChars ? dataUrl : null, mimeType };
   }
   const blob = await (canvas as OffscreenCanvas).convertToBlob({ type: mimeType, quality });
   if (blob.type && blob.type !== mimeType) return null;
+  const dataUrlLength = `data:${mimeType};base64,`.length + 4 * Math.ceil(blob.size / 3);
+  if (dataUrlLength > budgetChars) return { dataUrl: null, mimeType };
   return { dataUrl: await blobToDataUrl(blob, mimeType), mimeType };
 }
 
 /**
  * Draws `bitmap` scaled to fit `maxDimension` and encodes it, stepping
- * quality down until the data URL fits `budgetChars`. Returns the smallest
- * encoding produced, even if it still exceeds the budget, so the caller can
- * decide whether to keep or drop it.
+ * quality down until the data URL fits `budgetChars`.
  */
 async function encodeWithinBudget(
   bitmap: ImageBitmap,
   maxDimension: number,
   budgetChars: number,
   preferredMimeType?: "image/jpeg",
-): Promise<{ dataUrl: string; mimeType: string } | null> {
+): Promise<{ dataUrl: string; mimeType: string; imageSize: ImageSize } | null> {
   const scale = Math.min(1, maxDimension / Math.max(bitmap.width, bitmap.height));
   const width = Math.max(1, Math.round(bitmap.width * scale));
   const height = Math.max(1, Math.round(bitmap.height * scale));
@@ -263,7 +267,7 @@ async function encodeWithinBudget(
   // happen before drawing and depends on which codec we end up using.
   const mimeType =
     preferredMimeType ??
-    ((await encodeToDataUrl(target.canvas, QUALITY_STEPS[0], "image/webp"))
+    ((await encodeCanvas(target.canvas, QUALITY_STEPS[0], "image/webp", 0))
       ? "image/webp"
       : "image/jpeg");
 
@@ -273,22 +277,18 @@ async function encodeWithinBudget(
   }
   target.context.drawImage(bitmap, 0, 0, width, height);
 
-  let smallest: { dataUrl: string; mimeType: string } | null = null;
   for (const quality of QUALITY_STEPS) {
-    const encoded = await encodeToDataUrl(target.canvas, quality, mimeType);
+    const encoded = await encodeCanvas(target.canvas, quality, mimeType, budgetChars);
     if (!encoded) break;
-    if (smallest === null || encoded.dataUrl.length < smallest.dataUrl.length) {
-      smallest = encoded;
-    }
-    if (encoded.dataUrl.length <= budgetChars) {
-      return encoded;
+    if (encoded.dataUrl !== null) {
+      return { dataUrl: encoded.dataUrl, mimeType: encoded.mimeType, imageSize: { width, height } };
     }
   }
-  return smallest;
+  return null;
 }
 
 type ReencodeResult =
-  | { ok: true; dataUrl: string; mimeType: string }
+  | { ok: true; dataUrl: string; mimeType: string; imageSize: ImageSize }
   | { ok: false; reason: ImageCompressionFailureReason };
 
 /**
@@ -323,7 +323,7 @@ async function reencodeWithinBudget(
     let encodeFailed = false;
     for (const dimensionScale of [1, ...FALLBACK_SCALE_STEPS]) {
       const targetDimension = Math.max(1, Math.round(baseDimension * dimensionScale));
-      let encoded: { dataUrl: string; mimeType: string } | null;
+      let encoded: Awaited<ReturnType<typeof encodeWithinBudget>>;
       try {
         encoded = await encodeWithinBudget(bitmap, targetDimension, budgetChars, preferredMimeType);
       } catch {
@@ -338,7 +338,12 @@ async function reencodeWithinBudget(
       }
       encodeFailed = false;
       if (encoded && encoded.dataUrl.length <= budgetChars) {
-        return { ok: true, dataUrl: encoded.dataUrl, mimeType: encoded.mimeType };
+        return {
+          ok: true,
+          dataUrl: encoded.dataUrl,
+          mimeType: encoded.mimeType,
+          imageSize: encoded.imageSize,
+        };
       }
     }
     return { ok: false, reason: encodeFailed ? "unreadable" : "too-large" };
@@ -387,6 +392,7 @@ export async function compressImageForStash(
       mimeType: reencoded.mimeType,
       sizeBytes: dataUrlByteLength(reencoded.dataUrl),
       recompressed: true,
+      imageSize: reencoded.imageSize,
     },
   };
 }
@@ -427,6 +433,7 @@ export async function compressImageToByteLimit(
       reencoded.mimeType,
     ),
     recompressed: true,
+    imageSize: reencoded.imageSize,
   };
 }
 

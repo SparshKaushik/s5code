@@ -8,7 +8,7 @@ import * as Headers from "effect/unstable/http/Headers";
 import * as HttpClient from "effect/unstable/http/HttpClient";
 import * as HttpClientRequest from "effect/unstable/http/HttpClientRequest";
 import { ApnsEnvironment as ApnsEnvironmentSchema, type ApnsCredentials } from "../Config.ts";
-import type { LiveActivityAlert, NotificationPayload } from "./deliveryJobs.ts";
+import type { ApnsLiveActivityAlert, ApnsNotificationPayload } from "./apnsDeliveryJobs.ts";
 import { ApnsJwtEncodingError, ApnsJwtSigningError } from "./apnsJwt.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
 
@@ -53,7 +53,7 @@ export interface ApnsDeliveryResult {
   readonly apnsId: string | null;
 }
 
-export class ApnsHttpRequestError extends Schema.TaggedErrorClass<ApnsHttpRequestError>()(
+export class ApnsHttpRequestError extends Schema.TaggedError<ApnsHttpRequestError>()(
   "ApnsHttpRequestError",
   {
     requestKind: ApnsRequestKindSchema,
@@ -102,18 +102,18 @@ type MakeLiveActivityRequestInput =
   | (LiveActivityRequestBase & {
       readonly event: "end";
       readonly state: RelayAgentActivityAggregateState | null;
-      readonly alert?: LiveActivityAlert | null;
+      readonly alert?: ApnsLiveActivityAlert | null;
     })
   | (LiveActivityRequestBase & {
       readonly event: "start" | "update";
       readonly state: RelayAgentActivityAggregateState;
-      readonly alert?: LiveActivityAlert | null;
+      readonly alert?: ApnsLiveActivityAlert | null;
     });
 
 // An alert dict on an update/end makes it an "alerting" update: iOS wakes the
 // screen and plays the haptic (the Apple Sports score-change behavior) instead
 // of silently redrawing the activity.
-function liveActivityAlertPayload(alert: LiveActivityAlert) {
+function liveActivityAlertPayload(alert: ApnsLiveActivityAlert) {
   return {
     alert: {
       title: alert.title,
@@ -175,7 +175,7 @@ function makeLiveActivityRequest(input: MakeLiveActivityRequestInput): ApnsLiveA
 
 function makePushNotificationRequest(input: {
   readonly token: string;
-  readonly notification: NotificationPayload;
+  readonly notification: ApnsNotificationPayload;
 }): ApnsPushNotificationRequest {
   return {
     token: input.token,
@@ -195,7 +195,7 @@ function makePushNotificationRequest(input: {
   };
 }
 
-function deliveryReasonFromBody(body: string): string | undefined {
+function apnsReasonFromBody(body: string): string | undefined {
   if (body.trim().length === 0) {
     return undefined;
   }
@@ -279,7 +279,7 @@ export const make = Effect.gen(function* () {
           }),
       ),
     );
-    const reason = deliveryReasonFromBody(responseText);
+    const reason = apnsReasonFromBody(responseText);
     return {
       ok: response.status >= 200 && response.status < 300,
       status: response.status,
@@ -341,7 +341,7 @@ export const make = Effect.gen(function* () {
             }),
         ),
       );
-      const reason = deliveryReasonFromBody(responseText);
+      const reason = apnsReasonFromBody(responseText);
       return {
         ok: response.status >= 200 && response.status < 300,
         status: response.status,

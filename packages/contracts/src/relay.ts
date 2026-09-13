@@ -47,31 +47,36 @@ export const RelayDeviceRegistrationRequest = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  // iOS-only: the Live Activity runtime requires iOS 18+. Android builds omit
-  // this and identify themselves with appVersion instead.
   iosMajorVersion: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
+  androidApiLevel: Schema.optional(Schema.Int.check(Schema.isGreaterThanOrEqualTo(24))),
   appVersion: Schema.optional(TrimmedNonEmptyString),
   // APNs routing for this install: the topic must match the app's bundle id
   // (dev/preview/prod variants differ) and development-signed builds receive
   // sandbox tokens. Optional so older app builds keep registering; the relay
-  // falls back to its configured defaults. Android builds omit these.
+  // falls back to its configured defaults.
   bundleId: Schema.optional(TrimmedNonEmptyString),
   apsEnvironment: Schema.optional(RelayApnsEnvironment),
   pushToken: Schema.optional(TrimmedNonEmptyString),
   pushToStartToken: Schema.optional(TrimmedNonEmptyString),
-  // Android FCM registration token. Android builds send this instead of the
-  // iOS push tokens above.
-  fcmToken: Schema.optional(TrimmedNonEmptyString),
   preferences: RelayAgentAwarenessPreferences,
-});
+}).check(
+  Schema.makeFilter((device) =>
+    device.platform === "ios"
+      ? device.iosMajorVersion !== undefined
+      : device.androidApiLevel !== undefined &&
+        device.iosMajorVersion === undefined &&
+        device.apsEnvironment === undefined &&
+        device.pushToStartToken === undefined,
+  ),
+);
 export type RelayDeviceRegistrationRequest = typeof RelayDeviceRegistrationRequest.Type;
 
 export const RelayClientDeviceRecord = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   label: TrimmedNonEmptyString,
   platform: RelayAgentAwarenessPlatform,
-  // Null for Android devices, which do not report an iOS major version.
   iosMajorVersion: Schema.NullOr(Schema.Int.check(Schema.isGreaterThanOrEqualTo(18))),
+  androidApiLevel: Schema.optional(Schema.NullOr(Schema.Int)),
   appVersion: Schema.NullOr(TrimmedNonEmptyString),
   notifications: Schema.Struct({
     enabled: Schema.Boolean,
@@ -92,6 +97,17 @@ export const RelayListDevicesResponse = Schema.Struct({
 });
 export type RelayListDevicesResponse = typeof RelayListDevicesResponse.Type;
 
+// Installed clients decode v1 as iOS-only. Keep that response contract frozen.
+export const RelayListDevicesResponseV1 = Schema.Struct({
+  devices: Schema.Array(
+    Schema.Struct({
+      ...RelayClientDeviceRecord.fields,
+      platform: Schema.Literal("ios"),
+      iosMajorVersion: Schema.Int.check(Schema.isGreaterThanOrEqualTo(18)),
+    }),
+  ),
+});
+
 export const RelayLiveActivityRegistrationRequest = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
   activityPushToken: TrimmedNonEmptyString,
@@ -102,19 +118,6 @@ export const RelayDeviceUnregistrationParams = Schema.Struct({
   deviceId: TrimmedNonEmptyString,
 });
 export type RelayDeviceUnregistrationParams = typeof RelayDeviceUnregistrationParams.Type;
-
-export const RelayAgentActivityPlanProgress = Schema.Struct({
-  step: TrimmedNonEmptyString,
-  completedSteps: Schema.Int.check(Schema.isGreaterThanOrEqualTo(0)),
-  totalSteps: Schema.Int.check(Schema.isGreaterThan(0)),
-}).check(
-  Schema.makeFilter((progress) =>
-    progress.completedSteps <= progress.totalSteps
-      ? undefined
-      : { path: ["completedSteps"], issue: "completedSteps must not exceed totalSteps" },
-  ),
-);
-export type RelayAgentActivityPlanProgress = typeof RelayAgentActivityPlanProgress.Type;
 
 export const RelayAgentActivityState = Schema.Struct({
   environmentId: EnvironmentId,
@@ -127,7 +130,6 @@ export const RelayAgentActivityState = Schema.Struct({
   modelTitle: TrimmedNonEmptyString,
   updatedAt: TrimmedNonEmptyString,
   deepLink: TrimmedNonEmptyString,
-  planProgress: Schema.optional(Schema.NullOr(RelayAgentActivityPlanProgress)),
 });
 export type RelayAgentActivityState = typeof RelayAgentActivityState.Type;
 
@@ -141,7 +143,6 @@ export const RelayAgentActivityAggregateRow = Schema.Struct({
   status: TrimmedNonEmptyString,
   updatedAt: TrimmedNonEmptyString,
   deepLink: TrimmedNonEmptyString,
-  planProgress: Schema.optional(Schema.NullOr(RelayAgentActivityPlanProgress)),
 });
 export type RelayAgentActivityAggregateRow = typeof RelayAgentActivityAggregateRow.Type;
 
@@ -359,7 +360,7 @@ export const RelayInternalErrorReason = Schema.Literals([
 ]);
 export type RelayInternalErrorReason = typeof RelayInternalErrorReason.Type;
 
-export class RelayAuthInvalidError extends Schema.TaggedErrorClass<RelayAuthInvalidError>()(
+export class RelayAuthInvalidError extends Schema.TaggedError<RelayAuthInvalidError>()(
   "RelayAuthInvalidError",
   {
     code: Schema.Literal("auth_invalid"),
@@ -375,7 +376,7 @@ export class RelayAuthInvalidError extends Schema.TaggedErrorClass<RelayAuthInva
   }
 }
 
-export class RelayEnvironmentLinkProofExpiredError extends Schema.TaggedErrorClass<RelayEnvironmentLinkProofExpiredError>()(
+export class RelayEnvironmentLinkProofExpiredError extends Schema.TaggedError<RelayEnvironmentLinkProofExpiredError>()(
   "RelayEnvironmentLinkProofExpiredError",
   {
     code: Schema.Literal("environment_link_proof_expired"),
@@ -388,7 +389,7 @@ export class RelayEnvironmentLinkProofExpiredError extends Schema.TaggedErrorCla
   }
 }
 
-export class RelayEnvironmentLinkProofInvalidError extends Schema.TaggedErrorClass<RelayEnvironmentLinkProofInvalidError>()(
+export class RelayEnvironmentLinkProofInvalidError extends Schema.TaggedError<RelayEnvironmentLinkProofInvalidError>()(
   "RelayEnvironmentLinkProofInvalidError",
   {
     code: Schema.Literal("environment_link_proof_invalid"),
@@ -415,7 +416,7 @@ export const RelayEnvironmentConnectNotAuthorizedReason = Schema.Literals([
 export type RelayEnvironmentConnectNotAuthorizedReason =
   typeof RelayEnvironmentConnectNotAuthorizedReason.Type;
 
-export class RelayEnvironmentConnectNotAuthorizedError extends Schema.TaggedErrorClass<RelayEnvironmentConnectNotAuthorizedError>()(
+export class RelayEnvironmentConnectNotAuthorizedError extends Schema.TaggedError<RelayEnvironmentConnectNotAuthorizedError>()(
   "RelayEnvironmentConnectNotAuthorizedError",
   {
     code: Schema.Literal("environment_connect_not_authorized"),
@@ -433,7 +434,7 @@ export class RelayEnvironmentConnectNotAuthorizedError extends Schema.TaggedErro
   }
 }
 
-export class RelayEnvironmentEndpointUnavailableError extends Schema.TaggedErrorClass<RelayEnvironmentEndpointUnavailableError>()(
+export class RelayEnvironmentEndpointUnavailableError extends Schema.TaggedError<RelayEnvironmentEndpointUnavailableError>()(
   "RelayEnvironmentEndpointUnavailableError",
   {
     code: Schema.Literal("environment_endpoint_unavailable"),
@@ -447,7 +448,7 @@ export class RelayEnvironmentEndpointUnavailableError extends Schema.TaggedError
   }
 }
 
-export class RelayEnvironmentEndpointTimedOutError extends Schema.TaggedErrorClass<RelayEnvironmentEndpointTimedOutError>()(
+export class RelayEnvironmentEndpointTimedOutError extends Schema.TaggedError<RelayEnvironmentEndpointTimedOutError>()(
   "RelayEnvironmentEndpointTimedOutError",
   {
     code: Schema.Literal("environment_endpoint_timed_out"),
@@ -460,7 +461,7 @@ export class RelayEnvironmentEndpointTimedOutError extends Schema.TaggedErrorCla
   }
 }
 
-export class RelayEnvironmentLinkFailedError extends Schema.TaggedErrorClass<RelayEnvironmentLinkFailedError>()(
+export class RelayEnvironmentLinkFailedError extends Schema.TaggedError<RelayEnvironmentLinkFailedError>()(
   "RelayEnvironmentLinkFailedError",
   {
     code: Schema.Literal("environment_link_failed"),
@@ -474,7 +475,7 @@ export class RelayEnvironmentLinkFailedError extends Schema.TaggedErrorClass<Rel
   }
 }
 
-export class RelayEnvironmentLinkUnavailableError extends Schema.TaggedErrorClass<RelayEnvironmentLinkUnavailableError>()(
+export class RelayEnvironmentLinkUnavailableError extends Schema.TaggedError<RelayEnvironmentLinkUnavailableError>()(
   "RelayEnvironmentLinkUnavailableError",
   {
     code: Schema.Literal("environment_link_unavailable"),
@@ -488,7 +489,7 @@ export class RelayEnvironmentLinkUnavailableError extends Schema.TaggedErrorClas
   }
 }
 
-export class RelayEnvironmentLinkLimitExceededError extends Schema.TaggedErrorClass<RelayEnvironmentLinkLimitExceededError>()(
+export class RelayEnvironmentLinkLimitExceededError extends Schema.TaggedError<RelayEnvironmentLinkLimitExceededError>()(
   "RelayEnvironmentLinkLimitExceededError",
   {
     code: Schema.Literal("environment_link_limit_exceeded"),
@@ -502,7 +503,7 @@ export class RelayEnvironmentLinkLimitExceededError extends Schema.TaggedErrorCl
   }
 }
 
-export class RelayAgentActivityPublishProofExpiredError extends Schema.TaggedErrorClass<RelayAgentActivityPublishProofExpiredError>()(
+export class RelayAgentActivityPublishProofExpiredError extends Schema.TaggedError<RelayAgentActivityPublishProofExpiredError>()(
   "RelayAgentActivityPublishProofExpiredError",
   {
     code: Schema.Literal("agent_activity_publish_proof_expired"),
@@ -515,7 +516,7 @@ export class RelayAgentActivityPublishProofExpiredError extends Schema.TaggedErr
   }
 }
 
-export class RelayAgentActivityPublishProofInvalidError extends Schema.TaggedErrorClass<RelayAgentActivityPublishProofInvalidError>()(
+export class RelayAgentActivityPublishProofInvalidError extends Schema.TaggedError<RelayAgentActivityPublishProofInvalidError>()(
   "RelayAgentActivityPublishProofInvalidError",
   {
     code: Schema.Literal("agent_activity_publish_proof_invalid"),
@@ -529,7 +530,7 @@ export class RelayAgentActivityPublishProofInvalidError extends Schema.TaggedErr
   }
 }
 
-export class RelayInternalError extends Schema.TaggedErrorClass<RelayInternalError>()(
+export class RelayInternalError extends Schema.TaggedError<RelayInternalError>()(
   "RelayInternalError",
   {
     code: Schema.Literal("internal_error"),
@@ -864,7 +865,6 @@ export const RelayDeliveryKind = Schema.Literals([
   "live_activity_start",
   "live_activity_update",
   "live_activity_end",
-  "android_live_update",
   "push_notification",
 ]);
 export type RelayDeliveryKind = typeof RelayDeliveryKind.Type;
@@ -874,9 +874,9 @@ export const RelayDeliveryResult = Schema.Struct({
   kind: RelayDeliveryKind,
   ok: Schema.Boolean,
   queued: Schema.optional(Schema.Boolean),
-  deliveryStatus: Schema.NullOr(Schema.Number),
-  deliveryReason: Schema.NullOr(Schema.String),
-  providerMessageId: Schema.NullOr(Schema.String),
+  apnsStatus: Schema.NullOr(Schema.Number),
+  apnsReason: Schema.NullOr(Schema.String),
+  apnsId: Schema.NullOr(Schema.String),
 });
 export type RelayDeliveryResult = typeof RelayDeliveryResult.Type;
 
@@ -897,7 +897,7 @@ export const RelayHealthResponse = Schema.Struct({
 });
 export type RelayHealthResponse = typeof RelayHealthResponse.Type;
 
-export const RelayHealthGroup = HttpApiGroup.make("health")
+const RelayHealthGroup = HttpApiGroup.make("health")
   .add(
     HttpApiEndpoint.get("health", "/health", {
       success: RelayHealthResponse,
@@ -906,7 +906,7 @@ export const RelayHealthGroup = HttpApiGroup.make("health")
   )
   .annotate(OpenApi.Description, "Service health and readiness.");
 
-export const RelayMetadataGroup = HttpApiGroup.make("metadata")
+const RelayMetadataGroup = HttpApiGroup.make("metadata")
   .add(
     HttpApiEndpoint.get("authorizationServer", "/.well-known/oauth-authorization-server", {
       success: RelayAuthorizationServerMetadata,
@@ -927,24 +927,6 @@ export const RelayRegisterDeviceEndpoint = HttpApiEndpoint.post(
     error: RelayAuthAndInternalErrors,
   },
 ).annotate(OpenApi.Summary, "Register or update a mobile device");
-
-export const RelayAndroidLiveUpdateRegistrationRequest = Schema.Struct({
-  deviceId: TrimmedNonEmptyString,
-  generationId: TrimmedNonEmptyString,
-});
-export type RelayAndroidLiveUpdateRegistrationRequest =
-  typeof RelayAndroidLiveUpdateRegistrationRequest.Type;
-
-export const RelayRegisterAndroidLiveUpdateEndpoint = HttpApiEndpoint.post(
-  "registerAndroidLiveUpdate",
-  "/v1/mobile/android-live-updates",
-  {
-    headers: RelayDpopRequestHeaders,
-    payload: RelayAndroidLiveUpdateRegistrationRequest,
-    success: RelayOkResponse,
-    error: RelayAuthAndInternalErrors,
-  },
-).annotate(OpenApi.Summary, "Register an Android Live Update target");
 
 export const RelayRegisterLiveActivityEndpoint = HttpApiEndpoint.post(
   "registerLiveActivity",
@@ -986,18 +968,17 @@ export const RelayUnregisterDeviceEndpoint = HttpApiEndpoint.delete(
   },
 ).annotate(OpenApi.Summary, "Unregister a mobile device");
 
-export const RelayMobileGroup = HttpApiGroup.make("mobile")
+const RelayMobileGroup = HttpApiGroup.make("mobile")
   .add(
     RelayRegisterDeviceEndpoint,
-    RelayRegisterAndroidLiveUpdateEndpoint,
     RelayRegisterLiveActivityEndpoint,
     RelayAgentActivitySnapshotEndpoint,
     RelayUnregisterDeviceEndpoint,
   )
-  .annotate(OpenApi.Description, "Mobile push-notification and live-update registration.")
+  .annotate(OpenApi.Description, "Mobile push-notification and Live Activity registration.")
   .middleware(RelayDpopClientAuth);
 
-export const RelayClientGroup = HttpApiGroup.make("client")
+const RelayClientGroup = HttpApiGroup.make("client")
   .add(
     HttpApiEndpoint.get("listEnvironments", "/v1/environments", {
       headers: RelayBearerRequestHeaders,
@@ -1005,6 +986,11 @@ export const RelayClientGroup = HttpApiGroup.make("client")
       error: RelayAuthAndInternalErrors,
     }).annotate(OpenApi.Summary, "List linked environments"),
     HttpApiEndpoint.get("listDevices", "/v1/client/devices", {
+      headers: RelayBearerRequestHeaders,
+      success: RelayListDevicesResponseV1,
+      error: RelayAuthAndInternalErrors,
+    }).annotate(OpenApi.Summary, "List registered iOS devices (legacy clients)"),
+    HttpApiEndpoint.get("listDevicesV2", "/v2/client/devices", {
       headers: RelayBearerRequestHeaders,
       success: RelayListDevicesResponse,
       error: RelayAuthAndInternalErrors,
@@ -1066,7 +1052,7 @@ export const RelayExchangeDpopAccessTokenEndpoint = HttpApiEndpoint.post(
     "Bootstrap endpoint. Send the DPoP proof JWT in the dpop header and the Clerk token in subject_token. The returned access token is bound to the proof key.",
   );
 
-export const RelayTokenGroup = HttpApiGroup.make("token")
+const RelayTokenGroup = HttpApiGroup.make("token")
   .add(RelayExchangeDpopAccessTokenEndpoint)
   .annotate(OpenApi.Description, "OAuth token exchange for DPoP-bound client access.");
 
@@ -1097,12 +1083,12 @@ export const RelayGetEnvironmentStatusEndpoint = HttpApiEndpoint.post(
   },
 ).annotate(OpenApi.Summary, "Check environment status");
 
-export const RelayDpopClientGroup = HttpApiGroup.make("dpopClient")
+const RelayDpopClientGroup = HttpApiGroup.make("dpopClient")
   .add(RelayConnectEnvironmentEndpoint, RelayGetEnvironmentStatusEndpoint)
   .annotate(OpenApi.Description, "DPoP-authenticated client access to linked environments.")
   .middleware(RelayDpopClientAuth);
 
-export const RelayServerGroup = HttpApiGroup.make("server")
+const RelayServerGroup = HttpApiGroup.make("server")
   .add(
     HttpApiEndpoint.post(
       "publishAgentActivity",

@@ -23,7 +23,7 @@ import type { UsagePricer } from "./usagePricing.ts";
  * `en-CA` yields ISO-ordered parts, which is why it is used here rather than
  * assembling the day from `Date` getters (those are host-local only).
  */
-export function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
+function makeDayFormatter(timeZone: string): (timestampMs: number) => string {
   let format: Intl.DateTimeFormat;
   try {
     format = new Intl.DateTimeFormat("en-CA", {

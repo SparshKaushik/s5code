@@ -54,7 +54,20 @@ export interface ModelTotals {
   readonly costUsd: number;
   readonly totalTokens: number;
   readonly records: number;
+  /**
+   * Records whose tokens are counted here but which contributed nothing to
+   * `costUsd`. When it equals `records` the cost is unknown, not zero.
+   */
+  readonly unpricedRecords: number;
   readonly costShare: number;
+}
+
+/**
+ * A model whose every record lacked rates has an unknown cost, not a zero one.
+ * Clients must not present its `costUsd` as a real dollar figure.
+ */
+export function isModelCostUnknown(model: ModelTotals): boolean {
+  return model.records > 0 && model.unpricedRecords >= model.records;
 }
 
 export interface DailyTotals {
@@ -287,6 +300,7 @@ export function mergeUsage(
       costUsd: number;
       totalTokens: number;
       records: number;
+      unpricedRecords: number;
     }
   >();
   const dailyAccumulator = new Map<
@@ -373,6 +387,7 @@ export function mergeUsage(
         costUsd: 0,
         totalTokens: 0,
         records: 0,
+        unpricedRecords: 0,
       };
       if (bucket.apiProvider.length > 0) model.apiProviders.add(bucket.apiProvider);
       if (bucket.costSource !== "unpriced") model.unpricedOnly = false;
@@ -381,6 +396,7 @@ export function mergeUsage(
       model.costUsd += bucket.costUsd;
       model.totalTokens += tokens;
       model.records += bucket.records;
+      model.unpricedRecords += bucket.unpricedRecords;
       modelAccumulator.set(modelKey, model);
 
       const day = dailyAccumulator.get(bucket.day) ?? {
@@ -446,6 +462,7 @@ export function mergeUsage(
       costUsd: totals.costUsd,
       totalTokens: totals.totalTokens,
       records: totals.records,
+      unpricedRecords: totals.unpricedRecords,
       costShare: costUsd === 0 ? 0 : totals.costUsd / costUsd,
     }))
     .sort((a, b) => b.costUsd - a.costUsd || b.totalTokens - a.totalTokens);

@@ -18,12 +18,10 @@ import {
   RelayGetEnvironmentStatusEndpoint,
   RelayJwtSubjectTokenType,
   type RelayAgentActivitySnapshotResponse,
-  type RelayAndroidLiveUpdateRegistrationRequest,
   type RelayLiveActivityRegistrationRequest,
   RelayMobileRegistrationScope,
   type RelayOkResponse,
   type RelayPublicClientId,
-  RelayRegisterAndroidLiveUpdateEndpoint,
   RelayRegisterDeviceEndpoint,
   RelayAgentActivitySnapshotEndpoint,
   RelayRegisterLiveActivityEndpoint,
@@ -54,7 +52,7 @@ export interface ManagedRelayDpopProofInput {
   readonly accessToken?: string;
 }
 
-export class ManagedRelayDpopKeyLoadError extends Schema.TaggedErrorClass<ManagedRelayDpopKeyLoadError>()(
+export class ManagedRelayDpopKeyLoadError extends Schema.TaggedError<ManagedRelayDpopKeyLoadError>()(
   "ManagedRelayDpopKeyLoadError",
   {
     keyStore: Schema.Literals(["expo-secure-store", "indexed-db"]),
@@ -66,7 +64,7 @@ export class ManagedRelayDpopKeyLoadError extends Schema.TaggedErrorClass<Manage
   }
 }
 
-export class ManagedRelayDpopProofCreationError extends Schema.TaggedErrorClass<ManagedRelayDpopProofCreationError>()(
+export class ManagedRelayDpopProofCreationError extends Schema.TaggedError<ManagedRelayDpopProofCreationError>()(
   "ManagedRelayDpopProofCreationError",
   {
     method: Schema.String,
@@ -95,7 +93,6 @@ export const ManagedRelayRequestAction = Schema.Literals([
   "get relay environment status",
   "connect relay environment",
   "register relay mobile device",
-  "register relay Android Live Update",
   "unregister relay mobile device",
   "register relay live activity",
   "read relay agent activity snapshot",
@@ -112,14 +109,13 @@ export const ManagedRelayRequestActivity = Schema.Literals([
   "Relay environment status request",
   "Relay environment connection",
   "Relay mobile device registration",
-  "Relay Android Live Update registration",
   "Relay mobile device unregistration",
   "Relay Live Activity registration",
   "Relay agent activity snapshot",
 ]);
 export type ManagedRelayRequestActivity = typeof ManagedRelayRequestActivity.Type;
 
-export class ManagedRelayRequestTimeoutError extends Schema.TaggedErrorClass<ManagedRelayRequestTimeoutError>()(
+export class ManagedRelayRequestTimeoutError extends Schema.TaggedError<ManagedRelayRequestTimeoutError>()(
   "ManagedRelayRequestTimeoutError",
   {
     activity: ManagedRelayRequestActivity,
@@ -135,7 +131,7 @@ export class ManagedRelayRequestTimeoutError extends Schema.TaggedErrorClass<Man
   }
 }
 
-export class ManagedRelayUrlInvalidError extends Schema.TaggedErrorClass<ManagedRelayUrlInvalidError>()(
+export class ManagedRelayUrlInvalidError extends Schema.TaggedError<ManagedRelayUrlInvalidError>()(
   "ManagedRelayUrlInvalidError",
   {
     relayUrl: Schema.String,
@@ -146,7 +142,7 @@ export class ManagedRelayUrlInvalidError extends Schema.TaggedErrorClass<Managed
   }
 }
 
-export class ManagedRelayRequestFailedError extends Schema.TaggedErrorClass<ManagedRelayRequestFailedError>()(
+export class ManagedRelayRequestFailedError extends Schema.TaggedError<ManagedRelayRequestFailedError>()(
   "ManagedRelayRequestFailedError",
   {
     action: ManagedRelayRequestAction,
@@ -162,7 +158,7 @@ export class ManagedRelayRequestFailedError extends Schema.TaggedErrorClass<Mana
   }
 }
 
-export class ManagedRelayAccessTokenScopesUnexpectedError extends Schema.TaggedErrorClass<ManagedRelayAccessTokenScopesUnexpectedError>()(
+export class ManagedRelayAccessTokenScopesUnexpectedError extends Schema.TaggedError<ManagedRelayAccessTokenScopesUnexpectedError>()(
   "ManagedRelayAccessTokenScopesUnexpectedError",
   {
     requestedScopes: Schema.Array(RelayDpopAccessTokenScope),
@@ -174,7 +170,7 @@ export class ManagedRelayAccessTokenScopesUnexpectedError extends Schema.TaggedE
   }
 }
 
-export class ManagedRelayTokenProofCreationError extends Schema.TaggedErrorClass<ManagedRelayTokenProofCreationError>()(
+export class ManagedRelayTokenProofCreationError extends Schema.TaggedError<ManagedRelayTokenProofCreationError>()(
   "ManagedRelayTokenProofCreationError",
   {
     method: Schema.String,
@@ -187,7 +183,7 @@ export class ManagedRelayTokenProofCreationError extends Schema.TaggedErrorClass
   }
 }
 
-export class ManagedRelayRequestProofCreationError extends Schema.TaggedErrorClass<ManagedRelayRequestProofCreationError>()(
+export class ManagedRelayRequestProofCreationError extends Schema.TaggedError<ManagedRelayRequestProofCreationError>()(
   "ManagedRelayRequestProofCreationError",
   {
     method: Schema.String,
@@ -300,10 +296,6 @@ export class ManagedRelayClient extends Context.Service<
     readonly registerLiveActivity: (input: {
       readonly clerkToken: string;
       readonly payload: RelayLiveActivityRegistrationRequest;
-    }) => Effect.Effect<RelayOkResponse, ManagedRelayClientError>;
-    readonly registerAndroidLiveUpdate?: (input: {
-      readonly clerkToken: string;
-      readonly payload: RelayAndroidLiveUpdateRegistrationRequest;
     }) => Effect.Effect<RelayOkResponse, ManagedRelayClientError>;
     readonly getAgentActivitySnapshot: (input: {
       readonly clerkToken: string;
@@ -430,7 +422,6 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
     registerDevice: unavailable("clientRuntime.managedRelay.registerDevice"),
     unregisterDevice: unavailable("clientRuntime.managedRelay.unregisterDevice"),
     registerLiveActivity: unavailable("clientRuntime.managedRelay.registerLiveActivity"),
-    registerAndroidLiveUpdate: unavailable("clientRuntime.managedRelay.registerAndroidLiveUpdate"),
     getAgentActivitySnapshot: unavailable("clientRuntime.managedRelay.getAgentActivitySnapshot"),
     resetTokenCache: Effect.void.pipe(
       Effect.withSpan("clientRuntime.managedRelay.resetTokenCache"),
@@ -438,6 +429,7 @@ function disabledManagedRelayClient(relayUrl: string): ManagedRelayClient["Servi
   });
 }
 
+/** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.fn("ManagedRelayClient.make")(function* (
   options: ManagedRelayClientLayerOptions,
 ) {
@@ -482,10 +474,6 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
     getAgentActivitySnapshot: (): DpopProofTarget => ({
       method: RelayAgentActivitySnapshotEndpoint.method,
       url: urlBuilder.mobile.getAgentActivitySnapshot(),
-    }),
-    registerAndroidLiveUpdate: (): DpopProofTarget => ({
-      method: RelayRegisterAndroidLiveUpdateEndpoint.method,
-      url: urlBuilder.mobile.registerAndroidLiveUpdate(),
     }),
     registerLiveActivity: (): DpopProofTarget => ({
       method: RelayRegisterLiveActivityEndpoint.method,
@@ -741,7 +729,7 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
     listDevices: Effect.fnUntraced(
       function* (input) {
         return yield* client.client
-          .listDevices({
+          .listDevicesV2({
             headers: bearerHeaders(input.clerkToken),
           })
           .pipe(
@@ -919,28 +907,6 @@ export const make = Effect.fn("ManagedRelayClient.make")(function* (
         );
       },
       Effect.withSpan("clientRuntime.managedRelay.getAgentActivitySnapshot"),
-      withRelayClientTracing,
-    ),
-    registerAndroidLiveUpdate: Effect.fnUntraced(
-      function* (input) {
-        return yield* mobileRegistrationRequest(
-          {
-            clerkToken: input.clerkToken,
-            target: dpopProofTargets.registerAndroidLiveUpdate(),
-          },
-          (authorization) =>
-            client.mobile
-              .registerAndroidLiveUpdate({
-                headers: dpopHeaders(authorization),
-                payload: input.payload,
-              })
-              .pipe(
-                Effect.mapError(relayRequestError("register relay Android Live Update")),
-                timeoutRelayRequest("Relay Android Live Update registration"),
-              ),
-        );
-      },
-      Effect.withSpan("clientRuntime.managedRelay.registerAndroidLiveUpdate"),
       withRelayClientTracing,
     ),
     registerLiveActivity: Effect.fnUntraced(

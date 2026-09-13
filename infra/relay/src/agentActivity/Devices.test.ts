@@ -6,11 +6,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as RelayDb from "../db.ts";
-import {
-  relayAndroidLiveUpdates,
-  relayLiveActivities,
-  relayMobileDevices,
-} from "../persistence/schema.ts";
+import { relayLiveActivities, relayMobileDevices } from "../persistence/schema.ts";
 import * as Devices from "./Devices.ts";
 
 const registration: RelayDeviceRegistrationRequest = {
@@ -130,13 +126,7 @@ describe("Devices", () => {
 
     const fakeDb = {
       delete: (table: unknown) => {
-        calls.push(
-          table === relayLiveActivities
-            ? "delete.liveActivities"
-            : table === relayAndroidLiveUpdates
-              ? "delete.androidLiveUpdates"
-              : "delete.devices",
-        );
+        calls.push(table === relayLiveActivities ? "delete.liveActivities" : "delete.devices");
         return {
           where: (condition: SQL) => {
             expect(condition).toBeDefined();
@@ -155,8 +145,6 @@ describe("Devices", () => {
       expect(calls).toEqual([
         "delete.liveActivities",
         "delete.where",
-        "delete.androidLiveUpdates",
-        "delete.where",
         "delete.devices",
         "delete.where",
       ]);
@@ -165,12 +153,6 @@ describe("Devices", () => {
           sql:
             '(("relay_live_activities"."user_id" = $1) and ' +
             '("relay_live_activities"."device_id" = $2))',
-          params: ["user-2", "device-1"],
-        },
-        {
-          sql:
-            '(("relay_android_live_updates"."user_id" = $1) and ' +
-            '("relay_android_live_updates"."device_id" = $2))',
           params: ["user-2", "device-1"],
         },
         {

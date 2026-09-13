@@ -89,7 +89,7 @@ export const CheckpointCleanupResult = Schema.Struct({
 });
 export type CheckpointCleanupResult = typeof CheckpointCleanupResult.Type;
 
-export class CheckpointMaintenanceError extends Schema.TaggedErrorClass<CheckpointMaintenanceError>()(
+export class CheckpointMaintenanceError extends Schema.TaggedError<CheckpointMaintenanceError>()(
   "CheckpointMaintenanceError",
   {
     operation: Schema.String,

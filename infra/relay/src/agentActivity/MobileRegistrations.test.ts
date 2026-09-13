@@ -2,7 +2,7 @@ import type {
   RelayAgentActivityState,
   RelayDeviceRegistrationRequest,
 } from "@t3tools/contracts/relay";
-import type { SignedDeliveryJob } from "./deliveryJobs.ts";
+import type { SignedApnsDeliveryJob } from "./apnsDeliveryJobs.ts";
 import * as NodeCryptoLayer from "@effect/platform-node/NodeCrypto";
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
@@ -18,12 +18,20 @@ import * as EnvironmentLinks from "../environments/EnvironmentLinks.ts";
 import * as LiveActivities from "./LiveActivities.ts";
 import * as RelayConfiguration from "../Config.ts";
 import * as AgentActivityPublisher from "./AgentActivityPublisher.ts";
-import * as Deliveries from "./Deliveries.ts";
+import { FcmDeliveries } from "./FcmDeliveries.ts";
+
+const publisherLayer = AgentActivityPublisher.layer.pipe(
+  Layer.provide(
+    Layer.succeed(FcmDeliveries, {
+      enqueue: () => Effect.succeed(null),
+      process: () => Effect.void,
+    }),
+  ),
+);
+import * as ApnsDeliveries from "./ApnsDeliveries.ts";
 import * as ApnsClient from "./ApnsClient.ts";
 import * as ApnsProviderTokens from "./ApnsProviderTokens.ts";
-import * as FcmClient from "./FcmClient.ts";
-import * as FcmProviderTokens from "./FcmProviderTokens.ts";
-import * as DeliveryQueue from "./DeliveryQueue.ts";
+import * as ApnsDeliveryQueue from "./ApnsDeliveryQueue.ts";
 import * as MobileRegistrations from "./MobileRegistrations.ts";
 
 const device: RelayDeviceRegistrationRequest = {
@@ -135,16 +143,10 @@ const config = RelayConfiguration.RelayConfiguration.of({
     bundleId: "codes.t3.mobile",
     privateKey: Redacted.make("apns-private-key"),
   },
-  fcm: {
-    projectId: "test-project",
-    clientEmail: "firebase-adminsdk@test.iam.gserviceaccount.com",
-    privateKey: Redacted.make("not-a-private-key"),
-    tokenUri: "https://oauth2.googleapis.com/token",
-  },
   clerkSecretKey: Redacted.make("clerk-secret"),
   clerkPublishableKey: "pk_test_test",
   clerkJwtAudience: "t3-code-relay",
-  deliveryJobSigningSecret: Redacted.make("apns-job-secret"),
+  apnsDeliveryJobSigningSecret: Redacted.make("apns-job-secret"),
   cloudMintPrivateKey: Redacted.make("cloud-private-key"),
   cloudMintPublicKey: "cloud-public-key",
   managedEndpointBaseDomain: undefined,
@@ -154,17 +156,16 @@ const config = RelayConfiguration.RelayConfiguration.of({
 function makeRegistrationReplayLayer(input: {
   readonly devices: Devices.Devices["Service"];
   readonly liveActivities: LiveActivities.LiveActivities["Service"];
-  readonly queuedJobs: Array<SignedDeliveryJob>;
+  readonly queuedJobs: Array<SignedApnsDeliveryJob>;
 }) {
   return MobileRegistrations.layer.pipe(
-    Layer.provide(AgentActivityPublisher.layer),
+    Layer.provide(publisherLayer),
     Layer.provide(
-      Deliveries.layer.pipe(
+      ApnsDeliveries.layer.pipe(
         Layer.provide(ApnsClient.layer.pipe(Layer.provide(ApnsProviderTokens.layer))),
-        Layer.provide(FcmClient.layer.pipe(Layer.provide(FcmProviderTokens.layer))),
       ),
     ),
-    Layer.provide(DeliveryQueue.layer.pipe(Layer.provide(NodeCryptoLayer.layer))),
+    Layer.provide(ApnsDeliveryQueue.layer.pipe(Layer.provide(NodeCryptoLayer.layer))),
     Layer.provide(
       Layer.mergeAll(
         Layer.succeed(Devices.Devices, input.devices),
@@ -173,7 +174,7 @@ function makeRegistrationReplayLayer(input: {
         Layer.succeed(LiveActivities.LiveActivities, input.liveActivities),
         Layer.succeed(DeliveryAttempts.DeliveryAttempts, makeDeliveryAttempts()),
         RelayConfiguration.layer(config),
-        Layer.succeed(DeliveryQueue.DeliveryQueueSender, {
+        Layer.succeed(ApnsDeliveryQueue.ApnsDeliveryQueueSender, {
           send: (body) =>
             Effect.sync(() => {
               input.queuedJobs.push(body);
@@ -432,7 +433,7 @@ describe("MobileRegistrations", () => {
   it.effect(
     "does not remotely start a Live Activity when a device registers after work is already active",
     () => {
-      const queuedJobs: Array<SignedDeliveryJob> = [];
+      const queuedJobs: Array<SignedApnsDeliveryJob> = [];
       const queuedStarts: Array<
         Parameters<LiveActivities.LiveActivities["Service"]["markStartQueued"]>[0]
       > = [];
@@ -456,7 +457,6 @@ describe("MobileRegistrations", () => {
               aps_environment: null,
               push_token: "apns-device-token",
               push_to_start_token: "push-to-start-token",
-              fcm_token: null,
               preferences_json: JSON.stringify(device.preferences),
               activity_push_token: null,
               remote_start_queued_at: null,
