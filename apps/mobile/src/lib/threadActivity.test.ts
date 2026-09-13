@@ -1735,7 +1735,10 @@ describe("buildThreadFeed", () => {
       icon: "edit",
       canExpand: true,
     });
-    expect(group.activities[0]?.getFullDetail()).toContain("apps/web/src/EditView.tsx");
+    expect(group.activities[0]?.workEntry.changedFiles).toContain("apps/web/src/EditView.tsx");
+    expect(workEntryRowLabel(group.activities[0]!.workEntry, true)).toContain(
+      "apps/web/src/EditView.tsx",
+    );
   });
 
   it("defers large tool output expansion until a work row is opened or copied", () => {
