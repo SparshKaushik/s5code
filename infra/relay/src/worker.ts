@@ -1,3 +1,4 @@
+// @effect-diagnostics preferSchemaOverJson:off
 import * as Alchemy from "alchemy";
 import * as Cloudflare from "alchemy/Cloudflare";
 import * as Drizzle from "alchemy/Drizzle/Postgres";
@@ -141,16 +142,7 @@ export const ApiLive = Api.make(
     //
     // 2. Create bindings
     //
-    const apnsEnabled = yield* Config.boolean("APNS_ENABLED").pipe(Config.withDefault(true));
-    const apnsCredentials = apnsEnabled
-      ? {
-          environment: yield* Config.schema(RelayConfiguration.ApnsEnvironment, "APNS_ENVIRONMENT"),
-          teamId: yield* Config.string("APNS_TEAM_ID"),
-          keyId: yield* Config.string("APNS_KEY_ID"),
-          bundleId: yield* Config.string("APNS_BUNDLE_ID"),
-          privateKey: yield* Config.redacted("APNS_PRIVATE_KEY"),
-        }
-      : null;
+    const apnsCredentials = yield* RelayConfiguration.resolveApnsCredentials;
     const fcmServiceAccountDirect = Option.getOrUndefined(
       Option.filter(
         yield* Config.option(Config.redacted("FCM_SERVICE_ACCOUNT")),
