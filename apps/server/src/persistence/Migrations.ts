@@ -166,7 +166,7 @@ export interface RunMigrationsOptions {
  * This recovery aligns the migration table back with upstream (38, 39, 40)
  * and drops the discontinued rewind_entries table and its indexes.
  */
-export const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* () {
+const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* () {
   const sql = yield* SqlClient.SqlClient;
 
   const tables = yield* sql<{ readonly name: string }>`

@@ -172,7 +172,7 @@ function slashCommandsFromPi(
  * `--no-session` matters: the probe must not create a session file, or every
  * health refresh would litter the user's pi session history.
  */
-export const discoverPiCatalog = (
+const discoverPiCatalog = (
   piSettings: PiSettings,
   cwd: string,
   environment: NodeJS.ProcessEnv,

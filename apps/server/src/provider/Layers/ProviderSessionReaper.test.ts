@@ -530,7 +530,7 @@ describe("ProviderSessionReaper", () => {
           },
         },
       ]);
-      const harness = await createHarness({ readModel });
+      const harness = await createHarness({ readModel, liveThreadIds: [threadId] });
       const repository = await runtime!.runPromise(
         Effect.service(ProviderSessionRuntime.ProviderSessionRuntimeRepository),
       );

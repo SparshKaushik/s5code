@@ -234,7 +234,7 @@ export function priceUsage(
  * provider, and the raw model name. All three matter, because the same name
  * from two gateways can be two different products at two different prices.
  */
-export function modelAliasKey(provider: string, apiProvider: string, model: string): string {
+function modelAliasKey(provider: string, apiProvider: string, model: string): string {
   return `${provider}\u0000${apiProvider.trim().toLowerCase()}\u0000${model.trim().toLowerCase()}`;
 }
 
@@ -344,7 +344,7 @@ export class UsagePricer {
 }
 
 /** A pricer that prices nothing, for tests and for a cold rate fetch. */
-export function emptyPricer(): UsagePricer {
+function emptyPricer(): UsagePricer {
   return new UsagePricer({ rates: new Map(), catalog: EMPTY_CATALOG, aliases: [] });
 }
 

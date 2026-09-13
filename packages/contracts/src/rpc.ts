@@ -624,7 +624,7 @@ const WsServerGetUsageSummaryRpc = Rpc.make(WS_METHODS.serverGetUsageSummary, {
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
 });
 
-export const WsServerSearchUsageModelsRpc = Rpc.make(WS_METHODS.serverSearchUsageModels, {
+const WsServerSearchUsageModelsRpc = Rpc.make(WS_METHODS.serverSearchUsageModels, {
   payload: UsageModelSearchInput,
   success: UsageModelSearchResult,
   error: Schema.Union([EnvironmentAuthorizationError, UsageReadError]),
@@ -1302,16 +1302,13 @@ const WsSubscribeResourceTelemetryRpc = Rpc.make(WS_METHODS.subscribeResourceTel
   stream: true,
 });
 
-export const WsCheckpointMaintenanceGetUsageRpc = Rpc.make(
-  WS_METHODS.checkpointMaintenanceGetUsage,
-  {
-    payload: CheckpointMaintenanceGetUsageInput,
-    success: CheckpointStorageUsage,
-    error: Schema.Union([CheckpointMaintenanceError, EnvironmentAuthorizationError]),
-  },
-);
+const WsCheckpointMaintenanceGetUsageRpc = Rpc.make(WS_METHODS.checkpointMaintenanceGetUsage, {
+  payload: CheckpointMaintenanceGetUsageInput,
+  success: CheckpointStorageUsage,
+  error: Schema.Union([CheckpointMaintenanceError, EnvironmentAuthorizationError]),
+});
 
-export const WsCheckpointMaintenanceCleanupRpc = Rpc.make(WS_METHODS.checkpointMaintenanceCleanup, {
+const WsCheckpointMaintenanceCleanupRpc = Rpc.make(WS_METHODS.checkpointMaintenanceCleanup, {
   payload: CheckpointMaintenanceCleanupInput,
   success: CheckpointCleanupResult,
   error: Schema.Union([CheckpointMaintenanceError, EnvironmentAuthorizationError]),

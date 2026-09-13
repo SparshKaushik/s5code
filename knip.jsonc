@@ -25,6 +25,7 @@
         "scripts/cli.ts",
         "src/provider/testFixtures/*.mjs",
         "src/provider/*Compat.ts",
+        "pi-extension/*.ts!",
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
       // Native msgpack acceleration and the Vite+ web build prerequisite.

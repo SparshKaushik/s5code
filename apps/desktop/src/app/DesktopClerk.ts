@@ -178,7 +178,7 @@ export function rewriteClerkCorsOrigin(
   return next;
 }
 
-export function installClerkDesktopOriginFilter(
+function installClerkDesktopOriginFilter(
   session: Electron.Session,
   clerkFrontendApiHostname: string | undefined,
 ) {

@@ -97,7 +97,7 @@ const resolveBooleanFlag = (flag: Option.Option<boolean>, envValue: boolean) =>
 const mergeOptions = <A>(a: Option.Option<A>, b: Option.Option<A>, defaultValue: A) =>
   Option.getOrElse(a, () => Option.getOrElse(b, () => defaultValue));
 
-class ServerBinaryBuildError extends Schema.TaggedErrorClass<ServerBinaryBuildError>()(
+class ServerBinaryBuildError extends Schema.TaggedError<ServerBinaryBuildError>()(
   "ServerBinaryBuildError",
   {
     kind: Schema.String,
@@ -109,7 +109,7 @@ class ServerBinaryBuildError extends Schema.TaggedErrorClass<ServerBinaryBuildEr
   }
 }
 
-class ServerBinaryBuildCommandError extends Schema.TaggedErrorClass<ServerBinaryBuildCommandError>()(
+class ServerBinaryBuildCommandError extends Schema.TaggedError<ServerBinaryBuildCommandError>()(
   "ServerBinaryBuildCommandError",
   {
     command: Schema.String,

@@ -34,7 +34,7 @@ export interface UsageModelTagTarget {
  * every name the user pointed at its catalog entry, because that is what got
  * merged into the single row they are looking at.
  */
-export function matchesTarget(alias: UsageModelAlias, target: UsageModelTagTarget): boolean {
+function matchesTarget(alias: UsageModelAlias, target: UsageModelTagTarget): boolean {
   if (alias.provider !== target.provider) return false;
   return target.untagged === null
     ? alias.catalogModelId === target.taggedAs

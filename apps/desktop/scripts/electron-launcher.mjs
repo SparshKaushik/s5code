@@ -15,8 +15,8 @@ const repoRoot = NodePath.resolve(desktopDir, "..", "..");
 const devBundleIdSuffix = NodePath.basename(repoRoot)
   .toLowerCase()
   .replaceAll(/[^a-z0-9]+/g, "");
-export const APP_DISPLAY_NAME = isDevelopment ? "S5 Code (Dev)" : "S5 Code (Alpha)";
-export const APP_BUNDLE_ID = isDevelopment
+const APP_DISPLAY_NAME = isDevelopment ? "S5 Code (Dev)" : "S5 Code (Alpha)";
+const APP_BUNDLE_ID = isDevelopment
   ? `club.touchtech.s5code.dev.${devBundleIdSuffix || "local"}`
   : "club.touchtech.s5code";
 export function getAppProtocolSchemes(development = isDevelopment) {

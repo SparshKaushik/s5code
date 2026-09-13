@@ -599,7 +599,7 @@ class EnvironmentConnectHttpApi extends HttpApiGroup.make("connect")
   ) {}
 
 /** Large, compressible pull-request payloads travel over HTTP rather than the RPC socket. */
-export class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
+class EnvironmentPullRequestsHttpApi extends HttpApiGroup.make("pullRequests").add(
   HttpApiEndpoint.post("diff", "/api/pull-requests/diff", {
     headers: OptionalBearerHeaders,
     payload: PullRequestDiffInput,

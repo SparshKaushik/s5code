@@ -5,7 +5,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import { vi } from "vite-plus/test";
+import { beforeEach, vi } from "vite-plus/test";
 
 import * as NodePtyAdapter from "./NodePtyAdapter.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
@@ -18,6 +18,10 @@ const spawn = vi.fn(() => ({
   onData: vi.fn(() => ({ dispose: vi.fn() })),
   onExit: vi.fn(() => ({ dispose: vi.fn() })),
 }));
+
+beforeEach(() => {
+  spawn.mockClear();
+});
 
 vi.mock("node-pty", () => ({ spawn }));
 

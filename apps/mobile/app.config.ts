@@ -199,7 +199,7 @@ const config: ExpoConfig = {
   slug: "t3-code",
   platforms: ["ios", "android"],
   scheme: variant.scheme,
-  version: releaseVersion ?? "1.1.1",
+  ...(releaseVersion ? { version: releaseVersion } : {}),
   runtimeVersion: {
     // The app version is the explicit OTA compatibility boundary. Release CI
     // compares Expo fingerprints against the latest production build: matching
