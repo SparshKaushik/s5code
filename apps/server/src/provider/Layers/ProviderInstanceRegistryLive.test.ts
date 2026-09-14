@@ -55,7 +55,6 @@ import { CursorDriver } from "../Drivers/CursorDriver.ts";
 import { GrokDriver } from "../Drivers/GrokDriver.ts";
 import { OpenCodeDriver } from "../Drivers/OpenCodeDriver.ts";
 import * as ModelManifest from "../ModelManifest.ts";
-import { OpenCodeRuntimeLive } from "../opencodeRuntime.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
@@ -434,26 +433,13 @@ describe("ProviderInstanceRegistryLive — multi-instance codex slice", () => {
 });
 
 describe("ProviderInstanceRegistryLive — all drivers slice", () => {
-  // All drivers need `NodeServices` (ChildProcessSpawner + FileSystem +
-  // Path). `OpenCodeDriver.create` additionally yields `OpenCodeRuntime`
-  // at construction time, so we wire `OpenCodeRuntimeLive` into the stack.
-  // `OpenCodeRuntimeLive` bundles its own `NetService.layer` via
-  // `Layer.provide`, so the only external requirement it still exposes is
-  // `ChildProcessSpawner` — resolved here by piping it through
-  // `provideMerge(NodeServices.layer)`.
-  //
-  // The nested `provideMerge`s read bottom-up: `NodeServices.layer`
-  // provides `OpenCodeRuntimeLive`'s deps while keeping its own outputs
-  // surfaced; that merged layer then provides `ServerConfig.layerTest`'s
-  // `FileSystem` dep while keeping everything else surfaced to the test.
-  const infraLayer = OpenCodeRuntimeLive.pipe(Layer.provideMerge(NodeServices.layer));
   const testLayer = AntigravityInstallation.layer.pipe(
     Layer.provideMerge(
       ServerConfig.layerTest(process.cwd(), {
         prefix: "provider-instance-registry-all-drivers-test",
       }),
     ),
-    Layer.provideMerge(infraLayer),
+    Layer.provideMerge(NodeServices.layer),
     Layer.provideMerge(BackgroundPolicyAlwaysRunLayer),
     Layer.provideMerge(ServerSettingsService.layerTest()),
     Layer.provideMerge(TestHttpClientLive),

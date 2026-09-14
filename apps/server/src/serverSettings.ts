@@ -264,6 +264,7 @@ const PersistedOptionalProviderSettings = Schema.Struct({
       cursor: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
       grok: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
       opencode: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
+      opencode2: Schema.optionalKey(Schema.Struct({ enabled: Schema.optionalKey(Schema.Boolean) })),
     }),
   ),
 });
@@ -279,23 +280,30 @@ function restoreUsedProviders(
     readonly providerInstanceId: string | null;
   }>,
 ): ServerSettings {
-  const usedProviders = new Set(providerHistory.map(({ providerName }) => providerName));
-  const usedProviderInstances = new Set(
-    providerHistory.map(
-      ({ providerName, providerInstanceId }) => providerInstanceId ?? providerName,
+  const usedProviders = new Set(
+    providerHistory.map(({ providerName }) =>
+      providerName === "opencode2" ? "opencode" : providerName,
     ),
   );
+  const usedProviderInstances = new Set(
+    providerHistory.map(({ providerName, providerInstanceId }) => {
+      const id = providerInstanceId ?? providerName;
+      return id === "opencode2" ? "opencode" : id;
+    }),
+  );
   const providerInstances = Object.fromEntries(
-    Object.entries(settings.providerInstances).map(([instanceId, instance]) => [
-      instanceId,
-      instance.enabled === undefined &&
-      (instance.driver === "cursor" ||
-        instance.driver === "grok" ||
-        instance.driver === "opencode") &&
-      usedProviderInstances.has(instanceId)
-        ? { ...instance, enabled: true }
-        : instance,
-    ]),
+    Object.entries(settings.providerInstances).map(([instanceId, instance]) => {
+      const isOpencode2 = instance.driver === "opencode2" || instanceId === "opencode2";
+      const driver = isOpencode2 ? ProviderDriverKind.make("opencode") : instance.driver;
+      const targetId = instanceId === "opencode2" ? "opencode" : instanceId;
+      const enabled =
+        instance.enabled === undefined &&
+        (driver === "cursor" || driver === "grok" || driver === "opencode") &&
+        (usedProviderInstances.has(targetId) || usedProviderInstances.has(instanceId))
+          ? true
+          : instance.enabled;
+      return [targetId, { ...instance, driver, ...(enabled !== undefined ? { enabled } : {}) }];
+    }),
   );
 
   return {
@@ -312,7 +320,10 @@ function restoreUsedProviders(
       },
       opencode: {
         ...settings.providers.opencode,
-        enabled: persisted.providers?.opencode?.enabled ?? usedProviders.has("opencode"),
+        enabled:
+          persisted.providers?.opencode?.enabled ??
+          persisted.providers?.opencode2?.enabled ??
+          usedProviders.has("opencode"),
       },
     },
     providerInstances,
@@ -592,13 +603,13 @@ const make = Effect.gen(function* () {
         provider_name AS "providerName",
         provider_instance_id AS "providerInstanceId"
       FROM projection_thread_sessions
-      WHERE provider_name IN ('cursor', 'grok', 'opencode')
+      WHERE provider_name IN ('cursor', 'grok', 'opencode', 'opencode2')
       UNION
       SELECT DISTINCT
         provider_name AS "providerName",
         provider_instance_id AS "providerInstanceId"
       FROM provider_session_runtime
-      WHERE provider_name IN ('cursor', 'grok', 'opencode')
+      WHERE provider_name IN ('cursor', 'grok', 'opencode', 'opencode2')
     `.pipe(
       Effect.mapError(
         (cause) =>

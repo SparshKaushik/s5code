@@ -1,38 +1,40 @@
 /**
- * OpenCode2Host — manages the HTTP client for an OpenCode 2 instance.
+ * OpenCodeHost — manages the HTTP client for an OpenCode instance.
  *
  * When `serverUrl` is empty, the OpenCode client service helper discovers or starts an
- * out-of-process `opencode2 serve --service` daemon. The OpenCode SDK is never loaded into
+ * out-of-process `opencode serve --service` daemon. The OpenCode SDK is never loaded into
  * the S5 Code server process.
  *
- * @module provider/OpenCode2Host
+ * @module provider/OpenCodeHost
  */
 import { OpenCode as OpenCodeClient } from "@opencode-ai/client-v2";
-import { OpenCode2Settings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
+import { OpenCodeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
 import { ProviderDriverError } from "./Errors.ts";
+import { isOpenCodeVersionSupported } from "./Layers/OpenCodeProvider.ts";
 
-export type OpenCode2ClientFacade = ReturnType<typeof OpenCodeClient.make>;
+export type OpenCodeClientFacade = ReturnType<typeof OpenCodeClient.make>;
 
-export interface OpenCode2HostHandle {
+export interface OpenCodeHostHandle {
   readonly instanceId: ProviderInstanceId;
-  readonly client: OpenCode2ClientFacade;
+  readonly client: OpenCodeClientFacade;
   readonly isRemote: boolean;
   readonly databasePath: string | null;
 }
 
-export interface MakeOpenCode2HostOptions {
+export interface MakeOpenCodeHostOptions {
   readonly instanceId: ProviderInstanceId;
-  readonly config: OpenCode2Settings;
+  readonly config: OpenCodeSettings;
   readonly defaultDirectory: string;
   readonly stateDir: string;
   readonly environment?: Readonly<Record<string, string>> | undefined;
+  readonly fetch?: NonNullable<Parameters<typeof OpenCodeClient.make>[0]>["fetch"];
 }
 
-export function makeOpenCode2Host(
-  options: MakeOpenCode2HostOptions,
-): Effect.Effect<OpenCode2HostHandle, ProviderDriverError> {
+export function makeOpenCodeHost(
+  options: MakeOpenCodeHostOptions,
+): Effect.Effect<OpenCodeHostHandle, ProviderDriverError> {
   return Effect.gen(function* () {
     // The service helper inherits process.env when it needs to start a daemon.
     if (options.environment) {
@@ -61,32 +63,36 @@ export function makeOpenCode2Host(
       const client = OpenCodeClient.make({
         baseUrl: serverUrl,
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
-      }) as OpenCode2ClientFacade;
+        ...(options.fetch ? { fetch: options.fetch } : {}),
+      }) as OpenCodeClientFacade;
 
       return {
         instanceId: options.instanceId,
         client,
         isRemote: true,
         databasePath: null,
-      } satisfies OpenCode2HostHandle;
+      } satisfies OpenCodeHostHandle;
     }
+
+    const binary = options.config.binaryPath?.trim() || "opencode";
 
     const localService = yield* Effect.tryPromise({
       try: async () => {
         const service = await import("@opencode-ai/client-v2/service");
         const endpoint = await service.ensure({
-          command: ["opencode2", "serve", "--service"],
+          command: [binary, "serve", "--service"],
+          version: (v: string) => isOpenCodeVersionSupported(v),
           ...(options.environment ? { env: options.environment } : {}),
         });
         return { endpoint, headers: service.headers(endpoint) };
       },
       catch: (cause) =>
         new ProviderDriverError({
-          driver: ProviderDriverKind.make("opencode2"),
+          driver: ProviderDriverKind.make("opencode"),
           instanceId: options.instanceId,
           detail:
-            "Failed to connect to or start the local OpenCode 2 service. " +
-            "Install the OpenCode 2 CLI and ensure `opencode2` is available on PATH.",
+            `Failed to connect to or start the local OpenCode service (requires v2.0 or later). ` +
+            `Install the OpenCode CLI and ensure \`${binary}\` is available on PATH.`,
           cause,
         }),
     });
@@ -94,15 +100,14 @@ export function makeOpenCode2Host(
     const client = OpenCodeClient.make({
       baseUrl: localService.endpoint.url,
       ...(localService.headers ? { headers: localService.headers } : {}),
-    }) as OpenCode2ClientFacade;
+      ...(options.fetch ? { fetch: options.fetch } : {}),
+    }) as OpenCodeClientFacade;
 
     return {
       instanceId: options.instanceId,
       client,
       isRemote: false,
-      // databasePath is retained in settings for backwards compatibility, but an
-      // out-of-process service owns its database selection and lifecycle.
       databasePath: null,
-    } satisfies OpenCode2HostHandle;
+    } satisfies OpenCodeHostHandle;
   });
 }
