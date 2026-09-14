@@ -61,8 +61,8 @@ android {
         applicationId = "club.touchtech.s5code.kotlin"
         minSdk = 26
         targetSdk = 37
-        versionCode = 2
-        versionName = "0.1.0-alpha.2"
+        versionCode = 3
+        versionName = "0.1.0-alpha.3"
 
         // Same three values the RN client puts in `extra`: publishable key, the
         // JWT template the relay accepts, and the relay origin. Empty means
@@ -70,17 +70,17 @@ android {
         buildConfigField(
             "String",
             "CLERK_PUBLISHABLE_KEY",
-            "\"${publicConfig("T3CODE_CLERK_PUBLISHABLE_KEY", "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY")}\"",
+            "\"${publicConfig("T3CODE_CLERK_PUBLISHABLE_KEY", "CLERK_PUBLISHABLE_KEY", "EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY")}\"",
         )
         buildConfigField(
             "String",
             "CLERK_JWT_TEMPLATE",
-            "\"${publicConfig("T3CODE_CLERK_JWT_TEMPLATE", "EXPO_PUBLIC_CLERK_JWT_TEMPLATE")}\"",
+            "\"${publicConfig("T3CODE_CLERK_JWT_TEMPLATE", "CLERK_JWT_TEMPLATE", "EXPO_PUBLIC_CLERK_JWT_TEMPLATE")}\"",
         )
         buildConfigField(
             "String",
             "RELAY_URL",
-            "\"${publicConfig("T3CODE_RELAY_URL", "VITE_T3CODE_RELAY_URL")}\"",
+            "\"${publicConfig("T3CODE_RELAY_URL", "RELAY_URL", "VITE_T3CODE_RELAY_URL")}\"",
         )
         // Public Firebase Android client values. A maintainer can supply these
         // through CI or `.env.local` after registering this exact package in the

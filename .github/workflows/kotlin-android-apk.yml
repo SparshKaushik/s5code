@@ -22,6 +22,10 @@ jobs:
     name: Build & Release Kotlin Android APK
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY || vars.CLERK_PUBLISHABLE_KEY || 'pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA' }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE || vars.CLERK_JWT_TEMPLATE || 's5-relay' }}
+      T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL || 'https://relay.s5code.dpdns.org' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -41,29 +45,33 @@ jobs:
           ./gradlew assembleDebug --stacktrace
 
       - name: Prepare Artifacts
+        id: artifacts
         run: |
+          VERSION=$(grep 'versionName = ' apps/kotlin-android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           mkdir -p dist
-          cp apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk dist/s5code-kotlin-0.1.0-alpha.2-debug.apk
+          cp apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk "dist/s5code-kotlin-${VERSION}-debug.apk"
           cd dist
-          sha256sum s5code-kotlin-0.1.0-alpha.2-debug.apk > s5code-kotlin-0.1.0-alpha.2-debug.apk.sha256
+          sha256sum "s5code-kotlin-${VERSION}-debug.apk" > "s5code-kotlin-${VERSION}-debug.apk.sha256"
 
       - name: Upload Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: s5code-kotlin-0.1.0-alpha.2-debug
+          name: s5code-kotlin-${{ steps.artifacts.outputs.version }}-debug
           path: dist/*
 
       - name: Publish Pre-release
-        if: startsWith(github.ref, 'refs/tags/kotlin-android-') || github.event.inputs.publish_prerelease == true
+        if: startsWith(github.ref, 'refs/tags/kotlin-android-') || github.ref == 'refs/heads/kotlin-android-client' || github.event.inputs.publish_prerelease == true
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="kotlin-android-v0.1.0-alpha.2-debug"
+          VERSION="${{ steps.artifacts.outputs.version }}"
+          tag="kotlin-android-v${VERSION}-debug"
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             tag="${GITHUB_REF#refs/tags/}"
           fi
-          gh release create "$tag" dist/s5code-kotlin-0.1.0-alpha.2-debug.apk dist/s5code-kotlin-0.1.0-alpha.2-debug.apk.sha256 \
-            --title "Kotlin Android client 0.1.0-alpha.2 (debug)" \
+          gh release create "$tag" "dist/s5code-kotlin-${VERSION}-debug.apk" "dist/s5code-kotlin-${VERSION}-debug.apk.sha256" \
+            --title "Kotlin Android client ${VERSION} (debug)" \
             --notes "Debug build of the native Kotlin/Compose Android client (\`apps/kotlin-android\`), for install and update testing." \
             --prerelease || \
-          gh release upload "$tag" dist/s5code-kotlin-0.1.0-alpha.2-debug.apk dist/s5code-kotlin-0.1.0-alpha.2-debug.apk.sha256 --clobber
+          gh release upload "$tag" "dist/s5code-kotlin-${VERSION}-debug.apk" "dist/s5code-kotlin-${VERSION}-debug.apk.sha256" --clobber
