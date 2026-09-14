@@ -42,7 +42,8 @@ jobs:
         run: |
           mkdir -p ~/.android
           if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
-            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+            printf '%s' "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
+            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -n 5
           fi
 
       - name: Setup Gradle
