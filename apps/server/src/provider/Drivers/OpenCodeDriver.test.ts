@@ -230,4 +230,167 @@ describe("OpenCodeDriver", () => {
       expect(snapshot.message).toContain("2.0.0 or newer");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
+
+  it.effect(
+    "falls back to ~/.opencode/bin/opencode when binaryPath is default and file exists",
+    () =>
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+        const fakeHome = `${tempDir}/home`;
+        const binDir = `${fakeHome}/.opencode/bin`;
+        yield* fileSystem.makeDirectory(binDir, { recursive: true });
+        yield* fileSystem.writeFileString(`${binDir}/opencode`, "#!/bin/sh\nexit 0\n");
+
+        const origHome = process.env.HOME;
+        process.env.HOME = fakeHome;
+
+        try {
+          yield* makeOpenCodeHost({
+            instanceId: ProviderInstanceId.make("opencode-bin-fallback-test"),
+            config: {
+              enabled: true,
+              binaryPath: "opencode",
+              serverUrl: "",
+              serverPassword: "",
+              customModels: [],
+            },
+            defaultDirectory: tempDir,
+            stateDir: tempDir,
+            fetch: mockFetch,
+          });
+
+          expect(localService.ensure).toHaveBeenCalledWith(
+            expect.objectContaining({
+              command: [`${binDir}/opencode`, "serve", "--service"],
+            }),
+          );
+        } finally {
+          process.env.HOME = origHome;
+        }
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("retries requests on transport failure by re-ensuring the service endpoint", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+      let ensureCount = 0;
+      localService.ensure.mockImplementation(async () => {
+        ensureCount += 1;
+        return {
+          url: `http://127.0.0.1:${ensureCount === 1 ? "1111" : "2222"}`,
+          auth: { type: "basic" as const, username: "opencode", password: "test-password" },
+        };
+      });
+
+      const calledUrls: string[] = [];
+      const failFirstFetch: OpenCodeFetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const url = String(input);
+        calledUrls.push(url);
+        if (url.includes("1111")) {
+          throw new TypeError("fetch failed: connect ECONNREFUSED 127.0.0.1:1111");
+        }
+        return new Response(JSON.stringify({ data: { id: "ses-reconnected-1" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as OpenCodeFetch;
+
+      const hostHandle = yield* makeOpenCodeHost({
+        instanceId: ProviderInstanceId.make("opencode-reconnect-test"),
+        config: {
+          enabled: true,
+          binaryPath: "opencode",
+          serverUrl: "",
+          serverPassword: "",
+          customModels: [],
+        },
+        defaultDirectory: tempDir,
+        stateDir: tempDir,
+        fetch: failFirstFetch,
+      });
+
+      expect(ensureCount).toBe(1);
+
+      const session = yield* Effect.promise(() =>
+        hostHandle.client.session.create({
+          location: { directory: tempDir },
+          title: "Test Session",
+        }),
+      );
+
+      expect(session.id).toBe("ses-reconnected-1");
+      expect(ensureCount).toBe(2);
+      expect(calledUrls.some((u) => u.includes("1111"))).toBe(true);
+      expect(calledUrls.some((u) => u.includes("2222"))).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
+  it.effect("retries requests on 401 unauthorized by re-ensuring the service endpoint", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+      let ensureCount = 0;
+      localService.ensure.mockImplementation(async () => {
+        ensureCount += 1;
+        return {
+          url: `http://127.0.0.1:${ensureCount === 1 ? "3333" : "4444"}`,
+          auth: { type: "basic" as const, username: "opencode", password: "test-password" },
+        };
+      });
+
+      const calledUrls: string[] = [];
+      const fail401Fetch: OpenCodeFetch = (async (
+        input: string | URL | Request,
+        init?: RequestInit,
+      ) => {
+        const url = String(input);
+        calledUrls.push(url);
+        if (url.includes("3333")) {
+          return new Response(JSON.stringify({ error: "Unauthorized" }), {
+            status: 401,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ data: { id: "ses-auth-reconnected-2" } }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as OpenCodeFetch;
+
+      const hostHandle = yield* makeOpenCodeHost({
+        instanceId: ProviderInstanceId.make("opencode-401-reconnect-test"),
+        config: {
+          enabled: true,
+          binaryPath: "opencode",
+          serverUrl: "",
+          serverPassword: "",
+          customModels: [],
+        },
+        defaultDirectory: tempDir,
+        stateDir: tempDir,
+        fetch: fail401Fetch,
+      });
+
+      expect(ensureCount).toBe(1);
+
+      const session = yield* Effect.promise(() =>
+        hostHandle.client.session.create({
+          location: { directory: tempDir },
+          title: "Test Session",
+        }),
+      );
+
+      expect(session.id).toBe("ses-auth-reconnected-2");
+      expect(ensureCount).toBe(2);
+      expect(calledUrls.some((u) => u.includes("3333"))).toBe(true);
+      expect(calledUrls.some((u) => u.includes("4444"))).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
 });

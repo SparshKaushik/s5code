@@ -107,7 +107,9 @@ function toToolLifecycleItemType(
   if (
     normalized.includes("bash") ||
     normalized.includes("shell") ||
-    normalized.includes("command")
+    normalized.includes("command") ||
+    normalized.includes("terminal") ||
+    normalized.includes("exec")
   ) {
     return "command_execution";
   }
@@ -137,7 +139,13 @@ function summarizeToolCallInput(toolName: string, input: unknown): string | unde
     return undefined;
   };
   const normalized = toolName.toLowerCase();
-  if (normalized.includes("bash") || normalized.includes("shell")) {
+  if (
+    normalized.includes("bash") ||
+    normalized.includes("shell") ||
+    normalized.includes("command") ||
+    normalized.includes("terminal") ||
+    normalized.includes("exec")
+  ) {
     return firstString("command", "script", "cmd");
   }
   if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("patch")) {
@@ -197,10 +205,30 @@ function structuredErrorMessage(error: unknown): string | undefined {
 }
 
 /** OpenCode client errors often stringify as "[object Object]"; dig for the message. */
-function openCodeClientErrorMessage(cause: unknown): string {
-  return (
-    structuredErrorMessage(cause) ?? structuredErrorMessage((cause as any)?.cause) ?? String(cause)
-  );
+export function openCodeClientErrorMessage(cause: unknown): string {
+  if (!cause) return "Unknown error";
+  let current: any = cause;
+  const messages: string[] = [];
+  while (current && typeof current === "object") {
+    const msg =
+      (typeof current.message === "string" && current.message.trim().length > 0
+        ? current.message.trim()
+        : null) ??
+      (typeof current.detail === "string" && current.detail.trim().length > 0
+        ? current.detail.trim()
+        : null) ??
+      (typeof current.reason === "string" && current.reason.trim().length > 0
+        ? current.reason.trim()
+        : null);
+    if (msg && !messages.includes(msg)) {
+      messages.push(msg);
+    }
+    current = current.cause;
+  }
+  if (messages.length > 0) {
+    return messages.join(": ");
+  }
+  return String(cause);
 }
 
 function parseModelSlug(slug: string): { providerID: string; modelID: string } | null {
@@ -419,7 +447,7 @@ export function makeOpenCodeAdapter(
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "event.subscribe",
-            detail: `Failed to subscribe: ${String(cause)}`,
+            detail: `Failed to subscribe: ${openCodeClientErrorMessage(cause)}`,
             cause,
           }),
       }).pipe(Effect.orElseSucceed(() => null));
@@ -432,7 +460,7 @@ export function makeOpenCodeAdapter(
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "event.stream",
-            detail: String(cause),
+            detail: openCodeClientErrorMessage(cause),
             cause,
           }),
       ).pipe(
@@ -683,9 +711,7 @@ export function makeOpenCodeAdapter(
                 const toolName =
                   (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
                 const input = data.input ?? tracked?.input;
-                if (tracked && data.input !== undefined) {
-                  tracked.input = data.input;
-                }
+                parentContext.toolCallByCallId.set(callId, { name: toolName, input });
                 const inputSummary = summarizeToolCallInput(toolName, input);
                 const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
@@ -711,18 +737,27 @@ export function makeOpenCodeAdapter(
                 const tracked = parentContext.toolCallByCallId.get(callId);
                 const toolName =
                   (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
-                const inputSummary = summarizeToolCallInput(toolName, tracked?.input);
+                const input = data.input ?? tracked?.input;
+                const inputSummary = summarizeToolCallInput(toolName, input);
                 parentContext.toolCallByCallId.delete(callId);
                 const output = toolContentText(data.content);
+                const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.completed",
                   payload: {
-                    itemType: toToolLifecycleItemType(toolName),
+                    itemType,
                     status: "completed",
                     title: inputSummary ?? toolName,
                     ...(output ? { detail: output } : {}),
-                    data: { tool: toolName, toolName },
+                    data: {
+                      tool: toolName,
+                      toolName,
+                      ...(itemType === "command_execution" && inputSummary !== undefined
+                        ? { command: inputSummary }
+                        : {}),
+                      ...(output ? { rawOutput: { output, content: output } } : {}),
+                    },
                   },
                 });
                 break;
@@ -733,16 +768,25 @@ export function makeOpenCodeAdapter(
                 const tracked = parentContext.toolCallByCallId.get(callId);
                 const toolName =
                   (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
+                const input = data.input ?? tracked?.input;
+                const inputSummary = summarizeToolCallInput(toolName, input);
                 parentContext.toolCallByCallId.delete(callId);
+                const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.completed",
                   payload: {
-                    itemType: toToolLifecycleItemType(toolName),
+                    itemType,
                     status: "failed",
-                    title: summarizeToolCallInput(toolName, tracked?.input) ?? toolName,
+                    title: inputSummary ?? toolName,
                     detail: structuredErrorMessage(data.error) ?? "Tool failed",
-                    data: { tool: toolName, toolName },
+                    data: {
+                      tool: toolName,
+                      toolName,
+                      ...(itemType === "command_execution" && inputSummary !== undefined
+                        ? { command: inputSummary }
+                        : {}),
+                    },
                   },
                 });
                 break;
@@ -869,7 +913,7 @@ export function makeOpenCodeAdapter(
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
                 method: "session.create",
-                detail: `Failed to create OpenCode session: ${String(cause)}`,
+                detail: `Failed to create OpenCode session: ${openCodeClientErrorMessage(cause)}`,
                 cause,
               }),
           });
@@ -1059,7 +1103,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.prompt",
-              detail: `Failed to send turn to OpenCode: ${String(cause)}`,
+              detail: `Failed to send turn to OpenCode: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1085,7 +1129,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.interrupt",
-              detail: `Failed to interrupt turn: ${String(cause)}`,
+              detail: `Failed to interrupt turn: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1106,7 +1150,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.compact",
-              detail: `Failed to compact thread: ${String(cause)}`,
+              detail: `Failed to compact thread: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1152,7 +1196,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.fork",
-              detail: `Failed to fork session: ${String(cause)}`,
+              detail: `Failed to fork session: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1223,7 +1267,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.inbox.cancel",
-              detail: `Failed to cancel inbox item: ${String(cause)}`,
+              detail: `Failed to cancel inbox item: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1253,7 +1297,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: `session.inbox.${delivery}`,
-              detail: `Failed to change inbox delivery: ${String(cause)}`,
+              detail: `Failed to change inbox delivery: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1300,7 +1344,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.revert",
-              detail: `Failed to rollback session: ${String(cause)}`,
+              detail: `Failed to rollback session: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });

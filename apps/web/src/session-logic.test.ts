@@ -815,6 +815,58 @@ describe("deriveWorkLogEntries", () => {
     expect(entry?.command).toBe("bun run lint");
   });
 
+  it("extracts command name instead of stdout when detail carries terminal output", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "shell-tool-completed",
+        kind: "tool.completed",
+        summary: "which karabiner_cli completed",
+        payload: {
+          itemType: "command_execution",
+          title: "which karabiner_cli",
+          detail: "karabiner_cli not found\nzsh:1: no matches found\nCommand exited with code 1.",
+          data: {
+            tool: "shell",
+            toolName: "shell",
+            command: "which karabiner_cli",
+            rawOutput: {
+              output:
+                "karabiner_cli not found\nzsh:1: no matches found\nCommand exited with code 1.",
+            },
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.command).toBe("which karabiner_cli");
+    expect(entry?.detail).toBe(
+      "karabiner_cli not found\nzsh:1: no matches found\nCommand exited with code 1.",
+    );
+  });
+
+  it("extracts command name from title when data.command is absent and detail carries terminal output", () => {
+    const activities: OrchestrationThreadActivity[] = [
+      makeActivity({
+        id: "shell-tool-completed-legacy",
+        kind: "tool.completed",
+        summary: "which karabiner_cli completed",
+        payload: {
+          itemType: "command_execution",
+          title: "which karabiner_cli",
+          detail: "karabiner_cli not found\nzsh:1: no matches found\nCommand exited with code 1.",
+          data: {
+            tool: "shell",
+            toolName: "shell",
+          },
+        },
+      }),
+    ];
+
+    const [entry] = deriveWorkLogEntries(activities);
+    expect(entry?.command).toBe("which karabiner_cli");
+  });
+
   it("extracts failed tool lifecycle status from item payloads", () => {
     const activities: OrchestrationThreadActivity[] = [
       makeActivity({

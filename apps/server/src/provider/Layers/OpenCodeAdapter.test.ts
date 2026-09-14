@@ -7,14 +7,16 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Layer from "effect/Layer";
 
 import { ServerConfig } from "../../config.ts";
-import { makeOpenCodeAdapter } from "./OpenCodeAdapter.ts";
+import { makeOpenCodeAdapter, openCodeClientErrorMessage } from "./OpenCodeAdapter.ts";
 import { type OpenCodeClientFacade, type OpenCodeHostHandle } from "../OpenCodeHost.ts";
 
 const testLayer = Layer.merge(
@@ -750,6 +752,8 @@ describe("OpenCodeAdapter", () => {
       expect((completed.payload as any).title).toBe("ls -la");
       expect((completed.payload as any).detail).toBe("file-a\nfile-b");
       expect((completed.payload as any).data.tool).toBe("bash");
+      expect((completed.payload as any).data.command).toBe("ls -la");
+      expect((completed.payload as any).data.rawOutput?.output).toBe("file-a\nfile-b");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
@@ -878,6 +882,69 @@ describe("OpenCodeAdapter", () => {
         .pipe(Effect.exit);
 
       expect(exit._tag).toBe("Failure");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  describe("openCodeClientErrorMessage", () => {
+    it("unpacks nested cause chains", () => {
+      const err = new Error("Transport", {
+        cause: new TypeError("fetch failed", {
+          cause: new Error("connect ECONNREFUSED 127.0.0.1:49374"),
+        }),
+      });
+      expect(openCodeClientErrorMessage(err)).toBe(
+        "Transport: fetch failed: connect ECONNREFUSED 127.0.0.1:49374",
+      );
+    });
+
+    it("deduplicates identical messages in the cause chain", () => {
+      const err = new Error("Connection failed", {
+        cause: new Error("Connection failed", {
+          cause: new Error("Server offline"),
+        }),
+      });
+      expect(openCodeClientErrorMessage(err)).toBe("Connection failed: Server offline");
+    });
+
+    it("extracts detail and reason properties from structured errors", () => {
+      expect(openCodeClientErrorMessage({ detail: "Token expired" })).toBe("Token expired");
+      expect(openCodeClientErrorMessage({ reason: "Rate limited" })).toBe("Rate limited");
+    });
+
+    it("returns Unknown error for null or undefined", () => {
+      expect(openCodeClientErrorMessage(null)).toBe("Unknown error");
+      expect(openCodeClientErrorMessage(undefined)).toBe("Unknown error");
+    });
+  });
+
+  it.effect("surfaces nested transport errors cleanly when startSession fails", () =>
+    Effect.gen(function* () {
+      const { handle } = createMockHost();
+      (handle.client.session as any).create = async () => {
+        throw new Error("Transport", {
+          cause: new TypeError("fetch failed", {
+            cause: new Error("connect ECONNREFUSED 127.0.0.1:49374"),
+          }),
+        });
+      };
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-fail-create");
+      const exit = yield* adapter
+        .startSession({
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.exit);
+
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const failureStr = Cause.pretty(exit.cause);
+        expect(failureStr).toContain(
+          "Failed to create OpenCode session: Transport: fetch failed: connect ECONNREFUSED 127.0.0.1:49374",
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });

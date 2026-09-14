@@ -1113,12 +1113,24 @@ function extractToolCommand(payload: Record<string, unknown> | null): {
   const rawOutput = asRecord(data?.rawOutput);
   const itemType = asTrimmedString(payload?.itemType);
   const detail = asTrimmedString(payload?.detail);
+  const title = asTrimmedString(payload?.title);
+  const isGenericTitle = (t: string) => {
+    const l = t.toLowerCase();
+    return (
+      l === "ran command" ||
+      l === "run command" ||
+      l === "terminal" ||
+      l === "tool" ||
+      l === "tool call"
+    );
+  };
   const candidates: unknown[] = [
     item?.command,
     itemInput?.command,
     itemResult?.command,
     data?.command,
     rawOutput?.command,
+    itemType === "command_execution" && title && !isGenericTitle(title) ? title : null,
     itemType === "command_execution" && detail ? stripTrailingExitCode(detail).output : null,
   ];
 
