@@ -1,27 +1,19 @@
 /**
- * OpenCodeDriver — `ProviderDriver` for the OpenCode runtime.
+ * OpenCodeDriver — `ProviderDriver` for OpenCode (v2).
  *
- * Mirrors the Codex / Claude drivers: a plain value whose `create()`
- * bundles `snapshot` / `adapter` / `textGeneration` closures over the
- * per-instance `OpenCodeSettings`.
- *
- * Two instances with different `serverUrl`s therefore talk to independent
- * OpenCode servers; when no `serverUrl` is set, the adapter + text-generation
- * shares spin up their own scoped child processes, and those child
- * processes are released when the registry scope closes.
+ * Bundles `snapshot`, `adapter`, and `textGeneration` using an OpenCode
+ * HTTP service client per provider instance.
  *
  * @module provider/Drivers/OpenCodeDriver
  */
 import { OpenCodeSettings, ProviderDriverKind } from "@t3tools/contracts";
-import * as Crypto from "effect/Crypto";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { HttpClient } from "effect/unstable/http";
-import { ChildProcessSpawner } from "effect/unstable/process";
 
-import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGeneration.ts";
+import type * as Crypto from "effect/Crypto";
 import * as BackgroundPolicy from "../../background/BackgroundPolicy.ts";
 import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -30,12 +22,9 @@ import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
 import {
   checkOpenCodeProviderStatus,
   makePendingOpenCodeProvider,
-  openCodeSkillsToServerProviderSkills,
 } from "../Layers/OpenCodeProvider.ts";
-import { ProviderEventLoggers } from "../Layers/ProviderEventLoggers.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
-import { OpenCodeRuntime } from "../opencodeRuntime.ts";
-import * as OpenCodeServerOwner from "../OpenCodeServerOwner.ts";
+import { makeOpenCodeHost } from "../OpenCodeHost.ts";
 import {
   defaultProviderContinuationIdentity,
   type ProviderDriver,
@@ -43,48 +32,22 @@ import {
 } from "../ProviderDriver.ts";
 import { withInstanceIdentity } from "./instanceIdentity.ts";
 import { mergeProviderInstanceEnvironment } from "../ProviderInstanceEnvironment.ts";
-import {
-  enrichProviderSnapshotWithVersionAdvisory,
-  makeCachedProviderMaintenanceResolution,
-  makePackageManagedProviderMaintenanceResolver,
-  normalizeCommandPath,
-  resolveProviderMaintenanceCapabilitiesEffect,
-} from "../providerMaintenance.ts";
+import { makeOpenCodeTextGeneration } from "../../textGeneration/OpenCodeTextGeneration.ts";
 import {
   haveProviderSnapshotSettingsChanged,
   makeProviderSnapshotSettingsSource,
   type ProviderSnapshotSettings,
 } from "../providerUpdateSettings.ts";
+
 const decodeOpenCodeSettings = Schema.decodeSync(OpenCodeSettings);
-
 const DRIVER_KIND = ProviderDriverKind.make("opencode");
-
-function isOpenCodeNativeCommandPath(commandPath: string): boolean {
-  const normalized = normalizeCommandPath(commandPath);
-  return (
-    normalized.endsWith("/.opencode/bin/opencode") ||
-    normalized.endsWith("/.opencode/bin/opencode.exe")
-  );
-}
-
-const UPDATE = makePackageManagedProviderMaintenanceResolver({
-  provider: DRIVER_KIND,
-  npmPackageName: "opencode-ai",
-  nativeUpdate: {
-    args: ["upgrade"],
-    isCommandPath: isOpenCodeNativeCommandPath,
-  },
-});
 
 export type OpenCodeDriverEnv =
   | BackgroundPolicy.BackgroundPolicy
-  | ChildProcessSpawner.ChildProcessSpawner
   | Crypto.Crypto
   | FileSystem.FileSystem
   | HttpClient.HttpClient
-  | OpenCodeRuntime
   | Path.Path
-  | ProviderEventLoggers
   | ServerConfig
   | ServerSettingsService;
 
@@ -98,111 +61,63 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
   defaultConfig: (): OpenCodeSettings => decodeOpenCodeSettings({}),
   create: ({ instanceId, displayName, accentColor, environment, enabled, config }) =>
     Effect.gen(function* () {
-      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-      const fileSystem = yield* FileSystem.FileSystem;
-      const pathService = yield* Path.Path;
-      const openCodeRuntime = yield* OpenCodeRuntime;
       const serverConfig = yield* ServerConfig;
-      const httpClient = yield* HttpClient.HttpClient;
       const serverSettings = yield* ServerSettingsService;
-      const eventLoggers = yield* ProviderEventLoggers;
-      const processEnv = mergeProviderInstanceEnvironment(environment);
+      const rawEnv = mergeProviderInstanceEnvironment(environment);
+      const processEnv: Record<string, string> = {};
+      for (const [key, value] of Object.entries(rawEnv)) {
+        if (value !== undefined) {
+          processEnv[key] = value;
+        }
+      }
+
       const continuationIdentity = defaultProviderContinuationIdentity({
         driverKind: DRIVER_KIND,
         instanceId,
       });
+
       const stampIdentity = withInstanceIdentity({
         instanceId,
         driverKind: DRIVER_KIND,
-        displayName,
+        displayName: displayName ?? "OpenCode",
         accentColor,
         continuationGroupKey: continuationIdentity.continuationKey,
       });
-      const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
-      const resolveMaintenance = yield* makeCachedProviderMaintenanceResolution(
-        resolveProviderMaintenanceCapabilitiesEffect(UPDATE, {
-          binaryPath: effectiveConfig.binaryPath,
-          env: processEnv,
-        }).pipe(
-          Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
-          Effect.provideService(FileSystem.FileSystem, fileSystem),
-          Effect.provideService(Path.Path, pathService),
-        ),
-      );
 
-      const adapter = yield* makeOpenCodeAdapter(effectiveConfig, {
+      const effectiveConfig = { ...config, enabled } satisfies OpenCodeSettings;
+
+      const hostHandle = yield* makeOpenCodeHost({
         instanceId,
-        environment: processEnv,
-        ...(eventLoggers.native ? { nativeEventLogger: eventLoggers.native } : {}),
-      });
-      const serverOwner = yield* OpenCodeServerOwner.make({
-        binaryPath: effectiveConfig.binaryPath,
-        directory: serverConfig.cwd,
-        ...(effectiveConfig.serverPassword
-          ? { serverPassword: effectiveConfig.serverPassword }
-          : {}),
+        config: effectiveConfig,
+        defaultDirectory: serverConfig.cwd,
+        stateDir: serverConfig.stateDir,
         environment: processEnv,
       });
-      const textGeneration = yield* makeOpenCodeTextGeneration(effectiveConfig).pipe(
-        Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner),
-      );
+
+      const adapter = yield* makeOpenCodeAdapter(hostHandle, {
+        instanceId,
+      });
+
+      const textGeneration = makeOpenCodeTextGeneration(hostHandle, effectiveConfig);
 
       const checkProvider = checkOpenCodeProviderStatus(
+        hostHandle,
         effectiveConfig,
         serverConfig.cwd,
-        processEnv,
-      ).pipe(
-        Effect.map(stampIdentity),
-        Effect.provideService(OpenCodeServerOwner.OpenCodeServerOwner, serverOwner),
-        Effect.provideService(OpenCodeRuntime, openCodeRuntime),
-      );
-      // NOTE: the local branch intentionally uses the shared SDK server
-      // instead of `opencode debug skill` (loadSkillsFromCli). The CLI writes
-      // its full JSON inventory to stdout, but the Bun-compiled binary does
-      // not flush more than one 64KB pipe buffer to a non-TTY stdout, so the
-      // piped output arrives truncated and unparseable — which degrades to an
-      // empty skill list and poisons the workspace snapshot the `$` picker
-      // reads. The SDK `app.skills` endpoint honors the per-request directory
-      // and returns complete results regardless of size.
-      const loadSkillsForCwd = (cwd: string) =>
-        effectiveConfig.serverUrl.trim().length > 0
-          ? Effect.scoped(
-              Effect.gen(function* () {
-                const server = yield* openCodeRuntime.connectToOpenCodeServer({
-                  binaryPath: effectiveConfig.binaryPath,
-                  directory: cwd,
-                  serverUrl: effectiveConfig.serverUrl,
-                  ...(effectiveConfig.serverPassword
-                    ? { serverPassword: effectiveConfig.serverPassword }
-                    : {}),
-                  environment: processEnv,
-                });
-                const client = openCodeRuntime.createOpenCodeSdkClient({
-                  baseUrl: server.url,
-                  directory: cwd,
-                  ...(effectiveConfig.serverPassword
-                    ? { serverPassword: effectiveConfig.serverPassword }
-                    : {}),
-                });
-                return yield* openCodeRuntime.loadOpenCodeSkills(client);
-              }),
-            )
-          : serverOwner.withServer((server) =>
-              openCodeRuntime.loadOpenCodeSkills(
-                openCodeRuntime.createOpenCodeSdkClient({
-                  baseUrl: server.url,
-                  directory: cwd,
-                  ...(server.serverPassword !== undefined
-                    ? { serverPassword: server.serverPassword }
-                    : {}),
-                }),
-              ),
-            );
+      ).pipe(Effect.map(stampIdentity));
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
+
       const snapshot = yield* makeManagedServerProvider<ProviderSnapshotSettings<OpenCodeSettings>>(
         {
-          resolveMaintenance,
+          resolveMaintenance: () =>
+            Effect.succeed({
+              provider: DRIVER_KIND,
+              packageName: "@opencode-ai/client-v2",
+              canUpdate: false,
+              status: "current" as const,
+              update: null,
+            }),
           getSettings: snapshotSettings.getSettings,
           streamSettings: snapshotSettings.streamSettings,
           haveSettingsChanged: haveProviderSnapshotSettingsChanged,
@@ -211,16 +126,6 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
           initialSnapshot: (settings) =>
             makePendingOpenCodeProvider(settings.provider).pipe(Effect.map(stampIdentity)),
           checkProvider,
-          enrichSnapshot: ({ settings, snapshot, publishSnapshot }) =>
-            resolveMaintenance().pipe(
-              Effect.flatMap((maintenanceCapabilities) =>
-                enrichProviderSnapshotWithVersionAdvisory(snapshot, maintenanceCapabilities, {
-                  enableProviderUpdateChecks: settings.enableProviderUpdateChecks,
-                }),
-              ),
-              Effect.provideService(HttpClient.HttpClient, httpClient),
-              Effect.flatMap((enrichedSnapshot) => publishSnapshot(enrichedSnapshot)),
-            ),
         },
       ).pipe(
         Effect.mapError(
@@ -242,27 +147,6 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         accentColor,
         enabled,
         snapshot,
-        snapshotForCwd: (cwd) =>
-          !effectiveConfig.enabled
-            ? snapshot.getSnapshot
-            : Effect.all([
-                snapshot.getSnapshot,
-                loadSkillsForCwd(cwd).pipe(Effect.timeout("20 seconds")),
-              ]).pipe(
-                Effect.map(([machineSnapshot, skills]) => ({
-                  ...machineSnapshot,
-                  skills: openCodeSkillsToServerProviderSkills(skills),
-                })),
-                Effect.mapError(
-                  (cause) =>
-                    new ProviderDriverError({
-                      driver: DRIVER_KIND,
-                      instanceId,
-                      detail: `Failed to probe OpenCode skills for '${cwd}'`,
-                      cause,
-                    }),
-                ),
-              ),
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

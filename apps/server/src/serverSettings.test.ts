@@ -610,6 +610,23 @@ it.layer(NodeServices.layer)("server settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("migrates historical opencode2 usage to enable opencode", () =>
+    Effect.gen(function* () {
+      const serverConfig = yield* ServerConfig.ServerConfig;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const serverSettings = yield* ServerSettingsModule.ServerSettingsService;
+      yield* fileSystem.writeFileString(
+        serverConfig.settingsPath,
+        '{"providers":{"opencode2":{"enabled":true}}}',
+      );
+      yield* recordProviderUsage("opencode2", "opencode2");
+
+      const settings = yield* serverSettings.getSettings;
+
+      assert.isTrue(settings.providers.opencode.enabled);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("preserves existing provider instances without explicit enabled flags", () =>
     Effect.gen(function* () {
       const serverConfig = yield* ServerConfig.ServerConfig;
