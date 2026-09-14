@@ -61,8 +61,8 @@ android {
         applicationId = "club.touchtech.s5code.kotlin"
         minSdk = 26
         targetSdk = 37
-        versionCode = 5
-        versionName = "0.1.0-alpha.5"
+        versionCode = 6
+        versionName = "0.1.0-alpha.6"
 
         // Same three values the RN client puts in `extra`: publishable key, the
         // JWT template the relay accepts, and the relay origin. Empty means
@@ -108,6 +108,12 @@ android {
     }
 
     signingConfigs {
+        getByName("debug") {
+            val debugKeystore = rootProject.file("debug.keystore")
+            if (debugKeystore.exists()) {
+                storeFile = debugKeystore
+            }
+        }
         if (hasReleaseSigning) {
             create("release") {
                 storeFile = releaseStoreFile

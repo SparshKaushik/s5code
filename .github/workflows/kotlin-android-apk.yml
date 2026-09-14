@@ -40,10 +40,11 @@ jobs:
         env:
           ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
         run: |
-          mkdir -p ~/.android
           if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
-            printf '%s' "$ANDROID_DEBUG_KEYSTORE_BASE64" | base64 -d > ~/.android/debug.keystore
-            keytool -list -keystore ~/.android/debug.keystore -storepass android | head -n 5
+            mkdir -p ~/.android apps/kotlin-android
+            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > apps/kotlin-android/debug.keystore
+            cp apps/kotlin-android/debug.keystore ~/.android/debug.keystore
+            keytool -list -keystore apps/kotlin-android/debug.keystore -storepass android | head -n 5
           fi
 
       - name: Setup Gradle
@@ -53,6 +54,11 @@ jobs:
         run: |
           cd apps/kotlin-android
           ./gradlew assembleDebug --stacktrace
+
+      - name: Verify Signing Certificate
+        run: |
+          CERT_DIGEST=$(keytool -printcert -jarfile apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk | grep "SHA256:" | head -n 1)
+          echo "Debug APK signing certificate: $CERT_DIGEST"
 
       - name: Prepare Artifacts
         id: artifacts
