@@ -1,8 +1,10 @@
 package club.touchtech.s5code.kotlin.data
 
+import club.touchtech.s5code.kotlin.design.theme.S5ColorTheme
 import club.touchtech.s5code.kotlin.design.theme.S5ThemeMode
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
+import club.touchtech.s5code.kotlin.model.ModelFavorite
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
@@ -32,7 +34,18 @@ enum class TerminalThemePreference(val label: String) {
 fun StoredPreferences.toRuntime(): RuntimePreferences =
     RuntimePreferences(
         themeMode = S5ThemeMode.entries.byNameOr(themeMode, S5ThemeMode.System),
-        dynamicColor = dynamicColor,
+        colorTheme =
+            if (colorTheme.isBlank()) {
+                // Files from before color themes only know the dynamic-color
+                // switch, so it answers for them.
+                if (dynamicColor) S5ColorTheme.MaterialYou else S5ColorTheme.S5Code
+            } else {
+                S5ColorTheme.entries.firstOrNull { it.id == colorTheme } ?: S5ColorTheme.Default
+            },
+        modelFavorites =
+            modelFavorites
+                .filter { it.instanceId.isNotBlank() && it.model.isNotBlank() }
+                .map { ModelFavorite(it.instanceId, it.model) },
         projectGrouping = ProjectGrouping.entries.byNameOr(projectGrouping, ProjectGrouping.ByProject),
         threadSort = ThreadSort.entries.byNameOr(threadSort, ThreadSort.Recent),
         snoozedThreadsExpanded = snoozedThreadsExpanded,
@@ -56,7 +69,9 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
  */
 data class RuntimePreferences(
     val themeMode: S5ThemeMode = S5ThemeMode.System,
-    val dynamicColor: Boolean = true,
+    val colorTheme: S5ColorTheme = S5ColorTheme.Default,
+    /** Starred models in picker order. Client-local, same as the other clients. */
+    val modelFavorites: List<ModelFavorite> = emptyList(),
     val projectGrouping: ProjectGrouping = ProjectGrouping.ByProject,
     val threadSort: ThreadSort = ThreadSort.Recent,
     /**
@@ -86,7 +101,12 @@ data class RuntimePreferences(
 fun RuntimePreferences.toStored(): StoredPreferences =
     StoredPreferences(
         themeMode = themeMode.name,
-        dynamicColor = dynamicColor,
+        // Downgrade story: an older build keeps reading the switch and sees the
+        // same answer as the named choice.
+        dynamicColor = colorTheme == S5ColorTheme.MaterialYou,
+        colorTheme = colorTheme.id,
+        modelFavorites =
+            modelFavorites.map { StoredModelFavorite(it.instanceId, it.model) },
         projectGrouping = projectGrouping.name,
         threadSort = threadSort.name,
         snoozedThreadsExpanded = snoozedThreadsExpanded,

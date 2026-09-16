@@ -13,7 +13,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
-import club.touchtech.s5code.kotlin.data.ApprovalDecision
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -40,7 +39,7 @@ fun HomeApprovalCard(
     item: HomeListItem.PendingApprovalCard,
     resolveProjectIconUrl: suspend (Project) -> String?,
     onOpenThread: () -> Unit,
-    onDecision: (ApprovalDecision) -> Unit,
+    onDecision: (String) -> Unit,
     submitting: Boolean,
     modifier: Modifier = Modifier,
 ) {

@@ -239,6 +239,24 @@ data class PendingApproval(
     val detail: String,
     val command: String?,
     val kind: ApprovalKind,
+    /**
+     * The decisions the provider advertised on this request, in its own order.
+     * Empty means the request predates advertised options and the card falls
+     * back to the generic set.
+     */
+    val options: List<ApprovalOption> = emptyList(),
+)
+
+/**
+ * One decision a provider offered on an approval request. [decision] is the
+ * wire string (`ProviderApprovalDecision`) echoed back verbatim — clients never
+ * translate it, because adapters disagree on the vocabulary: OpenCode's
+ * "always" is `acceptAlways`, Claude's is `acceptForSession`.
+ */
+data class ApprovalOption(
+    val decision: String,
+    val label: String,
+    val warning: String? = null,
 )
 
 enum class ApprovalKind {
@@ -600,6 +618,17 @@ data class ProviderCatalogEntry(
      */
     val optionDescriptors: Map<String, List<ProviderOptionDescriptor>> = emptyMap(),
 )
+
+/**
+ * A model the user starred in the picker.
+ *
+ * Client-local by design: the other clients keep `favorites` in their own
+ * settings too, so nothing crosses the server and a favorite can point at an
+ * instance only this machine knows about. [instanceId] is the routing key, same
+ * as [ProviderInstance.instanceId] — a favorite for an instance the catalog no
+ * longer lists simply does not render.
+ */
+data class ModelFavorite(val instanceId: String, val model: String)
 
 /** One `/command` a provider advertises, as the composer's popover renders it. */
 data class SlashCommand(val name: String, val description: String)

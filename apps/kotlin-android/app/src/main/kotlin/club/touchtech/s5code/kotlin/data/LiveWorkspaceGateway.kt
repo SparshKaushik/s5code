@@ -529,6 +529,11 @@ class LiveWorkspaceGateway(
         sessions.value[environmentId.value]?.session?.retryNow()
     }
 
+    override suspend fun refreshProviders(environmentId: EnvironmentId) {
+        sessionFor(environmentId).refreshProviders()
+        publish()
+    }
+
     /* ── Thread detail ───────────────────────────────────────────────── */
 
     override fun thread(environmentId: EnvironmentId, id: ThreadId): StateFlow<ThreadDetail?> {
@@ -754,19 +759,14 @@ class LiveWorkspaceGateway(
         environmentId: EnvironmentId,
         id: ThreadId,
         approvalId: String,
-        decision: ApprovalDecision,
+        decision: String,
     ) {
         dispatch(
             environmentId,
             Commands.respondToApproval(
                 threadId = id.value,
                 requestId = approvalId,
-                decision =
-                    when (decision) {
-                        ApprovalDecision.AllowOnce -> "accept"
-                        ApprovalDecision.AllowAlways -> "acceptForSession"
-                        ApprovalDecision.Deny -> "decline"
-                    },
+                decision = decision,
             ),
         )
     }

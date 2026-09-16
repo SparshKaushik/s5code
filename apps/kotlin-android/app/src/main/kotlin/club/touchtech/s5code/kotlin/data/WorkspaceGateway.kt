@@ -95,6 +95,13 @@ interface WorkspaceGateway {
     val providerCatalogs: StateFlow<Map<EnvironmentId, List<ProviderCatalogEntry>>>
 
     /**
+     * Re-fetches one environment's provider config, asking the server to
+     * rediscover models. The catalog flows pick the answer up; callers never
+     * apply the payload themselves.
+     */
+    suspend fun refreshProviders(environmentId: EnvironmentId) = Unit
+
+    /**
      * Slash commands the connected environments advertise for a provider instance,
      * merged. Not suspend: these ride along with the provider config the session
      * already holds, so the composer can filter them while the user types.
@@ -137,11 +144,16 @@ interface WorkspaceGateway {
 
     suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId)
 
+    /**
+     * Answers an open approval request. [decision] is one of the strings the
+     * provider advertised on the request (see `PendingApproval.options`),
+     * echoed untouched — each adapter maps its own vocabulary.
+     */
     suspend fun respondToApproval(
         environmentId: EnvironmentId,
         id: ThreadId,
         approvalId: String,
-        decision: ApprovalDecision,
+        decision: String,
     )
 
     suspend fun respondToInput(
@@ -402,12 +414,6 @@ interface WorkspaceGateway {
  * explicitly; the server allocates nothing.
  */
 const val DEFAULT_TERMINAL_ID = "term-1"
-
-enum class ApprovalDecision {
-    AllowOnce,
-    AllowAlways,
-    Deny,
-}
 
 /** One actionable request shown on Home, keyed by environment and thread. */
 data class HomePendingRequest(

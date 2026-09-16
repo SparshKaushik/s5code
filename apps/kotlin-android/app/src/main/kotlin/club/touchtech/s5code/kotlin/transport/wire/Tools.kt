@@ -103,6 +103,12 @@ data class ServerProviderDto(
     val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
 )
 
+/** `server.refreshProviders` answer: the full list, not a delta. */
+@Serializable
+data class ServerProvidersUpdatedDto(
+    val providers: List<ServerProviderDto> = emptyList(),
+)
+
 @Serializable
 data class ServerConfigDto(
     val environment: ServerEnvironmentDto = ServerEnvironmentDto(),

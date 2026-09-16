@@ -241,6 +241,8 @@ fun NewTaskDraftScreen(
     onCreated: (String, String) -> Unit,
 ) {
     val draft by store.draft.collectAsStateWithLifecycle()
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    val catalogRefreshing by store.catalogRefreshing.collectAsStateWithLifecycle()
     // Model and settings open over the draft rather than pushing a page, so the
     // prompt you were writing stays on screen behind the sheet.
     var settingsOpen by remember { mutableStateOf(false) }
@@ -440,6 +442,10 @@ fun NewTaskDraftScreen(
             onDismiss = { settingsOpen = false },
             // A draft has no context to hand over, so searching every agent is free.
             searchScope = ModelSearchScope.AllProviders,
+            favorites = preferences.modelFavorites,
+            onToggleFavorite = { store.toggleModelFavorite(it.instanceId, it.model) },
+            catalogRefreshing = draft.environmentId.value in catalogRefreshing,
+            onRefreshCatalog = { store.refreshProviderCatalog(draft.environmentId) },
         )
     }
 }

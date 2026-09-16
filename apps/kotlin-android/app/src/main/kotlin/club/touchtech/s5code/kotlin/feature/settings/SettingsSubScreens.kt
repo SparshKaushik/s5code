@@ -8,6 +8,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,6 +18,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Bolt
@@ -30,7 +34,6 @@ import androidx.compose.material.icons.automirrored.rounded.Login
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.Notifications
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.Palette
 import androidx.compose.material.icons.rounded.PendingActions
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Storage
@@ -42,6 +45,8 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -51,6 +56,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -84,9 +90,13 @@ import club.touchtech.s5code.kotlin.design.component.S5StatusPill
 import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.component.statusPresentation
+import club.touchtech.s5code.kotlin.design.theme.S5ColorTheme
+import club.touchtech.s5code.kotlin.design.theme.S5DarkColorScheme
+import club.touchtech.s5code.kotlin.design.theme.S5LightColorScheme
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.design.theme.S5ThemeMode
+import club.touchtech.s5code.kotlin.design.theme.toColorScheme
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.platform.notifications.AndroidLiveUpdateNotifications
@@ -212,24 +222,43 @@ fun SettingsAppearanceScreen(store: AppStore, onBack: () -> Unit) {
                 )
             }
 
+            // One list, not a switch plus a picker: choosing a named theme leaves
+            // Material You, and choosing Material You leaves the named theme,
+            // which is the same mutual exclusion the RN picker models.
+            val dynamicColorSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            val themes = remember { S5ColorTheme.entries }
+            S5RowGroup(title = "Color theme") {
+                themes.forEachIndexed { index, theme ->
+                    S5SelectableRow(
+                        label = theme.label,
+                        supporting =
+                            when {
+                                theme == S5ColorTheme.MaterialYou && !dynamicColorSupported ->
+                                    "Needs Android 12 or later"
+                                theme == S5ColorTheme.MaterialYou ->
+                                    "Follows the system wallpaper palette"
+                                else -> null
+                            },
+                        selected = preferences.colorTheme == theme,
+                        onClick = {
+                            if (theme != S5ColorTheme.MaterialYou || dynamicColorSupported) {
+                                store.updatePreferences { it.copy(colorTheme = theme) }
+                            }
+                        },
+                        leading = { S5ThemeSwatch(theme) },
+                        position = rowPosition(index, themes.size),
+                    )
+                }
+            }
+
             S5RowGroup {
-                S5SwitchRow(
-                    icon = Icons.Rounded.Palette,
-                    label = "Dynamic color",
-                    supporting = "Follow the system wallpaper palette on Android 12+",
-                    checked = preferences.dynamicColor,
-                    onCheckedChange = { value ->
-                        store.updatePreferences { it.copy(dynamicColor = value) }
-                    },
-                    position = rowPosition(0, 2),
-                )
                 S5SwitchRow(
                     icon = Icons.AutoMirrored.Rounded.WrapText,
                     label = "Wrap code",
                     supporting = "Wrap long lines instead of scrolling horizontally",
                     checked = preferences.wrapCode,
                     onCheckedChange = { value -> store.updatePreferences { it.copy(wrapCode = value) } },
-                    position = rowPosition(1, 2),
+                    position = rowPosition(0, 1),
                 )
             }
 
@@ -700,5 +729,48 @@ fun SettingsClientStorageScreen(
                 )
             }
         }
+    }
+}
+
+/**
+ * A small three-tone preview of a theme: surface, container, and accent. For
+ * Material You the tones come from the live dynamic scheme, so the swatch is
+ * the wallpaper palette itself.
+ */
+@Composable
+private fun S5ThemeSwatch(theme: S5ColorTheme) {
+    val context = LocalContext.current
+    val dark = isSystemInDarkTheme()
+    val dynamic = theme == S5ColorTheme.MaterialYou && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val tones =
+        remember(theme, dark, dynamic) {
+            when {
+                dynamic && dark -> dynamicDarkColorScheme(context)
+                dynamic -> dynamicLightColorScheme(context)
+                else ->
+                    theme.namedTheme
+                        ?.let { if (dark) it.dark else it.light }
+                        ?.toColorScheme(dark)
+                        ?: if (dark) S5DarkColorScheme else S5LightColorScheme
+            }
+        }
+    Box(
+        Modifier.size(28.dp)
+            .clip(CircleShape)
+            .background(tones.surface)
+            .border(1.dp, tones.outlineVariant, CircleShape)
+    ) {
+        Box(
+            Modifier.align(Alignment.TopEnd)
+                .size(18.dp)
+                .clip(CircleShape)
+                .background(tones.surfaceContainerHighest)
+        )
+        Box(
+            Modifier.align(Alignment.BottomStart)
+                .size(16.dp)
+                .clip(CircleShape)
+                .background(tones.primary)
+        )
     }
 }

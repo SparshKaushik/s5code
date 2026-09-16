@@ -80,7 +80,7 @@ fun S5App(
     }
     LaunchedEffect(recents) { publishShortcuts(context, recents) }
 
-    S5Theme(themeMode = preferences.themeMode, dynamicColor = preferences.dynamicColor) {
+    S5Theme(themeMode = preferences.themeMode, colorTheme = preferences.colorTheme) {
         val navController = rememberNavController()
         val currentEntry by navController.currentBackStackEntryAsState()
         val queued by store.pendingLink.collectAsStateWithLifecycle()

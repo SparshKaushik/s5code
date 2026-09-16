@@ -43,6 +43,7 @@ import club.touchtech.s5code.kotlin.model.ApprovalPolicy
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.EnvironmentId
+import club.touchtech.s5code.kotlin.model.ModelFavorite
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.RuntimeMode
@@ -74,6 +75,7 @@ import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 
@@ -909,6 +911,61 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         (workspace as? LiveWorkspaceGateway)?.retry(environmentId)
     }
 
+    /**
+     * Stars or unstars a model in the picker. Favorites are a client-local
+     * preference (the other clients keep theirs in client settings too), so
+     * this only touches [RuntimePreferences] and persistence does the rest.
+     */
+    fun toggleModelFavorite(instanceId: String, model: String) {
+        _preferences.update { preferences ->
+            val existing =
+                preferences.modelFavorites.indexOfFirst {
+                    it.instanceId == instanceId && it.model == model
+                }
+            preferences.copy(
+                modelFavorites =
+                    if (existing >= 0) {
+                        preferences.modelFavorites.filterIndexed { index, _ -> index != existing }
+                    } else {
+                        preferences.modelFavorites + ModelFavorite(instanceId, model)
+                    }
+            )
+        }
+    }
+
+    /** In-flight model-catalog refresh per environment, for the picker's spinner. */
+    private val _catalogRefreshing = MutableStateFlow<Set<String>>(emptySet())
+    val catalogRefreshing: StateFlow<Set<String>> = _catalogRefreshing.asStateFlow()
+
+    /**
+     * Re-asks one environment's server for its provider catalog, including a
+     * model rediscovery pass (`refreshModels`). A slow discovery should not read
+     * as a hung sheet, so the spinner tracks the call and a failure lands on the
+     * global banner rather than inside the picker.
+     */
+    fun refreshProviderCatalog(environmentId: EnvironmentId?) {
+        if (environmentId == null) return
+        if (environmentId.value in _catalogRefreshing.value) return
+        _catalogRefreshing.update { it + environmentId.value }
+        viewModelScope.launch {
+            try {
+                // The socket layer waits for a live connection, so an offline
+                // environment would spin forever without a ceiling.
+                val refreshed =
+                    withTimeoutOrNull(PROVIDER_REFRESH_TIMEOUT_MILLIS) {
+                        workspace.refreshProviders(environmentId)
+                    } != null
+                if (!refreshed) showError("The model list refresh timed out.")
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                showError(error.message ?: "Could not refresh the model list.")
+            } finally {
+                _catalogRefreshing.update { it - environmentId.value }
+            }
+        }
+    }
+
     suspend fun unpair(environmentId: EnvironmentId) {
         outboxDrain.withLock {
             outboxMutation.withLock {
@@ -978,5 +1035,8 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     private companion object {
         const val PERSIST_DEBOUNCE_MILLIS = 400L
+
+        /** Discovery shells out to each provider CLI, so the ceiling is generous. */
+        const val PROVIDER_REFRESH_TIMEOUT_MILLIS = 30_000L
     }
 }

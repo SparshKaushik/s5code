@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.model.ApprovalKind
+import club.touchtech.s5code.kotlin.model.ApprovalOption
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
 import club.touchtech.s5code.kotlin.model.Checkpoint
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
@@ -767,6 +768,7 @@ fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApprova
                                 "file-read" -> ApprovalKind.FileWrite
                                 else -> ApprovalKind.Command
                             },
+                        options = approvalOptionsOf(payload),
                     )
             "approval.resolved" -> open.remove(requestId)
             // A "stale request" failure means the provider already moved on, so
@@ -777,6 +779,21 @@ fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApprova
     }
     return open.values.firstOrNull()
 }
+
+/**
+ * Reads the decisions a provider attached to an `approval.requested` payload.
+ * The strings pass through untouched: the reply echoes [ApprovalOption.decision]
+ * and translating it here is how "always" used to reach OpenCode as a reject.
+ */
+private fun approvalOptionsOf(payload: JsonObject): List<ApprovalOption> =
+    (payload["options"] as? JsonArray)
+        ?.mapNotNull { raw ->
+            val option = raw as? JsonObject ?: return@mapNotNull null
+            val decision = option.string("decision") ?: return@mapNotNull null
+            val label = option.string("label") ?: return@mapNotNull null
+            ApprovalOption(decision = decision, label = label, warning = option.string("warning"))
+        }
+        .orEmpty()
 
 /** Same replay for structured input requests, following `derivePendingUserInputs`. */
 fun pendingUserInputOf(sortedActivities: List<ThreadActivityDto>): PendingUserInput? {

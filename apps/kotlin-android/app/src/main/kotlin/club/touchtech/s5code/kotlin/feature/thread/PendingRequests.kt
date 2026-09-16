@@ -32,7 +32,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
-import club.touchtech.s5code.kotlin.data.ApprovalDecision
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -44,6 +43,7 @@ import club.touchtech.s5code.kotlin.design.component.rememberDraftTextFieldState
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ApprovalKind
+import club.touchtech.s5code.kotlin.model.ApprovalOption
 import club.touchtech.s5code.kotlin.model.PendingApproval
 import club.touchtech.s5code.kotlin.model.PendingUserInput
 import club.touchtech.s5code.kotlin.model.UserInputAnswer
@@ -63,10 +63,14 @@ import club.touchtech.s5code.kotlin.model.UserInputQuestion
 @Composable
 fun ApprovalCard(
     approval: PendingApproval,
-    onDecision: (ApprovalDecision) -> Unit,
+    onDecision: (String) -> Unit,
     modifier: Modifier = Modifier,
     submitting: Boolean = false,
 ) {
+    // The provider names its own decisions; requests without options (older
+    // payloads, Claude's permission prompt) fall back to the same generic set
+    // the RN card uses, in approve/session/deny order.
+    val options = approval.options.ifEmpty { DEFAULT_APPROVAL_OPTIONS }
     GateCard(
         accent = S5Theme.status.approval,
         container = S5Theme.status.approvalContainer,
@@ -89,40 +93,60 @@ fun ApprovalCard(
         if (approval.command != null) {
             S5CodeBlock(lines = listOf(approval.command), language = "bash")
         }
-        // Three actions plus a long provider label do not fit one line on a small
-        // phone, and the third would otherwise be clipped rather than wrapped.
+        // A provider caution, such as a prompt-injection warning on an "allow"
+        // option, belongs next to the actions that carry it.
+        options.firstNotNullOfOrNull { it.warning }?.let { warning ->
+            Text(
+                warning,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+            )
+        }
+        // Provider labels do not fit one line on a small phone, so the actions
+        // wrap rather than clip.
         FlowRow(
             Modifier.fillMaxWidth(),
             horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
-            S5Button(
-                text = if (submitting) "Approving…" else "Approve",
-                onClick = { onDecision(ApprovalDecision.AllowOnce) },
-                emphasis = S5ActionEmphasis.Prominent,
-                icon = Icons.Rounded.CheckCircle,
-                enabled = !submitting,
-            )
-            S5Button(
-                text = "Deny",
-                onClick = { onDecision(ApprovalDecision.Deny) },
-                emphasis = S5ActionEmphasis.Prominent,
-                style = S5ButtonStyle.Outlined,
-                icon = Icons.Rounded.Block,
-                enabled = !submitting,
-            )
-            // "Always" is a policy change, not a reply to this request, so it
-            // stays quiet and last.
-            S5Button(
-                text = "Always",
-                onClick = { onDecision(ApprovalDecision.AllowAlways) },
-                emphasis = S5ActionEmphasis.Prominent,
-                style = S5ButtonStyle.Text,
-                enabled = !submitting,
-            )
+            options.forEach { option ->
+                S5Button(
+                    text = option.label,
+                    onClick = { onDecision(option.decision) },
+                    emphasis = S5ActionEmphasis.Prominent,
+                    // Accept is the hero, decline/cancel read as refusal, and
+                    // every other decision (session, always) stays quiet — the
+                    // same emphasis ladder the web card draws.
+                    style =
+                        when (option.decision) {
+                            "accept" -> S5ButtonStyle.Filled
+                            "decline", "cancel" -> S5ButtonStyle.Outlined
+                            else -> S5ButtonStyle.Text
+                        },
+                    icon =
+                        when (option.decision) {
+                            "accept" -> Icons.Rounded.CheckCircle
+                            "decline", "cancel" -> Icons.Rounded.Block
+                            else -> null
+                        },
+                    enabled = !submitting,
+                )
+            }
         }
     }
 }
+
+/**
+ * Buttons for a request that arrived without provider options. These are the
+ * decisions every adapter understands, in the same order the RN card falls
+ * back to.
+ */
+private val DEFAULT_APPROVAL_OPTIONS =
+    listOf(
+        ApprovalOption(decision = "accept", label = "Allow once"),
+        ApprovalOption(decision = "acceptForSession", label = "Allow session"),
+        ApprovalOption(decision = "decline", label = "Decline"),
+    )
 
 /** Structured input: every question is answered and submitted as one record. */
 @Composable

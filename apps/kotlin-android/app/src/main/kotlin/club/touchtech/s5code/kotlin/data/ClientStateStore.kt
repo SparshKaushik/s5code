@@ -11,7 +11,18 @@ import kotlinx.serialization.json.Json
 @Serializable
 data class StoredPreferences(
     val themeMode: String = "System",
+    /**
+     * The old dynamic-color switch. Only read to seed [colorTheme] for files
+     * written before themes existed; new writes always carry [colorTheme].
+     */
     val dynamicColor: Boolean = true,
+    /**
+     * The named palette id, or "MaterialYou" for dynamic color. Empty means the
+     * file predates color themes: [dynamicColor] answers for it instead.
+     */
+    val colorTheme: String = "",
+    /** Starred (instanceId, model) pairs, in the order the picker shows them. */
+    val modelFavorites: List<StoredModelFavorite> = emptyList(),
     val projectGrouping: String = "ByProject",
     val threadSort: String = "Recent",
     val snoozedThreadsExpanded: Boolean = false,
@@ -28,6 +39,10 @@ data class StoredPreferences(
     val notifyFailures: Boolean = true,
     val liveUpdatesEnabled: Boolean = true,
 )
+
+/** One starred model: provider instance id plus model slug. */
+@Serializable
+data class StoredModelFavorite(val instanceId: String, val model: String)
 
 /** One persisted composer draft: text plus the attachments already copied to cache. */
 @Serializable

@@ -95,6 +95,8 @@ fun ThreadScreen(
             providerCatalogs[env]?.takeIf { it.isNotEmpty() } ?: providerCatalog
         }
     val attachmentError by store.attachmentError.collectAsStateWithLifecycle()
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    val catalogRefreshing by store.catalogRefreshing.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val copy = rememberClipboardWriter()
 
@@ -565,6 +567,10 @@ fun ThreadScreen(
             },
             onDismiss = { settingsOpen = false },
             title = "Model and settings",
+            favorites = preferences.modelFavorites,
+            onToggleFavorite = { store.toggleModelFavorite(it.instanceId, it.model) },
+            catalogRefreshing = env.value in catalogRefreshing,
+            onRefreshCatalog = { store.refreshProviderCatalog(env) },
         )
     }
 }

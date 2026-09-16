@@ -1,7 +1,9 @@
 package club.touchtech.s5code.kotlin.data
 
+import club.touchtech.s5code.kotlin.design.theme.S5ColorTheme
 import club.touchtech.s5code.kotlin.design.theme.S5ThemeMode
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
+import club.touchtech.s5code.kotlin.model.ModelFavorite
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
@@ -27,7 +29,12 @@ class ClientStateMappingTest {
         val runtime =
             RuntimePreferences(
                 themeMode = S5ThemeMode.Dark,
-                dynamicColor = false,
+                colorTheme = S5ColorTheme.Grove,
+                modelFavorites =
+                    listOf(
+                        ModelFavorite("codex", "gpt-5-codex"),
+                        ModelFavorite("claude", "claude-sonnet-4-5"),
+                    ),
                 projectGrouping = ProjectGrouping.ByRepository,
                 threadSort = ThreadSort.Alphabetical,
                 snoozedThreadsExpanded = true,
@@ -38,6 +45,31 @@ class ClientStateMappingTest {
             )
         assertEquals(runtime, runtime.toStored().toRuntime())
         assertEquals("Dark", runtime.toStored().themeMode)
+        // The legacy switch mirrors the theme choice, so a downgrade reads the
+        // same answer it used to write.
+        assertEquals(false, runtime.toStored().dynamicColor)
+        assertEquals("grove", runtime.toStored().colorTheme)
+    }
+
+    @Test
+    fun `a preference file from before color themes keeps its dynamic-color answer`() {
+        assertEquals(
+            S5ColorTheme.MaterialYou,
+            StoredPreferences(dynamicColor = true).toRuntime().colorTheme,
+        )
+        assertEquals(
+            S5ColorTheme.S5Code,
+            StoredPreferences(dynamicColor = false).toRuntime().colorTheme,
+        )
+        // A stored theme wins over the legacy switch once the file has one.
+        assertEquals(
+            S5ColorTheme.Iris,
+            StoredPreferences(dynamicColor = false, colorTheme = "iris").toRuntime().colorTheme,
+        )
+        assertEquals(
+            S5ColorTheme.Default,
+            StoredPreferences(colorTheme = "mystery").toRuntime().colorTheme,
+        )
     }
 
     @Test

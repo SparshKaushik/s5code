@@ -2,9 +2,14 @@ package club.touchtech.s5code.kotlin.design.component
 
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.exclude
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.ime
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.material3.BottomSheetDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
@@ -39,7 +44,18 @@ fun S5BottomSheet(
     content: @Composable ColumnScope.() -> Unit,
 ) {
     val state = rememberBottomSheetState(initialValue = SheetValue.Hidden)
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = state, modifier = modifier) {
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = state,
+        // The sheet's own window needs the keyboard handled twice: imePadding
+        // keeps the sheet surface itself above the IME even when the keyboard
+        // belongs to a field outside this window, and contentWindowInsets keeps
+        // the remaining system-bar padding inside it. Leaving the IME to
+        // contentWindowInsets alone has let the keyboard cover the picker's
+        // rows on devices whose insets arrive late.
+        modifier = modifier.imePadding(),
+        contentWindowInsets = { BottomSheetDefaults.modalWindowInsets.exclude(WindowInsets.ime) },
+    ) {
         Column(Modifier.fillMaxWidth().navigationBarsPadding()) {
             if (title != null) {
                 Column(

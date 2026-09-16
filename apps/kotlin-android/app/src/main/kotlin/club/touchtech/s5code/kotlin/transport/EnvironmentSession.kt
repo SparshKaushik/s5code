@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.transport
 import club.touchtech.s5code.kotlin.data.EnvironmentStore
 import club.touchtech.s5code.kotlin.data.SavedEnvironment
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerProvidersUpdatedDto
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -20,6 +21,8 @@ import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
 
 /** What the UI needs to know about one environment's connection. */
@@ -244,6 +247,24 @@ class EnvironmentSession(
     /** The environment's configured provider instances, empty while disconnected. */
     val providers: StateFlow<List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>> =
         _providers.asStateFlow()
+
+    /**
+     * Re-runs provider discovery on the server, including a fresh model list.
+     *
+     * The answer replaces [providers] in place — the picker reads this flow, so
+     * a refresh is a write to the source rather than a value handed back.
+     * `refreshModels` marks the request as user-driven, which is what lets the
+     * server open agent sessions for discovery instead of only rereading config.
+     */
+    suspend fun refreshProviders() {
+        val updated =
+            request(
+                WsMethods.ServerRefreshProviders,
+                buildJsonObject { put("refreshModels", true) },
+                ServerProvidersUpdatedDto.serializer(),
+            )
+        _providers.value = updated.providers
+    }
 
     /**
      * Issues a unary RPC on the current connection, waiting briefly for one if

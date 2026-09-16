@@ -7,6 +7,7 @@ package club.touchtech.s5code.kotlin.transport
  */
 internal object WsMethods {
     const val ServerGetConfig = "server.getConfig"
+    const val ServerRefreshProviders = "server.refreshProviders"
     const val ServerProbe = "server.probe"
     const val ServerGetUsageSummary = "server.getUsageSummary"
 

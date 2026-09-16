@@ -25,6 +25,34 @@ enum class S5ThemeMode {
     Dark,
 }
 
+/**
+ * User-selectable color theme, mirroring the RN client's theme picker.
+ *
+ * [MaterialYou] is the dynamic-color choice: it sits in the same list as the
+ * named palettes rather than behind a separate switch, so selecting a named
+ * theme leaves Material You and selecting Material You leaves the named theme.
+ * Named entries resolve to [S5_NAMED_THEMES] by [paletteId].
+ */
+enum class S5ColorTheme(val id: String, val label: String) {
+    MaterialYou("material-you", "Material You"),
+    S5Code("s5-code", "S5 Code"),
+    T3Chat("t3-chat", "T3 Chat"),
+    Grove("grove", "Grove"),
+    Ocean("ocean", "Ocean"),
+    Ember("ember", "Ember"),
+    Iris("iris", "Iris"),
+    ;
+
+    /** The shared palette this id resolves to, for named themes only. */
+    val namedTheme: S5NamedTheme?
+        get() = S5_NAMED_THEMES.firstOrNull { it.id == id }
+
+    companion object {
+        /** Dynamic color where the OS offers it, the brand palette everywhere else. */
+        val Default: S5ColorTheme = MaterialYou
+    }
+}
+
 /** Semantic spacing scale. Features never hard-code raw dp for layout rhythm. */
 data class S5Spacing(
     val hair: Dp = 2.dp,
@@ -54,7 +82,8 @@ val LocalS5ReducedMotion: ProvidableCompositionLocal<Boolean> = staticCompositio
 /**
  * The one theme wrapper every S5 Code destination is composed inside. It wires
  * [MaterialExpressiveTheme] to the expanded shape scale, the expressive motion
- * scheme, and either dynamic color or the branded fallback.
+ * scheme, and the chosen color source: dynamic color, the branded fallback, or
+ * one of the named palettes shared with the other clients.
  *
  * Experimental expressive APIs stay opted-in here and in `design/`; feature code
  * consumes only stable S5 wrappers.
@@ -62,7 +91,7 @@ val LocalS5ReducedMotion: ProvidableCompositionLocal<Boolean> = staticCompositio
 @Composable
 fun S5Theme(
     themeMode: S5ThemeMode = S5ThemeMode.System,
-    dynamicColor: Boolean = true,
+    colorTheme: S5ColorTheme = S5ColorTheme.Default,
     content: @Composable () -> Unit,
 ) {
     val dark =
@@ -73,10 +102,14 @@ fun S5Theme(
         }
     val context = LocalContext.current
     val supportsDynamicColor = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val namedPalette = colorTheme.namedTheme?.let { if (dark) it.dark else it.light }
     val colorScheme =
         when {
-            dynamicColor && supportsDynamicColor && dark -> dynamicDarkColorScheme(context)
-            dynamicColor && supportsDynamicColor -> dynamicLightColorScheme(context)
+            colorTheme == S5ColorTheme.MaterialYou && supportsDynamicColor && dark ->
+                dynamicDarkColorScheme(context)
+            colorTheme == S5ColorTheme.MaterialYou && supportsDynamicColor ->
+                dynamicLightColorScheme(context)
+            namedPalette != null -> namedPalette.toColorScheme(dark)
             dark -> S5DarkColorScheme
             else -> S5LightColorScheme
         }

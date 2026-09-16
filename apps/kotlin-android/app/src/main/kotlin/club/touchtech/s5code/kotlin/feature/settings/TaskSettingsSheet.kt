@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.feature.settings
 
+import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
@@ -8,6 +9,13 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Star
+import androidx.compose.material.icons.rounded.StarOutline
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -15,11 +23,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.design.component.S5BottomSheet
 import club.touchtech.s5code.kotlin.design.component.S5ConnectedButtonGroup
+import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5ProviderAvatar
 import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
@@ -28,12 +40,14 @@ import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
+import club.touchtech.s5code.kotlin.model.ModelFavorite
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.ProviderOptionDescriptor
 import club.touchtech.s5code.kotlin.model.ProviderOptionValue
 import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.ThreadSettings
+import kotlinx.coroutines.launch
 
 /**
  * Provider, model, mode, effort, and permissions in a modal sheet.
@@ -67,6 +81,10 @@ fun TaskSettingsSheet(
     onDismiss: () -> Unit,
     title: String = "Model and settings",
     searchScope: ModelSearchScope = ModelSearchScope.ActiveProvider,
+    favorites: List<ModelFavorite> = emptyList(),
+    onToggleFavorite: (ModelFavorite) -> Unit = {},
+    catalogRefreshing: Boolean = false,
+    onRefreshCatalog: () -> Unit = {},
 ) {
     // The thread's own instance always has a row, even when no connected server
     // lists it: a thread bound to an instance the user removed still has to show
@@ -124,12 +142,97 @@ fun TaskSettingsSheet(
             providerOptionDescriptors(catalog, settings.provider, settings.model, settings.options)
         }
 
+    // Starred rows resolve against the catalog so a favorite on an instance this
+    // environment no longer offers does not render a dead row. Under
+    // ActiveProvider only the bound instance's favorites show — picking another
+    // agent mid-thread is not a move the turn start would accept anyway.
+    val favoriteRows =
+        remember(favorites, catalog, searchScope, settings.provider, query) {
+            favorites
+                .asSequence()
+                .mapNotNull { favorite ->
+                    val entry =
+                        catalog.firstOrNull { it.instance.instanceId == favorite.instanceId }
+                            ?: return@mapNotNull null
+                    if (favorite.model !in entry.models) return@mapNotNull null
+                    if (searchScope == ModelSearchScope.ActiveProvider &&
+                        entry.instance.instanceId != settings.provider.instanceId
+                    ) {
+                        return@mapNotNull null
+                    }
+                    if (!modelMatchesQuery(favorite.model, entry.instance.label, query)) {
+                        return@mapNotNull null
+                    }
+                    entry.instance to favorite.model
+                }
+                .toList()
+        }
+    val favoriteKeys =
+        remember(favorites) { favorites.mapTo(mutableSetOf()) { it.instanceId to it.model } }
+
     fun change(id: String, value: ProviderOptionValue) {
         // Null means the catalog moved under the sheet; dropping the tap is better
         // than persisting a value the provider would refuse on the next turn.
         applyProviderOption(descriptors, id, value)?.let {
             onSettingsChange(settings.copy(options = it))
         }
+    }
+
+    fun select(provider: ProviderInstance, model: String) {
+        onSettingsChange(
+            settings.copy(
+                provider = provider,
+                model = model,
+                options = if (model == settings.model) settings.options else emptyList(),
+            )
+        )
+    }
+
+    val listState = rememberLazyListState()
+    val coroutineScope = rememberCoroutineScope()
+    val keyboard = LocalSoftwareKeyboardController.current
+
+    // Same contract as the RN list (`keyboardDismissMode="on-drag"`): a real
+    // pull on the list puts the keyboard away; the programmatic scroll after a
+    // selection is not a drag, so it never trips this.
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is DragInteraction.Start) keyboard?.hide()
+        }
+    }
+
+    // The rows below the model list (mode, reasoning, permissions) sit past the
+    // fold. After picking a model the sheet scrolls them into view instead of
+    // leaving the user to discover them; the count bookkeeping matches the
+    // LazyColumn content below exactly.
+    val hasNoMatchRow = groups.isEmpty() && query.isNotBlank()
+    var modelRowCount = 0
+    groups.forEach { group ->
+        modelRowCount += group.models.size + if (groups.size > 1) 1 else 0
+    }
+    val favoritesItemCount = if (favoriteRows.isEmpty()) 0 else favoriteRows.size + 1
+    val modeHeaderIndex =
+        favoritesItemCount +
+            1 + // header_agent
+            instances.size +
+            1 + // header_model
+            1 + // search_field
+            (if (hasNoMatchRow) 1 else 0) +
+            modelRowCount
+
+    fun scrollToModeSection() {
+        coroutineScope.launch {
+            val visible = listState.layoutInfo.visibleItemsInfo
+            if (visible.any { it.key == "header_mode" }) return@launch
+            if (modeHeaderIndex >= listState.layoutInfo.totalItemsCount) return@launch
+            listState.animateScrollToItem(modeHeaderIndex)
+        }
+    }
+
+    fun selectAndReveal(provider: ProviderInstance, model: String) {
+        keyboard?.hide()
+        select(provider, model)
+        scrollToModeSection()
     }
 
     S5BottomSheet(
@@ -141,15 +244,50 @@ fun TaskSettingsSheet(
             (listOf(settings.provider.label) + providerOptionSummaryLabels(descriptors))
                 .joinToString(" · "),
     ) {
-        // LazyColumn ensures even long model lists (hundreds of models) render smoothly
-        // without composition lag or frame drops.
+        // weight(fill = false) keeps the list shrinkable: without it the fixed
+        // cap plus the sections below can overflow the space the keyboard leaves,
+        // and the overflow is what made model rows unreachable while typing.
         LazyColumn(
+            state = listState,
             modifier =
                 Modifier.fillMaxWidth()
-                    .heightIn(max = 560.dp),
+                    .heightIn(max = 560.dp)
+                    .weight(1f, fill = false),
             contentPadding = PaddingValues(bottom = S5Theme.spacing.large),
             verticalArrangement = Arrangement.spacedBy(2.dp),
         ) {
+            if (favoriteRows.isNotEmpty()) {
+                item(key = "header_favorites", contentType = "header") {
+                    S5SectionHeader("Favorites")
+                }
+                itemsIndexed(
+                    items = favoriteRows,
+                    key = { _, (instance, model) -> "fav_${instance.instanceId}_$model" },
+                    contentType = { _, _ -> "model_row" },
+                ) { index, (instance, model) ->
+                    Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                        S5SelectableRow(
+                            label = model,
+                            supporting = instance.label,
+                            selected =
+                                model == settings.model &&
+                                    instance.instanceId == settings.provider.instanceId,
+                            onClick = { selectAndReveal(instance, model) },
+                            leading = { S5ProviderAvatar(instance, size = 28.dp) },
+                            trailing = {
+                                FavoriteToggle(
+                                    favorited = true,
+                                    onClick = {
+                                        onToggleFavorite(ModelFavorite(instance.instanceId, model))
+                                    },
+                                )
+                            },
+                            position = rowPosition(index, favoriteRows.size),
+                        )
+                    }
+                }
+            }
+
             item(key = "header_agent", contentType = "header") {
                 S5SectionHeader("Agent")
             }
@@ -163,17 +301,13 @@ fun TaskSettingsSheet(
                         label = provider.label,
                         selected = provider.instanceId == settings.provider.instanceId,
                         onClick = {
+                            keyboard?.hide()
                             val models = modelsFor(provider)
-                            onSettingsChange(
-                                settings.copy(
-                                    provider = provider,
-                                    model = models.firstOrNull() ?: settings.model,
-                                    // Options belong to a model, so they do not
-                                    // survive the move. Carrying them over would
-                                    // send the new provider an id it never advertised.
-                                    options = emptyList(),
-                                )
+                            select(
+                                provider,
+                                models.firstOrNull() ?: settings.model,
                             )
+                            scrollToModeSection()
                         },
                         leading = { S5ProviderAvatar(provider, size = 28.dp) },
                         position = rowPosition(index, instances.size),
@@ -182,7 +316,18 @@ fun TaskSettingsSheet(
             }
 
             item(key = "header_model", contentType = "header") {
-                S5SectionHeader("Model")
+                S5SectionHeader(
+                    "Model",
+                    trailing = {
+                        S5IconButton(
+                            icon = Icons.Rounded.Refresh,
+                            label = "Refresh model list",
+                            onClick = onRefreshCatalog,
+                            enabled = !catalogRefreshing,
+                            compact = true,
+                        )
+                    },
+                )
             }
             item(key = "search_field", contentType = "search") {
                 Box(
@@ -203,7 +348,7 @@ fun TaskSettingsSheet(
                     )
                 }
             }
-            if (groups.isEmpty() && query.isNotBlank()) {
+            if (hasNoMatchRow) {
                 item(key = "no_matching_models", contentType = "empty") {
                     Box(Modifier.padding(S5Theme.spacing.gutter)) {
                         Text(
@@ -230,18 +375,21 @@ fun TaskSettingsSheet(
                     Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                         S5SelectableRow(
                             label = model,
+                            supporting =
+                                if (groups.size > 1) group.instance.label else null,
                             selected =
                                 model == settings.model &&
                                     group.instance.instanceId == settings.provider.instanceId,
-                            onClick = {
-                                onSettingsChange(
-                                    settings.copy(
-                                        provider = group.instance,
-                                        model = model,
-                                        options =
-                                            if (model == settings.model) settings.options
-                                            else emptyList(),
-                                    )
+                            onClick = { selectAndReveal(group.instance, model) },
+                            trailing = {
+                                FavoriteToggle(
+                                    favorited =
+                                        (group.instance.instanceId to model) in favoriteKeys,
+                                    onClick = {
+                                        onToggleFavorite(
+                                            ModelFavorite(group.instance.instanceId, model)
+                                        )
+                                    },
                                 )
                             },
                             position = rowPosition(index, group.models.size),
@@ -359,6 +507,26 @@ fun TaskSettingsSheet(
         }
     }
 }
+
+/**
+ * The star toggle on a model row. Drawn directly rather than through
+ * [S5IconButton] because a tooltip on every row in a picker is noise, and the
+ * compact size keeps it inside the row's own tap target instead of growing the
+ * row to fit a button.
+ */
+@Composable
+private fun FavoriteToggle(favorited: Boolean, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Icon(
+            if (favorited) Icons.Rounded.Star else Icons.Rounded.StarOutline,
+            contentDescription = if (favorited) "Remove from favorites" else "Add to favorites",
+            tint = if (favorited) FavoriteStarColor else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** The same yellow the web picker fills its star with. */
+private val FavoriteStarColor = Color(0xFFEAB308)
 
 /**
  * Above this many choices a select becomes a list of rows rather than a connected
