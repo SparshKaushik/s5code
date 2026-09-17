@@ -1,10 +1,13 @@
 import { assert, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as Schema from "effect/Schema";
 import * as SqlClient from "effect/unstable/sql/SqlClient";
 
 import { runMigrations } from "../Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
+
+const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
 const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
 
@@ -214,15 +217,24 @@ layer("052_MigrateOpenCode2ToOpenCode", (it) => {
       `;
       assert.equal(threads.length, 3);
 
-      const thread1 = JSON.parse(threads[0]!.model_selection_json);
+      const thread1 = decodeJson(threads[0]!.model_selection_json) as {
+        readonly instanceId: string;
+        readonly model: string;
+      };
       assert.equal(thread1.instanceId, "opencode");
       assert.equal(thread1.model, "opencode/gpt-5");
 
-      const thread2 = JSON.parse(threads[1]!.model_selection_json);
+      const thread2 = decodeJson(threads[1]!.model_selection_json) as {
+        readonly provider: string;
+        readonly model: string;
+      };
       assert.equal(thread2.provider, "opencode");
       assert.equal(thread2.model, "opencode/claude-3-7");
 
-      const thread3 = JSON.parse(threads[2]!.model_selection_json);
+      const thread3 = decodeJson(threads[2]!.model_selection_json) as {
+        readonly instanceId: string;
+        readonly model: string;
+      };
       assert.equal(thread3.instanceId, "codex");
       assert.equal(thread3.model, "gpt-5.4");
 
@@ -232,7 +244,10 @@ layer("052_MigrateOpenCode2ToOpenCode", (it) => {
         FROM projection_projects
       `;
       assert.equal(projects.length, 1);
-      const project1 = JSON.parse(projects[0]!.default_model_selection_json);
+      const project1 = decodeJson(projects[0]!.default_model_selection_json) as {
+        readonly instanceId: string;
+        readonly model: string;
+      };
       assert.equal(project1.instanceId, "opencode");
       assert.equal(project1.model, "opencode/claude-3-7");
 
@@ -273,15 +288,27 @@ layer("052_MigrateOpenCode2ToOpenCode", (it) => {
         ORDER BY sequence
       `;
       assert.equal(events.length, 3);
-      const event1 = JSON.parse(events[0]!.payload_json);
+      const event1 = decodeJson(events[0]!.payload_json) as {
+        readonly modelSelection: { readonly instanceId: string; readonly model: string };
+      };
       assert.equal(event1.modelSelection.instanceId, "opencode");
       assert.equal(event1.modelSelection.model, "opencode/gpt-5");
 
-      const event2 = JSON.parse(events[1]!.payload_json);
+      const event2 = decodeJson(events[1]!.payload_json) as {
+        readonly session: {
+          readonly providerName: string;
+          readonly providerInstanceId: string;
+        };
+      };
       assert.equal(event2.session.providerName, "opencode");
       assert.equal(event2.session.providerInstanceId, "opencode");
 
-      const event3 = JSON.parse(events[2]!.payload_json);
+      const event3 = decodeJson(events[2]!.payload_json) as {
+        readonly defaultModelSelection: {
+          readonly instanceId: string;
+          readonly model: string;
+        };
+      };
       assert.equal(event3.defaultModelSelection.instanceId, "opencode");
       assert.equal(event3.defaultModelSelection.model, "opencode/claude-3-7");
     }),

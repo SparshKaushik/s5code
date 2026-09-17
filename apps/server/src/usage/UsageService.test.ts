@@ -407,7 +407,7 @@ describe("UsageService", () => {
             1,
             Date.parse("2026-08-01T10:00:00Z"),
             Date.parse("2026-08-01T10:00:01Z"),
-            JSON.stringify({
+            encodeUnknownJsonString({
               time: {
                 created: Date.parse("2026-08-01T10:00:00Z"),
                 completed: Date.parse("2026-08-01T10:00:01Z"),
