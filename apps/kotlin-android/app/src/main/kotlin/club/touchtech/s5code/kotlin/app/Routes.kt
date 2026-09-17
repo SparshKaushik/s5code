@@ -12,7 +12,7 @@ object Routes {
     // different exits. The origin travels in the route rather than being sniffed
     // from the back stack, which is a restricted API and a lie once a deep link
     // lands straight on the pair screen.
-    const val PairUrl = "pair/url?onboarding={onboarding}"
+    const val PairUrl = "pair/url?onboarding={onboarding}&host={host}&code={code}"
     const val PairQr = "pair/qr?onboarding={onboarding}"
     const val ConnectSignIn = "connect/sign-in?onboarding={onboarding}"
     const val ConnectSetup = "connect-onboarding?onboarding={onboarding}"
@@ -72,7 +72,10 @@ object Routes {
     const val Archive = "archive"
     const val NotFound = "not-found"
 
-    fun pairUrl(onboarding: Boolean) = "pair/url?onboarding=$onboarding"
+    fun pairUrl(onboarding: Boolean, host: String = "", code: String = "") =
+        "pair/url?onboarding=$onboarding" +
+            "&host=${android.net.Uri.encode(host)}" +
+            "&code=${android.net.Uri.encode(code)}"
 
     fun pairQr(onboarding: Boolean) = "pair/qr?onboarding=$onboarding"
 

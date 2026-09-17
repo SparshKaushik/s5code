@@ -111,15 +111,15 @@ class WaitNoticeTest {
     @Test
     fun `offline copy accurately describes restored chats`() {
         val result = notice(ConnectionState.Offline)!!
-        assertTrue(result.detail.contains("Cached chats"))
+        assertTrue(result.detail.contains("Cached data remains available"))
         assertFalse(result.detail.contains("already loaded"))
     }
 
     @Test
     fun `the environment label appears when there is one and reads generically when not`() {
-        assertEquals("Connecting to devbox", notice(ConnectionState.Connecting)!!.title)
+        assertEquals("Connecting to devbox…", notice(ConnectionState.Connecting)!!.title)
         assertEquals(
-            "Connecting to the environment",
+            "Connecting to the environment…",
             notice(ConnectionState.Connecting, label = null)!!.title,
         )
     }

@@ -22,6 +22,9 @@ enum class WaitPhase {
     /** No usable transport. Persisted or in-memory snapshots may still be shown. */
     Offline,
 
+    /** The environment is switched off locally; retrying cannot help. */
+    Off,
+
     /** The environment answered, but the pairing or token is no longer valid. */
     SignInNeeded,
 
@@ -42,9 +45,18 @@ data class WaitNotice(val phase: WaitPhase, val title: String, val detail: Strin
                 WaitPhase.Reconnecting,
                 WaitPhase.Loading -> true
                 WaitPhase.Offline,
+                WaitPhase.Off,
                 WaitPhase.SignInNeeded -> false
             }
 }
+
+/**
+ * Whether the notice's action should offer a retry, matching RN's
+ * EnvironmentConnectionNotice: every stuck phase except the two a button
+ * cannot fix — device offline and a switched-off environment.
+ */
+val WaitNotice.showRetry: Boolean
+    get() = !spinning && phase != WaitPhase.Offline && phase != WaitPhase.Off
 
 /**
  * The notice for a set of environment connections, or null when there is nothing to
@@ -97,6 +109,15 @@ fun waitNotice(
         )
     }
     val best = states.minByOrNull { it.waitRank } ?: return null
+    // RN names the count instead of a machine when several environments are
+    // reconnecting at once ("Reconnecting 3 environments", no "to").
+    val reconnecting =
+        states.count {
+            it == ConnectionState.Connecting || it == ConnectionState.Recovering
+        }
+    val multiReconnect =
+        reconnecting > 1 &&
+            (best == ConnectionState.Connecting || best == ConnectionState.Recovering)
     return when (best) {
         ConnectionState.Connected ->
             // "Loading" is only meaningful while the first read is still in
@@ -112,22 +133,22 @@ fun waitNotice(
         ConnectionState.Connecting ->
             WaitNotice(
                 WaitPhase.Connecting,
-                "Connecting to $label",
+                if (multiReconnect) "Reconnecting $reconnecting environments"
+                else "Connecting to $label…",
                 "The $resourceName will load as soon as the environment is ready.",
             )
         ConnectionState.Recovering ->
             WaitNotice(
                 WaitPhase.Reconnecting,
-                "Reconnecting to $label",
-                // Cached snapshots are restored before the socket catches up;
-                // reconnecting never clears them.
-                "The connection dropped. Retrying automatically, and cached chats stay on screen.",
+                if (multiReconnect) "Reconnecting $reconnecting environments"
+                else "Reconnecting to $label…",
+                "The $resourceName will load as soon as the environment is ready.",
             )
         ConnectionState.Offline ->
             WaitNotice(
                 WaitPhase.Offline,
                 "You are offline",
-                "Cached chats stay on screen. The $resourceName will refresh when your connection returns.",
+                "Cached data remains available. The $resourceName will load when your connection returns.",
             )
         ConnectionState.AuthRequired ->
             WaitNotice(
@@ -137,9 +158,9 @@ fun waitNotice(
             )
         ConnectionState.Disabled ->
             WaitNotice(
-                WaitPhase.Offline,
+                WaitPhase.Off,
                 "$label is switched off",
-                "Turn it on from Connections to load the $resourceName.",
+                "Turn it on from Environments to load the $resourceName.",
             )
     }
 }

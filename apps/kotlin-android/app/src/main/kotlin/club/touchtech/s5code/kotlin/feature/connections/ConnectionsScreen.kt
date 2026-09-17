@@ -23,6 +23,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -42,10 +43,11 @@ import club.touchtech.s5code.kotlin.design.component.S5CardTone
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
-import club.touchtech.s5code.kotlin.design.component.S5HeroFab
 import club.touchtech.s5code.kotlin.design.component.S5Notice
 import club.touchtech.s5code.kotlin.design.component.S5RowGroup
+import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5Screen
+import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
 import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
 import club.touchtech.s5code.kotlin.design.component.S5ShapeBadge
 import club.touchtech.s5code.kotlin.design.component.S5StatusPill
@@ -68,22 +70,45 @@ fun ConnectionsScreen(
     onOpen: (String) -> Unit,
 ) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val account by store.cloud.state.collectAsStateWithLifecycle()
+    val cloudEnvironments = store.cloudEnvironments
+    val cloudState = cloudEnvironments?.state?.collectAsStateWithLifecycle()?.value
+    val linking = cloudEnvironments?.linking?.collectAsStateWithLifecycle()?.value
+
+    // Relay environments available to this account but not yet added, matching
+    // RN's T3 Connect section on the same screen. A signed-out or unconfigured
+    // account simply contributes nothing.
+    val availableCloudRows =
+        remember(cloudState, environments) {
+            val rows =
+                (cloudState as? club.touchtech.s5code.kotlin.cloud.CloudEnvironmentsState.Loaded)
+                    ?.rows
+                    .orEmpty()
+            rows.filter { row -> environments.none { it.id.value == row.environmentId } }
+        }
+    // One load per visit; a signed-out account leaves the state untouched.
+    LaunchedEffect(account) {
+        if (account is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn) {
+            cloudEnvironments?.refresh()
+        }
+    }
+
+    val cloudEnvs = remember(environments) { environments.filter { it.kind == EnvironmentKind.Cloud } }
+    val localEnvs = remember(environments) { environments.filter { it.kind != EnvironmentKind.Cloud } }
+
     S5Screen(
-        title = "Connections",
-        subtitle = "${environments.size} environments",
+        title = "Environments",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
-        floatingActionButton = {
-            S5HeroFab(icon = Icons.Rounded.Add, label = "Add environment", onClick = onAdd)
+        actions = {
+            S5IconButton(icon = Icons.Rounded.Add, label = "Add environment", onClick = onAdd)
         },
     ) { padding ->
-        if (environments.isEmpty()) {
+        if (environments.isEmpty() && availableCloudRows.isEmpty()) {
             S5EmptyState(
                 icon = Icons.Rounded.Hub,
-                title = "No environments",
-                detail = "Pair with a machine running S5 Code to control agents from this device.",
-                actionLabel = "Add environment",
-                onAction = onAdd,
+                title = "No environments connected yet",
+                detail = "Tap + to add one.",
                 modifier = Modifier.padding(padding),
             )
         } else {
@@ -97,7 +122,7 @@ fun ConnectionsScreen(
                     ),
                 verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
             ) {
-                items(environments, key = { it.id.value }) { environment ->
+                items(localEnvs, key = { it.id.value }) { environment ->
                     EnvironmentCard(
                         environment,
                         onClick = { onOpen(environment.id.value) },
@@ -106,7 +131,81 @@ fun ConnectionsScreen(
                         },
                     )
                 }
+                if (cloudEnvs.isNotEmpty() || availableCloudRows.isNotEmpty()) {
+                    item(key = "connect-header") {
+                        S5SectionHeader(
+                            label = "S5 Connect",
+                            modifier = Modifier.padding(top = S5Theme.spacing.small),
+                        )
+                    }
+                    items(cloudEnvs, key = { it.id.value }) { environment ->
+                        EnvironmentCard(
+                            environment,
+                            onClick = { onOpen(environment.id.value) },
+                            onToggle = { enabled ->
+                                store.setEnvironmentEnabled(environment.id, enabled)
+                            },
+                        )
+                    }
+                    items(availableCloudRows, key = { "cloud-${it.environmentId}" }) { row ->
+                        AvailableCloudRow(
+                            row = row,
+                            busy = linking == row.environmentId,
+                            onAdd = {
+                                cloudEnvironments?.link(row.environmentId) {}
+                            },
+                        )
+                    }
+                }
             }
+        }
+    }
+}
+
+/** A relay environment the account can reach but this device has not paired yet. */
+@Composable
+private fun AvailableCloudRow(
+    row: club.touchtech.s5code.kotlin.cloud.CloudEnvironmentRow,
+    busy: Boolean,
+    onAdd: () -> Unit,
+) {
+    S5Card(
+        tone = if (row.online == false) S5CardTone.Receded else S5CardTone.Standard,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Row(
+            Modifier.padding(S5Theme.spacing.large),
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.medium),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            S5ShapeBadge(
+                icon = Icons.Rounded.Cloud,
+                contentDescription = null,
+                shape = S5MaterialShapes.avatar(),
+                containerColor = MaterialTheme.colorScheme.secondaryContainer,
+                contentColor = MaterialTheme.colorScheme.onSecondaryContainer,
+                size = 44.dp,
+                iconSize = 22.dp,
+            )
+            Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny)) {
+                Text(row.label, style = MaterialTheme.typography.titleMediumEmphasized)
+                Text(
+                    when (row.online) {
+                        null -> "Available · Checking relay status…"
+                        true -> "Available · Relay online"
+                        false -> row.statusError ?: "Available · Relay is offline."
+                    },
+                    style = MaterialTheme.typography.labelSmall,
+                    color =
+                        if (row.online == false) MaterialTheme.colorScheme.error
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+            // RN's available row toggles on to link; the row leaves the
+            // section once linked, so the switch never reads "on" here.
+            Switch(checked = false, onCheckedChange = { if (it) onAdd() }, enabled = !busy)
         }
     }
 }
@@ -153,15 +252,18 @@ private fun EnvironmentCard(
                         contentColor = health.content,
                     )
                     // The RN row shows the connection error under the status
-                    // pill when there is one; a healthy row shows nothing.
+                    // pill when there is one, in danger color; the detail
+                    // screen keeps the same text selectable.
                     if (environment.isEnabled && environment.lastError.isNotBlank()) {
-                        Text(
-                            environment.lastError,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.error,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
+                        androidx.compose.foundation.text.selection.SelectionContainer {
+                            Text(
+                                environment.lastError,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.error,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        }
                     }
                 }
             }
@@ -361,9 +463,9 @@ fun ConnectionDetailScreen(
                     onClick = {
                         confirmController.show(
                             S5ConfirmDialogRequest(
-                                title = "Remove environment?",
+                                title = "Remove from this device?",
                                 message =
-                                    "This removes ${environment.label} and its credential from this device. Switch it off instead to keep it saved.",
+                                    "Forget ${environment.label} and its cached threads on this device. Switch it off instead to keep it saved.",
                                 confirmText = "Remove",
                                 destructive = true,
                                 onConfirm = {

@@ -51,6 +51,7 @@ import club.touchtech.s5code.kotlin.design.component.S5TextField
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
 import club.touchtech.s5code.kotlin.feature.connections.environmentIcon
 import club.touchtech.s5code.kotlin.model.EnvironmentKind
 import kotlinx.coroutines.launch
@@ -224,20 +225,33 @@ fun AddProjectDestinationScreen(store: AppStore, onBack: () -> Unit, onCreated: 
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
-            S5RowGroup(title = "Environment") {
-                environments.forEachIndexed { index, environment ->
-                    S5SelectableRow(
-                        label = environment.label,
-                        supporting = environment.host,
-                        selected = environment.id == environmentId,
-                        onClick = {
-                            store.updateProjectDraft { it.copy(environmentId = environment.id) }
-                        },
-                        leading = {
-                            Icon(environmentIcon(environment), contentDescription = null)
-                        },
-                        position = rowPosition(index, environments.size),
-                    )
+            // RN only shows the picker once a second option exists, and a
+            // row that is not connected cannot accept a project.
+            if (environments.size > 1) {
+                S5RowGroup(title = "Environment") {
+                    environments.forEachIndexed { index, environment ->
+                        val creatable =
+                            environment.state ==
+                                club.touchtech.s5code.kotlin.model.ConnectionState.Connected
+                        S5SelectableRow(
+                            label = environment.label,
+                            supporting =
+                                if (creatable) environment.host
+                                else "${environment.host} · ${connectionPresentation(environment.state).label}",
+                            selected = environment.id == environmentId,
+                            onClick = {
+                                if (creatable) {
+                                    store.updateProjectDraft {
+                                        it.copy(environmentId = environment.id)
+                                    }
+                                }
+                            },
+                            leading = {
+                                Icon(environmentIcon(environment), contentDescription = null)
+                            },
+                            position = rowPosition(index, environments.size),
+                        )
+                    }
                 }
             }
 
@@ -332,12 +346,23 @@ fun AddProjectLocalPathScreen(store: AppStore, onBack: () -> Unit, onCreated: ()
             if (environments.size > 1) {
                 S5RowGroup(title = "Environment") {
                     environments.forEachIndexed { index, environment ->
+                        // A row that is not connected cannot accept a project;
+                        // RN renders it disabled rather than hiding it.
+                        val creatable =
+                            environment.state ==
+                                club.touchtech.s5code.kotlin.model.ConnectionState.Connected
                         S5SelectableRow(
                             label = environment.label,
-                            supporting = environment.host,
+                            supporting =
+                                if (creatable) environment.host
+                                else "${environment.host} · ${connectionPresentation(environment.state).label}",
                             selected = environment.id == environmentId,
                             onClick = {
-                                store.updateProjectDraft { it.copy(environmentId = environment.id) }
+                                if (creatable) {
+                                    store.updateProjectDraft {
+                                        it.copy(environmentId = environment.id)
+                                    }
+                                }
                             },
                             position = rowPosition(index, environments.size),
                         )

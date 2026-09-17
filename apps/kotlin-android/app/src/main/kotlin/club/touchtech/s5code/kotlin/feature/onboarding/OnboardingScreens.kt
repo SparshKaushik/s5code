@@ -49,6 +49,7 @@ import androidx.core.content.ContextCompat
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.connection.PairingUrlResult
 import club.touchtech.s5code.kotlin.connection.extractPairingUrlFromQrPayload
+import club.touchtech.s5code.kotlin.connection.pairingTargetFor
 import club.touchtech.s5code.kotlin.connection.parsePairingUrl
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
@@ -303,28 +304,49 @@ private fun ConnectionChoiceCard(
     }
 }
 
-/** Paste/type a pairing URL, validate it, exchange it, and show actionable errors. */
+/**
+ * Add-by-address form, matching RN's ConnectionsNewRouteScreen: a host field
+ * and a pairing-code field, with QR as the alternate entry. Pasting the whole
+ * `pairingUrl` line into the host field also works — the code field stays
+ * empty and the URL's own token is used.
+ */
 @Composable
 fun PairUrlScreen(
     store: AppStore,
     onBack: () -> Unit,
     onPaired: () -> Unit,
     onScanQr: () -> Unit,
+    initialHost: String = "",
+    initialCode: String = "",
 ) {
-    var input by remember { mutableStateOf("") }
+    var host by remember { mutableStateOf(initialHost) }
+    var code by remember { mutableStateOf(initialCode) }
     var attempted by remember { mutableStateOf(false) }
     var pairing by remember { mutableStateOf(false) }
     // Set only by a rejected exchange. Parse errors come from `result`, and
-    // keeping the two apart is what lets editing the URL clear one without
+    // keeping the two apart is what lets editing a field clear one without
     // hiding the other.
     var failure by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
-    val result = remember(input) { parsePairingUrl(input) }
+    // A full pairing URL pasted into the host field wins over the split form —
+    // the credential inside it is the one-time token either way.
+    val result =
+        remember(host, code) {
+            val hostAsUrl =
+                if (code.isBlank() && host.contains("://")) {
+                    parsePairingUrl(host)
+                } else {
+                    null
+                }
+            hostAsUrl ?: pairingTargetFor(host, code)
+        }
     val error = (result as? PairingUrlResult.Invalid)?.reason
+    // Both fields blank is the resting state, not an error to wave around.
+    val formEmpty = host.isBlank() && code.isBlank()
 
     S5Screen(
-        title = "Pair by URL",
-        subtitle = "Paste the line your server printed",
+        title = "Add environment",
+        subtitle = "Pair with a machine running S5 Code",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
     ) { padding ->
@@ -347,7 +369,7 @@ fun PairUrlScreen(
                         modifier = Modifier.padding(top = S5Theme.spacing.small),
                     )
                     Text(
-                        "Copy the whole pairingUrl line, including the token after ?pair=",
+                        "The output prints the address and a one-time pairing code.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = S5Theme.spacing.small),
@@ -356,27 +378,37 @@ fun PairUrlScreen(
             }
 
             S5TextField(
-                value = input,
+                value = host,
                 onValueChange = {
-                    input = it
+                    host = it
                     attempted = false
                     failure = null
                 },
-                label = "Pairing URL",
-                placeholder = "http://macbook.local:4488/?pair=…",
-                leadingIcon = Icons.Rounded.ContentPaste,
-                isError = attempted && (error != null || failure != null),
+                label = "Host",
+                placeholder = "192.168.1.10:4488 or https://…",
+                leadingIcon = Icons.Rounded.Lan,
+                isError = attempted && error != null,
                 supporting =
-                    (result as? PairingUrlResult.Valid)?.target.let { target ->
-                        when {
-                            attempted && error != null -> error.message
-                            target != null ->
-                                "Will pair with ${target.host}" +
-                                    if (target.secure) " over TLS" else ""
-                            else -> "The URL includes a one-time token that can only be used once."
-                        }
+                    when {
+                        attempted && error != null -> error.message
+                        host.contains("://") && code.isBlank() ->
+                            "Pasting the whole pairing URL here works too."
+                        else -> "An IP defaults to http; a hostname defaults to https."
                     },
                 maxLines = 3,
+            )
+            S5TextField(
+                value = code,
+                onValueChange = {
+                    code = it
+                    attempted = false
+                    failure = null
+                },
+                label = "Pairing code",
+                placeholder = "One-time token",
+                leadingIcon = Icons.Rounded.Lock,
+                isError = attempted && error != null,
+                supporting = "Printed once; consumed the moment it pairs.",
             )
 
             failure?.let { message ->
@@ -384,22 +416,13 @@ fun PairUrlScreen(
                     title = "Pairing failed",
                     detail = message,
                     onRetry = { failure = null },
-                    retryLabel = "Edit URL",
-                )
-            }
-
-            if (attempted && error != null) {
-                S5ErrorState(
-                    title = "That URL won't pair",
-                    detail = error.message,
-                    onRetry = { attempted = false },
-                    retryLabel = "Edit URL",
+                    retryLabel = "Edit fields",
                 )
             }
 
             Row(horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
                 S5Button(
-                    text = if (pairing) "Pairing…" else "Pair",
+                    text = if (pairing) "Adding…" else "Add environment",
                     onClick = {
                         attempted = true
                         failure = null
@@ -409,7 +432,7 @@ fun PairUrlScreen(
                             scope.launch {
                                 // The credential is one-time, so the exchange writes the
                                 // token before returning; there is nothing to retry with
-                                // this URL if it fails.
+                                // this code if it fails.
                                 val outcome = runCatching { store.pairing.pair(target) }
                                 pairing = false
                                 outcome.fold(
@@ -423,10 +446,10 @@ fun PairUrlScreen(
                     },
                     emphasis = S5ActionEmphasis.Primary,
                     icon = Icons.Rounded.Bolt,
-                    enabled = !pairing && input.isNotBlank(),
+                    enabled = !pairing && !formEmpty,
                 )
                 S5Button(
-                    text = "Scan instead",
+                    text = "Scan QR code",
                     onClick = onScanQr,
                     emphasis = S5ActionEmphasis.Primary,
                     style = S5ButtonStyle.Outlined,
@@ -437,7 +460,7 @@ fun PairUrlScreen(
             S5SectionHeader("If pairing fails")
             listOf(
                 "Both devices must reach each other — same Wi-Fi, tailnet, or tunnel." to Icons.Rounded.Router,
-                "A consumed token can't be reused. Mint a new one with s5 pair." to Icons.Rounded.Lock,
+                "A consumed code can't be reused. Mint a new one with s5 pair." to Icons.Rounded.Lock,
                 "Cleartext http:// is allowed for local addresses only." to Icons.Rounded.Lan,
             )
                 .forEach { (text, icon) -> S5Notice(icon = icon, text = text) }
@@ -457,11 +480,17 @@ fun PairUrlScreen(
  * - **Permission denied.** Offer the URL form and a route to system settings,
  *   because a second in-app request does nothing once Android has recorded a
  *   denial.
- * - **Scanned.** Parse immediately, then pair. A malformed code reports what is
- *   wrong and keeps scanning; a valid one spends its credential exactly once.
+ * - **Scanned.** Parse, then hand host and code back to the form so the user
+ *   confirms before the one-time credential is spent — the same review step
+ *   RN's scanner leaves in place. A malformed code reports what is wrong and
+ *   keeps scanning.
  */
 @Composable
-fun PairQrScreen(store: AppStore, onBack: () -> Unit, onManual: () -> Unit, onPaired: () -> Unit) {
+fun PairQrScreen(
+    onBack: () -> Unit,
+    onManual: () -> Unit,
+    onScanned: (host: String, code: String) -> Unit,
+) {
     val context = LocalContext.current
     var granted by remember {
         mutableStateOf(
@@ -471,32 +500,22 @@ fun PairQrScreen(store: AppStore, onBack: () -> Unit, onManual: () -> Unit, onPa
     }
     var requested by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<String?>(null) }
-    var pairing by remember { mutableStateOf(false) }
-    val scope = rememberCoroutineScope()
+    var scanned by remember { mutableStateOf(false) }
     val permissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { result ->
             granted = result
             requested = true
         }
 
-    /** One scan: parse, then exchange. Re-arms on failure so a retry is possible. */
+    /** One scan: parse, then fill the form. Re-arms on failure so a retry is possible. */
     fun handleScan(value: String) {
-        if (pairing) return
+        if (scanned) return
         when (val result = parsePairingUrl(extractPairingUrlFromQrPayload(value))) {
             is PairingUrlResult.Invalid -> failure = result.reason.message
             is PairingUrlResult.Valid -> {
-                pairing = true
+                scanned = true
                 failure = null
-                scope.launch {
-                    val outcome = runCatching { store.pairing.pair(result.target) }
-                    pairing = false
-                    outcome.fold(
-                        onSuccess = { onPaired() },
-                        onFailure = { cause ->
-                            failure = cause.message ?: "That machine refused the pairing."
-                        },
-                    )
-                }
+                onScanned(result.target.host, result.target.credential)
             }
         }
     }
@@ -505,7 +524,7 @@ fun PairQrScreen(store: AppStore, onBack: () -> Unit, onManual: () -> Unit, onPa
         title = "Scan pairing code",
         subtitle =
             when {
-                pairing -> "Pairing…"
+                scanned -> "Code captured"
                 granted -> "Point at the code on your machine"
                 else -> "Camera access needed"
             },
@@ -616,7 +635,7 @@ fun PairQrScreen(store: AppStore, onBack: () -> Unit, onManual: () -> Unit, onPa
                                 )
                             }
                             S5Button(
-                                text = "Enter the URL",
+                                text = "Enter it manually",
                                 onClick = onManual,
                                 emphasis = S5ActionEmphasis.Prominent,
                                 style = S5ButtonStyle.Outlined,

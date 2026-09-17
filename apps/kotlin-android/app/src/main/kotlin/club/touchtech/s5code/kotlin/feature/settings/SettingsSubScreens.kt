@@ -384,12 +384,13 @@ fun SettingsProjectGroupingScreen(store: AppStore, onBack: () -> Unit) {
     }
 }
 
-/** Master permission plus per-event notification preferences. */
+/** Master delivery switch plus per-event notification preferences. */
 @Composable
-fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit) {
+fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit, onSignIn: () -> Unit) {
     val context = LocalContext.current
     val preferences by store.preferences.collectAsStateWithLifecycle()
     val push by store.pushRuntime.collectAsStateWithLifecycle()
+    val account by store.cloud.state.collectAsStateWithLifecycle()
     var permission by remember { mutableStateOf(notificationsAllowed(context)) }
     val permissionLauncher =
         rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
@@ -408,12 +409,16 @@ fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit) {
         }
     }
 
+    // RN's Device Notifications switch reads on only once the device is
+    // registered with the relay; local permission alone delivers nothing.
+    val registered = push.status == PushRegistrationStatus.Registered
+
     S5Screen(
-        title = "Notifications",
+        title = "Device notifications",
         subtitle =
             when {
                 !permission -> "Blocked"
-                push.status == PushRegistrationStatus.Registered -> "Registered"
+                registered -> "Registered"
                 else -> "Allowed"
             },
         onBack = onBack,
@@ -422,7 +427,7 @@ fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
-            if (!permission || push.status != PushRegistrationStatus.Registered) {
+            if (!permission || !registered) {
                 Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                     S5Notice(
                         icon = Icons.Rounded.ErrorOutline,
@@ -440,11 +445,21 @@ fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit) {
             S5RowGroup {
                 S5SwitchRow(
                     icon = Icons.Rounded.Notifications,
-                    label = "Allow notifications",
-                    supporting = "Controls the Android permission for this app",
-                    checked = permission,
+                    label = "Device notifications",
+                    supporting = "Agent alerts pushed to this device",
+                    checked = permission && registered,
                     onCheckedChange = { allowed ->
-                        if (allowed) requestOrOpenNotifications() else openNotificationSettings(context)
+                        if (allowed) {
+                            // Enabling needs an account to register against; RN
+                            // routes a signed-out user to sign-in.
+                            if (account !is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn) {
+                                onSignIn()
+                            } else {
+                                requestOrOpenNotifications()
+                            }
+                        } else {
+                            openNotificationSettings(context)
+                        }
                     },
                     position = rowPosition(0, 1),
                 )
@@ -505,9 +520,11 @@ private data class Quad(
 
 /** Live Updates enablement, promotion status, and fallback behavior. */
 @Composable
-fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit) {
+fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit, onSignIn: () -> Unit) {
     val context = LocalContext.current
     val preferences by store.preferences.collectAsStateWithLifecycle()
+    val push by store.pushRuntime.collectAsStateWithLifecycle()
+    val account by store.cloud.state.collectAsStateWithLifecycle()
     // Re-read after returning from system promotion settings. The screen has no
     // invented defaults: every row below comes from Android or persisted native
     // delivery state.
@@ -521,12 +538,15 @@ fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit) {
                 else -> "${seconds / 3_600} h ago"
             }
         } ?: "None received"
+    // Same registration gate as RN's Ongoing Agent Activity switch: the
+    // preference means nothing until the relay can push to this device.
+    val registered = push.status == PushRegistrationStatus.Registered
     S5Screen(
-        title = "Live Updates",
+        title = "Ongoing Agent Activity",
         subtitle =
             when {
                 !diagnostics.supported -> "Requires Android 16"
-                preferences.liveUpdatesEnabled -> "Enabled"
+                preferences.liveUpdatesEnabled && registered -> "Enabled"
                 else -> "Disabled"
             },
         onBack = onBack,
@@ -538,11 +558,18 @@ fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit) {
             S5RowGroup {
                 S5SwitchRow(
                     icon = Icons.Rounded.Bolt,
-                    label = "Live Updates",
+                    label = "Ongoing Agent Activity",
                     supporting = "Show agent progress on the lock screen and status bar",
-                    checked = diagnostics.supported && preferences.liveUpdatesEnabled,
+                    checked =
+                        diagnostics.supported && preferences.liveUpdatesEnabled && registered,
                     enabled = diagnostics.supported && diagnostics.notificationPermission,
                     onCheckedChange = { value ->
+                        if (value &&
+                            account !is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn
+                        ) {
+                            onSignIn()
+                            return@S5SwitchRow
+                        }
                         store.updatePreferences { it.copy(liveUpdatesEnabled = value) }
                         if (!value) AndroidLiveUpdateNotifications.dismiss(context)
                     },

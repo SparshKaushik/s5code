@@ -76,6 +76,10 @@ import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5StatusPill
 import club.touchtech.s5code.kotlin.design.component.S5TextField
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
+import club.touchtech.s5code.kotlin.design.component.S5WaitState
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import club.touchtech.s5code.kotlin.feature.connections.showRetry
+import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.design.component.rememberHighlightedLines
 import club.touchtech.s5code.kotlin.design.text.codeLanguageOfPath
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
@@ -118,6 +122,24 @@ fun ReviewScreen(
     val scope = rememberCoroutineScope()
     val remote = state.value
     val files = remote.valueOrNull.orEmpty()
+
+    // RN's review shows the environment connection notice rather than a bare
+    // spinner while the machine is still connecting — the diff cannot build
+    // until the transport is live.
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val environment = remember(environments, environmentId) {
+        environments.firstOrNull { it.id.value == environmentId }
+    }
+    val wait =
+        remember(environment?.state, remote is Remote.Loaded) {
+            waitNotice(
+                states = listOfNotNull(environment?.state),
+                environmentLabel = environment?.label,
+                resourceName = "review",
+                hasContent = remote is Remote.Loaded,
+                loaded = remote is Remote.Loaded,
+            )
+        }
 
     val additions = files.sumOf { it.additions }
     val deletions = files.sumOf { it.deletions }
@@ -175,6 +197,18 @@ fun ReviewScreen(
             }
         },
     ) { padding ->
+        if (wait != null && remote !is Remote.Loaded) {
+            S5WaitState(
+                title = wait.title,
+                detail = wait.detail,
+                icon = Icons.Rounded.Difference,
+                spinning = wait.spinning,
+                actionLabel = if (wait.showRetry) "Retry now" else null,
+                onAction = { store.retryEnvironment(env) },
+                modifier = Modifier.padding(padding),
+            )
+            return@S5Screen
+        }
         when (remote) {
             is Remote.Loading -> S5LoadingState("Building the diff…", Modifier.padding(padding))
             is Remote.Failed ->

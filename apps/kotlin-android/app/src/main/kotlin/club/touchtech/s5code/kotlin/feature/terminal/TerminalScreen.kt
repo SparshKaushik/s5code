@@ -57,6 +57,7 @@ import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.S5WaitState
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.EnvironmentId
@@ -538,7 +539,7 @@ fun TerminalScreen(
                         detail = notice.detail,
                         icon = Icons.Rounded.Terminal,
                         spinning = notice.spinning,
-                        actionLabel = if (notice.spinning) null else "Retry now",
+                        actionLabel = if (notice.showRetry) "Retry now" else null,
                         onAction = { store.retryEnvironment(env) },
                         modifier = Modifier.fillMaxSize(),
                     )

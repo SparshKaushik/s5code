@@ -81,6 +81,7 @@ import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
 import club.touchtech.s5code.kotlin.feature.connections.environmentIcon
+import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.thread.Dictation
 import club.touchtech.s5code.kotlin.feature.thread.DictationMicControl
@@ -180,6 +181,10 @@ fun NewTaskProjectScreen(
                     detail = wait.detail,
                     icon = Icons.Rounded.Folder,
                     spinning = wait.spinning,
+                    actionLabel = if (wait.showRetry) "Retry now" else null,
+                    onAction = {
+                        enabledEnvironments.forEach { store.retryEnvironment(it.id) }
+                    },
                 )
             } else if (filtered.isEmpty()) {
                 S5EmptyState(
@@ -707,13 +712,20 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
         ) {
             items(environments, key = { it.id.value }) { environment ->
                 val health = connectionPresentation(environment.state)
+                // A task can only be drafted against a live connection — RN's
+                // canCreateProjectInEnvironment.
+                val creatable =
+                    environment.state ==
+                        club.touchtech.s5code.kotlin.model.ConnectionState.Connected
                 S5SelectableRow(
                     label = environment.label,
                     supporting = "${environment.host} · ${health.label}",
                     selected = environment.id == draft.environmentId,
                     onClick = {
-                        store.updateDraft { it.copy(environmentId = environment.id) }
-                        onBack()
+                        if (creatable) {
+                            store.updateDraft { it.copy(environmentId = environment.id) }
+                            onBack()
+                        }
                     },
                     leading = { Icon(health.icon, contentDescription = null) },
                     position = rowPosition(environments.indexOf(environment), environments.size),

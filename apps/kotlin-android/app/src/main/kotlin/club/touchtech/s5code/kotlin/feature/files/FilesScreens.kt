@@ -82,6 +82,9 @@ import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5ShapeBadge
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
+import club.touchtech.s5code.kotlin.design.component.S5WaitState
+import club.touchtech.s5code.kotlin.feature.connections.showRetry
+import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.component.rememberHighlightedLines
 import club.touchtech.s5code.kotlin.design.text.codeLanguageOfPath
@@ -362,6 +365,23 @@ fun FilePreviewScreen(
     val scroll = rememberScrollState()
     val file = state.value
 
+    // RN's preview shows the environment connection notice while the machine is
+    // unreachable — the file cannot read until the transport is live.
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val environment = remember(environments, environmentId) {
+        environments.firstOrNull { it.id.value == environmentId }
+    }
+    val wait =
+        remember(environment?.state, file is Remote.Loaded) {
+            waitNotice(
+                states = listOfNotNull(environment?.state),
+                environmentLabel = environment?.label,
+                resourceName = "preview",
+                hasContent = file is Remote.Loaded,
+                loaded = file is Remote.Loaded,
+            )
+        }
+
     S5Screen(
         title = path.substringAfterLast('/'),
         subtitle =
@@ -384,6 +404,18 @@ fun FilePreviewScreen(
             }
         },
     ) { padding ->
+        if (wait != null && file !is Remote.Loaded) {
+            S5WaitState(
+                title = wait.title,
+                detail = wait.detail,
+                icon = Icons.AutoMirrored.Rounded.InsertDriveFile,
+                spinning = wait.spinning,
+                actionLabel = if (wait.showRetry) "Retry now" else null,
+                onAction = { store.retryEnvironment(env) },
+                modifier = Modifier.padding(padding),
+            )
+            return@S5Screen
+        }
         when (file) {
             is Remote.Loading -> S5LoadingState("Reading the file…", Modifier.padding(padding))
             is Remote.Failed ->

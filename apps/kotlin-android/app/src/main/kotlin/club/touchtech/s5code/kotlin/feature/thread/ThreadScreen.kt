@@ -54,6 +54,7 @@ import club.touchtech.s5code.kotlin.design.component.S5WaitState
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
+import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.connections.waitPillLabel
 import club.touchtech.s5code.kotlin.feature.settings.TaskSettingsSheet
@@ -167,7 +168,7 @@ fun ThreadScreen(
                     detail = opening.detail,
                     icon = health?.icon ?: Icons.Rounded.Difference,
                     spinning = opening.spinning,
-                    actionLabel = if (opening.spinning) null else "Retry now",
+                    actionLabel = if (opening.showRetry) "Retry now" else null,
                     onAction = { store.retryEnvironment(env) },
                     modifier = Modifier.padding(padding),
                 )
@@ -637,7 +638,7 @@ fun ThreadScreen(
                     detail = wait?.detail ?: "Reading this thread's history.",
                     icon = health?.icon ?: Icons.Rounded.Difference,
                     spinning = wait?.spinning ?: true,
-                    actionLabel = if (wait?.spinning == false) "Retry now" else null,
+                    actionLabel = if (wait?.showRetry == true) "Retry now" else null,
                     onAction = { store.retryEnvironment(env) },
                 )
             } else {

@@ -65,9 +65,12 @@ data class S5ConnectionPresentation(
 fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
     val colors = S5Theme.status
     return when (state) {
+        // Labels match `connectionStatusText` in client-runtime's
+        // connection/presentation.ts so a user reading the same machine from
+        // both clients sees the same words.
         ConnectionState.Connected ->
             S5ConnectionPresentation(
-                "Online",
+                "Connected",
                 colors.settledContainer,
                 colors.onSettledContainer,
                 Icons.Rounded.Wifi,
@@ -75,7 +78,7 @@ fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
             )
         ConnectionState.Connecting ->
             S5ConnectionPresentation(
-                "Connecting",
+                "Connecting…",
                 colors.workingContainer,
                 colors.onWorkingContainer,
                 Icons.Rounded.Sync,
@@ -83,7 +86,7 @@ fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
             )
         ConnectionState.Recovering ->
             S5ConnectionPresentation(
-                "Recovering",
+                "Reconnecting…",
                 colors.approvalContainer,
                 colors.onApprovalContainer,
                 Icons.Rounded.SyncProblem,

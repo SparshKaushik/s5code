@@ -400,7 +400,38 @@ fun HomeScreen(
     // Switched-off environments have no session and no threads, so they count
     // toward neither "unreachable" nor the wait.
     val enabledEnvironments = remember(environments) { environments.filter { it.isEnabled } }
-    val offline = enabledEnvironments.count { connectionPresentation(it.state).offline }
+    // The header line mirrors `workspaceConnectionStatusLabel` in
+    // apps/mobile/src/features/home/workspace-connection-status.ts: offline
+    // first, then reconnecting, then sync state. It debounces the same 800ms
+    // so a reconnect blip does not flash text under the title.
+    val rawConnectionStatus =
+        remember(environments, enabledEnvironments, paired, sessionRestored) {
+            val connecting =
+                enabledEnvironments.filter {
+                    it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Connecting ||
+                        it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Recovering
+                }
+            when {
+                enabledEnvironments.any {
+                    it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Offline
+                } -> "You are offline"
+                connecting.size == 1 -> "Reconnecting to ${connecting.single().label}…"
+                connecting.size > 1 -> "Reconnecting ${connecting.size} environments"
+                environments.isEmpty() && sessionRestored && !paired -> "No environments"
+                enabledEnvironments.none { it.snapshotLoaded } &&
+                    enabledEnvironments.isNotEmpty() -> "Loading threads…"
+                else -> null
+            }
+        }
+    var connectionStatus by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(rawConnectionStatus) {
+        if (rawConnectionStatus == null) {
+            connectionStatus = null
+        } else {
+            delay(800)
+            connectionStatus = rawConnectionStatus
+        }
+    }
     // What the list is waiting on, if anything. A pill once there are rows, the whole
     // screen when there are none.
     val wait =
@@ -421,12 +452,7 @@ fun HomeScreen(
 
     S5Screen(
         title = "S5 Code",
-        subtitle =
-            when {
-                environments.isEmpty() -> "No environments"
-                offline > 0 -> "${environments.size} environments · $offline unreachable"
-                else -> "${environments.size} environments online"
-            },
+        subtitle = connectionStatus,
         prominence = S5TopBarProminence.Hero,
         actions = {
             S5IconButton(
@@ -439,20 +465,95 @@ fun HomeScreen(
             )
             S5OverflowMenu(
                 icon = Icons.AutoMirrored.Rounded.Sort,
-                label = "Sort and group",
+                label = "Filter and sort",
                 expanded = sortMenuOpen,
                 onExpandedChange = { sortMenuOpen = it },
                 options =
-                    ThreadSort.entries.map { sort ->
-                        S5MenuOption(
-                            id = "sort:${sort.name}",
-                            label = sort.label,
-                            selected = preferences.threadSort == sort,
-                        )
+                    buildList {
+                        // RN's HomeHeader exposes Environment and Project
+                        // filter submenus ahead of the sort options.
+                        if (enabledEnvironments.size > 1) {
+                            add(
+                                S5MenuOption(
+                                    id = "environment",
+                                    label = "Environment",
+                                    icon = Icons.Rounded.Hub,
+                                    children =
+                                        listOf(
+                                            S5MenuOption(
+                                                id = "env:",
+                                                label = "All environments",
+                                                selected = home.environmentId == null,
+                                            )
+                                        ) +
+                                            enabledEnvironments.map { environment ->
+                                                S5MenuOption(
+                                                    id = "env:${environment.id.value}",
+                                                    label = environment.label,
+                                                    selected =
+                                                        home.environmentId == environment.id,
+                                                )
+                                            },
+                                )
+                            )
+                        }
+                        if (projects.isNotEmpty()) {
+                            add(
+                                S5MenuOption(
+                                    id = "project",
+                                    label = "Project",
+                                    children =
+                                        listOf(
+                                            S5MenuOption(
+                                                id = "project:",
+                                                label = "All projects",
+                                                selected = home.projectKey == null,
+                                            )
+                                        ) +
+                                            projects.map { project ->
+                                                S5MenuOption(
+                                                    id = "project:${project.id.value}",
+                                                    label = project.title,
+                                                    selected =
+                                                        home.projectKey == project.id.value,
+                                                )
+                                            },
+                                )
+                            )
+                        }
+                        ThreadSort.entries.forEach { sort ->
+                            add(
+                                S5MenuOption(
+                                    id = "sort:${sort.name}",
+                                    label = sort.label,
+                                    selected = preferences.threadSort == sort,
+                                )
+                            )
+                        }
                     },
                 onSelect = { id ->
-                    val sort = ThreadSort.valueOf(id.removePrefix("sort:"))
-                    store.updatePreferences { it.copy(threadSort = sort) }
+                    when {
+                        id.startsWith("env:") ->
+                            store.updateHome {
+                                it.copy(
+                                    environmentId =
+                                        id.removePrefix("env:")
+                                            .takeIf(String::isNotEmpty)
+                                            ?.let(::EnvironmentId)
+                                )
+                            }
+                        id.startsWith("project:") ->
+                            store.updateHome {
+                                it.copy(
+                                    projectKey =
+                                        id.removePrefix("project:").takeIf(String::isNotEmpty)
+                                )
+                            }
+                        else ->
+                            store.updatePreferences {
+                                it.copy(threadSort = ThreadSort.valueOf(id.removePrefix("sort:")))
+                            }
+                    }
                 },
             )
             S5IconButton(icon = Icons.Rounded.Hub, label = "Connections", onClick = onConnections)
@@ -531,19 +632,37 @@ fun HomeScreen(
                     onAction = onConnections,
                 )
             } else if (items.isEmpty()) {
+                // With no environment at all the list can never fill; RN's
+                // empty state sends you to add one rather than to New task,
+                // which would dead-end at an empty project picker.
+                val noEnvironments = environments.isEmpty() && sessionRestored
                 S5EmptyState(
-                    icon = Icons.Rounded.Inbox,
-                    title = if (home.query.isBlank()) "No threads yet" else "No matches",
-                    detail =
-                        if (home.query.isBlank()) {
-                            "Start a task and it shows up here across every connected environment."
-                        } else {
-                            "Nothing matches \"${home.query}\". Try a shorter search."
+                    icon = if (noEnvironments) Icons.Rounded.Hub else Icons.Rounded.Inbox,
+                    title =
+                        when {
+                            noEnvironments -> "No environments connected yet"
+                            home.query.isBlank() -> "No threads yet"
+                            else -> "No matches"
                         },
-                    actionLabel = if (home.query.isBlank()) "New task" else "Clear search",
+                    detail =
+                        when {
+                            noEnvironments -> "Pair with a machine running S5 Code to get started."
+                            home.query.isBlank() ->
+                                "Start a task and it shows up here across every connected environment."
+                            else -> "Nothing matches \"${home.query}\". Try a shorter search."
+                        },
+                    actionLabel =
+                        when {
+                            noEnvironments -> "Add environment"
+                            home.query.isBlank() -> "New task"
+                            else -> "Clear search"
+                        },
                     onAction = {
-                        if (home.query.isBlank()) onNewTask()
-                        else store.updateHome { it.copy(query = "") }
+                        when {
+                            noEnvironments -> onConnections()
+                            home.query.isBlank() -> onNewTask()
+                            else -> store.updateHome { it.copy(query = "") }
+                        }
                     },
                 )
             } else {

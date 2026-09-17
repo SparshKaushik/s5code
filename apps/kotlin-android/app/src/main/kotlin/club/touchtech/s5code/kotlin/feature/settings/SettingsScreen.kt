@@ -51,6 +51,8 @@ import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationStatus
+import club.touchtech.s5code.kotlin.platform.notifications.notificationsAllowed
 import club.touchtech.s5code.kotlin.platform.updates.AppUpdateStatus
 
 /** Settings root. Every configuration destination plus build identity. */
@@ -61,7 +63,12 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val account by store.cloud.state.collectAsStateWithLifecycle()
     val updateStatus by store.updates.status.collectAsStateWithLifecycle()
+    val push by store.pushRuntime.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // RN's settings switches read as on only when the device is registered with
+    // the relay — a saved preference without delivery is meaningless there too.
+    val deviceRegistered = push.status == PushRegistrationStatus.Registered
+    val notificationsOn = deviceRegistered && notificationsAllowed(context)
 
     S5Screen(
         title = "Settings",
@@ -116,15 +123,15 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
             S5RowGroup(title = "Notifications") {
                 S5SettingsRow(
                     icon = Icons.Rounded.Notifications,
-                    label = "Notifications",
-                    value = if (preferences.notifyApprovals) "On" else "Off",
+                    label = "Device notifications",
+                    value = if (notificationsOn) "On" else "Off",
                     onClick = { onOpen(Routes.SettingsNotifications) },
                     position = rowPosition(0, 2),
                 )
                 S5SettingsRow(
                     icon = Icons.Rounded.Bolt,
-                    label = "Live Updates",
-                    value = if (preferences.liveUpdatesEnabled) "On" else "Off",
+                    label = "Ongoing Agent Activity",
+                    value = if (preferences.liveUpdatesEnabled && notificationsOn) "On" else "Off",
                     onClick = { onOpen(Routes.SettingsLiveUpdates) },
                     position = rowPosition(1, 2),
                 )

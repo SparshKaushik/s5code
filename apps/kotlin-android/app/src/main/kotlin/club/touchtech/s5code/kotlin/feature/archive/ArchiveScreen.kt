@@ -36,6 +36,7 @@ import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.S5WaitState
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.home.ThreadRow
 import kotlinx.coroutines.launch
@@ -106,6 +107,12 @@ fun ArchiveScreen(
                     detail = wait.detail,
                     icon = Icons.Rounded.Archive,
                     spinning = wait.spinning,
+                    actionLabel = if (wait.showRetry) "Retry now" else null,
+                    onAction = {
+                        environments
+                            .filter { it.isEnabled }
+                            .forEach { store.retryEnvironment(it.id) }
+                    },
                 )
             } else if (filtered.isEmpty()) {
                 S5EmptyState(

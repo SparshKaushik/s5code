@@ -92,6 +92,20 @@ fun S5NavGraph(
                 defaultValue = false
             }
         )
+    // The QR scanner navigates here with the parsed host/code so the user
+    // confirms before the credential is spent; deep links omit them.
+    val pairUrlArgs =
+        onboardingArgs +
+            listOf(
+                navArgument("host") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+                navArgument("code") {
+                    type = NavType.StringType
+                    defaultValue = ""
+                },
+            )
     val transitions = s5NavTransitions()
 
     NavHost(
@@ -137,22 +151,29 @@ fun S5NavGraph(
                 onConnect = { navController.navigate(Routes.connectSignIn(onboarding = true)) },
             )
         }
-        composable(Routes.PairUrl, arguments = onboardingArgs) { entry ->
+        composable(Routes.PairUrl, arguments = pairUrlArgs) { entry ->
             val onboarding = entry.arguments?.getBoolean("onboarding") == true
             PairUrlScreen(
                 store = store,
                 onBack = navController::popBackStack,
                 onPaired = { navController.finishPairing(onboarding) },
                 onScanQr = { navController.navigate(Routes.pairQr(onboarding)) },
+                initialHost = entry.arguments?.getString("host").orEmpty(),
+                initialCode = entry.arguments?.getString("code").orEmpty(),
             )
         }
         composable(Routes.PairQr, arguments = onboardingArgs) { entry ->
             val onboarding = entry.arguments?.getBoolean("onboarding") == true
             PairQrScreen(
-                store = store,
                 onBack = navController::popBackStack,
                 onManual = { navController.navigate(Routes.pairUrl(onboarding)) },
-                onPaired = { navController.finishPairing(onboarding) },
+                // RN's scanner fills the add form instead of spending the
+                // one-time credential sight unseen; the confirm happens there.
+                onScanned = { host, code ->
+                    navController.navigate(Routes.pairUrl(onboarding, host, code)) {
+                        popUpTo(Routes.PairUrl) { inclusive = true }
+                    }
+                },
             )
         }
         composable(Routes.ConnectSignIn, arguments = onboardingArgs) { entry ->
@@ -595,10 +616,20 @@ fun S5NavGraph(
             SettingsProjectGroupingScreen(store = store, onBack = navController::popBackStack)
         }
         composable(Routes.SettingsNotifications) {
-            SettingsNotificationsScreen(store = store, onBack = navController::popBackStack)
+            SettingsNotificationsScreen(
+                store = store,
+                onBack = navController::popBackStack,
+                // RN's toggle routes a signed-out user to sign-in rather than
+                // enabling nothing.
+                onSignIn = { navController.navigate(Routes.SettingsAccount) },
+            )
         }
         composable(Routes.SettingsLiveUpdates) {
-            SettingsLiveUpdatesScreen(store = store, onBack = navController::popBackStack)
+            SettingsLiveUpdatesScreen(
+                store = store,
+                onBack = navController::popBackStack,
+                onSignIn = { navController.navigate(Routes.SettingsAccount) },
+            )
         }
         composable(Routes.SettingsClientStorage) {
             SettingsClientStorageScreen(
