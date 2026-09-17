@@ -1,3 +1,6 @@
+// @effect-diagnostics nodeBuiltinImport:off
+import { spawnSync } from "node:child_process";
+
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -5,8 +8,15 @@ import * as Effect from "effect/Effect";
 import { checkOpenCodeProviderStatus } from "../src/provider/Layers/OpenCodeProvider.ts";
 import { makeOpenCodeHost } from "../src/provider/OpenCodeHost.ts";
 
+// These tests drive a real `opencode serve` process; environments without the
+// CLI (CI runners) can't satisfy that, so they skip.
+const openCodeBinaryPath = spawnSync("which", ["opencode"], { encoding: "utf8" }).stdout.trim();
+const hasOpenCodeBinary =
+  openCodeBinaryPath.length > 0 &&
+  spawnSync("opencode", ["--version"], { stdio: "ignore" }).status === 0;
+
 describe("OpenCode live service integration", () => {
-  it.live(
+  it.live.skipIf(!hasOpenCodeBinary)(
     "connects to local opencode service daemon via default opencode command",
     () =>
       Effect.gen(function* () {
@@ -45,7 +55,7 @@ describe("OpenCode live service integration", () => {
     30_000,
   );
 
-  it.live(
+  it.live.skipIf(!hasOpenCodeBinary)(
     "connects to local opencode service daemon via explicit binaryPath",
     () =>
       Effect.gen(function* () {
@@ -53,7 +63,7 @@ describe("OpenCode live service integration", () => {
           instanceId: ProviderInstanceId.make("opencode-integration-test-2"),
           config: {
             enabled: true,
-            binaryPath: "/home/ubuntu/.local/bin/opencode",
+            binaryPath: openCodeBinaryPath,
             serverUrl: "",
             serverPassword: "",
             customModels: [],
@@ -69,7 +79,7 @@ describe("OpenCode live service integration", () => {
           handle,
           {
             enabled: true,
-            binaryPath: "/home/ubuntu/.local/bin/opencode",
+            binaryPath: openCodeBinaryPath,
             serverUrl: "",
             serverPassword: "",
             customModels: [],
