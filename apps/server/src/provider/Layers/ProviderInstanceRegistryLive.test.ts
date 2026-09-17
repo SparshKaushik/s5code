@@ -24,6 +24,7 @@
  */
 import { describe, expect, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import { vi } from "vite-plus/test";
 import {
   type ClaudeSettings,
   type CodexSettings,
@@ -58,6 +59,21 @@ import * as ModelManifest from "../ModelManifest.ts";
 import * as CodexResetCredit from "./codexResetCredit.ts";
 import { NoOpProviderEventLoggers, ProviderEventLoggers } from "./ProviderEventLoggers.ts";
 import { makeProviderInstanceRegistry } from "./ProviderInstanceRegistryLive.ts";
+
+// The OpenCode driver connects to its service at host creation, even for
+// disabled instances, so the service helper is mocked to keep these registry
+// tests free of a real `opencode` binary requirement.
+const openCodeLocalService = vi.hoisted(() => ({
+  ensure: vi.fn(async () => ({
+    url: "http://127.0.0.1:1",
+    auth: { type: "basic" as const, username: "opencode", password: "test-password" },
+  })),
+}));
+
+vi.mock("@opencode-ai/client-v2/service", () => ({
+  ensure: openCodeLocalService.ensure,
+  headers: () => ({ authorization: "Basic test-credentials" }),
+}));
 
 const TestHttpClientLive = Layer.succeed(
   HttpClient.HttpClient,
