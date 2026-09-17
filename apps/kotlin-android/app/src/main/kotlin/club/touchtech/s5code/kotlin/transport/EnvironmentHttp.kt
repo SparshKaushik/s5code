@@ -380,7 +380,15 @@ data class EnvironmentDescriptorDto(
  * than as enums a future server value would break.
  */
 @Serializable
-data class EnvironmentPlatformDto(val os: String = "", val arch: String = "") {
+data class EnvironmentPlatformDto(
+    val os: String = "",
+    val arch: String = "",
+    /**
+     * `platform.machine` — one of the `ENVIRONMENT_MACHINE_KINDS` literals, or
+     * an unknown value from a newer server (forward-compatible by contract).
+     */
+    val machine: String? = null,
+) {
     /**
      * What a connection row shows. Derived here so the wire shape has one reader:
      * saved rows keep a display string and nothing else needs to know the

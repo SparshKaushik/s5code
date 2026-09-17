@@ -16,6 +16,12 @@ sealed interface DeepLink {
 
     data object Connections : DeepLink
 
+    /** RN's `environment-new` linking path — the add-environment form. */
+    data object EnvironmentNew : DeepLink
+
+    /** RN's `connect-onboarding` linking path — the S5 Connect setup screen. */
+    data object ConnectOnboarding : DeepLink
+
     data object Settings : DeepLink
 
     /** A settings sub-screen by its registered sub-route (`settings/auth`, …). */
@@ -42,6 +48,8 @@ sealed interface DeepLink {
                 Home -> Routes.Home
                 NewTask -> Routes.NewTask
                 Connections -> Routes.Connections
+                EnvironmentNew -> Routes.ConnectionsNew
+                ConnectOnboarding -> Routes.connectSetup(onboarding = false)
                 Settings -> Routes.Settings
                 is SettingsChild -> "settings/$page"
                 Archive -> Routes.Archive
@@ -118,6 +126,9 @@ fun parseDeepLinkPath(raw: String): DeepLink? {
         segments == listOf("new") -> DeepLink.NewTask
         segments == listOf("connections") || segments == listOf("environments") ->
             DeepLink.Connections
+        segments == listOf("environment-new") -> DeepLink.EnvironmentNew
+        // RN registers `connect-onboarding` for the S5 Connect setup screen.
+        segments == listOf("connect-onboarding") -> DeepLink.ConnectOnboarding
         segments == listOf("settings") -> DeepLink.Settings
         segments.size == 2 && segments[0] == "settings" ->
             SETTINGS_CHILDREN[segments[1]]?.let(DeepLink::SettingsChild)

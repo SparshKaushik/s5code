@@ -547,7 +547,7 @@ fun ThreadScreen(
                         it.environmentId == env && it.threadId == id
                     },
                 connectionState = environment?.state ?: club.touchtech.s5code.kotlin.model.ConnectionState.Offline,
-                connectionError = environment?.lastSeenLabel?.takeIf { it.isNotBlank() },
+                connectionError = environment?.lastError?.takeIf { it.isNotBlank() },
                 environmentLabel = environment?.label ?: "Environment",
                 syncPhase = syncPhase,
                 onReconnect = { store.retryEnvironment(env) },

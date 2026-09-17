@@ -24,8 +24,10 @@ import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
@@ -48,6 +50,7 @@ import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
 import club.touchtech.s5code.kotlin.design.component.S5ShapeBadge
 import club.touchtech.s5code.kotlin.design.component.S5StatusPill
 import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
+import club.touchtech.s5code.kotlin.design.component.S5TextField
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
@@ -126,9 +129,7 @@ private fun EnvironmentCard(
             verticalAlignment = Alignment.CenterVertically,
         ) {
             S5ShapeBadge(
-                icon =
-                    if (environment.kind == EnvironmentKind.Cloud) Icons.Rounded.Cloud
-                    else Icons.Rounded.Computer,
+                icon = environmentIcon(environment),
                 contentDescription = null,
                 shape = S5MaterialShapes.avatar(),
                 containerColor = health.container,
@@ -151,13 +152,15 @@ private fun EnvironmentCard(
                         containerColor = health.container,
                         contentColor = health.content,
                     )
-                    // A switched-off environment never connected, so "seen" is
-                    // meaningless for it.
-                    if (environment.isEnabled) {
+                    // The RN row shows the connection error under the status
+                    // pill when there is one; a healthy row shows nothing.
+                    if (environment.isEnabled && environment.lastError.isNotBlank()) {
                         Text(
-                            "seen ${environment.lastSeenLabel}",
+                            environment.lastError,
                             style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            color = MaterialTheme.colorScheme.error,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
                         )
                     }
                 }
@@ -218,12 +221,72 @@ fun ConnectionDetailScreen(
                 S5Notice(
                     icon = health.icon,
                     text =
-                        if (environment.isEnabled) {
-                            "${health.label} · seen ${environment.lastSeenLabel}"
-                        } else {
-                            health.label
+                        when {
+                            !environment.isEnabled -> health.label
+                            environment.lastError.isNotBlank() ->
+                                "${health.label} · ${environment.lastError}"
+                            else -> health.label
                         },
                 )
+            }
+
+            // RN's expanded row edits label and URL for direct environments;
+            // a relay-managed row is read-only because the tunnel owns the
+            // endpoint.
+            if (environment.kind == EnvironmentKind.Cloud) {
+                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                    Text(
+                        "Managed by S5 Connect. Tunnel details update automatically.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                var editLabel by
+                    remember(environment.id) { mutableStateOf(environment.label) }
+                var editUrl by
+                    remember(environment.id) { mutableStateOf(environment.baseUrl) }
+                S5RowGroup(title = "Edit environment") {
+                    Column(
+                        Modifier.padding(
+                            start = S5Theme.spacing.gutter,
+                            end = S5Theme.spacing.gutter,
+                            bottom = S5Theme.spacing.small,
+                        ),
+                        verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                    ) {
+                        S5TextField(
+                            value = editLabel,
+                            onValueChange = { editLabel = it },
+                            label = "Label",
+                            placeholder = "My MacBook",
+                            singleLine = true,
+                        )
+                        S5TextField(
+                            value = editUrl,
+                            onValueChange = { editUrl = it },
+                            label = "URL",
+                            placeholder = "192.168.1.100:8080",
+                            singleLine = true,
+                        )
+                        Row(
+                            Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.End,
+                        ) {
+                            S5Button(
+                                text = "Save",
+                                onClick = {
+                                    store.updateEnvironment(
+                                        environment.id,
+                                        editLabel.trim(),
+                                        editUrl.trim(),
+                                    )
+                                },
+                                emphasis = S5ActionEmphasis.Primary,
+                            )
+                        }
+                    }
+                }
             }
 
             S5RowGroup(title = "This device") {
@@ -243,16 +306,20 @@ fun ConnectionDetailScreen(
                 )
             }
 
-            S5RowGroup(title = "Devices") {
-                environment.devices.forEachIndexed { index, device ->
-                    S5SettingsRow(
-                        icon = Icons.Rounded.Computer,
-                        label = device.name,
-                        supporting = "${device.platform} · ${device.lastSeenLabel}",
-                        value = if (device.reachable) "Reachable" else "Unreachable",
-                        onClick = {},
-                        position = rowPosition(index, environment.devices.size),
-                    )
+            // No server publishes a device list yet, so this section stays
+            // empty in practice; an empty header is not worth a row.
+            if (environment.devices.isNotEmpty()) {
+                S5RowGroup(title = "Devices") {
+                    environment.devices.forEachIndexed { index, device ->
+                        S5SettingsRow(
+                            icon = Icons.Rounded.Computer,
+                            label = device.name,
+                            supporting = "${device.platform} · ${device.lastSeenLabel}",
+                            value = if (device.reachable) "Reachable" else "Unreachable",
+                            onClick = {},
+                            position = rowPosition(index, environment.devices.size),
+                        )
+                    }
                 }
             }
 
@@ -265,9 +332,7 @@ fun ConnectionDetailScreen(
                     position = rowPosition(0, 2),
                 )
                 S5SettingsRow(
-                    icon =
-                        if (environment.kind == EnvironmentKind.Cloud) Icons.Rounded.Cloud
-                        else Icons.Rounded.Computer,
+                    icon = environmentIcon(environment),
                     label = "Connection",
                     value = if (environment.kind == EnvironmentKind.Cloud) "S5 Connect" else "Direct",
                     onClick = {},

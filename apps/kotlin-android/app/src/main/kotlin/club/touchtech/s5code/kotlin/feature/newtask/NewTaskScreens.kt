@@ -80,6 +80,7 @@ import club.touchtech.s5code.kotlin.design.component.rememberDraftTextFieldState
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
+import club.touchtech.s5code.kotlin.feature.connections.environmentIcon
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.thread.Dictation
 import club.touchtech.s5code.kotlin.feature.thread.DictationMicControl
@@ -439,8 +440,7 @@ fun NewTaskDraftScreen(
                 onProject = onProject,
                 environmentLabel = environment?.label ?: draft.environmentId.value,
                 environmentIcon =
-                    if (environment?.kind == EnvironmentKind.Cloud) Icons.Rounded.Cloud
-                    else Icons.Rounded.Computer,
+                    environment?.let { environmentIcon(it) } ?: Icons.Rounded.Computer,
                 onEnvironment = onEnvironment,
                 canChangeEnvironment = enabledEnvironmentCount > 1,
                 modifier = Modifier.padding(top = S5Theme.spacing.section),

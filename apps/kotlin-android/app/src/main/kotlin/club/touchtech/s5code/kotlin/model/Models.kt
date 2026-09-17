@@ -34,6 +34,12 @@ data class Environment(
     val id: EnvironmentId,
     val label: String,
     val host: String,
+    /**
+     * The saved base URL with its scheme, for editing — [host] is the same
+     * value stripped for display. Empty for relay-managed rows, whose endpoint
+     * is owned by the relay.
+     */
+    val baseUrl: String = "",
     val kind: EnvironmentKind,
     val state: ConnectionState,
     /**
@@ -49,11 +55,22 @@ data class Environment(
      * with zero matches must render its empty state, not the loading skeleton.
      */
     val snapshotLoaded: Boolean = false,
-    val lastSeenLabel: String,
+    /**
+     * The session's current failure text, or empty while healthy. Rows render
+     * this under the status pill the way the RN client renders its
+     * `statusLabel`; it is not a timestamp.
+     */
+    val lastError: String = "",
     val devices: List<EnvironmentDevice> = emptyList(),
     val serverVersion: String = "0.5.2",
     /** `environment.platform.os` from the server config — "darwin", "linux", "windows". */
     val platformOs: String? = null,
+    /**
+     * The environment's icon kind (`settings.environmentIcon` else
+     * `platform.machine`), matching `resolveEnvironmentMachineKind` in the
+     * contracts package. Null falls back to the kind-based glyph.
+     */
+    val machineKind: String? = null,
     /**
      * What this environment's server supports. Defaulted off, because a command
      * the server does not understand is a protocol defect that kills the socket

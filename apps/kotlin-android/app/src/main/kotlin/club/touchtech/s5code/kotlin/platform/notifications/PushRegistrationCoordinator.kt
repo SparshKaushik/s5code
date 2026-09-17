@@ -10,6 +10,7 @@ import club.touchtech.s5code.kotlin.cloud.RelayDeviceRegistrationRequestDto
 import club.touchtech.s5code.kotlin.cloud.RelayError
 import club.touchtech.s5code.kotlin.data.RuntimePreferences
 import club.touchtech.s5code.kotlin.transport.PairingClient
+import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.StateFlow
@@ -34,6 +35,10 @@ class PushRegistrationCoordinator(
 ) {
     private val registrationLock = Mutex()
     private var observation: Job? = null
+
+    private companion object {
+        val REPLAY_INTERVAL_MS = TimeUnit.SECONDS.toMillis(60)
+    }
 
     fun start() {
         PushRuntime.setTokenListener { scope.launch { refresh() } }
@@ -60,15 +65,27 @@ class PushRegistrationCoordinator(
     /**
      * A new turn un-dismisses the ongoing card so the next relay update shows.
      * The relay drives the card from its aggregate payload; there is no
-     * server-side registration for it.
+     * server-side registration for it. Not gated on API 36: below it the card
+     * is an ordinary ongoing notification, which the preference still covers.
      */
     fun arm(threadTitle: String, projectTitle: String) {
-        if (!preferences.value.liveUpdatesEnabled || Build.VERSION.SDK_INT < 36) return
+        if (!preferences.value.liveUpdatesEnabled) return
         AndroidLiveUpdateNotifications.arm(context)
     }
 
     fun refresh() {
         scope.launch { synchronize() }
+    }
+
+    /**
+     * RN's foreground path (`ensureAppStateListener`): returning to the app
+     * re-asks registration so the relay replays the current card aggregate to
+     * this device — content that drifted while pushes were undeliverable
+     * repaints. The 60s dedupe lives inside [synchronize] like RN's
+     * ACTIVITY_TOKEN_REREGISTER_INTERVAL_MS.
+     */
+    fun onForeground() {
+        refresh()
     }
 
     suspend fun signOut() {
@@ -128,9 +145,11 @@ class PushRegistrationCoordinator(
                     pushToken = token,
                     preferences =
                         RelayAgentAwarenessPreferencesDto(
-                            liveActivitiesEnabled =
-                                Build.VERSION.SDK_INT >= 36 && preferenceState.liveUpdatesEnabled,
-                            notificationsEnabled = true,
+                            // Ungated like the RN registration body: the
+                            // preference is about the ongoing card, which posts
+                            // as an ordinary notification below API 36 too.
+                            liveActivitiesEnabled = preferenceState.liveUpdatesEnabled,
+                            notificationsEnabled = notificationsAllowed(context),
                             notifyOnApproval = preferenceState.notifyApprovals,
                             notifyOnInput = preferenceState.notifyInput,
                             notifyOnCompletion = preferenceState.notifyCompletion,
@@ -138,7 +157,16 @@ class PushRegistrationCoordinator(
                         ),
                 )
             val signature = registration.signature()
-            if (PushRuntime.registrationMatches(context, signedIn.accountId, signature)) {
+            // An accepted registration replays the relay's current card to
+            // this device, so more than a minute since the last one is reason
+            // enough to re-register even when nothing changed (RN's
+            // `needsAndroidReplay`, process-local).
+            val replayDue =
+                System.currentTimeMillis() - PushRuntime.replayedAt() >= REPLAY_INTERVAL_MS
+            if (
+                PushRuntime.registrationMatches(context, signedIn.accountId, signature) &&
+                    !replayDue
+            ) {
                 PushRuntime.publish(PushRegistrationStatus.Registered, "This device is registered with S5 Connect.")
                 // Identity may already be configured; configure is idempotent.
                 AndroidLiveUpdateNotifications.configure(

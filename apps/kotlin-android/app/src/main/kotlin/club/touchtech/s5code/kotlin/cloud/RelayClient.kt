@@ -132,7 +132,12 @@ private data class RelayAccessTokenDto(
 )
 
 /** A relay failure with a message a screen can show. */
-class RelayError(override val message: String, val unauthorized: Boolean = false) : Exception(message)
+class RelayError(
+    override val message: String,
+    val unauthorized: Boolean = false,
+    /** Correlates a failure with a relay-side log line; the RN client renders it as "Trace ID". */
+    val traceId: String? = null,
+) : Exception(message)
 
 /**
  * The S5 Connect relay, as this client uses it.
@@ -362,6 +367,7 @@ class RelayClient(
     private fun relayFailure(status: Int, body: String): RelayError {
         val tag = TAG_PATTERN.find(body)?.groupValues?.getOrNull(1)
         val reason = REASON_PATTERN.find(body)?.groupValues?.getOrNull(1)
+        val traceId = TRACE_ID_PATTERN.find(body)?.groupValues?.getOrNull(1)
         val message =
             when (tag) {
                 "RelayAuthInvalidError" ->
@@ -382,7 +388,11 @@ class RelayClient(
                 "RelayEnvironmentEndpointTimedOutError" -> "That machine did not answer in time."
                 else -> "The relay returned an error ($status)."
             }
-        return RelayError(message, unauthorized = status == 401 || status == 403)
+        return RelayError(
+            message,
+            unauthorized = status == 401 || status == 403,
+            traceId = traceId,
+        )
     }
 
     private fun encode(value: String): String = java.net.URLEncoder.encode(value, "UTF-8")
@@ -397,6 +407,7 @@ class RelayClient(
         val EMPTY_JSON: RequestBody = "{}".toRequestBody(JSON_MEDIA)
 
         val TAG_PATTERN = Regex("\"_tag\"\\s*:\\s*\"([^\"]+)\"")
+        val TRACE_ID_PATTERN = Regex("\"traceId\"\\s*:\\s*\"([^\"]+)\"")
         val REASON_PATTERN = Regex("\"reason\"\\s*:\\s*\"([^\"]+)\"")
     }
 }

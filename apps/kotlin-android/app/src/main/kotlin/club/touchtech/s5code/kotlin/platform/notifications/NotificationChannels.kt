@@ -11,8 +11,12 @@ import android.provider.Settings
 import androidx.core.net.toUri
 import androidx.core.content.ContextCompat
 
+// Channel ids and importance match the RN app's native module
+// (`AgentNotifications.kt`): the alert channel is identical, and the ongoing
+// card rides a low-importance "agent-activity" channel so the shade never
+// plays a sound for a progress update.
 const val ALERT_CHANNEL_ID = "agent-alerts"
-const val LIVE_UPDATE_CHANNEL_ID = "agent-live-updates"
+const val LIVE_UPDATE_CHANNEL_ID = "agent-activity"
 
 fun createNotificationChannels(context: Context) {
     val manager = context.getSystemService(NotificationManager::class.java)
@@ -27,8 +31,8 @@ fun createNotificationChannels(context: Context) {
             },
             NotificationChannel(
                 LIVE_UPDATE_CHANNEL_ID,
-                "Agent live updates",
-                NotificationManager.IMPORTANCE_DEFAULT,
+                "Ongoing agent activity",
+                NotificationManager.IMPORTANCE_LOW,
             ).apply {
                 description = "Ongoing agent progress on the lock screen and status bar"
                 setShowBadge(false)

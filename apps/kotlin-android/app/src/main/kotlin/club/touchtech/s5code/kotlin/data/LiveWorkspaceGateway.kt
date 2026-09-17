@@ -303,6 +303,14 @@ class LiveWorkspaceGateway(
                     },
                     online = onlineState,
                     initialPhase = SessionPhase.Connecting,
+                    activityClientId = {
+                        "mobile-${club.touchtech.s5code.kotlin.platform.notifications.PushRuntime.deviceId(context)}"
+                    },
+                    appIsForegrounded = {
+                        androidx.lifecycle.ProcessLifecycleOwner.get()
+                            .lifecycle.currentState
+                            .isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+                    },
                 )
             val connected = Connected(session, MutableStateFlow(null))
             sessions.update { it + (environment.environmentId to connected) }
@@ -384,7 +392,15 @@ class LiveWorkspaceGateway(
                                 ?.takeIf { it > 0 }
                                 ?.let { put("afterSequence", it) }
                         }
-                        put("requestCompletionMarker", true)
+                        // Gated on the capability like RN's state/shell.ts: an
+                        // older server never sends "synchronized", and asking
+                        // anyway would leave the shell parked in Loading.
+                        if (
+                            connected.session.state.value.capabilities
+                                .shellResumeCompletionMarker
+                        ) {
+                            put("requestCompletionMarker", true)
+                        }
                     }
                 },
                 ShellStreamItemDto.serializer(),
@@ -453,6 +469,7 @@ class LiveWorkspaceGateway(
                             .removePrefix("http://")
                             .removePrefix("https://")
                             .trimEnd('/'),
+                    baseUrl = if (saved.relayManaged) "" else saved.httpBaseUrl,
                     kind =
                         if (saved.relayManaged) EnvironmentKind.Cloud
                         else EnvironmentKind.Direct,
@@ -469,16 +486,26 @@ class LiveWorkspaceGateway(
                             else ->
                                 when (state.phase) {
                                     SessionPhase.Connected -> ConnectionState.Connected
-                                    SessionPhase.Connecting -> ConnectionState.Connecting
+                                    // RN presents a retry as "reconnecting"
+                                    // even while the socket is technically in
+                                    // its connecting stage; only a first,
+                                    // never-failed attempt reads "connecting".
+                                    SessionPhase.Connecting ->
+                                        if (state.attempt > 0 || state.lastError != null) {
+                                            ConnectionState.Recovering
+                                        } else {
+                                            ConnectionState.Connecting
+                                        }
                                     SessionPhase.Backoff -> ConnectionState.Recovering
                                     SessionPhase.Offline -> ConnectionState.Offline
                                     SessionPhase.Unauthorized -> ConnectionState.AuthRequired
                                     SessionPhase.Idle -> ConnectionState.Offline
                                 }
                         },
-                    lastSeenLabel = state?.lastError.orEmpty(),
+                    lastError = state?.lastError.orEmpty(),
                     serverVersion = state?.serverVersion.orEmpty(),
                     platformOs = state?.platformOs,
+                    machineKind = state?.machineKind,
                     capabilities =
                         EnvironmentCapabilities(
                             threadSettlement = state?.capabilities?.threadSettlement == true,
@@ -873,6 +900,8 @@ class LiveWorkspaceGateway(
         sync.value = if (target.value == null) ThreadSyncPhase.Loading else ThreadSyncPhase.Syncing
         val session = sessionFor(environmentId)
         val paginationSupported = session.state.value.capabilities.threadSnapshotPagination
+        val completionMarkerSupported =
+            session.state.value.capabilities.threadResumeCompletionMarker
         combine(
                 session.subscribe(
                     WsMethods.OrchestrationSubscribeThread,
@@ -885,7 +914,12 @@ class LiveWorkspaceGateway(
                             if (prefetchOk && lastSequence > 0) {
                                 put("afterSequence", lastSequence)
                             }
-                            put("requestCompletionMarker", true)
+                            // Gated like RN's state/threads.ts: an older server
+                            // never sends "synchronized", and asking anyway
+                            // would park the thread in Syncing forever.
+                            if (completionMarkerSupported) {
+                                put("requestCompletionMarker", true)
+                            }
                             // The fallback snapshot (no `afterSequence`, or a
                             // gap too large to replay) is windowed to the last
                             // ten user turns on capable servers — absent, the
@@ -953,8 +987,18 @@ class LiveWorkspaceGateway(
                     when (item.kind) {
                         "snapshot" -> {
                             sync.value =
-                                if (target.value == null) ThreadSyncPhase.Loading
-                                else ThreadSyncPhase.Syncing
+                                if (!completionMarkerSupported &&
+                                    item.snapshot?.thread != null
+                                ) {
+                                    // No "synchronized" frame is coming on a
+                                    // server without the marker capability;
+                                    // the snapshot alone is the settled state.
+                                    ThreadSyncPhase.Live
+                                } else if (target.value == null) {
+                                    ThreadSyncPhase.Loading
+                                } else {
+                                    ThreadSyncPhase.Syncing
+                                }
                             snapshot = item.snapshot?.thread
                             page = item.snapshot?.page
                             item.snapshot?.snapshotSequence?.let { lastSequence = it }

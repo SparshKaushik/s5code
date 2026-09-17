@@ -10,6 +10,7 @@ internal object WsMethods {
     const val ServerRefreshProviders = "server.refreshProviders"
     const val ServerProbe = "server.probe"
     const val ServerGetUsageSummary = "server.getUsageSummary"
+    const val ServerReportClientActivity = "server.reportClientActivity"
     const val SubscribeServerConfig = "subscribeServerConfig"
 
     const val OrchestrationSubscribeShell = "orchestration.subscribeShell"

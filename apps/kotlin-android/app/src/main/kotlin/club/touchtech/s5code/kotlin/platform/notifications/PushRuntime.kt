@@ -43,6 +43,13 @@ object PushRuntime {
 
     @Volatile private var tokenListener: ((String) -> Unit)? = null
 
+    /**
+     * Last accepted registration, process-local like RN's
+     * `androidDeviceReplayedAt`: the relay replays the current card aggregate
+     * on every accepted registration, so a cold start always counts as due.
+     */
+    @Volatile private var lastReplayAt: Long = 0L
+
     fun initialize(context: Context, firebaseConfigured: Boolean) {
         val token = preferences(context).getString(KEY_TOKEN, null)
         _state.value =
@@ -101,8 +108,12 @@ object PushRuntime {
             putString(KEY_IDENTITY, identity)
             putString(KEY_SIGNATURE, signature)
         }
+        lastReplayAt = System.currentTimeMillis()
         publish(PushRegistrationStatus.Registered, "This device is registered with S5 Connect.")
     }
+
+    /** When the last accepted registration happened; 0 when never. */
+    fun replayedAt(): Long = lastReplayAt
 
     fun registrationMatches(context: Context, identity: String, signature: String): Boolean {
         val preferences = preferences(context)
@@ -115,6 +126,7 @@ object PushRuntime {
             remove(KEY_IDENTITY)
             remove(KEY_SIGNATURE)
         }
+        lastReplayAt = 0L
         publish(
             if (_state.value.firebaseConfigured) PushRegistrationStatus.SignedOut
             else PushRegistrationStatus.Unconfigured

@@ -130,6 +130,13 @@ data class ServerConfigDto(
     val shellResumeCompletionMarker: Boolean = false,
     val threadResumeCompletionMarker: Boolean = false,
     val threadSnapshotPagination: Boolean = false,
+    val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
+)
+
+/** The `settings` slice this client reads — `environmentIcon` overrides `platform.machine`. */
+@Serializable
+data class ServerConfigSettingsDto(
+    val environmentIcon: String? = null,
 )
 
 @Serializable

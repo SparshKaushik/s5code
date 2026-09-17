@@ -121,9 +121,14 @@ fun pairingTargetFor(host: String, code: String): PairingUrlResult {
     val trimmedCode = code.trim()
     if (trimmedCode.isEmpty()) return PairingUrlResult.Invalid(PairingUrlError.MissingCode)
 
+    // RN's buildPairingUrl defaults a bare host to http when it is an IP
+    // literal — a LAN address almost never terminates TLS, and the pairing
+    // exchange would fail on a self-signed cert nobody installed.
     val url =
-        ParsedUrl.parseWithDefaultScheme(trimmedHost)
-            ?: return PairingUrlResult.Invalid(PairingUrlError.NotAUrl)
+        ParsedUrl.parseWithDefaultScheme(
+            trimmedHost,
+            defaultScheme = if (isIpLiteral(trimmedHost)) "http" else "https",
+        ) ?: return PairingUrlResult.Invalid(PairingUrlError.NotAUrl)
     if (url.scheme !in SUPPORTED_SCHEMES) {
         return PairingUrlResult.Invalid(PairingUrlError.UnsupportedScheme)
     }
@@ -136,6 +141,39 @@ fun pairingTargetFor(host: String, code: String): PairingUrlResult {
             credential = trimmedCode,
         )
     )
+}
+
+/**
+ * Matches `isIpLiteral` in `apps/mobile/src/features/connection/pairing.ts`:
+ * bracketed IPv6 or four dotted decimal octets. Anything else (including
+ * unbracketed IPv6, which the RN helper also declines to treat as an IP)
+ * keeps the https default.
+ */
+private fun isIpLiteral(host: String): Boolean {
+    val hostname = host.trim().substringBefore('/').substringBefore('?').substringBefore('#')
+    if (hostname.startsWith('[')) {
+        // Bracketed IPv6. Unbracketed colons are not a valid URL host, and the
+        // RN helper's URL() parse rejects them the same way.
+        return hostname.substringAfter('[').substringBefore(']').contains(':')
+    }
+    if (hostname.contains(':')) {
+        // host:port — IPv6 without brackets is invalid input, not a literal.
+        val name = hostname.substringBeforeLast(':')
+        val port = hostname.substringAfterLast(':')
+        if (!port.all(Char::isDigit)) return false
+        return isIpv4(name)
+    }
+    return isIpv4(hostname)
+}
+
+private fun isIpv4(name: String): Boolean {
+    val octets = name.split('.')
+    return octets.size == 4 &&
+        octets.all { octet ->
+            octet.length in 1..3 &&
+                octet.all(Char::isDigit) &&
+                octet.toIntOrNull()?.let { it <= 255 } == true
+        }
 }
 
 /**
@@ -193,10 +231,10 @@ private data class ParsedUrl(
         }
 
         /** Bare hosts default to https, matching `normalizeRemoteBaseUrl`. */
-        fun parseWithDefaultScheme(raw: String): ParsedUrl? {
+        fun parseWithDefaultScheme(raw: String, defaultScheme: String = "https"): ParsedUrl? {
             val cleaned = raw.trimStart('/')
             return if (SCHEME_PREFIX.containsMatchIn(cleaned)) parse(cleaned)
-            else parse("https://$cleaned")
+            else parse("$defaultScheme://$cleaned")
         }
 
         private val SCHEME_PREFIX = Regex("^[a-zA-Z][a-zA-Z\\d+-]*://")

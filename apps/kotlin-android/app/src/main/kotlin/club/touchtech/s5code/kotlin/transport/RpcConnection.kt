@@ -223,7 +223,9 @@ private constructor(
 
     companion object {
         private const val NORMAL_CLOSE = 1000
-        private const val KEEPALIVE_INTERVAL_MS = 15_000L
+        // 5s ping like the Effect RPC socket pinger the other clients use: a
+        // half-open socket is declared dead on the next tick (~10s worst case).
+        private const val KEEPALIVE_INTERVAL_MS = 5_000L
         private const val OPEN_TIMEOUT_MS = 15_000L
 
         /**

@@ -50,6 +50,11 @@ data class AndroidLiveUpdateDiagnostics(
  * `apps/mobile/modules/t3-agent-notifications` — the React Native app's Android
  * path — so both clients present the same card for the same payload.
  */
+// Tags let sign-out cancel everything this feature posted without knowing
+// each alert id, like the RN module's ACTIVITY_TAG/ALERT_TAG sweep.
+private const val ACTIVITY_TAG = "s5-agent-activity"
+private const val ALERT_TAG = "s5-agent-alert"
+
 object AndroidLiveUpdateNotifications {
     private const val NOTIFICATION_ID = 53_005
     private const val PREFERENCES = "s5code.android-live-updates"
@@ -104,7 +109,9 @@ object AndroidLiveUpdateNotifications {
         preferences(context).edit { clear() }
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.activeNotifications.forEach {
-            if (it.id == NOTIFICATION_ID) manager.cancel(it.id)
+            if (it.tag == ACTIVITY_TAG || it.tag == ALERT_TAG) {
+                manager.cancel(it.tag, it.id)
+            }
         }
     }
 
@@ -255,14 +262,18 @@ object AndroidLiveUpdateNotifications {
                 .setPriority(NotificationCompat.PRIORITY_LOW)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                 .setContentIntent(
-                    notificationPath(mapOf("deepLink" to data["activity_path"].orEmpty()))?.let {
-                        notificationPendingIntent(context, it, NOTIFICATION_ID)
-                    }
+                    notificationPendingIntent(
+                        context,
+                        notificationPath(mapOf("deepLink" to data["activity_path"].orEmpty())),
+                        NOTIFICATION_ID,
+                    )
                 )
                 .setDeleteIntent(dismissIntent)
                 .addAction(0, "Dismiss", dismissIntent)
                 .build()
-        context.getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, notification)
+        context
+            .getSystemService(NotificationManager::class.java)
+            .notify(ACTIVITY_TAG, NOTIFICATION_ID, notification)
     }
 
     /**
@@ -294,7 +305,7 @@ object AndroidLiveUpdateNotifications {
     }
 
     private fun cancelCard(context: Context) {
-        context.getSystemService(NotificationManager::class.java).cancel(NOTIFICATION_ID)
+        context.getSystemService(NotificationManager::class.java).cancel(ACTIVITY_TAG, NOTIFICATION_ID)
     }
 
     private fun preferences(context: Context) =
@@ -307,7 +318,10 @@ object AndroidLiveUpdateNotifications {
  */
 fun postAgentAlert(context: Context, data: Map<String, String>) {
     if (!notificationsAllowed(context)) return
-    val path = notificationPath(data) ?: return
+    // A payload with no usable thread path still posts, like the RN module's
+    // "/" fallback: the alert is real even when its deep link is not, and the
+    // tap just opens the app.
+    val path = notificationPath(data)
     createNotificationChannels(context)
     val title = data["alert_title"].orEmpty().take(120)
     // Grouped alerts list up to five 120-character thread titles.
@@ -328,17 +342,17 @@ fun postAgentAlert(context: Context, data: Map<String, String>) {
             .setOnlyAlertOnce(true)
             .setContentIntent(notificationPendingIntent(context, path, id))
             .build()
-    context.getSystemService(NotificationManager::class.java).notify(id, notification)
+    context.getSystemService(NotificationManager::class.java).notify(ALERT_TAG, id, notification)
 }
 
-private fun notificationPendingIntent(context: Context, path: String, id: Int): PendingIntent =
+private fun notificationPendingIntent(context: Context, path: String?, id: Int): PendingIntent =
     PendingIntent.getActivity(
         context,
         id,
         Intent(context, MainActivity::class.java).apply {
             action = Intent.ACTION_VIEW
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            putExtra(EXTRA_NOTIFICATION_PATH, path)
+            path?.let { putExtra(EXTRA_NOTIFICATION_PATH, it) }
         },
         PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
     )

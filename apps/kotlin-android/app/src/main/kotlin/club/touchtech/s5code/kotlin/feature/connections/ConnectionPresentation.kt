@@ -1,11 +1,17 @@
 package club.touchtech.s5code.kotlin.feature.connections
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.Computer
+import androidx.compose.material.icons.rounded.DesktopWindows
+import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.Laptop
 import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.SyncProblem
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
@@ -14,6 +20,33 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ConnectionState
+import club.touchtech.s5code.kotlin.model.Environment
+
+/**
+ * The environment glyph, matching `EnvironmentMachineSymbol` in the RN client:
+ * the machine kind the server publishes decides, and the cloud/direct fallback
+ * only applies when the server sent no kind.
+ */
+fun environmentIcon(environment: Environment): ImageVector =
+    when (environment.machineKind) {
+        "cloud" -> Icons.Rounded.Cloud
+        "linux" -> Icons.Rounded.Terminal
+        "desktop" -> Icons.Rounded.DesktopWindows
+        "laptop" -> Icons.Rounded.Laptop
+        // No Material glyph distinguishes mini/studio form factors; the RN
+        // labels ("Mini PC", "Workstation") both render as a desktop-class box.
+        "mac-mini",
+        "mac-studio" -> Icons.Rounded.Computer
+        "server" -> Icons.Rounded.Dns
+        else ->
+            if (environment.kind ==
+                club.touchtech.s5code.kotlin.model.EnvironmentKind.Cloud
+            ) {
+                Icons.Rounded.Cloud
+            } else {
+                Icons.Rounded.Computer
+            }
+    }
 
 /**
  * Label, color pair, and icon for one environment's health. [content] is the

@@ -140,6 +140,46 @@ class EnvironmentStore(context: Context) {
     }
 
     /**
+     * The RN client's environment edit (`updateBearerConnection`): a direct
+     * environment's label and base URL are both user-editable after pairing.
+     * The ws URL derives from the http one the same way pairing derives it —
+     * only the scheme changes.
+     */
+    suspend fun updateDirectEndpoint(environmentId: String, label: String, httpBaseUrl: String) {
+        val trimmed = httpBaseUrl.trim().trimEnd('/')
+        // Bare hosts take the same scheme rule as pairing: http for an IP
+        // literal (no TLS on a LAN), https for a name.
+        val normalized =
+            if ("://" in trimmed) trimmed
+            else {
+                val literal =
+                    trimmed.substringBefore(':').split('.').let {
+                        it.size == 4 &&
+                            it.all { o ->
+                                o.length in 1..3 && o.all(Char::isDigit) &&
+                                    o.toInt() <= 255
+                            }
+                    }
+                "${if (literal) "http" else "https"}://$trimmed"
+            }
+        val wsBaseUrl =
+            when {
+                normalized.startsWith("https://") -> "wss://" + normalized.removePrefix("https://")
+                normalized.startsWith("http://") -> "ws://" + normalized.removePrefix("http://")
+                else -> "ws://$normalized"
+            }
+        persist(
+            _environments.value.map {
+                if (it.environmentId == environmentId) {
+                    it.copy(label = label.trim(), httpBaseUrl = normalized, wsBaseUrl = wsBaseUrl)
+                } else {
+                    it
+                }
+            }
+        )
+    }
+
+    /**
      * Records the endpoint an environment is currently reachable at. Relay-managed
      * tunnels get a new hostname when they are re-provisioned, and the saved row
      * has to follow or the next cold start dials a host that no longer resolves.

@@ -51,6 +51,7 @@ import club.touchtech.s5code.kotlin.design.component.S5TextField
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.feature.connections.environmentIcon
 import club.touchtech.s5code.kotlin.model.EnvironmentKind
 import kotlinx.coroutines.launch
 
@@ -233,11 +234,7 @@ fun AddProjectDestinationScreen(store: AppStore, onBack: () -> Unit, onCreated: 
                             store.updateProjectDraft { it.copy(environmentId = environment.id) }
                         },
                         leading = {
-                            Icon(
-                                if (environment.kind == EnvironmentKind.Cloud) Icons.Rounded.Cloud
-                                else Icons.Rounded.Computer,
-                                contentDescription = null,
-                            )
+                            Icon(environmentIcon(environment), contentDescription = null)
                         },
                         position = rowPosition(index, environments.size),
                     )

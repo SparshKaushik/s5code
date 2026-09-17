@@ -1322,6 +1322,11 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     /** Refreshes all transports when Android returns the existing process to foreground. */
     fun refreshConnections(backgroundedMillis: Long = Long.MAX_VALUE) {
         workspace.refreshConnections(backgroundedMillis)
+        // Registration is not a pure no-op: the relay replays the current card
+        // aggregate to this device on every accepted registration, repairing
+        // pushes that could not be delivered while the app was away. Deduped
+        // to one replay per minute inside the coordinator.
+        pushRegistration.onForeground()
     }
 
     /** Retries one environment's connection, for the connections screen. */
@@ -1344,6 +1349,39 @@ class AppStore(application: Application) : AndroidViewModel(application) {
      */
     fun setEnvironmentEnabled(environmentId: EnvironmentId, enabled: Boolean) {
         viewModelScope.launch { environmentStore.setEnabled(environmentId.value, enabled) }
+    }
+
+    /**
+     * Edits a direct environment's label and URL — RN's `updateBearerConnection`
+     * in `ConnectionEnvironmentRow`. Only direct rows are editable: a cloud
+     * environment's endpoint is owned by the relay and rewriting it here would
+     * be overwritten by the next credential mint anyway.
+     *
+     * A URL change means the live socket is pointed at the old host, so the
+     * session restarts immediately rather than waiting for the next drop.
+     */
+    fun updateEnvironment(
+        environmentId: EnvironmentId,
+        label: String,
+        httpBaseUrl: String,
+    ) {
+        viewModelScope.launch {
+            try {
+                val saved =
+                    environmentStore.environments.value.firstOrNull {
+                        it.environmentId == environmentId.value
+                    } ?: return@launch
+                if (saved.relayManaged) return@launch
+                environmentStore.updateDirectEndpoint(
+                    environmentId.value,
+                    label.ifBlank { saved.label },
+                    httpBaseUrl.ifBlank { saved.httpBaseUrl },
+                )
+                (workspace as? LiveWorkspaceGateway)?.retry(environmentId)
+            } catch (error: Exception) {
+                showError(error.message ?: "The environment could not be updated.")
+            }
+        }
     }
 
     /**

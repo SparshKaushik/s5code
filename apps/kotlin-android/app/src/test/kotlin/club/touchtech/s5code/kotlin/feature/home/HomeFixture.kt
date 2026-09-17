@@ -44,7 +44,7 @@ internal object HomeFixture {
                 host = "http://macbook.tail9c2f.ts.net:4488",
                 kind = EnvironmentKind.Direct,
                 state = ConnectionState.Connected,
-                lastSeenLabel = "now",
+                lastError = "",
                 devices =
                     listOf(
                         EnvironmentDevice("MacBook Pro", "macOS 26.1", true, "now"),
@@ -57,7 +57,7 @@ internal object HomeFixture {
                 host = "http://10.0.4.21:4488",
                 kind = EnvironmentKind.Direct,
                 state = ConnectionState.Recovering,
-                lastSeenLabel = "12s ago",
+                lastError = "",
                 devices = listOf(EnvironmentDevice("devbox-01", "Ubuntu 24.04", true, "12s ago")),
             ),
             Environment(
@@ -66,7 +66,7 @@ internal object HomeFixture {
                 host = "relay.s5code.dpdns.org",
                 kind = EnvironmentKind.Cloud,
                 state = ConnectionState.Offline,
-                lastSeenLabel = "1h ago",
+                lastError = "",
                 devices = listOf(EnvironmentDevice("sandbox-runner", "Linux", false, "1h ago")),
             ),
         )
