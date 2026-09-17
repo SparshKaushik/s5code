@@ -21,14 +21,22 @@ enum class ModelSearchScope {
 data class ModelGroup(val instance: ProviderInstance, val models: List<String>)
 
 /**
- * Match the terms a user can actually see in the picker. Ported from
- * `modelMatchesCatalogQuery` in
- * `apps/mobile/src/features/threads/thread-settings-sheet-state.ts`.
+ * Match the terms a user can actually see in the picker — slug and display
+ * label, both — ported from `modelMatchesCatalogQuery` in
+ * `apps/mobile/src/features/threads/thread-settings-sheet-state.ts`, which
+ * searches label, subtitle, and slug.
  */
-fun modelMatchesQuery(model: String, providerLabel: String, query: String): Boolean {
+fun modelMatchesQuery(
+    model: String,
+    providerLabel: String,
+    query: String,
+    label: String = model,
+): Boolean {
     val needle = query.trim().lowercase()
     if (needle.isEmpty()) return true
-    return model.lowercase().contains(needle) || providerLabel.lowercase().contains(needle)
+    return model.lowercase().contains(needle) ||
+        label.lowercase().contains(needle) ||
+        providerLabel.lowercase().contains(needle)
 }
 
 /**
@@ -69,7 +77,10 @@ fun modelSearchResults(
                 if (providerMatches) {
                     entry.models
                 } else {
-                    entry.models.filter { it.lowercase().contains(needle) }
+                    entry.models.filter { slug ->
+                        slug.lowercase().contains(needle) ||
+                            entry.modelLabel(slug).lowercase().contains(needle)
+                    }
                 }
             if (matches.isEmpty()) null else ModelGroup(entry.instance, matches)
         }

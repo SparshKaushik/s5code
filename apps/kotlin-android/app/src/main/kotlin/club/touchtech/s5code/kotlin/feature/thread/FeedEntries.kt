@@ -20,6 +20,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
@@ -125,6 +126,8 @@ fun FeedEntryRow(
         is FeedEntry.QuestionAnswer -> QuestionAnswerRow(entry, onOpenAttachment, modifier)
 
         is FeedEntry.Warning -> WarningRow(entry, modifier)
+
+        is FeedEntry.Note -> NoteRow(entry, modifier)
 
         is FeedEntry.ErrorEntry -> ErrorRow(entry, modifier)
     }
@@ -853,6 +856,30 @@ private fun WarningRow(entry: FeedEntry.Warning, modifier: Modifier) {
             contentDescription = null,
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.tertiary,
+        )
+        Text(
+            entry.message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** An info-tone row: the quiet line RN's work log gives a check icon. */
+@Composable
+private fun NoteRow(entry: FeedEntry.Note, modifier: Modifier) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(vertical = S5Theme.spacing.tiny, horizontal = S5Theme.spacing.tiny),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+    ) {
+        Icon(
+            Icons.Rounded.Check,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
             entry.message,

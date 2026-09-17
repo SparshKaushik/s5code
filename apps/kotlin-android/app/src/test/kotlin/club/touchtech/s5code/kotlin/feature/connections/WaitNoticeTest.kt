@@ -19,7 +19,10 @@ class WaitNoticeTest {
         vararg states: ConnectionState,
         label: String? = "devbox",
         hasContent: Boolean = false,
-    ) = waitNotice(states.toList(), label, "threads", hasContent)
+        // "Still loading" is the scenario most of these exercise: a connected
+        // environment whose first snapshot has not landed.
+        loaded: Boolean = false,
+    ) = waitNotice(states.toList(), label, "threads", hasContent, loaded)
 
     @Test
     fun `connected with content on screen has nothing to say`() {
@@ -31,6 +34,13 @@ class WaitNoticeTest {
         val result = notice(ConnectionState.Connected)!!
         assertEquals(WaitPhase.Loading, result.phase)
         assertTrue(result.spinning)
+    }
+
+    @Test
+    fun `connected with a landed snapshot and nothing to show is not loading`() {
+        // The snapshot arrived and was empty: "Loading" would hold a skeleton
+        // over a real answer. A filtered tab that matches nothing is this case.
+        assertNull(notice(ConnectionState.Connected, loaded = true))
     }
 
     @Test

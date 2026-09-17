@@ -55,6 +55,12 @@ data class ServerProviderModelDto(
     val slug: String = "",
     val name: String = "",
     val shortName: String? = null,
+    /**
+     * Upstream vendor for aggregating providers (Pi, OpenCode), from
+     * `subProvider` in the contract. Pickers qualify the display name with it
+     * because several vendors ship identically-named models.
+     */
+    val subProvider: String? = null,
     val isDefault: Boolean = false,
     val isLegacy: Boolean = false,
     /**

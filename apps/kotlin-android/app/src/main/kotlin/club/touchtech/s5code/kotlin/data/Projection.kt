@@ -1176,7 +1176,23 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
                 at,
             )
 
-        else -> null
+        // Everything else that survived `isHiddenActivity` gets RN's generic
+        // work row: an info-tone note, or the error surface for failure kinds
+        // like `provider.turn.start.failed` and `setup-script.failed`. The RN
+        // work log has no kind whitelist, so a null here would silently drop
+        // approval history (`approval.requested`/`approval.resolved`),
+        // `provider.auth.signed-out`, and every kind added after this list.
+        else -> {
+            val detail = payload?.string("detail")?.takeIf { it != activity.summary }
+            val message =
+                if (detail.isNullOrBlank()) activity.summary
+                else "${activity.summary} — $detail"
+            if (activity.tone == "error") {
+                FeedEntry.ErrorEntry(activity.id, message, turnId, at)
+            } else {
+                FeedEntry.Note(activity.id, message, turnId, at)
+            }
+        }
     }
 }
 

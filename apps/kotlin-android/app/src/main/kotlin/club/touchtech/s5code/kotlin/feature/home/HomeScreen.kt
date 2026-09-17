@@ -410,6 +410,10 @@ fun HomeScreen(
                 environmentLabel = enabledEnvironments.singleOrNull()?.label,
                 resourceName = "threads",
                 hasContent = items.isNotEmpty(),
+                // The filter decides what renders, not whether data exists: an
+                // empty Pending or Snoozed tab on a live connection is a real
+                // answer, not a load in flight.
+                loaded = enabledEnvironments.any { it.snapshotLoaded },
                 awaitingEnvironments =
                     environments.isEmpty() && (!sessionRestored || paired),
             )

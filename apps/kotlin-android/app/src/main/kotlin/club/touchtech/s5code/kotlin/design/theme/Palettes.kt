@@ -365,11 +365,19 @@ internal fun S5ThemePalette.toColorScheme(dark: Boolean): ColorScheme {
         outlineVariant = Color(border),
         surfaceDim = Color(if (dark) surfaceOverlay else muted),
         surfaceBright = Color(if (dark) secondary else surfaceOverlay),
+        // The shared palettes carry no ten-rung surface ladder, so the container
+        // roles take the same escalation the other clients give their tokens:
+        // `surfaceOverlay` is the extreme, `surface` is the recessed card
+        // (`--color-card-alt`), `surfaceRaised` the card (`--color-card`), and
+        // `secondary`/`muted` the raised fills. Grove, Ocean, Ember, and Iris
+        // collapse `canvas` and `surface` onto one value, so anything that
+        // mapped the card onto `surface`/`canvas` rendered invisible on the
+        // screen fill — the highlight that vanished when a named theme loaded.
         surfaceContainerLowest = Color(surfaceOverlay),
-        surfaceContainerLow = Color(canvas),
-        surfaceContainer = Color(surface),
-        surfaceContainerHigh = Color(surfaceRaised),
-        surfaceContainerHighest = Color(secondary),
+        surfaceContainerLow = Color(surface),
+        surfaceContainer = Color(surfaceRaised),
+        surfaceContainerHigh = Color(secondary),
+        surfaceContainerHighest = Color(muted),
         inverseSurface = Color(muted),
         inverseOnSurface = Color(mutedForeground),
         scrim = Color(0xFF000000),

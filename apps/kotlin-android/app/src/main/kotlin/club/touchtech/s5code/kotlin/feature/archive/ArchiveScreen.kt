@@ -77,6 +77,7 @@ fun ArchiveScreen(
                 environmentLabel = environments.singleOrNull { it.isEnabled }?.label,
                 resourceName = "archive",
                 hasContent = archived.isNotEmpty(),
+                loaded = environments.any { it.isEnabled && it.snapshotLoaded },
             )
         }
 

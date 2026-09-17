@@ -42,6 +42,13 @@ data class Environment(
      * not "removed" — so pickers filter on this rather than on membership.
      */
     val isEnabled: Boolean = true,
+    /**
+     * True once this environment's first shell snapshot has landed — fetched,
+     * streamed, or restored from the cache. This is what separates "connected
+     * and still reading" from "connected and genuinely empty": a filtered list
+     * with zero matches must render its empty state, not the loading skeleton.
+     */
+    val snapshotLoaded: Boolean = false,
     val lastSeenLabel: String,
     val devices: List<EnvironmentDevice> = emptyList(),
     val serverVersion: String = "0.5.2",
@@ -281,6 +288,19 @@ sealed interface FeedEntry {
 
     /** A `runtime.warning` row: advisory, not an error. */
     data class Warning(
+        override val id: String,
+        val message: String,
+        override val turnId: String? = null,
+        override val atMillis: Long = 0,
+    ) : FeedEntry
+
+    /**
+     * A quiet informational line — RN's "info"-tone work row. Carries
+     * `runtime.note`, resolved approval history, provider lifecycle notes like
+     * `provider.auth.signed-out`, and any non-error activity no richer row
+     * claims.
+     */
+    data class Note(
         override val id: String,
         val message: String,
         override val turnId: String? = null,
@@ -771,12 +791,23 @@ data class ProviderCatalogEntry(
      */
     val optionDescriptors: Map<String, List<ProviderOptionDescriptor>> = emptyMap(),
     /**
+     * Display names per model slug, mirroring `buildModelOptions` in the RN
+     * client: `model.name`, vendor-qualified for aggregating providers. The
+     * picker and the composer chip render this; the slug stays the routing key
+     * everywhere it is sent.
+     */
+    val modelLabels: Map<String, String> = emptyMap(),
+    /**
      * Whether the composer may offer the plan/default mode switch for this
      * provider. True unless the server explicitly disables it, matching
      * `resolveProviderInteractionMode` in the RN client.
      */
     val interactionModeToggle: Boolean = true,
-)
+) {
+    /** The row label for a model slug, falling back to the slug itself. */
+    fun modelLabel(model: String): String =
+        modelLabels[model]?.takeIf { it.isNotEmpty() } ?: model
+}
 
 /**
  * A model the user starred in the picker.

@@ -53,12 +53,16 @@ fun S5Card(
             S5CardTone.Receded -> MaterialTheme.shapes.medium
             S5CardTone.Hero -> MaterialTheme.shapes.extraLargeIncreased
         }
+    // Named palettes collapse canvas and surface onto one value (Grove, Ocean,
+    // Ember, Iris) — the Standard card must sit a rung above `surface`, where
+    // the shared themes put `--color-card` (`surfaceRaised`), or it renders
+    // invisibly on the screen's own fill.
     val colors =
         when (tone) {
             S5CardTone.Standard ->
-                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
+                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainer)
             S5CardTone.Receded ->
-                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLowest)
+                CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceContainerLow)
             S5CardTone.Hero ->
                 CardDefaults.cardColors(
                     containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,

@@ -39,6 +39,12 @@ class MainActivity : ComponentActivity() {
         // so a later configuration change or a return from recents does not
         // repaint the wordmark behind the live UI.
         setTheme(R.style.Theme_S5Code)
+        // `enableEdgeToEdge` forced the decor to inflate before the theme swap,
+        // and setTheme does not re-read windowBackground into an existing decor.
+        // Resetting it here guarantees the splash drawable is gone from the
+        // window — predictive back makes a screen translucent as it reveals the
+        // one below, and a logo baked into the decor shows through that gap.
+        window.setBackgroundDrawableResource(R.color.window_background)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
             // Fade the platform splash out instead of cutting: without this the
             // splash is removed the instant the first frame is ready, which on a

@@ -457,6 +457,11 @@ class LiveWorkspaceGateway(
                         if (saved.relayManaged) EnvironmentKind.Cloud
                         else EnvironmentKind.Direct,
                     isEnabled = saved.enabled,
+                    // A restored cache counts: it is the same read model the
+                    // stream would have produced, and gating on "live" would
+                    // hold the skeleton while an offline shell is already on
+                    // screen.
+                    snapshotLoaded = connected?.shell?.value != null,
                     state =
                         when {
                             !saved.enabled -> ConnectionState.Disabled
@@ -570,6 +575,15 @@ class LiveWorkspaceGateway(
                             displayName = first.displayName,
                         ),
                     models = models.map { it.slug }.distinct(),
+                    modelLabels =
+                        models.associate { model ->
+                            model.slug to
+                                if (first.driver == "pi") {
+                                    modelDisplayLabel(model.name, model.subProvider)
+                                } else {
+                                    model.name
+                                }
+                        },
                     // Per model, because two models of the same provider do not
                     // offer the same knobs: Claude Opus 5 has a context window
                     // and Opus 4.8 does not. First wins on a duplicate slug, for
@@ -582,6 +596,18 @@ class LiveWorkspaceGateway(
                 )
             }
             .sortedBy { it.instance.label.lowercase() }
+
+    /**
+     * Model label, qualified by upstream vendor when the provider aggregates
+     * several (`modelDisplayLabel` in `apps/mobile/src/lib/modelOptions.ts`).
+     * A name already leading with its vendor is left alone.
+     */
+    private fun modelDisplayLabel(name: String, subProvider: String?): String {
+        val vendor = subProvider?.trim().orEmpty()
+        if (vendor.isEmpty()) return name
+        val alreadyQualified = name.lowercase().startsWith(vendor.lowercase())
+        return if (alreadyQualified) name else "$vendor · $name"
+    }
 
     /**
      * Names an instance id from whatever a connected server says about it, falling

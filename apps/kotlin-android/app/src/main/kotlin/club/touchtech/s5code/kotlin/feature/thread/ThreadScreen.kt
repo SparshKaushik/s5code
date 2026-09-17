@@ -155,6 +155,10 @@ fun ThreadScreen(
                     environmentLabel = environment?.label,
                     resourceName = "transcript",
                     hasContent = false,
+                    // Only a synchronized detail stream can declare this thread
+                    // missing; a connected environment still mid-subscribe is
+                    // "Loading", not "not available".
+                    loaded = syncPhase == ThreadSyncPhase.Live,
                 )
         S5Screen(title = "Thread", onBack = onBack) { padding ->
             if (opening != null) {
@@ -265,19 +269,27 @@ fun ThreadScreen(
     // first turn is running has a working row and nothing else — and that row is the
     // answer to "is anything happening", so it must not be replaced by a spinner.
     val wait =
-        remember(environment?.state, environment?.label, rows.isEmpty()) {
+        remember(environment?.state, environment?.label, rows.isEmpty(), detail != null) {
             waitNotice(
                 states = listOfNotNull(environment?.state),
                 environmentLabel = environment?.label,
                 resourceName = "transcript",
                 hasContent = rows.isNotEmpty(),
+                loaded = detail != null,
             )
         }
 
     S5Screen(
         title = summary.title,
         subtitle =
-            listOfNotNull(summary.branch, summary.provider.label, summary.model).joinToString(" · "),
+            listOfNotNull(
+                    summary.branch,
+                    summary.provider.label,
+                    machineCatalog
+                        .firstOrNull { it.instance.instanceId == summary.provider.instanceId }
+                        ?.modelLabel(summary.model) ?: summary.model,
+                )
+                .joinToString(" · "),
         prominence = S5TopBarProminence.Hero,
         onBack = onBack,
         topBarCollapsed = !atTop,
@@ -540,7 +552,13 @@ fun ThreadScreen(
                 syncPhase = syncPhase,
                 onReconnect = { store.retryEnvironment(env) },
                 provider = effectiveSettings.provider,
-                model = effectiveSettings.model,
+                modelLabel =
+                    machineCatalog
+                        .firstOrNull {
+                            it.instance.instanceId == effectiveSettings.provider.instanceId
+                        }
+                        ?.modelLabel(effectiveSettings.model)
+                        ?: effectiveSettings.model,
                 onOpenSettings = { settingsOpen = true },
                 interactionModeAllowed =
                     machineCatalog

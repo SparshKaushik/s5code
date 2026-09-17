@@ -132,6 +132,10 @@ fun TaskSettingsSheet(
     }
 
     var query by remember { mutableStateOf("") }
+    // Rows and searches both resolve display names through the catalog, so the
+    // picker never shows a raw slug while the wire key stays the slug.
+    val catalogById =
+        remember(catalog) { catalog.associateBy { it.instance.instanceId } }
     val groups =
         remember(catalog, settings.provider, query, searchScope) {
             modelSearchResults(catalog, settings.provider, query, searchScope)
@@ -160,7 +164,14 @@ fun TaskSettingsSheet(
                     ) {
                         return@mapNotNull null
                     }
-                    if (!modelMatchesQuery(favorite.model, entry.instance.label, query)) {
+                    if (
+                        !modelMatchesQuery(
+                            favorite.model,
+                            entry.instance.label,
+                            query,
+                            label = entry.modelLabel(favorite.model),
+                        )
+                    ) {
                         return@mapNotNull null
                     }
                     entry.instance to favorite.model
@@ -267,7 +278,8 @@ fun TaskSettingsSheet(
                 ) { index, (instance, model) ->
                     Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                         S5SelectableRow(
-                            label = model,
+                            label =
+                                catalogById[instance.instanceId]?.modelLabel(model) ?: model,
                             supporting = instance.label,
                             selected =
                                 model == settings.model &&
@@ -374,7 +386,9 @@ fun TaskSettingsSheet(
                 ) { index, model ->
                     Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                         S5SelectableRow(
-                            label = model,
+                            label =
+                                catalogById[group.instance.instanceId]?.modelLabel(model)
+                                    ?: model,
                             supporting =
                                 if (groups.size > 1) group.instance.label else null,
                             selected =

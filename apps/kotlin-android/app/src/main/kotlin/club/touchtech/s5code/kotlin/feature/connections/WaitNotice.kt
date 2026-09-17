@@ -68,6 +68,15 @@ fun waitNotice(
     resourceName: String,
     hasContent: Boolean,
     /**
+     * Whether the underlying data has arrived at least once — a shell snapshot
+     * landed (or a thread detail exists) on any environment this screen draws
+     * from. Without it a connected-but-empty answer and a connected-but-still-
+     * loading answer are indistinguishable, and a filtered list that happens to
+     * match nothing would hold the loading phase forever. Callers pass false
+     * when they cannot tell; RN's `hasLoadedShellSnapshot` is the same gate.
+     */
+    loaded: Boolean = true,
+    /**
      * True when the device has environments saved but none of their sessions exist
      * yet — the first frames after a cold start, before the store's list has been
      * reconciled into sessions.
@@ -90,7 +99,10 @@ fun waitNotice(
     val best = states.minByOrNull { it.waitRank } ?: return null
     return when (best) {
         ConnectionState.Connected ->
-            if (hasContent) null
+            // "Loading" is only meaningful while the first read is still in
+            // flight. Once the snapshot landed, an empty screen is a real
+            // answer and the notice steps aside for the empty state.
+            if (hasContent || loaded) null
             else
                 WaitNotice(
                     WaitPhase.Loading,

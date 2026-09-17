@@ -121,7 +121,8 @@ fun ThreadComposer(
     syncPhase: ThreadSyncPhase,
     onReconnect: () -> Unit,
     provider: ProviderInstance,
-    model: String,
+    /** Display name for the chip, resolved from the catalog — never the slug. */
+    modelLabel: String,
     onOpenSettings: () -> Unit,
     /**
      * Whether the provider allows the plan/default mode switch, from
@@ -364,7 +365,7 @@ fun ThreadComposer(
                                 onClick = onAddAttachment,
                             )
                             S5ComposerControl(
-                                label = model,
+                                label = modelLabel,
                                 leading = { S5ProviderAvatar(provider, size = 20.dp) },
                                 trailingIcon = Icons.Rounded.ExpandMore,
                                 onClick = onOpenSettings,

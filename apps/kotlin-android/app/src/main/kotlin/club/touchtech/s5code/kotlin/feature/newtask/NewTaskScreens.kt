@@ -138,6 +138,7 @@ fun NewTaskProjectScreen(
                 environmentLabel = enabledEnvironments.singleOrNull()?.label,
                 resourceName = "projects",
                 hasContent = projects.isNotEmpty(),
+                loaded = enabledEnvironments.any { it.snapshotLoaded },
             )
         }
 
@@ -382,7 +383,13 @@ fun NewTaskDraftScreen(
                 branch = draft.branch,
                 onBranch = onBranch,
                 provider = draft.settings.provider,
-                model = draft.settings.model,
+                modelLabel =
+                    machineCatalog
+                        .firstOrNull {
+                            it.instance.instanceId == draft.settings.provider.instanceId
+                        }
+                        ?.modelLabel(draft.settings.model)
+                        ?: draft.settings.model,
                 onOpenSettings = { settingsOpen = true },
                 creating = creating,
                 canStart = canStart,
@@ -577,7 +584,8 @@ private fun NewTaskComposerDock(
     branch: String,
     onBranch: () -> Unit,
     provider: ProviderInstance,
-    model: String,
+    /** Display name for the chip, resolved from the catalog — never the slug. */
+    modelLabel: String,
     onOpenSettings: () -> Unit,
     creating: Boolean,
     canStart: Boolean,
@@ -663,7 +671,7 @@ private fun NewTaskComposerDock(
                     // already works, and the thread composer never had one — two
                     // composers with different toolbars for the same job.
                     S5ComposerControl(
-                        label = model,
+                        label = modelLabel,
                         leading = { S5ProviderAvatar(provider, size = 20.dp) },
                         trailingIcon = Icons.Rounded.ExpandMore,
                         onClick = onOpenSettings,
