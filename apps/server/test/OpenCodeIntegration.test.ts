@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import { spawnSync } from "node:child_process";
+import * as NodeChildProcess from "node:child_process";
 
 import { assert, describe, it } from "@effect/vitest";
 import { ProviderInstanceId } from "@t3tools/contracts";
@@ -10,10 +10,12 @@ import { makeOpenCodeHost } from "../src/provider/OpenCodeHost.ts";
 
 // These tests drive a real `opencode serve` process; environments without the
 // CLI (CI runners) can't satisfy that, so they skip.
-const openCodeBinaryPath = spawnSync("which", ["opencode"], { encoding: "utf8" }).stdout.trim();
+const openCodeBinaryPath = NodeChildProcess.spawnSync("which", ["opencode"], {
+  encoding: "utf8",
+}).stdout.trim();
 const hasOpenCodeBinary =
   openCodeBinaryPath.length > 0 &&
-  spawnSync("opencode", ["--version"], { stdio: "ignore" }).status === 0;
+  NodeChildProcess.spawnSync("opencode", ["--version"], { stdio: "ignore" }).status === 0;
 
 describe("OpenCode live service integration", () => {
   it.live.skipIf(!hasOpenCodeBinary)(
