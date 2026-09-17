@@ -89,5 +89,6 @@ jobs:
           gh release create "$tag" "dist/s5code-kotlin-${VERSION}-debug.apk" "dist/s5code-kotlin-${VERSION}-debug.apk.sha256" \
             --title "Kotlin Android client ${VERSION} (debug)" \
             --notes "Debug build of the native Kotlin/Compose Android client (\`apps/kotlin-android\`), for install and update testing." \
+            --target "${{ github.sha }}" \
             --prerelease || \
           gh release upload "$tag" "dist/s5code-kotlin-${VERSION}-debug.apk" "dist/s5code-kotlin-${VERSION}-debug.apk.sha256" --clobber
