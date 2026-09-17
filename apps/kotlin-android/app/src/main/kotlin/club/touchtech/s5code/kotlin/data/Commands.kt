@@ -4,6 +4,7 @@ import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
 import club.touchtech.s5code.kotlin.model.ProviderOptionValue
 import club.touchtech.s5code.kotlin.model.RuntimeMode
+import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.UserInputAnswer
 import java.util.UUID
@@ -125,6 +126,7 @@ object Commands {
         interactionMode: String,
         branch: String?,
         newWorktree: Boolean,
+        worktreePath: String? = null,
         commandId: String = newCommandId(),
         messageId: String = UUID.randomUUID().toString(),
         createdAt: String = now(),
@@ -162,8 +164,9 @@ object Commands {
                 put("interactionMode", interactionMode)
                 if (branch != null) put("branch", branch) else put("branch", null as String?)
                 // In worktree mode the path is decided by prepareWorktree, so
-                // sending one here would fight it.
-                put("worktreePath", null as String?)
+                // sending one here would fight it. An explicit path is the
+                // "New thread on branch" prefill: open the existing worktree.
+                put("worktreePath", if (newWorktree) null else worktreePath)
                 put("createdAt", createdAt)
             }
             if (newWorktree && branch != null) {
@@ -203,11 +206,16 @@ object Commands {
      * the value is a string for single answers or an array for multi-select —
      * `ProviderUserInputAnswers` is an open record, so the shape has to match what
      * the provider asked for.
+     *
+     * [attachmentsByQuestionId] carries `ChatAttachment` records for files the
+     * user staged on a question: the id is the pending upload's server id, minted
+     * by `attachments.createUploadUrl` before submit.
      */
     fun respondToUserInput(
         threadId: String,
         requestId: String,
         answers: Map<String, UserInputAnswer>,
+        attachmentsByQuestionId: Map<String, List<SentAttachment>> = emptyMap(),
     ): JsonObject = buildJsonObject {
         put("type", "thread.user-input.respond")
         put("commandId", newCommandId())
@@ -222,8 +230,40 @@ object Commands {
                 }
             }
         }
+        if (attachmentsByQuestionId.isNotEmpty()) {
+            putJsonObject("attachmentsByQuestionId") {
+                attachmentsByQuestionId.forEach { (questionId, attachments) ->
+                    putJsonArray(questionId) {
+                        attachments.forEach { attachment ->
+                            addJsonObject {
+                                put("type", attachment.type)
+                                put("id", attachment.id)
+                                put("name", attachment.name)
+                                put("mimeType", attachment.mimeType)
+                                put("sizeBytes", attachment.sizeBytes)
+                            }
+                        }
+                    }
+                }
+            }
+        }
         put("createdAt", now())
     }
+
+    /**
+     * Closes an async question without answering it (`thread.user-input.dismiss`).
+     * The agent is not messaged; the composer is simply released. Only
+     * `responseMode: "message"` requests may be dismissed — a native callback
+     * question has the provider blocked on the reply.
+     */
+    fun dismissUserInput(threadId: String, requestId: String): JsonObject =
+        buildJsonObject {
+            put("type", "thread.user-input.dismiss")
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("requestId", requestId)
+            put("createdAt", now())
+        }
 
     fun updateMeta(
         threadId: String,
@@ -269,6 +309,18 @@ object Commands {
         put("interactionMode", interactionMode)
         put("createdAt", createdAt)
     }
+
+    /**
+     * `thread.pin.reorder` / `thread.active.reorder` — a move writes one
+     * fractional order key to the moved thread; neighbors are never touched.
+     */
+    fun reorderOrderKey(type: String, threadId: String, orderKey: String): JsonObject =
+        buildJsonObject {
+            put("type", type)
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("orderKey", orderKey)
+        }
 
     fun lifecycle(type: String, threadId: String): JsonObject = buildJsonObject {
         put("type", type)

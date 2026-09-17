@@ -53,7 +53,21 @@ class DeepLinkTest {
         // Present in the route table, but only meaningful with state the app set
         // up: an external link must not be able to present a confirmation.
         assertNull(parseDeepLinkPath("/threads/env-1/thread-2/git-confirm"))
-        assertNull(parseDeepLinkPath("/threads/env-1/thread-2/review-comment"))
+        // RN registers `review-comment` as a linked route; the composer handles
+        // absent params the same way its sheet does.
+        assertEquals(
+            DeepLink.Thread("env-1", "thread-2", "review-comment"),
+            parseDeepLinkPath("/threads/env-1/thread-2/review-comment"),
+        )
+        // `attachments/<id>` is the one parameterized child: the viewer
+        // defaults the missing name/mime/size params rather than refusing.
+        assertEquals(
+            DeepLink.Thread("env-1", "thread-2", "attachments/file-1"),
+            parseDeepLinkPath("/threads/env-1/thread-2/attachments/file-1"),
+        )
+        // But it is exactly two segments — nothing deeper is a real route.
+        assertNull(parseDeepLinkPath("/threads/env-1/thread-2/attachments/file-1/extra"))
+        assertNull(parseDeepLinkPath("/threads/env-1/thread-2/attachments"))
     }
 
     @Test
@@ -92,7 +106,9 @@ class DeepLinkTest {
     }
 
     @Test
-    fun `a share opens the new-task draft`() {
-        assertEquals(Routes.NewTaskDraft, DeepLink.Share("hello", emptyList()).route)
+    fun `a share opens the project picker`() {
+        // The picker reserves the inbox share once a project is chosen; going
+        // straight to the draft would strand "back" on Home instead.
+        assertEquals(Routes.NewTask, DeepLink.Share("hello", null, emptyList()).route)
     }
 }

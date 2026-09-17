@@ -144,7 +144,7 @@ fun homeListItems(
     }
 
     when (grouping) {
-        ProjectGrouping.Flat -> emitThreads(active.sortedWith(comparator(sort)))
+        ProjectGrouping.Flat -> emitThreads(active.sortedWith(homeListComparator(sort)))
         ProjectGrouping.ByProject,
         ProjectGrouping.ByRepository -> {
             val groups =
@@ -165,7 +165,7 @@ fun homeListItems(
                 )
                 .forEach { (label, groupThreads) ->
                     items += HomeListItem.Section(label)
-                    emitThreads(groupThreads.sortedWith(comparator(sort)))
+                    emitThreads(groupThreads.sortedWith(homeListComparator(sort)))
                 }
         }
     }
@@ -178,7 +178,7 @@ fun homeListItems(
                 expanded = snoozedExpanded,
                 kind = ShelfKind.Snoozed,
             )
-        if (snoozedExpanded) emitThreads(snoozed.sortedWith(comparator(sort)))
+        if (snoozedExpanded) emitThreads(snoozed.sortedWith(homeListComparator(sort)))
     }
     if (settled.isNotEmpty()) {
         items +=
@@ -188,7 +188,7 @@ fun homeListItems(
                 expanded = settledExpanded,
                 kind = ShelfKind.Settled,
             )
-        if (settledExpanded) emitThreads(settled.sortedWith(comparator(sort)))
+        if (settledExpanded) emitThreads(settled.sortedWith(homeListComparator(sort)))
     }
     return items
 }
@@ -319,18 +319,77 @@ fun searchMatch(
 /**
  * Pinned first, then attention-needing statuses, then the requested order. This
  * keeps approvals and failures reachable without scrolling on a busy home.
+ *
+ * Within the pinned block the user's arrangement always wins, and under Recent
+ * the active block follows `sortActiveThreadsByOrderKey` — new/reopened rows
+ * first (anchored on `max(createdAt, unsettledAt)`), then the saved
+ * arrangement. The Created/Alphabetical modes are this client's extra sorts;
+ * the arrangement only applies where an order key can be read as recency.
  */
-private fun comparator(sort: ThreadSort): Comparator<ThreadSummary> {
+internal fun homeListComparator(sort: ThreadSort): Comparator<ThreadSummary> {
     val base =
         compareByDescending<ThreadSummary> { it.pinned }
             .thenBy { statusRank(it.status) }
     return when (sort) {
+        ThreadSort.Recent ->
+            // Pinned block: keyed by arrangement, keyless newest-created last
+            // (`sortPinnedThreadsByOrderKey`). Active block: rank first, then
+            // keyless by re-entry anchor, then keyed rows (`sortActiveThreadsByOrderKey`).
+            compareByDescending<ThreadSummary> { it.pinned }
+                .thenComparator { left, right ->
+                    if (left.pinned) pinnedOrderCompare(left, right)
+                    else activeOrderCompare(left, right)
+                }
         // Newest first within a status rank, on the instant rather than the label:
         // the label is rounded, so two threads an hour apart can share a bucket.
-        ThreadSort.Recent -> base.thenByDescending { it.updatedAtMillis }
         ThreadSort.Created -> base.thenBy { it.id.value }
         ThreadSort.Alphabetical -> base.thenBy { it.title.lowercase() }
     }
+}
+
+/** `sortPinnedThreadsByOrderKey`: arranged rows by key, keyless by newest-created. */
+private fun pinnedOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
+    val leftKey = left.pinOrderKey
+    val rightKey = right.pinOrderKey
+    return when {
+        leftKey != null && rightKey != null ->
+            leftKey.compareTo(rightKey).takeIf { it != 0 }
+                ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+                ?: left.environmentId.value.compareTo(right.environmentId.value)
+        leftKey != null -> -1
+        rightKey != null -> 1
+        else ->
+            right.createdAtMillis.compareTo(left.createdAtMillis).takeIf { it != 0 }
+                ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+                ?: left.environmentId.value.compareTo(right.environmentId.value)
+    }
+}
+
+/**
+ * `sortActiveThreadsByOrderKey` applied inside one status rank: attention rows
+ * keep their lead, then unarranged threads by re-entry anchor, then arranged
+ * threads by key.
+ */
+private fun activeOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
+    val rank = statusRank(left.status).compareTo(statusRank(right.status))
+    if (rank != 0) return rank
+    val leftKey = left.activeOrderKey
+    val rightKey = right.activeOrderKey
+    if (leftKey == null && rightKey != null) return -1
+    if (leftKey != null && rightKey == null) return 1
+    val order =
+        if (leftKey != null && rightKey != null) {
+            leftKey.compareTo(rightKey)
+        } else {
+            // Re-entry anchor: createdAt re-anchored to unsettledAt, so an
+            // un-settled thread surfaces at the top rather than sinking back.
+            val leftAnchor = maxOf(left.createdAtMillis, left.unsettledAtMillis)
+            val rightAnchor = maxOf(right.createdAtMillis, right.unsettledAtMillis)
+            rightAnchor.compareTo(leftAnchor)
+        }
+    return order.takeIf { it != 0 }
+        ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+        ?: left.environmentId.value.compareTo(right.environmentId.value)
 }
 
 private fun statusRank(status: ThreadStatus): Int =

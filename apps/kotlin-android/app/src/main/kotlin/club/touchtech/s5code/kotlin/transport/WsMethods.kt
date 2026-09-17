@@ -10,6 +10,7 @@ internal object WsMethods {
     const val ServerRefreshProviders = "server.refreshProviders"
     const val ServerProbe = "server.probe"
     const val ServerGetUsageSummary = "server.getUsageSummary"
+    const val SubscribeServerConfig = "subscribeServerConfig"
 
     const val OrchestrationSubscribeShell = "orchestration.subscribeShell"
     const val OrchestrationSubscribeThread = "orchestration.subscribeThread"
@@ -29,6 +30,8 @@ internal object WsMethods {
     const val ProjectsSearchEntries = "projects.searchEntries"
 
     const val AssetsCreateUrl = "assets.createUrl"
+    const val AttachmentsCreateUploadUrl = "attachments.createUploadUrl"
+    const val AttachmentsDelete = "attachments.delete"
 
     const val ReviewGetDiffPreview = "review.getDiffPreview"
 
@@ -39,6 +42,7 @@ internal object WsMethods {
     const val TerminalClear = "terminal.clear"
     const val TerminalRestart = "terminal.restart"
     const val TerminalClose = "terminal.close"
+    const val SubscribeTerminalMetadata = "subscribeTerminalMetadata"
 
     const val RewindGetStatus = "rewind.getStatus"
     const val RewindUndo = "rewind.undo"

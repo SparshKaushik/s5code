@@ -120,20 +120,26 @@ class EnvironmentHttpTest {
 
     @Test
     fun `socket url appends the ticket and only adds ws when the base has no path`() {
-        assertEquals(
-            "wss://host.example/ws?wsTicket=a%2Fb",
-            EnvironmentHttp.socketUrl("wss://host.example", "a/b"),
+        assertTrue(
+            EnvironmentHttp.socketUrl("wss://host.example", "a/b")
+                .startsWith("wss://host.example/ws?wsTicket=a%2Fb")
         )
-        assertEquals(
-            "wss://host.example/ws?wsTicket=t",
-            EnvironmentHttp.socketUrl("wss://host.example/", "t"),
+        assertTrue(
+            EnvironmentHttp.socketUrl("wss://host.example/", "t")
+                .startsWith("wss://host.example/ws?wsTicket=t")
         )
         // A relay tunnel can hand back a URL that already routes. Overwriting that
         // path sends the upgrade somewhere the server is not listening.
-        assertEquals(
-            "wss://tunnel.example/env/abc?wsTicket=t",
-            EnvironmentHttp.socketUrl("wss://tunnel.example/env/abc", "t"),
+        assertTrue(
+            EnvironmentHttp.socketUrl("wss://tunnel.example/env/abc", "t")
+                .startsWith("wss://tunnel.example/env/abc?wsTicket=t")
         )
+        // Client-identity params ride beside the ticket, matching
+        // `appendClientConnectionParams` in client-runtime.
+        val url = EnvironmentHttp.socketUrl("wss://host.example", "t", "relay")
+        assertTrue(url.contains("clientSurface=mobile"))
+        assertTrue(url.contains("clientOs=Android"))
+        assertTrue(url.contains("connectionMethod=relay"))
     }
 
     @Test

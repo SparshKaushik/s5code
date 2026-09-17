@@ -18,6 +18,9 @@ sealed interface DeepLink {
 
     data object Settings : DeepLink
 
+    /** A settings sub-screen by its registered sub-route (`settings/auth`, …). */
+    data class SettingsChild(val page: String) : DeepLink
+
     data object Archive : DeepLink
 
     data object Usage : DeepLink
@@ -25,8 +28,12 @@ sealed interface DeepLink {
     data class Thread(val environmentId: String, val threadId: String, val child: String? = null) :
         DeepLink
 
-    /** Text or images arriving from the system sharesheet. */
-    data class Share(val text: String?, val imageUris: List<String>) : DeepLink
+    /**
+     * Payloads arriving from the system sharesheet. [uris] are the raw
+     * `content:` stream URIs — the inbox copies them before the draft exists,
+     * so nothing here holds a lapsed grant.
+     */
+    data class Share(val text: String?, val mimeType: String?, val uris: List<String>) : DeepLink
 
     /** The route this link opens. Deliberately built here, not by the caller. */
     val route: String
@@ -36,14 +43,16 @@ sealed interface DeepLink {
                 NewTask -> Routes.NewTask
                 Connections -> Routes.Connections
                 Settings -> Routes.Settings
+                is SettingsChild -> "settings/$page"
                 Archive -> Routes.Archive
                 Usage -> Routes.Usage
                 is Thread ->
                     if (child == null) Routes.thread(environmentId, threadId)
                     else Routes.threadChild(environmentId, threadId, child)
-                // A share lands in the new-task draft; the payload is applied to
-                // the draft before navigation.
-                is Share -> Routes.NewTaskDraft
+                // A share lands on the project picker, matching the RN client:
+                // the draft screen reserves the inbox entry once a project is
+                // chosen, and "back" must return to that picker.
+                is Share -> Routes.NewTask
             }
 }
 
@@ -55,7 +64,36 @@ sealed interface DeepLink {
  * present a confirmation for an action nobody chose.
  */
 private val THREAD_CHILDREN =
-    setOf("terminal", "review", "files", "git", "git/commit", "git/branches", "rewind")
+    setOf(
+        "terminal",
+        "review",
+        // RN registers `review-comment` as a linked route; the composer handles
+        // absent params the same way RN's sheet does.
+        "review-comment",
+        "files",
+        "git",
+        "git/commit",
+        "git/branches",
+        "rewind",
+    )
+
+/**
+ * Settings sub-routes an external link may open, matching the linking table in
+ * `apps/mobile/src/Stack.tsx`. RN's `settings/legal` and
+ * `settings/open-source-licenses` have no screen here yet, so they are not in
+ * the allowlist.
+ */
+private val SETTINGS_CHILDREN =
+    mapOf(
+        "auth" to "auth",
+        "waitlist" to "auth",
+        "environments" to "environments",
+        "appearance" to "appearance",
+        "project-grouping" to "project-grouping",
+        "client-storage" to "client-storage",
+        "notifications" to "notifications",
+        "live-updates" to "live-updates",
+    )
 
 private const val MAX_SEGMENT_LENGTH = 256
 
@@ -81,14 +119,31 @@ fun parseDeepLinkPath(raw: String): DeepLink? {
         segments == listOf("connections") || segments == listOf("environments") ->
             DeepLink.Connections
         segments == listOf("settings") -> DeepLink.Settings
+        segments.size == 2 && segments[0] == "settings" ->
+            SETTINGS_CHILDREN[segments[1]]?.let(DeepLink::SettingsChild)
         segments == listOf("archive") -> DeepLink.Archive
         segments == listOf("usage") -> DeepLink.Usage
         segments.size >= 3 && segments[0] == "threads" -> {
             val environmentId = segments[1]
             val threadId = segments[2]
             if (environmentId.isBlank() || threadId.isBlank()) return null
-            val child = segments.drop(3).joinToString("/").takeIf { it.isNotEmpty() }
-            if (child != null && child !in THREAD_CHILDREN) return null
+            val rest = segments.drop(3)
+            // A file deep link (`files/<path>`) carries the path as the route's
+            // query parameter; a bare `files` is the tree. `attachments/<id>` is
+            // the only parameterized child — the viewer defaults the missing
+            // name/mime/size params rather than refusing the link.
+            val child =
+                if (rest.firstOrNull() == "files" && rest.size > 1) {
+                    "files/source?path=${android.net.Uri.encode(rest.drop(1).joinToString("/"))}"
+                } else {
+                    rest.joinToString("/").takeIf { it.isNotEmpty() }
+                }
+            if (child != null && child !in THREAD_CHILDREN &&
+                !child.startsWith("files/source?path=") &&
+                !(rest.size == 2 && rest[0] == "attachments")
+            ) {
+                return null
+            }
             DeepLink.Thread(environmentId, threadId, child)
         }
         else -> null

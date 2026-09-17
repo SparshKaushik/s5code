@@ -17,6 +17,8 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Chat
+import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -26,6 +28,7 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
+import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
@@ -62,6 +65,7 @@ import club.touchtech.s5code.kotlin.feature.review.parseReviewCommentMessageSegm
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.PlanStepState
+import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.ToolState
 import kotlinx.coroutines.delay
 
@@ -77,6 +81,8 @@ fun FeedEntryRow(
     workspaceRoot: String? = null,
     onOpenFile: (String) -> Unit = {},
     resolveTranscriptAttachment: suspend (String) -> String? = { null },
+    /** Opens a sent attachment in the viewer route — file chips only; images keep the lightbox. */
+    onOpenAttachment: (SentAttachment) -> Unit = {},
 ) {
     when (entry) {
         is FeedEntry.TurnDivider ->
@@ -95,7 +101,7 @@ fun FeedEntryRow(
             }
 
         is FeedEntry.UserMessage ->
-            UserBubble(entry, modifier, resolveTranscriptAttachment)
+            UserBubble(entry, modifier, resolveTranscriptAttachment, onOpenAttachment)
 
         is FeedEntry.AgentMessage ->
             AgentMessage(
@@ -105,6 +111,7 @@ fun FeedEntryRow(
                 workspaceRoot,
                 onOpenFile,
                 resolveTranscriptAttachment,
+                onOpenAttachment,
             )
 
         is FeedEntry.Reasoning -> ReasoningRow(entry, modifier)
@@ -114,6 +121,10 @@ fun FeedEntryRow(
         is FeedEntry.PlanUpdate -> PlanCard(entry, modifier)
 
         is FeedEntry.Subagent -> SubagentRow(entry, modifier)
+
+        is FeedEntry.QuestionAnswer -> QuestionAnswerRow(entry, onOpenAttachment, modifier)
+
+        is FeedEntry.Warning -> WarningRow(entry, modifier)
 
         is FeedEntry.ErrorEntry -> ErrorRow(entry, modifier)
     }
@@ -249,6 +260,7 @@ private fun UserBubble(
     entry: FeedEntry.UserMessage,
     modifier: Modifier,
     resolveTranscriptAttachment: suspend (String) -> String?,
+    onOpenAttachment: (SentAttachment) -> Unit,
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
@@ -259,7 +271,17 @@ private fun UserBubble(
             modifier = Modifier.widthIn(max = 520.dp),
         ) {
             Column(Modifier.padding(S5Theme.spacing.large)) {
-                val segments = remember(entry.text) { parseReviewCommentMessageSegments(entry.text) }
+                // `t3-context://` links resolve to their record labels (or an
+                // "(unavailable)" marker) before review-comment segmentation:
+                // a label can never look like a <review-comment> block.
+                val contextResolvedText =
+                    remember(entry.text, entry.contextRecords) {
+                        replaceComposerContextReferences(entry.text, entry.contextRecords)
+                    }
+                val segments =
+                    remember(contextResolvedText) {
+                        parseReviewCommentMessageSegments(contextResolvedText)
+                    }
                 val hasReviewComments = segments.any { it is ReviewCommentMessageSegment.Comment }
                 if (hasReviewComments) {
                     Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
@@ -275,7 +297,7 @@ private fun UserBubble(
                         }
                     }
                 } else {
-                    Text(entry.text, style = MaterialTheme.typography.bodyMedium)
+                    Text(contextResolvedText, style = MaterialTheme.typography.bodyMedium)
                 }
                 if (entry.attachments.isNotEmpty()) {
                     Row(
@@ -289,6 +311,7 @@ private fun UserBubble(
                                 onPreview = { url ->
                                     previewAttachment = attachment.copy(uri = url)
                                 },
+                                onOpen = { onOpenAttachment(attachment.toSentAttachment()) },
                             )
                         }
                     }
@@ -317,6 +340,7 @@ private fun AgentMessage(
     workspaceRoot: String?,
     onOpenFile: (String) -> Unit,
     resolveTranscriptAttachment: suspend (String) -> String?,
+    onOpenAttachment: (SentAttachment) -> Unit,
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
     // No avatar and no provider label, matching the RN feed: the agent's identity
@@ -342,6 +366,7 @@ private fun AgentMessage(
                         onPreview = { url ->
                             previewAttachment = attachment.copy(uri = url)
                         },
+                        onOpen = { onOpenAttachment(attachment.toSentAttachment()) },
                     )
                 }
             }
@@ -376,16 +401,45 @@ private fun AgentMessage(
 }
 
 /**
- * Thumbnail for an image already sent on a turn. Falls back to a labeled chip
- * when the URI is no longer readable, which is expected once a clipboard grant
- * expires.
+ * A sent attachment's chip. Images keep the in-place thumbnail + lightbox;
+ * every other `type` renders as a file chip that opens the attachment viewer —
+ * the RN feed's split between a picture you glance at and a file you open.
  */
 @Composable
 private fun SentAttachmentThumbnail(
     attachment: ComposerAttachment,
     resolveUrl: suspend () -> String?,
     onPreview: (String) -> Unit,
+    onOpen: () -> Unit,
 ) {
+    if (attachment.type != "image") {
+        Surface(
+            onClick = onOpen,
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ) {
+            Row(
+                Modifier.padding(horizontal = S5Theme.spacing.small, vertical = S5Theme.spacing.tiny),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Rounded.InsertDriveFile,
+                    contentDescription = null,
+                    modifier = Modifier.size(14.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                Text(
+                    attachment.name,
+                    style = MaterialTheme.typography.labelSmall,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 160.dp),
+                )
+            }
+        }
+        return
+    }
     var resolvedUrl by remember(attachment.id, attachment.uri) {
         mutableStateOf(attachment.uri.takeIf(String::isNotBlank))
     }
@@ -419,6 +473,16 @@ private fun SentAttachmentThumbnail(
         }
     }
 }
+
+/** The viewer route works off the `ChatAttachment` record; the composer type carries it. */
+private fun ComposerAttachment.toSentAttachment(): SentAttachment =
+    SentAttachment(
+        id = id,
+        name = name,
+        mimeType = mimeType,
+        sizeBytes = sizeBytes,
+        type = type,
+    )
 
 /** Reasoning is collapsed by default: it is context, not the answer. */
 @Composable
@@ -666,6 +730,135 @@ private fun SubagentRow(entry: FeedEntry.Subagent, modifier: Modifier) {
                     Modifier.padding(start = 24.dp, top = S5Theme.spacing.tiny),
             )
         }
+    }
+}
+
+/**
+ * A folded user-input history row: the question block, plus its answer when one
+ * was submitted. Quiet like a tool row — one line with a disclosure — because it
+ * is a record of a prompt already answered, not a new gate.
+ */
+@Composable
+private fun QuestionAnswerRow(
+    entry: FeedEntry.QuestionAnswer,
+    onOpenAttachment: (SentAttachment) -> Unit,
+    modifier: Modifier,
+) {
+    val canExpand = entry.lines.isNotEmpty()
+    var expanded by remember(entry.id) { mutableStateOf(false) }
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .then(if (canExpand) Modifier.clickable { expanded = !expanded } else Modifier)
+            .padding(vertical = S5Theme.spacing.tiny, horizontal = S5Theme.spacing.tiny),
+    ) {
+        Row(
+            Modifier.fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Icon(
+                Icons.AutoMirrored.Rounded.Chat,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                entry.summary,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            if (entry.preview.isNotBlank()) {
+                Text(
+                    entry.preview,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
+                Box(Modifier.weight(1f))
+            }
+            if (canExpand) {
+                Icon(
+                    if (expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                    contentDescription = if (expanded) "Hide answers" else "Show answers",
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
+        AnimatedVisibility(
+            visible = expanded,
+            enter = fadeIn() + expandVertically(),
+            exit = fadeOut() + shrinkVertically(),
+        ) {
+            Column(
+                verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                modifier = Modifier.padding(start = 24.dp, top = S5Theme.spacing.tiny),
+            ) {
+                entry.lines.forEach { line ->
+                    Column {
+                        if (line.question.isNotBlank()) {
+                            Text(
+                                line.question,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                        if (line.answer.isNotBlank()) {
+                            Text(
+                                line.answer,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                modifier = Modifier.padding(start = S5Theme.spacing.small),
+                            )
+                        }
+                        // Answered-with files link into the attachment viewer,
+                        // the same destination a sent-message file chip opens.
+                        line.attachments.forEach { attachment ->
+                            Text(
+                                attachment.name,
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.primary,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier =
+                                    Modifier.padding(start = S5Theme.spacing.small)
+                                        .clip(MaterialTheme.shapes.small)
+                                        .clickable { onOpenAttachment(attachment) },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/** A `runtime.warning` row: advisory tint, no error surface. */
+@Composable
+private fun WarningRow(entry: FeedEntry.Warning, modifier: Modifier) {
+    Row(
+        modifier
+            .fillMaxWidth()
+            .padding(vertical = S5Theme.spacing.tiny, horizontal = S5Theme.spacing.tiny),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+    ) {
+        Icon(
+            Icons.Rounded.WarningAmber,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.tertiary,
+        )
+        Text(
+            entry.message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
     }
 }
 

@@ -21,6 +21,8 @@ enum class ConnectionState {
     Recovering,
     Offline,
     AuthRequired,
+    /** Paired but switched off locally: no session exists and nothing is retried. */
+    Disabled,
 }
 
 enum class EnvironmentKind {
@@ -34,9 +36,17 @@ data class Environment(
     val host: String,
     val kind: EnvironmentKind,
     val state: ConnectionState,
+    /**
+     * False while the environment is switched off locally. The row stays in the
+     * catalog and in every environment list — disabled means "not connected",
+     * not "removed" — so pickers filter on this rather than on membership.
+     */
+    val isEnabled: Boolean = true,
     val lastSeenLabel: String,
     val devices: List<EnvironmentDevice> = emptyList(),
     val serverVersion: String = "0.5.2",
+    /** `environment.platform.os` from the server config — "darwin", "linux", "windows". */
+    val platformOs: String? = null,
     /**
      * What this environment's server supports. Defaulted off, because a command
      * the server does not understand is a protocol defect that kills the socket
@@ -57,8 +67,22 @@ data class EnvironmentCapabilities(
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
     val threadPinning: Boolean = false,
+    val threadPinReorder: Boolean = false,
+    val threadActiveReorder: Boolean = false,
     val threadTitleRegeneration: Boolean = false,
+    /** `attachments.createUploadUrl`/`attachments.delete` exist on this server. */
+    val attachmentUploads: Boolean = false,
+    /** Question answers may carry uploaded attachments. */
+    val questionAttachments: Boolean = false,
+    /**
+     * Non-null when non-image files may upload. Absent means an older server
+     * that only accepts images, so the file picker stays hidden.
+     */
+    val fileAttachments: FileAttachmentsCapability? = null,
 )
+
+/** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
+data class FileAttachmentsCapability(val maxUploadBytes: Long)
 
 data class EnvironmentDevice(
     val name: String,
@@ -111,6 +135,8 @@ data class ThreadSummary(
     val provider: ProviderInstance,
     val model: String,
     val branch: String?,
+    /** The worktree the thread runs in, when it has one. */
+    val worktreePath: String? = null,
     val updatedLabel: String,
     /**
      * When the thread last changed, in epoch millis. Sorting uses this rather than
@@ -118,7 +144,15 @@ data class ThreadSummary(
      * four-minute-old thread and a fifty-minute-old one in the same bucket.
      */
     val updatedAtMillis: Long = 0,
+    /** Epoch millis of `createdAt`; the anchor keyless active rows sort by. */
+    val createdAtMillis: Long = 0,
+    /** Epoch millis of `unsettledAt`; re-entries surface above older actives. */
+    val unsettledAtMillis: Long = 0,
     val pinned: Boolean = false,
+    /** Fractional arrangement key within the pinned block (`thread.pin.reorder`). */
+    val pinOrderKey: String? = null,
+    /** Fractional arrangement key within the active block (`thread.active.reorder`). */
+    val activeOrderKey: String? = null,
     val snoozedUntilLabel: String? = null,
     val lastError: String? = null,
     val pullRequest: PullRequestRef? = null,
@@ -162,8 +196,18 @@ sealed interface FeedEntry {
         val text: String,
         val timeLabel: String,
         val attachments: List<ComposerAttachment> = emptyList(),
+        /**
+         * `contextId → kind/label` pairs from the message's `context` records —
+         * enough for the renderer to label `t3-context://` references and mark
+         * missing ones "(unavailable)". Full record payloads stay on the wire
+         * DTO; this is display data only.
+         */
+        val contextRecords: Map<String, ContextRecordLabel> = emptyMap(),
         override val atMillis: Long = 0,
     ) : FeedEntry
+
+    /** Display slice of one `ComposerContextRecord`. */
+    data class ContextRecordLabel(val kind: String, val label: String)
 
     data class AgentMessage(
         override val id: String,
@@ -209,6 +253,40 @@ sealed interface FeedEntry {
         override val atMillis: Long = 0,
     ) : FeedEntry
 
+    /**
+     * A folded `user-input.*` history row, following RN's
+     * `foldUserInputActivities`: the request, its resolution, and the
+     * answer-submitted record collapse into one row showing what was asked and
+     * what was answered.
+     */
+    data class QuestionAnswer(
+        override val id: String,
+        /** "User input submitted" / "User input dismissed" / "User input requested". */
+        val summary: String,
+        /** Joined answer texts for the collapsed one-line preview. */
+        val preview: String,
+        /** Question/answer pairs for the expanded body. */
+        val lines: List<QuestionAnswerLine> = emptyList(),
+        override val turnId: String? = null,
+        override val atMillis: Long = 0,
+    ) : FeedEntry
+
+    /** One question plus its submitted answer inside [FeedEntry.QuestionAnswer]. */
+    data class QuestionAnswerLine(
+        val question: String,
+        val answer: String,
+        /** Attachments submitted with the answer, openable in the attachment viewer. */
+        val attachments: List<SentAttachment> = emptyList(),
+    )
+
+    /** A `runtime.warning` row: advisory, not an error. */
+    data class Warning(
+        override val id: String,
+        val message: String,
+        override val turnId: String? = null,
+        override val atMillis: Long = 0,
+    ) : FeedEntry
+
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
 
     data class ErrorEntry(
@@ -240,6 +318,12 @@ data class PendingApproval(
     val command: String?,
     val kind: ApprovalKind,
     /**
+     * The app that raised the request, when the provider names it (Codex's
+     * plugin approvals do). The card headline prefers this over the kind label,
+     * matching `appName ?? requestKind` in the RN card.
+     */
+    val appName: String? = null,
+    /**
      * The decisions the provider advertised on this request, in its own order.
      * Empty means the request predates advertised options and the card falls
      * back to the generic set.
@@ -259,9 +343,12 @@ data class ApprovalOption(
     val warning: String? = null,
 )
 
+/** From `ProviderRequestKind` in `packages/contracts/src/orchestration.ts`. */
 enum class ApprovalKind {
     Command,
+    FileRead,
     FileWrite,
+    McpElicitation,
     NetworkAccess,
 }
 
@@ -270,6 +357,12 @@ data class PendingUserInput(
     val id: String,
     /** Every question must be answered before the request-wide response is sent. */
     val questions: List<UserInputQuestion>,
+    /**
+     * Async questions (`responseMode: "message"`) can be closed without a
+     * reply; native callback questions cannot, because the provider is blocked
+     * waiting on the answer.
+     */
+    val dismissible: Boolean = false,
 )
 
 data class UserInputQuestion(
@@ -278,8 +371,29 @@ data class UserInputQuestion(
     val header: String,
     val prompt: String,
     val kind: UserInputKind,
-    val options: List<String>,
+    val options: List<UserInputOption>,
+    /**
+     * When false the provider refuses free-form text and the card hides the
+     * custom-answer field. True or absent both allow it.
+     */
+    val allowCustomAnswer: Boolean = true,
 )
+
+/**
+ * One advertised choice on a [UserInputQuestion], from
+ * `UserInputQuestionOption` in `packages/contracts/src/providerRuntime.ts`.
+ *
+ * [answerValue] is what the response echoes: providers that distinguish display
+ * from identity set `value`, and everything else submits the trimmed label.
+ */
+data class UserInputOption(
+    val label: String,
+    val value: String? = null,
+    val description: String? = null,
+) {
+    val answerValue: String
+        get() = value ?: label.trim()
+}
 
 sealed interface UserInputAnswer {
     data class Text(val value: String) : UserInputAnswer
@@ -318,6 +432,12 @@ data class ThreadDetail(
      * transcript to know which turn is still open: the open one is the only one
      * that must not fold.
      */
+    /**
+     * Windowed-read state, from `OrchestrationThreadDetailPage`. Non-null only
+     * on pagination-capable servers; `hasMore` is what drives the "Load earlier
+     * turns" affordance at the top of the transcript.
+     */
+    val page: ThreadPage? = null,
     val latestTurn: TurnInfo? = null,
     /**
      * The provider session's own status (`idle`, `starting`, `running`, `ready`,
@@ -338,6 +458,18 @@ data class ThreadDetail(
      * thread rather than every row in a list.
      */
     val settings: ThreadSettings = ThreadSettings(),
+)
+
+/**
+ * The loaded window's upper edge, from `OrchestrationThreadDetailPage` in
+ * `packages/contracts/src/orchestration.ts`. `beforeCursor` is opaque and
+ * exclusive: handing it back returns the adjacent slice of older turns.
+ */
+data class ThreadPage(
+    val beforeCursor: String?,
+    val hasMore: Boolean,
+    /** An older-page fetch is in flight (or parked behind live events). */
+    val loadingOlder: Boolean = false,
 )
 
 /**
@@ -454,6 +586,27 @@ data class TerminalSession(
     val lines: List<String>,
     /** The last error the session reported, cleared by the next output. */
     val error: String? = null,
+    /** A foreground process is attached under the shell, per `activity` events. */
+    val hasRunningSubprocess: Boolean = false,
+    val updatedAt: String? = null,
+)
+
+/**
+ * One row of `subscribeTerminalMetadata`, from `TerminalSummary` in
+ * `packages/contracts/src/terminal.ts`. This is the session-switcher list: it
+ * exists for terminals nobody has attached, which is what makes "open another
+ * shell" and the exit fallback possible without touching any of them.
+ */
+data class TerminalSummary(
+    val terminalId: String,
+    val threadId: String,
+    val cwd: String,
+    val worktreePath: String?,
+    val status: TerminalStatus,
+    val hasRunningSubprocess: Boolean,
+    /** Server-computed title; blank means fall back to `getTerminalLabel`. */
+    val label: String,
+    val updatedAt: String?,
 )
 
 data class UsageTotals(
@@ -617,6 +770,12 @@ data class ProviderCatalogEntry(
      * list of strings to search and render.
      */
     val optionDescriptors: Map<String, List<ProviderOptionDescriptor>> = emptyMap(),
+    /**
+     * Whether the composer may offer the plan/default mode switch for this
+     * provider. True unless the server explicitly disables it, matching
+     * `resolveProviderInteractionMode` in the RN client.
+     */
+    val interactionModeToggle: Boolean = true,
 )
 
 /**

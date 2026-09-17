@@ -1,33 +1,40 @@
 package club.touchtech.s5code.kotlin.app
 
-import org.junit.Assert.assertFalse
+import androidx.lifecycle.Lifecycle
+import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class ForegroundRefreshGateTest {
     @Test
     fun `cold start does not restart sessions but return from background does`() {
-        var stopped = false
+        val gate = ForegroundRefreshGate()
 
-        var transition = shouldRefreshAfterLifecycleEvent(stopped, "start")
-        stopped = transition.first
-        assertFalse(transition.second)
-        transition = shouldRefreshAfterLifecycleEvent(stopped, "stop")
-        stopped = transition.first
-        assertFalse(transition.second)
-        transition = shouldRefreshAfterLifecycleEvent(stopped, "start")
-        assertTrue(transition.second)
+        assertNull(gate.onEvent(Lifecycle.Event.ON_START))
+        assertNull(gate.onEvent(Lifecycle.Event.ON_STOP))
+        assertNotNull(gate.onEvent(Lifecycle.Event.ON_START))
     }
 
     @Test
     fun `resume noise refreshes at most once per stop`() {
-        val afterStop = shouldRefreshAfterLifecycleEvent(false, "stop")
-        val firstStart = shouldRefreshAfterLifecycleEvent(afterStop.first, "start")
-        val secondStart = shouldRefreshAfterLifecycleEvent(firstStart.first, "start")
-        val resume = shouldRefreshAfterLifecycleEvent(secondStart.first, "other")
+        val gate = ForegroundRefreshGate()
 
-        assertTrue(firstStart.second)
-        assertFalse(secondStart.second)
-        assertFalse(resume.second)
+        gate.onEvent(Lifecycle.Event.ON_STOP)
+        assertNotNull(gate.onEvent(Lifecycle.Event.ON_START))
+        assertNull(gate.onEvent(Lifecycle.Event.ON_START))
+        assertNull(gate.onEvent(Lifecycle.Event.ON_RESUME))
+    }
+
+    @Test
+    fun `the reported duration is the real time spent stopped`() {
+        val gate = ForegroundRefreshGate()
+
+        gate.onEvent(Lifecycle.Event.ON_STOP)
+        Thread.sleep(15)
+        val duration = gate.onEvent(Lifecycle.Event.ON_START)
+
+        assertNotNull(duration)
+        assertTrue(duration!! >= 15)
     }
 }

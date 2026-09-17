@@ -12,6 +12,13 @@ import club.touchtech.s5code.kotlin.cloud.RelayClient
 import club.touchtech.s5code.kotlin.cloud.RelayEnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.data.ClientStateStore
 import club.touchtech.s5code.kotlin.data.EnvironmentStore
+import club.touchtech.s5code.kotlin.data.IncomingShareDestination
+import club.touchtech.s5code.kotlin.data.IncomingShareDraft
+import club.touchtech.s5code.kotlin.data.IncomingShareStore
+import club.touchtech.s5code.kotlin.data.IncomingShareAttachmentType
+import club.touchtech.s5code.kotlin.data.hasIncomingShareContent
+import club.touchtech.s5code.kotlin.data.incomingShareIdFor
+import club.touchtech.s5code.kotlin.data.selectIncomingShareAttachments
 import club.touchtech.s5code.kotlin.data.RuntimePreferences
 import club.touchtech.s5code.kotlin.data.StoredDraft
 import club.touchtech.s5code.kotlin.data.StoredNewTaskDraft
@@ -41,18 +48,24 @@ import club.touchtech.s5code.kotlin.model.ActionProgressPhase
 import club.touchtech.s5code.kotlin.model.AppErrorNotice
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
+import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ModelFavorite
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.QuestionAttachment
+import club.touchtech.s5code.kotlin.model.QuestionAttachmentStatus
 import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.ThreadFilter
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.ThreadSort
 import club.touchtech.s5code.kotlin.model.WorkspaceMode
+import club.touchtech.s5code.kotlin.platform.StagedQuestionFile
 import club.touchtech.s5code.kotlin.platform.notifications.AndroidLiveUpdateNotifications
+import club.touchtech.s5code.kotlin.platform.buildIncomingShare
+import club.touchtech.s5code.kotlin.platform.materializeComposerImages
 import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationCoordinator
 import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationStatus
 import club.touchtech.s5code.kotlin.platform.notifications.PushRuntime
@@ -73,6 +86,7 @@ import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -108,7 +122,18 @@ data class NewTaskDraft(
     val attachments: List<ComposerAttachment> = emptyList(),
     val branch: String = "",
     val workspaceMode: WorkspaceMode = WorkspaceMode.CurrentCheckout,
+    /**
+     * An existing worktree to run the task in ("New thread on <branch>" from a
+     * thread row), matching the RN draft's `worktreePath` prefill.
+     */
+    val worktreePath: String? = null,
     val settings: ThreadSettings = ThreadSettings(),
+    /**
+     * Share ids already merged into this draft. The draft persists between
+     * process death and the next picker visit, so the receipt travels with it:
+     * re-entering must not merge the same share's text a second time.
+     */
+    val importedShareIds: List<String> = emptyList(),
 )
 
 /** Per-thread composer draft: prompt text plus its pending attachments. */
@@ -184,9 +209,14 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             onSignOut = {
                 pushRegistration.signOut()
                 relay?.reset()
-                // The device key is the account's enrollment, so it goes too. The
-                // next sign-in enrolls a fresh device rather than inheriting one.
-                DpopKey.clear()
+                // Relay-managed rows belong to the account that linked them, so
+                // they leave with it (RN `removeCloudEnvironments`). The DPoP key
+                // deliberately survives: it is this install's device identity,
+                // and deleting it mid-process would leave the relay client and
+                // every live authorizer signing with a key nothing can recreate.
+                environmentStore.environments.value
+                    .filter { it.relayManaged }
+                    .forEach { unpair(EnvironmentId(it.environmentId)) }
             },
         )
 
@@ -210,7 +240,9 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         relay = relayClient,
                         http = http,
                         key = key,
-                        deviceId = { null },
+                        // The registered device id lets the relay attribute this
+                        // session and gate its alerts by this device's link.
+                        deviceId = { PushRuntime.deviceId(application) },
                         deviceLabel = PairingClient.deviceLabel(),
                         onEndpointResolved = { id, httpBaseUrl, wsBaseUrl ->
                             environmentStore.updateEndpoint(id, httpBaseUrl, wsBaseUrl)
@@ -256,6 +288,8 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     private val _threadDrafts = MutableStateFlow<Map<String, ThreadDraft>>(emptyMap())
     val threadDrafts: StateFlow<Map<String, ThreadDraft>> = _threadDrafts.asStateFlow()
+
+    private val shareStore = IncomingShareStore(application)
 
     private val outboxStore = ThreadOutboxStore(application)
     private val outboxMutation = Mutex()
@@ -333,6 +367,10 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     init {
         viewModelScope.launch { environmentStore.load() }
+        // A share can be ingested and then orphaned by process death before the
+        // user picked a project; republishing the inbox on launch is what lets
+        // the pending-share watcher pick it back up.
+        viewModelScope.launch { shareStore.refresh() }
         viewModelScope.launch {
             val loaded = clientState.load()
             _preferences.value = loaded.preferences.toRuntime()
@@ -471,25 +509,154 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     }
 
     /**
-     * Queues an external navigation request. A share also lands its payload in the
-     * new-task draft here rather than at the screen, so the draft is durable before
-     * anything is rendered.
+     * Queues an external navigation request. A share first materializes into the
+     * incoming-share inbox — the `content:` grants lapse when the sender's
+     * activity finishes, so the draft must never hold those URIs — and only then
+     * navigates to the project picker, matching the RN client's pending-share
+     * presentation.
      */
     fun openDeepLink(link: DeepLink) {
         if (link is DeepLink.Share) {
-            _draft.update { draft ->
-                val separator = if (draft.prompt.isBlank()) "" else "\n\n"
-                draft.copy(
-                    prompt = draft.prompt + separator + link.text.orEmpty().trim(),
-                )
+            viewModelScope.launch {
+                val ingested = ingestIncomingShare(link)
+                // Only navigate once the payload is durable: arriving at the
+                // picker with nothing ingested would strand the user in the
+                // new-task flow for a share that failed to copy.
+                if (ingested != null) _pendingLink.value = link
             }
-            if (link.imageUris.isNotEmpty()) {
-                addNewTaskDraftImages(
-                    link.imageUris.map { ComposerImageCandidate(uri = it, mimeType = null) }
-                )
-            }
+            return
         }
         _pendingLink.value = link
+    }
+
+    /* ── Incoming shares ────────────────────────────────────────────── */
+
+    /**
+     * Sharesheet payloads waiting for a project, newest first. Consumed at
+     * import, so a draft only lingers while it is genuinely unclaimed.
+     */
+    val incomingShareDrafts: StateFlow<List<IncomingShareDraft>> = shareStore.drafts
+
+    /**
+     * The share the new-task flow should present next, or null. A share that is
+     * already merged into the draft stays out of this slot even if its inbox
+     * record survived an interrupted import.
+     */
+    val pendingShare: StateFlow<IncomingShareDraft?> =
+        combine(incomingShareDrafts, _draft) { drafts, draft ->
+                drafts.firstOrNull { it.id !in draft.importedShareIds }
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, null)
+
+    /**
+     * Copies a share's payloads into the inbox and writes the draft record.
+     * Returns the share id, or null when nothing survived materialization —
+     * mirroring the RN inbox, which drops an all-warnings share rather than
+     * re-presenting an unactionable picker on every foreground.
+     */
+    private suspend fun ingestIncomingShare(link: DeepLink.Share): String? {
+        val shareId = incomingShareIdFor(link.text, link.mimeType, link.uris)
+        if (shareStore.draftsNow().any { it.id == shareId }) return shareId
+        val draft =
+            buildIncomingShare(
+                context = getApplication(),
+                text = link.text,
+                intentMimeType = link.mimeType,
+                uris = link.uris,
+                nowIso = java.time.Instant.now().toString(),
+            ) ?: run {
+                shareStore.consume(shareId)
+                return null
+            }
+        if (!hasIncomingShareContent(draft)) {
+            shareStore.consume(shareId)
+            showError(draft.warnings.firstOrNull() ?: "The shared content is not supported.")
+            return null
+        }
+        shareStore.write(draft)
+        return shareId
+    }
+
+    /**
+     * Merges [shareId] into the new-task draft for the chosen destination.
+     *
+     * Order matters: reserve first so a failure or process death mid-import
+     * leaves the share pinned to this project rather than free-floating, then
+     * merge, then consume — the durable draft is the commit point, and the
+     * attachments it records are composer-cache copies, not inbox files, so the
+     * share directory can be deleted.
+     */
+    suspend fun importIncomingShare(shareId: String, destination: IncomingShareDestination) {
+        if (shareId in _draft.value.importedShareIds) return
+        val share = shareStore.draftsNow().firstOrNull { it.id == shareId }
+        if (share == null) {
+            showError("The shared content is no longer in the inbox.")
+            return
+        }
+        // A stale reservation for another project is released before this one
+        // takes; the share belongs to the project the user just picked.
+        share.destination?.takeIf { it != destination }?.let {
+            shareStore.releaseReservation(shareId, it)
+        }
+        val reserved = shareStore.reserve(shareId, destination)
+        if (reserved == null) {
+            showError("The shared content is reserved for another draft.")
+            return
+        }
+
+        // The destination server's file support decides which attachments can
+        // ride along; the rest become warnings, matching RN's
+        // `selectIncomingShareAttachmentsForServer`.
+        val environment =
+            workspace.environments.value.firstOrNull {
+                it.id.value == destination.environmentId
+            }
+        val maxFileBytes =
+            environment
+                ?.capabilities
+                ?.takeIf { it.attachmentUploads }
+                ?.fileAttachments
+                ?.maxUploadBytes
+        val (kept, selectionWarnings) =
+            selectIncomingShareAttachments(share.attachments, maxFileBytes)
+        val (images, droppedFiles) = kept.partition {
+            it.type == IncomingShareAttachmentType.Image
+        }
+        val fileWarnings =
+            droppedFiles.map {
+                "'${it.name}' was skipped because this client does not support file attachments yet."
+            }
+
+        // Images pass through the same intake as a picker pick, so the draft
+        // holds composer-cache copies that outlive the inbox entry.
+        val candidates =
+            images.map {
+                ComposerImageCandidate(
+                    uri = it.uri,
+                    mimeType = it.mimeType,
+                    name = it.name,
+                    sizeBytes = it.sizeBytes,
+                )
+            }
+        val materialized = materializeComposerImages(getApplication(), candidates)
+        var acceptError: String? = null
+        _draft.update { draft ->
+            if (shareId in draft.importedShareIds) return@update draft
+            val result = acceptComposerImages(draft.attachments, materialized)
+            acceptError = result.error
+            val separator = if (draft.prompt.isBlank() || share.text.isBlank()) "" else "\n\n"
+            draft.copy(
+                prompt = draft.prompt + separator + share.text,
+                attachments = draft.attachments + result.attachments,
+                importedShareIds = draft.importedShareIds + shareId,
+            )
+        }
+
+        shareStore.consume(shareId)
+        val warnings = share.warnings + selectionWarnings + fileWarnings + listOfNotNull(acceptError)
+        if (warnings.isNotEmpty()) {
+            _attachmentError.value = warnings.joinToString("\n")
+        }
     }
 
     fun consumePendingLink() {
@@ -512,6 +679,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     approvalPolicy = storedApprovalPolicy(approvalPolicy),
                     options = storedProviderOptions(options),
                 ),
+            importedShareIds = importedShareIds,
         )
 
     private fun NewTaskDraft.toStored(): StoredNewTaskDraft =
@@ -528,6 +696,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             runtimeMode = settings.runtimeMode.name,
             approvalPolicy = settings.approvalPolicy.name,
             options = settings.options.associate { it.toStored() },
+            importedShareIds = importedShareIds,
         )
 
     /**
@@ -650,6 +819,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         projectKey = draft.projectKey,
                         branch = draft.branch,
                         newWorktree = draft.workspaceMode == WorkspaceMode.NewWorktree,
+                        worktreePath = draft.worktreePath,
                     ),
             )
         val durable = outboxStore.enqueue(message)
@@ -657,7 +827,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         outboxMutation.withLock {
             _outbox.update { current -> (current + durable).sortedBy { it.delivery.createdAt } }
         }
-        updateDraft { it.copy(prompt = "", attachments = emptyList()) }
+        updateDraft { it.copy(prompt = "", attachments = emptyList(), importedShareIds = emptyList()) }
         val project = workspace.projects.value.firstOrNull {
             it.environmentId == draft.environmentId && it.id.value == draft.projectKey
         }
@@ -731,6 +901,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                             branch = message.creation.branch,
                             newWorktree = message.creation.newWorktree,
                             attachments = message.attachments,
+                            worktreePath = message.creation.worktreePath,
                             threadId = message.threadId,
                             delivery = message.delivery,
                         )
@@ -853,6 +1024,253 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         _attachmentError.value = null
     }
 
+    /* ── Question attachments ────────────────────────────────────────── */
+
+    /**
+     * Files staged on pending user-input questions, keyed
+     * `envId/threadId/requestId/questionId` — the same scope RN's
+     * `questionAttachmentDraftKey` gives its composer drafts. Staging uploads
+     * eagerly: by submit time the bytes are already on the server, so answering
+     * is a metadata write rather than a transfer.
+     */
+    private val _questionAttachments =
+        MutableStateFlow<Map<String, List<QuestionAttachment>>>(emptyMap())
+    val questionAttachments: StateFlow<Map<String, List<QuestionAttachment>>> =
+        _questionAttachments.asStateFlow()
+
+    private fun questionAttachmentKey(
+        environmentId: String,
+        threadId: String,
+        requestId: String,
+        questionId: String,
+    ): String = "$environmentId/$threadId/$requestId/$questionId"
+
+    /**
+     * The attachments staged on every question of one request, re-keyed by
+     * question id for the card that renders them.
+     */
+    fun questionAttachmentsFor(
+        environmentId: String,
+        threadId: String,
+        requestId: String,
+    ): Map<String, List<QuestionAttachment>> {
+        val prefix = questionAttachmentKey(environmentId, threadId, requestId, "")
+        return _questionAttachments.value.entries
+            .filter { it.key.startsWith(prefix) }
+            .associate { it.key.removePrefix(prefix) to it.value }
+    }
+
+    /**
+     * Appends materialized files to one question's staging and starts their
+     * uploads. The send-turn cap counts attachments on the whole request, not
+     * per question — matching `appendComposerDraftAttachments`'s `maxAttachments`
+     * computation in RN, which subtracts the siblings' count.
+     */
+    fun stageQuestionAttachments(
+        environmentId: String,
+        threadId: String,
+        requestId: String,
+        questionId: String,
+        files: List<StagedQuestionFile>,
+    ) {
+        if (files.isEmpty()) return
+        val key = questionAttachmentKey(environmentId, threadId, requestId, questionId)
+        val requestPrefix = questionAttachmentKey(environmentId, threadId, requestId, "")
+        var staged: List<QuestionAttachment> = emptyList()
+        var overflow = false
+        _questionAttachments.update { current ->
+            val requestCount =
+                current.entries
+                    .filter { it.key.startsWith(requestPrefix) }
+                    .sumOf { it.value.size }
+            val accepted = files.take((ComposerAttachmentLimits.MAX_ATTACHMENTS - requestCount).coerceAtLeast(0))
+            overflow = accepted.size < files.size
+            staged =
+                accepted.map { file ->
+                    QuestionAttachment(
+                        localId = file.localPath,
+                        name = file.name,
+                        mimeType = file.mimeType,
+                        sizeBytes = file.sizeBytes,
+                        kind = file.kind,
+                        localPath = file.localPath,
+                        status = QuestionAttachmentStatus.Uploading,
+                    )
+                }
+            if (staged.isEmpty()) current
+            else current + (key to (current[key].orEmpty() + staged))
+        }
+        if (overflow) {
+            _attachmentError.value =
+                "You can attach up to ${ComposerAttachmentLimits.MAX_ATTACHMENTS} files per message."
+        }
+        // Files refused by the cap never enter the draft, so their cache copies
+        // are freed immediately — the same cleanup RN runs on rejected picks.
+        files.drop(staged.size).forEach { file -> java.io.File(file.localPath).delete() }
+        staged.forEach { attachment ->
+            viewModelScope.launch { uploadQuestionAttachment(environmentId, key, attachment) }
+        }
+    }
+
+    /**
+     * Re-runs the upload for a failed staged attachment. The local file is still
+     * in cache, so retry is a new `createUploadUrl` + POST, not a re-pick.
+     */
+    fun retryQuestionAttachment(
+        environmentId: String,
+        threadId: String,
+        requestId: String,
+        questionId: String,
+        localId: String,
+    ) {
+        val key = questionAttachmentKey(environmentId, threadId, requestId, questionId)
+        val attachment =
+            _questionAttachments.value[key]?.firstOrNull { it.localId == localId } ?: return
+        if (attachment.status != QuestionAttachmentStatus.Failed) return
+        updateQuestionAttachment(key, localId) {
+            it.copy(status = QuestionAttachmentStatus.Uploading, error = null)
+        }
+        viewModelScope.launch { uploadQuestionAttachment(environmentId, key, attachment) }
+    }
+
+    private suspend fun uploadQuestionAttachment(
+        environmentId: String,
+        key: String,
+        attachment: QuestionAttachment,
+    ) {
+        try {
+            val uploadId =
+                workspace.uploadPendingAttachment(
+                    environmentId = EnvironmentId(environmentId),
+                    type = attachment.kind.wireValue,
+                    name = attachment.name,
+                    mimeType = attachment.mimeType,
+                    file = java.io.File(attachment.localPath),
+                )
+            // The entry may have been removed while the POST was in flight; its
+            // upload then belongs to nobody and is deleted rather than leaked.
+            val stillStaged =
+                _questionAttachments.value[key]?.any { it.localId == attachment.localId } == true
+            if (stillStaged) {
+                updateQuestionAttachment(key, attachment.localId) {
+                    it.copy(status = QuestionAttachmentStatus.Ready, uploadedAttachmentId = uploadId)
+                }
+            } else {
+                runCatching { workspace.deletePendingAttachment(EnvironmentId(environmentId), uploadId) }
+            }
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            updateQuestionAttachment(key, attachment.localId) {
+                it.copy(
+                    status = QuestionAttachmentStatus.Failed,
+                    error = error.message ?: "The upload failed.",
+                )
+            }
+        }
+    }
+
+    private fun updateQuestionAttachment(
+        key: String,
+        localId: String,
+        transform: (QuestionAttachment) -> QuestionAttachment,
+    ) {
+        _questionAttachments.update { current ->
+            val list = current[key] ?: return@update current
+            current + (key to list.map { if (it.localId == localId) transform(it) else it })
+        }
+    }
+
+    /**
+     * Removes one staged attachment: its local copy, and its pending upload on
+     * the server when one was minted. The delete is best-effort — the server
+     * expires pending uploads on its own, so a failed delete must not keep the
+     * chip.
+     */
+    fun removeQuestionAttachment(
+        environmentId: String,
+        threadId: String,
+        requestId: String,
+        questionId: String,
+        localId: String,
+    ) {
+        val key = questionAttachmentKey(environmentId, threadId, requestId, questionId)
+        var removed: QuestionAttachment? = null
+        _questionAttachments.update { current ->
+            val list = current[key] ?: return@update current
+            removed = list.firstOrNull { it.localId == localId }
+            val next = list.filterNot { it.localId == localId }
+            if (next.isEmpty()) current - key else current + (key to next)
+        }
+        releaseStagedQuestionAttachment(EnvironmentId(environmentId), removed)
+    }
+
+    /**
+     * Drops every staged attachment on one request. Called when the request is
+     * answered or dismissed — the attachments were either consumed by the
+     * submission or belong to a draft that no longer exists.
+     */
+    fun releaseQuestionAttachments(
+        environmentId: String,
+        threadId: String,
+        requestId: String,
+    ) {
+        releaseQuestionAttachmentsMatching(
+            EnvironmentId(environmentId),
+            questionAttachmentKey(environmentId, threadId, requestId, ""),
+        )
+    }
+
+    /**
+     * Drops staged attachments on the thread that no live request still owns —
+     * the sweep RN runs off `questionAttachmentDraftPrefix` when the pending
+     * set changes, which is what frees files staged on a request resolved from
+     * another client.
+     */
+    fun releaseStaleQuestionAttachments(
+        environmentId: String,
+        threadId: String,
+        retainedRequestIds: Set<String>,
+    ) {
+        val threadPrefix = "$environmentId/$threadId/"
+        val retained =
+            retainedRequestIds.map { questionAttachmentKey(environmentId, threadId, it, "") }
+        val released = mutableListOf<QuestionAttachment>()
+        _questionAttachments.update { current ->
+            val doomed =
+                current.filterKeys { key ->
+                    key.startsWith(threadPrefix) && retained.none { key.startsWith(it) }
+                }
+            doomed.values.forEach { released += it }
+            current - doomed.keys
+        }
+        val env = EnvironmentId(environmentId)
+        released.forEach { releaseStagedQuestionAttachment(env, it) }
+    }
+
+    private fun releaseQuestionAttachmentsMatching(environmentId: EnvironmentId, prefix: String) {
+        val released = mutableListOf<QuestionAttachment>()
+        _questionAttachments.update { current ->
+            val doomed = current.filterKeys { it.startsWith(prefix) }
+            doomed.values.forEach { released += it }
+            current - doomed.keys
+        }
+        released.forEach { releaseStagedQuestionAttachment(environmentId, it) }
+    }
+
+    /** Frees the cache copy and the pending upload a staged attachment holds. */
+    private fun releaseStagedQuestionAttachment(
+        environmentId: EnvironmentId,
+        attachment: QuestionAttachment?,
+    ) {
+        if (attachment == null) return
+        viewModelScope.launch(Dispatchers.IO) { java.io.File(attachment.localPath).delete() }
+        val uploadId = attachment.uploadedAttachmentId ?: return
+        viewModelScope.launch {
+            runCatching { workspace.deletePendingAttachment(environmentId, uploadId) }
+        }
+    }
+
     fun beginAction(label: String, description: String? = null): Long {
         val id = ++nextNoticeId
         _actionProgress.value =
@@ -902,13 +1320,30 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     }
 
     /** Refreshes all transports when Android returns the existing process to foreground. */
-    fun refreshConnections() {
-        workspace.refreshConnections()
+    fun refreshConnections(backgroundedMillis: Long = Long.MAX_VALUE) {
+        workspace.refreshConnections(backgroundedMillis)
     }
 
     /** Retries one environment's connection, for the connections screen. */
     fun retryEnvironment(environmentId: EnvironmentId) {
+        // A switched-off environment has no session to retry; the switch is the
+        // retry affordance.
+        val saved =
+            environmentStore.environments.value.firstOrNull {
+                it.environmentId == environmentId.value
+            }
+        if (saved != null && !saved.enabled) return
         (workspace as? LiveWorkspaceGateway)?.retry(environmentId)
+    }
+
+    /**
+     * Switches an environment on or off. The row stays paired either way — off
+     * keeps the credential but tears the session down; on reconnects in place.
+     * The gateway reconciles sessions off the store's flow, so this write is the
+     * whole mutation.
+     */
+    fun setEnvironmentEnabled(environmentId: EnvironmentId, enabled: Boolean) {
+        viewModelScope.launch { environmentStore.setEnabled(environmentId.value, enabled) }
     }
 
     /**

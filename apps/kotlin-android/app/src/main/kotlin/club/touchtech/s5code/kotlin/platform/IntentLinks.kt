@@ -12,8 +12,8 @@ import club.touchtech.s5code.kotlin.platform.notifications.notificationPathFromE
 /** Extra a launcher shortcut carries: the in-app path it opens. */
 const val EXTRA_SHORTCUT_PATH = "club.touchtech.s5code.kotlin.SHORTCUT_PATH"
 
-/** Up to eight images, matching the send-turn attachment limit. */
-private const val MAX_SHARED_IMAGES = 8
+/** Up to eight payloads, matching the send-turn attachment limit. */
+private const val MAX_SHARED_ITEMS = 8
 
 /**
  * Resolves what an incoming intent asks the app to open.
@@ -45,9 +45,11 @@ fun resolveIntentLink(intent: Intent?): DeepLink? {
 }
 
 /**
- * A share turns into a new-task draft. Text and images can arrive together (a
+ * A share turns into a new-task draft. Text and files can arrive together (a
  * screenshot with a caption), so both are read rather than branching on the
- * intent's declared type, which lies often enough to matter.
+ * intent's declared type, which lies often enough to matter. The URIs stay raw
+ * `content:` here — the inbox materializes them, because this function runs
+ * before the store exists and the sender's grant only covers this intent.
  */
 private fun sharedPayload(intent: Intent, multiple: Boolean): DeepLink? {
     val text =
@@ -65,9 +67,13 @@ private fun sharedPayload(intent: Intent, multiple: Boolean): DeepLink? {
         } else {
             listOfNotNull(intent.parcelableUri(Intent.EXTRA_STREAM))
         }
-    val images = uris.map(Uri::toString).take(MAX_SHARED_IMAGES)
+    val payloadUris = uris.map(Uri::toString).take(MAX_SHARED_ITEMS)
 
-    return if (text == null && images.isEmpty()) null else DeepLink.Share(text, images)
+    return if (text == null && payloadUris.isEmpty()) {
+        null
+    } else {
+        DeepLink.Share(text = text, mimeType = intent.type?.lowercase(), uris = payloadUris)
+    }
 }
 
 @Suppress("DEPRECATION")

@@ -512,13 +512,15 @@ fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit) {
     // invented defaults: every row below comes from Android or persisted native
     // delivery state.
     val diagnostics = AndroidLiveUpdateNotifications.diagnostics(context)
-    val generation = diagnostics.generationId
-    val generationLabel =
-        when {
-            generation == null -> "None armed"
-            diagnostics.delivery != null -> "${generation.take(8)} · ${diagnostics.delivery}"
-            else -> generation.take(8)
-        }
+    val lastUpdateLabel =
+        diagnostics.lastUpdateAtMillis?.let { at ->
+            val seconds = (System.currentTimeMillis() - at).coerceAtLeast(0) / 1_000
+            when {
+                seconds < 60 -> "$seconds s ago"
+                seconds < 3_600 -> "${seconds / 60} min ago"
+                else -> "${seconds / 3_600} h ago"
+            }
+        } ?: "None received"
     S5Screen(
         title = "Live Updates",
         subtitle =
@@ -564,7 +566,8 @@ fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit) {
                                     "${diagnostics.apiLevel} (${if (diagnostics.supported) "promoted ongoing" else "standard alerts"})",
                                 "Fallback" to
                                     if (diagnostics.notificationPermission) "Ongoing notification" else "Notifications blocked",
-                                "Last generation" to generationLabel,
+                                "Card" to if (diagnostics.cardVisible) "Visible" else "Hidden",
+                                "Last update" to lastUpdateLabel,
                             )
                             .forEach { (label, value) ->
                                 Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

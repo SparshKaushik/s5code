@@ -34,6 +34,12 @@ data class SavedEnvironment(
     val serverVersion: String = "",
     val pairedAtMillis: Long = 0,
     /**
+     * False when the user switched the environment off. The row stays in the
+     * catalog — off is a pause, not a delete — and defaults true so rows written
+     * by earlier builds remain connected.
+     */
+    val enabled: Boolean = true,
+    /**
      * How this environment was reached, and therefore how its token is used.
      * Absent in rows written by earlier builds, which were all direct.
      */
@@ -177,6 +183,21 @@ class EnvironmentStore(context: Context) {
         serverVersion = serverVersion,
         kind = SavedEnvironmentKind.Cloud,
     )
+
+    /**
+     * Switches an environment on or off without removing it. The gateway reacts
+     * to the emitted list: off tears the session down, on reconnects in place.
+     */
+    suspend fun setEnabled(environmentId: String, enabled: Boolean) {
+        val current =
+            _environments.value.firstOrNull { it.environmentId == environmentId } ?: return
+        if (current.enabled == enabled) return
+        persist(
+            _environments.value.map {
+                if (it.environmentId == environmentId) it.copy(enabled = enabled) else it
+            }
+        )
+    }
 
     suspend fun remove(environmentId: String) {
         persist(_environments.value.filterNot { it.environmentId == environmentId })

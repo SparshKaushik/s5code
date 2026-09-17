@@ -62,9 +62,11 @@ import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import kotlinx.coroutines.delay
+import club.touchtech.s5code.kotlin.platform.active
 import club.touchtech.s5code.kotlin.platform.composerImageReceiver
 
 /** Radius of the collapsed pill. Half the collapsed height, so it is fully round. */
@@ -121,14 +123,75 @@ fun ThreadComposer(
     provider: ProviderInstance,
     model: String,
     onOpenSettings: () -> Unit,
+    /**
+     * Whether the provider allows the plan/default mode switch, from
+     * `showInteractionModeToggle`. Gates the built-in `/plan` and `/default`
+     * suggestions, which swap the mode rather than sending text.
+     */
+    interactionModeAllowed: Boolean = true,
+    /** Applies a `/plan` or `/default` pick to the staged thread settings. */
+    onInteractionMode: ((RuntimeMode) -> Unit)? = null,
     /** Resets the field's own text state, e.g. per thread. */
     draftKey: Any?,
 ) {
-    val activeToken = remember(value) { value.substringAfterLast(' ', missingDelimiterValue = value) }
+    // Token detection follows `detectComposerTrigger`: a trigger is the run of
+    // non-whitespace under the cursor (end of text here), not just the tail of
+    // the last space-separated word.
+    val activeToken =
+        remember(value) { value.takeLastWhile { !it.isWhitespace() } }
+    // A slash trigger exists only where the token sits at the start of its line —
+    // `/` mid-word is a path character, not a command. Provider commands
+    // additionally require the very first line, matching `atMessageStart`.
+    val slashActive =
+        remember(value, activeToken) {
+            activeToken.startsWith("/") &&
+                value.dropLast(activeToken.length).let { prefix ->
+                    prefix.isEmpty() || prefix.endsWith("\n")
+                }
+        }
+    val atMessageStart = remember(value, activeToken) {
+        slashActive && value == activeToken
+    }
     val commandSuggestions =
-        remember(activeToken, commands) {
-            if (activeToken.startsWith("/")) rankSlashCommands(commands, activeToken)
-            else emptyList()
+        remember(activeToken, commands, slashActive, atMessageStart, interactionModeAllowed) {
+            if (!slashActive) return@remember emptyList()
+            val query = activeToken.removePrefix("/").lowercase()
+            buildList<ComposerSuggestion> {
+                // T3's own commands act locally, ahead of provider ones.
+                if ("model".contains(query)) {
+                    // `/model` inserts literal text, matching mobile: the slash-model
+                    // picker that follows is a web-only affordance.
+                    add(ComposerSuggestion("/model", "Switch model", null, "/model "))
+                }
+                if (interactionModeAllowed) {
+                    if ("plan".contains(query)) {
+                        add(
+                            ComposerSuggestion(
+                                "/plan", "Switch to plan mode", null, "",
+                                interactionMode = RuntimeMode.Plan,
+                            )
+                        )
+                    }
+                    if ("default".contains(query)) {
+                        add(
+                            ComposerSuggestion(
+                                "/default", "Switch to default mode", null, "",
+                                interactionMode = RuntimeMode.Default,
+                            )
+                        )
+                    }
+                }
+                if (atMessageStart) {
+                    rankSlashCommands(commands, activeToken).forEach { command ->
+                        add(
+                            ComposerSuggestion(
+                                command.name, command.description,
+                                Icons.Rounded.Terminal, "${command.name} ",
+                            )
+                        )
+                    }
+                }
+            }
         }
     // Path lookup is a server round trip, so it is debounced and cancels itself
     // on the next keystroke rather than firing per character.
@@ -148,12 +211,18 @@ fun ThreadComposer(
     // The field owns its text so keyboard content commits (Gboard clipboard,
     // stickers, GIFs) reach it; the draft outside still wins on external change.
     val draftState = rememberDraftTextFieldState(draftKey, value, onValueChange)
+    // Dictation binds to the field, not the prop, so a transcript commits at the
+    // caret. Null on devices with no speech service, and the mic stays hidden.
+    val dictation = rememberDictation(draftKey, draftState)
+    val voicePresented = dictation?.presentation?.statusLabel != null
 
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
     // Attachments force the card open: thumbnails have nowhere to go in a pill,
     // and a paste that appeared to do nothing is worse than an expanded composer.
-    val expanded = focused || attachments.isNotEmpty()
+    // An active (or errored) dictation session does the same — its toolbar row
+    // lives in the expanded chrome.
+    val expanded = focused || attachments.isNotEmpty() || voicePresented
     val canSend = value.isNotBlank() || attachments.isNotEmpty()
 
     val spatial = MaterialTheme.motionScheme.fastSpatialSpec<Dp>()
@@ -196,8 +265,16 @@ fun ThreadComposer(
         SuggestionPopover(
             commands = commandSuggestions,
             paths = pathSuggestions,
-            onPick = { replacement ->
-                onValueChange(value.dropLast(activeToken.length) + replacement + " ")
+            onPick = { suggestion ->
+                if (suggestion.interactionMode != null) {
+                    // A mode command consumes the token rather than inserting text.
+                    onValueChange(value.dropLast(activeToken.length))
+                    onInteractionMode?.invoke(suggestion.interactionMode)
+                } else {
+                    onValueChange(
+                        value.dropLast(activeToken.length) + suggestion.replacement,
+                    )
+                }
             },
         )
 
@@ -242,17 +319,24 @@ fun ThreadComposer(
                         maxLines = if (expanded) EXPANDED_MAX_LINES else 1,
                         centerContent = !expanded,
                         interactionSource = interactionSource,
-                        onSubmitShortcut = { if (canSend) onSend() },
+                        // The editor freezes while a session is active
+                        // (`voiceInputFreezesEditor` in RN): a keystroke cannot
+                        // invalidate a transcript mid-flight.
+                        enabled = dictation?.state?.active != true,
+                        onSubmitShortcut = {
+                            if (canSend && dictation?.state?.active != true) onSend()
+                        },
                         modifier =
                             Modifier.weight(1f)
                                 .heightIn(min = 40.dp)
                                 .padding(start = fieldStartPadding)
                                 .composerImageReceiver(onAddImages),
                     )
-                    // Collapsed keeps one action in the pill. If a turn is active
-                    // that action remains Stop; focusing expands the composer and
-                    // exposes a separate Send action beside it.
+                    // Collapsed keeps the mic and one action in the pill. If a
+                    // turn is active that action remains Stop; focusing expands
+                    // the composer and exposes a separate Send action beside it.
                     if (!expanded) {
+                        DictationMicControl(dictation)
                         SendOrStop(
                             working = working,
                             canSend = canSend,
@@ -263,37 +347,48 @@ fun ThreadComposer(
                 }
 
                 if (expanded) {
-                    S5ComposerToolbarRow(Modifier.padding(top = S5Theme.spacing.small)) {
-                        S5ComposerControl(
-                            label = null,
-                            icon = Icons.Rounded.Add,
-                            contentDescription = "Attach image",
-                            onClick = onAddAttachment,
+                    val activeDictation = dictation?.takeIf { voicePresented }
+                    if (activeDictation != null) {
+                        // The whole toolbar flips to the dictation row while a
+                        // session is live, matching the RN composer.
+                        DictationToolbar(
+                            dictation = activeDictation,
+                            modifier = Modifier.padding(top = S5Theme.spacing.small),
                         )
-                        S5ComposerControl(
-                            label = model,
-                            leading = { S5ProviderAvatar(provider, size = 20.dp) },
-                            trailingIcon = Icons.Rounded.ExpandMore,
-                            onClick = onOpenSettings,
-                            contentDescription = "Model and settings",
-                            modifier = Modifier.widthIn(max = 180.dp),
-                        )
-                        Box(Modifier.weight(1f))
-                        if (working) {
+                    } else {
+                        S5ComposerToolbarRow(Modifier.padding(top = S5Theme.spacing.small)) {
+                            S5ComposerControl(
+                                label = null,
+                                icon = Icons.Rounded.Add,
+                                contentDescription = "Attach image",
+                                onClick = onAddAttachment,
+                            )
+                            S5ComposerControl(
+                                label = model,
+                                leading = { S5ProviderAvatar(provider, size = 20.dp) },
+                                trailingIcon = Icons.Rounded.ExpandMore,
+                                onClick = onOpenSettings,
+                                contentDescription = "Model and settings",
+                                modifier = Modifier.widthIn(max = 180.dp),
+                            )
+                            Box(Modifier.weight(1f))
+                            DictationMicControl(dictation)
+                            if (working) {
+                                S5ComposerAction(
+                                    icon = Icons.Rounded.Stop,
+                                    label = "Stop the agent",
+                                    onClick = onCancel,
+                                    containerColor = MaterialTheme.colorScheme.errorContainer,
+                                    contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                )
+                            }
                             S5ComposerAction(
-                                icon = Icons.Rounded.Stop,
-                                label = "Stop the agent",
-                                onClick = onCancel,
-                                containerColor = MaterialTheme.colorScheme.errorContainer,
-                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                icon = Icons.AutoMirrored.Rounded.Send,
+                                label = if (queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue message" else "Send message",
+                                onClick = onSend,
+                                enabled = canSend,
                             )
                         }
-                        S5ComposerAction(
-                            icon = Icons.AutoMirrored.Rounded.Send,
-                            label = if (queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue message" else "Send message",
-                            onClick = onSend,
-                            enabled = canSend,
-                        )
                     }
                 }
             }
@@ -339,6 +434,8 @@ private fun ComposerStatusPill(
                         unavailable = false,
                     )
                 ConnectionState.Offline -> ComposerStatus("You are offline", unavailable = true)
+                ConnectionState.Disabled ->
+                    ComposerStatus("$environmentLabel is switched off", unavailable = true)
                 ConnectionState.AuthRequired ->
                     ComposerStatus(
                         connectionError?.takeIf { it.isNotBlank() }
@@ -413,6 +510,19 @@ private fun SendOrStop(
 }
 
 /**
+ * One suggestion row. [replacement] is the text that replaces the trigger token
+ * — already serialized, so a path pick carries its Markdown link. When
+ * [interactionMode] is set the pick is a mode switch, not an insertion.
+ */
+private data class ComposerSuggestion(
+    val label: String,
+    val description: String,
+    val icon: ImageVector?,
+    val replacement: String,
+    val interactionMode: RuntimeMode? = null,
+)
+
+/**
  * Slash-command and path-mention discovery. Sits above the composer so the field
  * stays put while the list changes under the token.
  *
@@ -422,11 +532,22 @@ private fun SendOrStop(
  */
 @Composable
 private fun SuggestionPopover(
-    commands: List<SlashCommand>,
+    commands: List<ComposerSuggestion>,
     paths: List<String>,
-    onPick: (String) -> Unit,
+    onPick: (ComposerSuggestion) -> Unit,
 ) {
-    AnimatedVisibility(commands.isNotEmpty() || paths.isNotEmpty()) {
+    val pathSuggestions =
+        paths.map { path ->
+            ComposerSuggestion(
+                label = path.substringAfterLast('/'),
+                description = path.substringBeforeLast('/', missingDelimiterValue = ""),
+                icon = Icons.Rounded.AlternateEmail,
+                // The draft stores the serialized link, not a bare `@path`: the
+                // mention only means something to the provider once it is a link.
+                replacement = serializeComposerFileLink(path) + " ",
+            )
+        }
+    AnimatedVisibility(commands.isNotEmpty() || pathSuggestions.isNotEmpty()) {
         Surface(
             Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -450,16 +571,13 @@ private fun SuggestionPopover(
                     Modifier.heightIn(max = SUGGESTION_LIST_MAX_HEIGHT)
                         .verticalScroll(rememberScrollState())
                 ) {
-                    val rows =
-                        commands.map { command ->
-                            Triple(command.name, command.description, Icons.Rounded.Terminal)
-                        } + paths.map { Triple("@$it", "", Icons.Rounded.AlternateEmail) }
-                    rows.forEachIndexed { index, (label, description, icon) ->
+                    val rows = commands + pathSuggestions
+                    rows.forEachIndexed { index, suggestion ->
                         SuggestionRow(
-                            label = label,
-                            description = description,
-                            icon = icon,
-                            onClick = { onPick(label) },
+                            label = suggestion.label,
+                            description = suggestion.description,
+                            icon = suggestion.icon ?: Icons.Rounded.Terminal,
+                            onClick = { onPick(suggestion) },
                             divided = index != rows.lastIndex,
                         )
                     }

@@ -48,6 +48,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.connection.PairingUrlResult
+import club.touchtech.s5code.kotlin.connection.extractPairingUrlFromQrPayload
 import club.touchtech.s5code.kotlin.connection.parsePairingUrl
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
@@ -481,7 +482,7 @@ fun PairQrScreen(store: AppStore, onBack: () -> Unit, onManual: () -> Unit, onPa
     /** One scan: parse, then exchange. Re-arms on failure so a retry is possible. */
     fun handleScan(value: String) {
         if (pairing) return
-        when (val result = parsePairingUrl(value)) {
+        when (val result = parsePairingUrl(extractPairingUrlFromQrPayload(value))) {
             is PairingUrlResult.Invalid -> failure = result.reason.message
             is PairingUrlResult.Valid -> {
                 pairing = true

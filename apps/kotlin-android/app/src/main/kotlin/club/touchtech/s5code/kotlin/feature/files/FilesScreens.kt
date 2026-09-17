@@ -24,6 +24,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.ArrowForward
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.FolderOpen
@@ -690,6 +691,9 @@ fun WebPreviewScreen(
         loadError = null
     }
 
+    val context = LocalContext.current
+    val isPdf = path.substringBefore('?').substringBefore('#').lowercase().endsWith(".pdf")
+
     S5Screen(
         title = path.substringAfterLast('/'),
         subtitle = "Preview",
@@ -713,6 +717,27 @@ fun WebPreviewScreen(
                 label = "Reload preview",
                 onClick = { dispatch(WorkspaceWebAction.Reload) },
             )
+            // Android WebView cannot render a PDF inline (it treats it as a
+            // download), so the honest path is the signed URL in an external
+            // viewer — the same escape the RN screen's "Open PDF" action takes.
+            if (isPdf) {
+                (state.value as? Remote.Loaded)?.value?.let { url ->
+                    S5IconButton(
+                        icon = Icons.AutoMirrored.Rounded.OpenInNew,
+                        label = "Open PDF",
+                        onClick = {
+                            runCatching {
+                                context.startActivity(
+                                    android.content.Intent(
+                                        android.content.Intent.ACTION_VIEW,
+                                        android.net.Uri.parse(url),
+                                    )
+                                )
+                            }.onFailure { loadError = "No app can open this PDF." }
+                        },
+                    )
+                }
+            }
             S5IconButton(
                 icon = Icons.AutoMirrored.Rounded.InsertDriveFile,
                 label = "View as text",

@@ -101,6 +101,11 @@ data class StoredNewTaskDraft(
      * `providerOptionDescriptors` drops it on the way to the UI.
      */
     val options: Map<String, StoredOptionValue> = emptyMap(),
+    /**
+     * Sharesheet ids already merged into the draft. Persisted so a share
+     * consumed before a process death cannot be re-imported as duplicate text.
+     */
+    val importedShareIds: List<String> = emptyList(),
 )
 
 /** One persisted provider option value. Exactly one field is set. */

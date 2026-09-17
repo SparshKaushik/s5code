@@ -97,7 +97,13 @@ data class ServerProviderDto(
     val auth: ServerProviderAuthDto = ServerProviderAuthDto(),
     val availability: String? = null,
     val unavailableReason: String? = null,
-    val showInteractionModeToggle: Boolean = false,
+    /**
+     * `false` means the provider owns mode switching (a client must not offer
+     * plan/default). Absent is not false — legacy snapshots omit the field and
+     * the toggle stays available, matching `showInteractionModeToggle !== false`
+     * in the other clients.
+     */
+    val showInteractionModeToggle: Boolean? = null,
     val requiresNewThreadForModelChange: Boolean = false,
     val models: List<ServerProviderModelDto> = emptyList(),
     val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
@@ -114,6 +120,10 @@ data class ServerConfigDto(
     val environment: ServerEnvironmentDto = ServerEnvironmentDto(),
     val cwd: String = "",
     val providers: List<ServerProviderDto> = emptyList(),
+    /** Top-level capability flags from `ServerConfig` in `contracts/server.ts`. */
+    val shellResumeCompletionMarker: Boolean = false,
+    val threadResumeCompletionMarker: Boolean = false,
+    val threadSnapshotPagination: Boolean = false,
 )
 
 @Serializable
@@ -125,15 +135,47 @@ data class ServerEnvironmentDto(
     val capabilities: ServerCapabilitiesDto = ServerCapabilitiesDto(),
 )
 
+/**
+ * One frame of `subscribeServerConfig` (`ServerConfigStreamEvent` in
+ * `contracts/server.ts`). The union is flattened: this client reads the
+ * snapshot wholesale, applies `providerStatuses` for live provider health, and
+ * ignores the settings/keybindings/theme variants it does not consume.
+ */
+@Serializable
+data class ServerConfigStreamEventDto(
+    val version: Int = 0,
+    val type: String = "",
+    val config: ServerConfigDto? = null,
+    val payload: ServerConfigStreamPayloadDto? = null,
+)
+
+@Serializable
+data class ServerConfigStreamPayloadDto(
+    /** `providerStatuses` payload — the full provider list, not a delta. */
+    val providers: List<ServerProviderDto>? = null,
+)
+
 @Serializable
 data class ServerCapabilitiesDto(
     val connectionProbe: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
     val threadPinning: Boolean = false,
+    val threadPinReorder: Boolean = false,
+    val threadActiveReorder: Boolean = false,
     val threadTitleRegeneration: Boolean = false,
     val pullRequests: Boolean = false,
+    /** Absent on servers older than pending attachment uploads. */
+    val attachmentUploads: Boolean = false,
+    /** Question answers may carry uploaded attachments. */
+    val questionAttachments: Boolean = false,
+    /** Absent on servers that only accept image uploads. */
+    val fileAttachments: FileAttachmentsCapabilityDto? = null,
 )
+
+/** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */
+@Serializable
+data class FileAttachmentsCapabilityDto(val maxUploadBytes: Long = 0)
 
 /* ── Git / VCS ───────────────────────────────────────────────────────── */
 
@@ -266,6 +308,41 @@ data class TerminalSnapshotDto(
     val label: String = "",
     val updatedAt: String? = null,
     val sequence: Long? = null,
+    val hasRunningSubprocess: Boolean = false,
+)
+
+/**
+ * `TerminalSummary` in `packages/contracts/src/terminal.ts` — one row of the
+ * session list the terminal switcher renders. Same fields as
+ * [TerminalSnapshotDto] minus the scrollback.
+ */
+@Serializable
+data class TerminalSummaryDto(
+    val threadId: String = "",
+    val terminalId: String = "",
+    val cwd: String = "",
+    val worktreePath: String? = null,
+    val status: String = "starting",
+    val pid: Int? = null,
+    val exitCode: Int? = null,
+    val exitSignal: Int? = null,
+    val hasRunningSubprocess: Boolean = false,
+    val label: String = "",
+    val updatedAt: String? = null,
+)
+
+/**
+ * One frame of `subscribeTerminalMetadata`, flattened like
+ * [TerminalStreamEventDto]: `snapshot` carries the whole list, `upsert` one row,
+ * `remove` just the ids.
+ */
+@Serializable
+data class TerminalMetadataStreamEventDto(
+    val type: String,
+    val terminals: List<TerminalSummaryDto>? = null,
+    val terminal: TerminalSummaryDto? = null,
+    val threadId: String = "",
+    val terminalId: String = "",
 )
 
 /**
@@ -408,4 +485,15 @@ data class AssetUrlResultDto(
     val relativeUrl: String = "",
     val expiresAt: Long = 0,
     val sourcePath: String? = null,
+)
+
+/**
+ * `attachments.createUploadUrl` result. The relative URL is a self-signed
+ * upload endpoint: bytes go to it with a plain POST, no session credential.
+ */
+@Serializable
+data class AttachmentUploadUrlResultDto(
+    val attachmentId: String = "",
+    val relativeUrl: String = "",
+    val expiresAt: Long = 0,
 )

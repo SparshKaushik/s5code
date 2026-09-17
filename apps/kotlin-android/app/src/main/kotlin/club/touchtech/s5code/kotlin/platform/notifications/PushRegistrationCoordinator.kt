@@ -57,31 +57,14 @@ class PushRegistrationCoordinator(
         }
     }
 
+    /**
+     * A new turn un-dismisses the ongoing card so the next relay update shows.
+     * The relay drives the card from its aggregate payload; there is no
+     * server-side registration for it.
+     */
     fun arm(threadTitle: String, projectTitle: String) {
-        if (
-            !preferences.value.liveUpdatesEnabled ||
-                Build.VERSION.SDK_INT < 36 ||
-                PushRuntime.state.value.status != PushRegistrationStatus.Registered
-        ) {
-            return
-        }
-        val generation = java.util.UUID.randomUUID().toString()
-        if (!AndroidLiveUpdateNotifications.arm(context, generation, threadTitle, projectTitle)) return
-        scope.launch {
-            registrationLock.withLock {
-                val relayClient = relay ?: return@withLock
-                if (PushRuntime.state.value.status != PushRegistrationStatus.Registered) return@withLock
-                runCatching {
-                        relayClient.registerAndroidLiveUpdate(PushRuntime.deviceId(context), generation)
-                    }
-                    .onFailure {
-                        PushRuntime.publish(
-                            PushRegistrationStatus.Failed,
-                            it.message ?: "The Live Update could not be registered.",
-                        )
-                    }
-            }
-        }
+        if (!preferences.value.liveUpdatesEnabled || Build.VERSION.SDK_INT < 36) return
+        AndroidLiveUpdateNotifications.arm(context)
     }
 
     fun refresh() {
@@ -94,7 +77,7 @@ class PushRegistrationCoordinator(
         if (relayClient != null && account.value is CloudAccountState.SignedIn) {
             runCatching { relayClient.unregisterDevice(deviceId) }
         }
-        AndroidLiveUpdateNotifications.dismiss(context)
+        AndroidLiveUpdateNotifications.clear(context)
         PushRuntime.clearAccountRegistration(context)
     }
 
@@ -139,8 +122,10 @@ class PushRegistrationCoordinator(
                     deviceId = PushRuntime.deviceId(context),
                     label = PairingClient.deviceLabel(),
                     platform = "android",
+                    androidApiLevel = Build.VERSION.SDK_INT,
                     appVersion = BuildConfig.VERSION_NAME,
-                    fcmToken = token,
+                    bundleId = BuildConfig.APPLICATION_ID,
+                    pushToken = token,
                     preferences =
                         RelayAgentAwarenessPreferencesDto(
                             liveActivitiesEnabled =
@@ -155,13 +140,25 @@ class PushRegistrationCoordinator(
             val signature = registration.signature()
             if (PushRuntime.registrationMatches(context, signedIn.accountId, signature)) {
                 PushRuntime.publish(PushRegistrationStatus.Registered, "This device is registered with S5 Connect.")
+                // Identity may already be configured; configure is idempotent.
+                AndroidLiveUpdateNotifications.configure(
+                    context,
+                    deviceId = registration.deviceId,
+                    userId = signedIn.accountId,
+                    ongoingEnabled = registration.preferences.liveActivitiesEnabled,
+                )
                 return@withLock
             }
             PushRuntime.publish(PushRegistrationStatus.Registering, "Registering this device with S5 Connect…")
             try {
                 relay.registerDevice(registration)
                 PushRuntime.acceptedRegistration(context, signedIn.accountId, signature)
-                registerArmedLiveUpdate()
+                AndroidLiveUpdateNotifications.configure(
+                    context,
+                    deviceId = registration.deviceId,
+                    userId = signedIn.accountId,
+                    ongoingEnabled = registration.preferences.liveActivitiesEnabled,
+                )
             } catch (error: Exception) {
                 PushRuntime.publish(
                     PushRegistrationStatus.Failed,
@@ -169,13 +166,7 @@ class PushRegistrationCoordinator(
                 )
             }
         }
-
-    private suspend fun registerArmedLiveUpdate() {
-        if (!preferences.value.liveUpdatesEnabled || Build.VERSION.SDK_INT < 36) return
-        val generation = AndroidLiveUpdateNotifications.currentGeneration(context) ?: return
-        relay?.registerAndroidLiveUpdate(PushRuntime.deviceId(context), generation)
     }
-}
 
 internal fun RelayDeviceRegistrationRequestDto.signature(): String =
     listOf(
@@ -183,8 +174,10 @@ internal fun RelayDeviceRegistrationRequestDto.signature(): String =
         deviceId,
             label,
             platform,
+            androidApiLevel?.toString().orEmpty(),
             appVersion.orEmpty(),
-            fcmToken.orEmpty(),
+            bundleId.orEmpty(),
+            pushToken.orEmpty(),
             preferences.liveActivitiesEnabled,
             preferences.notificationsEnabled,
             preferences.notifyOnApproval,

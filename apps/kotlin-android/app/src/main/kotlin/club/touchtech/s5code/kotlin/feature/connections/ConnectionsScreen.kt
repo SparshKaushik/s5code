@@ -20,6 +20,7 @@ import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -46,6 +47,7 @@ import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
 import club.touchtech.s5code.kotlin.design.component.S5ShapeBadge
 import club.touchtech.s5code.kotlin.design.component.S5StatusPill
+import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
@@ -93,7 +95,13 @@ fun ConnectionsScreen(
                 verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
             ) {
                 items(environments, key = { it.id.value }) { environment ->
-                    EnvironmentCard(environment, onClick = { onOpen(environment.id.value) })
+                    EnvironmentCard(
+                        environment,
+                        onClick = { onOpen(environment.id.value) },
+                        onToggle = { enabled ->
+                            store.setEnvironmentEnabled(environment.id, enabled)
+                        },
+                    )
                 }
             }
         }
@@ -101,7 +109,11 @@ fun ConnectionsScreen(
 }
 
 @Composable
-private fun EnvironmentCard(environment: Environment, onClick: () -> Unit) {
+private fun EnvironmentCard(
+    environment: Environment,
+    onClick: () -> Unit,
+    onToggle: (Boolean) -> Unit,
+) {
     val health = connectionPresentation(environment.state)
     S5Card(
         tone = if (health.offline) S5CardTone.Receded else S5CardTone.Standard,
@@ -139,14 +151,25 @@ private fun EnvironmentCard(environment: Environment, onClick: () -> Unit) {
                         containerColor = health.container,
                         contentColor = health.content,
                     )
-                    Text(
-                        "seen ${environment.lastSeenLabel}",
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+                    // A switched-off environment never connected, so "seen" is
+                    // meaningless for it.
+                    if (environment.isEnabled) {
+                        Text(
+                            "seen ${environment.lastSeenLabel}",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 }
             }
-            Icon(health.icon, contentDescription = null, modifier = Modifier.size(20.dp))
+            // The switch, not the health icon, trails the row: it is the control
+            // the RN client offers on the same row, and the pill already says the
+            // state.
+            Switch(
+                checked = environment.isEnabled,
+                onCheckedChange = onToggle,
+                modifier = Modifier.padding(start = S5Theme.spacing.small),
+            )
         }
     }
 }
@@ -192,7 +215,32 @@ fun ConnectionDetailScreen(
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
             Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                S5Notice(icon = health.icon, text = "${health.label} · seen ${environment.lastSeenLabel}")
+                S5Notice(
+                    icon = health.icon,
+                    text =
+                        if (environment.isEnabled) {
+                            "${health.label} · seen ${environment.lastSeenLabel}"
+                        } else {
+                            health.label
+                        },
+                )
+            }
+
+            S5RowGroup(title = "This device") {
+                S5SwitchRow(
+                    icon = health.icon,
+                    label = "Connected",
+                    supporting =
+                        if (environment.isEnabled) {
+                            "This environment syncs with this device."
+                        } else {
+                            "Off keeps ${environment.label} saved but disconnects it."
+                        },
+                    checked = environment.isEnabled,
+                    onCheckedChange = { enabled ->
+                        store.setEnvironmentEnabled(environment.id, enabled)
+                    },
+                )
             }
 
             S5RowGroup(title = "Devices") {
@@ -231,16 +279,18 @@ fun ConnectionDetailScreen(
                 Modifier.fillMaxWidth().padding(S5Theme.spacing.gutter),
                 horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
             ) {
-                S5Button(
-                    text = "Reconnect",
-                    // Reconnect has no pending state of its own: the health dot and
-                    // the notice above already report the phase, and a third label
-                    // saying "Reconnecting…" would disagree with them within a
-                    // frame.
-                    onClick = { store.retryEnvironment(environment.id) },
-                    icon = Icons.Rounded.Refresh,
-                    emphasis = S5ActionEmphasis.Primary,
-                )
+                if (environment.isEnabled) {
+                    S5Button(
+                        text = "Reconnect",
+                        // Reconnect has no pending state of its own: the health dot and
+                        // the notice above already report the phase, and a third label
+                        // saying "Reconnecting…" would disagree with them within a
+                        // frame.
+                        onClick = { store.retryEnvironment(environment.id) },
+                        icon = Icons.Rounded.Refresh,
+                        emphasis = S5ActionEmphasis.Primary,
+                    )
+                }
                 S5Button(
                     text = "Remove",
                     onClick = {
@@ -248,7 +298,7 @@ fun ConnectionDetailScreen(
                             S5ConfirmDialogRequest(
                                 title = "Remove environment?",
                                 message =
-                                    "This removes ${environment.label} and its credential from this device. The server is not deleted.",
+                                    "This removes ${environment.label} and its credential from this device. Switch it off instead to keep it saved.",
                                 confirmText = "Remove",
                                 destructive = true,
                                 onConfirm = {

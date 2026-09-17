@@ -2,6 +2,7 @@ package club.touchtech.s5code.kotlin.transport
 
 import java.io.IOException
 import java.util.concurrent.TimeUnit
+import club.touchtech.s5code.kotlin.BuildConfig
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
@@ -123,9 +124,35 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         httpBaseUrl: String,
         wsBaseUrl: String,
         credential: EnvironmentCredential,
+        connectionMethod: String? = null,
     ): String {
         val ticket = webSocketTicket(httpBaseUrl, credential).ticket
-        return socketUrl(wsBaseUrl, ticket)
+        return socketUrl(wsBaseUrl, ticket, connectionMethod)
+    }
+
+    /**
+     * Authenticated GET for the orchestration snapshot fast-path
+     * (`/api/orchestration/shell`, `/api/orchestration/threads/:id`). Callers
+     * decode; the credential comes from the session's live authorize result so
+     * a DPoP environment signs the request like the socket ticket does.
+     */
+    suspend fun <T> getAuthenticated(
+        httpBaseUrl: String,
+        path: String,
+        credential: EnvironmentCredential,
+        serializer: kotlinx.serialization.KSerializer<T>,
+    ): T {
+        val url = endpoint(httpBaseUrl, path)
+        val builder = Request.Builder().url(url).get()
+        when (credential) {
+            is EnvironmentCredential.Bearer ->
+                builder.header("authorization", "Bearer ${credential.token}")
+            is EnvironmentCredential.Dpop -> {
+                builder.header("authorization", "DPoP ${credential.token}")
+                builder.header("dpop", credential.proof("GET", url, credential.token))
+            }
+        }
+        return executeSerialized(builder.build(), serializer)
     }
 
     private suspend inline fun <reified T> authenticated(
@@ -162,10 +189,21 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
     }
 
     private suspend inline fun <reified T> execute(request: Request): T =
+        executeSerialized(request, kotlinx.serialization.serializer<T>())
+
+    private suspend fun <T> executeSerialized(
+        request: Request,
+        serializer: kotlinx.serialization.KSerializer<T>,
+    ): T =
         withContext(Dispatchers.IO) {
+            // Per-request wall clock: the shared client reads forever so a WebSocket
+            // can idle, but a hung descriptor/ticket/snapshot must fail in seconds,
+            // not stall a connection attempt until Android kills the coroutine.
+            val callClient =
+                client.newBuilder().callTimeout(REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
             val response =
                 try {
-                    client.newCall(request).execute()
+                    callClient.newCall(request).execute()
                 } catch (cause: IOException) {
                     throw EnvironmentHttpError.unreachable(cause)
                 }
@@ -173,7 +211,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
                 val body = it.body.string()
                 if (!it.isSuccessful) throw EnvironmentHttpError.forStatus(it.code, body)
                 try {
-                    json.decodeFromString<T>(body)
+                    json.decodeFromString(serializer, body)
                 } catch (cause: Exception) {
                     throw EnvironmentHttpError(
                         EnvironmentHttpErrorKind.Protocol,
@@ -188,21 +226,50 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         httpBaseUrl.trimEnd('/') + path
 
     companion object {
+        /** Whole-request ceiling for the HTTP half; RN caps these at ~10s. */
+        private const val REQUEST_TIMEOUT_MS = 10_000L
+
         /**
-         * Appends the ticket to the socket URL, matching `resolveRemoteSocketUrl`
-         * in `packages/client-runtime/src/authorization/remote.ts`.
+         * Appends the ticket and the client-identity params to the socket URL,
+         * matching `resolveRemoteSocketUrl` + `appendClientConnectionParams` in
+         * `packages/client-runtime/src/authorization/remote.ts`. The server reads
+         * them off the `/ws` upgrade; unknown params are ignored by old servers.
          *
          * `/ws` is only added when the base has no path of its own. A relay tunnel
          * can hand back a URL that already routes, and overwriting that path sends
          * the upgrade to the wrong place.
          */
-        fun socketUrl(wsBaseUrl: String, ticket: String): String {
-            val encoded = java.net.URLEncoder.encode(ticket, "UTF-8")
+        fun socketUrl(wsBaseUrl: String, ticket: String, connectionMethod: String? = null): String {
             val trimmed = wsBaseUrl.trim().trimEnd('/')
             val path = runCatching { java.net.URI(trimmed).rawPath }.getOrNull().orEmpty()
             val base = if (path.isEmpty()) "$trimmed/ws" else trimmed
-            return "$base?wsTicket=$encoded"
+            val separator = if ('?' in base) '&' else '?'
+            val params =
+                buildString {
+                    append("wsTicket=").append(java.net.URLEncoder.encode(ticket, "UTF-8"))
+                    append("&clientSurface=mobile")
+                    append("&clientAppVersion=")
+                        .append(java.net.URLEncoder.encode(BuildConfig.VERSION_NAME, "UTF-8"))
+                    append("&clientDeviceType=phone")
+                    append("&clientOs=Android")
+                    deviceApiLevel()?.let { append("&clientOsMajorVersion=").append(it) }
+                    deviceModel()?.let {
+                        append("&clientDeviceModel=").append(java.net.URLEncoder.encode(it, "UTF-8"))
+                    }
+                    if (connectionMethod != null) {
+                        append("&connectionMethod=").append(connectionMethod)
+                    }
+                }
+            return "$base$separator$params"
         }
+
+        // `android.os.Build` is a stubbed class on the unit-test JVM, so both
+        // reads are defensive; the values are advisory telemetry either way.
+        private fun deviceApiLevel(): Int? =
+            runCatching { android.os.Build.VERSION.SDK_INT }.getOrNull()?.takeIf { it > 0 }
+
+        private fun deviceModel(): String? =
+            runCatching { android.os.Build.MODEL }.getOrNull()?.takeIf { it.isNotBlank() }
 
         const val TOKEN_EXCHANGE_GRANT = "urn:ietf:params:oauth:grant-type:token-exchange"
         const val ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"

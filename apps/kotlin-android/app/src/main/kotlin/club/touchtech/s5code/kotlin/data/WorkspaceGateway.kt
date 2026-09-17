@@ -13,9 +13,11 @@ import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.RepositoryRef
 import club.touchtech.s5code.kotlin.model.ReviewFile
+import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import club.touchtech.s5code.kotlin.model.SourceFile
 import club.touchtech.s5code.kotlin.model.TerminalSession
+import club.touchtech.s5code.kotlin.model.TerminalSummary
 import club.touchtech.s5code.kotlin.model.ThreadDetail
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
@@ -60,6 +62,9 @@ data class GitActionResult(
     val pullRequestUrl: String? = null,
 )
 
+/** A bounded read of a signed asset URL; `truncated` when the file is larger. */
+data class AssetBytesRead(val bytes: ByteArray, val truncated: Boolean)
+
 interface WorkspaceGateway {
     val environments: StateFlow<List<Environment>>
     val projects: StateFlow<List<Project>>
@@ -67,10 +72,19 @@ interface WorkspaceGateway {
     val archived: StateFlow<List<ThreadSummary>>
 
     /**
+     * Refetches the archived list for every connected environment. The archive
+     * list is a unary read, not a stream, so screens that show it should call
+     * this on focus.
+     */
+    fun refreshArchived() = Unit
+
+    /**
      * Called when the app becomes interactive after backgrounding. Implementations
      * should invalidate half-open mobile transports and re-establish live streams.
+     * [backgroundedMillis] decides between a cheap probe and a full restart —
+     * a 2-second backgrounding must not pay for re-authorizing every session.
      */
-    fun refreshConnections() = Unit
+    fun refreshConnections(backgroundedMillis: Long = Long.MAX_VALUE) = Unit
 
     /**
      * Actionable approval and structured-input requests from live threads.
@@ -122,6 +136,13 @@ interface WorkspaceGateway {
     fun threadSyncPhase(environmentId: EnvironmentId, id: ThreadId): StateFlow<ThreadSyncPhase>
 
     /**
+     * Fetches the next page of older turns into the open detail. Only
+     * meaningful when the server advertises `threadSnapshotPagination` and the
+     * detail's page still has `hasMore`; both are checked inside.
+     */
+    suspend fun loadOlderTurns(environmentId: EnvironmentId, id: ThreadId): Boolean
+
+    /**
      * Publishes the exact client-generated creation keys still owned by the
      * durable outbox. A thread screen may subscribe before bootstrap reaches the
      * server; gateways use this to treat that initial not-found as pending rather
@@ -161,7 +182,16 @@ interface WorkspaceGateway {
         id: ThreadId,
         inputId: String,
         answers: Map<String, UserInputAnswer>,
+        /**
+         * Pending-upload ids staged per question, emitted as
+         * `attachmentsByQuestionId` when non-empty. Null or empty means "no
+         * files attached" — the field is omitted rather than sent as `{}`.
+         */
+        attachmentsByQuestionId: Map<String, List<SentAttachment>> = emptyMap(),
     )
+
+    /** Closes a dismissible user-input request without answering it. */
+    suspend fun dismissInput(environmentId: EnvironmentId, id: ThreadId, inputId: String) = Unit
 
     /**
      * Searches persisted user and assistant messages on every selected environment.
@@ -187,6 +217,8 @@ interface WorkspaceGateway {
         branch: String,
         newWorktree: Boolean,
         attachments: List<ComposerAttachment> = emptyList(),
+        /** An existing worktree the thread should open in; ignored when [newWorktree]. */
+        worktreePath: String? = null,
         threadId: ThreadId? = null,
         delivery: TurnDeliveryMetadata? = null,
     ): ThreadId
@@ -247,8 +279,52 @@ interface WorkspaceGateway {
      */
     fun prewarmFile(environmentId: EnvironmentId, id: ThreadId, path: String)
 
-    /** Signs an image already attached to a transcript message. */
-    suspend fun attachmentUrl(environmentId: EnvironmentId, attachmentId: String): String
+    /**
+     * Signs an attachment already held on the server — a sent message file or a
+     * pending upload a question answer referenced. [fileName] and [mimeType] are
+     * baked into the signed URL so downloads carry a real filename and
+     * Content-Type; [disposition] is "inline" for in-app viewers, omitted for a
+     * plain download.
+     */
+    suspend fun attachmentUrl(
+        environmentId: EnvironmentId,
+        attachmentId: String,
+        fileName: String? = null,
+        mimeType: String? = null,
+        disposition: String? = null,
+    ): String
+
+    /**
+     * Mints a pending upload (`attachments.createUploadUrl`) and POSTs [file]'s
+     * bytes to the self-signed URL it returns, as the attachment's declared
+     * Content-Type. Returns the server-issued attachment id that
+     * `attachmentsByQuestionId` and `assets.createUrl` reference. [type] is
+     * "image" or "file".
+     */
+    suspend fun uploadPendingAttachment(
+        environmentId: EnvironmentId,
+        type: String,
+        name: String,
+        mimeType: String,
+        file: java.io.File,
+    ): String
+
+    /** Drops a pending upload the draft no longer references (`attachments.delete`). */
+    suspend fun deletePendingAttachment(environmentId: EnvironmentId, attachmentId: String)
+
+    /**
+     * Reads up to [maxBytes] from a signed asset URL, honoring HTTP range
+     * responses. [truncated] is true when the file did not fit the window. No
+     * credential: the URL's signed path is the authorization.
+     */
+    suspend fun readAssetBytes(url: String, maxBytes: Long): AssetBytesRead
+
+    /**
+     * Streams a signed asset URL into [target], returning the file on success.
+     * Sharing an attachment hands another app real bytes; the expiring link is
+     * useless off-device.
+     */
+    suspend fun downloadAsset(url: String, target: java.io.File): java.io.File
 
     /**
      * An absolute, signed URL for a project's icon, or null when the project has
@@ -288,6 +364,14 @@ interface WorkspaceGateway {
         cols: Int = DEFAULT_TERMINAL_COLS,
         rows: Int = DEFAULT_TERMINAL_ROWS,
     ): Flow<TerminalSession>
+
+    /**
+     * Every terminal the server knows about on [environmentId], from
+     * `subscribeTerminalMetadata`. This is the session-switcher list: it includes
+     * terminals nobody has attached, which is what lets the screen offer "open
+     * another shell" and pick a live one to fall back to on exit.
+     */
+    fun terminalSessions(environmentId: EnvironmentId): Flow<List<TerminalSummary>>
 
     /**
      * Workspace paths matching a partial `@` mention, from the server's file
@@ -406,6 +490,23 @@ interface WorkspaceGateway {
         terminalId: String,
         deleteHistory: Boolean = false,
     )
+
+    /**
+     * Applies one Move up/down plan: a list of `threadId → orderKey` writes.
+     * All ids belong to [environmentId]; cross-environment rows are never
+     * assigned keys.
+     */
+    suspend fun reorderThreads(
+        environmentId: EnvironmentId,
+        section: ReorderSection,
+        assignments: List<Pair<ThreadId, String>>,
+    )
+}
+
+/** Which list section a reorder writes — pinned keys and active keys are separate commands. */
+enum class ReorderSection {
+    Pinned,
+    Active,
 }
 
 /**

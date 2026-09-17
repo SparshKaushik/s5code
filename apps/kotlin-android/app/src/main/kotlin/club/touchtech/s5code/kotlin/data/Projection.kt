@@ -22,17 +22,21 @@ import club.touchtech.s5code.kotlin.model.ProviderOptionDescriptor
 import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
 import club.touchtech.s5code.kotlin.model.ProviderOptionValue
 import club.touchtech.s5code.kotlin.model.RuntimeMode
+import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.ThreadDetail
 import club.touchtech.s5code.kotlin.model.ThreadId
+import club.touchtech.s5code.kotlin.model.ThreadPage
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.model.ToolState
 import club.touchtech.s5code.kotlin.model.TurnInfo
 import club.touchtech.s5code.kotlin.model.UserInputKind
+import club.touchtech.s5code.kotlin.model.UserInputOption
 import club.touchtech.s5code.kotlin.transport.wire.ModelCapabilitiesDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectShellDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadActivityDto
+import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
 import kotlinx.serialization.json.JsonArray
@@ -40,8 +44,13 @@ import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
+import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.longOrNull
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 
 /**
  * Maps wire DTOs onto the presentation models the screens already render.
@@ -197,6 +206,29 @@ private fun isSettled(shell: ThreadShellDto, nowMillis: Long): Boolean {
 /** True while a thread lives on the archive screen rather than the home list. */
 fun isArchived(shell: ThreadShellDto): Boolean = shell.archivedAt != null
 
+/**
+ * Merges an older disjoint page below the currently loaded window — `mergeOlderPage`
+ * in `packages/client-runtime/src/state/threads.ts`. All four windowed collections
+ * prepend; identity dedupe guards the overlapping-page case so a row never renders
+ * twice. Thread metadata stays the loaded (newer) snapshot's.
+ */
+fun mergeOlderThreadPage(loaded: ThreadDto, older: ThreadDto): ThreadDto {
+    fun mergeById(olderRows: List<ThreadActivityDto>, loadedRows: List<ThreadActivityDto>) =
+        loadedRows.mapTo(mutableSetOf()) { it.id }.let { seen ->
+            olderRows.filter { it.id !in seen } + loadedRows
+        }
+    val loadedMessageIds = loaded.messages.mapTo(mutableSetOf()) { it.id }
+    val loadedPlanIds = loaded.proposedPlans.mapTo(mutableSetOf()) { it.id }
+    val loadedCheckpointTurns = loaded.checkpoints.mapTo(mutableSetOf()) { it.turnId }
+    return loaded.copy(
+        messages = older.messages.filter { it.id !in loadedMessageIds } + loaded.messages,
+        activities = mergeById(older.activities, loaded.activities),
+        proposedPlans = older.proposedPlans.filter { it.id !in loadedPlanIds } + loaded.proposedPlans,
+        checkpoints =
+            older.checkpoints.filter { it.turnId !in loadedCheckpointTurns } + loaded.checkpoints,
+    )
+}
+
 fun projectFrom(environmentId: EnvironmentId, dto: ProjectShellDto): Project =
     Project(
         id = ProjectId(dto.id),
@@ -226,9 +258,14 @@ fun threadSummaryFrom(
         provider = driverFor(shell.modelSelection.instanceId),
         model = shell.modelSelection.model,
         branch = shell.branch,
+        worktreePath = shell.worktreePath,
         updatedLabel = relativeLabel(shell.updatedAt ?: shell.createdAt, nowMillis),
         updatedAtMillis = parseInstant(shell.updatedAt ?: shell.createdAt) ?: 0,
+        createdAtMillis = parseInstant(shell.createdAt) ?: 0,
+        unsettledAtMillis = parseInstant(shell.unsettledAt) ?: 0,
         pinned = shell.pinnedAt != null,
+        pinOrderKey = shell.pinOrderKey,
+        activeOrderKey = shell.activeOrderKey,
         snoozedUntilLabel =
             shell.snoozedUntil?.takeIf { status == ThreadStatus.Snoozed }?.let {
                 absoluteLabel(it)
@@ -283,6 +320,8 @@ fun threadDetailFrom(
     thread: ThreadDto,
     driverFor: (String) -> ProviderInstance,
     nowMillis: Long,
+    page: ThreadDetailPageDto? = null,
+    loadingOlder: Boolean = false,
 ): ThreadDetail {
     val sortedActivities = thread.activities.sortedWith(activityOrder)
     val summary =
@@ -293,10 +332,28 @@ fun threadDetailFrom(
             nowMillis,
         )
 
+    // A folded user-input record supersedes the server's synthetic user message
+    // for the same answers (`async-answer:<requestId>`); rendering both doubles
+    // the answer in the transcript.
+    val foldedAnswerMessageIds =
+        thread.activities
+            .asSequence()
+            .filter {
+                it.kind == "user-input.requested" ||
+                    it.kind == "user-input.resolved" ||
+                    it.kind == "user-input.answer-submitted"
+            }
+            .mapNotNull { (it.payload as? JsonObject)?.string("requestId") }
+            .map { "async-answer:$it" }
+            .toSet()
+
     val entries = buildList {
         thread.messages.forEach { message ->
+            val contextRecordAttachments =
+                (message.context as? JsonObject)?.let(::contextAttachmentIdsOf) ?: emptySet()
             when (message.role) {
                 "user" ->
+                    if (message.id !in foldedAnswerMessageIds) {
                     add(
                         Sortable(
                             message.createdAt,
@@ -305,23 +362,34 @@ fun threadDetailFrom(
                                 text = message.text,
                                 timeLabel = timeLabel(message.createdAt),
                                 attachments =
-                                    message.attachments.orEmpty().map { attachment ->
-                                        ComposerAttachment(
-                                            id = attachment.id,
-                                            name = attachment.name,
-                                            mimeType = attachment.mimeType,
-                                            sizeBytes = attachment.sizeBytes,
-                                            // Attachment bytes are not in the
-                                            // snapshot; a sent image renders as a
-                                            // named chip rather than a broken
-                                            // thumbnail.
-                                            uri = "",
-                                        )
-                                    },
+                                    message.attachments.orEmpty()
+                                        // Context-bound attachments render as
+                                        // their reference chip, not a second
+                                        // thumbnail (`UserMessageContent`'s
+                                        // attachment suppression in the RN feed).
+                                        .filter { attachment ->
+                                            attachment.id !in contextRecordAttachments
+                                        }
+                                        .map { attachment ->
+                                            ComposerAttachment(
+                                                id = attachment.id,
+                                                name = attachment.name,
+                                                mimeType = attachment.mimeType,
+                                                sizeBytes = attachment.sizeBytes,
+                                                type = attachment.type,
+                                                // Attachment bytes are not in the
+                                                // snapshot; a sent image renders as a
+                                                // named chip rather than a broken
+                                                // thumbnail.
+                                                uri = "",
+                                            )
+                                        },
+                                contextRecords = contextRecordLabels(message.context),
                                 atMillis = parseInstant(message.createdAt) ?: 0L,
                             ),
                         )
                     )
+                    }
                 // System messages are provider bookkeeping, not conversation.
                 // An assistant message with neither text nor images is skipped for
                 // the same reason RN skips it: it renders as an orphaned timestamp.
@@ -342,6 +410,7 @@ fun threadDetailFrom(
                                                 name = attachment.name,
                                                 mimeType = attachment.mimeType,
                                                 sizeBytes = attachment.sizeBytes,
+                                                type = attachment.type,
                                                 uri = "",
                                             )
                                         },
@@ -382,6 +451,14 @@ fun threadDetailFrom(
         approval = pendingApprovalOf(sortedActivities),
         userInput = pendingUserInputOf(sortedActivities),
         workspaceRoot = thread.worktreePath,
+        page =
+            page?.let {
+                ThreadPage(
+                    beforeCursor = it.beforeCursor,
+                    hasMore = it.hasMore,
+                    loadingOlder = loadingOlder,
+                )
+            },
         latestTurn =
             thread.latestTurn?.let { turn ->
                 TurnInfo(
@@ -492,6 +569,38 @@ fun optionDescriptorsFrom(capabilities: ModelCapabilitiesDto?): List<ProviderOpt
 
 private data class Sortable(val createdAt: String?, val entry: FeedEntry)
 
+/**
+ * `contextId → display label` from a message's `context` records
+ * (`OrchestrationMessageContext`): the only fields the bubble needs are the
+ * kind and label of each record a `t3-context://` reference can point at.
+ * Unknown record kinds are kept — the reference still labels itself.
+ */
+private fun contextRecordLabels(context: JsonElement?): Map<String, FeedEntry.ContextRecordLabel> {
+    val records = (context as? JsonObject)?.get("records") as? JsonArray ?: return emptyMap()
+    return records.mapNotNull { element ->
+        val record = element as? JsonObject ?: return@mapNotNull null
+        val id = record.string("contextId") ?: return@mapNotNull null
+        id to
+            FeedEntry.ContextRecordLabel(
+                kind = record.string("kind").orEmpty(),
+                label = record.string("label").orEmpty(),
+            )
+    }.toMap()
+}
+
+/**
+ * Attachment ids owned by `image`/`file` context records: those attachments
+ * render as their in-text reference, not as a second thumbnail row.
+ */
+private fun contextAttachmentIdsOf(context: JsonObject): Set<String> {
+    val records = context["records"] as? JsonArray ?: return emptySet()
+    return records.mapNotNull { element ->
+        val record = element as? JsonObject ?: return@mapNotNull null
+        val kind = record.string("kind")
+        if (kind == "image" || kind == "file") record.string("attachmentId") else null
+    }.toSet()
+}
+
 private val activityOrder =
     compareBy<ThreadActivityDto>({ it.sequence ?: Long.MAX_VALUE }, { it.createdAt.orEmpty() }, { it.id })
 
@@ -520,7 +629,7 @@ private fun collapseToolLifecycle(sortedActivities: List<ThreadActivityDto>): Li
     val taskRows = mutableMapOf<String, Int>()
     var lastToolKey: String? = null
 
-    sortedActivities.forEach { activity ->
+    foldUserInputActivities(sortedActivities).forEach { activity ->
         if (isHiddenActivity(activity)) return@forEach
         val entry = feedEntryFor(activity) ?: return@forEach
         val payload = activity.payload as? JsonObject
@@ -558,6 +667,303 @@ private fun collapseToolLifecycle(sortedActivities: List<ThreadActivityDto>): Li
 }
 
 /**
+ * Folds `user-input.requested` / `user-input.resolved` /
+ * `user-input.answer-submitted` activities into one synthesized
+ * `answer-submitted` row per request id, following `foldUserInputActivities` in
+ * `packages/client-runtime/src/work-log/userInput.ts`.
+ *
+ * The question prompts and the submitted answers are spread across the three
+ * activities and merge into one payload carrying `questionTextById`, `answers`,
+ * and `attachmentsByQuestionId`. The synthesized row takes the *first*
+ * activity's slot in the timeline, so a question answered mid-turn renders
+ * where it was asked rather than where it was answered.
+ */
+private fun foldUserInputActivities(
+    activities: List<ThreadActivityDto>,
+): List<ThreadActivityDto> {
+    val groups = linkedMapOf<String, MutableList<ThreadActivityDto>>()
+    for (activity in activities) {
+        if (activity.kind != "user-input.requested" &&
+            activity.kind != "user-input.resolved" &&
+            activity.kind != "user-input.answer-submitted"
+        ) {
+            continue
+        }
+        val requestId =
+            (activity.payload as? JsonObject)?.string("requestId") ?: continue
+        groups.getOrPut(requestId) { mutableListOf() }.add(activity)
+    }
+    if (groups.isEmpty()) return activities
+
+    val replacements = mutableMapOf<ThreadActivityDto, ThreadActivityDto?>()
+    for ((requestId, group) in groups) {
+        val questions = mutableMapOf<String, JsonObject>()
+        val texts = linkedMapOf<String, String>()
+        val attachments = linkedMapOf<String, JsonElement>()
+        for (activity in group) {
+            val payload = activity.payload as? JsonObject ?: continue
+            (payload["questionTextById"] as? JsonObject)?.forEach { (id, text) ->
+                (text as? JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }?.let {
+                    texts[id] = it
+                }
+            }
+            (payload["questions"] as? JsonArray)?.forEach { raw ->
+                val question = raw as? JsonObject ?: return@forEach
+                val id = question.string("id") ?: return@forEach
+                questions[id] = question
+                question.string("question")?.let { texts[id] = it }
+            }
+            (payload["attachmentsByQuestionId"] as? JsonObject)?.forEach { (id, files) ->
+                attachments[id] = files
+            }
+        }
+        val submitted =
+            group.lastOrNull {
+                it.kind == "user-input.answer-submitted" &&
+                    (it.payload as? JsonObject)?.get("answers") is JsonObject
+            }
+        val rawAnswers =
+            (submitted?.payload as? JsonObject)?.get("answers") as? JsonObject
+                ?: group.lastOrNull {
+                    (it.payload as? JsonObject)?.get("answers") is JsonObject
+                }?.let { (it.payload as JsonObject)["answers"] as JsonObject }
+                ?: JsonObject(emptyMap())
+        // Display maps each stored option `value` back to its label; the wire
+        // value is an id the user never saw.
+        val answers = linkedMapOf<String, JsonElement>()
+        rawAnswers.forEach { (id, value) ->
+            val labels = mutableMapOf<String, String>()
+            (questions[id]?.get("options") as? JsonArray)?.forEach { raw ->
+                val option = raw as? JsonObject ?: return@forEach
+                val optionValue = option.string("value")
+                val optionLabel = option.string("label")
+                if (optionValue != null && optionLabel != null) labels[optionValue] = optionLabel
+            }
+            answers[id] = displayOptionAnswer(value, labels)
+        }
+        val submittedAnswer = answers.isNotEmpty() || attachments.isNotEmpty()
+        val summary =
+            when {
+                submittedAnswer -> "User input submitted"
+                group.any { it.kind == "user-input.resolved" } -> "User input dismissed"
+                else -> "User input requested"
+            }
+        val foldedPayload =
+            buildJsonObject {
+                put("requestId", requestId)
+                putJsonObject("questionTextById") { texts.forEach { (id, text) -> put(id, text) } }
+                put("answers", JsonObject(answers))
+                put("attachmentsByQuestionId", JsonObject(attachments))
+            }
+        for (activity in group) replacements[activity] = null
+        replacements[group.first()] =
+            group.first().copy(kind = "user-input.answer-submitted", summary = summary,
+                tone = "tool", payload = foldedPayload)
+    }
+
+    val folded =
+        activities.flatMap { activity ->
+            when {
+                !replacements.containsKey(activity) -> listOf(activity)
+                else -> listOfNotNull(replacements[activity])
+            }
+        }
+    return dedupeQuestionToolRows(folded)
+}
+
+/**
+ * Maps one stored answer back to display text, following `displayOptionAnswer`:
+ * strings resolve through the option value→label map, arrays recurse, and the
+ * nested `{ answers }` retry shape unwraps.
+ */
+private fun displayOptionAnswer(value: JsonElement, labels: Map<String, String>): JsonElement =
+    when (value) {
+        is JsonPrimitive ->
+            if (value.isString) JsonPrimitive(labels[value.content] ?: value.content) else value
+        is JsonArray -> JsonArray(value.map { displayOptionAnswer(it, labels) })
+        is JsonObject -> {
+            val nested = value["answers"]
+            if (nested != null) {
+                JsonObject(value + ("answers" to displayOptionAnswer(nested, labels)))
+            } else {
+                value
+            }
+        }
+        else -> value
+    }
+
+/**
+ * Providers that ask questions through a native tool (AskUserQuestion and its
+ * cousins) emit the question twice: once as a tool row and once as the folded
+ * answer record. `withoutDuplicateQuestionTools` drops the tool copy, keyed on
+ * the sorted set of question texts within the same turn.
+ */
+private fun dedupeQuestionToolRows(
+    activities: List<ThreadActivityDto>,
+): List<ThreadActivityDto> {
+    val fingerprints = mutableSetOf<String>()
+    for (activity in activities) {
+        if (activity.kind != "user-input.answer-submitted") continue
+        val turnId = activity.turnId ?: continue
+        val payload = activity.payload as? JsonObject ?: continue
+        val texts =
+            (payload["questionTextById"] as? JsonObject)
+                ?.values
+                ?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull?.trim() }
+                .orEmpty()
+        questionFingerprint(turnId, texts)?.let(fingerprints::add)
+    }
+    if (fingerprints.isEmpty()) return activities
+
+    val duplicateToolKeys = mutableSetOf<String>()
+    for (activity in activities) {
+        if (!activity.kind.startsWith("tool.")) continue
+        val turnId = activity.turnId ?: continue
+        val payload = activity.payload as? JsonObject ?: continue
+        val toolCallId = payload.string("toolCallId") ?: continue
+        val data = payload["data"] as? JsonObject ?: continue
+        val questionTexts = questionToolQuestionTexts(data, payload.string("title")) ?: continue
+        val fingerprint = questionFingerprint(turnId, questionTexts) ?: continue
+        if (fingerprint in fingerprints) duplicateToolKeys += "$turnId$toolCallId"
+    }
+    if (duplicateToolKeys.isEmpty()) return activities
+    return activities.filter { activity ->
+        if (activity.tone == "error") return@filter true
+        if (!activity.kind.startsWith("tool.")) return@filter true
+        val payload = activity.payload as? JsonObject
+        if (payload?.string("status") in setOf("failed", "declined", "stopped", "cancelled")) {
+            return@filter true
+        }
+        val turnId = activity.turnId ?: return@filter true
+        val toolCallId = payload?.string("toolCallId") ?: return@filter true
+        "$turnId$toolCallId" !in duplicateToolKeys
+    }
+}
+
+private fun questionFingerprint(turnId: String, texts: List<String>): String? {
+    if (texts.isEmpty() || texts.any { it.isEmpty() }) return null
+    return turnId + "" + texts.sorted().joinToString("")
+}
+
+/**
+ * Reads the question prompts out of a native question tool's payload, following
+ * `projectQuestionToolInput` in `packages/shared/src/toolActivity.ts`. Null when
+ * the payload is not a question tool at all.
+ */
+private fun questionToolQuestionTexts(data: JsonObject, title: String?): List<String>? {
+    val item = data["item"] as? JsonObject
+    val toolName =
+        data.string("toolName")
+            ?: data.string("tool")
+            ?: item?.string("tool")
+            ?: title
+            ?: return null
+    val name =
+        toolName
+            .split(Regex("__|[./]"))
+            .lastOrNull()
+            ?.replace(Regex("[_\\s]"), "")
+            ?.lowercase()
+    if (
+        name == null ||
+            !Regex("^(askuserquestion|requestuserinput(?:async)?|askquestion|question)$")
+                .matches(name)
+    ) {
+        return null
+    }
+    val input =
+        data["input"] as? JsonObject
+            ?: data["rawInput"] as? JsonObject
+            ?: (data["state"] as? JsonObject)?.get("input") as? JsonObject
+            ?: item?.get("arguments") as? JsonObject
+            ?: return null
+    val questions =
+        input["questions"] as? JsonArray
+            ?: (input["params"] as? JsonObject)?.get("questions") as? JsonArray
+            ?: return null
+    return questions.mapNotNull { raw ->
+        val question = raw as? JsonObject
+        question?.string("question")
+            ?: question?.string("question_text")
+            ?: question?.string("prompt")
+            ?: question?.string("title")
+    }
+}
+
+/** Builds the history row for a folded user-input record. */
+private fun questionAnswerEntry(
+    activity: ThreadActivityDto,
+    payload: JsonObject?,
+    turnId: String?,
+    at: Long,
+): FeedEntry.QuestionAnswer {
+    val texts = payload?.get("questionTextById") as? JsonObject
+    val answers = payload?.get("answers") as? JsonObject
+    val attachments = payload?.get("attachmentsByQuestionId") as? JsonObject
+    val questionIds =
+        buildList {
+            texts?.keys?.forEach(::add)
+            answers?.keys?.forEach(::add)
+            attachments?.keys?.forEach(::add)
+        }.distinct()
+    val lines =
+        questionIds.map { questionId ->
+            FeedEntry.QuestionAnswerLine(
+                question = texts?.string(questionId).orEmpty(),
+                answer = questionAnswerText(answers?.get(questionId)),
+                // The full `ChatAttachment` record is kept, not just the name:
+                // the row links into the attachment viewer, which signs its own
+                // URL and needs the id and mime type to do it.
+                attachments =
+                    (attachments?.get(questionId) as? JsonArray)
+                        ?.mapNotNull { raw ->
+                            (raw as? JsonObject)?.let { file ->
+                                val name = file.string("name") ?: return@let null
+                                SentAttachment(
+                                    id = file.string("id").orEmpty(),
+                                    name = name,
+                                    mimeType = file.string("mimeType").orEmpty(),
+                                    sizeBytes =
+                                        (file["sizeBytes"] as? JsonPrimitive)
+                                            ?.longOrNull
+                                            ?: 0L,
+                                    type = file.string("type") ?: "file",
+                                )
+                            }
+                        }
+                        .orEmpty(),
+            )
+        }
+    // The collapsed preview, following `getQuestionAnswerPreview`: answers win,
+    // then attachment names, then the bare question texts.
+    val preview =
+        lines.map { it.answer }.filter { it.isNotBlank() }.joinToString(" · ").ifBlank {
+            val names = lines.flatMap { line -> line.attachments.map { it.name } }
+            if (names.isNotEmpty()) names.joinToString(", ")
+            else texts?.values?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+                ?.joinToString(" · ")
+                .orEmpty()
+        }
+    return FeedEntry.QuestionAnswer(
+        id = activity.id,
+        summary = activity.summary,
+        preview = preview,
+        lines = lines,
+        turnId = turnId,
+        atMillis = at,
+    )
+}
+
+/** Display text for one stored answer, following `getQuestionAnswerText`. */
+private fun questionAnswerText(value: JsonElement?): String =
+    when (value) {
+        is JsonPrimitive -> if (value.isString) value.content else ""
+        is JsonArray -> value.map(::questionAnswerText).filter { it.isNotEmpty() }.joinToString(", ")
+        is JsonObject -> questionAnswerText(value["answers"])
+        else -> ""
+    }
+
+/**
  * Activities the transcript never shows, following `deriveWorkLogEntries` and
  * `isAgentInternalActivity`.
  *
@@ -571,40 +977,75 @@ private fun collapseToolLifecycle(sortedActivities: List<ThreadActivityDto>): Li
 private fun isHiddenActivity(activity: ThreadActivityDto): Boolean {
     if (activity.kind == "tool.started") return true
     if (activity.kind == "tool.progress") return true
-    if (activity.kind == "task.started") return true
     if (activity.kind == "context-window.updated") return true
     if (activity.kind == "checkpoint.captured") return true
-    val payload = activity.payload as? JsonObject ?: return false
+    // The check is on the summary, not the kind: the same "Checkpoint captured"
+    // string arrives under more than one kind, and RN drops them all.
+    if (activity.summary == "Checkpoint captured") return true
+    // Worktree setup noise stays out of the transcript; a failed setup script is
+    // the exception the user needs to see, matching `isWorktreeSetupActivity`.
+    if (
+        (activity.kind == "setup-script.requested" || activity.kind == "setup-script.started") &&
+            activity.tone != "error"
+    ) {
+        return true
+    }
+    // Adapters forward unknown wire-only SDK messages as runtime warnings; a row
+    // carrying nothing displayable is not worth a line in the transcript.
+    if (
+        activity.kind == "runtime.warning" &&
+            activity.summary.endsWith("(no displayable text content)")
+    ) {
+        return true
+    }
+    val payload = activity.payload as? JsonObject
     // `ExitPlanMode:` tool rows are the plan-mode boundary, already rendered as the
     // plan card.
     if (
         (activity.kind == "tool.updated" || activity.kind == "tool.completed") &&
-            payload.string("detail")?.startsWith("ExitPlanMode:") == true
+            payload?.string("detail")?.startsWith("ExitPlanMode:") == true
     ) {
         return true
     }
-    // Codex children never emit `task.completed`; a bypassed `task.updated` carrying
-    // a terminal status is their only finish signal.
+    val isTaskRow =
+        activity.kind == "task.started" ||
+            activity.kind == "task.progress" ||
+            activity.kind == "task.updated" ||
+            activity.kind == "task.completed"
+    // An agent spawn's `task.started` is the anchor row its progress ticks merge
+    // into, unlike a background task's start, which its first progress row covers.
+    if (
+        isTaskRow &&
+            payload?.string("taskId") != null &&
+            payload.string("agentKind") == "agent"
+    ) {
+        return false
+    }
+    // A non-agent task start is bookkeeping: the progress row carries the label.
+    if (activity.kind == "task.started") return true
+    // Some providers settle agents through task.updated rather than task.completed.
     val terminalTaskRow =
         activity.kind == "task.completed" ||
             (activity.kind == "task.updated" &&
-                payload.bool("timelineBypass") == true &&
-                payload.string("status") in TERMINAL_TASK_STATUSES)
+                payload?.string("status")?.let { status ->
+                    status in TERMINAL_TASK_STATUSES ||
+                        (payload.bool("timelineBypass") == true && status == "idle")
+                } == true)
     if (activity.kind == "task.updated" && !terminalTaskRow) return true
-    if (payload.bool("timelineBypass") == true && !terminalTaskRow) return true
+    if (payload?.bool("timelineBypass") == true && !terminalTaskRow) return true
     // `agentId` marks ownership, not "hide me": only an agent's own background work
     // is internal, and its terminal row is what tells the user it finished.
-    val ownedByAgent = payload.string("agentId") != null
+    val ownedByAgent = payload?.string("agentId") != null
     if (!ownedByAgent) return false
-    return !(terminalTaskRow && payload.string("agentKind") == "agent")
+    return !terminalTaskRow
 }
 
-private val TERMINAL_TASK_STATUSES =
-    setOf("idle", "completed", "failed", "cancelled", "interrupted")
+private val TERMINAL_TASK_STATUSES = setOf("completed", "failed", "cancelled", "interrupted")
 
 /** The subagent this activity belongs to, for identity-based collapsing. */
 private fun taskIdOf(activity: ThreadActivityDto, payload: JsonObject?): String? {
-    if (activity.kind != "task.progress" &&
+    if (activity.kind != "task.started" &&
+        activity.kind != "task.progress" &&
         activity.kind != "task.completed" &&
         activity.kind != "task.updated"
     ) {
@@ -676,16 +1117,55 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
 
         // Subagents are the one internal activity worth surfacing: they are work
         // the user did not ask for directly and would otherwise look like a stall.
+        // A task row's label is its own `summary`/`detail` payload field first,
+        // falling back to the activity summary — the same choice RN's
+        // `toDerivedWorkLogEntry` makes.
+        // A main-thread progress tick is the reasoning row: RN gives it the
+        // "thinking" work tone (`toDerivedWorkLogEntry`), which maps to the
+        // collapsed Thinking card here. Agent-owned ticks stay subagent rows —
+        // they describe spawned work, not the assistant's reasoning — and
+        // `isHiddenActivity` already drops agent-internal ones.
+        "task.progress" ->
+            if (payload?.string("agentKind") == "agent") {
+                subagentEntry(activity, payload, turnId, at)
+            } else {
+                FeedEntry.Reasoning(
+                    id = activity.id,
+                    text =
+                        payload?.string("detail")
+                            ?: payload?.string("summary")
+                            ?: activity.summary,
+                    turnId = turnId,
+                    atMillis = at,
+                )
+            }
+
         "task.started",
         "task.completed",
-        "task.updated" ->
-            FeedEntry.Subagent(
+        "task.updated" -> subagentEntry(activity, payload, turnId, at)
+
+        // The folded user-input record: `foldUserInputActivities` synthesizes one
+        // of these per request id from the request/resolve/answer triple.
+        "user-input.answer-submitted" -> questionAnswerEntry(activity, payload, turnId, at)
+
+        // Bare request/resolve rows that never folded (no requestId, or a payload
+        // the fold could not assemble) still get their quiet history row.
+        "user-input.requested",
+        "user-input.resolved" ->
+            FeedEntry.QuestionAnswer(
                 id = activity.id,
-                name = payload?.string("title") ?: payload?.string("taskType") ?: "Subagent",
-                task = payload?.string("detail") ?: activity.summary,
-                active = activity.kind == "task.started",
+                summary = activity.summary,
+                preview = "",
                 turnId = turnId,
                 atMillis = at,
+            )
+
+        "runtime.warning" ->
+            FeedEntry.Warning(
+                activity.id,
+                payload?.string("message") ?: activity.summary,
+                turnId,
+                at,
             )
 
         "runtime.error" ->
@@ -699,6 +1179,25 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
         else -> null
     }
 }
+
+/**
+ * A task lifecycle row for a subagent, extracted from [feedEntryFor] now that
+ * `task.progress` splits by ownership.
+ */
+private fun subagentEntry(
+    activity: ThreadActivityDto,
+    payload: JsonObject?,
+    turnId: String?,
+    at: Long,
+): FeedEntry =
+    FeedEntry.Subagent(
+        id = activity.id,
+        name = payload?.string("title") ?: payload?.string("taskType") ?: "Subagent",
+        task = payload?.string("summary") ?: payload?.string("detail") ?: activity.summary,
+        active = activity.kind == "task.started" || activity.kind == "task.progress",
+        turnId = turnId,
+        atMillis = at,
+    )
 
 private fun extractToolSummary(payload: JsonObject?): String {
     if (payload == null) return ""
@@ -751,34 +1250,71 @@ private fun planStepsOf(payload: JsonObject?): List<PlanStep>? {
  */
 fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApproval? {
     val open = linkedMapOf<String, PendingApproval>()
+    val createdAtById = mutableMapOf<String, String>()
+    // Request ids are unique. A terminal event stays final even when provider
+    // sequences and server-generated activities arrive out of order, matching
+    // `derivePendingRequests`.
+    val closed = mutableSetOf<String>()
     sortedActivities.forEach { activity ->
         val payload = activity.payload as? JsonObject
         val requestId = payload?.string("requestId") ?: return@forEach
         when (activity.kind) {
-            "approval.requested" ->
+            "approval.requested" -> {
+                if (requestId in closed) return@forEach
+                // The server replays these as approval-shaped activities, but they
+                // are not user decisions and must not hold a gate open.
+                val requestType = payload.string("requestType")
+                if (requestType == "tool_user_input" || requestType == "auth_tokens_refresh") {
+                    return@forEach
+                }
                 open[requestId] =
                     PendingApproval(
                         id = requestId,
                         title = activity.summary,
                         detail = payload.string("detail").orEmpty(),
                         command = payload.string("command"),
-                        kind =
-                            when (payload.string("requestKind")) {
-                                "file-change" -> ApprovalKind.FileWrite
-                                "file-read" -> ApprovalKind.FileWrite
-                                else -> ApprovalKind.Command
-                            },
+                        kind = approvalKindOf(payload),
+                        appName = payload.string("appName"),
                         options = approvalOptionsOf(payload),
                     )
-            "approval.resolved" -> open.remove(requestId)
+                createdAtById[requestId] = activity.createdAt.orEmpty()
+            }
+            "approval.resolved" -> {
+                closed += requestId
+                open.remove(requestId)
+            }
             // A "stale request" failure means the provider already moved on, so
             // the gate must close or it blocks the composer forever.
             "provider.approval.respond.failed" ->
-                if (isStaleRequestFailure(payload.string("detail"))) open.remove(requestId)
+                if (isStaleRequestFailure(activity.kind, payload.string("detail"))) {
+                    closed += requestId
+                    open.remove(requestId)
+                }
         }
     }
-    return open.values.firstOrNull()
+    return open.entries.minByOrNull { createdAtById[it.key].orEmpty() }?.value
 }
+
+/**
+ * Maps `requestKind` onto the card's kind, falling back to the legacy
+ * `requestType` vocabulary — `requestKindFromRequestType` in
+ * `packages/client-runtime/src/pendingRequests.ts`.
+ */
+private fun approvalKindOf(payload: JsonObject): ApprovalKind =
+    when (payload.string("requestKind")) {
+        "file-read" -> ApprovalKind.FileRead
+        "file-change" -> ApprovalKind.FileWrite
+        "mcp-elicitation" -> ApprovalKind.McpElicitation
+        "command" -> ApprovalKind.Command
+        else ->
+            when (payload.string("requestType")) {
+                "file_read_approval" -> ApprovalKind.FileRead
+                "file_change_approval",
+                "apply_patch_approval" -> ApprovalKind.FileWrite
+                "mcp_elicitation_approval" -> ApprovalKind.McpElicitation
+                else -> ApprovalKind.Command
+            }
+    }
 
 /**
  * Reads the decisions a provider attached to an `approval.requested` payload.
@@ -795,41 +1331,68 @@ private fun approvalOptionsOf(payload: JsonObject): List<ApprovalOption> =
         }
         .orEmpty()
 
-/** Same replay for structured input requests, following `derivePendingUserInputs`. */
+/** Same replay for structured input requests, following `derivePendingRequests`. */
 fun pendingUserInputOf(sortedActivities: List<ThreadActivityDto>): PendingUserInput? {
     val open = linkedMapOf<String, PendingUserInput>()
+    val createdAtById = mutableMapOf<String, String>()
+    val closed = mutableSetOf<String>()
     sortedActivities.forEach { activity ->
         val payload = activity.payload as? JsonObject
         val requestId = payload?.string("requestId") ?: return@forEach
         when (activity.kind) {
             "user-input.requested" -> {
+                if (requestId in closed) return@forEach
                 val request = userInputOf(payload) ?: return@forEach
                 open[requestId] = request.copy(id = requestId)
+                createdAtById[requestId] = activity.createdAt.orEmpty()
             }
-            "user-input.resolved" -> open.remove(requestId)
+            "user-input.resolved" -> {
+                closed += requestId
+                open.remove(requestId)
+            }
             "provider.user-input.respond.failed" ->
-                if (isStaleRequestFailure(payload.string("detail"))) open.remove(requestId)
+                if (isStaleRequestFailure(activity.kind, payload.string("detail"))) {
+                    closed += requestId
+                    open.remove(requestId)
+                }
         }
     }
-    return open.values.firstOrNull()
+    return open.entries.minByOrNull { createdAtById[it.key].orEmpty() }?.value
 }
 
-/** Reads every structured question from a `user-input.requested` payload. */
+/**
+ * Reads every structured question from a `user-input.requested` payload,
+ * following `parseQuestions` in `packages/client-runtime/src/pendingRequests.ts`.
+ * A malformed question (no `id`, `header`, or `question` text) or one that is
+ * unanswerable (no options and custom answers disallowed) is dropped rather than
+ * rendered as a card the user cannot satisfy.
+ */
 private fun userInputOf(payload: JsonObject): PendingUserInput? {
     val rawQuestions = payload["questions"] as? JsonArray ?: return null
     val questions =
         rawQuestions.mapNotNull { raw ->
             val question = raw as? JsonObject ?: return@mapNotNull null
+            val id = question.string("id") ?: return@mapNotNull null
+            val header = question.string("header") ?: return@mapNotNull null
             val prompt = question.string("question") ?: return@mapNotNull null
             val options =
-                (question["options"] as? JsonArray)
-                    ?.mapNotNull { (it as? JsonObject)?.string("label") }
-                    .orEmpty()
+                (question["options"] as? JsonArray)?.mapNotNull { rawOption ->
+                    val option = rawOption as? JsonObject ?: return@mapNotNull null
+                    val label = option.string("label") ?: return@mapNotNull null
+                    UserInputOption(
+                        label = label,
+                        value = option.string("value"),
+                        description = option.string("description"),
+                    )
+                } ?: return@mapNotNull null
+            val allowCustomAnswer =
+                (question["allowCustomAnswer"] as? JsonPrimitive)?.booleanOrNull != false
+            if (options.isEmpty() && !allowCustomAnswer) return@mapNotNull null
             val multiSelect =
                 (question["multiSelect"] as? JsonPrimitive)?.booleanOrNull == true
             UserInputQuestion(
-                id = question.string("id") ?: "answer-${questionsHash(rawQuestions, raw)}",
-                header = question.string("header") ?: "Question",
+                id = id,
+                header = header,
                 prompt = prompt,
                 kind =
                     when {
@@ -838,20 +1401,46 @@ private fun userInputOf(payload: JsonObject): PendingUserInput? {
                         else -> UserInputKind.SingleSelect
                     },
                 options = options,
+                allowCustomAnswer = allowCustomAnswer,
             )
         }
     return questions.takeIf { it.isNotEmpty() }?.let {
-        PendingUserInput(id = "", questions = it)
+        PendingUserInput(
+            id = "",
+            questions = it,
+            // Async questions may be dismissed without a reply; native callback
+            // questions cannot, because the provider is blocked on the answer.
+            dismissible = payload.string("responseMode") == "message",
+        )
     }
 }
 
-/** Stable fallback only for malformed legacy payloads that omitted an id. */
-private fun questionsHash(questions: JsonArray, question: JsonObject): String =
-    questions.indexOf(question).coerceAtLeast(0).toString()
-
-private fun isStaleRequestFailure(detail: String?): Boolean {
+/**
+ * The server reports a stale or unknown request through the failure text, and
+ * the fragments differ per request family — a failed reply with any other text
+ * stays open so the user can retry.
+ */
+private fun isStaleRequestFailure(kind: String, detail: String?): Boolean {
     val normalized = detail?.lowercase() ?: return false
-    return normalized.contains("stale pending") || normalized.contains("unknown pending")
+    val fragments =
+        when (kind) {
+            "provider.approval.respond.failed" ->
+                listOf(
+                    "stale pending approval request",
+                    "unknown pending approval request",
+                    "unknown pending permission request",
+                    "unknown pending codex approval request",
+                )
+            "provider.user-input.respond.failed" ->
+                listOf(
+                    "stale pending user-input request",
+                    "unknown pending user-input request",
+                    "unknown pending user input request",
+                    "unknown pending codex user input request",
+                )
+            else -> return false
+        }
+    return fragments.any(normalized::contains)
 }
 
 /**

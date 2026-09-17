@@ -42,10 +42,17 @@ object Routes {
     const val ThreadFileMarkdown = "threads/{environmentId}/{threadId}/files/markdown?path={path}"
     const val ThreadFileImage = "threads/{environmentId}/{threadId}/files/image?path={path}"
     const val ThreadFileWeb = "threads/{environmentId}/{threadId}/files/web?path={path}"
+    // The attachment viewer carries name/mime/size as query params: there is no
+    // metadata RPC for an attachment, so the route is the record (RN does the
+    // same in `AttachmentFileRouteParams`).
+    const val ThreadAttachment =
+        "threads/{environmentId}/{threadId}/attachments/{attachmentId}?name={name}&mimeType={mimeType}&sizeBytes={sizeBytes}"
     const val ThreadReview = "threads/{environmentId}/{threadId}/review"
     const val ThreadReviewComment =
         "threads/{environmentId}/{threadId}/review-comment?filePath={filePath}&startIndex={startIndex}&endIndex={endIndex}"
-    const val ThreadTerminal = "threads/{environmentId}/{threadId}/terminal"
+    // `terminalId` is a query param, not a path segment, matching the RN
+    // route's `terminalId?` param — a bare `/terminal` means the default shell.
+    const val ThreadTerminal = "threads/{environmentId}/{threadId}/terminal?terminalId={terminalId}"
     const val Git = "threads/{environmentId}/{threadId}/git"
     const val GitCommit = "threads/{environmentId}/{threadId}/git/commit"
     const val GitBranches = "threads/{environmentId}/{threadId}/git/branches"
@@ -93,20 +100,54 @@ object Routes {
 
     fun connectionDetail(environmentId: String) = "connections/$environmentId"
 
+    /** One terminal session; null id means the default shell (`term-1`). */
+    fun threadTerminal(environmentId: String, threadId: String, terminalId: String? = null) =
+        threadChild(
+            environmentId,
+            threadId,
+            if (terminalId == null) "terminal"
+            else "terminal?terminalId=${android.net.Uri.encode(terminalId)}",
+        )
+
     /** Source viewer for one file, used when a preview cannot render it. */
     fun threadFileSource(environmentId: String, threadId: String, path: String) =
         threadChild(environmentId, threadId, "files/source?path=${android.net.Uri.encode(path)}")
+
+    /** The viewer a sent or answer-staged attachment opens in. */
+    fun threadAttachment(
+        environmentId: String,
+        threadId: String,
+        attachmentId: String,
+        name: String,
+        mimeType: String,
+        sizeBytes: Long,
+    ) = threadChild(
+        environmentId,
+        threadId,
+        "attachments/${routeSegment(attachmentId)}" +
+            "?name=${android.net.Uri.encode(name)}" +
+            "&mimeType=${android.net.Uri.encode(mimeType)}" +
+            "&sizeBytes=$sizeBytes",
+    )
 
     /** The same type-sensitive destination used by the workspace file tree. */
     fun threadFilePreview(environmentId: String, threadId: String, path: String) =
         threadChild(environmentId, threadId, "${fileRouteSuffix(path)}?path=${android.net.Uri.encode(path)}")
 
+    /**
+     * The viewer a workspace file opens in, following `defaultViewMode` in
+     * `ThreadFilesRouteScreen`: browser/image/video/audio are previews and
+     * everything else is source. Video and audio share the web viewer because
+     * the WebView's own media element plays them.
+     */
     fun fileRouteSuffix(path: String): String {
         val lower = path.substringBefore('?').substringBefore('#').lowercase()
         return when {
-            lower.endsWith(".md") || lower.endsWith(".mdx") -> "files/markdown"
+            MARKDOWN_PREVIEW_EXTENSIONS.any(lower::endsWith) -> "files/markdown"
             IMAGE_PREVIEW_EXTENSIONS.any(lower::endsWith) -> "files/image"
-            BROWSER_PREVIEW_EXTENSIONS.any(lower::endsWith) -> "files/web"
+            BROWSER_PREVIEW_EXTENSIONS.any(lower::endsWith) ||
+                AUDIO_PREVIEW_EXTENSIONS.any(lower::endsWith) ||
+                VIDEO_PREVIEW_EXTENSIONS.any(lower::endsWith) -> "files/web"
             else -> "files/source"
         }
     }
@@ -116,5 +157,20 @@ object Routes {
 
     private val IMAGE_PREVIEW_EXTENSIONS =
         listOf(".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp")
+
+    // `WORKSPACE_BROWSER_PREVIEW_EXTENSIONS` in packages/shared/src/filePreview.ts.
+    // PDF lands here to match: Android WebView cannot render it inline, so the
+    // preview screen offers the signed URL to an external viewer instead.
     private val BROWSER_PREVIEW_EXTENSIONS = listOf(".htm", ".html", ".pdf")
+
+    // `AUDIO_MIME_TYPE_BY_EXTENSION` keys in the same file.
+    private val AUDIO_PREVIEW_EXTENSIONS =
+        listOf(".mp3", ".wav", ".ogg", ".oga", ".flac", ".aac", ".m4a", ".opus", ".aiff")
+
+    // `VIDEO_MIME_TYPE_BY_EXTENSION` keys in packages/shared/src/video.ts.
+    private val VIDEO_PREVIEW_EXTENSIONS =
+        listOf(".avi", ".m4v", ".mkv", ".mov", ".mp4", ".ogv", ".webm")
+
+    private val MARKDOWN_PREVIEW_EXTENSIONS =
+        listOf(".md", ".markdown", ".mdown", ".mkd", ".mdx")
 }

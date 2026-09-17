@@ -81,7 +81,14 @@ fun HomeUserInputCard(
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
             PendingThreadIdentity(item.thread.title, item.project, item.environmentLabel, resolveProjectIconUrl)
-            UserInputCard(request = item.request, onSubmit = onSubmit, submitting = submitting)
+            // Home answers in text only: file attachments need the thread
+            // screen's staging surface, which the card hides when no support
+            // is passed.
+            UserInputCard(
+                request = item.request,
+                onSubmit = { onSubmit(it.answers) },
+                submitting = submitting,
+            )
             S5Button(
                 text = "Open thread",
                 onClick = onOpenThread,

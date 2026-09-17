@@ -223,7 +223,15 @@ class HomeListTest {
                                                 header = "Headline",
                                                 prompt = "Which headline?",
                                                 kind = UserInputKind.SingleSelect,
-                                                options = listOf("A", "B"),
+                                                options =
+                                                    listOf(
+                                                        club.touchtech.s5code.kotlin.model.UserInputOption(
+                                                            label = "A"
+                                                        ),
+                                                        club.touchtech.s5code.kotlin.model.UserInputOption(
+                                                            label = "B"
+                                                        ),
+                                                    ),
                                             )
                                         ),
                                 ),

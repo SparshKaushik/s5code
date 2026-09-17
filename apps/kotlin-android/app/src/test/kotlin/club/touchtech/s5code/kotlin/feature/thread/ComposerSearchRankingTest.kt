@@ -80,4 +80,25 @@ class ComposerSearchRankingTest {
             rankComposerPaths(paths, "@msgd").take(2),
         )
     }
+
+    @Test
+    fun `picked paths serialize as markdown links`() {
+        // Mirrors serializeComposerFileLink in packages/shared/src/composerTrigger.ts.
+        assertEquals(
+            "[package.json](path/to/package.json)",
+            serializeComposerFileLink("path/to/package.json"),
+        )
+        assertEquals(
+            "[My File (draft).md](docs/My%20File%20%28draft%29.md)",
+            serializeComposerFileLink("docs/My File (draft).md"),
+        )
+        assertEquals(
+            "[index.ts](C:%5Crepo%5Csrc%5Cindex.ts)",
+            serializeComposerFileLink("C:\\repo\\src\\index.ts"),
+        )
+        assertEquals(
+            "[package.json](@scope/package.json)",
+            serializeComposerFileLink("@scope/package.json"),
+        )
+    }
 }

@@ -55,6 +55,7 @@ data class RelayDeviceDto(
     val label: String,
     val platform: String,
     val iosMajorVersion: Int? = null,
+    val androidApiLevel: Int? = null,
     val appVersion: String? = null,
     val notifications: RelayDeviceNotificationsDto = RelayDeviceNotificationsDto(),
     val liveActivities: RelayDeviceLiveActivitiesDto = RelayDeviceLiveActivitiesDto(),
@@ -82,17 +83,22 @@ data class RelayAgentAwarenessPreferencesDto(
     val notifyOnFailure: Boolean,
 )
 
+/**
+ * `RelayDeviceRegistrationRequest` from `packages/contracts/src/relay.ts`. The
+ * relay's filter requires `androidApiLevel` on Android registrations and routes
+ * FCM by `bundleId`; the token field is `pushToken`, not `fcmToken`.
+ */
 @Serializable
 data class RelayDeviceRegistrationRequestDto(
     val deviceId: String,
     val label: String,
     val platform: String,
+    val androidApiLevel: Int? = null,
     val appVersion: String? = null,
-    val fcmToken: String? = null,
+    val bundleId: String? = null,
+    val pushToken: String? = null,
     val preferences: RelayAgentAwarenessPreferencesDto,
 )
-
-@Serializable data class RelayAndroidLiveUpdateRegistrationRequestDto(val deviceId: String, val generationId: String)
 
 @Serializable private data class RelayOkDto(val ok: Boolean)
 
@@ -233,21 +239,6 @@ class RelayClient(
             method = "POST",
             scopes = setOf(RelayScopes.MobileRegistration),
             body = json.encodeToString(RelayDeviceRegistrationRequestDto.serializer(), registration).toRequestBody(JSON_MEDIA),
-            serializer = RelayOkDto.serializer(),
-        )
-    }
-
-    suspend fun registerAndroidLiveUpdate(deviceId: String, generationId: String) {
-        val registration = RelayAndroidLiveUpdateRegistrationRequestDto(deviceId, generationId)
-        dpopRequest(
-            url = "$base/v1/mobile/android-live-updates",
-            method = "POST",
-            scopes = setOf(RelayScopes.MobileRegistration),
-            body = json.encodeToString(
-                    RelayAndroidLiveUpdateRegistrationRequestDto.serializer(),
-                    registration,
-                )
-                .toRequestBody(JSON_MEDIA),
             serializer = RelayOkDto.serializer(),
         )
     }

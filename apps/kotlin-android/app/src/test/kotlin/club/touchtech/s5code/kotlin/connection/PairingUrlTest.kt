@@ -123,6 +123,26 @@ class PairingUrlTest {
     }
 
     @Test
+    fun `qr payloads unwrap the embedded pairing url`() {
+        assertEquals(
+            "http://h:4488/pair#token=abcdefgh1234",
+            extractPairingUrlFromQrPayload(
+                "t3code://pair?pairingUrl=http%3A%2F%2Fh%3A4488%2Fpair%23token%3Dabcdefgh1234"
+            ),
+        )
+        assertEquals(
+            "http://h:4488/pair#token=abcdefgh1234",
+            extractPairingUrlFromQrPayload("s5code://pair?pairingUrl=http://h:4488/pair%23token%3Dabcdefgh1234"),
+        )
+        // Raw URLs and junk pass through untouched for the parser to judge.
+        assertEquals(
+            "http://h:4488/pair#token=abcdefgh1234",
+            extractPairingUrlFromQrPayload("  http://h:4488/pair#token=abcdefgh1234  "),
+        )
+        assertEquals("not a url", extractPairingUrlFromQrPayload("not a url"))
+    }
+
+    @Test
     fun `host plus code reports what is missing`() {
         val noHost = pairingTargetFor("  ", "abcdefgh1234")
         assertEquals(

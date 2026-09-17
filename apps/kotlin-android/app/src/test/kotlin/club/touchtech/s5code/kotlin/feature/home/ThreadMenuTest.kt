@@ -10,18 +10,29 @@ class ThreadMenuTest {
 
     private val thread = HomeFixture.threads.first()
 
+    private fun options(
+        thread: club.touchtech.s5code.kotlin.model.ThreadSummary = this.thread,
+        settlement: Boolean = true,
+        snooze: Boolean = true,
+        pinning: Boolean = true,
+        titleRegeneration: Boolean = false,
+    ) =
+        threadMenuOptions(
+            thread = thread,
+            settlementSupported = settlement,
+            snoozeSupported = snooze,
+            pinningSupported = pinning,
+            titleRegenerationSupported = titleRegeneration,
+        )
+
     @Test
     fun `title regeneration is omitted when the environment does not support it`() {
-        assertTrue(threadMenuOptions(thread, titleRegenerationSupported = false).none {
-            it.id == "regenerate-title"
-        })
+        assertTrue(options(titleRegeneration = false).none { it.id == "regenerate-title" })
     }
 
     @Test
     fun `supported title regeneration is actionable at rest`() {
-        val option =
-            threadMenuOptions(thread, titleRegenerationSupported = true)
-                .single { it.id == "regenerate-title" }
+        val option = options(titleRegeneration = true).single { it.id == "regenerate-title" }
         assertEquals("Regenerate title", option.label)
         assertTrue(option.enabled)
     }
@@ -29,9 +40,9 @@ class ThreadMenuTest {
     @Test
     fun `in-flight title regeneration is labelled and disabled`() {
         val option =
-            threadMenuOptions(
-                    thread.copy(titleRegenerating = true, status = ThreadStatus.Working),
-                    titleRegenerationSupported = true,
+            options(
+                    thread = thread.copy(titleRegenerating = true, status = ThreadStatus.Working),
+                    titleRegeneration = true,
                 )
                 .single { it.id == "regenerate-title" }
         assertEquals("Regenerating…", option.label)
@@ -41,7 +52,7 @@ class ThreadMenuTest {
     @Test
     fun `snooze offers submenu presets on an active thread`() {
         val workingThread = thread.copy(status = ThreadStatus.Working)
-        val snooze = threadMenuOptions(workingThread, titleRegenerationSupported = false).single { it.id == "snooze" }
+        val snooze = options(thread = workingThread).single { it.id == "snooze" }
         assertEquals("Snooze", snooze.label)
         assertTrue(snooze.enabled)
         assertTrue(snooze.children.isNotEmpty())
@@ -52,22 +63,42 @@ class ThreadMenuTest {
     }
 
     @Test
-    fun `snooze is disabled when thread is awaiting approval`() {
+    fun `snooze is absent when the server cannot snooze or the thread is blocked`() {
+        assertTrue(options(snooze = false).none { it.id == "snooze" })
         val approvalThread = thread.copy(status = ThreadStatus.AwaitingApproval)
-        val snooze = threadMenuOptions(approvalThread, titleRegenerationSupported = false).single { it.id == "snooze" }
-        assertEquals("Snooze", snooze.label)
-        assertFalse(snooze.enabled)
-        assertTrue(snooze.children.isEmpty())
+        assertTrue(options(thread = approvalThread).none { it.id == "snooze" })
     }
 
     @Test
-    fun `snoozed thread offers unsnooze without children`() {
+    fun `snoozed thread offers wake without lifecycle items`() {
         val snoozedThread = thread.copy(status = ThreadStatus.Snoozed)
-        val options = threadMenuOptions(snoozedThread, titleRegenerationSupported = false)
-        assertTrue(options.none { it.id == "snooze" })
-        val unsnooze = options.single { it.id == "unsnooze" }
-        assertEquals("Unsnooze", unsnooze.label)
-        assertTrue(unsnooze.enabled)
-        assertTrue(unsnooze.children.isEmpty())
+        val menu = options(thread = snoozedThread)
+        assertTrue(menu.none { it.id == "snooze" || it.id == "settle" || it.id == "pin" })
+        val wake = menu.single { it.id == "unsnooze" }
+        assertEquals("Wake thread", wake.label)
+        assertTrue(wake.enabled)
+        assertTrue(wake.children.isEmpty())
+    }
+
+    @Test
+    fun `a pre-settlement server gets archive instead of lifecycle items`() {
+        val menu = options(settlement = false)
+        assertTrue(menu.none { it.id == "settle" || it.id == "snooze" })
+        assertTrue(menu.any { it.id == "archive" })
+    }
+
+    @Test
+    fun `a settled row un-settles on a modern server`() {
+        val settledThread = thread.copy(status = ThreadStatus.Settled)
+        val menu = options(thread = settledThread)
+        val settle = menu.single { it.id == "settle" }
+        assertEquals("Un-settle", settle.label)
+        assertTrue(menu.none { it.id == "archive" })
+    }
+
+    @Test
+    fun `pin requires the pinning capability`() {
+        assertTrue(options(pinning = true).any { it.id == "pin" })
+        assertTrue(options(pinning = false).none { it.id == "pin" })
     }
 }

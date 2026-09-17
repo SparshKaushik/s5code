@@ -134,7 +134,14 @@ fun applyThreadEvent(thread: ThreadDto, event: JsonElement): ThreadReduction {
 
         "thread.settled" ->
             thread
-                .copy(settledOverride = "settled", settledAt = payload.string("settledAt"))
+                .copy(
+                    settledOverride = "settled",
+                    settledAt = payload.string("settledAt"),
+                    // Settling releases the arranged Active slot; the re-entry
+                    // anchor (`unsettledAt`) starts clean too.
+                    unsettledAt = null,
+                    activeOrderKey = null,
+                )
                 .touched(payload, occurredAt)
 
         "thread.unsettled" ->
@@ -144,6 +151,12 @@ fun applyThreadEvent(thread: ThreadDto, event: JsonElement): ThreadReduction {
                     // unsettle is a neutral reset, so the override clears.
                     settledOverride = if (payload.string("reason") == "user") "active" else null,
                     settledAt = null,
+                    // A thread already pinned active keeps its re-entry stamp:
+                    // the activity reset that clears the pin must not reorder
+                    // the list.
+                    unsettledAt =
+                        if (thread.settledOverride == "active") thread.unsettledAt
+                        else payload.string("updatedAt") ?: occurredAt,
                 )
                 .touched(payload, occurredAt)
 
@@ -175,6 +188,12 @@ fun applyThreadEvent(thread: ThreadDto, event: JsonElement): ThreadReduction {
         "thread.meta-updated" ->
             thread
                 .copy(
+                    // Order updates ride this event so older clients decode it
+                    // unchanged; only a present key overwrites.
+                    activeOrderKey =
+                        if (payload.containsKey("activeOrderKey"))
+                            payload.string("activeOrderKey")
+                        else thread.activeOrderKey,
                     title = payload.string("title") ?: thread.title,
                     branch = if (payload.containsKey("branch")) payload.string("branch") else thread.branch,
                     worktreePath =
@@ -292,6 +311,7 @@ private fun applyMessageSent(
                     role = payload.string("role") ?: "assistant",
                     text = text,
                     attachments = payload.decodeList("attachments"),
+                    context = payload["context"],
                     turnId = payload.string("turnId"),
                     streaming = streaming,
                     createdAt = payload.string("createdAt"),

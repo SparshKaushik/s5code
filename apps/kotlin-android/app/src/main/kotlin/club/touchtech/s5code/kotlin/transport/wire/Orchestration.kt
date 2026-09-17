@@ -112,6 +112,8 @@ data class ThreadShellDto(
     val snoozedAt: String? = null,
     val pinnedAt: String? = null,
     val pinOrderKey: String? = null,
+    /** Manual Active placement; keyless threads keep creation/re-entry order. */
+    val activeOrderKey: String? = null,
     val titleRegeneration: TitleRegenerationDto? = null,
     val session: SessionDto? = null,
     val latestUserMessageAt: String? = null,
@@ -175,6 +177,12 @@ data class MessageDto(
     val role: String = "assistant",
     val text: String = "",
     val attachments: List<ChatAttachmentDto>? = null,
+    /**
+     * `OrchestrationMessageContext`, kept opaque: records are a forward-
+     * compatible union (`UnknownContextRecord` is the contract's own fallback),
+     * so the wire type stays `JsonElement` and the renderer picks what it knows.
+     */
+    val context: JsonElement? = null,
     val turnId: String? = null,
     val streaming: Boolean = false,
     val createdAt: String? = null,
@@ -246,10 +254,14 @@ data class ThreadDto(
     val archivedAt: String? = null,
     val settledOverride: String? = null,
     val settledAt: String? = null,
+    /** Last re-entry into the active list; anchors keyless active ordering. */
+    val unsettledAt: String? = null,
     val snoozedUntil: String? = null,
     val snoozedAt: String? = null,
     val pinnedAt: String? = null,
     val pinOrderKey: String? = null,
+    /** Manual Active placement; keyless threads keep creation/re-entry order. */
+    val activeOrderKey: String? = null,
     val titleRegeneration: TitleRegenerationDto? = null,
     val deletedAt: String? = null,
     val messages: List<MessageDto> = emptyList(),

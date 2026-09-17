@@ -15,6 +15,7 @@ import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.feature.archive.ArchiveScreen
 import club.touchtech.s5code.kotlin.feature.connections.ConnectionDetailScreen
 import club.touchtech.s5code.kotlin.feature.connections.ConnectionsScreen
+import club.touchtech.s5code.kotlin.feature.files.AttachmentFileScreen
 import club.touchtech.s5code.kotlin.feature.files.FilePreviewScreen
 import club.touchtech.s5code.kotlin.feature.files.FilesTreeScreen
 import club.touchtech.s5code.kotlin.feature.files.ImagePreviewScreen
@@ -384,6 +385,40 @@ fun S5NavGraph(
                 },
             )
         }
+        composable(
+            Routes.ThreadAttachment,
+            arguments =
+                listOf(
+                    environmentArg,
+                    threadArg,
+                    navArgument("attachmentId") { type = NavType.StringType },
+                    // A deep link may carry only the id; the params describe the
+                    // file, so they default rather than blocking the route.
+                    navArgument("name") {
+                        type = NavType.StringType
+                        defaultValue = ""
+                    },
+                    navArgument("mimeType") {
+                        type = NavType.StringType
+                        defaultValue = ""
+                    },
+                    navArgument("sizeBytes") {
+                        type = NavType.LongType
+                        defaultValue = 0L
+                    },
+                ),
+        ) { entry ->
+            AttachmentFileScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                threadId = entry.arguments?.getString("threadId").orEmpty(),
+                attachmentId = entry.arguments?.getString("attachmentId").orEmpty(),
+                name = entry.arguments?.getString("name").orEmpty(),
+                mimeType = entry.arguments?.getString("mimeType").orEmpty(),
+                sizeBytes = entry.arguments?.getLong("sizeBytes") ?: 0L,
+                onBack = navController::popBackStack,
+            )
+        }
         composable(Routes.ThreadReview, arguments = listOf(environmentArg, threadArg)) { entry ->
             val environmentId = entry.arguments?.getString("environmentId").orEmpty()
             val threadId = entry.arguments?.getString("threadId").orEmpty()
@@ -432,12 +467,43 @@ fun S5NavGraph(
                 onBack = navController::popBackStack,
             )
         }
-        composable(Routes.ThreadTerminal, arguments = listOf(environmentArg, threadArg)) { entry ->
+        composable(
+            Routes.ThreadTerminal,
+            arguments =
+                listOf(
+                    environmentArg,
+                    threadArg,
+                    // Nullable so `threads/e/t/terminal` still resolves to the
+                    // default shell; only session switches carry an id.
+                    navArgument("terminalId") {
+                        type = NavType.StringType
+                        nullable = true
+                    },
+                ),
+        ) { entry ->
+            val terminalEnvironmentId = entry.arguments?.getString("environmentId").orEmpty()
+            val terminalThreadId = entry.arguments?.getString("threadId").orEmpty()
             TerminalScreen(
                 store = store,
-                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
-                threadId = entry.arguments?.getString("threadId").orEmpty(),
+                environmentId = terminalEnvironmentId,
+                threadId = terminalThreadId,
+                terminalId = entry.arguments?.getString("terminalId"),
                 onBack = navController::popBackStack,
+                // RN `StackActions.replace`: the dead session leaves the stack.
+                onSwitchTerminal = { nextTerminalId ->
+                    navController.navigate(
+                        Routes.threadTerminal(terminalEnvironmentId, terminalThreadId, nextTerminalId)
+                    ) {
+                        popUpTo(Routes.ThreadTerminal) { inclusive = true }
+                    }
+                },
+                onExitToThread = {
+                    if (!navController.popBackStack()) {
+                        navController.navigate(Routes.thread(terminalEnvironmentId, terminalThreadId)) {
+                            popUpTo(Routes.ThreadTerminal) { inclusive = true }
+                        }
+                    }
+                },
                 confirmController = confirmController,
             )
         }

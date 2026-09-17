@@ -27,6 +27,8 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Download
 import androidx.compose.material.icons.rounded.Key
 import androidx.compose.material.icons.rounded.DoneAll
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
@@ -65,6 +67,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
+import club.touchtech.s5code.kotlin.data.ReorderSection
 import club.touchtech.s5code.kotlin.data.cacheSizeLabel
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
@@ -223,9 +226,67 @@ fun HomeScreen(
 
     fun reportError(message: String) = store.showError(message)
 
+    /**
+     * Executes a move: replans at action time so a stale menu can't write keys
+     * against an order that has since changed.
+     */
+    fun moveAssignmentsFor(thread: ThreadSummary, direction: MoveDirection): List<Pair<ThreadId, String>>? {
+        val section = thread.pinned
+        val reorderable =
+            environments
+                .filter {
+                    if (section) it.capabilities.threadPinReorder
+                    else it.capabilities.threadActiveReorder
+                }
+                .mapTo(mutableSetOf()) { it.id.value }
+        val sectionThreads =
+            threads.filter {
+                it.status != ThreadStatus.Snoozed &&
+                    it.status != ThreadStatus.Settled &&
+                    it.pinned == section
+            }
+        val toRow = { row: ThreadSummary ->
+            ThreadOrderRow(
+                compositeId = "${row.environmentId.value}:${row.id.value}",
+                environmentId = row.environmentId.value,
+                orderKey = if (section) row.pinOrderKey else row.activeOrderKey,
+            )
+        }
+        return planThreadMove(
+            ordered = sectionThreads.sortedWith(homeListComparator(preferences.threadSort)).map(toRow),
+            allThreads = sectionThreads.map(toRow),
+            reorderableEnvironmentIds = reorderable,
+            movedCompositeId = "${thread.environmentId.value}:${thread.id.value}",
+            direction = direction,
+        )?.map { assignment ->
+            ThreadId(assignment.id.substringAfter(':')) to assignment.orderKey
+        }
+    }
+
     fun launchThreadAction(thread: ThreadSummary, action: String) {
+        if (action == "new-thread-on-branch") {
+            // Straight to the draft, prefilled like RN's NewTaskSheet params:
+            // same environment, same project, the thread's branch/worktree.
+            store.updateDraft {
+                it.copy(
+                    environmentId = thread.environmentId,
+                    projectKey = thread.projectId.value,
+                    branch = thread.branch.orEmpty(),
+                    worktreePath = thread.worktreePath,
+                    workspaceMode = club.touchtech.s5code.kotlin.model.WorkspaceMode.CurrentCheckout,
+                )
+            }
+            onResumeDraft()
+            return
+        }
         scope.launch {
             try {
+                val (moveUp, moveDown) =
+                    when (action) {
+                        "move-up" -> moveAssignmentsFor(thread, MoveDirection.Up) to null
+                        "move-down" -> null to moveAssignmentsFor(thread, MoveDirection.Down)
+                        else -> null to null
+                    }
                 performThreadAction(
                     store = store,
                     environmentId = thread.environmentId,
@@ -233,6 +294,10 @@ fun HomeScreen(
                     action = action,
                     pinned = thread.pinned,
                     status = thread.status,
+                    moveUpAssignments = moveUp,
+                    moveDownAssignments = moveDown,
+                    moveSection =
+                        if (thread.pinned) ReorderSection.Pinned else ReorderSection.Active,
                 )
             } catch (cancelled: CancellationException) {
                 throw cancelled
@@ -272,15 +337,77 @@ fun HomeScreen(
     // Swipe actions are capability-gated per environment, and a merged home draws
     // rows from several at once.
     val environmentsById = remember(environments) { environments.associateBy { it.id.value } }
+
+    /**
+     * Move availability per row, `compositeId → (canMoveUp, canMoveDown)`.
+     * Computed once per data change rather than inside each row's trailing
+     * lambda: the planner is O(section) per query, so per-row composition would
+     * make it quadratic in recompositions instead of once in data.
+     */
+    val moveAvailability =
+        remember(threads, environments, preferences.threadSort, preferences.projectGrouping) {
+            val result = mutableMapOf<String, Pair<Boolean, Boolean>>()
+            val reorderablePin =
+                environments
+                    .filter { it.capabilities.threadPinReorder }
+                    .mapTo(mutableSetOf()) { it.id.value }
+            val reorderableActive =
+                environments
+                    .filter { it.capabilities.threadActiveReorder }
+                    .mapTo(mutableSetOf()) { it.id.value }
+            for (section in listOf(true, false)) {
+                val reorderable = if (section) reorderablePin else reorderableActive
+                val sectionThreads =
+                    threads.filter {
+                        it.status != ThreadStatus.Snoozed &&
+                            it.status != ThreadStatus.Settled &&
+                            it.pinned == section
+                    }
+                if (sectionThreads.isEmpty()) continue
+                // The ordered section mirrors what the list renders; every row
+                // is an anchor so a respread can re-key hidden rows too.
+                val visual = sectionThreads.sortedWith(homeListComparator(preferences.threadSort))
+                val toRow = { row: ThreadSummary ->
+                    ThreadOrderRow(
+                        compositeId = "${row.environmentId.value}:${row.id.value}",
+                        environmentId = row.environmentId.value,
+                        orderKey = if (section) row.pinOrderKey else row.activeOrderKey,
+                    )
+                }
+                val ordered = visual.map(toRow)
+                val all = sectionThreads.map(toRow)
+                for (thread in sectionThreads) {
+                    val compositeId = "${thread.environmentId.value}:${thread.id.value}"
+                    if (thread.environmentId.value !in reorderable) {
+                        result[compositeId] = false to false
+                        continue
+                    }
+                    fun has(direction: MoveDirection) =
+                        planThreadMove(
+                            ordered = ordered,
+                            allThreads = all,
+                            reorderableEnvironmentIds = reorderable,
+                            movedCompositeId = compositeId,
+                            direction = direction,
+                        ) != null
+                    result[compositeId] = has(MoveDirection.Up) to has(MoveDirection.Down)
+                }
+            }
+            result
+        }
+
     val listState = rememberLazyListState()
-    val offline = environments.count { connectionPresentation(it.state).offline }
+    // Switched-off environments have no session and no threads, so they count
+    // toward neither "unreachable" nor the wait.
+    val enabledEnvironments = remember(environments) { environments.filter { it.isEnabled } }
+    val offline = enabledEnvironments.count { connectionPresentation(it.state).offline }
     // What the list is waiting on, if anything. A pill once there are rows, the whole
     // screen when there are none.
     val wait =
-        remember(environments, items.isEmpty(), paired, sessionRestored) {
+        remember(enabledEnvironments, items.isEmpty(), paired, sessionRestored) {
             waitNotice(
-                states = environments.map { it.state },
-                environmentLabel = environments.singleOrNull()?.label,
+                states = enabledEnvironments.map { it.state },
+                environmentLabel = enabledEnvironments.singleOrNull()?.label,
                 resourceName = "threads",
                 hasContent = items.isNotEmpty(),
                 awaitingEnvironments =
@@ -595,10 +722,14 @@ fun HomeScreen(
                                 val swipes =
                                     threadSwipeActions(
                                         thread = item.thread,
+                                        // `!= false` would offer settle to a
+                                        // server that has never heard of it —
+                                        // a command the server rejects kills
+                                        // the socket, so support must be proven.
                                         settlementSupported =
                                             environment
                                                 ?.capabilities
-                                                ?.threadSettlement != false,
+                                                ?.threadSettlement == true,
                                         snoozeSupported =
                                             environment?.capabilities?.threadSnooze == true,
                                     )
@@ -636,6 +767,10 @@ fun HomeScreen(
                                                     environment
                                                         ?.capabilities
                                                         ?.threadTitleRegeneration == true
+                                                val (canMoveUp, canMoveDown) =
+                                                    moveAvailability[
+                                                        "${item.thread.environmentId.value}:${item.thread.id.value}"
+                                                    ] ?: (false to false)
                                                 S5OverflowMenu(
                                                     icon = Icons.Rounded.MoreVert,
                                                     label = "Thread actions",
@@ -646,8 +781,22 @@ fun HomeScreen(
                                                     options =
                                                         threadMenuOptions(
                                                             thread = item.thread,
+                                                            settlementSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadSettlement == true,
+                                                            snoozeSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadSnooze == true,
+                                                            pinningSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadPinning == true,
                                                             titleRegenerationSupported =
                                                                 titleRegenerationSupported,
+                                                            canMoveUp = canMoveUp,
+                                                            canMoveDown = canMoveDown,
                                                         ),
                                                     onSelect = { action ->
                                                         val runAction = {
@@ -731,61 +880,105 @@ private fun swipeActionFor(action: ThreadSwipeAction, onAction: () -> Unit): S5S
     }
 
 /**
- * Row menu for a thread in the list, matching the RN client's: lifecycle plus
- * title regeneration. This is the only place thread lifecycle lives, so the
- * thread screen's header can stay about the work rather than the object.
+ * Row menu for a thread in the list, matching the RN client's card menus in
+ * `thread-list-v2-items.tsx`. The capability flags gate the *write*, not just
+ * the label: a command a server does not understand is a protocol defect that
+ * kills the socket, so settle, snooze, and pin are absent rather than disabled
+ * when the environment cannot honor them.
+ *
+ * The menu's shape follows the RN variant: a snoozed row only wakes or deletes;
+ * a pre-settlement server gets archive in place of the lifecycle items; a
+ * settled row un-settles; and an active row settles and snoozes. Pin and
+ * regenerate join every modern variant.
  */
 internal fun threadMenuOptions(
     thread: ThreadSummary,
+    settlementSupported: Boolean,
+    snoozeSupported: Boolean,
+    pinningSupported: Boolean,
     titleRegenerationSupported: Boolean,
     snoozePresets: List<SnoozePreset> = resolveSnoozePresets(),
+    /** `createThreadMovePlanner` results for this row; null hides the item. */
+    canMoveUp: Boolean = false,
+    canMoveDown: Boolean = false,
 ): List<S5MenuOption> {
     return buildList {
-        add(
-            S5MenuOption(
-                id = "pin",
-                label = if (thread.pinned) "Unpin" else "Pin",
-                icon = Icons.Rounded.PushPin,
-            )
-        )
-        if (thread.status == ThreadStatus.Snoozed) {
+        // Prepended like the RN Android menu: the branch the thread already
+        // runs on is the fastest way to ask for a second attempt.
+        thread.branch?.let { branch ->
             add(
                 S5MenuOption(
-                    id = "unsnooze",
-                    label = "Unsnooze",
-                    icon = Icons.Rounded.Bedtime,
-                )
-            )
-        } else {
-            val canSnooze = threadSnoozable(thread)
-            add(
-                S5MenuOption(
-                    id = "snooze",
-                    label = "Snooze",
-                    icon = Icons.Rounded.Bedtime,
-                    enabled = canSnooze,
-                    children =
-                        if (canSnooze) {
-                            snoozePresets.map { preset ->
-                                S5MenuOption(
-                                    id = "snooze:${preset.snoozedUntilIso}",
-                                    label = preset.label,
-                                    supporting = preset.whenLabel,
-                                )
-                            }
-                        } else {
-                            emptyList()
-                        },
+                    id = "new-thread-on-branch",
+                    label = "New thread on $branch",
+                    icon = Icons.Rounded.EditNote,
                 )
             )
         }
-        add(
-            S5MenuOption(
-                id = "settle",
-                label = if (thread.status == ThreadStatus.Settled) "Reopen" else "Settle",
-                icon = Icons.Rounded.DoneAll,
+        if (canMoveUp) {
+            add(S5MenuOption(id = "move-up", label = "Move up", icon = Icons.Rounded.ArrowUpward))
+        }
+        if (canMoveDown) {
+            add(
+                S5MenuOption(
+                    id = "move-down",
+                    label = "Move down",
+                    icon = Icons.Rounded.ArrowDownward,
+                )
             )
-        )
+        }
+        when {
+            thread.status == ThreadStatus.Snoozed ->
+                add(
+                    S5MenuOption(
+                        id = "unsnooze",
+                        label = "Wake thread",
+                        icon = Icons.Rounded.Bedtime,
+                    )
+                )
+            !settlementSupported ->
+                add(
+                    S5MenuOption(id = "archive", label = "Archive", icon = Icons.Rounded.Archive)
+                )
+            thread.status == ThreadStatus.Settled ->
+                add(
+                    S5MenuOption(
+                        id = "settle",
+                        label = "Un-settle",
+                        icon = Icons.Rounded.DoneAll,
+                    )
+                )
+            else -> {
+                add(
+                    S5MenuOption(id = "settle", label = "Settle", icon = Icons.Rounded.DoneAll)
+                )
+                if (snoozeSupported && threadSnoozable(thread)) {
+                    add(
+                        S5MenuOption(
+                            id = "snooze",
+                            label = "Snooze",
+                            icon = Icons.Rounded.Bedtime,
+                            children =
+                                snoozePresets.map { preset ->
+                                    S5MenuOption(
+                                        id = "snooze:${preset.snoozedUntilIso}",
+                                        label = preset.label,
+                                        supporting = preset.whenLabel,
+                                    )
+                                },
+                        )
+                    )
+                }
+            }
+        }
+        if (pinningSupported && thread.status != ThreadStatus.Snoozed) {
+            add(
+                S5MenuOption(
+                    id = "pin",
+                    label = if (thread.pinned) "Unpin" else "Pin",
+                    icon = Icons.Rounded.PushPin,
+                )
+            )
+        }
         if (titleRegenerationSupported) {
             add(
                 S5MenuOption(
@@ -796,7 +989,6 @@ internal fun threadMenuOptions(
                 )
             )
         }
-        add(S5MenuOption(id = "archive", label = "Archive", icon = Icons.Rounded.Archive))
         add(
             S5MenuOption(
                 id = "delete",
@@ -815,9 +1007,19 @@ private suspend fun performThreadAction(
     action: String,
     pinned: Boolean,
     status: ThreadStatus,
+    /** Move plans the menu was built with; absent means no reorder happens. */
+    moveUpAssignments: List<Pair<ThreadId, String>>? = null,
+    moveDownAssignments: List<Pair<ThreadId, String>>? = null,
+    moveSection: ReorderSection = if (pinned) ReorderSection.Pinned else ReorderSection.Active,
 ) {
     when {
         action == "pin" -> store.workspace.setPinned(environmentId, id, !pinned)
+        action == "move-up" ->
+            moveUpAssignments?.let { store.workspace.reorderThreads(environmentId, moveSection, it) }
+        action == "move-down" ->
+            moveDownAssignments?.let {
+                store.workspace.reorderThreads(environmentId, moveSection, it)
+            }
         action.startsWith("snooze:") -> {
             val untilIso = action.removePrefix("snooze:")
             store.workspace.setSnoozed(environmentId, id, true, untilIso)

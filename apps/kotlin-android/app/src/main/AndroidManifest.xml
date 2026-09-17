@@ -5,10 +5,14 @@
     <!-- QR pairing. Optional hardware: a tablet without a camera still pairs by URL. -->
     <uses-permission android:name="android.permission.CAMERA" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- Lets the connection supervisor park offline instead of burning backoff. -->
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <!-- Android 16: lets the system promote eligible ongoing progress. -->
     <uses-permission android:name="android.permission.POST_PROMOTED_NOTIFICATIONS" />
     <!-- Self-updating via system package installer without Play Store. -->
     <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <!-- Composer dictation via SpeechRecognizer. -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
 
@@ -81,7 +85,11 @@
                 <data android:scheme="s5code" />
             </intent-filter>
 
-            <!-- Sharesheet: text, URLs, and images become a new-task draft. -->
+            <!--
+              Sharesheet: text, URLs, images, and files become a new-task draft.
+              `*/*` matches the RN client's receiver, which takes any stream and
+              lets the inbox warn about the payloads it cannot use.
+            -->
             <intent-filter>
                 <action android:name="android.intent.action.SEND" />
                 <category android:name="android.intent.category.DEFAULT" />
@@ -92,6 +100,7 @@
                 <action android:name="android.intent.action.SEND_MULTIPLE" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <data android:mimeType="image/*" />
+                <data android:mimeType="*/*" />
             </intent-filter>
         </activity>
     </application>

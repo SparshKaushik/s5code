@@ -55,6 +55,10 @@ fun ArchiveScreen(
     var query by rememberSaveable { mutableStateOf("") }
     var menuFor by remember { mutableStateOf<String?>(null) }
 
+    // The archived list is a unary read, not a stream: entering the screen is the
+    // refresh, matching the RN archive screen's focus refetch.
+    androidx.compose.runtime.LaunchedEffect(Unit) { store.workspace.refreshArchived() }
+
     val filtered =
         remember(archived, query) {
             val needle = query.trim().lowercase()
@@ -69,8 +73,8 @@ fun ArchiveScreen(
     val wait =
         remember(environments, archived.isEmpty()) {
             waitNotice(
-                states = environments.map { it.state },
-                environmentLabel = environments.singleOrNull()?.label,
+                states = environments.filter { it.isEnabled }.map { it.state },
+                environmentLabel = environments.singleOrNull { it.isEnabled }?.label,
                 resourceName = "archive",
                 hasContent = archived.isNotEmpty(),
             )

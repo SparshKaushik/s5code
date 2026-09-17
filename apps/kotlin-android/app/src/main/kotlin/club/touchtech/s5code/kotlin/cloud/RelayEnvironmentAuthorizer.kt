@@ -84,6 +84,7 @@ class RelayEnvironmentAuthorizer(
                 EnvironmentCredential.Dpop(access.access_token) { method, url, accessToken ->
                     key.createProof(method, url, accessToken)
                 },
+            connectionMethod = "relay",
         )
     }
 }

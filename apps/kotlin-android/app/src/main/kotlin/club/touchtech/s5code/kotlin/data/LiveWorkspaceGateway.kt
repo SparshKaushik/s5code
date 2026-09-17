@@ -18,10 +18,12 @@ import club.touchtech.s5code.kotlin.model.PullRequestState
 import club.touchtech.s5code.kotlin.model.RepositoryRef
 import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.model.RuntimeMode
+import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import club.touchtech.s5code.kotlin.model.SourceFile
 import club.touchtech.s5code.kotlin.model.TerminalSession
 import club.touchtech.s5code.kotlin.model.TerminalStatus
+import club.touchtech.s5code.kotlin.model.TerminalSummary
 import club.touchtech.s5code.kotlin.model.ThreadDetail
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
@@ -36,6 +38,7 @@ import club.touchtech.s5code.kotlin.model.UsageTotals
 import club.touchtech.s5code.kotlin.model.UsageWindow
 import club.touchtech.s5code.kotlin.model.UserInputAnswer
 import club.touchtech.s5code.kotlin.model.WorkspaceAsset
+import club.touchtech.s5code.kotlin.transport.Connectivity
 import club.touchtech.s5code.kotlin.transport.EnvironmentHttp
 import club.touchtech.s5code.kotlin.transport.EnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.DirectEnvironmentAuthorizer
@@ -47,6 +50,7 @@ import club.touchtech.s5code.kotlin.transport.applyShellStreamItem
 import club.touchtech.s5code.kotlin.transport.hasCacheableWorkspaceContent
 import club.touchtech.s5code.kotlin.transport.applyThreadEvent
 import club.touchtech.s5code.kotlin.transport.wire.AssetUrlResultDto
+import club.touchtech.s5code.kotlin.transport.wire.AttachmentUploadUrlResultDto
 import club.touchtech.s5code.kotlin.transport.wire.DispatchResultDto
 import club.touchtech.s5code.kotlin.transport.wire.GitActionProgressEventDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectListEntriesResultDto
@@ -57,8 +61,10 @@ import club.touchtech.s5code.kotlin.transport.wire.ShellSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlCloneResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlRepositoryDto
+import club.touchtech.s5code.kotlin.transport.wire.TerminalMetadataStreamEventDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalStreamEventDto
+import club.touchtech.s5code.kotlin.transport.wire.TerminalSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.UsageSummaryDto
@@ -68,6 +74,7 @@ import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseResultDto
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -80,16 +87,27 @@ import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import okhttp3.OkHttpClient
+import okhttp3.RequestBody
+import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MediaType.Companion.toMediaTypeOrNull
+import okhttp3.RequestBody.Companion.asRequestBody
 
 /**
  * The real workspace: several environments, merged.
@@ -126,11 +144,24 @@ class LiveWorkspaceGateway(
         val session: EnvironmentSession,
         val shell: MutableStateFlow<ShellSnapshotDto?>,
         var job: Job? = null,
+        var archivedJob: Job? = null,
         var stateJob: Job? = null,
         var providersJob: Job? = null,
     )
 
     private val sessions = MutableStateFlow<Map<String, Connected>>(emptyMap())
+
+    /**
+     * Per-environment archived snapshots. The live shell stream carries active
+     * threads only — the server filters `archived_at IS NULL` out of it — so the
+     * archive list comes from `orchestration.getArchivedShellSnapshot`, fetched
+     * on connect and refreshed on demand, matching
+     * `useArchivedThreadSnapshots` in the RN client.
+     */
+    private val archivedShells = MutableStateFlow<Map<String, ShellSnapshotDto>>(emptyMap())
+
+    /** Network reachability shared by every session's supervisor. */
+    private val onlineState: Flow<Boolean> = Connectivity.online(context)
 
     /**
      * Ticks once a minute so relative timestamps ("4m", "2h") and the queued-turn
@@ -175,6 +206,12 @@ class LiveWorkspaceGateway(
      */
     private val pendingCreationKeys = MutableStateFlow<Set<String>>(emptySet())
     private val detailJobs = mutableMapOf<String, Job>()
+
+    /**
+     * Load-earlier entry points keyed like [detailJobs]: the subscription's own
+     * closure, so a page fetch shares its snapshot state and apply lock.
+     */
+    private val detailOlderLoaders = mutableMapOf<String, suspend () -> Boolean>()
     /** Threads subscribed solely because their shell says Home needs an actionable gate. */
     private val homePendingDetailKeys = mutableSetOf<String>()
     /** Explicit thread screens own subscriptions independently from Home's temporary interest. */
@@ -227,14 +264,19 @@ class LiveWorkspaceGateway(
     /* ── Session lifecycle ───────────────────────────────────────────── */
 
     private fun reconcile(saved: List<SavedEnvironment>) {
-        val savedIds = saved.map { it.environmentId }.toSet()
+        // Only enabled environments get a session. A disabled row stays in the
+        // catalog and in `environments` (marked `isEnabled = false`) but owns no
+        // socket: switching off is a pause that tears down, not a remove.
+        val enabledIds = saved.filter { it.enabled }.map { it.environmentId }.toSet()
         val current = sessions.value
 
-        current.filterKeys { it !in savedIds }.forEach { (id, connected) ->
+        current.filterKeys { it !in enabledIds }.forEach { (id, connected) ->
             connected.job?.cancel()
+            connected.archivedJob?.cancel()
             connected.stateJob?.cancel()
             connected.providersJob?.cancel()
             connected.session.stop()
+            archivedShells.update { it - id }
             val prefix = "$id/"
             detailJobs.keys.filter { it.startsWith(prefix) }.forEach(::dropDetailSubscription)
             pendingCreationKeys.update { keys -> keys.filterNotTo(mutableSetOf()) { it.startsWith(prefix) } }
@@ -244,6 +286,7 @@ class LiveWorkspaceGateway(
         }
 
         saved.forEach { environment ->
+            if (!environment.enabled) return@forEach
             if (current.containsKey(environment.environmentId)) return@forEach
             val session =
                 EnvironmentSession(
@@ -258,6 +301,7 @@ class LiveWorkspaceGateway(
                             it.environmentId == environment.environmentId
                         }
                     },
+                    online = onlineState,
                     initialPhase = SessionPhase.Connecting,
                 )
             val connected = Connected(session, MutableStateFlow(null))
@@ -271,6 +315,15 @@ class LiveWorkspaceGateway(
             // as a fallback and compareAndSet keeps a fresh socket snapshot newer.
             session.start()
             connected.job = scope.launch { subscribeShell(connected) }
+            connected.archivedJob =
+                scope.launch {
+                    // Every socket edge refetches the archived snapshot: archive
+                    // mutations arrive as shell deltas for a list the live stream
+                    // no longer carries, so connect is the only reliable hook.
+                    session.connected.collect { connectedNow ->
+                        if (connectedNow) fetchArchivedShell(environment.environmentId)
+                    }
+                }
             scope.launch {
                 snapshotStore.loadShell(EnvironmentId(environment.environmentId))?.let { cached ->
                     // Never replace a fresher live snapshot if the disk read loses
@@ -284,19 +337,76 @@ class LiveWorkspaceGateway(
     }
 
     /**
+     * One unary read of the archived list. Failures keep the previous snapshot so
+     * a flaky link does not empty the screen.
+     */
+    private suspend fun fetchArchivedShell(environmentId: String) {
+        runCatching {
+                sessionFor(EnvironmentId(environmentId))
+                    .request(
+                        WsMethods.OrchestrationGetArchivedShellSnapshot,
+                        JsonObject(emptyMap()),
+                        ShellSnapshotDto.serializer(),
+                    )
+            }
+            .onSuccess { snapshot ->
+                archivedShells.update { it + (environmentId to snapshot) }
+                publish()
+            }
+    }
+
+    /** Refreshes every connected environment's archived list, e.g. on screen focus. */
+    override fun refreshArchived() {
+        sessions.value.keys.forEach { scope.launch { fetchArchivedShell(it) } }
+    }
+
+    /**
      * Keeps one environment's shell snapshot current.
      *
-     * The subscription re-issues itself on reconnect (see
-     * [EnvironmentSession.subscribe]), and each new subscription opens with a
-     * fresh snapshot frame, so the reducer rebuilds from authoritative state
-     * rather than trusting deltas across a gap.
+     * Each new connection first tries the HTTP snapshot endpoint
+     * (`/api/orchestration/shell`), matching `state/shell.ts` in
+     * `packages/client-runtime`: a fast, resumable baseline that lets the socket
+     * subscribe with `afterSequence` and replay only what was missed. When the
+     * prefetch fails — or there is no cursor — the subscription omits
+     * `afterSequence` and the server sends a full snapshot, because resuming from
+     * a stale local cache would leave a permanent gap.
      */
     private suspend fun subscribeShell(connected: Connected) {
+        var prefetchOk = false
         connected.session
             .subscribe(
                 WsMethods.OrchestrationSubscribeShell,
-                buildJsonObject { put("requestCompletionMarker", true) },
+                payload = {
+                    buildJsonObject {
+                        if (prefetchOk) {
+                            connected.shell.value
+                                ?.snapshotSequence
+                                ?.takeIf { it > 0 }
+                                ?.let { put("afterSequence", it) }
+                        }
+                        put("requestCompletionMarker", true)
+                    }
+                },
                 ShellStreamItemDto.serializer(),
+                prefetch = { session ->
+                    prefetchOk =
+                        runCatching {
+                                withTimeoutOrNull(SNAPSHOT_PREFETCH_MS) {
+                                    val snapshot =
+                                        session.getJson(
+                                            "/api/orchestration/shell",
+                                            ShellSnapshotDto.serializer(),
+                                        )
+                                    connected.shell.value = snapshot
+                                    snapshotStore.saveShell(
+                                        EnvironmentId(session.environmentId),
+                                        snapshot,
+                                    )
+                                    publish()
+                                } != null
+                            }
+                            .getOrDefault(false)
+                },
             )
             .collect { item ->
                 connected.shell.update { current ->
@@ -327,43 +437,59 @@ class LiveWorkspaceGateway(
         val entries = sessions.value
         val now = clock.value
 
+        // Every saved environment publishes, connected or not: a disabled one
+        // still owns a Connections row ("Off"), and an enabled one before its
+        // first session reconcile reports Connecting rather than vanishing.
         _environments.value =
-            entries.values.map { connected ->
-                val state = connected.session.state.value
-                val saved =
-                    store.environments.value.firstOrNull {
-                        it.environmentId == connected.session.environmentId
-                    }
+            store.environments.value.map { saved ->
+                val connected = sessions.value[saved.environmentId]
+                val state = connected?.session?.state?.value
                 Environment(
-                    id = EnvironmentId(connected.session.environmentId),
-                    label = connected.session.label.value,
+                    id = EnvironmentId(saved.environmentId),
+                    label = connected?.session?.label?.value ?: saved.label,
                     host =
                         saved
-                            ?.httpBaseUrl
-                            ?.removePrefix("http://")
-                            ?.removePrefix("https://")
-                            ?.trimEnd('/')
-                            .orEmpty(),
+                            .httpBaseUrl
+                            .removePrefix("http://")
+                            .removePrefix("https://")
+                            .trimEnd('/'),
                     kind =
-                        if (saved?.relayManaged == true) EnvironmentKind.Cloud
+                        if (saved.relayManaged) EnvironmentKind.Cloud
                         else EnvironmentKind.Direct,
+                    isEnabled = saved.enabled,
                     state =
-                        when (state.phase) {
-                            SessionPhase.Connected -> ConnectionState.Connected
-                            SessionPhase.Connecting -> ConnectionState.Connecting
-                            SessionPhase.Backoff -> ConnectionState.Recovering
-                            SessionPhase.Unauthorized -> ConnectionState.AuthRequired
-                            SessionPhase.Idle -> ConnectionState.Offline
+                        when {
+                            !saved.enabled -> ConnectionState.Disabled
+                            state == null -> ConnectionState.Connecting
+                            else ->
+                                when (state.phase) {
+                                    SessionPhase.Connected -> ConnectionState.Connected
+                                    SessionPhase.Connecting -> ConnectionState.Connecting
+                                    SessionPhase.Backoff -> ConnectionState.Recovering
+                                    SessionPhase.Offline -> ConnectionState.Offline
+                                    SessionPhase.Unauthorized -> ConnectionState.AuthRequired
+                                    SessionPhase.Idle -> ConnectionState.Offline
+                                }
                         },
-                    lastSeenLabel = state.lastError ?: "",
-                    serverVersion = state.serverVersion.orEmpty(),
+                    lastSeenLabel = state?.lastError.orEmpty(),
+                    serverVersion = state?.serverVersion.orEmpty(),
+                    platformOs = state?.platformOs,
                     capabilities =
                         EnvironmentCapabilities(
-                            threadSettlement = state.capabilities.threadSettlement,
-                            threadSnooze = state.capabilities.threadSnooze,
-                            threadPinning = state.capabilities.threadPinning,
+                            threadSettlement = state?.capabilities?.threadSettlement == true,
+                            threadSnooze = state?.capabilities?.threadSnooze == true,
+                            threadPinning = state?.capabilities?.threadPinning == true,
+                            threadPinReorder = state?.capabilities?.threadPinReorder == true,
+                            threadActiveReorder = state?.capabilities?.threadActiveReorder == true,
                             threadTitleRegeneration =
-                                state.capabilities.threadTitleRegeneration,
+                                state?.capabilities?.threadTitleRegeneration == true,
+                            attachmentUploads = state?.capabilities?.attachmentUploads == true,
+                            questionAttachments = state?.capabilities?.questionAttachments == true,
+                            fileAttachments =
+                                state?.capabilities?.fileAttachmentsMaxUploadBytes?.let {
+                                    club.touchtech.s5code.kotlin.model
+                                        .FileAttachmentsCapability(maxUploadBytes = it)
+                                },
                         ),
                 )
             }
@@ -379,6 +505,20 @@ class LiveWorkspaceGateway(
             snapshot.threads.forEach { shell ->
                 val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
                 if (isArchived(shell)) archivedThreads += summary else active += summary
+            }
+        }
+        // The dedicated archived snapshot is the real list; the live shell only
+        // contributes rows archived mid-session before a refetch lands.
+        archivedShells.value.forEach { (environmentId, snapshot) ->
+            val id = EnvironmentId(environmentId)
+            snapshot.threads.forEach { shell ->
+                val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
+                if (archivedThreads.none {
+                        it.environmentId == summary.environmentId && it.id == summary.id
+                    }
+                ) {
+                    archivedThreads += summary
+                }
             }
         }
 
@@ -438,6 +578,7 @@ class LiveWorkspaceGateway(
                         models
                             .associate { it.slug to optionDescriptorsFrom(it.capabilities) }
                             .filterValues { it.isNotEmpty() },
+                    interactionModeToggle = first.showInteractionModeToggle != false,
                 )
             }
             .sortedBy { it.instance.label.lowercase() }
@@ -518,8 +659,8 @@ class LiveWorkspaceGateway(
     }
 
     /** Forces every paired environment onto a fresh socket after app foreground. */
-    override fun refreshConnections() {
-        sessions.value.values.forEach { it.session.refreshAfterForeground() }
+    override fun refreshConnections(backgroundedMillis: Long) {
+        sessions.value.values.forEach { it.session.refreshAfterForeground(backgroundedMillis) }
         clock.value = System.currentTimeMillis()
         publish()
     }
@@ -593,6 +734,7 @@ class LiveWorkspaceGateway(
 
     private fun dropDetailSubscription(key: String) {
         detailJobs.remove(key)?.cancel()
+        detailOlderLoaders.remove(key)
         details.remove(key)
         detailSyncPhases.remove(key)
     }
@@ -611,18 +753,145 @@ class LiveWorkspaceGateway(
     ) {
         var snapshot: ThreadDto? = null
         var page: club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto? = null
+        // The orchestration-log sequence of the newest applied frame. Resuming
+        // subscriptions pass it as `afterSequence`; replayed events at or below
+        // it are dropped, matching the shell reducer's dedup semantics.
+        var lastSequence = 0L
+        var prefetchOk = false
+        // Serializes stream application against `loadOlderTurns` merges — the
+        // UI's load-earlier tap runs on another coroutine, and a page merge
+        // interleaved with an event application is how transcripts duplicate.
+        val applyLock = Mutex()
+        // Anything that rewrites history (a snapshot frame, a revert) bumps the
+        // epoch so an in-flight older-page fetch cannot merge into a state it
+        // was not read against.
+        var historyEpoch = 0
+        var loadingOlder = false
+        // A page read ahead of the live watermark parks here until the stream
+        // catches up; merging early would duplicate deltas still in flight.
+        var pendingOlderPage:
+            club.touchtech.s5code.kotlin.transport.wire.ThreadDetailSnapshotDto? = null
         val sync = detailSyncPhases.getOrPut(key) { MutableStateFlow(ThreadSyncPhase.Loading) }
+        fun reproject(now: Long) {
+            snapshot?.let { thread ->
+                val projected =
+                    threadDetailFrom(
+                        environmentId,
+                        thread,
+                        ::instanceFor,
+                        now,
+                        page,
+                        loadingOlder,
+                    )
+                target.value = projected.copy(syncPhase = sync.value)
+            }
+        }
+        // The load-earlier path lives here rather than on the public method so
+        // it shares the subscription's snapshot state and apply lock — the
+        // merged page has to compose with whatever the stream has already
+        // applied, not a second copy.
+        suspend fun loadOlder(): Boolean {
+            val session = sessionFor(environmentId)
+            if (!session.state.value.capabilities.threadSnapshotPagination) return false
+            val epochAtStart = historyEpoch
+            var cursor: String? = null
+            applyLock.withLock {
+                cursor = page?.beforeCursor
+                if (loadingOlder || page?.hasMore != true || cursor == null) return false
+                loadingOlder = true
+                reproject(clock.value)
+            }
+            val fresh =
+                runCatching {
+                        session.getJson(
+                            "/api/orchestration/threads/${id.value}" +
+                                "?turnLimit=$OLDER_THREAD_PAGE_USER_TURN_LIMIT" +
+                                "&beforeCursor=${android.net.Uri.encode(cursor)}",
+                            club.touchtech.s5code.kotlin.transport.wire
+                                .ThreadDetailSnapshotDto.serializer(),
+                        )
+                    }
+                    .getOrNull()
+            var merged = false
+            applyLock.withLock {
+                if (fresh != null && epochAtStart == historyEpoch &&
+                    fresh.snapshotSequence >= lastSequence
+                ) {
+                    val current = snapshot
+                    if (current != null) {
+                        val watermark = fresh.page?.threadSequence
+                        if (watermark != null && watermark > lastSequence) {
+                            // Parked: merge once live events reach the page's
+                            // thread-scoped watermark (`pendingOlderPage` in
+                            // client-runtime's thread state).
+                            pendingOlderPage = fresh
+                        } else {
+                            snapshot = mergeOlderThreadPage(current, fresh.thread)
+                            // The merged page persists under the loaded
+                            // watermark, not the page's own sequence: it is
+                            // only known consistent with what it merged into.
+                            page = fresh.page?.copy(snapshotSequence = lastSequence)
+                            snapshotStore.saveThread(environmentId, snapshot!!, page)
+                            merged = true
+                        }
+                    }
+                }
+                if (pendingOlderPage == null) loadingOlder = false
+                reproject(clock.value)
+            }
+            return merged
+        }
+        detailOlderLoaders[key] = ::loadOlder
         // A fresh subscription is either loading from scratch or reconciling the
         // cached/live detail already visible from the prior connection.
         sync.value = if (target.value == null) ThreadSyncPhase.Loading else ThreadSyncPhase.Syncing
+        val session = sessionFor(environmentId)
+        val paginationSupported = session.state.value.capabilities.threadSnapshotPagination
         combine(
-                sessionFor(environmentId).subscribe(
+                session.subscribe(
                     WsMethods.OrchestrationSubscribeThread,
-                    buildJsonObject {
-                        put("threadId", id.value)
-                        put("requestCompletionMarker", true)
+                    payload = {
+                        buildJsonObject {
+                            put("threadId", id.value)
+                            // Only resume when this connection fetched an
+                            // authoritative baseline (HTTP prefetch). A stale
+                            // cursor would skip events the local copy never saw.
+                            if (prefetchOk && lastSequence > 0) {
+                                put("afterSequence", lastSequence)
+                            }
+                            put("requestCompletionMarker", true)
+                            // The fallback snapshot (no `afterSequence`, or a
+                            // gap too large to replay) is windowed to the last
+                            // ten user turns on capable servers — absent, the
+                            // server sends the full thread, which preserves
+                            // pre-pagination behavior.
+                            if (paginationSupported) {
+                                put("turnLimit", INITIAL_THREAD_USER_TURN_LIMIT)
+                            }
+                        }
                     },
                     ThreadStreamItemDto.serializer(),
+                    prefetch = { connected ->
+                        prefetchOk =
+                            runCatching {
+                                    withTimeoutOrNull(SNAPSHOT_PREFETCH_MS) {
+                                        val fresh =
+                                            connected.getJson(
+                                                "/api/orchestration/threads/${id.value}" +
+                                                    if (paginationSupported)
+                                                        "?turnLimit=$INITIAL_THREAD_USER_TURN_LIMIT"
+                                                    else "",
+                                                club.touchtech.s5code.kotlin.transport.wire
+                                                    .ThreadDetailSnapshotDto.serializer(),
+                                            )
+                                        snapshot = fresh.thread
+                                        page = fresh.page
+                                        lastSequence = fresh.snapshotSequence
+                                        snapshotStore.saveThread(environmentId, fresh.thread, page)
+                                    } != null
+                                }
+                                .getOrDefault(false)
+                    },
                 ),
                 clock,
             ) { item, now ->
@@ -654,40 +923,101 @@ class LiveWorkspaceGateway(
                 if (!isPendingCreationMissingThread(cause, id)) return@catch
             }
             .collect { (item, now) ->
-                when (item.kind) {
-                    "snapshot" -> {
-                        sync.value =
-                            if (target.value == null) ThreadSyncPhase.Loading
-                            else ThreadSyncPhase.Syncing
-                        snapshot = item.snapshot?.thread
-                        page = item.snapshot?.page
-                        snapshot?.let { snapshotStore.saveThread(environmentId, it, page) }
-                    }
-                    "synchronized" -> sync.value = ThreadSyncPhase.Live
-                    "event" -> {
-                        val current = snapshot
-                        val event = item.event
-                        if (current != null && event != null) {
-                            when (val result = applyThreadEvent(current, event)) {
-                                is ThreadReduction.Updated -> snapshot = result.thread
-                                ThreadReduction.Deleted -> {
-                                    snapshot = null
-                                    target.value = null
-                                    snapshotStore.removeThread(environmentId, id.value)
+                applyLock.withLock {
+                    when (item.kind) {
+                        "snapshot" -> {
+                            sync.value =
+                                if (target.value == null) ThreadSyncPhase.Loading
+                                else ThreadSyncPhase.Syncing
+                            snapshot = item.snapshot?.thread
+                            page = item.snapshot?.page
+                            item.snapshot?.snapshotSequence?.let { lastSequence = it }
+                            // A fresh window rewrites history: an older-page
+                            // fetch in flight merges against nothing valid.
+                            historyEpoch += 1
+                            pendingOlderPage = null
+                            loadingOlder = false
+                            snapshot?.let { snapshotStore.saveThread(environmentId, it, page) }
+                        }
+                        "synchronized" -> sync.value = ThreadSyncPhase.Live
+                        "event" -> {
+                            val current = snapshot
+                            val event = item.event
+                            // Replay overlap: `afterSequence` resumes can re-deliver
+                            // events the HTTP snapshot already covered.
+                            val eventSequence =
+                                (event as? JsonObject)?.get("sequence")
+                                    ?.jsonPrimitive?.longOrNull
+                            if (eventSequence != null && eventSequence <= lastSequence) {
+                                return@collect
+                            }
+                            val eventType =
+                                (event as? JsonObject)?.get("type")
+                                    ?.jsonPrimitive?.contentOrNull
+                            if (eventType == "thread.reverted") {
+                                historyEpoch += 1
+                                pendingOlderPage = null
+                            }
+                            if (current != null && event != null) {
+                                when (val result = applyThreadEvent(current, event)) {
+                                    is ThreadReduction.Updated -> snapshot = result.thread
+                                    ThreadReduction.Deleted -> {
+                                        snapshot = null
+                                        target.value = null
+                                        snapshotStore.removeThread(environmentId, id.value)
+                                    }
+                                    ThreadReduction.Unchanged -> Unit
                                 }
-                                ThreadReduction.Unchanged -> Unit
+                                if (eventSequence != null) lastSequence = eventSequence
+                            }
+                            // A parked older page merges once the live stream
+                            // has reached its thread-scoped watermark.
+                            val parked = pendingOlderPage
+                            val parkedWatermark = parked?.page?.threadSequence
+                            if (parked != null && parkedWatermark != null &&
+                                parkedWatermark <= lastSequence
+                            ) {
+                                val current = snapshot
+                                if (current != null &&
+                                    parked.snapshotSequence >= lastSequence
+                                ) {
+                                    snapshot = mergeOlderThreadPage(current, parked.thread)
+                                    page = parked.page?.copy(snapshotSequence = lastSequence)
+                                    snapshotStore.saveThread(environmentId, snapshot!!, page)
+                                }
+                                pendingOlderPage = null
+                                loadingOlder = false
                             }
                         }
                     }
-                }
-                snapshot?.let { thread ->
-                    if (item.kind == "event") snapshotStore.saveThread(environmentId, thread, page)
-                    val projected = threadDetailFrom(environmentId, thread, ::instanceFor, now)
-                    target.value = projected.copy(syncPhase = sync.value)
-                    if (key in homePendingDetailKeys) publishPendingRequests()
+                    snapshot?.let { thread ->
+                        if (item.kind == "event") {
+                            snapshotStore.saveThread(environmentId, thread, page)
+                        }
+                        val projected =
+                            threadDetailFrom(
+                                environmentId,
+                                thread,
+                                ::instanceFor,
+                                now,
+                                page,
+                                loadingOlder,
+                            )
+                        target.value = projected.copy(syncPhase = sync.value)
+                        if (key in homePendingDetailKeys) publishPendingRequests()
+                    }
                 }
             }
     }
+
+    /**
+     * Fetches and merges the next page of older turns — `loadOlderTurns` in
+     * client-runtime. The actual work is the subscription's own closure so it
+     * shares snapshot state and the apply lock; a screen call with no live
+     * subscription is a no-op rather than a second state copy.
+     */
+    override suspend fun loadOlderTurns(environmentId: EnvironmentId, id: ThreadId): Boolean =
+        detailOlderLoaders["${environmentId.value}/${id.value}"]?.invoke() ?: false
 
     /** The wire thread behind an open detail, for commands that need turn ids. */
     private fun latestTurnId(environmentId: EnvironmentId, id: ThreadId): String? =
@@ -776,6 +1106,7 @@ class LiveWorkspaceGateway(
         id: ThreadId,
         inputId: String,
         answers: Map<String, UserInputAnswer>,
+        attachmentsByQuestionId: Map<String, List<SentAttachment>>,
     ) {
         dispatch(
             environmentId,
@@ -783,7 +1114,15 @@ class LiveWorkspaceGateway(
                 threadId = id.value,
                 requestId = inputId,
                 answers = answers,
+                attachmentsByQuestionId = attachmentsByQuestionId,
             ),
+        )
+    }
+
+    override suspend fun dismissInput(environmentId: EnvironmentId, id: ThreadId, inputId: String) {
+        dispatch(
+            environmentId,
+            Commands.dismissUserInput(threadId = id.value, requestId = inputId),
         )
     }
 
@@ -841,6 +1180,7 @@ class LiveWorkspaceGateway(
         branch: String,
         newWorktree: Boolean,
         attachments: List<ComposerAttachment>,
+        worktreePath: String?,
         threadId: ThreadId?,
         delivery: TurnDeliveryMetadata?,
     ): ThreadId {
@@ -866,6 +1206,7 @@ class LiveWorkspaceGateway(
                 interactionMode = if (settings.runtimeMode == RuntimeMode.Plan) "plan" else "default",
                 branch = branch.takeIf { it.isNotBlank() },
                 newWorktree = newWorktree,
+                worktreePath = worktreePath,
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
                 messageId = delivery?.messageId ?: UUID.randomUUID().toString(),
                 createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
@@ -931,11 +1272,32 @@ class LiveWorkspaceGateway(
         )
     }
 
+    /**
+     * One reorder write per assignment from the move planner. A move is usually
+     * a single write; keyless neighbors force a section respread, which arrives
+     * here as one assignment per row.
+     */
+    override suspend fun reorderThreads(
+        environmentId: EnvironmentId,
+        section: ReorderSection,
+        assignments: List<Pair<ThreadId, String>>,
+    ) {
+        val type =
+            when (section) {
+                ReorderSection.Pinned -> "thread.pin.reorder"
+                ReorderSection.Active -> "thread.active.reorder"
+            }
+        assignments.forEach { (threadId, orderKey) ->
+            dispatch(environmentId, Commands.reorderOrderKey(type, threadId.value, orderKey))
+        }
+    }
+
     override suspend fun setArchived(environmentId: EnvironmentId, id: ThreadId, archived: Boolean) {
         dispatch(
             environmentId,
             Commands.lifecycle(if (archived) "thread.archive" else "thread.unarchive", id.value),
         )
+        scope.launch { fetchArchivedShell(environmentId.value) }
     }
 
     override suspend fun setSettled(environmentId: EnvironmentId, id: ThreadId, settled: Boolean) {
@@ -966,6 +1328,7 @@ class LiveWorkspaceGateway(
         explicitDetailKeys.remove(key)
         dropDetailSubscription(key)
         snapshotStore.removeThread(environmentId, id.value)
+        scope.launch { fetchArchivedShell(environmentId.value) }
     }
 
     override suspend fun revertToCheckpoint(
@@ -1090,12 +1453,7 @@ class LiveWorkspaceGateway(
                     },
                     AssetUrlResultDto.serializer(),
                 )
-        val origin =
-            sessions.value[environmentId.value]?.session?.httpBaseUrl
-                ?: store.environments.value
-                    .firstOrNull { it.environmentId == environmentId.value }
-                    ?.httpBaseUrl
-                ?: error("That environment is no longer paired.")
+        val origin = assetOrigin(environmentId)
         return WorkspaceAsset(
             url = origin.trimEnd('/') + "/" + result.relativeUrl.trimStart('/'),
             expiresAtMillis = result.expiresAt,
@@ -1118,6 +1476,9 @@ class LiveWorkspaceGateway(
     override suspend fun attachmentUrl(
         environmentId: EnvironmentId,
         attachmentId: String,
+        fileName: String?,
+        mimeType: String?,
+        disposition: String?,
     ): String {
         val result =
             sessionFor(environmentId)
@@ -1129,19 +1490,142 @@ class LiveWorkspaceGateway(
                             buildJsonObject {
                                 put("_tag", "attachment")
                                 put("attachmentId", attachmentId)
+                                if (fileName != null) put("fileName", fileName)
+                                if (mimeType != null) put("mimeType", mimeType)
+                                if (disposition != null) put("disposition", disposition)
                             },
                         )
                     },
                     AssetUrlResultDto.serializer(),
                 )
-        val origin =
-            sessions.value[environmentId.value]?.session?.httpBaseUrl
-                ?: store.environments.value
-                    .firstOrNull { it.environmentId == environmentId.value }
-                    ?.httpBaseUrl
-                ?: error("That environment is no longer paired.")
-        return origin.trimEnd('/') + "/" + result.relativeUrl.trimStart('/')
+        return assetOrigin(environmentId).trimEnd('/') +
+            "/" + result.relativeUrl.trimStart('/')
     }
+
+    /** The live session's HTTP origin, falling back to the saved row. */
+    private fun assetOrigin(environmentId: EnvironmentId): String =
+        sessions.value[environmentId.value]?.session?.httpBaseUrl
+            ?: store.environments.value
+                .firstOrNull { it.environmentId == environmentId.value }
+                ?.httpBaseUrl
+            ?: error("That environment is no longer paired.")
+
+    override suspend fun uploadPendingAttachment(
+        environmentId: EnvironmentId,
+        type: String,
+        name: String,
+        mimeType: String,
+        file: java.io.File,
+    ): String {
+        val upload =
+            sessionFor(environmentId)
+                .request(
+                    WsMethods.AttachmentsCreateUploadUrl,
+                    buildJsonObject {
+                        put("type", type)
+                        put("name", name)
+                        put("mimeType", mimeType)
+                        put("sizeBytes", file.length())
+                    },
+                    AttachmentUploadUrlResultDto.serializer(),
+                )
+        // The returned URL is self-signed — a plain POST with no credential,
+        // resolved against the live base so a moved tunnel still lands.
+        val url =
+            assetOrigin(environmentId).trimEnd('/') +
+                "/" + upload.relativeUrl.trimStart('/')
+        postBytes(
+            url = url,
+            body =
+                file.asRequestBody(
+                    mimeType.toMediaTypeOrNull()
+                        ?: "application/octet-stream".toMediaType()
+                ),
+        )
+        return upload.attachmentId
+    }
+
+    override suspend fun deletePendingAttachment(
+        environmentId: EnvironmentId,
+        attachmentId: String,
+    ) {
+        sessionFor(environmentId)
+            .execute(
+                WsMethods.AttachmentsDelete,
+                buildJsonObject { put("attachmentId", attachmentId) },
+            )
+    }
+
+    /**
+     * One POST of raw bytes to a self-signed upload URL. The shared client reads
+     * forever (a WebSocket must), so the call gets its own generous ceiling: a
+     * 50 MB upload on a slow uplink is slow, not hung.
+     */
+    private suspend fun postBytes(url: String, body: RequestBody) {
+        withContext(Dispatchers.IO) {
+            val callClient =
+                client.newBuilder()
+                    .callTimeout(UPLOAD_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .build()
+            callClient
+                .newCall(okhttp3.Request.Builder().url(url).post(body).build())
+                .execute()
+                .use { response ->
+                    if (!response.isSuccessful) {
+                        error("The upload was rejected (${response.code}).")
+                    }
+                }
+        }
+    }
+
+    override suspend fun readAssetBytes(url: String, maxBytes: Long): AssetBytesRead =
+        withContext(Dispatchers.IO) {
+            val callClient =
+                client.newBuilder()
+                    .callTimeout(ASSET_READ_TIMEOUT_MS, java.util.concurrent.TimeUnit.MILLISECONDS)
+                    .build()
+            val request =
+                okhttp3.Request.Builder()
+                    .url(url)
+                    // The window mirrors RN's `bytes=0-1048576`: one byte past the
+                    // cap is how "the file did not fit" is detected.
+                    .header("Range", "bytes=0-$maxBytes")
+                    .build()
+            callClient.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    error("The file could not be read (${response.code}).")
+                }
+                val source = response.body.source()
+                val buffer = okio.Buffer()
+                // maxBytes + 1 bytes: the extra byte marks truncation.
+                var remaining = maxBytes + 1
+                while (remaining > 0) {
+                    val read = source.read(buffer, remaining)
+                    if (read < 0) break
+                    remaining -= read
+                }
+                val bytes = buffer.readByteArray()
+                AssetBytesRead(
+                    bytes = if (bytes.size > maxBytes) bytes.copyOf(maxBytes.toInt()) else bytes,
+                    truncated = bytes.size > maxBytes,
+                )
+            }
+        }
+
+    override suspend fun downloadAsset(url: String, target: java.io.File): java.io.File =
+        withContext(Dispatchers.IO) {
+            val request = okhttp3.Request.Builder().url(url).build()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    error("The file could not be downloaded (${response.code}).")
+                }
+                target.parentFile?.mkdirs()
+                target.outputStream().use { output ->
+                    response.body.byteStream().copyTo(output)
+                }
+            }
+            target
+        }
 
     override suspend fun projectIconUrl(project: Project): String? {
         val key = "${project.environmentId.value}/${project.workspaceRoot}/${project.faviconPath}"
@@ -1325,6 +1809,8 @@ class LiveWorkspaceGateway(
         var cwd = ""
         var status = TerminalStatus.Starting
         var error: String? = null
+        var hasRunningSubprocess = false
+        var updatedAt: String? = null
         return flow {
             val location = terminalLocation(environmentId, id)
             sessionFor(environmentId)
@@ -1354,11 +1840,17 @@ class LiveWorkspaceGateway(
                             title = snapshot.label.ifBlank { "Terminal" }
                             cwd = snapshot.cwd
                             status = terminalStatusOf(snapshot.status)
+                            hasRunningSubprocess = snapshot.hasRunningSubprocess
+                            updatedAt = snapshot.updatedAt
                             error = null
                         }
                         "output" -> {
                             val data = event.data.orEmpty()
                             rawHistory.append(data)
+                            // The retained tail, from DEFAULT_MAX_TERMINAL_BUFFER_BYTES
+                            // in the RN client: old scrollback is dropped rather than
+                            // letting a long-running build grow the buffer without bound.
+                            rawHistory.trimToUtf8Tail(MAX_TERMINAL_BUFFER_BYTES)
                             if (status == TerminalStatus.Closed) status = TerminalStatus.Running
                             error = null
                         }
@@ -1366,14 +1858,24 @@ class LiveWorkspaceGateway(
                             rawHistory.clear()
                             error = null
                         }
-                        "exited" -> status = TerminalStatus.Exited
-                        "closed" -> status = TerminalStatus.Closed
+                        "exited" -> {
+                            status = TerminalStatus.Exited
+                            hasRunningSubprocess = false
+                        }
+                        "closed" -> {
+                            status = TerminalStatus.Closed
+                            hasRunningSubprocess = false
+                        }
                         "error" -> {
                             status = TerminalStatus.Error
                             error = event.message
                         }
-                        // Activity only changes the label the server computes.
-                        "activity" -> event.label?.takeIf { it.isNotBlank() }?.let { title = it }
+                        // Activity carries both the label the server computes and the
+                        // subprocess flag the menu renders as "Task running".
+                        "activity" -> {
+                            event.label?.takeIf { it.isNotBlank() }?.let { title = it }
+                            hasRunningSubprocess = event.hasRunningSubprocess
+                        }
                         else -> return@collect
                     }
                     emit(
@@ -1385,11 +1887,60 @@ class LiveWorkspaceGateway(
                             buffer = rawHistory.toString(),
                             lines = emptyList(),
                             error = error,
+                            hasRunningSubprocess = hasRunningSubprocess,
+                            updatedAt = updatedAt,
                         )
                     )
                 }
         }
     }
+
+    /**
+     * The per-environment session list behind the terminal switcher. One
+     * subscription folds `snapshot`/`upsert`/`remove` into a map so ordering
+     * stays the server's until a screen sorts it.
+     */
+    override fun terminalSessions(environmentId: EnvironmentId): Flow<List<TerminalSummary>> =
+        flow {
+            // Keyed by thread+id rather than id alone: `term-1` exists once per
+            // thread, and `remove` names both.
+            val sessions = linkedMapOf<String, TerminalSummary>()
+            sessionFor(environmentId)
+                .subscribe(
+                    WsMethods.SubscribeTerminalMetadata,
+                    buildJsonObject {},
+                    TerminalMetadataStreamEventDto.serializer(),
+                )
+                .collect { event ->
+                    when (event.type) {
+                        "snapshot" -> {
+                            sessions.clear()
+                            event.terminals.orEmpty().forEach {
+                                sessions["${it.threadId}/${it.terminalId}"] = it.toModel()
+                            }
+                        }
+                        "upsert" ->
+                            event.terminal?.let {
+                                sessions["${it.threadId}/${it.terminalId}"] = it.toModel()
+                            }
+                        "remove" -> sessions.remove("${event.threadId}/${event.terminalId}")
+                        else -> return@collect
+                    }
+                    emit(sessions.values.toList())
+                }
+        }
+
+    private fun TerminalSummaryDto.toModel() =
+        TerminalSummary(
+            terminalId = terminalId,
+            threadId = threadId,
+            cwd = cwd,
+            worktreePath = worktreePath,
+            status = terminalStatusOf(status),
+            hasRunningSubprocess = hasRunningSubprocess,
+            label = label,
+            updatedAt = updatedAt,
+        )
 
     /**
      * Where a new shell starts, from `resolveTerminalOpenLocation` in
@@ -1848,6 +2399,26 @@ class LiveWorkspaceGateway(
 
         /** How long a project with no icon is remembered before asking again. */
         const val MISSING_ICON_RETRY_MS = 30 * 60 * 1_000L
+
+        /** Pending-upload POSTs are large and one-shot; five minutes is the ceiling. */
+        const val UPLOAD_TIMEOUT_MS = 5 * 60 * 1_000L
+
+        /** A preview read should answer quickly or fail; it is retryable. */
+        const val ASSET_READ_TIMEOUT_MS = 30_000L
+
+        /**
+         * Cap on the HTTP snapshot fast-path, matching client-runtime's 6s. A
+         * slow prefetch must not hold the socket open waiting for a baseline the
+         * stream can provide itself.
+         */
+        const val SNAPSHOT_PREFETCH_MS = 6_000L
+
+        /**
+         * Turn-window sizes from `packages/client-runtime/src/state/threads.ts`:
+         * ten user-anchored turns on open, twenty per load-earlier tap.
+         */
+        const val INITIAL_THREAD_USER_TURN_LIMIT = 10
+        const val OLDER_THREAD_PAGE_USER_TURN_LIMIT = 20
 
         fun gitActionLabel(action: String): String =
             when (action) {

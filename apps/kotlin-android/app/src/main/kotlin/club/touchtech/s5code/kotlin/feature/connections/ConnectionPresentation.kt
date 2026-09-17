@@ -3,9 +3,11 @@ package club.touchtech.s5code.kotlin.feature.connections
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.PowerSettingsNew
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.SyncProblem
 import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.graphics.Color
@@ -68,6 +70,16 @@ fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
                 colors.inputContainer,
                 colors.onInputContainer,
                 Icons.Rounded.Key,
+                offline = true,
+            )
+        // Deliberately not an error tone: off is a choice the user made, so the
+        // row recedes to neutral surface colors rather than alarming.
+        ConnectionState.Disabled ->
+            S5ConnectionPresentation(
+                "Off",
+                MaterialTheme.colorScheme.surfaceContainerHigh,
+                MaterialTheme.colorScheme.onSurfaceVariant,
+                Icons.Rounded.PowerSettingsNew,
                 offline = true,
             )
     }

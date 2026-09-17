@@ -191,8 +191,10 @@ class RelayClientTest {
                 deviceId = "device-9",
                 label = "Pixel",
                 platform = "android",
+                androidApiLevel = 35,
                 appVersion = "0.1.0",
-                fcmToken = "fcm-token",
+                bundleId = "club.touchtech.s5code.kotlin",
+                pushToken = "fcm-token",
                 preferences =
                     RelayAgentAwarenessPreferencesDto(
                         liveActivitiesEnabled = true,
@@ -213,24 +215,10 @@ class RelayClientTest {
         assertEquals("DPoP relay-mobile", registration.headers["authorization"])
         val payload = registration.body?.utf8().orEmpty()
         assertTrue(payload.contains("\"platform\":\"android\""))
-        assertTrue(payload.contains("\"fcmToken\":\"fcm-token\""))
+        assertTrue(payload.contains("\"androidApiLevel\":35"))
+        assertTrue(payload.contains("\"bundleId\":\"club.touchtech.s5code.kotlin\""))
+        assertTrue(payload.contains("\"pushToken\":\"fcm-token\""))
         assertTrue(payload.contains("\"notifyOnInput\":false"))
-    }
-
-    @Test
-    fun `live update registration uses persisted generation endpoint`() = runTest {
-        server.enqueue(json(mobileAccessTokenBody))
-        server.enqueue(json("""{"ok":true}"""))
-
-        client().registerAndroidLiveUpdate("device-9", "generation-2")
-
-        server.takeRequest()
-        val registration = server.takeRequest()
-        assertEquals("/v1/mobile/android-live-updates", registration.url.encodedPath)
-        assertEquals(
-            "{\"deviceId\":\"device-9\",\"generationId\":\"generation-2\"}",
-            registration.body?.utf8(),
-        )
     }
 
     @Test

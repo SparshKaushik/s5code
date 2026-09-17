@@ -123,6 +123,12 @@ fun waitNotice(
                 "$label needs sign-in again",
                 "Pair this device with $label to load the $resourceName.",
             )
+        ConnectionState.Disabled ->
+            WaitNotice(
+                WaitPhase.Offline,
+                "$label is switched off",
+                "Turn it on from Connections to load the $resourceName.",
+            )
     }
 }
 
@@ -149,4 +155,6 @@ private val ConnectionState.waitRank: Int
             ConnectionState.Recovering -> 2
             ConnectionState.AuthRequired -> 3
             ConnectionState.Offline -> 4
+            // Worst: a switched-off environment never explains a wait by itself.
+            ConnectionState.Disabled -> 5
         }

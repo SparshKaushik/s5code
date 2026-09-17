@@ -198,6 +198,8 @@ data class StoredQueuedThreadCreation(
     val projectKey: String,
     val branch: String,
     val newWorktree: Boolean,
+    /** An existing worktree to open the thread in ("New thread on branch"). */
+    val worktreePath: String? = null,
 )
 
 @Serializable

@@ -5,8 +5,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
@@ -16,9 +19,13 @@ import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material.icons.rounded.History
+import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Source
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -36,6 +43,9 @@ import club.touchtech.s5code.kotlin.app.ThreadDraft
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5FloatingAction
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
+import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
+import club.touchtech.s5code.kotlin.design.component.S5Button
+import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
 import club.touchtech.s5code.kotlin.design.component.S5Notice
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
@@ -54,6 +64,9 @@ import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import club.touchtech.s5code.kotlin.platform.rememberComposerImageIntake
 import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
+import club.touchtech.s5code.kotlin.platform.rememberQuestionFileIntake
+import club.touchtech.s5code.kotlin.platform.rememberQuestionFilePicker
+import club.touchtech.s5code.kotlin.platform.rememberQuestionMediaPicker
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -95,6 +108,7 @@ fun ThreadScreen(
             providerCatalogs[env]?.takeIf { it.isNotEmpty() } ?: providerCatalog
         }
     val attachmentError by store.attachmentError.collectAsStateWithLifecycle()
+    val stagedQuestionAttachments by store.questionAttachments.collectAsStateWithLifecycle()
     val preferences by store.preferences.collectAsStateWithLifecycle()
     val catalogRefreshing by store.catalogRefreshing.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -102,6 +116,10 @@ fun ThreadScreen(
 
     var settingsOpen by remember(threadId) { mutableStateOf(false) }
     var following by remember(threadId) { mutableStateOf(true) }
+    // The questionnaire owns the composer slot while a user-input request is
+    // open, matching the RN client: expanded it is the full card, collapsed it
+    // is a composer-style bar in the same place.
+    var userInputCollapsed by remember(threadId) { mutableStateOf(false) }
     val draft = threadDrafts["$environmentId/$threadId"] ?: threadDrafts[threadId] ?: ThreadDraft()
     // Every image path (keyboard paste, drop, explicit paste, picker) goes
     // through intake so the draft holds a cached copy, not a lapsing grant.
@@ -164,6 +182,16 @@ fun ThreadScreen(
     }
 
     val summary = current.summary
+    // Files staged on a request that resolved elsewhere (another client, a
+    // dismissed card) are released once the pending set no longer retains them —
+    // RN's `questionAttachmentDraftPrefix` sweep.
+    LaunchedEffect(environmentId, threadId, current.userInput?.id) {
+        store.releaseStaleQuestionAttachments(
+            environmentId,
+            threadId,
+            setOfNotNull(current.userInput?.id),
+        )
+    }
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val workspaceRoot =
         remember(projects, summary.projectId, environmentId, current) {
@@ -297,6 +325,175 @@ fun ThreadScreen(
             )
         },
         bottomBar = {
+            val pendingInput = current.userInput
+            if (pendingInput != null) {
+                val capabilities = environment?.capabilities
+                val attachmentSupport =
+                    remember(capabilities) {
+                        capabilities?.let {
+                            QuestionAttachmentSupport(
+                                enabled = it.questionAttachments,
+                                supportsFiles = it.fileAttachments != null,
+                            )
+                        }
+                    }
+                // Staged uploads, re-keyed by question id for the card. The
+                // send-turn cap is request-wide, matching RN's sibling count.
+                val stagedByQuestion =
+                    remember(stagedQuestionAttachments, pendingInput.id) {
+                        store.questionAttachmentsFor(environmentId, threadId, pendingInput.id)
+                    }
+                // Pickers feed one question at a time; the id travels in state
+                // because the launcher callback carries only URIs.
+                var preparingQuestions by
+                    remember(pendingInput.id) { mutableStateOf(emptySet<String>()) }
+                var pickingQuestion by
+                    remember(pendingInput.id) { mutableStateOf<String?>(null) }
+                val maxFileBytes =
+                    capabilities?.fileAttachments?.maxUploadBytes?.let {
+                        minOf(it, ComposerAttachmentLimits.MAX_FILE_BYTES)
+                    }
+                val intake =
+                    rememberQuestionFileIntake(maxFileBytes) { staged ->
+                        val question = pickingQuestion
+                        pickingQuestion = null
+                        if (question == null) {
+                            // No question owns the result (the request changed
+                            // mid-pick): free the copies rather than leak them.
+                            staged.files.forEach { java.io.File(it.localPath).delete() }
+                        } else {
+                            preparingQuestions = preparingQuestions - question
+                            staged.error?.let(store::showError)
+                            store.stageQuestionAttachments(
+                                environmentId, threadId, pendingInput.id, question, staged.files,
+                            )
+                        }
+                    }
+                val pickFiles = rememberQuestionFilePicker(onPicked = intake)
+                val pickMedia =
+                    rememberQuestionMediaPicker(
+                        remaining =
+                            ComposerAttachmentLimits.MAX_ATTACHMENTS -
+                                stagedByQuestion.values.sumOf { it.size },
+                        allowVideos = attachmentSupport?.supportsFiles == true,
+                        onPicked = intake,
+                    )
+                // The card replaces the composer outright, so it must carry the
+                // same IME and navigation-bar padding the composer would.
+                Column(
+                    Modifier.imePadding().navigationBarsPadding()
+                ) {
+                var submitting by remember(pendingInput.id) { mutableStateOf(false) }
+                if (userInputCollapsed) {
+                    UserInputCollapsedBar(
+                        questionCount = pendingInput.questions.size,
+                        working = working,
+                        onExpand = { userInputCollapsed = false },
+                        onStop = {
+                            scope.launch {
+                                runCatching { store.workspace.cancelTurn(env, id) }
+                                    .onFailure {
+                                        store.showError(
+                                            it.message ?: "The turn could not be stopped."
+                                        )
+                                    }
+                            }
+                        },
+                    )
+                } else {
+                    UserInputCard(
+                        request = pendingInput,
+                        submitting = submitting,
+                        modifier =
+                            Modifier.padding(
+                                horizontal = S5Theme.spacing.medium,
+                                vertical = S5Theme.spacing.small,
+                            ),
+                        attachments = stagedByQuestion,
+                        attachmentSupport = attachmentSupport,
+                        preparingQuestions = preparingQuestions,
+                        onPickImages = { questionId ->
+                            pickingQuestion = questionId
+                            preparingQuestions = preparingQuestions + questionId
+                            pickMedia()
+                        },
+                        onPickFiles = { questionId ->
+                            pickingQuestion = questionId
+                            preparingQuestions = preparingQuestions + questionId
+                            pickFiles()
+                        },
+                        onRemoveAttachment = { questionId, attachment ->
+                            store.removeQuestionAttachment(
+                                environmentId, threadId, pendingInput.id, questionId,
+                                attachment.localId,
+                            )
+                        },
+                        onRetryAttachment = { questionId, attachment ->
+                            store.retryQuestionAttachment(
+                                environmentId, threadId, pendingInput.id, questionId,
+                                attachment.localId,
+                            )
+                        },
+                        onSubmit = { submission ->
+                            if (!submitting) {
+                                submitting = true
+                                scope.launch {
+                                    try {
+                                        store.workspace.respondToInput(
+                                            env,
+                                            id,
+                                            pendingInput.id,
+                                            submission.answers,
+                                            submission.attachmentsByQuestionId,
+                                        )
+                                        // Sent uploads belong to the request
+                                        // now; the draft copies are released.
+                                        store.releaseQuestionAttachments(
+                                            environmentId, threadId, pendingInput.id,
+                                        )
+                                    } catch (error: Exception) {
+                                        store.showError(
+                                            error.message ?: "The answer could not be sent."
+                                        )
+                                    } finally {
+                                        submitting = false
+                                    }
+                                }
+                            }
+                        },
+                        onDismiss =
+                            if (pendingInput.dismissible) {
+                                {
+                                    if (!submitting) {
+                                        submitting = true
+                                        scope.launch {
+                                            try {
+                                                store.workspace.dismissInput(
+                                                    env,
+                                                    id,
+                                                    pendingInput.id,
+                                                )
+                                                store.releaseQuestionAttachments(
+                                                    environmentId, threadId, pendingInput.id,
+                                                )
+                                            } catch (error: Exception) {
+                                                store.showError(
+                                                    error.message
+                                                        ?: "The question could not be dismissed."
+                                                )
+                                            } finally {
+                                                submitting = false
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                null
+                            },
+                    )
+                }
+                }
+            } else {
             ThreadComposer(
                 value = draft.text,
                 commands = remember(summary.provider) { store.workspace.slashCommands(summary.provider) },
@@ -345,8 +542,22 @@ fun ThreadScreen(
                 provider = effectiveSettings.provider,
                 model = effectiveSettings.model,
                 onOpenSettings = { settingsOpen = true },
+                interactionModeAllowed =
+                    machineCatalog
+                        .firstOrNull {
+                            it.instance.instanceId == effectiveSettings.provider.instanceId
+                        }
+                        ?.interactionModeToggle != false,
+                onInteractionMode = { mode ->
+                    store.setThreadDraftSettings(
+                        environmentId,
+                        threadId,
+                        effectiveSettings.copy(runtimeMode = mode),
+                    )
+                },
                 draftKey = threadId,
             )
+            }
         },
         floatingActionButton = {
             // The pill and the jump button share this slot: both belong just above the
@@ -425,40 +636,9 @@ fun ThreadScreen(
                         ),
                     verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
                 ) {
-                    // Gates sit at the visual bottom, which is index 0 in a
-                    // reversed list.
-                    current.userInput?.let { request ->
-                        item(key = "input-${request.id}") {
-                            Box(Modifier.animateItem()) {
-                                var submitting by remember(request.id) { mutableStateOf(false) }
-                                UserInputCard(
-                                    request = request,
-                                    submitting = submitting,
-                                    onSubmit = { answers ->
-                                        if (!submitting) {
-                                            submitting = true
-                                            scope.launch {
-                                                try {
-                                                    store.workspace.respondToInput(
-                                                        env,
-                                                        id,
-                                                        request.id,
-                                                        answers,
-                                                    )
-                                                } catch (error: Exception) {
-                                                    store.showError(
-                                                        error.message ?: "The answer could not be sent."
-                                                    )
-                                                } finally {
-                                                    submitting = false
-                                                }
-                                            }
-                                        }
-                                    },
-                                )
-                            }
-                        }
-                    }
+                    // The approval gate sits at the visual bottom, which is index 0
+                    // in a reversed list. A user-input request owns the composer
+                    // slot instead of this one.
                     current.approval?.let { approval ->
                         item(key = "approval-${approval.id}") {
                             Box(Modifier.animateItem()) {
@@ -520,6 +700,14 @@ fun ThreadScreen(
                                             }
                                             .getOrNull()
                                     },
+                                    onOpenAttachment = { attachment ->
+                                        onOpen(
+                                            "attachments/${android.net.Uri.encode(attachment.id)}" +
+                                                "?name=${android.net.Uri.encode(attachment.name)}" +
+                                                "&mimeType=${android.net.Uri.encode(attachment.mimeType)}" +
+                                                "&sizeBytes=${attachment.sizeBytes}"
+                                        )
+                                    },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             is FeedRow.WorkToggle ->
@@ -549,6 +737,31 @@ fun ThreadScreen(
                             }
                         }
                     }
+                    // Reversed list: the last index is the visual top, where
+                    // "Load earlier turns" sits in the RN feed.
+                    val page = current.page
+                    if (page?.hasMore == true && page.beforeCursor != null) {
+                        item(key = "load-earlier") {
+                            Box(
+                                Modifier.fillMaxWidth().animateItem(),
+                                contentAlignment = Alignment.Center,
+                            ) {
+                                S5Button(
+                                    text =
+                                        if (page.loadingOlder) "Loading earlier turns…"
+                                        else "Load earlier turns",
+                                    onClick = {
+                                        scope.launch {
+                                            store.workspace.loadOlderTurns(env, id)
+                                        }
+                                    },
+                                    emphasis = S5ActionEmphasis.Secondary,
+                                    style = S5ButtonStyle.Outlined,
+                                    enabled = !page.loadingOlder,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -572,6 +785,62 @@ fun ThreadScreen(
             catalogRefreshing = env.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(env) },
         )
+    }
+}
+
+/**
+ * The collapsed form of the pending questionnaire — a composer-sized bar in the
+ * composer's place, matching the RN card's collapsed state. Tapping expands
+ * back to the full card; while a turn is running it also carries the stop
+ * control the composer would otherwise own.
+ */
+@Composable
+private fun UserInputCollapsedBar(
+    questionCount: Int,
+    working: Boolean,
+    onExpand: () -> Unit,
+    onStop: () -> Unit,
+) {
+    Surface(
+        onClick = onExpand,
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHigh,
+        modifier =
+            Modifier.fillMaxWidth()
+                .padding(
+                    horizontal = S5Theme.spacing.medium,
+                    vertical = S5Theme.spacing.small,
+                ),
+    ) {
+        Row(
+            Modifier.padding(start = S5Theme.spacing.medium, end = S5Theme.spacing.tiny),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Text(
+                "User input needed",
+                style = MaterialTheme.typography.labelMediumEmphasized,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(
+                "$questionCount question${if (questionCount == 1) "" else "s"}",
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.weight(1f),
+            )
+            if (working) {
+                S5IconButton(
+                    icon = Icons.Rounded.Stop,
+                    label = "Stop the agent",
+                    onClick = onStop,
+                )
+            }
+            Icon(
+                Icons.Rounded.KeyboardArrowUp,
+                contentDescription = "Expand user input",
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
     }
 }
 

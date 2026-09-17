@@ -31,6 +31,8 @@ import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogHost
 import club.touchtech.s5code.kotlin.design.component.S5GlobalErrorBanner
 import club.touchtech.s5code.kotlin.design.component.S5WorkspacePaneDivider
 import club.touchtech.s5code.kotlin.design.component.WORKSPACE_DIVIDER_TOUCH_WIDTH
+import club.touchtech.s5code.kotlin.data.IncomingSharePresentationState
+import club.touchtech.s5code.kotlin.data.transitionIncomingSharePresentation
 import club.touchtech.s5code.kotlin.design.component.rememberS5ConfirmDialogController
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.home.HomeScreen
@@ -66,7 +68,9 @@ fun S5App(
     androidx.compose.runtime.DisposableEffect(lifecycleOwner) {
         val refreshGate = ForegroundRefreshGate()
         val observer = LifecycleEventObserver { _, event ->
-            if (refreshGate.onEvent(event)) currentStore.refreshConnections()
+            refreshGate.onEvent(event)?.let { backgrounded ->
+                currentStore.refreshConnections(backgrounded)
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
@@ -100,6 +104,34 @@ fun S5App(
                 launchSingleTop = true
             }
             store.consumePendingLink()
+        }
+
+        // A share waiting in the inbox presents the project picker itself, once.
+        // The transition state is what stops a back-out from re-presenting it
+        // forever — `transitionIncomingSharePresentation` in the RN client.
+        val pendingShare by store.pendingShare.collectAsStateWithLifecycle()
+        var sharePresentation by remember { mutableStateOf(IncomingSharePresentationState()) }
+        val currentRoute = currentEntry?.destination?.route
+        LaunchedEffect(
+            pendingShare?.id,
+            currentRoute,
+            restored,
+            paired,
+            queued != null,
+        ) {
+            if (!restored || !paired || queued != null) return@LaunchedEffect
+            val transition =
+                transitionIncomingSharePresentation(
+                    state = sharePresentation,
+                    isInShareFlow =
+                        currentRoute == Routes.NewTask || currentRoute?.startsWith("new/") == true,
+                    isOnProjectPicker = currentRoute == Routes.NewTask,
+                    pendingShareId = pendingShare?.id,
+                )
+            sharePresentation = transition.state
+            transition.shareIdToPresent?.let {
+                navController.navigate(Routes.NewTask) { launchSingleTop = true }
+            }
         }
 
         fun handleEscape() {

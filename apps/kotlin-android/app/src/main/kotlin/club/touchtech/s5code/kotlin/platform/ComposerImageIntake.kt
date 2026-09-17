@@ -99,14 +99,14 @@ private fun copyToCache(
             }
             candidate.copy(
                 uri = Uri.fromFile(target).toString(),
-                name = candidate.name ?: displayName(resolver, source),
+                name = candidate.name ?: attachmentDisplayName(resolver, source),
                 sizeBytes = copied,
             )
         }
         .getOrNull()
 
-/** The provider's display name, so the UI and errors can name the image. */
-private fun displayName(resolver: ContentResolver, uri: Uri): String? =
+/** The provider's display name, so the UI and errors can name the file. */
+internal fun attachmentDisplayName(resolver: ContentResolver, uri: Uri): String? =
     runCatching {
             resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { cursor ->
                 val index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
@@ -128,7 +128,7 @@ private fun extensionFor(mimeType: String): String =
     }
 
 /** Drops yesterday's copies; drafts that still reference them are long gone. */
-private fun pruneStaleAttachments(directory: File) {
+internal fun pruneStaleAttachments(directory: File) {
     val cutoff = System.currentTimeMillis() - STALE_ATTACHMENT_AGE_MILLIS
     directory.listFiles()?.forEach { file -> if (file.lastModified() < cutoff) file.delete() }
 }

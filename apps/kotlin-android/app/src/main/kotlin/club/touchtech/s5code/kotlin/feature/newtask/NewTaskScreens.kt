@@ -81,14 +81,21 @@ import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
+import club.touchtech.s5code.kotlin.feature.thread.Dictation
+import club.touchtech.s5code.kotlin.feature.thread.DictationMicControl
+import club.touchtech.s5code.kotlin.feature.thread.DictationToolbar
+import club.touchtech.s5code.kotlin.feature.thread.rememberDictation
 import club.touchtech.s5code.kotlin.feature.settings.ModelSearchScope
 import club.touchtech.s5code.kotlin.feature.settings.TaskSettingsSheet
+import club.touchtech.s5code.kotlin.data.IncomingShareAttachmentType
+import club.touchtech.s5code.kotlin.data.IncomingShareDestination
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.EnvironmentKind
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.WorkspaceMode
+import club.touchtech.s5code.kotlin.platform.active
 import club.touchtech.s5code.kotlin.platform.composerImageReceiver
 import club.touchtech.s5code.kotlin.platform.rememberComposerImageIntake
 import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
@@ -119,21 +126,38 @@ fun NewTaskProjectScreen(
                 }
         }
     val grouped = remember(filtered, environments) { filtered.groupBy { it.environmentId } }
+    // A switched-off environment contributes no projects and no connection to
+    // wait on, so only enabled rows drive the notice.
+    val enabledEnvironments = remember(environments) { environments.filter { it.isEnabled } }
     // Same split as the RN route screen: "Connecting to environment" while the
     // project catalog has not arrived, and only then "No projects yet".
     val wait =
-        remember(environments, projects.isEmpty()) {
+        remember(enabledEnvironments, projects.isEmpty()) {
             waitNotice(
-                states = environments.map { it.state },
-                environmentLabel = environments.singleOrNull()?.label,
+                states = enabledEnvironments.map { it.state },
+                environmentLabel = enabledEnvironments.singleOrNull()?.label,
                 resourceName = "projects",
                 hasContent = projects.isNotEmpty(),
             )
         }
 
+    val pendingShare by store.pendingShare.collectAsStateWithLifecycle()
+    val shareSubtitle =
+        pendingShare?.let { share ->
+            when {
+                share.attachments.isEmpty() -> "Choose a project for what you shared"
+                share.attachments.size == 1 ->
+                    "Choose a project for the " +
+                        "${if (share.attachments.first().type == IncomingShareAttachmentType.Image) "image" else "file"} you shared"
+                else ->
+                    "Choose a project for the ${share.attachments.size} " +
+                        "${if (share.attachments.all { it.type == IncomingShareAttachmentType.Image }) "images" else "files"} you shared"
+            }
+        }
+
     S5Screen(
         title = "New task",
-        subtitle = "Choose a project",
+        subtitle = shareSubtitle ?: "Choose a project",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
     ) { padding ->
@@ -280,9 +304,34 @@ fun NewTaskDraftScreen(
         onImages = addImages,
     )
 
+    // A share waiting in the inbox merges into the draft once a project exists.
+    // Import consumes the inbox record, so this effect runs at most once per
+    // share; the draft's `importedShareIds` is the receipt for process death.
+    val pendingShare by store.pendingShare.collectAsStateWithLifecycle()
+    var shareImportAttempted by remember(draft.projectKey) { mutableStateOf(setOf<String>()) }
+    LaunchedEffect(pendingShare?.id, draft.environmentId, draft.projectKey) {
+        val share = pendingShare ?: return@LaunchedEffect
+        if (share.id in draft.importedShareIds || share.id in shareImportAttempted) {
+            return@LaunchedEffect
+        }
+        if (draft.environmentId.value.isEmpty() || draft.projectKey.isEmpty()) {
+            return@LaunchedEffect
+        }
+        shareImportAttempted = shareImportAttempted + share.id
+        store.importIncomingShare(
+            share.id,
+            IncomingShareDestination(
+                environmentId = draft.environmentId.value,
+                projectId = draft.projectKey,
+            ),
+        )
+    }
+
     val project = remember(projects, draft) { projects.firstOrNull { it.id.value == draft.projectKey } }
     val environment = remember(environments, draft) { environments.firstOrNull { it.id == draft.environmentId } }
-    val canStart = draft.prompt.isNotBlank() && !creating
+    // Switching away is only a choice while a second enabled environment exists.
+    val enabledEnvironmentCount = remember(environments) { environments.count { it.isEnabled } }
+    val canStart = draft.prompt.isNotBlank() && !creating && environment?.isEnabled != false
 
     val start: () -> Unit = {
         if (canStart) {
@@ -311,6 +360,7 @@ fun NewTaskDraftScreen(
         bottomBar = {
             NewTaskComposerDock(
                 promptState = promptState,
+                dictation = rememberDictation("new-task", promptState),
                 attachments = draft.attachments,
                 onRemoveAttachment = { attachment -> store.removeNewTaskDraftImage(attachment.id) },
                 onPreviewAttachment = { previewAttachment = it },
@@ -385,7 +435,7 @@ fun NewTaskDraftScreen(
                     if (environment?.kind == EnvironmentKind.Cloud) Icons.Rounded.Cloud
                     else Icons.Rounded.Computer,
                 onEnvironment = onEnvironment,
-                canChangeEnvironment = environments.size > 1,
+                canChangeEnvironment = enabledEnvironmentCount > 1,
                 modifier = Modifier.padding(top = S5Theme.spacing.section),
             )
         }
@@ -516,6 +566,7 @@ private fun NewTaskHero(
 @Composable
 private fun NewTaskComposerDock(
     promptState: TextFieldState,
+    dictation: Dictation?,
     attachments: List<ComposerAttachment>,
     onRemoveAttachment: (ComposerAttachment) -> Unit,
     onPreviewAttachment: (ComposerAttachment) -> Unit,
@@ -581,7 +632,12 @@ private fun NewTaskComposerDock(
                     state = promptState,
                     placeholder = "Ask anything…",
                     maxLines = 6,
-                    onSubmitShortcut = { if (canStart) onStart() },
+                    // Same freeze as the thread composer: a keystroke cannot
+                    // invalidate a transcript mid-flight.
+                    enabled = dictation?.state?.active != true,
+                    onSubmitShortcut = {
+                        if (canStart && dictation?.state?.active != true) onStart()
+                    },
                     modifier =
                         Modifier.fillMaxWidth()
                             .heightIn(min = 72.dp)
@@ -589,6 +645,12 @@ private fun NewTaskComposerDock(
                             .composerImageReceiver(onAddImages),
                 )
 
+                if (dictation?.presentation?.statusLabel != null) {
+                    DictationToolbar(
+                        dictation = dictation,
+                        modifier = Modifier.padding(top = S5Theme.spacing.small),
+                    )
+                } else {
                 S5ComposerToolbarRow(Modifier.padding(top = S5Theme.spacing.small)) {
                     S5ComposerControl(
                         label = null,
@@ -609,6 +671,7 @@ private fun NewTaskComposerDock(
                         modifier = Modifier.widthIn(max = 180.dp),
                     )
                     Box(Modifier.weight(1f))
+                    DictationMicControl(dictation)
                     S5ComposerAction(
                         icon = Icons.Rounded.ArrowUpward,
                         label = if (creating) "Starting task" else "Start task",
@@ -616,15 +679,17 @@ private fun NewTaskComposerDock(
                         enabled = canStart,
                     )
                 }
+                }
             }
         }
     }
 }
 
-/** Environment picker with reachability. */
+/** Environment picker with reachability. Switched-off environments are hidden. */
 @Composable
 fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
-    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val allEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
+    val environments = remember(allEnvironments) { allEnvironments.filter { it.isEnabled } }
     val draft by store.draft.collectAsStateWithLifecycle()
     S5Screen(title = "Environment", subtitle = "Where should this run?", onBack = onBack) { padding ->
         LazyColumn(

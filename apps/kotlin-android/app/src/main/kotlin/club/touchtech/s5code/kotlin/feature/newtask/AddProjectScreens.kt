@@ -106,7 +106,9 @@ fun AddProjectSourceScreen(
  */
 @Composable
 fun AddProjectRepositoryScreen(store: AppStore, onBack: () -> Unit, onSelected: () -> Unit) {
-    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val allEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
+    // Switched-off environments cannot accept projects, so pickers hide them.
+    val environments = remember(allEnvironments) { allEnvironments.filter { it.isEnabled } }
     val draft by store.projectDraft.collectAsStateWithLifecycle()
     val environmentId = draft.environmentId.takeIf { it.value.isNotEmpty() } ?: environments.firstOrNull()?.id
     var query by rememberSaveable { mutableStateOf("") }
@@ -192,7 +194,9 @@ fun AddProjectRepositoryScreen(store: AppStore, onBack: () -> Unit, onSelected: 
 /** Destination: environment, parent path, project name, conflict validation. */
 @Composable
 fun AddProjectDestinationScreen(store: AppStore, onBack: () -> Unit, onCreated: () -> Unit) {
-    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val allEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
+    // Switched-off environments cannot accept projects, so pickers hide them.
+    val environments = remember(allEnvironments) { allEnvironments.filter { it.isEnabled } }
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val draft by store.projectDraft.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
@@ -301,7 +305,9 @@ fun AddProjectDestinationScreen(store: AppStore, onBack: () -> Unit, onCreated: 
 /** Browse or type a path on the machine, then register it as a project. */
 @Composable
 fun AddProjectLocalPathScreen(store: AppStore, onBack: () -> Unit, onCreated: () -> Unit) {
-    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val allEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
+    // Switched-off environments cannot accept projects, so pickers hide them.
+    val environments = remember(allEnvironments) { allEnvironments.filter { it.isEnabled } }
     val draft by store.projectDraft.collectAsStateWithLifecycle()
     val scope = rememberCoroutineScope()
     val environmentId = draft.environmentId.takeIf { it.value.isNotEmpty() } ?: environments.firstOrNull()?.id

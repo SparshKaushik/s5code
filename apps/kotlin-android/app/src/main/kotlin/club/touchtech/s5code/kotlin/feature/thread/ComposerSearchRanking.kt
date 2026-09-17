@@ -128,6 +128,52 @@ internal fun rankComposerPaths(
         .map { it.item }
 }
 
+/**
+ * Serializes a picked `@` path as a Markdown link, ported from
+ * `serializeComposerFileLink` in `packages/shared/src/composerTrigger.ts`.
+ *
+ * The basename becomes the label and the full path the destination. Providers
+ * resolve file references from the link syntax — a bare `@path` token is a
+ * client-side convention only, so sending it raw loses the mention.
+ */
+internal fun serializeComposerFileLink(path: String): String {
+    val basename = path.substringAfterLast('/').substringAfterLast('\\')
+    val label =
+        basename
+            .replace("\\", "\\\\")
+            .replace("[", "\\[")
+            .replace("]", "\\]")
+    // `encodeURI` rather than `Uri.encode`, so the function stays testable on
+    // the plain JVM. The allow set is encodeURI's: everything else percent-
+    // encodes per UTF-8 byte, then the four Markdown-sensitive survivors go.
+    val destination =
+        encodeUri(path)
+            .replace("(", "%28")
+            .replace(")", "%29")
+            .replace("#", "%23")
+            .replace("?", "%3F")
+            .replace("\\", "%5C")
+    return "[$label]($destination)"
+}
+
+/** JS `encodeURI`: these characters survive verbatim; all others percent-encode. */
+private val ENCODE_URI_UNESCAPED =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789;,/?:@&=+\$-_.!~*'()#"
+        .toSet()
+
+private fun encodeUri(value: String): String = buildString {
+    for (character in value) {
+        if (character in ENCODE_URI_UNESCAPED) {
+            append(character)
+        } else {
+            for (byte in character.toString().toByteArray(Charsets.UTF_8)) {
+                append('%')
+                append(String.format("%02X", byte))
+            }
+        }
+    }
+}
+
 private fun lengthPenalty(value: String, query: String): Int =
     (value.length - query.length).coerceIn(0, 64)
 

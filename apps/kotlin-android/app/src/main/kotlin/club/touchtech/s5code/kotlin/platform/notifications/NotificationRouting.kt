@@ -12,16 +12,19 @@ private const val MAX_NOTIFICATION_SEGMENT_LENGTH = 256
 /**
  * Resolves an untrusted FCM data map to a validated in-app thread path.
  *
- * Relay payloads normally carry `deepLink`; older jobs carry only ids. Both paths
- * pass through the same allowlist as shortcuts and app links. Notification taps
- * may open a safe thread child (review, files, terminal, git), but can never open
- * stateful confirmations or arbitrary settings routes.
+ * The relay's `agent_activity` payload carries the alert deep link as
+ * `alert_path` and the ongoing-card link as `activity_path` (see
+ * `fcmPayloads.ts` in `infra/relay`). Older payloads used `deepLink`, and the
+ * oldest carried only ids. All paths pass through the same allowlist as
+ * shortcuts and app links: notification taps may open a thread or a safe child
+ * (review, files, terminal, git), never a stateful confirmation or a settings
+ * route.
  */
 fun notificationPath(data: Map<String, String>): String? {
-    val supplied = data["deepLink"]
-    if (supplied != null && supplied.trim() == supplied && '?' !in supplied && '#' !in supplied) {
-        val link = parseDeepLinkPath(supplied)
-        if (link is DeepLink.Thread) return supplied.ensureLeadingSlash()
+    for (key in listOf("alert_path", "activity_path", "deepLink")) {
+        val supplied = data[key] ?: continue
+        if (supplied.trim() != supplied || '?' in supplied || '#' in supplied) continue
+        if (parseDeepLinkPath(supplied) is DeepLink.Thread) return supplied.ensureLeadingSlash()
     }
 
     val environmentId = data["environmentId"]?.trim().orEmpty()
@@ -41,9 +44,16 @@ fun notificationPath(data: Map<String, String>): String? {
 fun notificationPathFromExtras(read: (String) -> String?): String? =
     notificationPath(
         buildMap {
-            listOf("deepLink", "environmentId", "threadId", "phase", "updatedAt").forEach { key ->
-                read(key)?.let { put(key, it) }
-            }
+            listOf(
+                    "alert_path",
+                    "activity_path",
+                    "deepLink",
+                    "environmentId",
+                    "threadId",
+                    "phase",
+                    "updatedAt",
+                )
+                .forEach { key -> read(key)?.let { put(key, it) } }
         }
     )
 

@@ -26,6 +26,8 @@ interface EnvironmentAuthorizer {
         val httpBaseUrl: String,
         val wsBaseUrl: String,
         val credential: EnvironmentCredential,
+        /** `direct` | `relay` — reported on the /ws URL like RN does. */
+        val connectionMethod: String = "direct",
     )
 }
 
