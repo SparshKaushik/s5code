@@ -8,7 +8,7 @@
  */
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
-export type TranscriptUsageProvider = Exclude<UsageProviderKind, "cursor">;
+export type TranscriptUsageProvider = Exclude<UsageProviderKind, "cursor" | "opencode">;
 
 export interface UsageRecord {
   readonly provider: UsageProviderKind;

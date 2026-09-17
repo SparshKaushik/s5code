@@ -1,6 +1,14 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
-import { ClaudeAI, CursorIcon, GrokIcon, type Icon, OpenAI, PiAgentIcon } from "../Icons";
+import {
+  ClaudeAI,
+  CursorIcon,
+  GrokIcon,
+  type Icon,
+  OpenAI,
+  OpenCodeIcon,
+  PiAgentIcon,
+} from "../Icons";
 
 type UsageProviderPresentation = {
   readonly label: string;
@@ -28,6 +36,13 @@ export const PROVIDER_PRESENTATION = {
     label: "Grok Build",
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
     mark: GrokIcon,
+  },
+  opencode: {
+    label: "OpenCode",
+    // OpenCode's mark is a third neutral; the 45% mix keeps the band readable
+    // on either theme without colliding with Codex or Grok.
+    color: "color-mix(in oklab, var(--contrast-foreground) 45%, var(--background))",
+    mark: OpenCodeIcon,
   },
   pi: {
     label: "pi",

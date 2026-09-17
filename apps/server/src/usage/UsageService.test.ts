@@ -27,6 +27,7 @@ import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import * as ServerConfig from "../config.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import { DatabaseSync } from "../provider/sqliteCompat.ts";
 import * as UsageService from "./UsageService.ts";
 
 const encodeUnknownJsonString = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
@@ -101,6 +102,9 @@ const serviceLayers = (input: {
     Layer.provideMerge(
       Layer.succeed(HostProcessEnvironment, {
         GROK_HOME: NodePath.join(input.home, "grok"),
+        // OpenCode usage resolves its database under XDG_DATA_HOME; point it
+        // at the sandbox so tests never scan the developer's real opencode.db.
+        XDG_DATA_HOME: NodePath.join(input.home, "xdg-data"),
         ...input.environment,
       }),
     ),
@@ -373,6 +377,63 @@ describe("UsageService", () => {
           serviceLayers({ prefix: "usage-service-price-overrides-test", home, settings }),
         ),
       );
+    }).pipe(Effect.scoped),
+  );
+
+  it.live("reads assistant usage out of the OpenCode database", () =>
+    Effect.gen(function* () {
+      const { settings, home } = yield* setup;
+      const dbDir = NodePath.join(home, "xdg-data", "opencode");
+      yield* Effect.promise(() => NodeFSP.mkdir(dbDir, { recursive: true }));
+      const dbPath = NodePath.join(dbDir, "opencode.db");
+      yield* Effect.sync(() => {
+        const db = new DatabaseSync(dbPath);
+        try {
+          db.exec(
+            `CREATE TABLE session_message (
+              id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              type TEXT NOT NULL,
+              seq INTEGER NOT NULL,
+              time_created INTEGER NOT NULL,
+              time_updated INTEGER NOT NULL,
+              data TEXT NOT NULL
+            )`,
+          );
+          db.prepare(`INSERT INTO session_message VALUES (?, ?, ?, ?, ?, ?, ?)`).run(
+            "msg_oc1",
+            "ses_oc",
+            "assistant",
+            1,
+            Date.parse("2026-08-01T10:00:00Z"),
+            Date.parse("2026-08-01T10:00:01Z"),
+            JSON.stringify({
+              time: {
+                created: Date.parse("2026-08-01T10:00:00Z"),
+                completed: Date.parse("2026-08-01T10:00:01Z"),
+              },
+              model: { id: "claude-sonnet-5", providerID: "anthropic", variant: "default" },
+              cost: 0,
+              tokens: { input: 100, output: 23, reasoning: 0, cache: { read: 10, write: 0 } },
+            }),
+          );
+        } finally {
+          db.close();
+        }
+      });
+
+      const service = yield* UsageService.make.pipe(
+        Effect.provide(serviceLayers({ prefix: "usage-service-opencode-test", home, settings })),
+      );
+      const summary = yield* service.readSummary(WINDOW);
+      const source = summary.sources.find((entry) => entry.fingerprint.provider === "opencode");
+      assert.strictEqual(source?.status, "ok");
+      assert.strictEqual(source?.fingerprint.resolvedHomePath, dbPath);
+      const bucket = summary.buckets.find((entry) => entry.provider === "opencode");
+      assert.strictEqual(bucket?.totals.outputTokens, 23);
+      assert.strictEqual(bucket?.totals.cachedInputTokens, 10);
+      assert.strictEqual(bucket?.apiProvider, "anthropic");
+      assert.strictEqual(bucket?.sessions, 1);
     }).pipe(Effect.scoped),
   );
 

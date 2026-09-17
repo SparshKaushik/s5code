@@ -17,6 +17,7 @@ import * as NodeOS from "node:os";
 import {
   ClaudeSettings,
   CodexSettings,
+  OpenCodeSettings,
   type ProviderInstanceConfig,
   USAGE_CONTRACT_VERSION,
   type ServerSettings as ServerSettingsValue,
@@ -75,6 +76,7 @@ import {
   UsagePricer,
   type RateTable,
 } from "./usagePricing.ts";
+import { readOpenCodeUsage, resolveOpenCodeDatabasePath } from "./usageOpenCode.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -119,6 +121,7 @@ const CACHE_RETENTION_DAYS = 90;
 
 const decodeCodexSettings = Schema.decodeOption(CodexSettings);
 const decodeClaudeSettings = Schema.decodeOption(ClaudeSettings);
+const decodeOpenCodeSettings = Schema.decodeOption(OpenCodeSettings);
 
 /** On-disk shape of the rate snapshot. */
 const RatesCacheFile = Schema.Struct({
@@ -369,6 +372,43 @@ export const make = Effect.gen(function* () {
           cause: Cause.squash(cause),
         }),
     ),
+  );
+
+  /**
+   * The local OpenCode databases to read, deduplicated by resolved path.
+   *
+   * OpenCode keeps session usage in one SQLite database per data directory
+   * rather than per-session files. Remote `serverUrl` instances report their
+   * usage on their own host, so they contribute no path here; each local
+   * instance's `OPENCODE_DB`/`XDG_DATA_HOME` environment is honoured.
+   */
+  const resolveOpenCodeDatabasePaths = Effect.fn("UsageService.resolveOpenCodeDatabasePaths")(
+    function* (settings: ServerSettingsValue) {
+      const paths: string[] = [];
+      const seen = new Set<string>();
+      const instances: Array<Pick<ProviderInstanceConfig, "config" | "environment">> =
+        Object.values(settings.providerInstances).filter(
+          (instance) => instance.driver === "opencode" || instance.driver === "opencode2",
+        );
+      if (!Object.hasOwn(settings.providerInstances, "opencode")) {
+        instances.push({ config: settings.providers.opencode });
+      }
+      for (const instance of instances) {
+        const decoded = decodeOpenCodeSettings(instance.config ?? {});
+        if (Option.isNone(decoded)) continue;
+        // A remote server owns its own environment's usage.
+        if (decoded.value.serverUrl.trim().length > 0) continue;
+        const environment = mergeProviderInstanceEnvironment(instance.environment, hostEnvironment);
+        const candidate = path.resolve(resolveOpenCodeDatabasePath(NodeOS.homedir(), environment));
+        const resolved = yield* fileSystem
+          .realPath(candidate)
+          .pipe(Effect.orElseSucceed(() => candidate));
+        if (seen.has(resolved)) continue;
+        seen.add(resolved);
+        paths.push(resolved);
+      }
+      return paths;
+    },
   );
 
   /** Resolves the transcript directory for each provider. */
@@ -750,7 +790,16 @@ export const make = Effect.gen(function* () {
     }
 
     const startedAtMs = yield* Clock.currentTimeMillis;
-    if (input.modelAliases.length > 0) {
+    const openCodeDbPaths = yield* resolveOpenCodeDatabasePaths(settings);
+    // OpenCode and pi both price against the models.dev catalog, so it loads
+    // whenever a database that can carry them exists, not only when tags do.
+    let anyOpenCodeDb = false;
+    for (const dbPath of openCodeDbPaths) {
+      anyOpenCodeDb ||= yield* fileSystem
+        .exists(dbPath)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+    }
+    if (input.modelAliases.length > 0 || anyOpenCodeDb) {
       yield* ensureCatalog();
     }
     yield* ensureScanCacheLoaded;
@@ -799,6 +848,62 @@ export const make = Effect.gen(function* () {
     sources.push({ ...cursor.source, distinctSessions: cursorSessionIds.size });
     const livePaths = new Set<string>();
     const walkedRoots: string[] = [];
+
+    // OpenCode keeps usage in one database per data directory. Each path is
+    // read like a single "transcript", and its sessions become the source's
+    // session count via the same contributed-record rule the files use.
+    const openCodeUntilMs =
+      hourlyWindow?.untilTimeMs ?? Date.parse(`${input.untilDay}T00:00:00Z`) + 24 * 60 * 60 * 1000;
+    for (const dbPath of openCodeDbPaths) {
+      const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dbPath));
+      const exists = yield* fileSystem
+        .exists(dbPath)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      if (!exists) {
+        sources.push({
+          fingerprint: { hostId, provider: "opencode", resolvedHomePath: dbPath, volumeId },
+          status: "missing",
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message: "No OpenCode database on this environment.",
+        });
+        continue;
+      }
+
+      const read = yield* Effect.sync(() =>
+        readOpenCodeUsage(dbPath, windowStartMs, openCodeUntilMs),
+      );
+      if (read === null) {
+        sources.push({
+          fingerprint: { hostId, provider: "opencode", resolvedHomePath: dbPath, volumeId },
+          status: "failed",
+          scannedFiles: 0,
+          skippedFiles: 0,
+          malformedRecords: 0,
+          distinctSessions: 0,
+          message: "The OpenCode database could not be read.",
+        });
+        continue;
+      }
+
+      const sessionIds = new Set<string>();
+      for (const record of read.records) {
+        if (aggregator.add(record) && record.sessionId.length > 0) {
+          sessionIds.add(record.sessionId);
+        }
+      }
+      sources.push({
+        fingerprint: { hostId, provider: "opencode", resolvedHomePath: dbPath, volumeId },
+        status: "ok",
+        scannedFiles: 1,
+        skippedFiles: 0,
+        malformedRecords: read.malformedRecords,
+        distinctSessions: sessionIds.size,
+        message: null,
+      });
+    }
 
     for (const { provider, dir, volumeId, files } of scannedDirs) {
       if (files === null) {

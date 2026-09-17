@@ -238,6 +238,7 @@ export function decodeScanCache(document: unknown): ScanCache {
       entry.p !== "claude" &&
       entry.p !== "codex" &&
       entry.p !== "grok" &&
+      entry.p !== "opencode" &&
       entry.p !== "pi" &&
       entry.p !== "cursor"
     )
