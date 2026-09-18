@@ -107,7 +107,7 @@ function createMockHost() {
       },
       prompt: async (params: any) => {
         calls.prompts.push(params);
-        return { id: "prompt-1" };
+        return { id: `prompt-${calls.prompts.length}` };
       },
       interrupt: async (params: any) => {
         calls.interrupts.push(params);
@@ -819,6 +819,106 @@ describe("OpenCodeAdapter", () => {
       const lateItem = yield* waitForEvent((e) => e.type === "item.completed");
       expect(lateItem.turnId).toBe(settledTurnId);
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect(
+    "defers a mid-turn follow-up until its inbox item is delivered and splits the turns",
+    () =>
+      Effect.gen(function* () {
+        const { handle, emit } = createMockHost();
+        const adapter = yield* makeOpenCodeAdapter(handle);
+
+        const threadId = ThreadId.make("thread-deferred");
+        const session = yield* adapter.startSession({
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+        const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+        const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+        const deltas: Array<{ turnId: string | undefined; delta: string }> = [];
+        yield* Effect.forkScoped(
+          Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.gen(function* () {
+              if (event.type === "content.delta") {
+                deltas.push({
+                  turnId: event.turnId === undefined ? undefined : String(event.turnId),
+                  delta: (event.payload as any).delta,
+                });
+              }
+              yield* Queue.offer(canonicalEvents, event);
+            }),
+          ),
+        );
+        const waitForEvent = Effect.fn("waitForEvent")(function* (
+          predicate: (event: ProviderRuntimeEvent) => boolean,
+        ) {
+          while (true) {
+            const event = yield* Queue.take(canonicalEvents);
+            if (predicate(event)) return event;
+          }
+        });
+
+        const firstTurn = yield* adapter.sendTurn({ threadId, input: "first" });
+        emit({
+          type: "session.inbox.delivered",
+          data: { sessionID: sessionId, inboxID: "prompt-1" },
+        });
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "one " },
+        });
+
+        // A second send while the turn runs must not open its turn yet.
+        const secondTurn = yield* adapter.sendTurn({ threadId, input: "second" });
+        expect(secondTurn.turnId).not.toBe(firstTurn.turnId);
+        const runningSessions = yield* adapter.listSessions();
+        expect(runningSessions[0]?.activeTurnId).toBe(firstTurn.turnId);
+
+        // More text from the first assistant message still belongs to turn 1.
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "one more " },
+        });
+
+        // The queued item is delivered mid-execution: the first turn ends and
+        // the follow-up turn begins there.
+        emit({
+          type: "session.inbox.delivered",
+          data: { sessionID: sessionId, inboxID: "prompt-2" },
+        });
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: "msg-b", delta: "two" },
+        });
+        emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+
+        const superseded = yield* waitForEvent(
+          (e) => e.type === "turn.completed" && e.turnId === firstTurn.turnId,
+        );
+        expect((superseded.payload as any).state).toBe("cancelled");
+
+        const secondStarted = yield* waitForEvent(
+          (e) => e.type === "turn.started" && e.turnId === secondTurn.turnId,
+        );
+        expect(secondStarted).toBeDefined();
+
+        // The execution terminal closes only the follow-up turn — the
+        // superseded turn already emitted its own turn.completed.
+        const finalCompleted = yield* waitForEvent(
+          (e) =>
+            e.type === "turn.completed" &&
+            e.turnId === secondTurn.turnId &&
+            (e.payload as any).state === "completed",
+        );
+        expect(finalCompleted).toBeDefined();
+        expect(deltas).toEqual([
+          { turnId: firstTurn.turnId, delta: "one " },
+          { turnId: firstTurn.turnId, delta: "one more " },
+          { turnId: secondTurn.turnId, delta: "two" },
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
   it.effect("reports native compaction completion without an active turn", () =>
