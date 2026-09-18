@@ -18,16 +18,15 @@ import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -43,6 +42,8 @@ import club.touchtech.s5code.kotlin.design.component.S5CardTone
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
+import club.touchtech.s5code.kotlin.design.component.S5ErrorState
+import club.touchtech.s5code.kotlin.design.component.S5HeroFab
 import club.touchtech.s5code.kotlin.design.component.S5Notice
 import club.touchtech.s5code.kotlin.design.component.S5RowGroup
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
@@ -74,12 +75,17 @@ fun ConnectionsScreen(
     val cloudEnvironments = store.cloudEnvironments
     val cloudState = cloudEnvironments?.state?.collectAsStateWithLifecycle()?.value
     val linking = cloudEnvironments?.linking?.collectAsStateWithLifecycle()?.value
+    val linkError = cloudEnvironments?.linkError?.collectAsStateWithLifecycle()?.value
 
     // Relay environments available to this account but not yet added, matching
     // RN's T3 Connect section on the same screen. A signed-out or unconfigured
-    // account simply contributes nothing.
+    // account contributes only its connected rows, like RN's
+    // ConnectedOnlyCloudEnvironmentRows.
+    val signedIn = account is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn
+    val discoveryAvailable = signedIn && cloudEnvironments != null
     val availableCloudRows =
-        remember(cloudState, environments) {
+        remember(cloudState, environments, discoveryAvailable) {
+            if (!discoveryAvailable) return@remember emptyList()
             val rows =
                 (cloudState as? club.touchtech.s5code.kotlin.cloud.CloudEnvironmentsState.Loaded)
                     ?.rows
@@ -88,23 +94,28 @@ fun ConnectionsScreen(
         }
     // One load per visit; a signed-out account leaves the state untouched.
     LaunchedEffect(account) {
-        if (account is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn) {
-            cloudEnvironments?.refresh()
-        }
+        if (signedIn) cloudEnvironments?.refresh()
     }
 
     val cloudEnvs = remember(environments) { environments.filter { it.kind == EnvironmentKind.Cloud } }
     val localEnvs = remember(environments) { environments.filter { it.kind != EnvironmentKind.Cloud } }
+    val cloudLoading = cloudState is club.touchtech.s5code.kotlin.cloud.CloudEnvironmentsState.Loading ||
+        cloudState is club.touchtech.s5code.kotlin.cloud.CloudEnvironmentsState.Idle
+    val cloudError =
+        (cloudState as? club.touchtech.s5code.kotlin.cloud.CloudEnvironmentsState.Failed)?.message
+    // RN renders the section whenever discovery could return rows — header,
+    // refresh affordance, and a body that says what it found.
+    val showConnectSection = discoveryAvailable || cloudEnvs.isNotEmpty()
 
     S5Screen(
         title = "Environments",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
-        actions = {
-            S5IconButton(icon = Icons.Rounded.Add, label = "Add environment", onClick = onAdd)
+        floatingActionButton = {
+            S5HeroFab(icon = Icons.Rounded.Add, label = "Add environment", onClick = onAdd)
         },
     ) { padding ->
-        if (environments.isEmpty() && availableCloudRows.isEmpty()) {
+        if (environments.isEmpty() && !showConnectSection) {
             S5EmptyState(
                 icon = Icons.Rounded.Hub,
                 title = "No environments connected yet",
@@ -131,11 +142,23 @@ fun ConnectionsScreen(
                         },
                     )
                 }
-                if (cloudEnvs.isNotEmpty() || availableCloudRows.isNotEmpty()) {
+                if (showConnectSection) {
                     item(key = "connect-header") {
                         S5SectionHeader(
                             label = "S5 Connect",
                             modifier = Modifier.padding(top = S5Theme.spacing.small),
+                            trailing =
+                                if (discoveryAvailable) {
+                                    {
+                                        S5IconButton(
+                                            icon = Icons.Rounded.Refresh,
+                                            label = "Refresh",
+                                            onClick = { cloudEnvironments?.refresh() },
+                                        )
+                                    }
+                                } else {
+                                    null
+                                },
                         )
                     }
                     items(cloudEnvs, key = { it.id.value }) { environment ->
@@ -155,6 +178,50 @@ fun ConnectionsScreen(
                                 cloudEnvironments?.link(row.environmentId) {}
                             },
                         )
+                    }
+                    // A failed link attempt reports next to the rows, the way
+                    // RN surfaces connectRelayEnvironment errors.
+                    if (linkError != null) {
+                        item(key = "connect-link-error") {
+                            S5Notice(
+                                icon = Icons.Rounded.Cloud,
+                                text = linkError,
+                                containerColor = MaterialTheme.colorScheme.errorContainer,
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                onDismiss = { cloudEnvironments?.clearLinkError() },
+                            )
+                        }
+                    }
+                    if (cloudEnvs.isEmpty() && availableCloudRows.isEmpty()) {
+                        when {
+                            cloudLoading ->
+                                item(key = "connect-loading") {
+                                    S5Notice(
+                                        icon = Icons.Rounded.Cloud,
+                                        text = "Loading linked cloud environments.",
+                                    )
+                                }
+                            discoveryAvailable && cloudError == null ->
+                                item(key = "connect-empty") {
+                                    S5Notice(
+                                        icon = Icons.Rounded.Cloud,
+                                        text = "No additional linked cloud environments.",
+                                    )
+                                }
+                        }
+                    }
+                    // A failed discovery reports itself alongside any rows,
+                    // as RN's error card does — it must not hide behind a
+                    // healthy-looking list.
+                    if (discoveryAvailable && cloudError != null) {
+                        item(key = "connect-error") {
+                            S5ErrorState(
+                                title = "Could not load S5 Connect environments",
+                                detail = cloudError,
+                                onRetry = { cloudEnvironments?.refresh() },
+                                retryLabel = "Try again",
+                            )
+                        }
                     }
                 }
             }
@@ -190,10 +257,14 @@ private fun AvailableCloudRow(
             Column(Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny)) {
                 Text(row.label, style = MaterialTheme.typography.titleMediumEmphasized)
                 Text(
-                    when (row.online) {
-                        null -> "Available · Checking relay status…"
-                        true -> "Available · Relay online"
-                        false -> row.statusError ?: "Available · Relay is offline."
+                    // availableCloudEnvironmentPresentation in the RN client:
+                    // error text when the probe failed, the relay's own error
+                    // when offline, "Available · …" otherwise.
+                    when {
+                        row.online == false -> row.statusError ?: "Relay is offline."
+                        row.statusError != null -> row.statusError
+                        row.online == true -> "Available · Relay online"
+                        else -> "Available · Checking relay status…"
                     },
                     style = MaterialTheme.typography.labelSmall,
                     color =

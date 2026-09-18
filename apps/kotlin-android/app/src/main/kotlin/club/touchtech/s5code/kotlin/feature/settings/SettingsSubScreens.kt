@@ -1,11 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.settings
 
 import android.app.Application
-import android.Manifest
-import android.content.pm.PackageManager
 import android.os.Build
-import androidx.activity.compose.rememberLauncherForActivityResult
-import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.background
@@ -21,20 +17,12 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Difference
-import androidx.compose.material.icons.rounded.DoneAll
-import androidx.compose.material.icons.rounded.ErrorOutline
-import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.automirrored.rounded.Login
-import androidx.compose.material.icons.automirrored.rounded.Logout
-import androidx.compose.material.icons.rounded.Notifications
-import androidx.compose.material.icons.automirrored.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.PendingActions
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.Terminal
@@ -49,17 +37,16 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
-import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.cloud.CloudAccountState
@@ -99,10 +86,6 @@ import club.touchtech.s5code.kotlin.design.theme.S5ThemeMode
 import club.touchtech.s5code.kotlin.design.theme.toColorScheme
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ThreadStatus
-import club.touchtech.s5code.kotlin.platform.notifications.AndroidLiveUpdateNotifications
-import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationStatus
-import club.touchtech.s5code.kotlin.platform.notifications.notificationsAllowed
-import club.touchtech.s5code.kotlin.platform.notifications.openNotificationSettings
 import com.clerk.ui.auth.AuthView
 import com.clerk.ui.userprofile.UserProfileView
 import kotlinx.coroutines.launch
@@ -379,248 +362,6 @@ fun SettingsProjectGroupingScreen(store: AppStore, onBack: () -> Unit) {
                         position = rowPosition(index, ProjectGrouping.entries.size),
                     )
                 }
-            }
-        }
-    }
-}
-
-/** Master delivery switch plus per-event notification preferences. */
-@Composable
-fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit, onSignIn: () -> Unit) {
-    val context = LocalContext.current
-    val preferences by store.preferences.collectAsStateWithLifecycle()
-    val push by store.pushRuntime.collectAsStateWithLifecycle()
-    val account by store.cloud.state.collectAsStateWithLifecycle()
-    var permission by remember { mutableStateOf(notificationsAllowed(context)) }
-    val permissionLauncher =
-        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-            permission = granted && notificationsAllowed(context)
-            store.refreshPushRegistration()
-        }
-
-    fun requestOrOpenNotifications() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
-            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
-                PackageManager.PERMISSION_GRANTED
-        ) {
-            permissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-        } else {
-            openNotificationSettings(context)
-        }
-    }
-
-    // RN's Device Notifications switch reads on only once the device is
-    // registered with the relay; local permission alone delivers nothing.
-    val registered = push.status == PushRegistrationStatus.Registered
-
-    S5Screen(
-        title = "Device notifications",
-        subtitle =
-            when {
-                !permission -> "Blocked"
-                registered -> "Registered"
-                else -> "Allowed"
-            },
-        onBack = onBack,
-    ) { padding ->
-        Column(
-            Modifier.fillMaxSize().padding(padding),
-            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-        ) {
-            if (!permission || !registered) {
-                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                    S5Notice(
-                        icon = Icons.Rounded.ErrorOutline,
-                        text =
-                            if (!permission) {
-                                "Notifications are blocked for S5 Code. Allow them to receive agent alerts."
-                            } else {
-                                push.detail ?: "This device is not registered for remote notifications."
-                            },
-                        containerColor = MaterialTheme.colorScheme.errorContainer,
-                        contentColor = MaterialTheme.colorScheme.onErrorContainer,
-                    )
-                }
-            }
-            S5RowGroup {
-                S5SwitchRow(
-                    icon = Icons.Rounded.Notifications,
-                    label = "Device notifications",
-                    supporting = "Agent alerts pushed to this device",
-                    checked = permission && registered,
-                    onCheckedChange = { allowed ->
-                        if (allowed) {
-                            // Enabling needs an account to register against; RN
-                            // routes a signed-out user to sign-in.
-                            if (account !is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn) {
-                                onSignIn()
-                            } else {
-                                requestOrOpenNotifications()
-                            }
-                        } else {
-                            openNotificationSettings(context)
-                        }
-                    },
-                    position = rowPosition(0, 1),
-                )
-            }
-            S5RowGroup(title = "Notify me when") {
-                val rows =
-                    listOf(
-                        Quad(
-                            Icons.Rounded.PendingActions,
-                            "Approval needed",
-                            preferences.notifyApprovals,
-                        ) { value: Boolean ->
-                            store.updatePreferences { it.copy(notifyApprovals = value) }
-                        },
-                        Quad(Icons.AutoMirrored.Rounded.HelpOutline, "Input needed", preferences.notifyInput) {
-                            value: Boolean ->
-                            store.updatePreferences { it.copy(notifyInput = value) }
-                        },
-                        Quad(Icons.Rounded.DoneAll, "Turn completed", preferences.notifyCompletion) {
-                            value: Boolean ->
-                            store.updatePreferences { it.copy(notifyCompletion = value) }
-                        },
-                        Quad(Icons.Rounded.ErrorOutline, "Turn failed", preferences.notifyFailures) {
-                            value: Boolean ->
-                            store.updatePreferences { it.copy(notifyFailures = value) }
-                        },
-                    )
-                rows.forEachIndexed { index, row ->
-                    S5SwitchRow(
-                        icon = row.icon,
-                        label = row.label,
-                        checked = row.checked,
-                        onCheckedChange = row.onChange,
-                        enabled = permission,
-                        position = rowPosition(index, rows.size),
-                    )
-                }
-            }
-            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                S5Button(
-                    text = "Open Android notification settings",
-                    onClick = { openNotificationSettings(context) },
-                    emphasis = S5ActionEmphasis.Prominent,
-                    style = S5ButtonStyle.Tonal,
-                    icon = Icons.AutoMirrored.Rounded.OpenInNew,
-                )
-            }
-        }
-    }
-}
-
-private data class Quad(
-    val icon: androidx.compose.ui.graphics.vector.ImageVector,
-    val label: String,
-    val checked: Boolean,
-    val onChange: (Boolean) -> Unit,
-)
-
-/** Live Updates enablement, promotion status, and fallback behavior. */
-@Composable
-fun SettingsLiveUpdatesScreen(store: AppStore, onBack: () -> Unit, onSignIn: () -> Unit) {
-    val context = LocalContext.current
-    val preferences by store.preferences.collectAsStateWithLifecycle()
-    val push by store.pushRuntime.collectAsStateWithLifecycle()
-    val account by store.cloud.state.collectAsStateWithLifecycle()
-    // Re-read after returning from system promotion settings. The screen has no
-    // invented defaults: every row below comes from Android or persisted native
-    // delivery state.
-    val diagnostics = AndroidLiveUpdateNotifications.diagnostics(context)
-    val lastUpdateLabel =
-        diagnostics.lastUpdateAtMillis?.let { at ->
-            val seconds = (System.currentTimeMillis() - at).coerceAtLeast(0) / 1_000
-            when {
-                seconds < 60 -> "$seconds s ago"
-                seconds < 3_600 -> "${seconds / 60} min ago"
-                else -> "${seconds / 3_600} h ago"
-            }
-        } ?: "None received"
-    // Same registration gate as RN's Ongoing Agent Activity switch: the
-    // preference means nothing until the relay can push to this device.
-    val registered = push.status == PushRegistrationStatus.Registered
-    S5Screen(
-        title = "Ongoing Agent Activity",
-        subtitle =
-            when {
-                !diagnostics.supported -> "Requires Android 16"
-                preferences.liveUpdatesEnabled && registered -> "Enabled"
-                else -> "Disabled"
-            },
-        onBack = onBack,
-    ) { padding ->
-        Column(
-            Modifier.fillMaxSize().padding(padding),
-            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-        ) {
-            S5RowGroup {
-                S5SwitchRow(
-                    icon = Icons.Rounded.Bolt,
-                    label = "Ongoing Agent Activity",
-                    supporting = "Show agent progress on the lock screen and status bar",
-                    checked =
-                        diagnostics.supported && preferences.liveUpdatesEnabled && registered,
-                    enabled = diagnostics.supported && diagnostics.notificationPermission,
-                    onCheckedChange = { value ->
-                        if (value &&
-                            account !is club.touchtech.s5code.kotlin.cloud.CloudAccountState.SignedIn
-                        ) {
-                            onSignIn()
-                            return@S5SwitchRow
-                        }
-                        store.updatePreferences { it.copy(liveUpdatesEnabled = value) }
-                        if (!value) AndroidLiveUpdateNotifications.dismiss(context)
-                    },
-                )
-            }
-            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                S5Card(tone = S5CardTone.Standard, modifier = Modifier.fillMaxWidth()) {
-                    Column(
-                        Modifier.padding(S5Theme.spacing.large),
-                        verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-                    ) {
-                        Text("Diagnostics", style = MaterialTheme.typography.titleSmallEmphasized)
-                        listOf(
-                                "Promotion permission" to
-                                    when {
-                                        !diagnostics.supported -> "Unsupported"
-                                        diagnostics.promotionPermission -> "Granted"
-                                        else -> "Not granted"
-                                    },
-                                "API level" to
-                                    "${diagnostics.apiLevel} (${if (diagnostics.supported) "promoted ongoing" else "standard alerts"})",
-                                "Fallback" to
-                                    if (diagnostics.notificationPermission) "Ongoing notification" else "Notifications blocked",
-                                "Card" to if (diagnostics.cardVisible) "Visible" else "Hidden",
-                                "Last update" to lastUpdateLabel,
-                            )
-                            .forEach { (label, value) ->
-                                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                                    Text(label, style = MaterialTheme.typography.bodySmall)
-                                    Text(value, style = S5Theme.code.inlineTechnical)
-                                }
-                            }
-                    }
-                }
-            }
-            if (diagnostics.supported && !diagnostics.promotionPermission) {
-                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                    S5Button(
-                        text = "Open Live Update settings",
-                        onClick = { openNotificationSettings(context, promotion = true) },
-                        emphasis = S5ActionEmphasis.Prominent,
-                        style = S5ButtonStyle.Tonal,
-                        icon = Icons.AutoMirrored.Rounded.OpenInNew,
-                    )
-                }
-            }
-            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                S5Notice(
-                    icon = Icons.Rounded.Bolt,
-                    text = "Dismissing a Live Update keeps it hidden until the next turn arms a new one.",
-                )
             }
         }
     }

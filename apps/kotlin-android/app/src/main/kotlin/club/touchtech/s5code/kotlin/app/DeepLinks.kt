@@ -19,7 +19,11 @@ sealed interface DeepLink {
     /** RN's `environment-new` linking path — the add-environment form. */
     data object EnvironmentNew : DeepLink
 
-    /** RN's `connect-onboarding` linking path — the S5 Connect setup screen. */
+    /**
+     * RN's `connect-onboarding` linking path. RN has no managed-machines add
+     * flow — connect devices appear on the environments list itself — so the
+     * link lands there.
+     */
     data object ConnectOnboarding : DeepLink
 
     data object Settings : DeepLink
@@ -49,7 +53,7 @@ sealed interface DeepLink {
                 NewTask -> Routes.NewTask
                 Connections -> Routes.Connections
                 EnvironmentNew -> Routes.ConnectionsNew
-                ConnectOnboarding -> Routes.connectSetup(onboarding = false)
+                ConnectOnboarding -> Routes.Connections
                 Settings -> Routes.Settings
                 is SettingsChild -> "settings/$page"
                 Archive -> Routes.Archive
@@ -99,8 +103,6 @@ private val SETTINGS_CHILDREN =
         "appearance" to "appearance",
         "project-grouping" to "project-grouping",
         "client-storage" to "client-storage",
-        "notifications" to "notifications",
-        "live-updates" to "live-updates",
     )
 
 private const val MAX_SEGMENT_LENGTH = 256

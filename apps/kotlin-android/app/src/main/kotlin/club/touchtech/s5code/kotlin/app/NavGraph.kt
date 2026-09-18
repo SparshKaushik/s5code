@@ -36,20 +36,15 @@ import club.touchtech.s5code.kotlin.feature.newtask.NewTaskBranchScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskDraftScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskEnvironmentScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskProjectScreen
-import club.touchtech.s5code.kotlin.feature.onboarding.AddEnvironmentScreen
 import club.touchtech.s5code.kotlin.feature.onboarding.BootstrapScreen
-import club.touchtech.s5code.kotlin.feature.onboarding.ConnectSetupScreen
 import club.touchtech.s5code.kotlin.feature.onboarding.ConnectSignInScreen
 import club.touchtech.s5code.kotlin.feature.onboarding.OnboardingScreen
-import club.touchtech.s5code.kotlin.feature.onboarding.PairQrScreen
 import club.touchtech.s5code.kotlin.feature.onboarding.PairUrlScreen
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentScreen
 import club.touchtech.s5code.kotlin.feature.review.ReviewScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsAccountScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsAppearanceScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsClientStorageScreen
-import club.touchtech.s5code.kotlin.feature.settings.SettingsLiveUpdatesScreen
-import club.touchtech.s5code.kotlin.feature.settings.SettingsNotificationsScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsProjectGroupingScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsScreen
 import club.touchtech.s5code.kotlin.feature.terminal.TerminalScreen
@@ -92,8 +87,8 @@ fun S5NavGraph(
                 defaultValue = false
             }
         )
-    // The QR scanner navigates here with the parsed host/code so the user
-    // confirms before the credential is spent; deep links omit them.
+    // Deep links may carry the parsed host/code to prefill the form and a
+    // scan flag that opens the camera inline, as RN's `mode=scan_qr` does.
     val pairUrlArgs =
         onboardingArgs +
             listOf(
@@ -104,6 +99,10 @@ fun S5NavGraph(
                 navArgument("code") {
                     type = NavType.StringType
                     defaultValue = ""
+                },
+                navArgument("scan") {
+                    type = NavType.BoolType
+                    defaultValue = false
                 },
             )
     val transitions = s5NavTransitions()
@@ -147,7 +146,9 @@ fun S5NavGraph(
         composable(Routes.Onboarding) {
             OnboardingScreen(
                 onPairUrl = { navController.navigate(Routes.pairUrl(onboarding = true)) },
-                onPairQr = { navController.navigate(Routes.pairQr(onboarding = true)) },
+                onPairQr = {
+                    navController.navigate(Routes.pairUrl(onboarding = true, scan = true))
+                },
                 onConnect = { navController.navigate(Routes.connectSignIn(onboarding = true)) },
             )
         }
@@ -157,23 +158,9 @@ fun S5NavGraph(
                 store = store,
                 onBack = navController::popBackStack,
                 onPaired = { navController.finishPairing(onboarding) },
-                onScanQr = { navController.navigate(Routes.pairQr(onboarding)) },
                 initialHost = entry.arguments?.getString("host").orEmpty(),
                 initialCode = entry.arguments?.getString("code").orEmpty(),
-            )
-        }
-        composable(Routes.PairQr, arguments = onboardingArgs) { entry ->
-            val onboarding = entry.arguments?.getBoolean("onboarding") == true
-            PairQrScreen(
-                onBack = navController::popBackStack,
-                onManual = { navController.navigate(Routes.pairUrl(onboarding)) },
-                // RN's scanner fills the add form instead of spending the
-                // one-time credential sight unseen; the confirm happens there.
-                onScanned = { host, code ->
-                    navController.navigate(Routes.pairUrl(onboarding, host, code)) {
-                        popUpTo(Routes.PairUrl) { inclusive = true }
-                    }
-                },
+                startScanning = entry.arguments?.getBoolean("scan") == true,
             )
         }
         composable(Routes.ConnectSignIn, arguments = onboardingArgs) { entry ->
@@ -181,15 +168,15 @@ fun S5NavGraph(
             ConnectSignInScreen(
                 store = store,
                 onBack = navController::popBackStack,
-                onContinue = { navController.navigate(Routes.connectSetup(onboarding)) },
-            )
-        }
-        composable(Routes.ConnectSetup, arguments = onboardingArgs) { entry ->
-            val onboarding = entry.arguments?.getBoolean("onboarding") == true
-            ConnectSetupScreen(
-                store = store,
-                onBack = navController::popBackStack,
-                onDone = { navController.finishPairing(onboarding) },
+                // RN has no managed-machines step: signing in lands on the
+                // environments list, which discovers and toggles them inline.
+                onContinue = {
+                    if (onboarding) {
+                        navController.finishPairing(fromOnboarding = true)
+                    } else {
+                        navController.popBackStack()
+                    }
+                },
             )
         }
 
@@ -220,16 +207,14 @@ fun S5NavGraph(
                 onOpen = { environmentId -> navController.navigate(Routes.connectionDetail(environmentId)) },
             )
         }
-        // Adding an environment from an already-paired app is the same choice as
-        // first-run onboarding (direct pairing or S5 Connect), so it reuses that
-        // screen on its own route instead of dropping the user straight into the
-        // URL form with no way to pick Connect.
+        // RN's add flow is only the pairing form — S5 Connect machines are
+        // discovered and toggled from the environments list itself, never
+        // added through a separate chooser.
         composable(Routes.ConnectionsNew) {
-            AddEnvironmentScreen(
+            PairUrlScreen(
+                store = store,
                 onBack = navController::popBackStack,
-                onPairUrl = { navController.navigate(Routes.pairUrl(onboarding = false)) },
-                onPairQr = { navController.navigate(Routes.pairQr(onboarding = false)) },
-                onConnect = { navController.navigate(Routes.connectSignIn(onboarding = false)) },
+                onPaired = { navController.finishPairing(fromOnboarding = false) },
             )
         }
         composable(Routes.ConnectionDetail, arguments = listOf(environmentArg)) { entry ->
@@ -615,22 +600,6 @@ fun S5NavGraph(
         composable(Routes.SettingsProjectGrouping) {
             SettingsProjectGroupingScreen(store = store, onBack = navController::popBackStack)
         }
-        composable(Routes.SettingsNotifications) {
-            SettingsNotificationsScreen(
-                store = store,
-                onBack = navController::popBackStack,
-                // RN's toggle routes a signed-out user to sign-in rather than
-                // enabling nothing.
-                onSignIn = { navController.navigate(Routes.SettingsAccount) },
-            )
-        }
-        composable(Routes.SettingsLiveUpdates) {
-            SettingsLiveUpdatesScreen(
-                store = store,
-                onBack = navController::popBackStack,
-                onSignIn = { navController.navigate(Routes.SettingsAccount) },
-            )
-        }
         composable(Routes.SettingsClientStorage) {
             SettingsClientStorageScreen(
                 store = store,
@@ -671,7 +640,9 @@ fun S5NavGraph(
 private fun NavHostController.finishPairing(fromOnboarding: Boolean) {
     if (fromOnboarding) {
         navigate(Routes.Home) { popUpTo(Routes.Onboarding) { inclusive = true } }
-    } else {
-        popBackStack(Routes.Connections, inclusive = false)
+    } else if (!popBackStack()) {
+        // A deep-linked form has nothing beneath it; home is the fallback,
+        // matching RN's `canGoBack ? goBack : replace(Home)`.
+        navigate(Routes.Home)
     }
 }

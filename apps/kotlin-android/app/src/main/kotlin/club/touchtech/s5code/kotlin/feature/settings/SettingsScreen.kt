@@ -1,5 +1,10 @@
 package club.touchtech.s5code.kotlin.feature.settings
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,7 +33,11 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -48,11 +57,15 @@ import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5RowGroup
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
+import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationStatus
+import club.touchtech.s5code.kotlin.platform.notifications.AndroidLiveUpdateNotifications
 import club.touchtech.s5code.kotlin.platform.notifications.notificationsAllowed
+import club.touchtech.s5code.kotlin.platform.notifications.openNotificationSettings
+import androidx.core.content.ContextCompat
 import club.touchtech.s5code.kotlin.platform.updates.AppUpdateStatus
 
 /** Settings root. Every configuration destination plus build identity. */
@@ -65,10 +78,32 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
     val updateStatus by store.updates.status.collectAsStateWithLifecycle()
     val push by store.pushRuntime.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    // Re-read on every composition path back from system settings; the OS does
+    // not push permission changes to us.
+    var notificationsAllowedNow by remember { mutableStateOf(notificationsAllowed(context)) }
+    LaunchedEffect(Unit) {
+        notificationsAllowedNow = notificationsAllowed(context)
+    }
     // RN's settings switches read as on only when the device is registered with
     // the relay — a saved preference without delivery is meaningless there too.
     val deviceRegistered = push.status == PushRegistrationStatus.Registered
-    val notificationsOn = deviceRegistered && notificationsAllowed(context)
+    val notificationsOn = deviceRegistered && notificationsAllowedNow
+    val notificationPermissionLauncher =
+        rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
+            notificationsAllowedNow = granted && notificationsAllowed(context)
+            store.refreshPushRegistration()
+        }
+
+    fun requestOrOpenNotifications() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
+            ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
+                PackageManager.PERMISSION_GRANTED
+        ) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        } else {
+            openNotificationSettings(context)
+        }
+    }
 
     S5Screen(
         title = "Settings",
@@ -92,14 +127,56 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
                     label = "S5 account",
                     value = accountLabel,
                     onClick = { onOpen(Routes.SettingsAccount) },
-                    position = rowPosition(0, 2),
+                    position = rowPosition(0, 4),
                 )
                 S5SettingsRow(
                     icon = Icons.Rounded.Hub,
                     label = "Environments",
                     value = "${environments.size} paired",
                     onClick = { onOpen(Routes.SettingsEnvironments) },
-                    position = rowPosition(1, 2),
+                    position = rowPosition(1, 4),
+                )
+                // RN renders these as inline switches on this screen, not
+                // sub-pages. Both read as on only once the device is actually
+                // registered with the relay.
+                S5SwitchRow(
+                    icon = Icons.Rounded.Notifications,
+                    label = "Device notifications",
+                    supporting = "Agent alerts pushed to this device",
+                    checked = notificationsOn,
+                    enabled = account !is CloudAccountState.Unconfigured,
+                    onCheckedChange = { enabled ->
+                        if (enabled) {
+                            // Enabling needs an account to register against;
+                            // RN routes a signed-out user to sign-in.
+                            if (account is CloudAccountState.SignedIn) {
+                                requestOrOpenNotifications()
+                            } else {
+                                onOpen(Routes.SettingsAccount)
+                            }
+                        } else {
+                            openNotificationSettings(context)
+                        }
+                    },
+                    position = rowPosition(2, 4),
+                )
+                S5SwitchRow(
+                    icon = Icons.Rounded.Bolt,
+                    label = "Ongoing Agent Activity",
+                    supporting = "Show agent progress on the lock screen and status bar",
+                    checked = preferences.liveUpdatesEnabled && deviceRegistered,
+                    enabled = account !is CloudAccountState.Unconfigured,
+                    onCheckedChange = { enabled ->
+                        if (enabled && account !is CloudAccountState.SignedIn) {
+                            onOpen(Routes.SettingsAccount)
+                            return@S5SwitchRow
+                        }
+                        store.updatePreferences { it.copy(liveUpdatesEnabled = enabled) }
+                        if (!enabled) {
+                            AndroidLiveUpdateNotifications.dismiss(context)
+                        }
+                    },
+                    position = rowPosition(3, 4),
                 )
             }
 
@@ -116,23 +193,6 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
                     label = "Project grouping",
                     value = preferences.projectGrouping.label,
                     onClick = { onOpen(Routes.SettingsProjectGrouping) },
-                    position = rowPosition(1, 2),
-                )
-            }
-
-            S5RowGroup(title = "Notifications") {
-                S5SettingsRow(
-                    icon = Icons.Rounded.Notifications,
-                    label = "Device notifications",
-                    value = if (notificationsOn) "On" else "Off",
-                    onClick = { onOpen(Routes.SettingsNotifications) },
-                    position = rowPosition(0, 2),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Bolt,
-                    label = "Ongoing Agent Activity",
-                    value = if (preferences.liveUpdatesEnabled && notificationsOn) "On" else "Off",
-                    onClick = { onOpen(Routes.SettingsLiveUpdates) },
                     position = rowPosition(1, 2),
                 )
             }

@@ -12,10 +12,8 @@ object Routes {
     // different exits. The origin travels in the route rather than being sniffed
     // from the back stack, which is a restricted API and a lie once a deep link
     // lands straight on the pair screen.
-    const val PairUrl = "pair/url?onboarding={onboarding}&host={host}&code={code}"
-    const val PairQr = "pair/qr?onboarding={onboarding}"
+    const val PairUrl = "pair/url?onboarding={onboarding}&host={host}&code={code}&scan={scan}"
     const val ConnectSignIn = "connect/sign-in?onboarding={onboarding}"
-    const val ConnectSetup = "connect-onboarding?onboarding={onboarding}"
 
     const val Home = "home"
     /** Detail-pane placeholder used only on expanded widths. */
@@ -65,23 +63,22 @@ object Routes {
     const val SettingsEnvironments = "settings/environments"
     const val SettingsAppearance = "settings/appearance"
     const val SettingsProjectGrouping = "settings/project-grouping"
-    const val SettingsNotifications = "settings/notifications"
-    const val SettingsLiveUpdates = "settings/live-updates"
     const val SettingsClientStorage = "settings/client-storage"
     const val Usage = "usage"
     const val Archive = "archive"
     const val NotFound = "not-found"
 
-    fun pairUrl(onboarding: Boolean, host: String = "", code: String = "") =
-        "pair/url?onboarding=$onboarding" +
-            "&host=${android.net.Uri.encode(host)}" +
-            "&code=${android.net.Uri.encode(code)}"
-
-    fun pairQr(onboarding: Boolean) = "pair/qr?onboarding=$onboarding"
+    fun pairUrl(
+        onboarding: Boolean,
+        host: String = "",
+        code: String = "",
+        scan: Boolean = false,
+    ) = "pair/url?onboarding=$onboarding" +
+        "&host=${android.net.Uri.encode(host)}" +
+        "&code=${android.net.Uri.encode(code)}" +
+        "&scan=$scan"
 
     fun connectSignIn(onboarding: Boolean) = "connect/sign-in?onboarding=$onboarding"
-
-    fun connectSetup(onboarding: Boolean) = "connect-onboarding?onboarding=$onboarding"
 
     fun thread(environmentId: String, threadId: String) =
         "threads/${routeSegment(environmentId)}/${routeSegment(threadId)}"
