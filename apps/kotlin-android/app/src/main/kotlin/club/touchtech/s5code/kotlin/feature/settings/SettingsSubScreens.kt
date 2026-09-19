@@ -403,7 +403,7 @@ fun SettingsClientStorageScreen(
     LaunchedEffect(caches) { inventory = caches.inventory() }
 
     S5Screen(
-        title = "Client storage",
+        title = "Client Storage",
         subtitle = inventory?.let { "${cacheSizeLabel(it.totalBytes)} on this device" }
             ?: "Measuring…",
         onBack = onBack,

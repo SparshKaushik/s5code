@@ -640,16 +640,17 @@ fun HomeScreen(
                     icon = if (noEnvironments) Icons.Rounded.Hub else Icons.Rounded.Inbox,
                     title =
                         when {
-                            noEnvironments -> "No environments connected yet"
+                            noEnvironments -> "No environments connected"
                             home.query.isBlank() -> "No threads yet"
-                            else -> "No matches"
+                            else -> "No results"
                         },
                     detail =
                         when {
-                            noEnvironments -> "Pair with a machine running S5 Code to get started."
+                            noEnvironments ->
+                                "Add an environment to load projects and start coding sessions."
                             home.query.isBlank() ->
-                                "Start a task and it shows up here across every connected environment."
-                            else -> "Nothing matches \"${home.query}\". Try a shorter search."
+                                "Create a task to start a new coding session."
+                            else -> "No threads matching \"${home.query}\"."
                         },
                     actionLabel =
                         when {
@@ -930,7 +931,7 @@ fun HomeScreen(
                                                                 S5ConfirmDialogRequest(
                                                                     title = "Delete thread?",
                                                                     message =
-                                                                        "\"${item.thread.title}\" and its local thread history will be permanently deleted.",
+                                                                        "\"${item.thread.title}\" will be permanently deleted, including its terminal history.",
                                                                     confirmText = "Delete",
                                                                     destructive = true,
                                                                     onConfirm = runAction,

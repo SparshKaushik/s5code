@@ -592,9 +592,13 @@ class LiveWorkspaceGateway(
     ): List<ProviderCatalogEntry> =
         providers
             .filter { provider ->
+                // RN's buildModelOptions keeps non-Antigravity providers
+                // regardless of `availability`; only Antigravity hides itself
+                // when its local runtime is unavailable.
                 provider.enabled &&
                     provider.installed &&
-                    provider.availability != "unavailable" &&
+                    (provider.driver != "antigravity" ||
+                        provider.availability != "unavailable") &&
                     provider.auth.status != "unauthenticated"
             }
             .groupBy { it.instanceId }
@@ -618,6 +622,16 @@ class LiveWorkspaceGateway(
                                     model.name
                                 }
                         },
+                    modelSubProviders =
+                        models.mapNotNull { model ->
+                            model.subProvider?.takeIf { it.isNotEmpty() }?.let {
+                                model.slug to it
+                            }
+                        }.toMap(),
+                    defaultModels =
+                        models.filter { it.isDefault }.map { it.slug }.toSet(),
+                    legacyModels =
+                        models.filter { it.isLegacy }.map { it.slug }.toSet(),
                     // Per model, because two models of the same provider do not
                     // offer the same knobs: Claude Opus 5 has a context window
                     // and Opus 4.8 does not. First wins on a duplicate slug, for

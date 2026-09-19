@@ -56,7 +56,7 @@ fun statusPresentation(status: ThreadStatus): S5StatusPresentation {
             )
         ThreadStatus.AwaitingApproval ->
             S5StatusPresentation(
-                "Approval",
+                "Needs Approval",
                 colors.approvalContainer,
                 colors.onApprovalContainer,
                 colors.approval,
@@ -66,7 +66,7 @@ fun statusPresentation(status: ThreadStatus): S5StatusPresentation {
             )
         ThreadStatus.AwaitingInput ->
             S5StatusPresentation(
-                "Input",
+                "Awaiting Input",
                 colors.inputContainer,
                 colors.onInputContainer,
                 colors.input,
@@ -76,7 +76,7 @@ fun statusPresentation(status: ThreadStatus): S5StatusPresentation {
             )
         ThreadStatus.Failed ->
             S5StatusPresentation(
-                "Failed",
+                "Error",
                 colors.failedContainer,
                 colors.onFailedContainer,
                 colors.failed,

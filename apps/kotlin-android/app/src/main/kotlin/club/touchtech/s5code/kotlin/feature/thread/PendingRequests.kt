@@ -97,20 +97,15 @@ fun ApprovalCard(
         container = S5Theme.status.approvalContainer,
         onContainer = S5Theme.status.onApprovalContainer,
         icon = Icons.Rounded.CheckCircle,
-        label =
-            when (approval.kind) {
-                ApprovalKind.Command -> "Approve command"
-                ApprovalKind.FileRead -> "Approve file read"
-                ApprovalKind.FileWrite -> "Approve file write"
-                ApprovalKind.McpElicitation -> "Answer MCP request"
-                ApprovalKind.NetworkAccess -> "Approve network access"
-            },
+        // RN's eyebrow label is a fixed "Approval needed", not a kind-specific
+        // verb.
+        label = "Approval needed",
         modifier = modifier,
     ) {
         // The provider's own name for the request beats our kind label, matching
         // `appName ?? requestKind` in the RN card.
         Text(
-            approval.appName ?: approval.title,
+            approval.appName ?: approval.requestKindLabel ?: approval.title,
             style = MaterialTheme.typography.titleSmallEmphasized,
         )
         Text(

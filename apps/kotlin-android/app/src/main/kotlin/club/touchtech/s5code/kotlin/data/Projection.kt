@@ -39,6 +39,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
+import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonNull
@@ -1111,6 +1112,22 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
                     },
                 turnId = turnId,
                 atMillis = at,
+                sourceKind = activity.kind,
+                itemType = payload?.string("itemType").orEmpty(),
+                toolTitle = payload?.string("title"),
+                toolName = extractToolName(payload),
+                requestKind = extractWorkLogRequestKind(payload),
+                changedFiles = extractChangedFiles(payload),
+                command = extractToolCommand(payload),
+                lifecycleStatus = payload?.string("status"),
+                toolDataJson =
+                    (payload?.get("data") as? JsonObject)
+                        ?.let { PRETTY_JSON.encodeToString(JsonObject.serializer(), it) },
+                prNumber = extractToolPrNumber(payload),
+                toolSourceName =
+                    (payload?.get("toolSource") as? JsonObject)?.string("name"),
+                toolSourceKind =
+                    (payload?.get("toolSource") as? JsonObject)?.string("kind"),
             )
 
         "tool.denied" ->
@@ -1122,6 +1139,15 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
                 state = ToolState.Failed,
                 turnId = turnId,
                 atMillis = at,
+                sourceKind = activity.kind,
+                itemType = payload?.string("itemType").orEmpty(),
+                toolTitle = payload?.string("title"),
+                toolName = payload?.string("toolName"),
+                lifecycleStatus = "declined",
+                toolSourceName =
+                    (payload?.get("toolSource") as? JsonObject)?.string("name"),
+                toolSourceKind =
+                    (payload?.get("toolSource") as? JsonObject)?.string("kind"),
             )
 
         "turn.plan.updated" ->
@@ -1227,27 +1253,274 @@ private fun subagentEntry(
         atMillis = at,
     )
 
+private val PRETTY_JSON = Json { prettyPrint = true }
+
+/**
+ * The PR number a link/unlink tool call targets, from `data.arguments`/
+ * `data.input`/`data.rawInput`: a direct `number`, or the number inside a `url`
+ * pointing at a pull/merge request (`parseChangeRequestUrl` in
+ * `packages/shared/src/changeRequestUrl.ts` — the URL forms are all
+ * `.../<digits>` after a fixed marker).
+ */
+private fun extractToolPrNumber(payload: JsonObject?): Int? {
+    if (payload == null) return null
+    val data = payload["data"] as? JsonObject ?: return null
+    val input =
+        listOf("arguments", "input", "rawInput")
+            .firstNotNullOfOrNull { data[it] as? JsonObject }
+            ?: return null
+    val number = (input["number"] as? JsonPrimitive)?.contentOrNull?.toIntOrNull()
+    if (number != null && number > 0) return number
+    val url = input.string("url") ?: return null
+    val match =
+        Regex(
+                "(?:pull|pulls|pull-requests|merge_requests)/?(\\d+)(?:[/?#]|$)",
+                RegexOption.IGNORE_CASE,
+            )
+            .find(url)
+            ?: return null
+    return match.groupValues[1].toIntOrNull()?.takeIf { it > 0 }
+}
+
 private fun extractToolSummary(payload: JsonObject?): String {
     if (payload == null) return ""
-    val directCommand = payload.string("command")
-    if (!directCommand.isNullOrBlank()) return directCommand
-    val data = payload["data"] as? JsonObject
-    val dataCommand = data?.string("command")
-    if (!dataCommand.isNullOrBlank()) return dataCommand
-    val item = data?.get("item") as? JsonObject
-    val itemCommand = item?.string("command")
-    if (!itemCommand.isNullOrBlank()) return itemCommand
-    val itemInput = item?.get("input") as? JsonObject
-    val itemInputCommand = itemInput?.string("command")
-    if (!itemInputCommand.isNullOrBlank()) return itemInputCommand
-    val itemResult = item?.get("result") as? JsonObject
-    val itemResultCommand = itemResult?.string("command")
-    if (!itemResultCommand.isNullOrBlank()) return itemResultCommand
-    val rawOutput = data?.get("rawOutput") as? JsonObject
-    val rawOutputCommand = rawOutput?.string("command")
-    if (!rawOutputCommand.isNullOrBlank()) return rawOutputCommand
-    return payload.string("itemType").orEmpty()
+    return extractToolCommand(payload) ?: payload.string("itemType").orEmpty()
 }
+
+/**
+ * The MCP tool id `resolveWorkEntryToolPresentation` looks up, from the same
+ * payload spots in the same order: `data.server` + `data.tool` joined, then
+ * `data.toolName`, then the top-level `toolName`. The row's title and the
+ * activity label are tried after this at classification time, matching
+ * `resolveWorkEntryToolPresentation`'s toolTitle/label fallbacks.
+ */
+private fun extractToolName(payload: JsonObject?): String? {
+    if (payload == null) return null
+    val data = payload["data"] as? JsonObject
+    val server = data?.string("server")
+    val tool = data?.string("tool")
+    if (!server.isNullOrBlank() && !tool.isNullOrBlank()) return "$server.$tool"
+    return data?.string("toolName")?.takeIf { it.isNotBlank() }
+        ?: payload.string("toolName")?.takeIf { it.isNotBlank() }
+}
+
+/**
+ * `extractWorkLogRequestKind` in `apps/mobile/src/lib/threadActivity.ts`: the
+ * literal `requestKind`, else the approval `requestType` mapped through
+ * `requestKindFromRequestType` in `packages/client-runtime/src/pendingRequests.ts`.
+ */
+private fun extractWorkLogRequestKind(payload: JsonObject?): String? {
+    if (payload == null) return null
+    payload.string("requestKind")?.takeIf {
+        it == "command" || it == "file-read" || it == "file-change"
+    }?.let { return it }
+    return when (payload.string("requestType")) {
+        "command_execution_approval",
+        "exec_command_approval",
+        "dynamic_tool_call" -> "command"
+        "file_read_approval" -> "file-read"
+        "file_change_approval",
+        "apply_patch_approval" -> "file-change"
+        "mcp_elicitation_approval" -> "mcp-elicitation"
+        else -> null
+    }
+}
+
+/**
+ * The file list RN's `changedFiles` carries: `collectChangedFiles` walks
+ * `payload.data` recursively for path-shaped fields, dedupes, and caps at 12.
+ */
+private fun extractChangedFiles(payload: JsonObject?): List<String> {
+    if (payload == null) return emptyList()
+    val files = mutableListOf<String>()
+    val seen = mutableSetOf<String>()
+    collectChangedFiles(payload["data"], files, seen, 0)
+    return files
+}
+
+private fun normalizeChangedFileUri(value: String): String? {
+    val raw = value.trim()
+    if (raw.isEmpty()) return null
+    var path = raw
+    if (path.startsWith("file://")) {
+        path = path.substring("file://".length)
+    } else if (path.startsWith("zed://")) {
+        val queryIndex = path.indexOf('?')
+        if (queryIndex < 0) return null
+        val query = path.substring(queryIndex + 1)
+        path =
+            query.split('&')
+                .firstNotNullOfOrNull { part ->
+                    part.removePrefix("path=").takeIf { part.startsWith("path=") }
+                }
+                ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
+                ?: return null
+    } else if (Regex("^[a-z][a-z0-9+.-]*:", RegexOption.IGNORE_CASE).containsMatchIn(path)) {
+        return null
+    }
+    val queryIndex = path.indexOfFirst { it == '?' || it == '#' }
+    if (queryIndex >= 0) path = path.substring(0, queryIndex)
+    val normalized =
+        try {
+            java.net.URLDecoder.decode(path.trim(), Charsets.UTF_8)
+        } catch (_: Exception) {
+            path.trim()
+        }
+    return normalized.takeIf { it.isNotEmpty() }
+}
+
+private val CHANGED_FILE_KEYS =
+    listOf("path", "filePath", "relativePath", "filename", "newPath", "oldPath", "uri")
+private val CHANGED_FILE_NESTED_KEYS =
+    listOf(
+        "content", "locations", "rawInput", "rawOutput", "item", "result",
+        "input", "data", "changes", "files", "edits", "patch", "patches",
+        "operations",
+    )
+
+private fun collectChangedFiles(
+    value: kotlinx.serialization.json.JsonElement?,
+    target: MutableList<String>,
+    seen: MutableSet<String>,
+    depth: Int,
+) {
+    if (depth > 6 || target.size >= 12 || value == null) return
+    if (value is kotlinx.serialization.json.JsonArray) {
+        for (entry in value) {
+            collectChangedFiles(entry, target, seen, depth + 1)
+            if (target.size >= 12) return
+        }
+        return
+    }
+    val record = value as? JsonObject ?: return
+    for (key in CHANGED_FILE_KEYS) {
+        val raw = (record[key] as? JsonPrimitive)?.contentOrNull ?: continue
+        val normalized =
+            if (key == "uri") normalizeChangedFileUri(raw)
+            else raw.trim().takeIf { it.isNotEmpty() }
+        if (normalized != null && seen.add(normalized)) target += normalized
+    }
+    for (key in CHANGED_FILE_NESTED_KEYS) {
+        if (key !in record) continue
+        collectChangedFiles(record[key], target, seen, depth + 1)
+        if (target.size >= 12) return
+    }
+}
+
+/**
+ * The command a tool call ran, normalized the way RN's `extractToolCommand`
+ * normalizes it: first non-empty candidate wins, and a `sh -c`/`bash -lc`
+ * wrapper is unwrapped so the row shows the real command.
+ */
+private fun extractToolCommand(payload: JsonObject?): String? {
+    if (payload == null) return null
+    val data = payload["data"] as? JsonObject
+    val item = data?.get("item") as? JsonObject
+    val itemInput = item?.get("input") as? JsonObject
+    val itemResult = item?.get("result") as? JsonObject
+    val rawOutput = data?.get("rawOutput") as? JsonObject
+    val detailCommand =
+        if (payload.string("itemType") == "command_execution") {
+            payload.string("detail")?.let(::stripTrailingExitCode)
+        } else {
+            null
+        }
+    val candidates =
+        listOf(
+            item?.string("command"),
+            itemInput?.string("command"),
+            itemResult?.string("command"),
+            data?.string("command"),
+            rawOutput?.string("command"),
+            detailCommand,
+        )
+    return candidates.firstNotNullOfOrNull { candidate ->
+        normalizeCommandValue(candidate)
+    }
+}
+
+/** `<exited with exit code N>` suffix a provider appends to command output. */
+private fun stripTrailingExitCode(value: String): String? {
+    val trimmed = value.trim()
+    val match =
+        Regex("^(?<output>[\\s\\S]*?)(?:\\s*<exited with exit code \\d+>)\\s*$", RegexOption.IGNORE_CASE)
+            .find(trimmed)
+    val output = match?.groups?.get("output")?.value?.trim() ?: trimmed
+    return output.takeIf { it.isNotEmpty() }
+}
+
+private fun trimMatchingOuterQuotes(value: String): String {
+    val trimmed = value.trim()
+    if ((trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+        (trimmed.startsWith("\"") && trimmed.endsWith("\""))
+    ) {
+        val unquoted = trimmed.substring(1, trimmed.length - 1).trim()
+        return unquoted.ifEmpty { trimmed }
+    }
+    return trimmed
+}
+
+private fun executableBasename(value: String): String? {
+    val trimmed = trimMatchingOuterQuotes(value)
+    if (trimmed.isEmpty()) return null
+    return trimmed.replace('\\', '/').substringAfterLast('/').trim()
+        .lowercase().takeIf { it.isNotEmpty() }
+}
+
+private fun splitExecutableAndRest(value: String): Pair<String, String>? {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty()) return null
+    if (trimmed.startsWith("\"") || trimmed.startsWith("'")) {
+        val quote = trimmed[0]
+        val closeIndex = trimmed.indexOf(quote, 1)
+        if (closeIndex <= 0) return null
+        return trimmed.substring(0, closeIndex + 1) to trimmed.substring(closeIndex + 1).trim()
+    }
+    val firstWhitespace = trimmed.indexOfFirst { it.isWhitespace() }
+    if (firstWhitespace < 0) return trimmed to ""
+    return trimmed.substring(0, firstWhitespace) to trimmed.substring(firstWhitespace).trim()
+}
+
+private data class ShellWrapperSpec(val executables: Set<String>, val flagPattern: Regex)
+
+private val SHELL_WRAPPER_SPECS =
+    listOf(
+        ShellWrapperSpec(
+            setOf("pwsh", "pwsh.exe", "powershell", "powershell.exe"),
+            Regex("(?:^|\\s)-command\\s+", RegexOption.IGNORE_CASE),
+        ),
+        ShellWrapperSpec(
+            setOf("cmd", "cmd.exe"),
+            Regex("(?:^|\\s)/c\\s+", RegexOption.IGNORE_CASE),
+        ),
+        ShellWrapperSpec(
+            setOf("bash", "sh", "zsh"),
+            Regex("(?:^|\\s)-(?:l)?c\\s+", RegexOption.IGNORE_CASE),
+        ),
+    )
+
+private fun unwrapCommandRemainder(value: String, flagPattern: Regex): String? {
+    val match = flagPattern.find(value) ?: return null
+    val command = value.substring(match.range.last + 1).trim()
+    if (command.isEmpty()) return null
+    val openingQuote = command.first()
+    if ((openingQuote == '\'' || openingQuote == '"') && !command.endsWith(openingQuote)) {
+        return null
+    }
+    return trimMatchingOuterQuotes(command).takeIf { it.isNotEmpty() }
+}
+
+/** Ported from `unwrapKnownShellCommandWrapper` in `apps/mobile/src/lib/threadActivity.ts`. */
+private fun unwrapKnownShellCommandWrapper(value: String): String {
+    val split = splitExecutableAndRest(value) ?: return value
+    if (split.second.isEmpty()) return value
+    val shell = executableBasename(split.first) ?: return value
+    val spec = SHELL_WRAPPER_SPECS.firstOrNull { shell in it.executables } ?: return value
+    return unwrapCommandRemainder(split.second, spec.flagPattern) ?: value
+}
+
+private fun normalizeCommandValue(value: String?): String? =
+    value?.takeIf { it.isNotBlank() }?.let(::unwrapKnownShellCommandWrapper)
 
 private fun planStepsOf(payload: JsonObject?): List<PlanStep>? {
     val steps = payload?.get("plan") as? JsonArray ?: return null
@@ -1303,6 +1576,7 @@ fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApprova
                         command = payload.string("command"),
                         kind = approvalKindOf(payload),
                         appName = payload.string("appName"),
+                        requestKindLabel = extractWorkLogRequestKind(payload),
                         options = approvalOptionsOf(payload),
                     )
                 createdAtById[requestId] = activity.createdAt.orEmpty()

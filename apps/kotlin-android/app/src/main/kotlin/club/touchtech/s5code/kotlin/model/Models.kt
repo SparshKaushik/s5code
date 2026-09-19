@@ -283,6 +283,30 @@ sealed interface FeedEntry {
         val state: ToolState,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
+        /**
+         * The fields `toolGroupAction`/`summarizeToolGroup`/`workEntryRowLabel`
+         * classify on in the RN client, extracted from the activity payload so
+         * the folded-work summary and the row's own label read the same on both
+         * clients.
+         */
+        val sourceKind: String = "",
+        val itemType: String = "",
+        val toolTitle: String? = null,
+        /** `data.server.tool` / `data.toolName` / `toolName` — the MCP tool id. */
+        val toolName: String? = null,
+        val requestKind: String? = null,
+        val changedFiles: List<String> = emptyList(),
+        /** The shell command the call ran, unwrapped of its sh -c wrapper. */
+        val command: String? = null,
+        /** `payload.status` verbatim: inProgress/completed/failed/declined/stopped. */
+        val lifecycleStatus: String? = null,
+        /** `payload.data` pretty-printed, for the "MCP call" expanded block. */
+        val toolDataJson: String? = null,
+        /** PR number a link/unlink call targets, parsed from the tool input. */
+        val prNumber: Int? = null,
+        /** `payload.toolSource`: the integration/browser surface the call ran on. */
+        val toolSourceName: String? = null,
+        val toolSourceKind: String? = null,
     ) : FeedEntry
 
     data class Reasoning(
@@ -391,6 +415,8 @@ data class PendingApproval(
      * matching `appName ?? requestKind` in the RN card.
      */
     val appName: String? = null,
+    /** `requestKind` verbatim — the RN card's title fallback after `appName`. */
+    val requestKindLabel: String? = null,
     /**
      * The decisions the provider advertised on this request, in its own order.
      * Empty means the request predates advertised options and the card falls
@@ -845,6 +871,14 @@ data class ProviderCatalogEntry(
      * everywhere it is sent.
      */
     val modelLabels: Map<String, String> = emptyMap(),
+    /**
+     * `subProvider` per slug — the upstream vendor an aggregating provider
+     * (OpenCode, pi) lists the model under. RN renders it as the row subtitle.
+     */
+    val modelSubProviders: Map<String, String> = emptyMap(),
+    /** Slugs the server marks `isDefault` / `isLegacy`; RN badges them in-row. */
+    val defaultModels: Set<String> = emptySet(),
+    val legacyModels: Set<String> = emptySet(),
     /**
      * Whether the composer may offer the plan/default mode switch for this
      * provider. True unless the server explicitly disables it, matching

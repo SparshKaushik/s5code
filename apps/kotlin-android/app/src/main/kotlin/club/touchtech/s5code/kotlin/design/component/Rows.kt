@@ -4,6 +4,7 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -183,6 +184,8 @@ fun S5SelectableRow(
     supporting: String? = null,
     leading: @Composable (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
+    /** Small inline content after the label — model badges, count chips. */
+    labelSuffix: @Composable (() -> Unit)? = null,
     position: S5RowPosition = S5RowPosition.Only,
 ) {
     ListItem(
@@ -194,7 +197,20 @@ fun S5SelectableRow(
         leadingContent = leading,
         supportingContent = supporting?.let { { Text(it, style = MaterialTheme.typography.bodySmall) } },
         trailingContent = trailing,
-        content = { Text(label, maxLines = 2, overflow = TextOverflow.Ellipsis) },
+        content = {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    label,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (labelSuffix != null) {
+                    Spacer(Modifier.size(6.dp))
+                    labelSuffix()
+                }
+            }
+        },
     )
 }
 

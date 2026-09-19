@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
 import club.touchtech.s5code.kotlin.model.FeedEntry
+import club.touchtech.s5code.kotlin.model.ToolState
 import club.touchtech.s5code.kotlin.model.TurnInfo
 
 /**
@@ -19,17 +20,19 @@ sealed interface FeedRow {
     }
 
     /**
-     * Discloses the tool calls folded away above it.
+     * Discloses the tool calls folded away beneath it.
      *
-     * [onlyTools] picks the noun, following `ThreadWorkGroupToggle`: a run of pure
-     * tool calls says "tool calls", a mixed run says "log entries", because
-     * "3 previous tool calls" is a lie when one of them is a subagent.
+     * [summary] is the collapsed-group label the RN client computes in
+     * `appendToolGroupRows`: "Ran 4 commands and read 2 files", or the single
+     * call's own label, or the live "Running x" line while the trailing call is
+     * in flight. It does not change when the group opens — RN keeps the summary
+     * as the expanded group's header — so there is no "Show fewer" wording here.
      */
     data class WorkToggle(
         val groupId: String,
         val hiddenCount: Int,
         val expanded: Boolean,
-        val onlyTools: Boolean,
+        val summary: String,
     ) : FeedRow {
         override val key: String
             get() = "work-toggle:$groupId"
@@ -51,7 +54,6 @@ sealed interface FeedRow {
             get() = "turn-fold:$turnId:${placement.name.lowercase()}"
 
         /**
-         * What the row reads.
          *
          * The footer says what it does rather than repeating the duration: the
          * header above already stated how long the turn took, and a second
@@ -75,22 +77,15 @@ sealed interface FeedRow {
 }
 
 /**
- * How many rows of a run of work stay visible when it is folded.
- *
- * One, matching `MAX_VISIBLE_WORK_LOG_ENTRIES` in
- * `apps/mobile/src/lib/threadActivity.ts`. A phone transcript is mostly tool
- * calls, and the last one is the only one that is still news.
- */
-const val MAX_VISIBLE_WORK_ROWS = 1
-
-/**
  * Folds runs of adjacent work rows, mirroring `appendPresentedFeedEntry` in the RN
  * client and `MessagesTimeline.logic.ts` on the desktop/web side.
  *
- * Only tool calls fold. Subagent rows stay visible however long the run is: a
- * running fleet hidden behind "+7 previous tool calls" is exactly the stall the
- * subagent row exists to explain. Errors stay for the same reason — an error
- * folded away is an error the user does not know about.
+ * Tool calls and reasoning fold, and the whole run folds behind its summary
+ * toggle, the way RN's `work-toggle` row replaces its `activity-group`. A failed
+ * call does not fold: `appendActivityGroupRows` passes `tone !== "error"` rows
+ * into the run and renders the rest standalone, and an error folded away is an
+ * error the user does not know about. Subagent rows stay visible for the same
+ * reason RN's `agent-spawn` card flushes the run instead of joining it.
  *
  * [expandedGroups] holds the groups the user has opened, keyed by the group's first
  * row. That key is stable while the run grows downward, which is the direction a
@@ -172,28 +167,20 @@ fun presentFeed(
         index = end + 1
         if (group.isEmpty()) continue
 
-        val foldable = group.filter { it is FeedEntry.ToolCall }
-        if (foldable.size <= MAX_VISIBLE_WORK_ROWS) {
-            group.forEach { rows += FeedRow.Entry(it) }
-            appendFooterFor(group.map { it.id })
-            continue
-        }
-
         val groupId = "work-group:${group.first().id}"
         val expanded = groupId in expandedGroups
-        // Fold from the top: the newest calls are the ones worth keeping. Filtering
-        // the original group (rather than concatenating two filtered lists) is what
-        // keeps a subagent that ran mid-run in its own chronological place.
-        val foldedAway = foldable.dropLast(MAX_VISIBLE_WORK_ROWS).map { it.id }.toSet()
-        val visible = if (expanded) group else group.filter { it.id !in foldedAway }
-        visible.forEach { rows += FeedRow.Entry(it) }
+        // RN emits the toggle first and the rows under it only once expanded —
+        // even a single call is a summary row until it is opened.
         rows +=
             FeedRow.WorkToggle(
                 groupId = groupId,
-                hiddenCount = foldedAway.size,
+                hiddenCount = group.size,
                 expanded = expanded,
-                onlyTools = group.all { it is FeedEntry.ToolCall },
+                summary = workGroupSummary(group, activeWorkStartedAtMillis != null),
             )
+        if (expanded) {
+            group.forEach { rows += FeedRow.Entry(it) }
+        }
         // After the work toggle, not before: the toggle belongs to the rows above
         // it, and the turn trigger closes the whole turn.
         appendFooterFor(group.map { it.id })
@@ -330,24 +317,469 @@ internal fun formatDuration(millis: Long): String {
 /**
  * Whether an entry is part of a run of work rather than conversation.
  *
- * Messages, plans, and errors break a run: they are the things you scroll to read,
- * and a plan card swallowed into a fold would be unreachable.
+ * Messages, plans, errors, and subagent rows break a run: they are the things you
+ * scroll to read. Subagents break it for the same reason RN's `agent-spawn` card
+ * does — a spawn flushes the tool-call run on either side instead of folding into
+ * it.
  */
 private fun isWorkRow(entry: FeedEntry): Boolean =
-    entry is FeedEntry.ToolCall || entry is FeedEntry.Subagent
+    (entry is FeedEntry.ToolCall && entry.state != ToolState.Failed) ||
+        entry is FeedEntry.Reasoning
 
-/** Toggle label, matching `ThreadWorkGroupToggle`'s wording. */
-fun workToggleLabel(row: FeedRow.WorkToggle): String {
-    val noun =
-        when {
-            row.onlyTools && row.hiddenCount == 1 -> "tool call"
-            row.onlyTools -> "tool calls"
-            row.hiddenCount == 1 -> "log entry"
-            else -> "log entries"
+/* ── Folded-run summaries ────────────────────────────────────────────────
+ * The block below is `summarizeToolGroup` and friends from
+ * `packages/client-runtime/src/work-log/presentation.ts`, ported against the
+ * payload fields Projection extracts onto FeedEntry.ToolCall. Labels are
+ * verbatim so a user reading the same thread on both clients sees the same
+ * sentence.
+ */
+
+private enum class ToolGroupAction {
+    LinkPr,
+    UnlinkPr,
+    ListPrs,
+    Read,
+    Edit,
+    Command,
+    Browser,
+    Device,
+    CodeSearch,
+    Search,
+    Other,
+    Update,
+}
+
+private enum class T3ToolIcon { PullRequest, Browser, Device, T3Code }
+
+private data class T3ToolPresentation(
+    val displayName: String,
+    val icon: T3ToolIcon,
+    val action: ToolGroupAction?,
+)
+
+/** name → [action, running, completed, detail], from `T3_MCP_TOOL_LABELS`. */
+private val T3_MCP_TOOL_LABELS: Map<String, List<String>> =
+    mapOf(
+        "link_pull_request" to listOf("Link", "Linking", "Linked", "a pull request"),
+        "unlink_pull_request" to listOf("Unlink", "Unlinking", "Unlinked", "a pull request"),
+        "list_thread_pull_requests" to listOf("Check", "Checking", "Checked", "linked pull requests"),
+        "orchestrator_capabilities" to listOf("Get", "Getting", "Got", "orchestration capabilities"),
+        "delegate_task" to listOf("Delegate", "Delegating", "Delegated", "a child task"),
+        "task_status" to listOf("Get", "Getting", "Got", "delegated task status"),
+        "task_cancel" to listOf("Cancel", "Canceling", "Canceled", "delegated task"),
+        "schedule_task" to listOf("Schedule", "Scheduling", "Scheduled", "a recurring task"),
+        "list_scheduled_tasks" to listOf("List", "Listing", "Listed", "scheduled tasks"),
+        "update_scheduled_task" to listOf("Update", "Updating", "Updated", "a scheduled task"),
+        "delete_scheduled_task" to listOf("Delete", "Deleting", "Deleted", "a scheduled task"),
+        "create_threads" to listOf("Create", "Creating", "Created", "T3 threads"),
+        "t3_thread_start" to listOf("Start", "Starting", "Started", "a T3 thread"),
+        "t3_thread_list" to listOf("List", "Listing", "Listed", "T3 threads"),
+        "t3_thread_read" to listOf("Read", "Reading", "Read", "a T3 thread"),
+        "t3_thread_send" to listOf("Send", "Sending", "Sent", "to a T3 thread"),
+        "t3_thread_wait" to listOf("Wait", "Waiting", "Waited", "for a T3 thread"),
+        "t3_thread_interrupt" to listOf("Interrupt", "Interrupting", "Interrupted", "a T3 thread"),
+        "t3_worktree_handoff" to
+            listOf("Hand off", "Handing off", "Handed off", "thread to a git worktree"),
+        "t3_worktree_status" to listOf("Get", "Getting", "Got", "thread worktree status"),
+        "preview_status" to listOf("Get", "Getting", "Got", "preview browser status"),
+        "preview_open" to listOf("Open", "Opening", "Opened", "a page in the preview browser"),
+        "preview_navigate" to
+            listOf("Navigate", "Navigating", "Navigated", "the preview browser"),
+        "preview_snapshot" to
+            listOf(
+                "Take a snapshot of",
+                "Taking a snapshot of",
+                "Took a snapshot of",
+                "the preview page",
+            ),
+        "preview_click" to listOf("Click", "Clicking", "Clicked", "in the preview browser"),
+        "preview_press" to listOf("Press", "Pressing", "Pressed", "a key in the preview browser"),
+        "preview_type" to listOf("Type", "Typing", "Typed", "in the preview browser"),
+        "preview_scroll" to listOf("Scroll", "Scrolling", "Scrolled", "the preview browser"),
+        "preview_resize" to listOf("Resize", "Resizing", "Resized", "the preview browser"),
+        "preview_evaluate" to
+            listOf("Evaluate", "Evaluating", "Evaluated", "script in the preview browser"),
+        "preview_wait_for" to listOf("Wait", "Waiting", "Waited", "for the preview page"),
+        "preview_set_appearance" to
+            listOf("Set", "Setting", "Set", "preview browser appearance"),
+        "preview_recording_start" to
+            listOf("Start", "Starting", "Started", "recording the preview browser"),
+        "preview_recording_stop" to
+            listOf("Stop", "Stopping", "Stopped", "recording the preview browser"),
+        "device_list" to listOf("List", "Listing", "Listed", "simulators and emulators"),
+        "device_open" to listOf("Open", "Opening", "Opened", "a device in the Device panel"),
+        "device_screenshot" to
+            listOf(
+                "Take a screenshot of",
+                "Taking a screenshot of",
+                "Took a screenshot of",
+                "the device",
+            ),
+        "device_close" to listOf("Close", "Closing", "Closed", "a device"),
+    )
+
+private val PR_TOOL_ACTIONS: Map<String, ToolGroupAction> =
+    mapOf(
+        "link_pull_request" to ToolGroupAction.LinkPr,
+        "unlink_pull_request" to ToolGroupAction.UnlinkPr,
+        "list_thread_pull_requests" to ToolGroupAction.ListPrs,
+    )
+
+private val T3_MCP_PREFIX =
+    Regex("^(?:mcp__(?:t3-code|t3_code|t3code)__|(?:t3-code|t3_code|t3code)(?:[.:/]|\\s*·\\s*))", RegexOption.IGNORE_CASE)
+
+internal fun normalizeCompactToolLabel(value: String): String =
+    value.replace(Regex("\\s+(?:complete|completed)\\s*$", RegexOption.IGNORE_CASE), "").trim()
+
+/**
+ * `resolveT3McpToolPresentation`: null when [value] is not a T3 Code MCP tool.
+ * [status] is the lifecycle status (`inProgress`/`completed`/`failed`/
+ * `declined`/`stopped`); anything else falls through to the running verb.
+ */
+private fun t3ToolPresentation(
+    value: String?,
+    status: String?,
+    prNumber: Int?,
+): T3ToolPresentation? {
+    if (value.isNullOrEmpty()) return null
+    val name = normalizeCompactToolLabel(value).replace(T3_MCP_PREFIX, "")
+    val labels = T3_MCP_TOOL_LABELS[name] ?: return null
+    val (action, running, completed, detail) = labels
+    val verb =
+        when (status) {
+            "inProgress" -> running
+            "completed" -> completed
+            "failed" -> "Failed to ${action.lowercase()}"
+            "declined" -> "Declined to ${action.lowercase()}"
+            "stopped" -> "Stopped ${running.lowercase()}"
+            else -> running
         }
-    return if (row.expanded) {
-        if (row.onlyTools) "Show fewer tool calls" else "Show fewer log entries"
-    } else {
-        "+${row.hiddenCount} previous $noun"
+    val actionKind = PR_TOOL_ACTIONS[name]
+    val target =
+        if (actionKind != null && actionKind != ToolGroupAction.ListPrs && prNumber != null) {
+            "PR #$prNumber"
+        } else {
+            detail
+        }
+    val icon =
+        when {
+            actionKind != null -> T3ToolIcon.PullRequest
+            name.startsWith("preview_") -> T3ToolIcon.Browser
+            name.startsWith("device_") -> T3ToolIcon.Device
+            else -> T3ToolIcon.T3Code
+        }
+    return T3ToolPresentation("$verb $target", icon, actionKind)
+}
+
+private val TOOL_LIFECYCLE_ITEM_TYPES =
+    setOf(
+        "command_execution",
+        "file_change",
+        "mcp_tool_call",
+        "dynamic_tool_call",
+        "collab_agent_tool_call",
+        "web_search",
+        "image_view",
+    )
+
+private fun FeedEntry.ToolCall.t3Presentation(statusOverride: String? = null): T3ToolPresentation? {
+    val status =
+        statusOverride
+            ?: lifecycleStatus
+            ?: when (state) {
+                ToolState.Running -> "inProgress"
+                ToolState.Succeeded -> "completed"
+                ToolState.Failed -> "failed"
+            }
+    return t3ToolPresentation(toolName, status, prNumber)
+        ?: t3ToolPresentation(toolTitle, status, prNumber)
+        ?: t3ToolPresentation(name, status, prNumber)
+}
+
+private val WORKSPACE_IMAGE_PREVIEW_EXTENSIONS =
+    listOf(".avif", ".gif", ".ico", ".jpeg", ".jpg", ".png", ".svg", ".webp")
+
+private fun isWorkspaceImagePreviewPath(path: String): Boolean {
+    val lower = path.substringBefore('?').substringBefore('#').lowercase()
+    return WORKSPACE_IMAGE_PREVIEW_EXTENSIONS.any { lower.endsWith(it) }
+}
+
+/** `workLogEntryIsLocalCodeSearch`: a web-search row whose title is a grep call. */
+private fun FeedEntry.ToolCall.isLocalCodeSearch(): Boolean =
+    itemType == "web_search" &&
+        Regex("\\bgrep\\b", RegexOption.IGNORE_CASE)
+            .containsMatchIn(normalizeCompactToolLabel(toolTitle ?: name))
+
+/** `toolGroupAction`: which verb bucket a call counts toward in the summary. */
+private fun FeedEntry.ToolCall.groupAction(): ToolGroupAction {
+    if (sourceKind == "approval.requested" ||
+        sourceKind == "approval.resolved" ||
+        sourceKind == "provider.approval.respond.failed"
+    ) {
+        return ToolGroupAction.Update
     }
+    val presentation = t3Presentation()
+    if (presentation?.action != null) return presentation.action
+    if (presentation?.icon == T3ToolIcon.Browser) return ToolGroupAction.Browser
+    if (presentation?.icon == T3ToolIcon.Device) return ToolGroupAction.Device
+    if (requestKind == "file-read" ||
+        itemType == "image_view" ||
+        (itemType == "dynamic_tool_call" &&
+            toolTitle?.trim()?.lowercase() == "read file")
+    ) {
+        return ToolGroupAction.Read
+    }
+    if (requestKind == "file-change" || itemType == "file_change" || changedFiles.isNotEmpty()) {
+        return ToolGroupAction.Edit
+    }
+    if (requestKind == "command" || itemType == "command_execution" || command != null) {
+        return ToolGroupAction.Command
+    }
+    if (isLocalCodeSearch()) return ToolGroupAction.CodeSearch
+    if (itemType == "web_search") return ToolGroupAction.Search
+    // Every FeedEntry.ToolCall is tool-like; the "update" bucket RN reserves for
+    // non-tool rows is unreachable here.
+    return ToolGroupAction.Other
+}
+
+private fun toolGroupActionCount(action: ToolGroupAction, entries: List<FeedEntry>): Int {
+    if (action != ToolGroupAction.Edit) return entries.size
+    val changedFiles = mutableSetOf<String>()
+    var editsWithoutFileDetails = 0
+    for (entry in entries) {
+        val files = (entry as? FeedEntry.ToolCall)?.changedFiles.orEmpty()
+        if (files.isEmpty()) {
+            editsWithoutFileDetails += 1
+            continue
+        }
+        changedFiles.addAll(files)
+    }
+    return changedFiles.size + editsWithoutFileDetails
+}
+
+private fun toolGroupActionLabel(action: ToolGroupAction, count: Int): String =
+    when (action) {
+        ToolGroupAction.LinkPr ->
+            "Linked $count ${if (count == 1) "pull request" else "pull requests"}"
+        ToolGroupAction.UnlinkPr ->
+            "Unlinked $count ${if (count == 1) "pull request" else "pull requests"}"
+        ToolGroupAction.ListPrs ->
+            if (count == 1) "Checked linked pull requests"
+            else "Checked linked pull requests $count times"
+        ToolGroupAction.Read -> "Read $count ${if (count == 1) "file" else "files"}"
+        ToolGroupAction.Edit -> "Changed $count ${if (count == 1) "file" else "files"}"
+        ToolGroupAction.Command -> "Ran $count ${if (count == 1) "command" else "commands"}"
+        ToolGroupAction.Device ->
+            "Used device controls $count ${if (count == 1) "time" else "times"}"
+        ToolGroupAction.Browser -> "Used browser $count ${if (count == 1) "time" else "times"}"
+        ToolGroupAction.Search ->
+            "Searched the web $count ${if (count == 1) "time" else "times"}"
+        ToolGroupAction.CodeSearch -> "Searched code $count ${if (count == 1) "time" else "times"}"
+        ToolGroupAction.Other -> "Used $count ${if (count == 1) "tool" else "tools"}"
+        ToolGroupAction.Update -> "Received $count ${if (count == 1) "update" else "updates"}"
+    }
+
+/**
+ * `summarizeToolGroup`: integration sources are named up front ("Used GitHub
+ * integration"), the rest bucket by action and join as an English list.
+ */
+private fun summarizeToolGroup(entries: List<FeedEntry>): String {
+    val sources = LinkedHashMap<String, String>()
+    val grouped = LinkedHashMap<ToolGroupAction, MutableList<FeedEntry>>()
+    for (entry in entries) {
+        if (entry is FeedEntry.ToolCall &&
+            entry.toolSourceName != null &&
+            entry.t3Presentation()?.icon != T3ToolIcon.PullRequest
+        ) {
+            sources[entry.toolSourceName] = entry.toolSourceKind.orEmpty()
+            continue
+        }
+        val action =
+            if (entry is FeedEntry.ToolCall) entry.groupAction()
+            // Non-tool rows folded into the run (thinking) count toward "other".
+            else ToolGroupAction.Other
+        grouped.getOrPut(action) { mutableListOf() } += entry
+    }
+    val labels =
+        grouped.map { (action, actionEntries) ->
+            toolGroupActionLabel(action, toolGroupActionCount(action, actionEntries))
+        }.toMutableList()
+    if (sources.isNotEmpty()) {
+        val names = sources.keys.toList()
+        val formattedNames =
+            when (names.size) {
+                1 -> names[0]
+                2 -> names.joinToString(" and ")
+                else -> "${names.dropLast(1).joinToString(", ")}, and ${names.last()}"
+            }
+        val allIntegrations = sources.values.all { it == "integration" }
+        labels.add(
+            0,
+            "Used $formattedNames" +
+                if (allIntegrations) {
+                    if (sources.size == 1) " integration" else " integrations"
+                } else {
+                    ""
+                },
+        )
+    }
+    val sentenceLabels =
+        labels.mapIndexed { index, label ->
+            if (index == 0) label else label.replaceFirstChar { it.lowercase() }
+        }
+    return when (sentenceLabels.size) {
+        0 -> ""
+        1 -> sentenceLabels[0]
+        2 -> sentenceLabels.joinToString(" and ")
+        else ->
+            "${sentenceLabels.dropLast(1).joinToString(", ")}, and ${sentenceLabels.last()}"
+    }
+}
+
+/** First token of the command — a light stand-in for RN's `commandProgramName`. */
+private fun commandProgramName(command: String): String? =
+    command.trim().split(Regex("\\s+"), limit = 2).firstOrNull()
+        ?.substringAfterLast('/')
+        ?.takeIf { it.isNotEmpty() }
+
+/**
+ * `liveToolActivitySummary`: the trailing group's present-tense label while its
+ * latest call is still running ("Running bash", "Linked a pull request").
+ */
+private fun liveToolCallSummary(entry: FeedEntry.ToolCall): String {
+    val status =
+        when (entry.lifecycleStatus) {
+            "failed", "declined", "stopped" -> entry.lifecycleStatus
+            else -> "inProgress"
+        }
+    entry.t3Presentation(status)?.let { return it.displayName }
+    val command = entry.command?.trim()
+    if (!command.isNullOrEmpty()) {
+        val verb =
+            when (status) {
+                "inProgress" -> "Running"
+                "failed" -> "Failed"
+                "declined" -> "Declined"
+                "stopped" -> "Stopped"
+                else -> "Ran"
+            }
+        return "$verb ${commandProgramName(command) ?: "command"}"
+    }
+    return entry.detail.takeIf { it.isNotBlank() } ?: entry.name
+}
+
+/**
+ * The toggle's label, from `appendToolGroupRows`: a live run labels its latest
+ * call in the present tense, a single non-edit call labels itself, and anything
+ * else is the action-count summary.
+ */
+private fun workGroupSummary(group: List<FeedEntry>, workInFlight: Boolean): String {
+    val latest = group.last()
+    if (workInFlight && latest is FeedEntry.ToolCall && latest.state == ToolState.Running) {
+        return liveToolCallSummary(latest)
+    }
+    if (group.size == 1) {
+        val single = latest
+        return when {
+            single is FeedEntry.ToolCall && single.groupAction() != ToolGroupAction.Edit ->
+                singleToolCallLabel(single)
+            single is FeedEntry.Reasoning -> "Thinking"
+            else -> singleSummary(single)
+        }
+    }
+    return summarizeToolGroup(group)
+}
+
+/** `workEntry.label` fallback for a lone non-tool row inside a run. */
+private fun singleSummary(entry: FeedEntry): String =
+    when (entry) {
+        is FeedEntry.ToolCall -> entry.name
+        is FeedEntry.Reasoning -> "Thinking"
+        else -> ""
+    }
+
+/* ── Row labels ────────────────────────────────────────────────────────── */
+
+private fun collapseWhitespace(value: String): String =
+    value.replace(Regex("\\s+"), " ").trim()
+
+private fun stripShellWrapper(value: String): String {
+    val trimmed = value.trim()
+    val match =
+        Regex("^/bin/zsh -lc ['\"]?([\\s\\S]*?)['\"]?$").matchEntire(trimmed)
+    return (match?.groupValues?.get(1) ?: trimmed).trim()
+}
+
+private fun capitalizePhrase(value: String): String {
+    val trimmed = value.trim()
+    if (trimmed.isEmpty()) return value
+    return trimmed.replaceFirstChar { it.uppercase() }
+}
+
+/** `workEntryPreview`: command, else detail, else the changed-file list. */
+private fun toolCallPreview(entry: FeedEntry.ToolCall): String? {
+    entry.command?.let { return it }
+    if (entry.detail.isNotEmpty()) return entry.detail
+    if (entry.changedFiles.isEmpty()) return null
+    val first = entry.changedFiles.first()
+    return if (entry.changedFiles.size == 1) first
+    else "$first +${entry.changedFiles.size - 1} more"
+}
+
+private fun toolCallHeading(entry: FeedEntry.ToolCall): String {
+    entry.t3Presentation()?.let { return it.displayName }
+    return capitalizePhrase(normalizeCompactToolLabel(entry.toolTitle ?: entry.name))
+}
+
+/**
+ * `workEntryRowLabel`: what the row's one line says. Collapsed it is the T3
+ * tool's friendly name, else the command/detail/files preview squashed to one
+ * line, else the title. Expanded rows heading a command say "Command" and leave
+ * the command itself to the body.
+ */
+fun toolCallRowLabel(entry: FeedEntry.ToolCall, expanded: Boolean = false): String {
+    entry.t3Presentation()?.let { return it.displayName }
+    if (expanded && !entry.command.isNullOrBlank()) return "Command"
+    val preview = toolCallPreview(entry)
+    if (expanded) return preview?.trim()?.takeIf { it.isNotEmpty() } ?: toolCallHeading(entry)
+    return preview?.let { collapseWhitespace(stripShellWrapper(it)) }
+        ?.takeIf { it.isNotEmpty() }
+        ?: toolCallHeading(entry)
+}
+
+/** `singleToolCallLabel`: the toggle's label when the run is one non-edit call. */
+private fun singleToolCallLabel(entry: FeedEntry.ToolCall): String =
+    entry.t3Presentation()?.displayName ?: entry.command?.trim() ?: entry.name
+
+/**
+ * `workEntryCanExpand`: something must be behind the chevron — MCP payload,
+ * files, a command, or detail text.
+ */
+fun toolCallCanExpand(entry: FeedEntry.ToolCall): Boolean =
+    (entry.itemType == "mcp_tool_call" && entry.toolDataJson != null) ||
+        entry.changedFiles.any { it.isNotBlank() } ||
+        !entry.command.isNullOrBlank() ||
+        entry.detail.isNotBlank()
+
+/**
+ * `buildWorkEntryExpandedBody`: MCP payload, then the command, then detail,
+ * then the file list — each block deduped against the row's visible label the
+ * way RN's `appendBlock` does.
+ */
+fun toolCallExpandedBody(entry: FeedEntry.ToolCall): String? {
+    val blocks = mutableListOf<String>()
+    val visibleLabel = toolCallRowLabel(entry, expanded = true).trim()
+    fun appendBlock(value: String?) {
+        val trimmed = value?.trim() ?: return
+        if (trimmed.isEmpty()) return
+        if (entry.command == null && (trimmed == visibleLabel || trimmed in blocks)) return
+        blocks += trimmed
+    }
+    if (entry.itemType == "mcp_tool_call" && entry.toolDataJson != null) {
+        appendBlock("MCP call\n${entry.toolDataJson}")
+    }
+    appendBlock(entry.command)
+    appendBlock(entry.detail)
+    if (entry.changedFiles.isNotEmpty()) appendBlock(entry.changedFiles.joinToString("\n"))
+    return blocks.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
 }

@@ -342,7 +342,7 @@ fun PairUrlScreen(
     }
 
     S5Screen(
-        title = if (scanning) "Scan QR code" else "Add environment",
+        title = if (scanning) "Scan QR Code" else "Add Environment",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
         actions = {

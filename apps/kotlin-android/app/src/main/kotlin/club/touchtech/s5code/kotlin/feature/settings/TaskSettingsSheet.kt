@@ -4,6 +4,7 @@ import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
@@ -37,6 +38,7 @@ import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
 import club.touchtech.s5code.kotlin.design.component.S5SelectableRow
 import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
+import club.touchtech.s5code.kotlin.design.component.S5TextBadge
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
@@ -390,17 +392,34 @@ fun TaskSettingsSheet(
                     key = { _, model -> "model_${group.instance.instanceId}_$model" },
                     contentType = { _, _ -> "model_row" },
                 ) { index, model ->
+                    val catalogEntry = catalogById[group.instance.instanceId]
+                    // RN's ModelRow: display name, the upstream vendor as the
+                    // subtitle, and Default/Legacy chips. The provider instance
+                    // is already the section header, so repeating it per row is
+                    // noise.
+                    val badges =
+                        buildList {
+                            if (catalogEntry?.defaultModels?.contains(model) == true) add("Default")
+                            if (catalogEntry?.legacyModels?.contains(model) == true) add("Legacy")
+                        }
                     Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                         S5SelectableRow(
-                            label =
-                                catalogById[group.instance.instanceId]?.modelLabel(model)
-                                    ?: model,
-                            supporting =
-                                if (groups.size > 1) group.instance.label else null,
+                            label = catalogEntry?.modelLabel(model) ?: model,
+                            supporting = catalogEntry?.modelSubProviders?.get(model),
                             selected =
                                 model == settings.model &&
                                     group.instance.instanceId == settings.provider.instanceId,
                             onClick = { selectAndReveal(group.instance, model) },
+                            labelSuffix =
+                                if (badges.isEmpty()) {
+                                    null
+                                } else {
+                                    {
+                                        Row(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                                            badges.forEach { badge -> S5TextBadge(badge) }
+                                        }
+                                    }
+                                },
                             trailing = {
                                 FavoriteToggle(
                                     favorited =

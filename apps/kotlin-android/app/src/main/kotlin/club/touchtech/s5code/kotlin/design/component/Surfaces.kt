@@ -112,6 +112,32 @@ fun S5SectionHeader(
 }
 
 /**
+ * Small inline text chip, matching the Default/Legacy badges in RN's model
+ * rows: tinted container, label-sized text.
+ */
+@Composable
+fun S5TextBadge(
+    text: String,
+    modifier: Modifier = Modifier,
+    containerColor: Color = MaterialTheme.colorScheme.surfaceContainerHighest,
+    contentColor: Color = MaterialTheme.colorScheme.onSurfaceVariant,
+) {
+    Surface(
+        modifier = modifier,
+        shape = MaterialTheme.shapes.extraSmall,
+        color = containerColor,
+        contentColor = contentColor,
+    ) {
+        Text(
+            text,
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = androidx.compose.ui.text.font.FontWeight.Bold,
+        )
+    }
+}
+
+/**
  * Iconic-shape badge. Used for avatars, statuses, and hero art — the intentional
  * places for `MaterialShapes`, not scattered through dense rows.
  */

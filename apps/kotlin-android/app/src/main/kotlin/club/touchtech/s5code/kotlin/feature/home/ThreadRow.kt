@@ -132,11 +132,23 @@ fun ThreadRow(
                     horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
                 ) {
                     TurnStatusIndicator(thread.status)
-                    S5StatusPill(
-                        label = elapsedLabel?.let { "${status.label} · $it" } ?: status.label,
-                        containerColor = status.container,
-                        contentColor = status.content,
-                    )
+                    // RN's resolveThreadStatus returns nothing for quiescent
+                    // threads; only attention states and live work get a pill,
+                    // so idle/settled/snoozed rows stay clean.
+                    if (thread.status !in setOf(
+                            ThreadStatus.Idle, ThreadStatus.Settled, ThreadStatus.Snoozed,
+                        )
+                    ) {
+                        S5StatusPill(
+                            label =
+                                // Kotlin's Queued covers RN's "connecting"
+                                // window between message send and session start.
+                                if (thread.status == ThreadStatus.Queued) "Connecting"
+                                else elapsedLabel?.let { "${status.label} · $it" } ?: status.label,
+                            containerColor = status.container,
+                            contentColor = status.content,
+                        )
+                    }
                     Text(
                         thread.updatedLabel,
                         style = MaterialTheme.typography.labelSmall,

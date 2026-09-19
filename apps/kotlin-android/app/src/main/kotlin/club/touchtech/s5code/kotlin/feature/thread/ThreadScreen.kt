@@ -175,8 +175,8 @@ fun ThreadScreen(
             } else {
                 S5EmptyState(
                     icon = Icons.Rounded.Difference,
-                    title = "Thread not available",
-                    detail = "It may have been deleted, or this environment is no longer paired.",
+                    title = "Thread unavailable",
+                    detail = "This thread was deleted or is no longer available.",
                     actionLabel = "Back to home",
                     onAction = onBack,
                     modifier = Modifier.padding(padding),

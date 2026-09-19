@@ -83,7 +83,7 @@ fun ArchiveScreen(
         }
 
     S5Screen(
-        title = "Archived",
+        title = "Archived Threads",
         subtitle = "${archived.size} threads",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
@@ -92,7 +92,7 @@ fun ArchiveScreen(
             S5SearchField(
                 value = query,
                 onValueChange = { query = it },
-                placeholder = "Search archived",
+                placeholder = "Search archived threads",
                 modifier =
                     Modifier.padding(
                         horizontal = S5Theme.spacing.gutter,
@@ -117,12 +117,12 @@ fun ArchiveScreen(
             } else if (filtered.isEmpty()) {
                 S5EmptyState(
                     icon = Icons.Rounded.Archive,
-                    title = if (archived.isEmpty()) "Nothing archived" else "No matches",
+                    title = if (archived.isEmpty()) "No archived threads" else "No matching threads",
                     detail =
                         if (archived.isEmpty()) {
-                            "Archived threads stay on the machine and can be restored any time."
+                            "Threads you archive will appear here."
                         } else {
-                            "Nothing matches \"$query\"."
+                            "Try another search or environment."
                         },
                     actionLabel = if (query.isNotBlank()) "Clear search" else null,
                     onAction = if (query.isNotBlank()) ({ query = "" }) else null,
@@ -160,7 +160,7 @@ fun ArchiveScreen(
                                     },
                                     options =
                                         listOf(
-                                            S5MenuOption("restore", "Restore", Icons.Rounded.Unarchive),
+                                            S5MenuOption("restore", "Unarchive", Icons.Rounded.Unarchive),
                                             S5MenuOption(
                                                 "delete",
                                                 "Delete",
@@ -187,9 +187,9 @@ fun ArchiveScreen(
                                             "delete" ->
                                                 confirmController.show(
                                                     S5ConfirmDialogRequest(
-                                                        title = "Permanently delete thread?",
+                                                        title = "Delete thread?",
                                                         message =
-                                                            "\"${thread.title}\" cannot be restored after this.",
+                                                            "\"${thread.title}\" will be permanently deleted, including its terminal history.",
                                                         confirmText = "Delete",
                                                         destructive = true,
                                                         onConfirm = {

@@ -306,9 +306,8 @@ fun ThreadComposer(
                 ) {
                     S5ComposerField(
                         state = draftState,
-                        placeholder =
-                            if (expanded) "Message the agent. / for commands, @ for paths"
-                            else "Message the agent",
+                        // RN's composer placeholder, verbatim.
+                        placeholder = "Ask the repo agent, or run a command…",
                         // Never single-line, even collapsed. `singleLine` is what
                         // tells the IME to replace the newline key with Done, and
                         // Android fixes that when the input session opens: a field
@@ -377,7 +376,7 @@ fun ThreadComposer(
                             if (working) {
                                 S5ComposerAction(
                                     icon = Icons.Rounded.Stop,
-                                    label = "Stop the agent",
+                                    label = "Stop agent",
                                     onClick = onCancel,
                                     containerColor = MaterialTheme.colorScheme.errorContainer,
                                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
@@ -385,7 +384,7 @@ fun ThreadComposer(
                             }
                             S5ComposerAction(
                                 icon = Icons.AutoMirrored.Rounded.Send,
-                                label = if (queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue message" else "Send message",
+                                label = if (queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue" else "Send",
                                 onClick = onSend,
                                 enabled = canSend,
                             )

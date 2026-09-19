@@ -11,13 +11,24 @@ import org.junit.Test
  * Folding runs of work.
  *
  * The rules that matter are about what must *not* fold. A subagent hidden behind
- * "+7 previous tool calls" is exactly the stall the subagent row exists to explain,
- * and a folded error is an error the user does not know about.
+ * "Used 7 tools" is exactly the stall the subagent row exists to explain, and a
+ * folded error is an error the user does not know about. Every run — even a
+ * single call — collapses to its summary row, matching RN's `work-toggle`.
  */
 class WorkGroupsTest {
 
     private fun tool(id: String, state: ToolState = ToolState.Succeeded) =
         FeedEntry.ToolCall(id = id, name = "Bash", summary = "ls", detail = "", state = state)
+
+    private fun command(id: String) =
+        FeedEntry.ToolCall(
+            id = id,
+            name = "Bash",
+            summary = "ls",
+            detail = "",
+            state = ToolState.Succeeded,
+            command = "ls -la",
+        )
 
     private fun message(id: String) = FeedEntry.AgentMessage(id, "text", "12:00")
 
@@ -27,67 +38,107 @@ class WorkGroupsTest {
     private fun keys(rows: List<FeedRow>) = rows.map { it.key }
 
     @Test
-    fun `a short run is left alone`() {
-        val feed = listOf(message("m1"), tool("t1"), message("m2"))
-        assertEquals(listOf("m1", "t1", "m2"), keys(presentFeed(feed, emptySet())))
+    fun `a single call is its own summary row`() {
+        val feed = listOf(message("m1"), command("t1"), message("m2"))
+        assertEquals(listOf("m1", "work-toggle:work-group:t1", "m2"), keys(presentFeed(feed, emptySet())))
+        val toggle =
+            presentFeed(feed, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single()
+        // `singleToolCallLabel`: the command itself, as RN shows it.
+        assertEquals("ls -la", toggle.summary)
     }
 
     @Test
-    fun `a long run folds to the newest row plus a toggle`() {
-        val feed = listOf(message("m1"), tool("t1"), tool("t2"), tool("t3"), message("m2"))
+    fun `a long run folds behind one summary toggle`() {
+        val feed =
+            listOf(message("m1"), command("t1"), command("t2"), command("t3"), message("m2"))
         val rows = presentFeed(feed, emptySet())
-        assertEquals(listOf("m1", "t3", "work-toggle:work-group:t1", "m2"), keys(rows))
+        assertEquals(listOf("m1", "work-toggle:work-group:t1", "m2"), keys(rows))
         val toggle = rows.filterIsInstance<FeedRow.WorkToggle>().single()
-        assertEquals(2, toggle.hiddenCount)
-        assertTrue(toggle.onlyTools)
+        assertEquals(3, toggle.hiddenCount)
+        assertEquals("Ran 3 commands", toggle.summary)
     }
 
     @Test
-    fun `expanding a group restores every row and keeps the toggle`() {
-        val feed = listOf(tool("t1"), tool("t2"), tool("t3"))
+    fun `expanding a group shows the summary then every row`() {
+        val feed = listOf(command("t1"), command("t2"), command("t3"))
         val rows = presentFeed(feed, setOf("work-group:t1"))
-        assertEquals(listOf("t1", "t2", "t3", "work-toggle:work-group:t1"), keys(rows))
+        assertEquals(listOf("work-toggle:work-group:t1", "t1", "t2", "t3"), keys(rows))
         assertTrue(rows.filterIsInstance<FeedRow.WorkToggle>().single().expanded)
     }
 
     @Test
-    fun `messages break a run so two short runs never merge`() {
-        val feed = listOf(tool("t1"), message("m1"), tool("t2"))
-        assertEquals(listOf("t1", "m1", "t2"), keys(presentFeed(feed, emptySet())))
+    fun `mixed runs summarize each action the way RN does`() {
+        val feed =
+            listOf(
+                command("t1"),
+                command("t2"),
+                FeedEntry.ToolCall(
+                    id = "r1",
+                    name = "Read",
+                    summary = "",
+                    detail = "src/Main.kt",
+                    state = ToolState.Succeeded,
+                    requestKind = "file-read",
+                ),
+            )
+        val toggle =
+            presentFeed(feed, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single()
+        assertEquals("Ran 2 commands and read 1 file", toggle.summary)
+    }
+
+    @Test
+    fun `messages break a run so two runs never merge`() {
+        val feed = listOf(command("t1"), message("m1"), command("t2"))
+        assertEquals(
+            listOf("work-toggle:work-group:t1", "m1", "work-toggle:work-group:t2"),
+            keys(presentFeed(feed, emptySet())),
+        )
     }
 
     @Test
     fun `a plan card is never swallowed into a fold`() {
-        val feed = listOf(tool("t1"), tool("t2"), FeedEntry.PlanUpdate("p1", emptyList()), tool("t3"))
+        val feed =
+            listOf(command("t1"), command("t2"), FeedEntry.PlanUpdate("p1", emptyList()), command("t3"))
         val rows = keys(presentFeed(feed, emptySet()))
         assertTrue(rows.contains("p1"))
-        // Two tools before the plan is one over the visible budget, so only that
-        // run folds; the single tool after it stays.
-        assertEquals(listOf("t2", "work-toggle:work-group:t1", "p1", "t3"), rows)
+        assertEquals(
+            listOf("work-toggle:work-group:t1", "p1", "work-toggle:work-group:t3"),
+            rows,
+        )
     }
 
     @Test
     fun `an error row is never folded away`() {
-        val feed = listOf(tool("t1"), FeedEntry.ErrorEntry("e1", "boom"), tool("t2"), tool("t3"))
+        val feed =
+            listOf(command("t1"), FeedEntry.ErrorEntry("e1", "boom"), command("t2"), command("t3"))
         val rows = keys(presentFeed(feed, emptySet()))
         assertTrue(rows.contains("e1"))
     }
 
     @Test
-    fun `a subagent inside a folded run stays visible in place`() {
-        val feed = listOf(tool("t1"), subagent("s1"), tool("t2"), tool("t3"))
-        val rows = keys(presentFeed(feed, emptySet()))
-        // s1 keeps its chronological slot rather than being pushed above the tools
-        // that ran before it.
-        assertEquals(listOf("s1", "t3", "work-toggle:work-group:t1"), rows)
+    fun `a failed tool call stays visible rather than folding into the run`() {
+        // RN's groupable run only takes non-error rows; a failed call is the thing
+        // the user needs to see, not something to hide inside "Ran 2 commands".
+        val feed =
+            listOf(
+                command("t1"),
+                tool("t2", ToolState.Failed),
+                command("t3"),
+            )
+        assertEquals(
+            listOf("work-toggle:work-group:t1", "t2", "work-toggle:work-group:t3"),
+            keys(presentFeed(feed, emptySet())),
+        )
     }
 
     @Test
-    fun `a run with a subagent counts log entries rather than tool calls`() {
-        val feed = listOf(tool("t1"), tool("t2"), subagent("s1"), tool("t3"))
-        val toggle = presentFeed(feed, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single()
-        assertTrue(!toggle.onlyTools)
-        assertEquals("+2 previous log entries", workToggleLabel(toggle))
+    fun `a subagent breaks the run and stays visible in place`() {
+        val feed = listOf(command("t1"), subagent("s1"), command("t2"), command("t3"))
+        val rows = keys(presentFeed(feed, emptySet()))
+        assertEquals(
+            listOf("work-toggle:work-group:t1", "s1", "work-toggle:work-group:t2"),
+            rows,
+        )
     }
 
     @Test
@@ -99,22 +150,12 @@ class WorkGroupsTest {
     @Test
     fun `the group key follows the first row so a growing run stays open`() {
         val open = setOf("work-group:t1")
-        val before = presentFeed(listOf(tool("t1"), tool("t2"), tool("t3")), open)
-        val after = presentFeed(listOf(tool("t1"), tool("t2"), tool("t3"), tool("t4")), open)
+        val before = presentFeed(listOf(command("t1"), command("t2"), command("t3")), open)
+        val after =
+            presentFeed(listOf(command("t1"), command("t2"), command("t3"), command("t4")), open)
         assertTrue(before.filterIsInstance<FeedRow.WorkToggle>().single().expanded)
         assertTrue(after.filterIsInstance<FeedRow.WorkToggle>().single().expanded)
         assertEquals(4, after.filterIsInstance<FeedRow.Entry>().size)
-    }
-
-    @Test
-    fun `toggle labels read correctly at one hidden row and when expanded`() {
-        val one =
-            FeedRow.WorkToggle(groupId = "g", hiddenCount = 1, expanded = false, onlyTools = true)
-        assertEquals("+1 previous tool call", workToggleLabel(one))
-        assertEquals("Show fewer tool calls", workToggleLabel(one.copy(expanded = true)))
-        val mixed = one.copy(onlyTools = false)
-        assertEquals("+1 previous log entry", workToggleLabel(mixed))
-        assertEquals("Show fewer log entries", workToggleLabel(mixed.copy(expanded = true)))
     }
 
     @Test
@@ -123,10 +164,20 @@ class WorkGroupsTest {
     }
 
     @Test
+    fun `a running call on the live edge labels the group in the present tense`() {
+        val feed = listOf(command("t1"), command("t2").copy(state = ToolState.Running))
+        val toggle =
+            presentFeed(feed, emptySet(), activeWorkStartedAtMillis = 1_000)
+                .filterIsInstance<FeedRow.WorkToggle>()
+                .single()
+        assertEquals("Running ls", toggle.summary)
+    }
+
+    @Test
     fun `a run at the very end of the feed still folds`() {
-        val feed = listOf(message("m1"), tool("t1"), tool("t2"))
+        val feed = listOf(message("m1"), command("t1"), command("t2"))
         assertEquals(
-            listOf("m1", "t2", "work-toggle:work-group:t1"),
+            listOf("m1", "work-toggle:work-group:t1"),
             keys(presentFeed(feed, emptySet())),
         )
     }
@@ -195,8 +246,15 @@ class TurnFoldTest {
     @Test
     fun `expanding a turn restores its work and keeps the header`() {
         val feed = listOf(prompt("u1"), tool("t1", "turn-1"), answer("a1", "turn-1"))
+        // The single tool call presents as its summary toggle, still folded.
         assertEquals(
-            listOf("u1", "turn-fold:turn-1:header", "t1", "a1", "turn-fold:turn-1:footer"),
+            listOf(
+                "u1",
+                "turn-fold:turn-1:header",
+                "work-toggle:work-group:t1",
+                "a1",
+                "turn-fold:turn-1:footer",
+            ),
             keys(presentFeed(feed, emptySet(), settled("turn-1"), setOf("turn-1"))),
         )
     }
@@ -223,7 +281,13 @@ class TurnFoldTest {
         val feed = listOf(prompt("u1"), answer("a1", "turn-1"), tool("t1", "turn-1"))
         val rows = presentFeed(feed, emptySet(), settled("turn-1"), setOf("turn-1"))
         assertEquals(
-            listOf("u1", "turn-fold:turn-1:header", "a1", "t1", "turn-fold:turn-1:footer"),
+            listOf(
+                "u1",
+                "turn-fold:turn-1:header",
+                "a1",
+                "work-toggle:work-group:t1",
+                "turn-fold:turn-1:footer",
+            ),
             keys(rows),
         )
     }
@@ -238,20 +302,32 @@ class TurnFoldTest {
                 tool("t2", "turn-1"),
                 tool("t3", "turn-1"),
             )
-        // The work toggle belongs to the rows above it, so the turn trigger — which
-        // closes everything — comes last.
+        // The work toggle opens its run; the turn trigger — which closes
+        // everything — comes last.
         assertEquals(
             listOf(
                 "u1",
                 "turn-fold:turn-1:header",
                 "a1",
+                "work-toggle:work-group:t1",
                 "t1",
                 "t2",
                 "t3",
-                "work-toggle:work-group:t1",
                 "turn-fold:turn-1:footer",
             ),
             keys(presentFeed(feed, setOf("work-group:t1"), settled("turn-1"), setOf("turn-1"))),
+        )
+        // Collapsed, the run is just its summary row between the answer and the
+        // turn trigger.
+        assertEquals(
+            listOf(
+                "u1",
+                "turn-fold:turn-1:header",
+                "a1",
+                "work-toggle:work-group:t1",
+                "turn-fold:turn-1:footer",
+            ),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"), setOf("turn-1"))),
         )
     }
 
@@ -267,7 +343,10 @@ class TurnFoldTest {
     fun `the open turn is never folded`() {
         val feed = listOf(prompt("u1"), tool("t1", "turn-1"), answer("a1", "turn-1"))
         val running = TurnInfo("turn-1", "running", 1_000, null)
-        assertEquals(listOf("u1", "t1", "a1"), keys(presentFeed(feed, emptySet(), running)))
+        assertEquals(
+            listOf("u1", "work-toggle:work-group:t1", "a1"),
+            keys(presentFeed(feed, emptySet(), running)),
+        )
     }
 
     @Test
@@ -276,7 +355,10 @@ class TurnFoldTest {
             listOf(prompt("u1"), tool("t1", "turn-1"), answer("a1", "turn-1", streaming = true))
         // The turn record says settled, but the message says otherwise; the message
         // wins, because that is what is visibly still changing on screen.
-        assertEquals(listOf("u1", "t1", "a1"), keys(presentFeed(feed, emptySet(), settled("turn-1"))))
+        assertEquals(
+            listOf("u1", "work-toggle:work-group:t1", "a1"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
     }
 
     @Test
@@ -309,7 +391,7 @@ class TurnFoldTest {
             )
         val running = TurnInfo("turn-2", "running", 5_000, null)
         assertEquals(
-            listOf("u1", "turn-fold:turn-1:header", "a1", "u2", "t2", "a2"),
+            listOf("u1", "turn-fold:turn-1:header", "a1", "u2", "work-toggle:work-group:t2", "a2"),
             keys(presentFeed(feed, emptySet(), running)),
         )
     }
@@ -319,7 +401,10 @@ class TurnFoldTest {
         // Some providers attribute nothing. Those rows must stay: there is no header
         // that would ever bring them back.
         val feed = listOf(prompt("u1"), tool("t1", null), answer("a1", null))
-        assertEquals(listOf("u1", "t1", "a1"), keys(presentFeed(feed, emptySet(), settled("turn-1"))))
+        assertEquals(
+            listOf("u1", "work-toggle:work-group:t1", "a1"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
     }
 
     @Test
@@ -339,12 +424,11 @@ class TurnFoldTest {
             listOf("u1", "turn-fold:turn-1:header", "a1"),
             keys(presentFeed(feed, emptySet(), settled("turn-1"))),
         )
-        // Expanded turn: the run is long enough that the inner fold applies again.
+        // Expanded turn: the run still folds inside it, behind its summary.
         assertEquals(
             listOf(
                 "u1",
                 "turn-fold:turn-1:header",
-                "t3",
                 "work-toggle:work-group:t1",
                 "a1",
                 "turn-fold:turn-1:footer",

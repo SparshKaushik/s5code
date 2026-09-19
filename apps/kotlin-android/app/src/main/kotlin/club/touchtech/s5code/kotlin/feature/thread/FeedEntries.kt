@@ -233,7 +233,6 @@ fun TurnFoldRow(row: FeedRow.TurnFold, onToggle: () -> Unit, modifier: Modifier 
  */
 @Composable
 fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: Modifier = Modifier) {
-    val label = workToggleLabel(row)
     Row(
         modifier
             .fillMaxWidth()
@@ -251,7 +250,7 @@ fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: 
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
-            label,
+            row.summary,
             style = MaterialTheme.typography.labelMedium,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
@@ -545,7 +544,7 @@ private fun ReasoningRow(entry: FeedEntry.Reasoning, modifier: Modifier) {
 @Composable
 private fun ToolRow(entry: FeedEntry.ToolCall, onCopy: (String) -> Unit, modifier: Modifier) {
     // A chevron on a row with nothing behind it is a promise the row cannot keep.
-    val canExpand = entry.detail.isNotBlank()
+    val canExpand = toolCallCanExpand(entry)
     var expanded by remember(entry.id) { mutableStateOf(false) }
     val tint =
         when (entry.state) {
@@ -574,12 +573,12 @@ private fun ToolRow(entry: FeedEntry.ToolCall, onCopy: (String) -> Unit, modifie
                         tint = tint,
                     )
                 }
-                Text(entry.name, style = S5Theme.code.codeEmphasized)
+                // One line, same text RN's collapsed work row shows: the T3 tool's
+                // friendly name, the command, the detail, or the file list.
                 Text(
-                    entry.summary,
-                    style = S5Theme.code.code,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
+                    toolCallRowLabel(entry, expanded),
+                    style = S5Theme.code.codeEmphasized,
+                    maxLines = if (expanded) Int.MAX_VALUE else 1,
                     overflow = TextOverflow.Ellipsis,
                     modifier = Modifier.weight(1f),
                 )
@@ -592,16 +591,15 @@ private fun ToolRow(entry: FeedEntry.ToolCall, onCopy: (String) -> Unit, modifie
                         else Color.Transparent,
                 )
             }
-            AnimatedVisibility(
-                visible = expanded,
-                enter = fadeIn() + expandVertically(),
-                exit = fadeOut() + shrinkVertically(),
-            ) {
-                Box(Modifier.padding(top = S5Theme.spacing.small)) {
-                    S5CodeBlock(
-                        lines = entry.detail.lines(),
-                        onCopy = { onCopy(entry.detail) },
-                    )
+            if (expanded) {
+                val body = remember(entry.id, entry) { toolCallExpandedBody(entry) }
+                if (body != null) {
+                    Box(Modifier.padding(top = S5Theme.spacing.small)) {
+                        S5CodeBlock(
+                            lines = body.lines(),
+                            onCopy = { onCopy(body) },
+                        )
+                    }
                 }
             }
         }

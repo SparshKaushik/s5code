@@ -100,9 +100,11 @@ fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
                 Icons.Rounded.CloudOff,
                 offline = true,
             )
+        // RN's "error" phase — `connectionStatusText` prints "Connection
+        // failed" and the reason under the row, which the screens append.
         ConnectionState.AuthRequired ->
             S5ConnectionPresentation(
-                "Sign-in needed",
+                "Connection failed",
                 colors.inputContainer,
                 colors.onInputContainer,
                 Icons.Rounded.Key,
