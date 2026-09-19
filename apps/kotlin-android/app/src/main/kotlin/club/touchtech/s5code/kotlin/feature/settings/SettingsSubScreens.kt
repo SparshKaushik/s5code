@@ -1,0 +1,556 @@
+package club.touchtech.s5code.kotlin.feature.settings
+
+import android.app.Application
+import android.os.Build
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.isSystemInDarkTheme
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.Cloud
+import androidx.compose.material.icons.rounded.Code
+import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.Difference
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.automirrored.rounded.Login
+import androidx.compose.material.icons.rounded.Person
+import androidx.compose.material.icons.rounded.Storage
+import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.TextFields
+import androidx.compose.material.icons.rounded.Workspaces
+import androidx.compose.material.icons.automirrored.rounded.WrapText
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Slider
+import androidx.compose.material3.Text
+import androidx.compose.material3.dynamicDarkColorScheme
+import androidx.compose.material3.dynamicLightColorScheme
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import club.touchtech.s5code.kotlin.app.AppStore
+import club.touchtech.s5code.kotlin.cloud.CloudAccountState
+import club.touchtech.s5code.kotlin.data.ClientCacheInventory
+import club.touchtech.s5code.kotlin.data.ClientCacheKind
+import club.touchtech.s5code.kotlin.data.ClientCacheStore
+import club.touchtech.s5code.kotlin.data.TerminalThemePreference
+import club.touchtech.s5code.kotlin.data.cacheSizeLabel
+import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
+import club.touchtech.s5code.kotlin.design.component.S5Button
+import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
+import club.touchtech.s5code.kotlin.design.component.S5Card
+import club.touchtech.s5code.kotlin.design.component.S5CardTone
+import club.touchtech.s5code.kotlin.design.component.S5CodeBlock
+import club.touchtech.s5code.kotlin.design.component.S5ConnectedButtonGroup
+import club.touchtech.s5code.kotlin.design.component.S5Markdown
+import club.touchtech.s5code.kotlin.design.component.S5LoadingState
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
+import club.touchtech.s5code.kotlin.design.component.S5Notice
+import club.touchtech.s5code.kotlin.design.component.S5RowGroup
+import club.touchtech.s5code.kotlin.design.component.S5Screen
+import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
+import club.touchtech.s5code.kotlin.design.component.S5SelectableRow
+import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
+import club.touchtech.s5code.kotlin.design.component.S5ShapeBadge
+import club.touchtech.s5code.kotlin.design.component.S5StatusPill
+import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
+import club.touchtech.s5code.kotlin.design.component.rowPosition
+import club.touchtech.s5code.kotlin.design.component.statusPresentation
+import club.touchtech.s5code.kotlin.design.theme.S5ColorTheme
+import club.touchtech.s5code.kotlin.design.theme.S5DarkColorScheme
+import club.touchtech.s5code.kotlin.design.theme.S5LightColorScheme
+import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
+import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.design.theme.S5ThemeMode
+import club.touchtech.s5code.kotlin.design.theme.toColorScheme
+import club.touchtech.s5code.kotlin.model.ProjectGrouping
+import club.touchtech.s5code.kotlin.model.ThreadStatus
+import com.clerk.ui.auth.AuthView
+import com.clerk.ui.userprofile.UserProfileView
+import kotlinx.coroutines.launch
+
+/**
+ * S5 account.
+ *
+ * Signed in, this is Clerk's own [UserProfileView]: email addresses, connected
+ * accounts, passkeys, and sessions are Clerk-owned records, and a second UI over
+ * them would be a second thing to keep correct. Signed out, the screen offers
+ * sign-in and nothing else. An unconfigured build says so instead.
+ */
+@Composable
+fun SettingsAccountScreen(store: AppStore, onBack: () -> Unit) {
+    val account by store.cloud.state.collectAsStateWithLifecycle()
+    var authOpen by remember { mutableStateOf(false) }
+
+    when (val current = account) {
+        CloudAccountState.Unconfigured ->
+            S5Screen(title = "S5 account", subtitle = "Not configured in this build", onBack = onBack) {
+                padding ->
+                Box(Modifier.fillMaxSize().padding(padding).padding(S5Theme.spacing.gutter)) {
+                    S5Notice(
+                        icon = Icons.Rounded.Cloud,
+                        text =
+                            "This build has no S5 Connect configuration, so there is no account to " +
+                                "manage. Direct pairing works without one.",
+                    )
+                }
+            }
+        CloudAccountState.Loading ->
+            S5Screen(title = "S5 account", onBack = onBack) { padding ->
+                S5LoadingState("Checking your account…", Modifier.padding(padding))
+            }
+        is CloudAccountState.SignedIn ->
+            // Clerk's profile view brings its own navigation, so it replaces the
+            // screen rather than sitting inside our scaffold. Its dismiss is the
+            // way back to settings.
+            UserProfileView(isDismissible = true, onDismiss = onBack)
+        is CloudAccountState.SignedOut ->
+            if (authOpen) {
+                AuthView(isDismissible = true, onDismiss = { authOpen = false })
+            } else {
+                S5Screen(title = "S5 account", subtitle = "Not signed in", onBack = onBack) { padding ->
+                    Column(
+                        Modifier.fillMaxSize().padding(padding),
+                        verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.medium),
+                    ) {
+                        Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                            S5Card(tone = S5CardTone.Hero, modifier = Modifier.fillMaxWidth()) {
+                                Row(
+                                    Modifier.padding(S5Theme.spacing.large),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.medium),
+                                ) {
+                                    S5ShapeBadge(
+                                        icon = Icons.Rounded.Person,
+                                        contentDescription = null,
+                                        shape = S5MaterialShapes.avatar(),
+                                        containerColor = MaterialTheme.colorScheme.primaryContainer,
+                                        contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                                        size = 52.dp,
+                                        iconSize = 26.dp,
+                                    )
+                                    Column(Modifier.weight(1f)) {
+                                        Text(
+                                            "Signed out",
+                                            style = MaterialTheme.typography.titleMediumEmphasized,
+                                        )
+                                        Text(
+                                            current.error
+                                                ?: "Sign in to reach machines through the relay",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                            S5Button(
+                                text = "Sign in",
+                                onClick = { authOpen = true },
+                                emphasis = S5ActionEmphasis.Primary,
+                                icon = Icons.AutoMirrored.Rounded.Login,
+                            )
+                        }
+                        Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                            S5Notice(
+                                icon = Icons.Rounded.Cloud,
+                                text =
+                                    "Signing out clears relay tokens and the device key from the Keystore.",
+                            )
+                        }
+                    }
+                }
+            }
+    }
+}
+
+/** Theme, dynamic color, and text/code/terminal sizing. */
+@Composable
+fun SettingsAppearanceScreen(store: AppStore, onBack: () -> Unit) {
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    S5Screen(title = "Appearance", subtitle = preferences.themeMode.name, onBack = onBack) { padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            S5SectionHeader("Theme")
+            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                S5ConnectedButtonGroup(
+                    options = S5ThemeMode.entries,
+                    selected = preferences.themeMode,
+                    onSelect = { mode -> store.updatePreferences { it.copy(themeMode = mode) } },
+                    label = { it.name },
+                )
+            }
+
+            // One list, not a switch plus a picker: choosing a named theme leaves
+            // Material You, and choosing Material You leaves the named theme,
+            // which is the same mutual exclusion the RN picker models.
+            val dynamicColorSupported = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+            val themes = remember { S5ColorTheme.entries }
+            S5RowGroup(title = "Color theme") {
+                themes.forEachIndexed { index, theme ->
+                    S5SelectableRow(
+                        label = theme.label,
+                        supporting =
+                            when {
+                                theme == S5ColorTheme.MaterialYou && !dynamicColorSupported ->
+                                    "Needs Android 12 or later"
+                                theme == S5ColorTheme.MaterialYou ->
+                                    "Follows the system wallpaper palette"
+                                else -> null
+                            },
+                        selected = preferences.colorTheme == theme,
+                        onClick = {
+                            if (theme != S5ColorTheme.MaterialYou || dynamicColorSupported) {
+                                store.updatePreferences { it.copy(colorTheme = theme) }
+                            }
+                        },
+                        leading = { S5ThemeSwatch(theme) },
+                        position = rowPosition(index, themes.size),
+                    )
+                }
+            }
+
+            S5RowGroup {
+                S5SwitchRow(
+                    icon = Icons.AutoMirrored.Rounded.WrapText,
+                    label = "Wrap code",
+                    supporting = "Wrap long lines instead of scrolling horizontally",
+                    checked = preferences.wrapCode,
+                    onCheckedChange = { value -> store.updatePreferences { it.copy(wrapCode = value) } },
+                    position = rowPosition(0, 1),
+                )
+            }
+
+            ScaleSlider(
+                icon = Icons.Rounded.TextFields,
+                label = "Text size",
+                value = preferences.textScale,
+                onChange = { value -> store.updatePreferences { it.copy(textScale = value) } },
+            )
+            ScaleSlider(
+                icon = Icons.Rounded.Code,
+                label = "Code size",
+                value = preferences.codeScale,
+                onChange = { value -> store.updatePreferences { it.copy(codeScale = value) } },
+            )
+            ScaleSlider(
+                icon = Icons.Rounded.Terminal,
+                label = "Terminal size",
+                value = preferences.terminalScale,
+                onChange = { value -> store.updatePreferences { it.copy(terminalScale = value) } },
+            )
+            S5SectionHeader("Terminal theme")
+            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                S5ConnectedButtonGroup(
+                    options = TerminalThemePreference.entries,
+                    selected = preferences.terminalTheme,
+                    onSelect = { terminalTheme ->
+                        store.updatePreferences { it.copy(terminalTheme = terminalTheme) }
+                    },
+                    label = TerminalThemePreference::label,
+                )
+            }
+
+            S5SectionHeader("Preview")
+            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                S5Card(tone = S5CardTone.Standard, modifier = Modifier.fillMaxWidth()) {
+                    Column(Modifier.padding(S5Theme.spacing.large)) {
+                        S5Markdown(source = "Agent reply with `inline code` and a [link](https://s5.dev).")
+                        S5CodeBlock(
+                            lines = listOf("fun main() {", "    println(\"hi\")", "}"),
+                            language = "kotlin",
+                            wrap = preferences.wrapCode,
+                        )
+                        Row(
+                            Modifier.padding(top = S5Theme.spacing.small),
+                            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                        ) {
+                            ThreadStatus.entries.take(4).forEach { status ->
+                                val presentation = statusPresentation(status)
+                                S5StatusPill(
+                                    label = presentation.label,
+                                    containerColor = presentation.container,
+                                    contentColor = presentation.content,
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+            Box(Modifier.padding(bottom = S5Theme.spacing.section))
+        }
+    }
+}
+
+@Composable
+private fun ScaleSlider(
+    icon: androidx.compose.ui.graphics.vector.ImageVector,
+    label: String,
+    value: Float,
+    onChange: (Float) -> Unit,
+) {
+    Column(
+        Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
+        verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Icon(icon, contentDescription = null, modifier = Modifier.size(18.dp))
+            Text(label, style = MaterialTheme.typography.labelLarge)
+            Box(Modifier.weight(1f))
+            Text("${(value * 100).toInt()}%", style = MaterialTheme.typography.labelSmall)
+        }
+        Slider(
+            value = value,
+            onValueChange = onChange,
+            valueRange = 0.8f..1.6f,
+            steps = 7,
+            modifier = Modifier.fillMaxWidth(),
+        )
+    }
+}
+
+/** Default project grouping for the home list. */
+@Composable
+fun SettingsProjectGroupingScreen(store: AppStore, onBack: () -> Unit) {
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    S5Screen(title = "Project grouping", subtitle = preferences.projectGrouping.label, onBack = onBack) {
+        padding ->
+        Column(
+            Modifier.fillMaxSize().padding(padding),
+            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            S5RowGroup {
+                // RN offers only these three modes; a stored Flat selection is
+                // honored by the list but not selectable here.
+                val options =
+                    ProjectGrouping.entries.filter { it != ProjectGrouping.Flat }
+                options.forEachIndexed { index, grouping ->
+                    S5SelectableRow(
+                        label = grouping.label,
+                        // RN's GROUPING_OPTIONS descriptions, verbatim.
+                        supporting =
+                            when (grouping) {
+                                ProjectGrouping.Repository ->
+                                    "Matching repositories appear as one project."
+                                ProjectGrouping.RepositoryPath ->
+                                    "Keep monorepo paths separate."
+                                ProjectGrouping.Separate ->
+                                    "Show every workspace as its own project."
+                                ProjectGrouping.Flat -> ""
+                            },
+                        selected = preferences.projectGrouping == grouping,
+                        onClick = { store.updatePreferences { it.copy(projectGrouping = grouping) } },
+                        leading = { Icon(Icons.Rounded.Workspaces, contentDescription = null) },
+                        position = rowPosition(index, options.size),
+                    )
+                }
+            }
+        }
+    }
+}
+
+/**
+ * Cache inventory with per-category and global clear.
+ *
+ * Real measured bytes, not a hardcoded list: this screen used to show four invented
+ * figures and a button that only changed local state, which is a worse lie than
+ * having no screen — the user clears, believes the space came back, and nothing
+ * happened. Categories come from [ClientCacheKind], which is the client's actual
+ * on-disk footprint (see `data/ClientCache.kt`); cached shell rows and opened
+ * transcripts are included, while diffs, highlighted lines, and terminal
+ * scrollback remain memory-only.
+ */
+@Composable
+fun SettingsClientStorageScreen(
+    store: AppStore,
+    onBack: () -> Unit,
+    confirmController: S5ConfirmDialogController,
+) {
+    val scope = rememberCoroutineScope()
+    val caches = remember { ClientCacheStore(store.getApplication<Application>()) }
+    var inventory by remember { mutableStateOf<ClientCacheInventory?>(null) }
+    var busy by remember { mutableStateOf(false) }
+
+    // Measured on open and after every clear, because the numbers are only useful if
+    // they are current: a stale total is the same failure as the invented one.
+    LaunchedEffect(caches) { inventory = caches.inventory() }
+
+    S5Screen(
+        title = "Client storage",
+        subtitle = inventory?.let { "${cacheSizeLabel(it.totalBytes)} on this device" }
+            ?: "Measuring…",
+        onBack = onBack,
+    ) { padding ->
+        val current = inventory
+        if (current == null) {
+            S5LoadingState("Measuring caches…", Modifier.padding(padding))
+            return@S5Screen
+        }
+        Column(
+            Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
+            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            S5RowGroup(title = "Caches") {
+                current.entries.forEachIndexed { index, entry ->
+                    S5SettingsRow(
+                        icon =
+                            when (entry.kind) {
+                                ClientCacheKind.Attachments -> Icons.Rounded.Image
+                                ClientCacheKind.Images -> Icons.Rounded.Difference
+                                ClientCacheKind.Workspace -> Icons.Rounded.Storage
+                            },
+                        label = entry.label,
+                        supporting = entry.detail,
+                        value = cacheSizeLabel(entry.bytes),
+                        // An empty category has nothing to clear, and a row that
+                        // responds by doing nothing is the behaviour this screen was
+                        // rewritten to remove.
+                        onClick =
+                            if (entry.bytes == 0L || busy) null
+                            else
+                                {
+                                    {
+                                        confirmController.show(
+                                            S5ConfirmDialogRequest(
+                                                title = "Clear ${entry.label.lowercase()}?",
+                                                message =
+                                                    "This removes ${entry.detail.lowercase()} from this device. It does not change anything on the machine.",
+                                                confirmText = "Clear cache",
+                                                destructive = true,
+                                                onConfirm = {
+                                                    busy = true
+                                                    scope.launch {
+                                                        try {
+                                                            inventory = caches.clear(entry.kind)
+                                                        } catch (error: Exception) {
+                                                            store.showError(
+                                                                error.message ?: "That cache could not be cleared."
+                                                            )
+                                                        } finally {
+                                                            busy = false
+                                                        }
+                                                    }
+                                                },
+                                            )
+                                        )
+                                    }
+                                },
+                        position = rowPosition(index, current.entries.size),
+                    )
+                }
+            }
+            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                S5Button(
+                    text = if (busy) "Clearing…" else "Clear all caches",
+                    onClick = {
+                        confirmController.show(
+                            S5ConfirmDialogRequest(
+                                title = "Clear all caches?",
+                                message =
+                                    "This removes attachments, image previews, and offline chat snapshots from this device. Credentials and drafts are kept.",
+                                confirmText = "Clear all",
+                                destructive = true,
+                                onConfirm = {
+                                    busy = true
+                                    scope.launch {
+                                        try {
+                                            inventory = caches.clearAll()
+                                        } catch (error: Exception) {
+                                            store.showError(
+                                                error.message ?: "The caches could not be cleared."
+                                            )
+                                        } finally {
+                                            busy = false
+                                        }
+                                    }
+                                },
+                            )
+                        )
+                    },
+                    enabled = !busy && !current.isEmpty,
+                    emphasis = S5ActionEmphasis.Primary,
+                    style = S5ButtonStyle.Outlined,
+                    icon = Icons.Rounded.Delete,
+                )
+            }
+            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter, vertical = S5Theme.spacing.small)) {
+                S5Notice(
+                    icon = Icons.Rounded.Storage,
+                    text =
+                        "Clearing caches never touches credentials, drafts, or anything on the machine. " +
+                            "Offline chat snapshots will load again after the environment reconnects.",
+                )
+            }
+        }
+    }
+}
+
+/**
+ * A small three-tone preview of a theme: surface, container, and accent. For
+ * Material You the tones come from the live dynamic scheme, so the swatch is
+ * the wallpaper palette itself.
+ */
+@Composable
+private fun S5ThemeSwatch(theme: S5ColorTheme) {
+    val context = LocalContext.current
+    val dark = isSystemInDarkTheme()
+    val dynamic = theme == S5ColorTheme.MaterialYou && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
+    val tones =
+        remember(theme, dark, dynamic) {
+            when {
+                dynamic && dark -> dynamicDarkColorScheme(context)
+                dynamic -> dynamicLightColorScheme(context)
+                else ->
+                    theme.namedTheme
+                        ?.let { if (dark) it.dark else it.light }
+                        ?.toColorScheme(dark)
+                        ?: if (dark) S5DarkColorScheme else S5LightColorScheme
+            }
+        }
+    Box(
+        Modifier.size(28.dp)
+            .clip(CircleShape)
+            .background(tones.surface)
+            .border(1.dp, tones.outlineVariant, CircleShape)
+    ) {
+        Box(
+            Modifier.align(Alignment.TopEnd)
+                .size(18.dp)
+                .clip(CircleShape)
+                .background(tones.surfaceContainerHighest)
+        )
+        Box(
+            Modifier.align(Alignment.BottomStart)
+                .size(16.dp)
+                .clip(CircleShape)
+                .background(tones.primary)
+        )
+    }
+}

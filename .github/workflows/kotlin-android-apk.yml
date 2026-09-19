@@ -1,0 +1,94 @@
+name: Kotlin Android APK
+
+on:
+  push:
+    branches:
+      - kotlin-android-client
+    tags:
+      - "kotlin-android-*"
+  workflow_dispatch:
+    inputs:
+      publish_prerelease:
+        description: "Publish GitHub pre-release"
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build & Release Kotlin Android APK
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      T3CODE_CLERK_PUBLISHABLE_KEY: ${{ vars.T3CODE_CLERK_PUBLISHABLE_KEY || vars.CLERK_PUBLISHABLE_KEY || 'pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA' }}
+      T3CODE_CLERK_JWT_TEMPLATE: ${{ vars.T3CODE_CLERK_JWT_TEMPLATE || vars.CLERK_JWT_TEMPLATE || 's5-relay' }}
+      T3CODE_RELAY_URL: ${{ vars.T3CODE_RELAY_URL || 'https://relay.s5code.dpdns.org' }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: "temurin"
+          java-version: "17"
+
+      - name: Restore Keystore
+        env:
+          ANDROID_DEBUG_KEYSTORE_BASE64: ${{ secrets.ANDROID_DEBUG_KEYSTORE_BASE64 }}
+        run: |
+          if [ -n "$ANDROID_DEBUG_KEYSTORE_BASE64" ]; then
+            mkdir -p ~/.android apps/kotlin-android
+            echo "$ANDROID_DEBUG_KEYSTORE_BASE64" | tr -d '\r\n ' | base64 -d > apps/kotlin-android/debug.keystore
+            cp apps/kotlin-android/debug.keystore ~/.android/debug.keystore
+            keytool -list -keystore apps/kotlin-android/debug.keystore -storepass android | head -n 5
+          fi
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      - name: Build Debug APK
+        run: |
+          cd apps/kotlin-android
+          ./gradlew assembleDebug --stacktrace
+
+      - name: Verify Signing Certificate
+        run: |
+          CERT_DIGEST=$(keytool -printcert -jarfile apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk | grep "SHA256:" | head -n 1)
+          echo "Debug APK signing certificate: $CERT_DIGEST"
+
+      - name: Prepare Artifacts
+        id: artifacts
+        run: |
+          VERSION=$(grep 'versionName = ' apps/kotlin-android/app/build.gradle.kts | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          mkdir -p dist
+          cp apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk "dist/s5code-kotlin-${VERSION}-debug.apk"
+          cd dist
+          sha256sum "s5code-kotlin-${VERSION}-debug.apk" > "s5code-kotlin-${VERSION}-debug.apk.sha256"
+
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: s5code-kotlin-${{ steps.artifacts.outputs.version }}-debug
+          path: dist/*
+
+      - name: Publish Pre-release
+        if: startsWith(github.ref, 'refs/tags/kotlin-android-') || github.ref == 'refs/heads/kotlin-android-client' || github.event.inputs.publish_prerelease == true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          VERSION="${{ steps.artifacts.outputs.version }}"
+          tag="kotlin-android-v${VERSION}-debug"
+          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
+            tag="${GITHUB_REF#refs/tags/}"
+          fi
+          gh release create "$tag" "dist/s5code-kotlin-${VERSION}-debug.apk" "dist/s5code-kotlin-${VERSION}-debug.apk.sha256" \
+            --title "Kotlin Android client ${VERSION} (debug)" \
+            --notes "Debug build of the native Kotlin/Compose Android client (\`apps/kotlin-android\`), for install and update testing." \
+            --target "${{ github.sha }}" \
+            --prerelease || \
+          gh release upload "$tag" "dist/s5code-kotlin-${VERSION}-debug.apk" "dist/s5code-kotlin-${VERSION}-debug.apk.sha256" --clobber

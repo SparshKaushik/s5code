@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Splash mark for API 31+ (`windowSplashScreenAnimatedIcon`).
+
+  Drawn inside the platform's icon slot, so it carries no background of its own:
+  the splash background colour shows through. The wordmark is tinted rather than
+  baked white so it reads on both the light and the dark splash background, and
+  it is sized to stay inside the circular mask some launchers apply.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item
+        android:gravity="center"
+        android:width="108dp"
+        android:height="61dp">
+        <bitmap
+            android:src="@drawable/s5_mark_alpha"
+            android:gravity="fill"
+            android:tint="@color/splash_icon_tint" />
+    </item>
+</layer-list>
