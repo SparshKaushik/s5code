@@ -240,6 +240,18 @@ fun projectFrom(environmentId: EnvironmentId, dto: ProjectShellDto): Project =
         // Showing the default here would be a guess that goes stale.
         branch = "",
         faviconPath = dto.faviconPath,
+        repositoryIdentity =
+            dto.repositoryIdentity?.let { identity ->
+                club.touchtech.s5code.kotlin.model.RepositoryIdentity(
+                    canonicalKey = identity.canonicalKey,
+                    displayName = identity.displayName,
+                    owner = identity.owner,
+                    name = identity.name,
+                    rootPath = identity.rootPath,
+                )
+            },
+        createdAtMillis = parseInstant(dto.createdAt),
+        updatedAtMillis = parseInstant(dto.updatedAt),
     )
 
 fun threadSummaryFrom(

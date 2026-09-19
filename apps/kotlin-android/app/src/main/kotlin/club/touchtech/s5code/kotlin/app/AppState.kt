@@ -150,18 +150,6 @@ data class ThreadDraft(
 )
 
 /**
- * Add-project draft. Separate from [NewTaskDraft] because adding a project and
- * starting a task are different flows that happen to be reachable from the same
- * screen, and merging them made "which environment" mean two things.
- */
-@Immutable
-data class AddProjectDraft(
-    val environmentId: EnvironmentId = EnvironmentId(""),
-    /** `owner/name` chosen on the repository step, when cloning. */
-    val repository: String? = null,
-)
-
-/**
  * Single app-scoped store.
  *
  * It owns the three things every screen needs and nothing else: the paired
@@ -282,9 +270,6 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     private val _draft = MutableStateFlow(NewTaskDraft())
     val draft: StateFlow<NewTaskDraft> = _draft.asStateFlow()
-
-    private val _projectDraft = MutableStateFlow(AddProjectDraft())
-    val projectDraft: StateFlow<AddProjectDraft> = _projectDraft.asStateFlow()
 
     private val _threadDrafts = MutableStateFlow<Map<String, ThreadDraft>>(emptyMap())
     val threadDrafts: StateFlow<Map<String, ThreadDraft>> = _threadDrafts.asStateFlow()
@@ -737,9 +722,6 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     fun updateDraft(transform: (NewTaskDraft) -> NewTaskDraft) = _draft.update(transform)
 
-    fun updateProjectDraft(transform: (AddProjectDraft) -> AddProjectDraft) =
-        _projectDraft.update(transform)
-
     fun setThreadDraft(environmentId: String, threadId: String, text: String) =
         updateThreadDraft(environmentId, threadId) { it.copy(text = text) }
 
@@ -808,12 +790,20 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     /** Creates a durable pending task and lets the same drain create its thread. */
     suspend fun enqueueNewTask(draft: NewTaskDraft): ThreadId {
+        // RN's resolvePendingTaskInteractionMode: a persisted Plan choice does
+        // not bypass a disabled planMode preference.
+        val settings =
+            if (preferences.value.planModeEnabled) {
+                draft.settings
+            } else {
+                draft.settings.copy(runtimeMode = RuntimeMode.Default)
+            }
         val message =
             newQueuedThreadMessage(
                 environmentId = draft.environmentId,
                 text = draft.prompt.trim(),
                 attachments = draft.attachments,
-                settings = draft.settings,
+                settings = settings,
                 creation =
                     club.touchtech.s5code.kotlin.data.StoredQueuedThreadCreation(
                         projectKey = draft.projectKey,

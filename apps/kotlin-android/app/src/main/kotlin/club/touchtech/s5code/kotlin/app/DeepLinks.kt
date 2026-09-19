@@ -35,6 +35,13 @@ sealed interface DeepLink {
 
     data object Usage : DeepLink
 
+    /**
+     * RN's `add-project` linking paths. The environment and clone params are
+     * optional on RN's side, so a bare step resolves the first creatable
+     * environment the same way.
+     */
+    data class AddProject(val step: String) : DeepLink
+
     data class Thread(val environmentId: String, val threadId: String, val child: String? = null) :
         DeepLink
 
@@ -58,6 +65,13 @@ sealed interface DeepLink {
                 is SettingsChild -> "settings/$page"
                 Archive -> Routes.Archive
                 Usage -> Routes.Usage
+                is AddProject ->
+                    when (step) {
+                        "local" -> Routes.AddProjectLocal
+                        "repository" -> Routes.AddProjectRepository
+                        "destination" -> Routes.AddProjectDestination
+                        else -> Routes.AddProjectSource
+                    }
                 is Thread ->
                     if (child == null) Routes.thread(environmentId, threadId)
                     else Routes.threadChild(environmentId, threadId, child)
@@ -136,6 +150,10 @@ fun parseDeepLinkPath(raw: String): DeepLink? {
             SETTINGS_CHILDREN[segments[1]]?.let(DeepLink::SettingsChild)
         segments == listOf("archive") -> DeepLink.Archive
         segments == listOf("usage") -> DeepLink.Usage
+        segments.firstOrNull() == "add-project" &&
+            segments.getOrElse(1) { "" } in setOf("", "repository", "destination", "local") &&
+            segments.size <= 2 ->
+            DeepLink.AddProject(segments.getOrElse(1) { "" })
         segments.size >= 3 && segments[0] == "threads" -> {
             val environmentId = segments[1]
             val threadId = segments[2]

@@ -78,6 +78,14 @@ data class Environment(
      * buttons are drawn.
      */
     val capabilities: EnvironmentCapabilities = EnvironmentCapabilities(),
+    /**
+     * `settings.addProjectBaseDirectory` — where the add-project folder browser
+     * opens. Empty means the environment home directory.
+     */
+    val addProjectBaseDirectory: String = "",
+    /** `settings.sidebarAutoSettle*` — the defaults Settings edits per environment. */
+    val autoSettleOnMerge: Boolean = true,
+    val autoSettleAfterDays: Int? = 3,
 )
 
 /**
@@ -103,6 +111,11 @@ data class EnvironmentCapabilities(
      * that only accepts images, so the file picker stays hidden.
      */
     val fileAttachments: FileAttachmentsCapability? = null,
+    /**
+     * `capabilities.threadAutoSettlement` — `server.updateSettings` accepts
+     * sidebar auto-settle writes, so Settings may offer the switches.
+     */
+    val threadAutoSettlement: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -128,6 +141,24 @@ data class Project(
      * gap.
      */
     val faviconPath: String? = null,
+    /**
+     * The repository the workspace belongs to, when the server resolved one.
+     * This is what the project picker groups on: two checkouts of one repo are
+     * one scope, matching `buildProjectGroups` in the client-runtime package.
+     */
+    val repositoryIdentity: RepositoryIdentity? = null,
+    /** Snapshot timestamps, for scope sorting — newest first. */
+    val createdAtMillis: Long? = null,
+    val updatedAtMillis: Long? = null,
+)
+
+/** `ProjectShell.repositoryIdentity`, kept whole rather than flattened into [Project.repository]. */
+data class RepositoryIdentity(
+    val canonicalKey: String,
+    val displayName: String? = null,
+    val owner: String? = null,
+    val name: String? = null,
+    val rootPath: String? = null,
 )
 
 enum class ThreadStatus {
@@ -840,7 +871,6 @@ data class ModelFavorite(val instanceId: String, val model: String)
 /** One `/command` a provider advertises, as the composer's popover renders it. */
 data class SlashCommand(val name: String, val description: String)
 
-data class RepositoryRef(val fullName: String, val description: String, val private: Boolean)
 
 /* ── Home list layout ────────────────────────────────────────────────── */
 
@@ -962,9 +992,21 @@ enum class ThreadFilter(val label: String) {
     Settled("Settled"),
 }
 
+/**
+ * `SidebarProjectGroupingMode` from the contracts, with the labels the RN
+ * settings screen uses. Repositories merge checkouts of the same repo across
+ * machines; `RepositoryPath` keeps monorepo subdirectories apart; `Separate`
+ * treats every workspace root as its own project.
+ */
 enum class ProjectGrouping(val label: String) {
-    ByProject("By project"),
-    ByRepository("By repository"),
+    Repository("Group by repository"),
+    RepositoryPath("Group by repository path"),
+    Separate("Keep separate"),
+    /**
+     * Sections off entirely. Not offered in Settings — the RN client has no
+     * flat mode — but stored preferences may still carry it and tests use it to
+     * assert pure ordering, so the home list honors it.
+     */
     Flat("Flat list"),
 }
 

@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.foundation.verticalScroll
@@ -65,24 +66,26 @@ import club.touchtech.s5code.kotlin.design.component.S5ComposerControl
 import club.touchtech.s5code.kotlin.design.component.S5ComposerField
 import club.touchtech.s5code.kotlin.design.component.S5ComposerSurface
 import club.touchtech.s5code.kotlin.design.component.S5ComposerToolbarRow
-import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5ErrorState
+import club.touchtech.s5code.kotlin.design.component.S5IconButton
+import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
+import club.touchtech.s5code.kotlin.design.component.S5ProjectIcon
 import club.touchtech.s5code.kotlin.design.component.S5LoadingState
 import club.touchtech.s5code.kotlin.design.component.S5Notice
 import club.touchtech.s5code.kotlin.design.component.S5ProviderAvatar
 import club.touchtech.s5code.kotlin.design.component.S5Screen
-import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
 import club.touchtech.s5code.kotlin.design.component.S5SelectableRow
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
-import club.touchtech.s5code.kotlin.design.component.S5WaitState
 import club.touchtech.s5code.kotlin.design.component.rememberDraftTextFieldState
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
+import club.touchtech.s5code.kotlin.feature.home.buildProjectScopes
+import club.touchtech.s5code.kotlin.feature.home.projectScopeSelectionTarget
+import club.touchtech.s5code.kotlin.feature.home.sortProjectScopes
 import club.touchtech.s5code.kotlin.feature.connections.environmentIcon
 import club.touchtech.s5code.kotlin.feature.connections.showRetry
-import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.thread.Dictation
 import club.touchtech.s5code.kotlin.feature.thread.DictationMicControl
 import club.touchtech.s5code.kotlin.feature.thread.DictationToolbar
@@ -94,8 +97,10 @@ import club.touchtech.s5code.kotlin.data.IncomingShareDestination
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
+import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.EnvironmentKind
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ThreadSort
 import club.touchtech.s5code.kotlin.model.WorkspaceMode
 import club.touchtech.s5code.kotlin.platform.active
 import club.touchtech.s5code.kotlin.platform.composerImageReceiver
@@ -104,45 +109,100 @@ import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
-/** Step 1: pick the project the task runs in. */
+/**
+ * `deriveProjectEmptyState` from RN's NewTaskRouteScreen: what the picker says
+ * when there are no scopes to list, and whether a spinner belongs next to it.
+ */
+private data class ProjectEmptyState(val title: String, val detail: String, val loading: Boolean)
+
+private fun projectEmptyState(
+    enabled: List<club.touchtech.s5code.kotlin.model.Environment>,
+    hasSnapshot: Boolean,
+): ProjectEmptyState {
+    if (enabled.isEmpty()) {
+        return ProjectEmptyState(
+            "No environments connected",
+            "Add an environment before creating a task.",
+            loading = false,
+        )
+    }
+    val offline = enabled.all { it.state == ConnectionState.Offline }
+    val error = enabled.firstOrNull { it.state == ConnectionState.AuthRequired }
+    val connecting =
+        enabled.any {
+            it.state == ConnectionState.Connecting || it.state == ConnectionState.Recovering
+        }
+    if (!hasSnapshot) {
+        if (offline) {
+            return ProjectEmptyState(
+                "Environment unavailable",
+                enabled.firstNotNullOfOrNull { it.lastError.ifBlank { null } }
+                    ?: "The saved environment is offline. Check the URL or start the environment, then retry.",
+                loading = false,
+            )
+        }
+        if (error != null) {
+            return ProjectEmptyState(
+                "Environment unavailable",
+                error.lastError.ifBlank {
+                    "The saved environment is offline. Check the URL or start the environment, then retry."
+                },
+                loading = false,
+            )
+        }
+        if (connecting) {
+            return ProjectEmptyState(
+                "Connecting to environment",
+                "Loading projects from the saved environment.",
+                loading = true,
+            )
+        }
+        return ProjectEmptyState(
+            "Environment unavailable",
+            enabled.firstNotNullOfOrNull { it.lastError.ifBlank { null } }
+                ?: "The saved environment is offline. Check the URL or start the environment, then retry.",
+            loading = false,
+        )
+    }
+    return ProjectEmptyState(
+        "No projects found",
+        "The connected environment did not report any projects.",
+        loading = false,
+    )
+}
+
+/** Step 1: pick the project the task runs in, matching RN's NewTaskRouteScreen. */
 @Composable
 fun NewTaskProjectScreen(
     store: AppStore,
     onBack: () -> Unit,
     onProjectChosen: () -> Unit,
     onAddProject: () -> Unit,
+    onAddEnvironment: () -> Unit,
 ) {
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
-    var query by rememberSaveable { mutableStateOf("") }
+    val threads by store.workspace.threads.collectAsStateWithLifecycle()
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    val draft by store.draft.collectAsStateWithLifecycle()
 
-    val filtered =
-        remember(projects, query) {
-            val needle = query.trim().lowercase()
-            if (needle.isEmpty()) projects
-            else
-                projects.filter { project ->
-                    listOfNotNull(project.title, project.repository, project.workspaceRoot).any {
-                        it.lowercase().contains(needle)
-                    }
-                }
-        }
-    val grouped = remember(filtered, environments) { filtered.groupBy { it.environmentId } }
     // A switched-off environment contributes no projects and no connection to
-    // wait on, so only enabled rows drive the notice.
-    val enabledEnvironments = remember(environments) { environments.filter { it.isEnabled } }
-    // Same split as the RN route screen: "Connecting to environment" while the
-    // project catalog has not arrived, and only then "No projects yet".
-    val wait =
-        remember(enabledEnvironments, projects.isEmpty()) {
-            waitNotice(
-                states = enabledEnvironments.map { it.state },
-                environmentLabel = enabledEnvironments.singleOrNull()?.label,
-                resourceName = "projects",
-                hasContent = projects.isNotEmpty(),
-                loaded = enabledEnvironments.any { it.snapshotLoaded },
+    // wait on, so only enabled rows drive the state.
+    val enabled = remember(environments) { environments.filter { it.isEnabled } }
+    val hasReadyEnvironment = enabled.any { it.state == ConnectionState.Connected }
+    val hasSnapshot = enabled.any { it.snapshotLoaded }
+
+    // Same scopes RN offers: repository-grouped projects sorted by recent
+    // activity, each row selecting the member on the draft's environment.
+    val scopes =
+        remember(projects, preferences.projectGrouping, threads) {
+            sortProjectScopes(
+                buildProjectScopes(projects, preferences.projectGrouping),
+                threads,
+                ThreadSort.Recent,
             )
         }
+    val empty = remember(enabled, hasSnapshot) { projectEmptyState(enabled, hasSnapshot) }
 
     val pendingShare by store.pendingShare.collectAsStateWithLifecycle()
     val shareSubtitle =
@@ -158,90 +218,110 @@ fun NewTaskProjectScreen(
             }
         }
 
+    fun choose(project: club.touchtech.s5code.kotlin.model.Project) {
+        store.updateDraft {
+            it.copy(
+                environmentId = project.environmentId,
+                projectKey = project.id.value,
+                branch = project.branch,
+            )
+        }
+        onProjectChosen()
+    }
+
     S5Screen(
-        title = "New task",
-        subtitle = shareSubtitle ?: "Choose a project",
+        title = if (pendingShare != null) "Start a task" else "Choose project",
+        subtitle = shareSubtitle,
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
+        actions = {
+            if (hasReadyEnvironment) {
+                S5IconButton(
+                    icon = Icons.Rounded.Add,
+                    label = "Add project",
+                    onClick = onAddProject,
+                )
+            }
+        },
     ) { padding ->
-        Column(Modifier.fillMaxSize().padding(padding)) {
-            S5SearchField(
-                value = query,
-                onValueChange = { query = it },
-                placeholder = "Search projects",
-                modifier =
-                    Modifier.padding(
-                        horizontal = S5Theme.spacing.gutter,
-                        vertical = S5Theme.spacing.small,
+        if (scopes.isEmpty()) {
+            Column(
+                Modifier.fillMaxSize().padding(padding).padding(S5Theme.spacing.gutter),
+                verticalArrangement = Arrangement.Center,
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                if (empty.loading) {
+                    S5InlineLoading(modifier = Modifier.padding(bottom = S5Theme.spacing.small))
+                }
+                Text(
+                    empty.title,
+                    style = MaterialTheme.typography.titleMediumEmphasized,
+                    textAlign = TextAlign.Center,
+                )
+                Text(
+                    empty.detail,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.padding(top = S5Theme.spacing.tiny),
+                )
+                Box(Modifier.padding(top = S5Theme.spacing.medium)) {
+                    if (!hasReadyEnvironment) {
+                        S5Button(
+                            text = "Add environment",
+                            onClick = onAddEnvironment,
+                            emphasis = S5ActionEmphasis.Primary,
+                        )
+                    } else {
+                        S5Button(
+                            text = "Add new project",
+                            onClick = onAddProject,
+                            emphasis = S5ActionEmphasis.Primary,
+                        )
+                    }
+                }
+            }
+        } else {
+            LazyColumn(
+                Modifier.fillMaxSize().padding(padding),
+                contentPadding =
+                    PaddingValues(
+                        start = S5Theme.spacing.gutter,
+                        end = S5Theme.spacing.gutter,
+                        bottom = 32.dp,
                     ),
-            )
-            if (filtered.isEmpty() && wait != null && query.isBlank()) {
-                S5WaitState(
-                    title = wait.title,
-                    detail = wait.detail,
-                    icon = Icons.Rounded.Folder,
-                    spinning = wait.spinning,
-                    actionLabel = if (wait.showRetry) "Retry now" else null,
-                    onAction = {
-                        enabledEnvironments.forEach { store.retryEnvironment(it.id) }
-                    },
-                )
-            } else if (filtered.isEmpty()) {
-                S5EmptyState(
-                    icon = Icons.Rounded.Folder,
-                    title = if (query.isBlank()) "No projects yet" else "No matches",
-                    detail =
-                        if (query.isBlank()) {
-                            "Add a project by cloning a repository or pointing at a folder on the machine."
-                        } else {
-                            "Nothing matches \"$query\"."
-                        },
-                    actionLabel = "Add project",
-                    onAction = onAddProject,
-                )
-            } else {
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 32.dp),
-                    verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
-                ) {
-                    grouped.forEach { (environmentId, environmentProjects) ->
-                        val environment = environments.firstOrNull { it.id == environmentId }
-                        item(key = "env-${environmentId.value}") {
-                            S5SectionHeader(environment?.label ?: environmentId.value)
-                        }
-                        items(environmentProjects, key = { it.id.value }) { project ->
-                            Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                                S5SelectableRow(
-                                    label = project.title,
-                                    supporting = project.repository ?: project.workspaceRoot,
-                                    selected = false,
-                                    onClick = {
-                                        store.updateDraft {
-                                            it.copy(
-                                                environmentId = environmentId,
-                                                projectKey = project.id.value,
-                                                branch = project.branch,
-                                            )
-                                        }
-                                        onProjectChosen()
-                                    },
-                                    leading = { Icon(Icons.Rounded.Folder, contentDescription = null) },
-                                )
-                            }
-                        }
-                    }
-                    item(key = "add-project") {
-                        Box(Modifier.padding(S5Theme.spacing.gutter)) {
-                            S5Button(
-                                text = "Add project",
-                                onClick = onAddProject,
-                                icon = Icons.Rounded.CreateNewFolder,
-                                emphasis = S5ActionEmphasis.Primary,
-                                style = S5ButtonStyle.Tonal,
+                verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+            ) {
+                items(scopes.size) { index ->
+                    val scope = scopes[index]
+                    val target =
+                        projectScopeSelectionTarget(
+                            scope,
+                            draft.environmentId.value.takeIf { it.isNotEmpty() },
+                        )
+                    S5SelectableRow(
+                        label = scope.title,
+                        supporting =
+                            if (scope.projects.size > 1) "${scope.projects.size} workspaces"
+                            else target.workspaceRoot,
+                        selected = false,
+                        onClick = { choose(target) },
+                        leading = {
+                            S5ProjectIcon(
+                                project = scope.representative,
+                                resolveUrl = store.workspace::projectIconUrl,
+                                size = 28.dp,
                             )
-                        }
-                    }
+                        },
+                        trailing = {
+                            Icon(
+                                Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        },
+                        position = rowPosition(index, scopes.size),
+                    )
                 }
             }
         }
@@ -508,6 +588,7 @@ fun NewTaskDraftScreen(
             onToggleFavorite = { store.toggleModelFavorite(it.instanceId, it.model) },
             catalogRefreshing = draft.environmentId.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(draft.environmentId) },
+            planModeEnabled = preferences.planModeEnabled,
         )
     }
 }
@@ -698,11 +779,41 @@ private fun NewTaskComposerDock(
     }
 }
 
+/**
+ * `resolveEnvironmentProjectMatch` in the RN client: switching machines follows
+ * the same repo. Repository identity wins, then workspace basename, then title;
+ * a known *different* repository never matches on the weaker signals.
+ */
+private fun environmentProjectMatch(
+    projectsOnTarget: List<club.touchtech.s5code.kotlin.model.Project>,
+    selected: club.touchtech.s5code.kotlin.model.Project?,
+): club.touchtech.s5code.kotlin.model.Project? {
+    val repositoryKey = selected?.repositoryIdentity?.canonicalKey
+    val workspaceBasename = selected?.workspaceRoot?.split('/')?.lastOrNull()?.takeIf { it.isNotEmpty() }
+    fun knownMismatch(project: club.touchtech.s5code.kotlin.model.Project): Boolean {
+        val key = project.repositoryIdentity?.canonicalKey ?: return false
+        return repositoryKey != null && key != repositoryKey
+    }
+    return (repositoryKey?.let { key ->
+            projectsOnTarget.firstOrNull { it.repositoryIdentity?.canonicalKey == key }
+        })
+        ?: (workspaceBasename?.let { base ->
+            projectsOnTarget.firstOrNull {
+                !knownMismatch(it) && it.workspaceRoot.split('/').lastOrNull() == base
+            }
+        })
+        ?: (selected?.let { wanted ->
+            projectsOnTarget.firstOrNull { !knownMismatch(it) && it.title == wanted.title }
+        })
+        ?: projectsOnTarget.firstOrNull()
+}
+
 /** Environment picker with reachability. Switched-off environments are hidden. */
 @Composable
 fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
     val allEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
     val environments = remember(allEnvironments) { allEnvironments.filter { it.isEnabled } }
+    val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val draft by store.draft.collectAsStateWithLifecycle()
     S5Screen(title = "Environment", subtitle = "Where should this run?", onBack = onBack) { padding ->
         LazyColumn(
@@ -723,7 +834,23 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
                     selected = environment.id == draft.environmentId,
                     onClick = {
                         if (creatable) {
-                            store.updateDraft { it.copy(environmentId = environment.id) }
+                            // RN's selectEnvironment follows the repo to the
+                            // target machine rather than leaving the draft
+                            // pointing at a project the environment lacks.
+                            val current =
+                                projects.firstOrNull { it.id.value == draft.projectKey }
+                            val match =
+                                environmentProjectMatch(
+                                    projects.filter { it.environmentId == environment.id },
+                                    current,
+                                )
+                            store.updateDraft {
+                                it.copy(
+                                    environmentId = environment.id,
+                                    projectKey = match?.id?.value ?: it.projectKey,
+                                    branch = match?.branch ?: it.branch,
+                                )
+                            }
                             onBack()
                         }
                     },

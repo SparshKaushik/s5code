@@ -143,32 +143,40 @@ fun homeListItems(
         }
     }
 
-    when (grouping) {
-        ProjectGrouping.Flat -> emitThreads(active.sortedWith(homeListComparator(sort)))
-        ProjectGrouping.ByProject,
-        ProjectGrouping.ByRepository -> {
-            val groups =
-                active.groupBy { thread ->
-                    val project = projectsById[thread.environmentId.value to thread.projectId.value]
-                    when (grouping) {
-                        ProjectGrouping.ByRepository ->
-                            project?.repository ?: project?.title ?: "Ungrouped"
-                        else -> project?.title ?: "Ungrouped"
-                    }
+    // Flat keeps no sections; every other mode groups by the same logical
+    // scopes the new-task picker offers, with `buildProjectScopes` supplying
+    // the label the picker row would carry.
+    val scopeByProject =
+        if (grouping == ProjectGrouping.Flat) {
+            emptyMap()
+        } else {
+            buildProjectScopes(projects, grouping)
+                .flatMap { scope ->
+                    scope.projects.map { (it.environmentId.value to it.id.value) to scope }
                 }
-            groups.entries
-                .sortedWith(
-                    compareByDescending<Map.Entry<String, List<ThreadSummary>>> { entry ->
-                        entry.value.any { it.pinned }
-                    }
-                        .thenBy { it.key.lowercase() }
-                )
-                .forEach { (label, groupThreads) ->
-                    items += HomeListItem.Section(label)
-                    emitThreads(groupThreads.sortedWith(homeListComparator(sort)))
-                }
+                .toMap()
         }
-    }
+    val groups =
+        if (grouping == ProjectGrouping.Flat) {
+            mapOf("" to active)
+        } else {
+            active.groupBy { thread ->
+                scopeByProject[thread.environmentId.value to thread.projectId.value]?.title
+                    ?: projectsById[thread.environmentId.value to thread.projectId.value]?.title
+                    ?: "Ungrouped"
+            }
+        }
+    groups.entries
+        .sortedWith(
+            compareByDescending<Map.Entry<String, List<ThreadSummary>>> { entry ->
+                entry.value.any { it.pinned }
+            }
+                .thenBy { it.key.lowercase() }
+        )
+        .forEach { (label, groupThreads) ->
+            if (label.isNotEmpty()) items += HomeListItem.Section(label)
+            emitThreads(groupThreads.sortedWith(homeListComparator(sort)))
+        }
 
     if (snoozed.isNotEmpty()) {
         items +=

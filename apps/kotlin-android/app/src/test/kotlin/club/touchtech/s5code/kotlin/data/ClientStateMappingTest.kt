@@ -35,7 +35,7 @@ class ClientStateMappingTest {
                         ModelFavorite("codex", "gpt-5-codex"),
                         ModelFavorite("claude", "claude-sonnet-4-5"),
                     ),
-                projectGrouping = ProjectGrouping.ByRepository,
+                projectGrouping = ProjectGrouping.Repository,
                 threadSort = ThreadSort.Alphabetical,
                 snoozedThreadsExpanded = true,
                 textScale = 1.2f,
@@ -83,7 +83,7 @@ class ClientStateMappingTest {
             )
         val runtime = stored.toRuntime()
         assertEquals(S5ThemeMode.System, runtime.themeMode)
-        assertEquals(ProjectGrouping.ByProject, runtime.projectGrouping)
+        assertEquals(ProjectGrouping.Repository, runtime.projectGrouping)
         assertEquals(ThreadSort.Recent, runtime.threadSort)
         assertEquals(TerminalThemePreference.App, runtime.terminalTheme)
     }

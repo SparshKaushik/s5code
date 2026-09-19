@@ -85,6 +85,12 @@ fun TaskSettingsSheet(
     onToggleFavorite: (ModelFavorite) -> Unit = {},
     catalogRefreshing: Boolean = false,
     onRefreshCatalog: () -> Unit = {},
+    /**
+     * RN's `planModeEnabled` preference: when off, the Mode section is hidden
+     * and every task runs Build, so the sheet pretends runtime mode does not
+     * exist.
+     */
+    planModeEnabled: Boolean = false,
 ) {
     // The thread's own instance always has a row, even when no connected server
     // lists it: a thread bound to an instance the user removed still has to show
@@ -412,17 +418,19 @@ fun TaskSettingsSheet(
                 }
             }
 
-            item(key = "header_mode", contentType = "header") {
-                S5SectionHeader("Mode")
-            }
-            item(key = "mode_picker", contentType = "mode") {
-                Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
-                    S5ConnectedButtonGroup(
-                        options = RuntimeMode.entries,
-                        selected = settings.runtimeMode,
-                        onSelect = { onSettingsChange(settings.copy(runtimeMode = it)) },
-                        label = { it.label },
-                    )
+            if (planModeEnabled) {
+                item(key = "header_mode", contentType = "header") {
+                    S5SectionHeader("Mode")
+                }
+                item(key = "mode_picker", contentType = "mode") {
+                    Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                        S5ConnectedButtonGroup(
+                            options = RuntimeMode.entries,
+                            selected = settings.runtimeMode,
+                            onSelect = { onSettingsChange(settings.copy(runtimeMode = it)) },
+                            label = { it.label },
+                        )
+                    }
                 }
             }
 

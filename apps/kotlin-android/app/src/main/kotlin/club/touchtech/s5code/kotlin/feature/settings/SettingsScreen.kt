@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
@@ -28,7 +29,15 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Storage
 import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material.icons.rounded.Workspaces
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.material.icons.rounded.Build
+import androidx.compose.material.icons.rounded.CallSplit
+import androidx.compose.material.icons.rounded.Info
+import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.ViewSidebar
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -37,12 +46,15 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.unit.dp
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.BuildConfig
 import club.touchtech.s5code.kotlin.app.AppStore
@@ -67,6 +79,13 @@ import club.touchtech.s5code.kotlin.platform.notifications.notificationsAllowed
 import club.touchtech.s5code.kotlin.platform.notifications.openNotificationSettings
 import androidx.core.content.ContextCompat
 import club.touchtech.s5code.kotlin.platform.updates.AppUpdateStatus
+import club.touchtech.s5code.kotlin.model.ConnectionState
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonNull
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 
 /** Settings root. Every configuration destination plus build identity. */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -105,6 +124,35 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
         }
     }
 
+    // RN's AutoSettleSettingsRows: every connected, capable environment takes
+    // the write; the first supplies the displayed values.
+    val syncTargets =
+        remember(environments) {
+            environments.filter {
+                it.state == ConnectionState.Connected && it.capabilities.threadAutoSettlement
+            }
+        }
+    val autoSettleReference = syncTargets.firstOrNull()
+    val autoSettleMismatches =
+        remember(syncTargets, autoSettleReference?.autoSettleOnMerge, autoSettleReference?.autoSettleAfterDays) {
+            if (autoSettleReference == null) emptyList()
+            else
+                syncTargets.drop(1).filter {
+                    it.autoSettleOnMerge != autoSettleReference.autoSettleOnMerge ||
+                        it.autoSettleAfterDays != autoSettleReference.autoSettleAfterDays
+                }
+        }
+    val scope = rememberCoroutineScope()
+
+    fun writeAutoSettle(patch: JsonObject) {
+        for (target in syncTargets) {
+            scope.launch {
+                runCatching { store.workspace.updateServerSettings(target.id, patch) }
+                    .onFailure { store.showError(it.message ?: "Couldn't update settings.") }
+            }
+        }
+    }
+
     S5Screen(
         title = "Settings",
         prominence = S5TopBarProminence.Hero,
@@ -114,110 +162,284 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
-            S5RowGroup(title = "Account and connections") {
-                val accountLabel =
-                    when (val current = account) {
-                        CloudAccountState.Unconfigured -> "Not available"
-                        CloudAccountState.Loading -> ""
-                        is CloudAccountState.SignedIn -> current.label
-                        is CloudAccountState.SignedOut -> "Not signed in"
+            // RN's ConfiguredSettingsRouteScreen: account rows only exist when
+            // cloud is configured; the switches carry no subtitle on Android.
+            if (account != CloudAccountState.Unconfigured) {
+                Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+                    S5RowGroup(title = "Account") {
+                        val accountLabel =
+                            when (val current = account) {
+                                CloudAccountState.Unconfigured -> "Not available"
+                                CloudAccountState.Loading -> "Checking"
+                                is CloudAccountState.SignedIn -> current.label
+                                is CloudAccountState.SignedOut -> "Sign in"
+                            }
+                        S5SettingsRow(
+                            icon = Icons.Rounded.Person,
+                            label = "S5 Account",
+                            value = accountLabel,
+                            onClick = { onOpen(Routes.SettingsAccount) },
+                        )
                     }
-                S5SettingsRow(
-                    icon = Icons.Rounded.Person,
-                    label = "S5 account",
-                    value = accountLabel,
-                    onClick = { onOpen(Routes.SettingsAccount) },
-                    position = rowPosition(0, 4),
-                )
+                    Text(
+                        "S5 Code works locally without signing in. Cloud features are optional.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+                    )
+                }
+            }
+
+            S5RowGroup(title = "Configuration") {
+                val configRowCount = if (account == CloudAccountState.Unconfigured) 1 else 3
                 S5SettingsRow(
                     icon = Icons.Rounded.Hub,
                     label = "Environments",
-                    value = "${environments.size} paired",
+                    value = "${environments.size}",
                     onClick = { onOpen(Routes.SettingsEnvironments) },
-                    position = rowPosition(1, 4),
+                    position = rowPosition(0, configRowCount),
                 )
-                // RN renders these as inline switches on this screen, not
-                // sub-pages. Both read as on only once the device is actually
-                // registered with the relay.
-                S5SwitchRow(
-                    icon = Icons.Rounded.Notifications,
-                    label = "Device notifications",
-                    supporting = "Agent alerts pushed to this device",
-                    checked = notificationsOn,
-                    enabled = account !is CloudAccountState.Unconfigured,
-                    onCheckedChange = { enabled ->
-                        if (enabled) {
-                            // Enabling needs an account to register against;
-                            // RN routes a signed-out user to sign-in.
-                            if (account is CloudAccountState.SignedIn) {
-                                requestOrOpenNotifications()
+                if (account != CloudAccountState.Unconfigured) {
+                    // RN renders these as inline switches on this screen, not
+                    // sub-pages. Both read as on only once the device is actually
+                    // registered with the relay.
+                    S5SwitchRow(
+                        icon = Icons.Rounded.Notifications,
+                        label = "Device Notifications",
+                        checked = notificationsOn,
+                        onCheckedChange = { enabled ->
+                            if (enabled) {
+                                // Enabling needs an account to register against;
+                                // RN routes a signed-out user to sign-in.
+                                if (account is CloudAccountState.SignedIn) {
+                                    requestOrOpenNotifications()
+                                } else {
+                                    onOpen(Routes.SettingsAccount)
+                                }
                             } else {
-                                onOpen(Routes.SettingsAccount)
+                                openNotificationSettings(context)
                             }
-                        } else {
-                            openNotificationSettings(context)
-                        }
-                    },
-                    position = rowPosition(2, 4),
-                )
-                S5SwitchRow(
-                    icon = Icons.Rounded.Bolt,
-                    label = "Ongoing Agent Activity",
-                    supporting = "Show agent progress on the lock screen and status bar",
-                    checked = preferences.liveUpdatesEnabled && deviceRegistered,
-                    enabled = account !is CloudAccountState.Unconfigured,
-                    onCheckedChange = { enabled ->
-                        if (enabled && account !is CloudAccountState.SignedIn) {
-                            onOpen(Routes.SettingsAccount)
-                            return@S5SwitchRow
-                        }
-                        store.updatePreferences { it.copy(liveUpdatesEnabled = enabled) }
-                        if (!enabled) {
-                            AndroidLiveUpdateNotifications.dismiss(context)
-                        }
-                    },
-                    position = rowPosition(3, 4),
-                )
+                        },
+                        position = rowPosition(1, configRowCount),
+                    )
+                    S5SwitchRow(
+                        icon = Icons.Rounded.Bolt,
+                        label = "Ongoing Agent Activity",
+                        checked = preferences.liveUpdatesEnabled && deviceRegistered,
+                        onCheckedChange = { enabled ->
+                            if (enabled && account !is CloudAccountState.SignedIn) {
+                                onOpen(Routes.SettingsAccount)
+                                return@S5SwitchRow
+                            }
+                            store.updatePreferences { it.copy(liveUpdatesEnabled = enabled) }
+                            if (!enabled) {
+                                AndroidLiveUpdateNotifications.dismiss(context)
+                            }
+                        },
+                        position = rowPosition(2, configRowCount),
+                    )
+                }
             }
 
-            S5RowGroup(title = "Appearance and behavior") {
-                S5SettingsRow(
-                    icon = Icons.Rounded.Palette,
-                    label = "Appearance",
-                    value = preferences.themeMode.name,
-                    onClick = { onOpen(Routes.SettingsAppearance) },
-                    position = rowPosition(0, 2),
-                )
+            // RN's GeneralSettingsSection.
+            S5RowGroup(title = "General") {
+                var generalRows = 2
+                if (autoSettleReference != null) generalRows += 2
+                var position = 0
                 S5SettingsRow(
                     icon = Icons.Rounded.Workspaces,
-                    label = "Project grouping",
-                    value = preferences.projectGrouping.label,
+                    label = "Project Grouping",
                     onClick = { onOpen(Routes.SettingsProjectGrouping) },
-                    position = rowPosition(1, 2),
+                    position = rowPosition(position++, generalRows),
                 )
-            }
-
-            S5RowGroup(title = "Data") {
+                if (autoSettleReference != null) {
+                    S5SwitchRow(
+                        icon = Icons.Rounded.CallSplit,
+                        label = "Auto-settle merged threads",
+                        checked = autoSettleReference.autoSettleOnMerge,
+                        onCheckedChange = { enabled ->
+                            writeAutoSettle(
+                                buildJsonObject { put("sidebarAutoSettleOnMerge", enabled) }
+                            )
+                        },
+                        position = rowPosition(position++, generalRows),
+                    )
+                    var daysDraft by remember { mutableStateOf<String?>(null) }
+                    val afterDays = autoSettleReference.autoSettleAfterDays
+                    S5SwitchRow(
+                        icon = Icons.Rounded.Schedule,
+                        label = "Auto-settle inactive threads",
+                        supporting =
+                            afterDays?.let { "After $it days without activity" },
+                        checked = afterDays != null,
+                        onCheckedChange = { enabled ->
+                            writeAutoSettle(
+                                buildJsonObject {
+                                    // Null days disables the idle sweep; the
+                                    // server default (3) restores it.
+                                    put(
+                                        "sidebarAutoSettleAfterDays",
+                                        if (enabled) JsonPrimitive(3) else JsonNull,
+                                    )
+                                }
+                            )
+                        },
+                        position = rowPosition(position++, generalRows),
+                    )
+                    if (afterDays != null) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                        ) {
+                            Text(
+                                "Days before auto-settle",
+                                modifier = Modifier.weight(1f),
+                            )
+                            OutlinedTextField(
+                                value = daysDraft ?: afterDays.toString(),
+                                onValueChange = { daysDraft = it },
+                                modifier = Modifier.width(96.dp),
+                                keyboardOptions =
+                                    KeyboardOptions(
+                                        keyboardType = KeyboardType.Number,
+                                        imeAction = ImeAction.Done,
+                                    ),
+                                keyboardActions =
+                                    KeyboardActions(
+                                        onDone = {
+                                            // Whole-string check so "3.5" is
+                                            // rejected rather than silently
+                                            // becoming 3 on every sync target.
+                                            val parsed =
+                                                daysDraft?.trim()?.toIntOrNull()
+                                            daysDraft = null
+                                            if (parsed != null && parsed in 1..90 &&
+                                                parsed != afterDays
+                                            ) {
+                                                writeAutoSettle(
+                                                    buildJsonObject {
+                                                        put(
+                                                            "sidebarAutoSettleAfterDays",
+                                                            JsonPrimitive(parsed),
+                                                        )
+                                                    }
+                                                )
+                                            }
+                                        }
+                                    ),
+                                singleLine = true,
+                                textStyle = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                    if (autoSettleMismatches.isNotEmpty()) {
+                        Row(
+                            Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                        ) {
+                            Column(Modifier.weight(1f)) {
+                                Text("Auto-settle defaults differ")
+                                Text(
+                                    autoSettleMismatches.joinToString(", ") { it.label },
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                )
+                            }
+                            S5Button(
+                                text = "Apply auto-settle defaults",
+                                style = S5ButtonStyle.Tonal,
+                                onClick = {
+                                    writeAutoSettle(
+                                        buildJsonObject {
+                                            put(
+                                                "sidebarAutoSettleOnMerge",
+                                                autoSettleReference.autoSettleOnMerge,
+                                            )
+                                            autoSettleReference.autoSettleAfterDays.let { days ->
+                                                put(
+                                                    "sidebarAutoSettleAfterDays",
+                                                    days?.let { JsonPrimitive(it) } ?: JsonNull,
+                                                )
+                                            }
+                                        }
+                                    )
+                                },
+                            )
+                        }
+                    }
+                }
                 S5SettingsRow(
                     icon = Icons.Rounded.Analytics,
                     label = "Usage",
-                    value = null,
                     onClick = { onOpen(Routes.Usage) },
-                    position = rowPosition(0, 3),
+                    position = rowPosition(position, generalRows),
                 )
+            }
+
+            S5RowGroup(title = "Appearance") {
+                S5SettingsRow(
+                    icon = Icons.Rounded.Palette,
+                    label = "Appearance",
+                    onClick = { onOpen(Routes.SettingsAppearance) },
+                )
+            }
+
+            // RN's LegacySettingsSection plus its footnote.
+            Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+                S5RowGroup(title = "Legacy") {
+                    S5SwitchRow(
+                        icon = Icons.Rounded.ViewSidebar,
+                        label = "Legacy Thread List",
+                        checked = preferences.legacyThreadListEnabled,
+                        onCheckedChange = { enabled ->
+                            store.updatePreferences { it.copy(legacyThreadListEnabled = enabled) }
+                        },
+                        position = rowPosition(0, 2),
+                    )
+                    S5SwitchRow(
+                        icon = Icons.Rounded.Build,
+                        label = "Plan Mode",
+                        checked = preferences.planModeEnabled,
+                        onCheckedChange = { enabled ->
+                            store.updatePreferences { it.copy(planModeEnabled = enabled) }
+                        },
+                        position = rowPosition(1, 2),
+                    )
+                }
+                Text(
+                    "Opt into retired interfaces kept for compatibility. Plan Mode restores the Build/Plan control; otherwise every task runs in Build mode.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+                )
+            }
+
+            S5RowGroup(title = "Threads") {
                 S5SettingsRow(
                     icon = Icons.Rounded.Archive,
-                    label = "Archived threads",
-                    value = null,
+                    label = "Archived Threads",
                     onClick = { onOpen(Routes.Archive) },
-                    position = rowPosition(1, 3),
                 )
+            }
+
+            // RN's AppSettingsSection: storage + the version row. The update
+            // card below it is this client's own updater, which RN reaches
+            // through a hidden gesture on the version row.
+            S5RowGroup(title = "App") {
                 S5SettingsRow(
                     icon = Icons.Rounded.Storage,
-                    label = "Client storage",
-                    value = null,
+                    label = "Client Storage",
                     onClick = { onOpen(Routes.SettingsClientStorage) },
-                    position = rowPosition(2, 3),
+                    position = rowPosition(0, 2),
+                )
+                S5SettingsRow(
+                    icon = Icons.Rounded.Info,
+                    label = "Version",
+                    value = BuildConfig.VERSION_NAME,
+                    onClick = null,
+                    position = rowPosition(1, 2),
                 )
             }
 

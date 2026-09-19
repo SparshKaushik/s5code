@@ -9,9 +9,9 @@ import club.touchtech.s5code.kotlin.model.GitStatus
 import club.touchtech.s5code.kotlin.model.PendingApproval
 import club.touchtech.s5code.kotlin.model.PendingUserInput
 import club.touchtech.s5code.kotlin.model.Project
+import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
-import club.touchtech.s5code.kotlin.model.RepositoryRef
 import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.SlashCommand
@@ -28,7 +28,11 @@ import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageWindow
 import club.touchtech.s5code.kotlin.model.WorkspaceAsset
 import club.touchtech.s5code.kotlin.model.UserInputAnswer
+import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseEntryDto
+import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
+import club.touchtech.s5code.kotlin.transport.wire.SourceControlRepositoryDto
 import kotlinx.coroutines.flow.Flow
+import kotlinx.serialization.json.JsonObject
 import kotlinx.coroutines.flow.StateFlow
 
 /**
@@ -391,36 +395,58 @@ interface WorkspaceGateway {
      */
     suspend fun usage(window: UsageWindow = UsageWindow.Month): Usage
 
-    suspend fun repositories(environmentId: EnvironmentId, query: String): List<RepositoryRef>
+    /**
+     * `sourceControl.lookupRepository` — validates one `owner/name` reference on
+     * one provider. The server has no repository search; this throws on failure
+     * so the form can show the reason instead of an empty list.
+     */
+    suspend fun lookupRepository(
+        environmentId: EnvironmentId,
+        provider: String,
+        repository: String,
+    ): SourceControlRepositoryDto
 
-    suspend fun remotePaths(environmentId: EnvironmentId, partialPath: String): List<String>
+    /** `filesystem.browse` — directory entries under a partial path. */
+    suspend fun browseFilesystem(
+        environmentId: EnvironmentId,
+        partialPath: String,
+    ): List<FilesystemBrowseEntryDto>
+
+    /** `server.discoverSourceControl` — which clone providers the machine can serve. */
+    suspend fun discoverSourceControl(
+        environmentId: EnvironmentId,
+    ): SourceControlDiscoveryResultDto
 
     /* ── Projects ────────────────────────────────────────────────────── */
 
     /**
      * Registers a project rooted at an existing directory on the machine.
-     *
-     * [createWorkspaceRootIfMissing] is what separates "point at a folder I have"
-     * from "make this folder for me"; the caller decides, because creating a
-     * directory on someone's machine by accident is not recoverable from here.
+     * Returns the project id assigned to the create command, so the caller can
+     * open the draft for it — matching RN's `buildProjectCreateCommand`, the
+     * directory is created when missing.
      */
     suspend fun createProject(
         environmentId: EnvironmentId,
-        title: String,
         workspaceRoot: String,
-        createWorkspaceRootIfMissing: Boolean = false,
-    )
+    ): ProjectId
 
     /**
-     * Clones a repository on the machine and registers the result as a project.
-     * Returns the directory the clone landed in, which is not always the
-     * destination that was asked for.
+     * Clones a remote URL on the machine (`sourceControl.cloneRepository`), then
+     * registers the clone's landing directory as a project. Returns the project
+     * id plus where the clone actually landed — the existing-project check
+     * needs that path, since it is not always the requested destination.
      */
     suspend fun cloneProject(
         environmentId: EnvironmentId,
-        repository: String,
+        remoteUrl: String,
         destinationPath: String,
-    ): String
+    ): Pair<ProjectId, String>
+
+    /**
+     * `server.updateSettings` — writes a settings patch. Callers only patch what
+     * they mean to change; the server returns the full settings.
+     */
+    suspend fun updateServerSettings(environmentId: EnvironmentId, patch: JsonObject)
 
     /* ── Git writes ──────────────────────────────────────────────────── */
 

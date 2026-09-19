@@ -347,19 +347,28 @@ fun SettingsProjectGroupingScreen(store: AppStore, onBack: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
             S5RowGroup {
-                ProjectGrouping.entries.forEachIndexed { index, grouping ->
+                // RN offers only these three modes; a stored Flat selection is
+                // honored by the list but not selectable here.
+                val options =
+                    ProjectGrouping.entries.filter { it != ProjectGrouping.Flat }
+                options.forEachIndexed { index, grouping ->
                     S5SelectableRow(
                         label = grouping.label,
+                        // RN's GROUPING_OPTIONS descriptions, verbatim.
                         supporting =
                             when (grouping) {
-                                ProjectGrouping.ByProject -> "One section per project"
-                                ProjectGrouping.ByRepository -> "Group projects that share a repository"
-                                ProjectGrouping.Flat -> "No sections, purely by recency"
+                                ProjectGrouping.Repository ->
+                                    "Matching repositories appear as one project."
+                                ProjectGrouping.RepositoryPath ->
+                                    "Keep monorepo paths separate."
+                                ProjectGrouping.Separate ->
+                                    "Show every workspace as its own project."
+                                ProjectGrouping.Flat -> ""
                             },
                         selected = preferences.projectGrouping == grouping,
                         onClick = { store.updatePreferences { it.copy(projectGrouping = grouping) } },
                         leading = { Icon(Icons.Rounded.Workspaces, contentDescription = null) },
-                        position = rowPosition(index, ProjectGrouping.entries.size),
+                        position = rowPosition(index, options.size),
                     )
                 }
             }

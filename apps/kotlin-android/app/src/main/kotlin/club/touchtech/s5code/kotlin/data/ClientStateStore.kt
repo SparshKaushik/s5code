@@ -23,7 +23,7 @@ data class StoredPreferences(
     val colorTheme: String = "",
     /** Starred (instanceId, model) pairs, in the order the picker shows them. */
     val modelFavorites: List<StoredModelFavorite> = emptyList(),
-    val projectGrouping: String = "ByProject",
+    val projectGrouping: String = "Repository",
     val threadSort: String = "Recent",
     val snoozedThreadsExpanded: Boolean = false,
     val settledThreadsExpanded: Boolean = false,
@@ -38,6 +38,16 @@ data class StoredPreferences(
     val notifyCompletion: Boolean = true,
     val notifyFailures: Boolean = true,
     val liveUpdatesEnabled: Boolean = true,
+    /**
+     * `planModeEnabled` in the RN client: when off, every task sends in Build
+     * mode and the composer hides the Build/Plan control entirely.
+     */
+    val planModeEnabled: Boolean = false,
+    /**
+     * `legacyThreadListEnabled` — kept in lockstep with RN's preference shape
+     * even though this client has no legacy list to restore.
+     */
+    val legacyThreadListEnabled: Boolean = false,
 )
 
 /** One starred model: provider instance id plus model slug. */

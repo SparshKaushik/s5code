@@ -31,7 +31,7 @@ class HomeListTest {
 
     private fun items(
         state: HomeUiState = HomeUiState(),
-        grouping: ProjectGrouping = ProjectGrouping.ByProject,
+        grouping: ProjectGrouping = ProjectGrouping.Separate,
         sort: ThreadSort = ThreadSort.Recent,
         drafts: Map<String, ThreadDraft> = emptyMap(),
         newTask: NewTaskDraft? = null,
@@ -489,7 +489,7 @@ class HomeListTest {
 
     @Test
     fun `empty input produces an empty list`() {
-        assertTrue(homeListItems(emptyList(), projects, environments, HomeUiState(), ProjectGrouping.ByProject, ThreadSort.Recent).isEmpty())
+        assertTrue(homeListItems(emptyList(), projects, environments, HomeUiState(), ProjectGrouping.Separate, ThreadSort.Recent).isEmpty())
     }
 
     private fun newTask(

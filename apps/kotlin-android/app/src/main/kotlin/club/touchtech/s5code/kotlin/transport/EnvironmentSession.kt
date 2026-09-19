@@ -67,6 +67,13 @@ data class SessionState(
      */
     val machineKind: String? = null,
     val capabilities: ServerCapabilities = ServerCapabilities(),
+    /**
+     * Server settings the screens read: the add-project base directory and the
+     * auto-settle defaults Settings edits through `server.updateSettings`.
+     */
+    val addProjectBaseDirectory: String = "",
+    val autoSettleOnMerge: Boolean = true,
+    val autoSettleAfterDays: Int? = 3,
 )
 
 /**
@@ -97,6 +104,8 @@ data class ServerCapabilities(
     val threadResumeCompletionMarker: Boolean = false,
     /** Thread reads accept `turnLimit`/`beforeCursor` windows and `page` metadata. */
     val threadSnapshotPagination: Boolean = false,
+    /** `server.updateSettings` accepts auto-settle writes (shared settings sync). */
+    val threadAutoSettlement: Boolean = false,
 )
 
 /**
@@ -435,7 +444,11 @@ class EnvironmentSession(
                             shellResumeCompletionMarker = config.shellResumeCompletionMarker,
                             threadResumeCompletionMarker = config.threadResumeCompletionMarker,
                             threadSnapshotPagination = config.threadSnapshotPagination,
+                            threadAutoSettlement = descriptor.capabilities.threadAutoSettlement,
                         ),
+                    addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
+                    autoSettleOnMerge = config.settings.sidebarAutoSettleOnMerge,
+                    autoSettleAfterDays = config.settings.sidebarAutoSettleAfterDays,
                 )
             probeSupported = descriptor.capabilities.connectionProbe
             connection.value = opened
@@ -508,7 +521,24 @@ class EnvironmentSession(
                                 )
                             when {
                                 event.type == "snapshot" && event.config != null -> {
-                                    firstConfig.complete(event.config)
+                                    val snapshot = event.config
+                                    if (!firstConfig.complete(snapshot)) {
+                                        // Later snapshots carry settings edits
+                                        // made elsewhere; refresh the session's
+                                        // read of them in place.
+                                        _state.value =
+                                            _state.value.copy(
+                                                machineKind =
+                                                    snapshot.settings.environmentIcon
+                                                        ?: snapshot.environment.platform.machine,
+                                                addProjectBaseDirectory =
+                                                    snapshot.settings.addProjectBaseDirectory,
+                                                autoSettleOnMerge =
+                                                    snapshot.settings.sidebarAutoSettleOnMerge,
+                                                autoSettleAfterDays =
+                                                    snapshot.settings.sidebarAutoSettleAfterDays,
+                                            )
+                                    }
                                 }
                                 event.type == "providerStatuses" -> {
                                     event.payload?.providers?.let { _providers.value = it }

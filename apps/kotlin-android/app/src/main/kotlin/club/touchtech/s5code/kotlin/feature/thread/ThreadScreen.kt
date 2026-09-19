@@ -561,12 +561,15 @@ fun ThreadScreen(
                         ?.modelLabel(effectiveSettings.model)
                         ?: effectiveSettings.model,
                 onOpenSettings = { settingsOpen = true },
+                // RN gates the Build/Plan control on the planModeEnabled
+                // preference in addition to what the provider advertises.
                 interactionModeAllowed =
-                    machineCatalog
-                        .firstOrNull {
-                            it.instance.instanceId == effectiveSettings.provider.instanceId
-                        }
-                        ?.interactionModeToggle != false,
+                    preferences.planModeEnabled &&
+                        machineCatalog
+                            .firstOrNull {
+                                it.instance.instanceId == effectiveSettings.provider.instanceId
+                            }
+                            ?.interactionModeToggle != false,
                 onInteractionMode = { mode ->
                     store.setThreadDraftSettings(
                         environmentId,
@@ -803,6 +806,7 @@ fun ThreadScreen(
             onToggleFavorite = { store.toggleModelFavorite(it.instanceId, it.model) },
             catalogRefreshing = env.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(env) },
+            planModeEnabled = preferences.planModeEnabled,
         )
     }
 }

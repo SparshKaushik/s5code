@@ -61,8 +61,8 @@ android {
         applicationId = "club.touchtech.s5code.kotlin"
         minSdk = 26
         targetSdk = 37
-        versionCode = 12
-        versionName = "0.1.0-alpha.12"
+        versionCode = 13
+        versionName = "0.1.0-alpha.13"
 
         // Same three values the RN client puts in `extra`: publishable key, the
         // JWT template the relay accepts, and the relay origin. Empty means

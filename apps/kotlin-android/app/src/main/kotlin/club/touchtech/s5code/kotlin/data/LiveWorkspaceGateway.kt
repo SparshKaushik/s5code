@@ -11,11 +11,11 @@ import club.touchtech.s5code.kotlin.model.EnvironmentKind
 import club.touchtech.s5code.kotlin.model.FileNode
 import club.touchtech.s5code.kotlin.model.GitStatus
 import club.touchtech.s5code.kotlin.model.Project
+import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.PullRequestRef
 import club.touchtech.s5code.kotlin.model.PullRequestState
-import club.touchtech.s5code.kotlin.model.RepositoryRef
 import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SentAttachment
@@ -52,6 +52,8 @@ import club.touchtech.s5code.kotlin.transport.applyThreadEvent
 import club.touchtech.s5code.kotlin.transport.wire.AssetUrlResultDto
 import club.touchtech.s5code.kotlin.transport.wire.AttachmentUploadUrlResultDto
 import club.touchtech.s5code.kotlin.transport.wire.DispatchResultDto
+import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseEntryDto
+import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseResultDto
 import club.touchtech.s5code.kotlin.transport.wire.GitActionProgressEventDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectListEntriesResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectReadFileResultDto
@@ -60,6 +62,7 @@ import club.touchtech.s5code.kotlin.transport.wire.SearchThreadsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlCloneResultDto
+import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlRepositoryDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalMetadataStreamEventDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalSnapshotDto
@@ -70,7 +73,6 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.UsageSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsListRefsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsStatusDto
-import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseResultDto
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -522,7 +524,12 @@ class LiveWorkspaceGateway(
                                     club.touchtech.s5code.kotlin.model
                                         .FileAttachmentsCapability(maxUploadBytes = it)
                                 },
+                            threadAutoSettlement =
+                                state?.capabilities?.threadAutoSettlement == true,
                         ),
+                    addProjectBaseDirectory = state?.addProjectBaseDirectory.orEmpty(),
+                    autoSettleOnMerge = state?.autoSettleOnMerge ?: true,
+                    autoSettleAfterDays = state?.autoSettleAfterDays,
                 )
             }
 
@@ -2143,75 +2150,72 @@ class LiveWorkspaceGateway(
         )
     }
 
-    override suspend fun repositories(
+    override suspend fun lookupRepository(
         environmentId: EnvironmentId,
-        query: String,
-    ): List<RepositoryRef> {
-        val reference = query.trim()
-        // There is no repository *search* RPC; lookup validates one reference. An
-        // incomplete `owner/name` is not an error worth surfacing while typing.
-        if (!reference.contains('/')) return emptyList()
-        val info =
-            runCatching {
-                    sessionFor(environmentId)
-                        .request(
-                            WsMethods.SourceControlLookupRepository,
-                            buildJsonObject {
-                                put("provider", "github")
-                                put("repository", reference)
-                            },
-                            SourceControlRepositoryDto.serializer(),
-                        )
-                }
-                .getOrNull() ?: return emptyList()
-        return listOf(
-            RepositoryRef(fullName = info.nameWithOwner, description = info.url, private = false)
-        )
-    }
+        provider: String,
+        repository: String,
+    ): SourceControlRepositoryDto =
+        sessionFor(environmentId)
+            .request(
+                WsMethods.SourceControlLookupRepository,
+                buildJsonObject {
+                    put("provider", provider)
+                    put("repository", repository.trim())
+                },
+                SourceControlRepositoryDto.serializer(),
+            )
 
-    override suspend fun remotePaths(
+    override suspend fun browseFilesystem(
         environmentId: EnvironmentId,
         partialPath: String,
-    ): List<String> {
-        val result =
-            runCatching {
-                    sessionFor(environmentId)
-                        .request(
-                            WsMethods.FilesystemBrowse,
-                            buildJsonObject {
-                                put("partialPath", partialPath.ifBlank { "~/" })
-                            },
-                            FilesystemBrowseResultDto.serializer(),
-                        )
-                }
-                .getOrNull() ?: return emptyList()
-        return result.entries.map { it.fullPath }
-    }
+    ): List<FilesystemBrowseEntryDto> =
+        sessionFor(environmentId)
+            .request(
+                WsMethods.FilesystemBrowse,
+                buildJsonObject {
+                    put("partialPath", partialPath.ifBlank { "~/" })
+                },
+                FilesystemBrowseResultDto.serializer(),
+            )
+            .entries
+
+    override suspend fun discoverSourceControl(
+        environmentId: EnvironmentId,
+    ): SourceControlDiscoveryResultDto =
+        sessionFor(environmentId)
+            .request(
+                WsMethods.ServerDiscoverSourceControl,
+                JsonObject(emptyMap()),
+                SourceControlDiscoveryResultDto.serializer(),
+            )
 
     /* ── Projects ────────────────────────────────────────────────────── */
 
     override suspend fun createProject(
         environmentId: EnvironmentId,
-        title: String,
         workspaceRoot: String,
-        createWorkspaceRootIfMissing: Boolean,
-    ) {
+    ): ProjectId {
+        // The id is client-generated because the command is idempotent on it:
+        // a retry after a dropped socket must not create a second project for
+        // the same directory.
+        val projectId = ProjectId(UUID.randomUUID().toString())
         dispatch(
             environmentId,
             Commands.createProject(
-                projectId = UUID.randomUUID().toString(),
-                title = title,
+                projectId = projectId.value,
+                title = inferProjectTitleFromPath(workspaceRoot),
                 workspaceRoot = workspaceRoot,
-                createWorkspaceRootIfMissing = createWorkspaceRootIfMissing,
+                createWorkspaceRootIfMissing = true,
             ),
         )
+        return projectId
     }
 
     override suspend fun cloneProject(
         environmentId: EnvironmentId,
-        repository: String,
+        remoteUrl: String,
         destinationPath: String,
-    ): String {
+    ): Pair<ProjectId, String> {
         // Two steps, in this order: the clone has to exist before a project can
         // point at it, and the server reports where it actually landed.
         val clone =
@@ -2219,18 +2223,21 @@ class LiveWorkspaceGateway(
                 .request(
                     WsMethods.SourceControlCloneRepository,
                     buildJsonObject {
-                        put("provider", "github")
-                        put("repository", repository)
+                        put("remoteUrl", remoteUrl)
                         put("destinationPath", destinationPath)
                     },
                     SourceControlCloneResultDto.serializer(),
                 )
-        createProject(
-            environmentId = environmentId,
-            title = repository.substringAfterLast('/'),
-            workspaceRoot = clone.cwd,
-        )
-        return clone.cwd
+        return createProject(environmentId = environmentId, workspaceRoot = clone.cwd) to clone.cwd
+    }
+
+    override suspend fun updateServerSettings(environmentId: EnvironmentId, patch: JsonObject) {
+        sessionFor(environmentId)
+            .request(
+                WsMethods.ServerUpdateSettings,
+                buildJsonObject { put("patch", patch) },
+                kotlinx.serialization.json.JsonObject.serializer(),
+            )
     }
 
     /* ── Git writes ──────────────────────────────────────────────────── */

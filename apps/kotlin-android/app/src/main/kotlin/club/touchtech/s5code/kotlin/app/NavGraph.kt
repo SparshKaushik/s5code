@@ -10,6 +10,7 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.feature.archive.ArchiveScreen
@@ -29,7 +30,7 @@ import club.touchtech.s5code.kotlin.feature.git.PullRequestsScreen
 import club.touchtech.s5code.kotlin.feature.git.SourceControlScreen
 import club.touchtech.s5code.kotlin.feature.home.HomeScreen
 import club.touchtech.s5code.kotlin.feature.newtask.AddProjectDestinationScreen
-import club.touchtech.s5code.kotlin.feature.newtask.AddProjectLocalPathScreen
+import club.touchtech.s5code.kotlin.feature.newtask.AddProjectLocalFolderScreen
 import club.touchtech.s5code.kotlin.feature.newtask.AddProjectRepositoryScreen
 import club.touchtech.s5code.kotlin.feature.newtask.AddProjectSourceScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskBranchScreen
@@ -103,6 +104,37 @@ fun S5NavGraph(
                 navArgument("scan") {
                     type = NavType.BoolType
                     defaultValue = false
+                },
+            )
+    // Add-project steps carry the chosen environment (and the repository the
+    // lookup resolved) as params, as RN's routes do.
+    val addProjectArgs =
+        listOf(
+            navArgument("environmentId") {
+                type = NavType.StringType
+                defaultValue = ""
+            },
+            navArgument("source") {
+                type = NavType.StringType
+                defaultValue = ""
+            },
+        )
+    val addProjectDestinationArgs =
+        addProjectArgs +
+            listOf(
+                navArgument("remoteUrl") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("repositoryTitle") {
+                    type = NavType.StringType
+                    nullable = true
+                    defaultValue = null
+                },
+                navArgument("repositoryName") {
+                    type = NavType.StringType
+                    defaultValue = ""
                 },
             )
     val transitions = s5NavTransitions()
@@ -233,6 +265,7 @@ fun S5NavGraph(
                 onBack = navController::popBackStack,
                 onProjectChosen = { navController.navigate(Routes.NewTaskDraft) },
                 onAddProject = { navController.navigate(Routes.AddProjectSource) },
+                onAddEnvironment = { navController.navigate(Routes.ConnectionsNew) },
             )
         }
         composable(Routes.NewTaskDraft) {
@@ -258,32 +291,93 @@ fun S5NavGraph(
         composable(Routes.NewTaskBranch) {
             NewTaskBranchScreen(store = store, onBack = navController::popBackStack)
         }
+        // RN's flow keeps the environment on each step's params, and a finished
+        // add lands on the new-task draft bound to the new project rather than
+        // back on the picker.
         composable(Routes.AddProjectSource) {
             AddProjectSourceScreen(
+                store = store,
                 onBack = navController::popBackStack,
-                onRepository = { navController.navigate(Routes.AddProjectRepository) },
-                onLocalPath = { navController.navigate(Routes.AddProjectLocal) },
+                onRepository = { environmentId, source ->
+                    navController.navigate(Routes.addProjectRepository(environmentId, source))
+                },
+                onLocalPath = { environmentId ->
+                    navController.navigate(Routes.addProjectLocal(environmentId))
+                },
+                onAddEnvironment = {
+                    navController.navigate(Routes.ConnectionsNew) {
+                        popUpTo(Routes.AddProjectSource) { inclusive = true }
+                    }
+                },
             )
         }
-        composable(Routes.AddProjectRepository) {
+        composable(Routes.AddProjectRepository, arguments = addProjectArgs) { entry ->
             AddProjectRepositoryScreen(
                 store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                source = entry.arguments?.getString("source").orEmpty().ifBlank { "url" },
                 onBack = navController::popBackStack,
-                onSelected = { navController.navigate(Routes.AddProjectDestination) },
+                onDestination = { envId, source, remoteUrl, repositoryTitle, repositoryName ->
+                    navController.navigate(
+                        Routes.addProjectDestination(
+                            envId, source, remoteUrl, repositoryTitle, repositoryName,
+                        )
+                    )
+                },
+                onAddEnvironment = {
+                    navController.navigate(Routes.ConnectionsNew) {
+                        popUpTo(Routes.AddProjectSource) { inclusive = true }
+                    }
+                },
             )
         }
-        composable(Routes.AddProjectDestination) {
+        composable(Routes.AddProjectDestination, arguments = addProjectDestinationArgs) { entry ->
             AddProjectDestinationScreen(
                 store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                remoteUrl = entry.arguments?.getString("remoteUrl"),
+                repositoryTitle = entry.arguments?.getString("repositoryTitle"),
+                repositoryName = entry.arguments?.getString("repositoryName").orEmpty(),
                 onBack = navController::popBackStack,
-                onCreated = { navController.popBackStack(Routes.NewTask, inclusive = false) },
+                onCreated = { environmentId, projectId ->
+                    store.updateDraft {
+                        it.copy(
+                            environmentId = EnvironmentId(environmentId),
+                            projectKey = projectId,
+                        )
+                    }
+                    navController.navigate(Routes.NewTaskDraft) {
+                        popUpTo(Routes.NewTask) { inclusive = true }
+                    }
+                },
+                onAddEnvironment = {
+                    navController.navigate(Routes.ConnectionsNew) {
+                        popUpTo(Routes.AddProjectSource) { inclusive = true }
+                    }
+                },
             )
         }
-        composable(Routes.AddProjectLocal) {
-            AddProjectLocalPathScreen(
+        composable(Routes.AddProjectLocal, arguments = addProjectArgs) { entry ->
+            AddProjectLocalFolderScreen(
                 store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
                 onBack = navController::popBackStack,
-                onCreated = { navController.popBackStack(Routes.NewTask, inclusive = false) },
+                onCreated = { environmentId, projectId ->
+                    store.updateDraft {
+                        it.copy(
+                            environmentId = EnvironmentId(environmentId),
+                            projectKey = projectId,
+                        )
+                    }
+                    navController.navigate(Routes.NewTaskDraft) {
+                        popUpTo(Routes.NewTask) { inclusive = true }
+                    }
+                },
+                onAddEnvironment = {
+                    navController.navigate(Routes.ConnectionsNew) {
+                        popUpTo(Routes.AddProjectSource) { inclusive = true }
+                    }
+                },
             )
         }
 

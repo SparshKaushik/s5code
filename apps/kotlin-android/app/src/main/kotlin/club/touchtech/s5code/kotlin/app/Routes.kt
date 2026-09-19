@@ -27,9 +27,12 @@ object Routes {
     const val NewTaskEnvironment = "new/draft/environment"
     const val NewTaskBranch = "new/draft/branch"
     const val AddProjectSource = "new/add-project"
-    const val AddProjectRepository = "new/add-project/repository"
-    const val AddProjectDestination = "new/add-project/destination"
-    const val AddProjectLocal = "new/add-project/local"
+    const val AddProjectRepository =
+        "new/add-project/repository?environmentId={environmentId}&source={source}"
+    const val AddProjectDestination =
+        "new/add-project/destination?environmentId={environmentId}&source={source}" +
+            "&remoteUrl={remoteUrl}&repositoryTitle={repositoryTitle}&repositoryName={repositoryName}"
+    const val AddProjectLocal = "new/add-project/local?environmentId={environmentId}"
 
     const val Thread = "threads/{environmentId}/{threadId}"
     const val ThreadRewind = "threads/{environmentId}/{threadId}/rewind"
@@ -99,6 +102,25 @@ object Routes {
     )
 
     fun connectionDetail(environmentId: String) = "connections/$environmentId"
+
+    fun addProjectRepository(environmentId: String, source: String) =
+        "new/add-project/repository?environmentId=${android.net.Uri.encode(environmentId)}" +
+            "&source=${android.net.Uri.encode(source)}"
+
+    fun addProjectLocal(environmentId: String) =
+        "new/add-project/local?environmentId=${android.net.Uri.encode(environmentId)}"
+
+    fun addProjectDestination(
+        environmentId: String,
+        source: String,
+        remoteUrl: String,
+        repositoryTitle: String,
+        repositoryName: String,
+    ) = "new/add-project/destination?environmentId=${android.net.Uri.encode(environmentId)}" +
+        "&source=${android.net.Uri.encode(source)}" +
+        "&remoteUrl=${android.net.Uri.encode(remoteUrl)}" +
+        "&repositoryTitle=${android.net.Uri.encode(repositoryTitle)}" +
+        "&repositoryName=${android.net.Uri.encode(repositoryName)}"
 
     /** One terminal session; null id means the default shell (`term-1`). */
     fun threadTerminal(environmentId: String, threadId: String, terminalId: String? = null) =

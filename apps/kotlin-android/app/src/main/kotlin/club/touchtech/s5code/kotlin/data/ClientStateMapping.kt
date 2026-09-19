@@ -46,7 +46,17 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
             modelFavorites
                 .filter { it.instanceId.isNotBlank() && it.model.isNotBlank() }
                 .map { ModelFavorite(it.instanceId, it.model) },
-        projectGrouping = ProjectGrouping.entries.byNameOr(projectGrouping, ProjectGrouping.ByProject),
+        // Older builds stored Kotlin-specific names; the closest RN mode keeps
+        // the intent.
+        projectGrouping =
+            ProjectGrouping.entries.byNameOr(
+                when (projectGrouping) {
+                    "ByProject" -> ProjectGrouping.Separate.name
+                    "ByRepository" -> ProjectGrouping.Repository.name
+                    else -> projectGrouping
+                },
+                ProjectGrouping.Repository,
+            ),
         threadSort = ThreadSort.entries.byNameOr(threadSort, ThreadSort.Recent),
         snoozedThreadsExpanded = snoozedThreadsExpanded,
         settledThreadsExpanded = settledThreadsExpanded,
@@ -61,6 +71,8 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         notifyCompletion = notifyCompletion,
         notifyFailures = notifyFailures,
         liveUpdatesEnabled = liveUpdatesEnabled,
+        planModeEnabled = planModeEnabled,
+        legacyThreadListEnabled = legacyThreadListEnabled,
     )
 
 /**
@@ -72,7 +84,7 @@ data class RuntimePreferences(
     val colorTheme: S5ColorTheme = S5ColorTheme.Default,
     /** Starred models in picker order. Client-local, same as the other clients. */
     val modelFavorites: List<ModelFavorite> = emptyList(),
-    val projectGrouping: ProjectGrouping = ProjectGrouping.ByProject,
+    val projectGrouping: ProjectGrouping = ProjectGrouping.Repository,
     val threadSort: ThreadSort = ThreadSort.Recent,
     /**
      * Shelf state, remembered per device.
@@ -96,6 +108,10 @@ data class RuntimePreferences(
     val notifyCompletion: Boolean = true,
     val notifyFailures: Boolean = true,
     val liveUpdatesEnabled: Boolean = true,
+    /** Off hides the Build/Plan control everywhere, matching RN's planModeEnabled. */
+    val planModeEnabled: Boolean = false,
+    /** RN's `legacyThreadListEnabled`; no legacy list exists in this client. */
+    val legacyThreadListEnabled: Boolean = false,
 )
 
 fun RuntimePreferences.toStored(): StoredPreferences =
@@ -122,6 +138,8 @@ fun RuntimePreferences.toStored(): StoredPreferences =
         notifyCompletion = notifyCompletion,
         notifyFailures = notifyFailures,
         liveUpdatesEnabled = liveUpdatesEnabled,
+        planModeEnabled = planModeEnabled,
+        legacyThreadListEnabled = legacyThreadListEnabled,
     )
 
 fun ComposerAttachment.toStored(): StoredAttachment =

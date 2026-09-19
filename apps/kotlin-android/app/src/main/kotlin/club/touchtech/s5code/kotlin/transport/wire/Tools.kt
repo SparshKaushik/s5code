@@ -137,6 +137,11 @@ data class ServerConfigDto(
 @Serializable
 data class ServerConfigSettingsDto(
     val environmentIcon: String? = null,
+    /** Base directory the add-project flow opens its folder browser on. */
+    val addProjectBaseDirectory: String = "",
+    /** Server-side auto-settle defaults; `null` days means the idle sweep is off. */
+    val sidebarAutoSettleOnMerge: Boolean = true,
+    val sidebarAutoSettleAfterDays: Int? = 3,
 )
 
 @Serializable
@@ -184,6 +189,11 @@ data class ServerCapabilitiesDto(
     val questionAttachments: Boolean = false,
     /** Absent on servers that only accept image uploads. */
     val fileAttachments: FileAttachmentsCapabilityDto? = null,
+    /**
+     * `server.updateSettings` accepts sidebar auto-settle writes. Absent on
+     * servers older than shared settings sync.
+     */
+    val threadAutoSettlement: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */
@@ -469,6 +479,39 @@ data class SourceControlRepositoryDto(
     val nameWithOwner: String = "",
     val url: String = "",
     val sshUrl: String = "",
+)
+
+/**
+ * `server.discoverSourceControl` (`SourceControlDiscoveryResult`). The
+ * add-project source list reads which providers are installed and signed in.
+ */
+@Serializable
+data class SourceControlDiscoveryResultDto(
+    val versionControlSystems: List<VcsDiscoveryItemDto> = emptyList(),
+    val sourceControlProviders: List<SourceControlProviderDiscoveryItemDto> = emptyList(),
+)
+
+@Serializable
+data class VcsDiscoveryItemDto(
+    val kind: String = "",
+    val implemented: Boolean = false,
+    val label: String = "",
+    val status: String = "",
+)
+
+@Serializable
+data class SourceControlProviderDiscoveryItemDto(
+    val kind: String = "",
+    val label: String = "",
+    val status: String = "",
+    val installHint: String = "",
+    val auth: SourceControlProviderAuthDto = SourceControlProviderAuthDto(),
+)
+
+@Serializable
+data class SourceControlProviderAuthDto(
+    val status: String = "unknown",
+    val detail: String? = null,
 )
 
 /** `sourceControl.cloneRepository` result. */

@@ -52,4 +52,6 @@ internal object WsMethods {
     const val FilesystemBrowse = "filesystem.browse"
     const val SourceControlLookupRepository = "sourceControl.lookupRepository"
     const val SourceControlCloneRepository = "sourceControl.cloneRepository"
+    const val ServerDiscoverSourceControl = "server.discoverSourceControl"
+    const val ServerUpdateSettings = "server.updateSettings"
 }
