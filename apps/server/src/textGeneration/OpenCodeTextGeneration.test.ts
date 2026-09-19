@@ -24,6 +24,7 @@ describe("OpenCodeTextGeneration", () => {
         client: mockClient,
         isRemote: false,
         databasePath: null,
+        serviceVersion: null,
       };
 
       const textGen = makeOpenCodeTextGeneration(handle, {
@@ -79,6 +80,7 @@ describe("OpenCodeTextGeneration", () => {
         client: mockClient,
         isRemote: false,
         databasePath: null,
+        serviceVersion: null,
       };
 
       const textGen = makeOpenCodeTextGeneration(handle, {
@@ -130,6 +132,7 @@ describe("OpenCodeTextGeneration", () => {
         client: mockClient,
         isRemote: false,
         databasePath: null,
+        serviceVersion: null,
       };
 
       const textGen = makeOpenCodeTextGeneration(handle, {

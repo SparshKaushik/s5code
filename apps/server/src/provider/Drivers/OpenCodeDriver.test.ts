@@ -231,6 +231,90 @@ describe("OpenCodeDriver", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("reports ready for released daemons that do not mount /api/health (v2.0.8)", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+      // The registration file is how local daemons report their version;
+      // /api/health was added after v2.0.8 shipped, so released daemons
+      // answer it with the web UI's 404 HTML while still serving the API.
+      const stateDir = `${tempDir}/state`;
+      yield* fileSystem.makeDirectory(`${stateDir}/opencode`, { recursive: true });
+      yield* fileSystem.writeFileString(
+        `${stateDir}/opencode/service.json`,
+        JSON.stringify({
+          id: "test-service",
+          version: "2.0.8",
+          url: "http://127.0.0.1:1",
+          pid: 1,
+        }),
+      );
+
+      const v208Fetch: OpenCodeFetch = (async (input, init) => {
+        const url = String(input);
+        if (url.includes("/api/health")) {
+          return new Response("<!doctype html><html></html>", {
+            status: 404,
+            headers: { "content-type": "text/html" },
+          });
+        }
+        if (url.includes("/api/location")) {
+          return new Response(JSON.stringify({ directory: tempDir }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as OpenCodeFetch;
+
+      const originalXdgStateHome = process.env.XDG_STATE_HOME;
+      process.env.XDG_STATE_HOME = stateDir;
+      try {
+        const hostHandle = yield* makeOpenCodeHost({
+          instanceId: ProviderInstanceId.make("opencode-v208-test"),
+          config: {
+            enabled: true,
+            binaryPath: "",
+            serverUrl: "",
+            serverPassword: "",
+            customModels: [],
+          },
+          defaultDirectory: tempDir,
+          stateDir: tempDir,
+          fetch: v208Fetch,
+        });
+
+        expect(hostHandle.serviceVersion).toBe("2.0.8");
+
+        const snapshot = yield* checkOpenCodeProviderStatus(
+          hostHandle,
+          {
+            enabled: true,
+            binaryPath: "",
+            serverUrl: "",
+            serverPassword: "",
+            customModels: [],
+          },
+          tempDir,
+        );
+
+        expect(snapshot.status).toBe("ready");
+        expect(snapshot.version).toBe("2.0.8");
+        expect(snapshot.message).toBeUndefined();
+      } finally {
+        if (originalXdgStateHome === undefined) {
+          delete process.env.XDG_STATE_HOME;
+        } else {
+          process.env.XDG_STATE_HOME = originalXdgStateHome;
+        }
+      }
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect(
     "falls back to ~/.opencode/bin/opencode when binaryPath is default and file exists",
     () =>

@@ -154,6 +154,7 @@ function createMockHost() {
     client,
     isRemote: false,
     databasePath: null,
+    serviceVersion: null,
   };
 
   return { handle, emit, calls };

@@ -12,6 +12,9 @@ import { OpenCodeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3too
 import * as Effect from "effect/Effect";
 // @effect-diagnostics-next-line nodeBuiltinImport:off
 import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodePath from "node:path";
 
 import { ProviderDriverError } from "./Errors.ts";
 import { isOpenCodeVersionSupported } from "./Layers/OpenCodeProvider.ts";
@@ -23,6 +26,12 @@ export interface OpenCodeHostHandle {
   readonly client: OpenCodeClientFacade;
   readonly isRemote: boolean;
   readonly databasePath: string | null;
+  /**
+   * Daemon version reported by the service registration file. Only set for the
+   * local `--service` daemon; it is the status probe's version fallback because
+   * released daemons (v2.0.8) do not mount the SDK's `/api/health` endpoint.
+   */
+  readonly serviceVersion: string | null;
 }
 
 export interface MakeOpenCodeHostOptions {
@@ -73,6 +82,7 @@ export function makeOpenCodeHost(
         client,
         isRemote: true,
         databasePath: null,
+        serviceVersion: null,
       } satisfies OpenCodeHostHandle;
     }
 
@@ -194,11 +204,33 @@ export function makeOpenCodeHost(
       fetch: resilientFetch as unknown as typeof fetch,
     }) as OpenCodeClientFacade;
 
+    // The registration file is the daemon's own version record; `health.get`
+    // alone cannot supply it on daemons that predate the endpoint.
+    const serviceVersion = (() => {
+      const registrationPath = NodePath.join(
+        process.env["XDG_STATE_HOME"] ?? NodePath.join(NodeOS.homedir(), ".local", "state"),
+        "opencode",
+        "service.json",
+      );
+      try {
+        const info: unknown = JSON.parse(NodeFS.readFileSync(registrationPath, "utf8"));
+        return info !== null &&
+          typeof info === "object" &&
+          "version" in info &&
+          typeof info.version === "string"
+          ? info.version
+          : null;
+      } catch {
+        return null;
+      }
+    })();
+
     return {
       instanceId: options.instanceId,
       client,
       isRemote: false,
       databasePath: null,
+      serviceVersion,
     } satisfies OpenCodeHostHandle;
   });
 }

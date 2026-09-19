@@ -154,6 +154,49 @@ export function openCodeCapabilitiesForModel(input: {
   });
 }
 
+function trimOptional(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+/**
+ * The daemon's `skill.list` wire shape and the SDK's `SkillInfo` type disagree:
+ * the SDK declares `location`, but OpenCode v2.0.8 emits `path` (including
+ * `/builtin/*.md` for built-in skills). Both are read here, and skills without
+ * a usable name or path are dropped — emitting one without `path` produced a
+ * `ServerProviderSkill` that failed contract decode on every connected client,
+ * killing the config stream and looping "connection failed unexpectedly".
+ */
+export function openCodeSkillsToServerProviderSkills(
+  input: ReadonlyArray<unknown>,
+): Array<ServerProviderSkill> {
+  const skills: Array<ServerProviderSkill> = [];
+  for (const skill of input) {
+    if (!skill || typeof skill !== "object") continue;
+    const entry = skill as {
+      name?: unknown;
+      description?: unknown;
+      path?: unknown;
+      location?: unknown;
+      slash?: unknown;
+    };
+    const name = trimOptional(entry.name);
+    const path = trimOptional(entry.path) ?? trimOptional(entry.location);
+    if (!name || !path) continue;
+    skills.push({
+      name,
+      description: trimOptional(entry.description) ?? name,
+      path,
+      enabled: true,
+      displayName: titleCaseSlug(name),
+      userInvocationOnly: false,
+      userInvocable: entry.slash !== false,
+    });
+  }
+  return skills.toSorted((left, right) => left.name.localeCompare(right.name));
+}
+
 const DEFAULT_OPENCODE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [
     {
@@ -267,9 +310,14 @@ export function checkOpenCodeProviderStatus(
 
     const inventory = yield* Effect.tryPromise({
       try: async () => {
-        const [healthRes, modelsRes, providersRes, agentsRes, commandsRes, skillsRes] =
+        // `health.get` hits `/api/health`, which released daemons (v2.0.8) do
+        // not mount even though they serve the rest of the API. `/api/location`
+        // is the reachability fallback and `service.json`'s registered version
+        // covers the version check for the local daemon.
+        const [healthRes, locationRes, modelsRes, providersRes, agentsRes, commandsRes, skillsRes] =
           await Promise.all([
-            hostHandle.client.health.get().catch((cause) => ({ cause, healthy: false as const })),
+            hostHandle.client.health.get().catch(() => null),
+            hostHandle.client.location.get().catch(() => null),
             hostHandle.client.model
               .list({ location: { directory: cwd } })
               .catch(() => ({ data: [] })),
@@ -287,10 +335,24 @@ export function checkOpenCodeProviderStatus(
               .catch(() => ({ data: [] })),
           ]);
 
-        const probedVersion =
+        const healthVersion =
           healthRes && "version" in healthRes && typeof healthRes.version === "string"
             ? healthRes.version
             : null;
+        const probedVersion = healthVersion ?? hostHandle.serviceVersion;
+        const served = (res: unknown) =>
+          res !== null &&
+          typeof res === "object" &&
+          Array.isArray((res as { data?: unknown }).data) &&
+          (res as { data: Array<unknown> }).data.length > 0;
+        const reachable =
+          healthRes !== null ||
+          locationRes !== null ||
+          served(modelsRes) ||
+          served(providersRes) ||
+          served(agentsRes) ||
+          served(commandsRes) ||
+          served(skillsRes);
 
         const providerNames = new Map<string, string>();
         for (const prov of (providersRes as { data?: Array<{ id?: string; name?: string }> })
@@ -333,7 +395,7 @@ export function checkOpenCodeProviderStatus(
           agents: (agentsRes as { data?: unknown[] }).data ?? [],
           commands: (commandsRes as { data?: unknown[] }).data ?? [],
           skills: (skillsRes as { data?: unknown[] }).data ?? [],
-          failed: probedVersion === null,
+          failed: !reachable,
         };
       },
       catch: (cause) =>
@@ -420,23 +482,7 @@ export function checkOpenCodeProviderStatus(
       })),
     ];
 
-    const skills: Array<ServerProviderSkill> = (
-      inventory.skills as Array<{
-        name: string;
-        description?: string;
-        location: string;
-        slash?: boolean;
-        autoinvoke?: boolean;
-      }>
-    ).map((sk) => ({
-      name: sk.name,
-      description: sk.description ?? sk.name,
-      path: sk.location,
-      enabled: true,
-      displayName: titleCaseSlug(sk.name),
-      userInvocationOnly: false,
-      userInvocable: sk.slash !== false,
-    }));
+    const skills = openCodeSkillsToServerProviderSkills(inventory.skills);
 
     return {
       ...buildServerProvider({
@@ -447,7 +493,7 @@ export function checkOpenCodeProviderStatus(
         slashCommands,
         skills,
         probe: {
-          installed: !hostHandle.isRemote || inventory.version !== null,
+          installed: !hostHandle.isRemote || !inventory.failed,
           version: inventory.version,
           status: inventory.failed ? "error" : "ready",
           auth: { status: "unknown" },
