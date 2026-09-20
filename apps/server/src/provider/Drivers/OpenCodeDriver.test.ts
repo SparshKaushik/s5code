@@ -178,6 +178,57 @@ describe("OpenCodeDriver", () => {
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("sends both reply and decision keys when replying to a permission request", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const tempDir = yield* fileSystem.makeTempDirectoryScoped();
+
+      const capturedBodies: string[] = [];
+      const captureFetch: OpenCodeFetch = (async (input, init) => {
+        const url = String(input);
+        if (
+          init?.method === "POST" &&
+          /\/api\/session\/[^/]+\/permission\/[^/]+\/reply$/.test(new URL(url).pathname) &&
+          typeof init.body === "string"
+        ) {
+          capturedBodies.push(init.body);
+          return new Response(null, { status: 204 });
+        }
+        return new Response(JSON.stringify({ data: [] }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }) as OpenCodeFetch;
+
+      const hostHandle = yield* makeOpenCodeHost({
+        instanceId: ProviderInstanceId.make("opencode-permission-test"),
+        config: {
+          enabled: true,
+          binaryPath: "",
+          serverUrl: "",
+          serverPassword: "",
+          customModels: [],
+        },
+        defaultDirectory: tempDir,
+        stateDir: tempDir,
+        fetch: captureFetch,
+      });
+
+      yield* Effect.promise(() =>
+        hostHandle.client.permission.reply({
+          sessionID: "ses_1" as never,
+          requestID: "per_1" as never,
+          reply: "always",
+        }),
+      );
+
+      expect(capturedBodies).toHaveLength(1);
+      const body = JSON.parse(capturedBodies[0]!);
+      // Dev daemons decode `reply`; released daemons (v2.0.8) decode `decision`.
+      expect(body).toMatchObject({ reply: "always", decision: "always" });
+    }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("rejects OpenCode versions prior to 2.0.0 with error status", () =>
     Effect.gen(function* () {
       const fileSystem = yield* FileSystem.FileSystem;

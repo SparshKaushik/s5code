@@ -21,6 +21,45 @@ import { isOpenCodeVersionSupported } from "./Layers/OpenCodeProvider.ts";
 
 export type OpenCodeClientFacade = ReturnType<typeof OpenCodeClient.make>;
 
+// Released daemons (v2.0.8) decode permission replies from a `decision` key,
+// while dev daemons decode `reply`. Both ignore unknown payload keys, so
+// sending both keeps the endpoint working across the rename.
+const PERMISSION_REPLY_PATH_PATTERN = /\/api\/session\/[^/]+\/permission\/[^/]+\/reply$/;
+
+function withPermissionReplyCompat(
+  fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    try {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+      if (
+        method.toUpperCase() === "POST" &&
+        PERMISSION_REPLY_PATH_PATTERN.test(new URL(url).pathname) &&
+        typeof init?.body === "string"
+      ) {
+        const body: unknown = JSON.parse(init.body);
+        if (
+          body !== null &&
+          typeof body === "object" &&
+          "reply" in body &&
+          !("decision" in body) &&
+          typeof body.reply === "string"
+        ) {
+          init = {
+            ...init,
+            body: JSON.stringify({ ...body, decision: body.reply }),
+          };
+        }
+      }
+    } catch {
+      // Malformed URLs or non-JSON bodies pass through untouched.
+    }
+    return fetchImpl(input, init);
+  }) as typeof fetch;
+}
+
 export interface OpenCodeHostHandle {
   readonly instanceId: ProviderInstanceId;
   readonly client: OpenCodeClientFacade;
@@ -74,7 +113,7 @@ export function makeOpenCodeHost(
       const client = OpenCodeClient.make({
         baseUrl: serverUrl,
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
-        ...(options.fetch ? { fetch: options.fetch } : {}),
+        fetch: withPermissionReplyCompat(options.fetch ?? globalThis.fetch),
       }) as OpenCodeClientFacade;
 
       return {
@@ -174,7 +213,7 @@ export function makeOpenCodeHost(
       input: string | URL | Request,
       init?: RequestInit,
     ) => Promise<Response> = async (input, init) => {
-      const baseFetch = options.fetch ?? globalThis.fetch;
+      const baseFetch = withPermissionReplyCompat(options.fetch ?? globalThis.fetch);
       const first = rewriteRequest(input, init, currentService);
       try {
         const res = await baseFetch(first.url, first.init);
