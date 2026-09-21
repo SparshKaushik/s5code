@@ -13,6 +13,7 @@ import {
   ProviderDriverKind,
   ProviderInstanceId,
   UsageDay,
+  type UsageSummary,
   type UsageSummaryInput,
 } from "@t3tools/contracts";
 import * as Duration from "effect/Duration";
@@ -502,9 +503,8 @@ describe("UsageService", () => {
 
         // Sources include fork providers (cursor, opencode, pi) ahead of the
         // transcript sources; the assertions below always target claude's.
-        const claudeSource = (summary: {
-          sources: ReadonlyArray<{ fingerprint: { provider: string } }>;
-        }) => summary.sources.find((source) => source.fingerprint.provider === "claude");
+        const claudeSource = (summary: UsageSummary) =>
+          summary.sources.find((source) => source.fingerprint.provider === "claude");
         const firstClaudeSource = claudeSource(first);
 
         // A moved transcript must not count the saved usage twice.
