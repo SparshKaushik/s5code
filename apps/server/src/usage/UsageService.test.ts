@@ -107,6 +107,9 @@ const serviceLayers = (input: {
         // OpenCode usage resolves its database under XDG_DATA_HOME; point it
         // at the sandbox so tests never scan the developer's real opencode.db.
         XDG_DATA_HOME: NodePath.join(input.home, "xdg-data"),
+        // pi resolves its sessions under PI_CODING_AGENT_DIR; keep scans off
+        // the developer's real ~/.pi/agent.
+        PI_CODING_AGENT_DIR: NodePath.join(input.home, "pi-agent"),
         ...input.environment,
       }),
     ),
@@ -497,11 +500,18 @@ describe("UsageService", () => {
         assert.deepStrictEqual(restored.buckets, first.buckets);
         assert.deepStrictEqual(restored.sources, first.sources);
 
+        // Sources include fork providers (cursor, opencode, pi) ahead of the
+        // transcript sources; the assertions below always target claude's.
+        const claudeSource = (summary: {
+          sources: ReadonlyArray<{ fingerprint: { provider: string } }>;
+        }) => summary.sources.find((source) => source.fingerprint.provider === "claude");
+        const firstClaudeSource = claudeSource(first);
+
         // A moved transcript must not count the saved usage twice.
         yield* Effect.promise(() => NodeFSP.writeFile(transcript + ".jsonl", content));
         const moved = yield* restarted.readSummary(WINDOW);
         assert.deepStrictEqual(moved.buckets, first.buckets);
-        assert.strictEqual(moved.sources[0]?.distinctSessions, 1);
+        assert.strictEqual(claudeSource(moved)?.distinctSessions, 1);
 
         const replacementProjects = NodePath.join(home, "replacement-projects");
         yield* Effect.promise(() => NodeFSP.mkdir(replacementProjects));
@@ -511,9 +521,12 @@ describe("UsageService", () => {
         const afterRootCleanup = yield* UsageService.make;
         const missingRoot = yield* afterRootCleanup.readSummary(WINDOW);
         assert.deepStrictEqual(missingRoot.buckets, first.buckets);
-        assert.strictEqual(missingRoot.sources[0]?.distinctSessions, 1);
-        assert.strictEqual(missingRoot.sources[0]?.status, "ok");
-        assert.deepStrictEqual(missingRoot.sources[0]?.fingerprint, first.sources[0]?.fingerprint);
+        assert.strictEqual(claudeSource(missingRoot)?.distinctSessions, 1);
+        assert.strictEqual(claudeSource(missingRoot)?.status, "ok");
+        assert.deepStrictEqual(
+          claudeSource(missingRoot)?.fingerprint,
+          firstClaudeSource?.fingerprint,
+        );
         yield* Effect.promise(async () => {
           const projects = NodePath.join(home, "claude", "projects");
           await NodeFSP.rename(replacementProjects, projects);
@@ -521,7 +534,10 @@ describe("UsageService", () => {
         });
         const recreated = yield* afterRootCleanup.readSummary(WINDOW);
         assert.strictEqual(totalOutputTokens(recreated), 12);
-        assert.deepStrictEqual(recreated.sources[0]?.fingerprint, first.sources[0]?.fingerprint);
+        assert.deepStrictEqual(
+          claudeSource(recreated)?.fingerprint,
+          firstClaudeSource?.fingerprint,
+        );
 
         const merged = mergeUsage(
           [
@@ -547,7 +563,7 @@ describe("UsageService", () => {
           sinceDay: UsageDay.make("2026-08-02"),
         });
         assert.deepStrictEqual(outsideWindow.buckets, []);
-        assert.strictEqual(outsideWindow.sources[0]?.distinctSessions, 0);
+        assert.strictEqual(claudeSource(outsideWindow)?.distinctSessions, 0);
       }).pipe(
         Effect.provide(
           serviceLayers({

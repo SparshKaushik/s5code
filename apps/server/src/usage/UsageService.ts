@@ -50,6 +50,7 @@ import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
+import { PI_AGENT_DIR_ENV } from "../provider/pi/PiLaunch.ts";
 import {
   CURSOR_USAGE_MAX_PAGES,
   CURSOR_USAGE_PAGE_SIZE,
@@ -366,10 +367,18 @@ export const make = Effect.gen(function* () {
     Effect.withSpan("UsageService.refreshRates"),
   );
 
-  const resolvePiAgentDir = (piSettings: { readonly agentDirPath: string }): string => {
+  const resolvePiAgentDir = (
+    piSettings: { readonly agentDirPath: string },
+    environment: NodeJS.ProcessEnv,
+  ): string => {
     const agentDirPath = piSettings.agentDirPath.trim();
-    return agentDirPath.length > 0
-      ? path.resolve(expandHomePath(agentDirPath))
+    if (agentDirPath.length > 0) return path.resolve(expandHomePath(agentDirPath));
+    // pi isolates per-instance state through PI_CODING_AGENT_DIR (see
+    // provider/pi/PiLaunch.ts); usage must read the same directory it launches
+    // with, or a configured instance reports empty history.
+    const environmentDir = environment[PI_AGENT_DIR_ENV]?.trim();
+    return environmentDir
+      ? path.resolve(expandHomePath(environmentDir))
       : path.join(NodeOS.homedir(), ".pi", "agent");
   };
   // A settings failure must not silently discard custom rates or transcript homes.
@@ -507,7 +516,10 @@ export const make = Effect.gen(function* () {
       }
     }
     if (settings.providers.pi) {
-      const piDir = path.join(resolvePiAgentDir(settings.providers.pi), "sessions");
+      const piDir = path.join(
+        resolvePiAgentDir(settings.providers.pi, hostEnvironment),
+        "sessions",
+      );
       const sourceKey = `pi\0${piDir}`;
       const previous = sourceCache.get(sourceKey);
       const dir = yield* fileSystem
