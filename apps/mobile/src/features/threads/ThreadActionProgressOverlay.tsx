@@ -8,10 +8,13 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { AppText as Text } from "../../components/AppText";
 import { tryOpenExternalUrl } from "../../lib/openExternalUrl";
+import { APP_BAR_HEIGHT } from "../../lib/layoutMetrics";
 import { themeColorWithAlpha } from "../../lib/mobileTheme";
 import { useUniwindTheme } from "../../lib/useUniwindTheme";
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "../../native/native-glass";
 import type { ThreadActionProgress } from "../../state/use-vcs-action-state";
+
+const OVERLAY_TOP_GAP = 8;
 
 const OVERLAY_LAYOUT_TRANSITION = LinearTransition.duration(220);
 const AnimatedGlassView = Animated.createAnimatedComponent(GlassView);
@@ -59,7 +62,7 @@ export function ThreadActionProgressOverlay(props: {
       entering={NATIVE_LIQUID_GLASS_SUPPORTED ? undefined : FadeIn.duration(200)}
       exiting={FadeOut.duration(150)}
       className="absolute inset-x-3 z-[100]"
-      style={{ top: insets.top + 48 }}
+      style={{ top: insets.top + APP_BAR_HEIGHT + OVERLAY_TOP_GAP }}
       pointerEvents="box-none"
     >
       <Pressable onPress={handlePress}>

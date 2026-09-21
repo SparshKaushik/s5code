@@ -38,6 +38,7 @@ on:
         options:
           - build
           - update
+
       version:
         description: "Existing mobile version for OTA, or new version for a build"
         required: true

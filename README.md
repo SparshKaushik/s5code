@@ -22,17 +22,25 @@ We wanted something performant, remote-ready, and truly open. If we ever go the 
 > - OpenCode: install [OpenCode](https://opencode.ai) and run `opencode auth login`
 > - Antigravity: enable it in Settings, then use **Install Antigravity** and **Sign in with Google**. No CLI is required.
 
-### Try it out (install-free)
+### Command line
 
 The easiest way to test S5 Code is to run the server in your terminal (requires Node.js 22.16+, 23.11+, or 24.10+):
 
 ```bash
-npx t3@latest
+curl -fsSL https://t3.codes/install.sh | sh
 ```
 
 This will launch S5 Code's backend on your machine as well as the local web app to control your agents.
 
-Tip: Use `npx t3@latest --help` for the full CLI reference.
+On Windows, in PowerShell:
+
+```powershell
+irm https://t3.codes/install.ps1 | iex
+```
+
+Then run `t3` to start the server and open the local web app. `t3 service install` keeps it running in the background, `t3 update` moves to a newer release, and `t3 --help` has the full reference.
+
+To try it once without installing, run `npx t3@latest` instead.
 
 ### Precompiled server binary (Linux, no Node or pnpm)
 

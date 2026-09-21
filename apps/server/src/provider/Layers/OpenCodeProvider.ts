@@ -237,6 +237,42 @@ export function isOpenCodeVersionSupported(version: string | null | undefined): 
   return false;
 }
 
+/**
+ * Daemon `command.list` entries include skill-sourced commands; those already
+ * appear under `skills`, so they are dropped here. `hints` are joined into the
+ * slash-command input hint.
+ */
+export function openCodeCommandsToServerProviderSlashCommands(
+  input: ReadonlyArray<unknown>,
+): Array<ServerProviderSlashCommand> {
+  const commands: Array<ServerProviderSlashCommand> = [COMPACT_SLASH_COMMAND];
+  const names = new Set([COMPACT_SLASH_COMMAND.name]);
+  for (const command of input) {
+    if (!command || typeof command !== "object") continue;
+    const entry = command as {
+      name?: unknown;
+      description?: unknown;
+      hints?: unknown;
+      source?: unknown;
+    };
+    const name = trimOptional(entry.name);
+    if (!name || names.has(name) || entry.source === "skill") continue;
+    names.add(name);
+    const description = trimOptional(entry.description);
+    const hint = trimOptional(
+      Array.isArray(entry.hints)
+        ? entry.hints.filter((h): h is string => typeof h === "string").join(" ")
+        : undefined,
+    );
+    commands.push({
+      name,
+      ...(description ? { description } : {}),
+      ...(hint ? { input: { hint } } : {}),
+    });
+  }
+  return commands;
+}
+
 export function makePendingOpenCodeProvider(
   config: OpenCodeSettings,
 ): Effect.Effect<ServerProviderDraft> {
@@ -474,13 +510,7 @@ export function checkOpenCodeProviderStatus(
     );
     const models = customModels;
 
-    const slashCommands: Array<ServerProviderSlashCommand> = [
-      COMPACT_SLASH_COMMAND,
-      ...(inventory.commands as Array<{ name: string; description?: string }>).map((cmd) => ({
-        name: cmd.name,
-        ...(cmd.description ? { description: cmd.description } : {}),
-      })),
-    ];
+    const slashCommands = openCodeCommandsToServerProviderSlashCommands(inventory.commands);
 
     const skills = openCodeSkillsToServerProviderSkills(inventory.skills);
 

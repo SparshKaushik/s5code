@@ -71,6 +71,10 @@ interface PendingSend {
   /** inboxID once the prompt RPC resolves; `session.inbox.delivered` can
    * outrun the response, so a send without an id adopts its delivery. */
   inboxId?: string;
+  /** `session.command` returns no inbox id and some daemons emit no
+   * `inbox.delivered` for commands, so a command send may stay unbound
+   * forever; a later prompt's delivery must not be claimed by it. */
+  isCommand?: boolean;
 }
 
 interface OpenCodeSessionContext {
@@ -552,10 +556,18 @@ export function makeOpenCodeAdapter(
                 : -1;
               // The delivery often lands before session.prompt resolves, so
               // the pending send has no id yet — take the oldest unbound one.
+              // Command sends stay unbound forever on daemons that emit no
+              // delivery for them, so a real prompt's delivery skips them
+              // unless nothing else can claim it.
               if (sendIndex === -1) {
                 sendIndex = parentContext.pendingSends.findIndex(
-                  (send) => send.inboxId === undefined,
+                  (send) => send.inboxId === undefined && send.isCommand !== true,
                 );
+                if (sendIndex === -1) {
+                  sendIndex = parentContext.pendingSends.findIndex(
+                    (send) => send.inboxId === undefined,
+                  );
+                }
               }
               if (sendIndex !== -1) {
                 const send = parentContext.pendingSends[sendIndex]!;
@@ -1221,6 +1233,35 @@ export function makeOpenCodeAdapter(
                 })
             : undefined;
 
+          const text = input.input?.trim();
+          const commandMatch = text?.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
+          // Native commands expand provider-owned templates inside the daemon.
+          // Only treat a leading slash as a command when the daemon actually
+          // registers one; unknown slash text stays a plain prompt.
+          const nativeCommand = commandMatch
+            ? yield* Effect.tryPromise({
+                try: () =>
+                  hostHandle.client.command.list({
+                    location: { directory: context.directory },
+                  }),
+                catch: () =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "command.list",
+                    detail: "command.list unavailable",
+                  }),
+              }).pipe(
+                Effect.timeout("10 seconds"),
+                Effect.map((res) =>
+                  ((res as { data?: Array<{ name?: unknown }> }).data ?? []).some(
+                    (command) => command.name === commandMatch[1],
+                  ),
+                ),
+                Effect.orElseSucceed(() => false),
+              )
+            : false;
+          send.isCommand = nativeCommand;
+
           if (opensImmediately) {
             yield* emit({
               ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
@@ -1233,29 +1274,55 @@ export function makeOpenCodeAdapter(
             send.model = modelSlug;
           }
 
-          yield* Effect.tryPromise({
-            try: async () => {
-              const promptResult = await hostHandle.client.session.prompt({
-                sessionID: context.sessionId,
-                text: input.input ?? "",
-                delivery,
-                ...(files && files.length > 0 ? { files } : {}),
-              });
-              // The inbox item id lets session.inbox.delivered attribute this
-              // send exactly, even when several sends are queued at once.
-              const inboxId = (promptResult as { id?: unknown })?.id;
-              if (typeof inboxId === "string" && inboxId.length > 0) {
-                send.inboxId = inboxId;
-              }
-            },
-            catch: (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session.prompt",
-                detail: `Failed to send turn to OpenCode: ${openCodeClientErrorMessage(cause)}`,
-                cause,
-              }),
-          });
+          if (nativeCommand && commandMatch) {
+            yield* Effect.tryPromise({
+              try: () =>
+                hostHandle.client.session.command({
+                  sessionID: context.sessionId,
+                  command: commandMatch[1]!,
+                  text: commandMatch[2] ?? "",
+                  delivery,
+                  ...(files && files.length > 0 ? { files } : {}),
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session.command",
+                  detail: `Failed to send turn to OpenCode: ${openCodeClientErrorMessage(cause)}`,
+                  cause,
+                }),
+            }).pipe(
+              // `session.command` waits for the command to finish on some
+              // daemons; cap the wait so sendTurn does not pin the RPC open
+              // for the command's whole duration. The command keeps running
+              // and its events still flow through the event stream.
+              Effect.timeout("10 seconds"),
+              Effect.catchTag("TimeoutError", () => Effect.void),
+            );
+          } else {
+            const promptResult = yield* Effect.tryPromise({
+              try: () =>
+                hostHandle.client.session.prompt({
+                  sessionID: context.sessionId,
+                  text: input.input ?? "",
+                  delivery,
+                  ...(files && files.length > 0 ? { files } : {}),
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session.prompt",
+                  detail: `Failed to send turn to OpenCode: ${openCodeClientErrorMessage(cause)}`,
+                  cause,
+                }),
+            });
+            // The inbox item id lets session.inbox.delivered attribute this
+            // send exactly, even when several sends are queued at once.
+            const inboxId = (promptResult as { id?: unknown })?.id;
+            if (typeof inboxId === "string" && inboxId.length > 0) {
+              send.inboxId = inboxId;
+            }
+          }
 
           return {
             threadId: input.threadId,

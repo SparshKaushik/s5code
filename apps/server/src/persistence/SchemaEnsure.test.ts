@@ -6,7 +6,7 @@ import { runMigrations } from "./Migrations.ts";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const provideSqlite = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-  effect.pipe(Effect.provide(NodeSqliteClient.layerMemory()));
+  effect.pipe(Effect.provide(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 const threadColumnNames = Effect.fn("threadColumnNames")(function* () {
   const sql = yield* SqlClient.SqlClient;
