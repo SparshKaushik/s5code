@@ -29,16 +29,10 @@ This document covers the unified release workflow for stable and nightly desktop
 - Emits the fork's self-hosted T3 Connect relay URL and Clerk client configuration (static values
   in the `relay_public_config` job) before packaging clients.
 - Builds the platform-independent JS (server bundle, web client, Electron main) once in the `build_bundle` job and hands it to every platform job as the `js-bundle` artifact; the platform jobs only package it, so no runner rebuilds it.
-- Builds six desktop artifacts in parallel for both channels, each as its own job (`desktop_<platform>_<arch>`, one call of `release-desktop.yml`) on hardware of its own architecture, gated only on the bundle (the Windows jobs also wait for the same-arch Linux job, whose CLI archive they embed as the WSL runtime):
-  - macOS `arm64` DMG
-  - macOS `x64` DMG
-  - Linux `x64` and `arm64` AppImage
-  - Windows `x64` and `arm64` NSIS installer
-- Builds a self-contained CLI archive per platform (`t3-<version>-<platform>-<arch>.tar.gz`, `.zip` on Windows) in the same job as that target's desktop artifact and attaches them to the GitHub Release with a `SHA256SUMS` file, on every channel, for five targets: macOS arm64, Linux x64 and arm64, Windows x64 and arm64. Every archive is built and smoke-tested on hardware of its own architecture. There is no macOS x64 archive: Node single-executables are unsupported on x64 macOS (the SEA docs list macOS as arm64 only) and the binary segfaults on start; the x64 desktop app is Electron and unaffected.
-  - The archive holds the server as a Node single-executable (`scripts/build-cli-archive.ts`), so unpacking it needs neither Node, npm, nor a compiler. It is the form T3 Code manages a runtime in: the desktop's SSH environments, the boot service, `t3 update`, and the install scripts all download and verify this archive against `SHA256SUMS`. The `curl | sh` installers are `scripts/install.sh` and `scripts/install.ps1`.
-  - The executable is built with a Node that supports `--build-sea` (`VP_NODE_VERSION=26.8.2`, kept in step with `SEA_NODE_VERSION` in `apps/server/vite.config.ts`), while the repo stays on `engines.node`.
-  - Each archive is extracted and executed on its build runner (`scripts/smoke-cli-archive.ts`) before it is uploaded.
-- Builds self-updating Linux server binaries (`s5code-server-<version>-linux-<arch>`) on matching-arch runners; the binary self-update path in `apps/server/src/cloud/selfUpdate.ts` downloads them from the release.
+- Builds the desktop app for Apple Silicon only, as one job (`desktop_mac_arm64`, a call of
+  `release-desktop.yml`) gated on the JS bundle: a macOS `arm64` DMG plus its zip and updater
+  metadata. The fork ships no Windows, Linux, or Intel desktop builds.
+- Builds self-updating Linux server binaries (`s5code-server-<version>-linux-<arch>`) on matching-arch runners; the binary self-update path in `apps/server/src/cloud/selfUpdate.ts` downloads them from the release. The fork does not ship upstream's `t3-<version>-<platform>` CLI archives or `SHA256SUMS`; the launcher-managed `boot-service` update path that consumes them is not usable on this repo's releases.
 - Reconciles the Android mobile release through EAS:
   - if the current native fingerprint matches the fingerprint recorded on the previous GitHub Release, publishes an OTA update reusing that release's mobile version
   - otherwise, injects the unified release version, builds a new Android APK locally on the runner (`eas build --local`, signed with EAS-managed remote credentials but not run on EAS's cloud queue), and attaches it as `s5code-<version>.apk` alongside a `fingerprint.txt` recording the native fingerprint it was built from
@@ -49,8 +43,8 @@ This document covers the unified release workflow for stable and nightly desktop
   - Nightly runs are always GitHub prereleases and never marked latest.
   - Automatically generated release notes are pinned to the previous tag in the same channel, so stable compares to the previous stable tag and nightly compares to the previous nightly tag.
 
-- Includes Electron auto-update metadata (for example `latest*.yml`, `nightly*.yml`, and `*.blockmap`) in release assets.
-- Signing is optional and auto-detected per platform from secrets: Apple secrets sign the DMGs. Android APKs are always signed, using the credentials EAS manages remotely for the "production" build profile (downloaded to the runner over `EXPO_TOKEN` at build time). Mobile reconciliation requires EAS configuration and fails rather than silently omitting a requested OTA or build.
+- Includes Electron auto-update metadata (`latest-mac.yml` or `nightly-mac.yml`, plus `*.blockmap`) in release assets.
+- Signing is optional and auto-detected: Apple secrets sign the DMG. Android APKs are always signed, using the credentials EAS manages remotely for the "production" build profile (downloaded to the runner over `EXPO_TOKEN` at build time). Mobile reconciliation requires EAS configuration and fails rather than silently omitting a requested OTA or build.
 
 ## Mobile release invariant
 
@@ -145,7 +139,7 @@ workflow file's header comment for the one-time Cloudflare Pages and Clerk setup
   - `make_latest` is always `false`
 - Uses the next stable patch version as the nightly base. For example, `0.0.17` produces nightlies on `0.0.18-nightly.*`.
 - Publishes Electron auto-update metadata to the dedicated `nightly` updater channel, so desktop users can opt into that track independently from stable.
-- Attaches the same `t3-<version>-<platform>` CLI archives and updater manifests as a stable release.
+- Attaches the same macOS DMG/zip, updater manifests, `s5code-server-*-linux-*` binaries, and APK as a stable release.
 - Does not commit version bumps back to `main`.
 
 ## Server self-update release invariant
@@ -154,23 +148,25 @@ Connected servers update to the client's exact version. Every released client ve
 therefore carry matching server runtime assets on the GitHub Release before users can receive
 that client.
 
-The fork ships two server runtime forms on every release:
+The fork ships one server runtime form on every release:
 
-- `t3-<version>-<platform>.tar.gz`/`.zip` CLI archives (the Node single-executables the install
-  scripts, `t3 update`, the boot service, and the desktop's SSH/WSL environments download and
-  verify against `SHA256SUMS`).
 - `s5code-server-<version>-linux-<arch>` Bun-compiled binaries for the fork's binary self-update
   path in `apps/server/src/cloud/selfUpdate.ts`.
+
+Upstream's `t3-<version>-<platform>` CLI archives and `SHA256SUMS` are intentionally not produced:
+the fork ships no npm/SEA CLI distribution, so the archive-consuming paths (`t3 update`, the
+launcher-managed `boot-service` update, `scripts/install.sh`/`install.ps1`, SSH/WSL remote
+runtimes) do not work against this repo's releases.
 
 The `release` job waits on every build job (desktop, server, mobile) before publishing, so no
 release can exist with a client version whose server assets are missing. Preserve that dependency
 when changing the release graph.
 
-For a release smoke test, download the release's `SHA256SUMS` and the matching `t3-<version>`
-archive, verify the checksum, then connect the new client to a server on the previous version and
-verify that the update action reconnects to the matching server. When the release adds database
-migrations, verify that the remote update applies them and reconnects. A failed trial must restore
-the database snapshot and restart the previous server.
+For a release smoke test, connect the new client to a server binary on the previous version and
+verify that the update action downloads `s5code-server-<version>-linux-<arch>` and reconnects to
+the matching server. When the release adds database migrations, verify that the remote update
+applies them and reconnects. A failed trial must restore the database snapshot and restart the
+previous server.
 
 ## Desktop auto-update notes
 
@@ -193,47 +189,6 @@ the database snapshot and restart the previous server.
   - `electron-updater` reads `latest-mac.yml` on stable and `nightly-mac.yml` on nightly, for both Intel and Apple Silicon.
   - The workflow merges the per-arch mac manifests into one channel-specific mac manifest before publishing the GitHub Release.
 
-### Windows payload topology and update validation
-
-Windows packages the bundled server and only its runtime-external/native
-dependency closure in `resources/server.asar`. Native modules and helper
-executables declared as unpacked by that archive must be present at the matching
-paths below `resources/server.asar.unpacked`. The Windows-native backend reads
-the archive in place through Electron. Packaged Windows builds also ship
-`resources/wsl-runtime.tar.gz` plus its SHA-256 sidecar: the Linux CLI archive
-(`t3-<version>-linux-<arch>.tar.gz`, the same arch as the Windows host) built
-by the Linux desktop job and handed to the Windows desktop build as
-`--wsl-runtime`, copied in verbatim so WSL runs the exact bytes a Linux user
-downloads. WSL verifies and extracts that archive
-into `~/.t3/wsl-runtime/sha256-<archive-digest>` inside the selected distro,
-then reuses it for later launches of the same update.
-
-The artifact builder rejects a Windows package when any of these invariants
-break:
-
-- `resources/server.asar` is absent or does not contain the server entry.
-- Any file marked unpacked in the ASAR header is absent from
-  `resources/server.asar.unpacked`.
-- On same-architecture Windows builds, the packaged primary cannot load the fff
-  native library from inside `server.asar` through its `.unpacked` sibling.
-- The isolated, extracted sidecar cannot load the server entry with plain Node.
-- A Windows build given `--wsl-runtime` omits the WSL archive or SHA-256
-  sidecar, or the sidecar digest does not match the emitted archive.
-- The emitted WSL archive is not a Linux CLI release archive: it must unpack to
-  a single `t3-<version>-linux-<arch>` directory holding `t3`, `client/`, and
-  `node_modules/` with the Linux node-pty binary, and must not carry a loose
-  server bundle (`bin.mjs`).
-- The external Windows resource monitor is absent.
-- The unpacked Windows application contains more than 80 files.
-
-Cross-architecture Windows builds retain every structural and extracted-sidecar
-check, but skip executing the target Electron binary. A same-architecture build
-for each release target must exercise the primary native-load probe.
-
-NSIS differential packaging remains enabled. A sidecar layout transition can
-produce a larger one-time download; subsequent small releases retain their
-blockmaps, with a 60 MB maximum for a representative sidecar-to-sidecar update.
-
 ## 1) Release validation and unsigned builds
 
 There is no dry-run tag path. Pushing any accepted non-nightly tag, including
@@ -243,7 +198,7 @@ not push a test tag to validate the workflow.
 The workflow has no non-publishing `workflow_dispatch` mode. Use normal CI or local quality gates to
 validate checks and builds without shipping. To exercise the complete release graph at lower stable
 risk, manually dispatch `channel=nightly`; this still publishes a real GitHub
-prerelease with desktop updater metadata, CLI archives, and server binaries, but it does not touch
+prerelease with desktop updater metadata and server binaries, but it does not touch
 the `latest` updater channel. Only run it when a real nightly release is acceptable.
 
 Manual `channel=stable` with a version input is also a real stable-channel release. Omitting signing
@@ -297,33 +252,7 @@ Notes:
 - The workflow decodes `MACOS_PROVISIONING_PROFILE`, validates it with `security cms`, and passes it
   to the desktop packager.
 
-## 3) Azure Trusted Signing setup (Windows)
-
-Required secrets used by the workflow:
-
-- `AZURE_TENANT_ID`
-- `AZURE_CLIENT_ID`
-- `AZURE_CLIENT_SECRET`
-- `AZURE_TRUSTED_SIGNING_ENDPOINT`
-- `AZURE_TRUSTED_SIGNING_ACCOUNT_NAME`
-- `AZURE_TRUSTED_SIGNING_CERTIFICATE_PROFILE_NAME`
-- `AZURE_TRUSTED_SIGNING_PUBLISHER_NAME`
-
-Checklist:
-
-1. Create Azure Trusted Signing account and certificate profile.
-2. Record ATS values:
-   - Endpoint
-   - Account name
-   - Certificate profile name
-   - Publisher name
-3. Create/choose an Entra app registration (service principal).
-4. Grant service principal permissions required by Trusted Signing.
-5. Create a client secret for the service principal.
-6. Add Azure secrets listed above in GitHub Actions secrets.
-7. Re-run a tag release and confirm Windows installer is signed.
-
-## 4) Ongoing release checklist
+## 3) Ongoing release checklist
 
 1. Ensure `main` is green in CI.
 2. Bump app version as needed.
@@ -337,14 +266,12 @@ Checklist:
    - release job uploads expected files
 6. Smoke test downloaded artifacts.
 
-## 5) Troubleshooting
+## 4) Troubleshooting
 
 - macOS build unsigned when expected signed:
   - Check all Apple secrets plus `APPLE_TEAM_ID` are populated and non-empty.
   - Confirm the provisioning profile belongs to `APPLE_TEAM_ID.club.touchtech.s5code` and includes
     Associated Domains.
-- Windows build unsigned when expected signed:
-  - Check all Azure ATS and auth secrets are populated and non-empty.
 - Build fails with signing error:
   - Retry with secrets removed to confirm unsigned path still works.
-  - Re-check certificate/profile names and tenant/client credentials.
+  - Re-check certificate/profile names.
