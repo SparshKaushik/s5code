@@ -5,8 +5,7 @@
  * speak to one vendor under names LiteLLM already publishes, which is the table
  * `ccusage` prices against and the one that keeps those numbers stable. pi and
  * OpenCode speak to gateways whose names only models.dev knows,
- * provider-scoped. Cursor reports API-equivalent cost on each dashboard
- * event. The
+ * provider-scoped. The
  * {@link UsagePricer} picks per provider and applies the user's tags over both.
  *
  * Everything here is pure: fetching and caching the tables lives in

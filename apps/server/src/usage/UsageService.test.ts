@@ -501,7 +501,7 @@ describe("UsageService", () => {
         assert.deepStrictEqual(restored.buckets, first.buckets);
         assert.deepStrictEqual(restored.sources, first.sources);
 
-        // Sources include fork providers (cursor, opencode, pi) ahead of the
+        // Sources include fork providers (opencode, pi) ahead of the
         // transcript sources; the assertions below always target claude's.
         const claudeSource = (summary: UsageSummary) =>
           summary.sources.find((source) => source.fingerprint.provider === "claude");

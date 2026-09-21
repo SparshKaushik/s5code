@@ -236,8 +236,7 @@ export function decodeScanCache(document: unknown): ScanCache {
       entry.p !== "codex" &&
       entry.p !== "grok" &&
       entry.p !== "opencode" &&
-      entry.p !== "pi" &&
-      entry.p !== "cursor"
+      entry.p !== "pi"
     )
       continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;

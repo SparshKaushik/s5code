@@ -35,14 +35,7 @@ export const USAGE_CONTRACT_VERSION = 8 as const;
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 6 as const;
 
-export const UsageProviderKind = Schema.Literals([
-  "claude",
-  "codex",
-  "cursor",
-  "grok",
-  "opencode",
-  "pi",
-]);
+export const UsageProviderKind = Schema.Literals(["claude", "codex", "grok", "opencode", "pi"]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -194,11 +187,6 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
-  /**
-   * Stable source identity. Local transcript sources carry a filesystem path;
-   * account-wide APIs carry a non-secret account identifier such as
-   * `cursor-account:<hash>`.
-   */
   resolvedHomePath: TrimmedNonEmptyString,
   /**
    * Filesystem identity of a transcript directory, as `device:inode`. Empty
