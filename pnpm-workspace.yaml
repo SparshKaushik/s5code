@@ -54,8 +54,8 @@ catalog:
   lightningcss: 1.33.0
   tailwindcss: 4.3.3
   typescript: 7.0.2
-  vite: npm:@voidzero-dev/vite-plus-core@0.3.0
-  vite-plus: 0.3.0
+  vite: npm:@voidzero-dev/vite-plus-core@0.3.3
+  vite-plus: 0.3.3
   yaml: ^2.9.0
 
 minimumReleaseAgeExclude:
@@ -110,6 +110,8 @@ minimumReleaseAgeExclude:
   - "@opencode-ai/server@0.0.0-dev-19272"
   - "@opencode-ai/simulation@0.0.0-dev-19272"
   - "@opencode-ai/util@0.0.0-dev-19272"
+  - "@shadcn/lint@0.1.5"
+  - cn@0.3.2
 
 overrides:
   # Earlier React Navigation declarations create a circular type alias in TypeScript 7.
