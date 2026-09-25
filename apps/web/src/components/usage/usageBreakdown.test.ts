@@ -6,6 +6,11 @@ import { sortModelsByTokens } from "./usageBreakdown";
 const model = (name: string, totalTokens: number, costUsd: number): ModelTotals => ({
   model: name,
   provider: "codex",
+  apiProvider: "codex",
+  pricedAs: null,
+  unpriced: false,
+  tagged: false,
+  inputTokensEstimated: false,
   costUsd,
   totalTokens,
   records: 1,
