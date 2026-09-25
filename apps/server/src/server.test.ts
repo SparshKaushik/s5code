@@ -1942,14 +1942,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         headers: { "accept-encoding": "gzip" },
       });
       assert.equal(compressed.headers["content-encoding"], "gzip");
-      assert.equal(compressed.headers.vary, "Accept-Encoding");
+      assert.equal(compressed.headers.vary, "Accept-Encoding, Origin");
       assert.equal(yield* compressed.text, largeAsset);
       const compressedHead = yield* HttpClient.head("/assets/large-aBcD9876.js", {
         headers: { "accept-encoding": "gzip" },
       });
       assert.equal(compressedHead.status, 200);
       assert.equal(compressedHead.headers["content-encoding"], "gzip");
-      assert.equal(compressedHead.headers.vary, "Accept-Encoding");
+      assert.equal(compressedHead.headers.vary, "Accept-Encoding, Origin");
       assert.equal(compressedHead.headers.etag, compressed.headers.etag);
       assert.equal(compressedHead.headers["content-length"], compressed.headers["content-length"]);
       assert.equal(yield* compressedHead.text, "");
@@ -1957,7 +1957,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
         headers: { "accept-encoding": "identity", "if-none-match": compressed.headers.etag! },
       });
       assert.equal(unchanged.status, 304);
-      assert.equal(unchanged.headers.vary, "Accept-Encoding");
+      assert.equal(unchanged.headers.vary, "Accept-Encoding, Origin");
       assert.equal(yield* unchanged.text, "");
 
       for (const resource of [
@@ -2250,7 +2250,7 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(response.status, 200);
       assert.equal(response.headers["content-encoding"], "gzip");
-      assert.equal(response.headers.vary, "Accept-Encoding");
+      assert.equal(response.headers.vary, "Accept-Encoding, Origin");
       assert.deepEqual(body, descriptor);
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );

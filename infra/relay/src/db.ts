@@ -62,7 +62,7 @@ function parsePostgresUrl(rawUrl: string): PublicOrigin {
 }
 
 export const RelayHyperdrive = Effect.gen(function* () {
-  const databaseUrl = yield* Config.nonEmptyString("DATABASE_URL");
+  const databaseUrl = yield* Config.NonEmptyString("DATABASE_URL");
   return yield* Cloudflare.Hyperdrive.Connection("RelayHyperdrive", {
     origin: parsePostgresUrl(databaseUrl),
     caching: {

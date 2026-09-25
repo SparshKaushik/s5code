@@ -152,9 +152,9 @@ export const ApiLive = Api.make(
         (value) => Redacted.value(value).trim().length > 0,
       ),
     );
-    const fcmProjectId = yield* Config.string("FCM_PROJECT_ID").pipe(Config.option);
-    const fcmClientEmail = yield* Config.string("FCM_CLIENT_EMAIL").pipe(Config.option);
-    const fcmPrivateKey = yield* Config.redacted("FCM_PRIVATE_KEY").pipe(Config.option);
+    const fcmProjectId = yield* Config.String("FCM_PROJECT_ID").pipe(Config.option);
+    const fcmClientEmail = yield* Config.String("FCM_CLIENT_EMAIL").pipe(Config.option);
+    const fcmPrivateKey = yield* Config.Redacted("FCM_PRIVATE_KEY").pipe(Config.option);
     const fcmServiceAccount =
       fcmServiceAccountDirect ??
       (Option.isSome(fcmProjectId) && Option.isSome(fcmClientEmail) && Option.isSome(fcmPrivateKey)

@@ -32,12 +32,12 @@ export interface ApnsCredentials {
 }
 
 export const resolveApnsCredentials = Effect.gen(function* () {
-  const apnsEnabled = yield* Config.boolean("APNS_ENABLED").pipe(Config.withDefault(true));
+  const apnsEnabled = yield* Config.Boolean("APNS_ENABLED").pipe(Config.withDefault(true));
   if (!apnsEnabled) return null;
 
   const apnsEnvironmentRaw = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_ENVIRONMENT").pipe(Config.option),
+      yield* Config.String("APNS_ENVIRONMENT").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
@@ -47,25 +47,25 @@ export const resolveApnsCredentials = Effect.gen(function* () {
       : undefined;
   const apnsTeamId = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_TEAM_ID").pipe(Config.option),
+      yield* Config.String("APNS_TEAM_ID").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
   const apnsKeyId = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_KEY_ID").pipe(Config.option),
+      yield* Config.String("APNS_KEY_ID").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
   const apnsBundleId = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_BUNDLE_ID").pipe(Config.option),
+      yield* Config.String("APNS_BUNDLE_ID").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
   const apnsPrivateKey = Option.getOrUndefined(
     Option.filter(
-      yield* Config.redacted("APNS_PRIVATE_KEY").pipe(Config.option),
+      yield* Config.Redacted("APNS_PRIVATE_KEY").pipe(Config.option),
       (value) => Redacted.value(value).trim().length > 0,
     ),
   );
