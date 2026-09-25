@@ -70,6 +70,7 @@ import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_MigrateOpenCode2ToOpenCode.ts";
 import Migration0053 from "./Migrations/053_ProjectionThreadTitleState.ts";
 import Migration0054 from "./Migrations/054_PullRequestFilesViewed.ts";
+import Migration0055 from "./Migrations/055_ProjectionThreadsAutoSettleDisabledAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -136,6 +137,7 @@ const migrationEntries = [
   [52, "MigrateOpenCode2ToOpenCode", Migration0052],
   [53, "ProjectionThreadTitleState", Migration0053],
   [54, "PullRequestFilesViewed", Migration0054],
+  [55, "ProjectionThreadsAutoSettleDisabledAt", Migration0055],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -167,15 +169,16 @@ export interface RunMigrationsOptions {
  * - Earlier builds also had migration 35 recorded as RewindEntries.
  * - The fork inserted MigrateOpenCode2ToOpenCode at id 52, so upstream's 52/53
  *   (ProjectionThreadTitleState, PullRequestFilesViewed) were renumbered to
- *   53/54. Databases adopted from upstream still record the upstream ids.
+ *   53/54, and upstream's 54 (ProjectionThreadsAutoSettleDisabledAt) to 55.
+ *   Databases adopted from upstream still record the upstream ids.
  *
  * If a database has RewindEntries in effect_sql_migrations, the migrator would
  * see latestMigrationId as 41 and skip future migrations (such as 41).
- * If a database records upstream's 52/53 ids, the migrator would skip the
- * renumbered 53 and run 54 under the wrong recorded id.
+ * If a database records upstream's 52/53/54 ids, the migrator would skip the
+ * renumbered migrations or run them under the wrong recorded id.
  *
  * This recovery aligns the migration table back with upstream (38, 39, 40),
- * remaps upstream-numbered 52/53 rows to the fork's 53/54, and drops the
+ * remaps upstream-numbered 52/53/54 rows to the fork's 53/54/55, and drops the
  * discontinued rewind_entries table and its indexes.
  */
 const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* () {
@@ -198,13 +201,21 @@ const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* (
   // Remap highest-first so the updates cannot collide on the unique id.
   const hasUpstreamNumbering =
     nameById.get(52) === "ProjectionThreadTitleState" ||
-    nameById.get(53) === "PullRequestFilesViewed";
+    nameById.get(53) === "PullRequestFilesViewed" ||
+    nameById.get(54) === "ProjectionThreadsAutoSettleDisabledAt";
   if (!hasRewindEntries && !hasUpstreamNumbering) {
     return;
   }
 
   yield* sql.withTransaction(
     Effect.gen(function* () {
+      if (nameById.get(54) === "ProjectionThreadsAutoSettleDisabledAt") {
+        yield* sql`
+          UPDATE effect_sql_migrations
+          SET migration_id = 55
+          WHERE migration_id = 54 AND name = 'ProjectionThreadsAutoSettleDisabledAt'
+        `;
+      }
       if (nameById.get(53) === "PullRequestFilesViewed") {
         yield* sql`
           UPDATE effect_sql_migrations

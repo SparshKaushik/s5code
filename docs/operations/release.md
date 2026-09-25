@@ -116,7 +116,13 @@ Update both places together if the relay or Clerk instance moves.
 
 The deploy workflow reads Cloudflare/Neon/Clerk credentials from the `production` GitHub Actions
 environment. See `.github/workflows/deploy-relay.yml` and `infra/relay/scripts/deploy.ts` for the
-exact variable and secret names.
+exact variable and secret names. `RELAY_TUNNEL_CLEANUP_MODE` (`off`, `dry-run`, or `enabled`)
+defaults to `off` when unset.
+
+Alchemy does not redeploy the Worker when only a Config value read in its Init changes
+([alchemy-run/alchemy#1831](https://github.com/alchemy-run/alchemy/issues/1831)), so after changing
+one of these variables run the **Deploy T3 Connect relay** workflow manually from `main` with
+**force** checked.
 
 ## Hosted web app deployment
 
