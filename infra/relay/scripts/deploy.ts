@@ -7,10 +7,13 @@ import * as Apply from "alchemy/Apply";
 import { ArtifactStore, createArtifactStore, provideFreshArtifactStore } from "alchemy/Artifacts";
 import { AuthProviders } from "alchemy/Auth/AuthProvider";
 import { CredentialsStoreLive } from "alchemy/Auth/Credentials";
-import { ProfileLive } from "alchemy/Auth/Profile";
+import { ProfileStoreLive } from "alchemy/Auth/Profile";
 import * as Cloudflare from "alchemy/Cloudflare";
-import { Cli } from "alchemy/Cli/Cli";
 import { LoggingCli } from "alchemy/Cli/LoggingCli";
+import { layerNonInteractive } from "alchemy/Interaction";
+import { Cli } from "alchemy/Report";
+import { plainCliFormatter } from "alchemy/Cli/PlainCliFormatter";
+import * as CliOutput from "effect/unstable/cli/CliOutput";
 import * as Plan from "alchemy/Plan";
 import * as Stage from "alchemy/Stage";
 import * as State from "alchemy/State/State";
@@ -259,11 +262,18 @@ const deployBaseServices = Layer.mergeAll(
   Layer.succeed(AuthProviders, {}),
   Layer.succeed(ArtifactStore, createArtifactStore()),
   Layer.provideMerge(AlchemyContextLive, PlatformServices),
-  Layer.provide(ProfileLive, PlatformServices),
+  Layer.provide(ProfileStoreLive, PlatformServices),
   Layer.provide(CredentialsStoreLive, PlatformServices),
   FetchHttpClient.layer,
   TelemetryLive,
-  LoggingCli,
+  Layer.provide(
+    Layer.mergeAll(
+      LoggingCli,
+      CliOutput.layer(plainCliFormatter({ columns: 80 })),
+      layerNonInteractive(),
+    ),
+    PlatformServices,
+  ),
 );
 const deployServices = deployBaseServices;
 
