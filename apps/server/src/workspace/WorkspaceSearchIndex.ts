@@ -1,13 +1,15 @@
-import {
-  type DirItem,
-  type DirSearchResult,
-  type FileItem,
-  FileFinder,
-  type GrepCursor,
-  type MixedItem,
-  type MixedSearchResult,
-  type Result,
-  type SearchResult,
+import * as NodeModule from "node:module";
+
+import type {
+  DirItem,
+  DirSearchResult,
+  FileItem,
+  FileFinder as FileFinderType,
+  GrepCursor,
+  MixedItem,
+  MixedSearchResult,
+  Result,
+  SearchResult,
 } from "@ff-labs/fff-node";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
@@ -25,12 +27,24 @@ import type {
 } from "@t3tools/contracts";
 import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 
-// Fork note: upstream loads fff-node through createRequire because its Node
-// single-executable cannot resolve a static import of an external package.
-// Our server binary is `bun build --compile`: bun compiles this static import
-// into the bundle, and a runtime require would instead die inside the bunfs.
-// The embedded libfff_c asset is extracted and pointed at through
-// T3CODE_FFF_NATIVE_LIB_PATH by workspace/FffNativeLibrary.ts.
+// fff-node stays external to the CLI bundle because it dlopens a native
+// library. A static `import` of an external package is a hard error inside a
+// Node single-executable (only built-ins resolve there), so load it through
+// `require`, which reads from the real filesystem in every runtime.
+//
+// The `bun build --compile` server binary is the exception: nothing outside the
+// binary exists there, so `require` cannot see the package at all. The
+// `import()` fallback is what the bun bundler traces to inline fff-node (and
+// its ffi-rs binding) into the binary; the native library itself is still
+// extracted to disk by workspace/FffNativeLibrary.ts.
+const requireForFff = NodeModule.createRequire(import.meta.url);
+const loadFffNode = async (): Promise<typeof import("@ff-labs/fff-node")> => {
+  try {
+    return requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
+  } catch {
+    return import("@ff-labs/fff-node");
+  }
+};
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
@@ -302,6 +316,15 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
   cwd: string,
   variant: WorkspaceSearchIndexVariant,
 ) {
+  const { FileFinder } = yield* Effect.tryPromise({
+    try: () => loadFffNode(),
+    catch: (cause) =>
+      new WorkspaceSearchIndexCreateFailed({
+        cwd,
+        reason: "@ff-labs/fff-node failed to load.",
+        cause,
+      }),
+  });
   const result = yield* Effect.try({
     try: () =>
       FileFinder.create({
@@ -331,7 +354,7 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
 
 const waitForIndexReady = Effect.fn("WorkspaceSearchIndex.waitForIndexReady")(function* <E>(
   cwd: string,
-  finder: FileFinder,
+  finder: FileFinderType,
   onFailure: (input: { readonly reason: string; readonly cause?: unknown }) => E,
 ): Effect.fn.Return<void, E | WorkspaceSearchIndexScanTimedOut> {
   const result = yield* Effect.tryPromise({
