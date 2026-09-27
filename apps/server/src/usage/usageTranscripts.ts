@@ -22,6 +22,11 @@ export interface UsageRecord {
    * single vendor.
    */
   readonly apiProvider: string;
+  /**
+   * Rate-table key when the provider's display name carries tiers the table
+   * does not know, such as Cursor's `claude-opus-5-5-high`. Defaults to `model`.
+   */
+  readonly rateModel?: string;
   readonly sessionId: string;
   readonly totals: UsageTokenTotals;
   /**
@@ -31,6 +36,11 @@ export interface UsageRecord {
    */
   readonly inputTokensEstimated: boolean;
   readonly reportedCostUsd: number | null;
+  /**
+   * Whether the request ran in fast mode, which bills at a model-specific
+   * multiple of the standard rate. Only Claude Code records this.
+   */
+  readonly fast: boolean;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.
@@ -168,6 +178,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     },
     inputTokensEstimated: false,
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
+    fast: usageRecord["speed"] === "fast",
     dedupeKey,
   };
 }
@@ -329,7 +340,9 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     // Codex does not report cost in the rollout.
     inputTokensEstimated: false,
     reportedCostUsd: null,
-    // Rollout files are unique per session, so events need no global dedup.
+    fast: false,
+    // Events surviving the fork-copy suppression above are unique to this
+    // rollout, so they need no global dedup.
     dedupeKey: null,
   };
 }
@@ -586,6 +599,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
         totals: grokTotalsToUsage(topLevel),
         inputTokensEstimated: false,
         reportedCostUsd: grokCostTicksToUsd(topLevel.costUsdTicks),
+        fast: false,
         // No prompt id means we cannot tell two same-second updates apart.
         dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:grok`,
       },
@@ -626,6 +640,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
       totals,
       inputTokensEstimated: false,
       reportedCostUsd,
+      fast: false,
       dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:${entry.model}`,
     });
   }

@@ -1,15 +1,14 @@
 /**
  * Usage reporting contract.
  *
- * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
- * `~/.grok/sessions/**\/updates.jsonl`, `~/.pi/agent/sessions/**\/*.jsonl`) plus
- * OpenCode's `opencode.db` and Cursor's account-wide dashboard API rather than
- * relying on T3 Code's own orchestration projections, so usage stays complete
- * even for turns that were never driven through T3 Code. This mirrors the
- * approach `ccusage` takes.
+ * Each environment scans native session files and databases — the provider
+ * CLIs' own transcripts plus OpenCode's `opencode.db`, Cursor's dashboard API,
+ * and pi's session files — including work driven outside T3 Code, so usage
+ * stays complete for turns that were never orchestrated here. This mirrors
+ * the approach `ccusage` takes. Source status describes gaps in local
+ * coverage.
  *
- * Environments return pre-aggregated `(day, hourStart?, provider, model)`
+ * Environments return pre-aggregated `(day, hourStart?, provider, model, sourcePath?)`
  * buckets. Raw transcript records never cross the wire.
  *
  * @module usage
@@ -24,18 +23,27 @@ import { NonNegativeInt, TrimmedNonEmptyString, TrimmedString } from "./baseSche
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  */
-export const USAGE_CONTRACT_VERSION = 8 as const;
+export const USAGE_CONTRACT_VERSION = 9 as const;
 
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * Versions back to {@link USAGE_MERGE_COMPATIBLE_SINCE} remain valid, so
- * mixed-version environments keep those totals instead of treating every older
- * server as stale.
+ * v4-v6 buckets (Claude/Codex and the upstream provider additions) still
+ * decode because `apiProvider` has a decoding default, so mixed-version
+ * environments keep those totals instead of treating the older server as
+ * stale.
  */
-export const USAGE_MERGE_COMPATIBLE_SINCE = 6 as const;
+export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
-export const UsageProviderKind = Schema.Literals(["claude", "codex", "grok", "opencode", "pi"]);
+export const UsageProviderKind = Schema.Literals([
+  "claude",
+  "codex",
+  "grok",
+  "cursor",
+  "opencode",
+  "antigravity",
+  "pi",
+]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
 /**
@@ -139,12 +147,15 @@ export const UsageBucket = Schema.Struct({
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
   /**
-   * The upstream API provider, when the usage source names one. pi routes through
-   * gateways, so this is what separates `claude-opus-5` served by a reseller
-   * from the same name served by Anthropic. Empty for providers that speak to a
-   * single vendor.
+   * The upstream API provider, when the usage source names one. pi and other
+   * gateway-driven providers reuse model names across resellers, so this is
+   * what separates `claude-opus-5` sold by a reseller from the same name
+   * served by Anthropic. Empty for providers that speak to a single vendor.
+   * Optional at the wire level so pre-fork (upstream) buckets still decode.
    */
-  apiProvider: Schema.String,
+  apiProvider: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Source directory, so overlapping multi-home environments merge once per source. */
+  sourcePath: Schema.optional(TrimmedNonEmptyString),
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
   /**
@@ -220,6 +231,8 @@ export const UsageSource = Schema.Struct({
    */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
+  /** An action the client can offer to make this source available. */
+  action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
 });
 export type UsageSource = typeof UsageSource.Type;
 
