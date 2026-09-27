@@ -224,7 +224,7 @@ const DEFAULT_OPENCODE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabi
   ],
 });
 
-export const MINIMUM_OPENCODE_VERSION = "2.0.0";
+const MINIMUM_OPENCODE_VERSION = "2.0.0";
 
 export function isOpenCodeVersionSupported(version: string | null | undefined): boolean {
   if (!version) return false;

@@ -34,6 +34,9 @@ export const CLI_RUNTIME_EXTERNAL_PREFIXES = [
   "@clerk/electron-passkeys",
   "node-gyp-build",
   "node-addon-api",
+  // Runtime helper of node-gyp-build-optional-packages (still in the graph via
+  // msgpackr-extract). An external package's own deps must stay external too.
+  "detect-libc",
   // ws's optional accelerators. Nothing in this repo declares them, so they are
   // not in the staged production install and the packaged app does not ship
   // them either way -- ws wraps the require in try/catch and falls back to its

@@ -71,12 +71,6 @@ export interface ServerProviderPresentation {
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
 
-export function nonEmptyTrimmed(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
 export function isCommandMissingCause(error: unknown): boolean {
   if (isProviderCommandNotFoundError(error)) return true;
   return error instanceof PlatformError.PlatformError && error.reason._tag === "NotFound";
