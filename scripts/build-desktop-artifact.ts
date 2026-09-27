@@ -3660,6 +3660,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
     private: true,
     packageManager: rootPackageJson.packageManager,
     description: "S5 Code desktop build",
+    // Required by the .deb control file.
+    homepage: "https://app.s5code.touchtech.club",
     author: "T3 Tools",
     main: "apps/desktop/dist-electron/boot.cjs",
     build: yield* createBuildConfig(
