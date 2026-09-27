@@ -277,6 +277,7 @@ fun threadSummaryFrom(
         createdAtMillis = parseInstant(shell.createdAt) ?: 0,
         unsettledAtMillis = parseInstant(shell.unsettledAt) ?: 0,
         pinned = shell.pinnedAt != null,
+        autoSettleDisabled = shell.autoSettleDisabledAt != null,
         pinOrderKey = shell.pinOrderKey,
         activeOrderKey = shell.activeOrderKey,
         snoozedUntilLabel =
@@ -437,6 +438,30 @@ fun threadDetailFrom(
                             )
                         )
                     }
+
+                // A provider's thinking trace arrives as role-"reasoning" when
+                // the client opted in (`reasoningMessages` on the read). Empty
+                // traces are skipped like empty assistant text: a "Thought" row
+                // with nothing behind the disclosure is a broken promise.
+                "reasoning" ->
+                    if (message.text.isNotBlank()) {
+                        add(
+                            Sortable(
+                                message.createdAt,
+                                FeedEntry.Reasoning(
+                                    id = message.id,
+                                    text = message.text,
+                                    thought = true,
+                                    turnId = message.turnId,
+                                    atMillis = parseInstant(message.createdAt) ?: 0L,
+                                    endedAtMillis =
+                                        parseInstant(message.updatedAt)
+                                            ?: parseInstant(message.createdAt)
+                                            ?: 0L,
+                                ),
+                            )
+                        )
+                    }
             }
         }
 
@@ -457,6 +482,12 @@ fun threadDetailFrom(
             // message that requested it.
             .sortedBy { parseInstant(it.createdAt) ?: 0L }
             .map { it.entry }
+            // Adjacent thoughts from the same turn collapse into one row, as
+            // RN's `groupConsecutiveReasoningMessages` does: providers emit a
+            // trace per reasoning block, and a tool call's start and end
+            // bracketing a thought would otherwise strand two cards where RN
+            // shows one.
+            .let(::groupConsecutiveThoughts)
 
     return ThreadDetail(
         summary = summary,
@@ -677,6 +708,39 @@ private fun collapseToolLifecycle(sortedActivities: List<ThreadActivityDto>): Li
         collapsed += Sortable(activity.createdAt, entry)
     }
     return collapsed
+}
+
+/**
+ * `groupConsecutiveReasoningMessages`: adjacent role-`reasoning` rows from the
+ * same turn merge into the first one, which carries the rest in `extraParts`
+ * and reads "Thought (×N)". Progress ticks (`thought == false`) never merge —
+ * they fold beside tools, not into a thought card.
+ */
+private fun groupConsecutiveThoughts(feed: List<FeedEntry>): List<FeedEntry> {
+    val result = mutableListOf<FeedEntry>()
+    var index = 0
+    while (index < feed.size) {
+        val entry = feed[index]
+        val reasoning = entry as? FeedEntry.Reasoning
+        if (reasoning == null || !reasoning.thought || reasoning.turnId == null) {
+            result += entry
+            index += 1
+            continue
+        }
+        val parts = mutableListOf(reasoning.text)
+        var end = index
+        while (end + 1 < feed.size) {
+            val next = feed[end + 1] as? FeedEntry.Reasoning
+            if (next == null || !next.thought || next.turnId != reasoning.turnId) break
+            parts += next.text
+            end += 1
+        }
+        result +=
+            if (parts.size == 1) reasoning
+            else reasoning.copy(extraParts = parts.drop(1))
+        index = end + 1
+    }
+    return result
 }
 
 /**
@@ -1177,6 +1241,11 @@ private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
                     atMillis = at,
                 )
             }
+
+        // The compaction marker is a quiet history row; the fold rules know it
+        // by flag rather than by wording, matching `isContextCompactionActivityGroup`.
+        "context-compaction" ->
+            FeedEntry.Note(activity.id, activity.summary, turnId, at, compaction = true)
 
         "task.started",
         "task.completed",
@@ -1787,6 +1856,7 @@ private fun ThreadDto.asShell(): ThreadShellDto =
         pinOrderKey = pinOrderKey,
         titleRegeneration = titleRegeneration,
         session = session,
+        autoSettleDisabledAt = autoSettleDisabledAt,
         latestUserMessageAt = messages.lastOrNull { it.role == "user" }?.createdAt,
         hasPendingApprovals = pendingApprovalOf(activities.sortedWith(activityOrder)) != null,
         hasPendingUserInput = pendingUserInputOf(activities.sortedWith(activityOrder)) != null,

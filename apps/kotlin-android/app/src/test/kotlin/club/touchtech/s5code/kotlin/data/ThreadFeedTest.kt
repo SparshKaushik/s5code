@@ -305,6 +305,78 @@ class ThreadFeedTest {
     }
 
     @Test
+    fun `a reasoning message is a thought row, not a dropped role`() {
+        // With the `reasoningMessages` opt-in a provider's thinking trace
+        // arrives as its own role; before this it fell out of the `when` and
+        // the transcript silently lost it.
+        val feed =
+            feedOf(
+                messages =
+                    listOf(
+                        MessageDto(
+                            id = "r-1",
+                            role = "reasoning",
+                            text = "Considering the options.",
+                            turnId = "turn-1",
+                            createdAt = at(0),
+                            updatedAt = at(1),
+                        )
+                    ),
+            )
+        val thought = feed.single() as FeedEntry.Reasoning
+        assertTrue(thought.thought)
+        assertEquals("turn-1", thought.turnId)
+        assertEquals(start.plusSeconds(1).toEpochMilli(), thought.endedAtMillis)
+    }
+
+    @Test
+    fun `consecutive thoughts from one turn group into a single row`() {
+        val feed =
+            feedOf(
+                messages =
+                    listOf(
+                        MessageDto(
+                            id = "r-1",
+                            role = "reasoning",
+                            text = "First pass.",
+                            turnId = "turn-1",
+                            createdAt = at(0),
+                        ),
+                        MessageDto(
+                            id = "r-2",
+                            role = "reasoning",
+                            text = "Second pass.",
+                            turnId = "turn-1",
+                            createdAt = at(1),
+                        ),
+                        MessageDto(
+                            id = "r-3",
+                            role = "reasoning",
+                            text = "Another turn.",
+                            turnId = "turn-2",
+                            createdAt = at(2),
+                        ),
+                    ),
+            )
+        assertEquals(2, feed.size)
+        val grouped = feed[0] as FeedEntry.Reasoning
+        assertEquals(listOf("Second pass."), grouped.extraParts)
+        assertEquals("r-3", feed[1].id)
+    }
+
+    @Test
+    fun `a blank reasoning trace renders nothing`() {
+        val feed =
+            feedOf(
+                messages =
+                    listOf(
+                        MessageDto(id = "r-1", role = "reasoning", text = "  ", createdAt = at(0))
+                    ),
+            )
+        assertTrue(feed.isEmpty())
+    }
+
+    @Test
     fun `the plan-mode boundary tool row is left to the plan card`() {
         val feed =
             feedOf(

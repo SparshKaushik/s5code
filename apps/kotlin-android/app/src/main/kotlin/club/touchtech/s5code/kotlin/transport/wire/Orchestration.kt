@@ -124,6 +124,8 @@ data class ThreadShellDto(
     val backgroundLiveness: String? = null,
     val planProgress: PlanProgressDto? = null,
     val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
+    /** Set when `thread.auto-settle.set` turned the idle sweep off for this thread. */
+    val autoSettleDisabledAt: String? = null,
     val unsettledAt: String? = null,
 )
 
@@ -173,7 +175,7 @@ data class ChatAttachmentDto(
 @Serializable
 data class MessageDto(
     val id: String,
-    /** user | assistant | system */
+    /** user | assistant | system | reasoning (the last behind `reasoningMessages` opt-in) */
     val role: String = "assistant",
     val text: String = "",
     val attachments: List<ChatAttachmentDto>? = null,
@@ -264,6 +266,8 @@ data class ThreadDto(
     val activeOrderKey: String? = null,
     val titleRegeneration: TitleRegenerationDto? = null,
     val deletedAt: String? = null,
+    /** Set when `thread.auto-settle.set` turned the idle sweep off for this thread. */
+    val autoSettleDisabledAt: String? = null,
     val messages: List<MessageDto> = emptyList(),
     val proposedPlans: List<ProposedPlanDto> = emptyList(),
     val activities: List<ThreadActivityDto> = emptyList(),

@@ -336,6 +336,17 @@ object Commands {
         put("reason", "user")
     }
 
+    /**
+     * `thread.auto-settle.set` — the per-thread opt-out from the idle sweep.
+     * `enabled` false stamps `autoSettleDisabledAt`; true clears it.
+     */
+    fun setAutoSettle(threadId: String, enabled: Boolean): JsonObject = buildJsonObject {
+        put("type", "thread.auto-settle.set")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("enabled", enabled)
+    }
+
     fun snooze(threadId: String, untilIso: String): JsonObject = buildJsonObject {
         put("type", "thread.snooze")
         put("commandId", newCommandId())

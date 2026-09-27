@@ -438,6 +438,110 @@ class TurnFoldTest {
     }
 
     @Test
+    fun `the first assistant message stays visible beside the answer`() {
+        // RN's `firstAssistantMessageIdByTurn`/`terminalAssistantMessageIdByTurn`:
+        // a turn that spoke twice reads as its opening line, the fold, and the
+        // answer it ended on.
+        val feed =
+            listOf(
+                prompt("u1"),
+                answer("a1", "turn-1"),
+                tool("t1", "turn-1"),
+                answer("a2", "turn-1"),
+            )
+        assertEquals(
+            listOf("u1", "a1", "turn-fold:turn-1:header", "a2"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
+    }
+
+    @Test
+    fun `a folded user-input record never hides inside the turn`() {
+        val feed =
+            listOf(
+                prompt("u1"),
+                FeedEntry.QuestionAnswer(id = "q1", summary = "User input submitted", preview = "ok", turnId = "turn-1"),
+                tool("t1", "turn-1"),
+                answer("a1", "turn-1"),
+            )
+        assertEquals(
+            listOf("u1", "q1", "turn-fold:turn-1:header", "a1"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
+    }
+
+    @Test
+    fun `a turn hiding only thoughts does not collapse`() {
+        // Thinking is work, but a question answered by thought alone keeps its
+        // "Thought" row — `hidesFoldableWork` says there is nothing to disclose.
+        val feed =
+            listOf(
+                prompt("u1"),
+                FeedEntry.Reasoning(id = "r1", text = "thinking", thought = true, turnId = "turn-1"),
+                answer("a1", "turn-1"),
+            )
+        assertEquals(
+            listOf("u1", "work-toggle:work-group:r1", "a1"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
+    }
+
+    @Test
+    fun `a lone compaction row does not fold on its own`() {
+        val feed =
+            listOf(
+                prompt("u1"),
+                FeedEntry.Note(id = "c1", message = "Context compacted", turnId = "turn-1", compaction = true),
+                answer("a1", "turn-1"),
+            )
+        assertEquals(
+            listOf("u1", "c1", "a1"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
+    }
+
+    @Test
+    fun `the fold header sits above the first hidden row`() {
+        // RN anchors the fold on `firstHiddenEntry.id`, so a visible opening
+        // assistant message renders above it.
+        val feed =
+            listOf(
+                prompt("u1"),
+                answer("a1", "turn-1"),
+                tool("t1", "turn-1"),
+                answer("a2", "turn-1"),
+            )
+        val fold = turnFolds(feed, settled("turn-1")).values.single()
+        assertEquals("t1", fold.anchorId)
+    }
+
+    @Test
+    fun `thoughts count as thoughts in a folded run, not tools`() {
+        val feed =
+            listOf(
+                FeedEntry.Reasoning(id = "r1", text = "a", thought = true, turnId = "turn-1"),
+                FeedEntry.Reasoning(
+                    id = "r2",
+                    text = "b",
+                    extraParts = listOf("c"),
+                    thought = true,
+                    turnId = "turn-1",
+                ),
+            )
+        val toggle = presentFeed(feed, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single()
+        assertEquals("Thought (×3)", toggle.summary)
+        assertEquals(3, toggle.hiddenCount)
+    }
+
+    @Test
+    fun `a single thought row labels itself Thought`() {
+        val feed =
+            listOf(FeedEntry.Reasoning(id = "r1", text = "a", thought = true, turnId = "turn-1"))
+        val toggle = presentFeed(feed, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single()
+        assertEquals("Thought", toggle.summary)
+    }
+
+    @Test
     fun `the label measures from the prompt, not the first tool call`() {
         val feed =
             listOf(prompt("u1", 0), tool("t1", "turn-1", 30_000), answer("a1", "turn-1", 65_000))

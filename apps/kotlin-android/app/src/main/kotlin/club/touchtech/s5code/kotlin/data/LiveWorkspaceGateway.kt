@@ -526,6 +526,8 @@ class LiveWorkspaceGateway(
                                 },
                             threadAutoSettlement =
                                 state?.capabilities?.threadAutoSettlement == true,
+                            threadAutoSettleOptOut =
+                                state?.capabilities?.threadAutoSettleOptOut == true,
                         ),
                     addProjectBaseDirectory = state?.addProjectBaseDirectory.orEmpty(),
                     autoSettleOnMerge = state?.autoSettleOnMerge ?: true,
@@ -880,7 +882,12 @@ class LiveWorkspaceGateway(
                         session.getJson(
                             "/api/orchestration/threads/${id.value}" +
                                 "?turnLimit=$OLDER_THREAD_PAGE_USER_TURN_LIMIT" +
-                                "&beforeCursor=${android.net.Uri.encode(cursor)}",
+                                "&beforeCursor=${android.net.Uri.encode(cursor)}" +
+                                if (session.state.value.capabilities.reasoningMessages) {
+                                    "&reasoningMessages=true"
+                                } else {
+                                    ""
+                                },
                             club.touchtech.s5code.kotlin.transport.wire
                                 .ThreadDetailSnapshotDto.serializer(),
                         )
@@ -923,6 +930,7 @@ class LiveWorkspaceGateway(
         val paginationSupported = session.state.value.capabilities.threadSnapshotPagination
         val completionMarkerSupported =
             session.state.value.capabilities.threadResumeCompletionMarker
+        val reasoningSupported = session.state.value.capabilities.reasoningMessages
         combine(
                 session.subscribe(
                     WsMethods.OrchestrationSubscribeThread,
@@ -940,6 +948,12 @@ class LiveWorkspaceGateway(
                             // would park the thread in Syncing forever.
                             if (completionMarkerSupported) {
                                 put("requestCompletionMarker", true)
+                            }
+                            // Without the opt-in the server folds thinking
+                            // traces into system messages; asking turns them
+                            // into the feed's "Thought" rows.
+                            if (reasoningSupported) {
+                                put("reasoningMessages", true)
                             }
                             // The fallback snapshot (no `afterSequence`, or a
                             // gap too large to replay) is windowed to the last
@@ -959,9 +973,17 @@ class LiveWorkspaceGateway(
                                         val fresh =
                                             connected.getJson(
                                                 "/api/orchestration/threads/${id.value}" +
-                                                    if (paginationSupported)
-                                                        "?turnLimit=$INITIAL_THREAD_USER_TURN_LIMIT"
-                                                    else "",
+                                                    buildString {
+                                                        if (paginationSupported) {
+                                                            append("?turnLimit=$INITIAL_THREAD_USER_TURN_LIMIT")
+                                                        }
+                                                        if (reasoningSupported) {
+                                                            append(
+                                                                if (paginationSupported) "&" else "?"
+                                                            )
+                                                            append("reasoningMessages=true")
+                                                        }
+                                                    },
                                                 club.touchtech.s5code.kotlin.transport.wire
                                                     .ThreadDetailSnapshotDto.serializer(),
                                             )
@@ -1410,6 +1432,10 @@ class LiveWorkspaceGateway(
         } else {
             dispatch(environmentId, Commands.lifecycleByUser("thread.unsnooze", id.value))
         }
+    }
+
+    override suspend fun setAutoSettle(environmentId: EnvironmentId, id: ThreadId, enabled: Boolean) {
+        dispatch(environmentId, Commands.setAutoSettle(id.value, enabled))
     }
 
     override suspend fun deleteThread(environmentId: EnvironmentId, id: ThreadId) {

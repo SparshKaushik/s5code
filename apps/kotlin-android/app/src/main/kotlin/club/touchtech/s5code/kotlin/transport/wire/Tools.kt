@@ -130,6 +130,8 @@ data class ServerConfigDto(
     val shellResumeCompletionMarker: Boolean = false,
     val threadResumeCompletionMarker: Boolean = false,
     val threadSnapshotPagination: Boolean = false,
+    /** Whether thread reads accept the `reasoningMessages` opt-in. */
+    val reasoningMessages: Boolean = false,
     val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
 )
 
@@ -194,6 +196,8 @@ data class ServerCapabilitiesDto(
      * servers older than shared settings sync.
      */
     val threadAutoSettlement: Boolean = false,
+    /** `thread.auto-settle.set` is accepted (per-thread auto-settle opt-out). */
+    val threadAutoSettleOptOut: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */

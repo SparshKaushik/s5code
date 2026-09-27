@@ -209,6 +209,11 @@ fun applyThreadEvent(thread: ThreadDto, event: JsonElement): ThreadReduction {
                 )
                 .touched(payload, occurredAt)
 
+        "thread.auto-settle-set" ->
+            thread
+                .copy(autoSettleDisabledAt = payload.string("autoSettleDisabledAt"))
+                .touched(payload, occurredAt)
+
         "thread.runtime-mode-set" ->
             thread
                 .copy(runtimeMode = payload.string("runtimeMode") ?: thread.runtimeMode)

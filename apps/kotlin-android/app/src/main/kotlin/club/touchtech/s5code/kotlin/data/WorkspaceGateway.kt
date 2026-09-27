@@ -248,6 +248,13 @@ interface WorkspaceGateway {
         untilIso: String? = null,
     )
 
+    /**
+     * `thread.auto-settle.set`: `enabled` false keeps the thread out of the
+     * idle sweep forever (stamps `autoSettleDisabledAt`); true restores it.
+     * Call only when the server advertises `threadAutoSettleOptOut`.
+     */
+    suspend fun setAutoSettle(environmentId: EnvironmentId, id: ThreadId, enabled: Boolean)
+
     suspend fun deleteThread(environmentId: EnvironmentId, id: ThreadId)
 
     /**

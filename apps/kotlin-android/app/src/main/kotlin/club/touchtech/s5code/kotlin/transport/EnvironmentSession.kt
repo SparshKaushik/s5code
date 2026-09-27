@@ -104,8 +104,12 @@ data class ServerCapabilities(
     val threadResumeCompletionMarker: Boolean = false,
     /** Thread reads accept `turnLimit`/`beforeCursor` windows and `page` metadata. */
     val threadSnapshotPagination: Boolean = false,
+    /** Thread reads accept `reasoningMessages`, returning thought traces. */
+    val reasoningMessages: Boolean = false,
     /** `server.updateSettings` accepts auto-settle writes (shared settings sync). */
     val threadAutoSettlement: Boolean = false,
+    /** `thread.auto-settle.set` exists — the per-thread Auto-settle menu item. */
+    val threadAutoSettleOptOut: Boolean = false,
 )
 
 /**
@@ -444,7 +448,10 @@ class EnvironmentSession(
                             shellResumeCompletionMarker = config.shellResumeCompletionMarker,
                             threadResumeCompletionMarker = config.threadResumeCompletionMarker,
                             threadSnapshotPagination = config.threadSnapshotPagination,
+                            reasoningMessages = config.reasoningMessages,
                             threadAutoSettlement = descriptor.capabilities.threadAutoSettlement,
+                            threadAutoSettleOptOut =
+                                descriptor.capabilities.threadAutoSettleOptOut,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     autoSettleOnMerge = config.settings.sidebarAutoSettleOnMerge,

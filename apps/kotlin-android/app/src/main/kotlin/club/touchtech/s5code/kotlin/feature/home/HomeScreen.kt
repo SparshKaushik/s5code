@@ -40,6 +40,7 @@ import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material.icons.rounded.Timer
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
@@ -919,6 +920,10 @@ fun HomeScreen(
                                                                     ?.threadPinning == true,
                                                             titleRegenerationSupported =
                                                                 titleRegenerationSupported,
+                                                            autoSettleOptOutSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadAutoSettleOptOut == true,
                                                             canMoveUp = canMoveUp,
                                                             canMoveDown = canMoveDown,
                                                         ),
@@ -1021,6 +1026,8 @@ internal fun threadMenuOptions(
     snoozeSupported: Boolean,
     pinningSupported: Boolean,
     titleRegenerationSupported: Boolean,
+    /** `threadAutoSettleOptOut`: the server accepts `thread.auto-settle.set`. */
+    autoSettleOptOutSupported: Boolean = false,
     snoozePresets: List<SnoozePreset> = resolveSnoozePresets(),
     /** `createThreadMovePlanner` results for this row; null hides the item. */
     canMoveUp: Boolean = false,
@@ -1113,6 +1120,32 @@ internal fun threadMenuOptions(
                 )
             )
         }
+        // A submenu with the current option checked, not a one-shot action —
+        // this is a setting. Settled and snoozed rows keep it too: RN and web
+        // share one menu builder across row variants, and Disabled keeps a
+        // long-running thread out of the settled shelf however quiet it gets.
+        if (autoSettleOptOutSupported) {
+            add(
+                S5MenuOption(
+                    id = "auto-settle",
+                    label = "Auto-settle behavior",
+                    icon = Icons.Rounded.Timer,
+                    children =
+                        listOf(
+                            S5MenuOption(
+                                id = "auto-settle:enabled",
+                                label = "Enabled",
+                                selected = !thread.autoSettleDisabled,
+                            ),
+                            S5MenuOption(
+                                id = "auto-settle:disabled",
+                                label = "Disabled",
+                                selected = thread.autoSettleDisabled,
+                            ),
+                        ),
+                )
+            )
+        }
         add(
             S5MenuOption(
                 id = "delete",
@@ -1151,6 +1184,8 @@ private suspend fun performThreadAction(
         action == "snooze" -> store.workspace.setSnoozed(environmentId, id, status != ThreadStatus.Snoozed)
         action == "unsnooze" -> store.workspace.setSnoozed(environmentId, id, false)
         action == "settle" -> store.workspace.setSettled(environmentId, id, status != ThreadStatus.Settled)
+        action == "auto-settle:enabled" -> store.workspace.setAutoSettle(environmentId, id, true)
+        action == "auto-settle:disabled" -> store.workspace.setAutoSettle(environmentId, id, false)
         action == "regenerate-title" -> store.workspace.regenerateTitle(environmentId, id)
         action == "archive" -> store.workspace.setArchived(environmentId, id, true)
         action == "delete" -> store.workspace.deleteThread(environmentId, id)

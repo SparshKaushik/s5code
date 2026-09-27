@@ -58,6 +58,7 @@ import club.touchtech.s5code.kotlin.data.Remote
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5AttachmentPreviewDialog
+import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5AttachmentStrip
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -94,6 +95,7 @@ import club.touchtech.s5code.kotlin.feature.settings.ModelSearchScope
 import club.touchtech.s5code.kotlin.feature.settings.TaskSettingsSheet
 import club.touchtech.s5code.kotlin.data.IncomingShareAttachmentType
 import club.touchtech.s5code.kotlin.data.IncomingShareDestination
+import club.touchtech.s5code.kotlin.model.BranchRef
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
@@ -862,6 +864,16 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
     }
 }
 
+/**
+ * `filterNewTaskBranches`: a typed ref name searches every ref the server
+ * listed — remote `origin/*` included — and the query itself is sanitized like
+ * a branch name, so "my feature" finds `my-feature`.
+ */
+fun filterNewTaskBranches(branches: List<BranchRef>, rawQuery: String): List<BranchRef> {
+    val query = rawQuery.trim().replace(Regex("[\\s]+"), "-").lowercase()
+    return if (query.isEmpty()) branches else branches.filter { it.name.lowercase().contains(query) }
+}
+
 /** Branch picker with a retryable fetch state. */
 @Composable
 fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
@@ -873,22 +885,31 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
             store.workspace.projectBranches(draft.environmentId, draft.projectKey)
         }
     val remote = state.value
+    var query by remember { mutableStateOf("") }
     val branches = remote.valueOrNull.orEmpty()
+    val filtered = remember(branches, query) { filterNewTaskBranches(branches, query) }
 
     S5Screen(
         title = "Base branch",
         subtitle = if (remote is Remote.Loaded) "${branches.size} branches" else "",
         onBack = onBack,
     ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            S5SearchField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = "Search branches",
+                modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+            )
         when (remote) {
-            is Remote.Loading -> S5LoadingState("Listing branches…", Modifier.padding(padding))
+            is Remote.Loading -> S5LoadingState("Listing branches…")
             is Remote.Failed ->
-                Box(Modifier.padding(padding).padding(S5Theme.spacing.gutter)) {
+                Box(Modifier.padding(S5Theme.spacing.gutter)) {
                     S5ErrorState(title = "Couldn't list branches", detail = remote.message, onRetry = retry)
                 }
             is Remote.Loaded ->
                 LazyColumn(
-                    Modifier.fillMaxSize().padding(padding),
+                    Modifier.fillMaxSize(),
                     contentPadding =
                         PaddingValues(
                             horizontal = S5Theme.spacing.gutter,
@@ -896,7 +917,7 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
                         ),
                     verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
                 ) {
-                    itemsIndexed(branches, key = { _, branch -> branch.name }) { index, branch ->
+                    itemsIndexed(filtered, key = { _, branch -> branch.name }) { index, branch ->
                         S5SelectableRow(
                             label = branch.name,
                             supporting =
@@ -914,10 +935,11 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
                             leading = {
                                 Icon(Icons.AutoMirrored.Rounded.CallSplit, contentDescription = null)
                             },
-                            position = rowPosition(index, branches.size),
+                            position = rowPosition(index, filtered.size),
                         )
                     }
                 }
+        }
         }
     }
 }

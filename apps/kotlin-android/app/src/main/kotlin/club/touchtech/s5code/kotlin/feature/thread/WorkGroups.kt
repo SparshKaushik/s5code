@@ -174,7 +174,9 @@ fun presentFeed(
         rows +=
             FeedRow.WorkToggle(
                 groupId = groupId,
-                hiddenCount = group.size,
+                // A grouped thought counts its messages, not its rows —
+                // `activities.length + thoughtCount` in RN's mixed run.
+                hiddenCount = group.sumOf { it.thoughtParts },
                 expanded = expanded,
                 summary = workGroupSummary(group, activeWorkStartedAtMillis != null),
             )
@@ -223,6 +225,19 @@ data class TurnFold(
 fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFold> {
     val openTurnId = latestTurn?.takeIf { !it.settled }?.turnId
 
+    // The first and last assistant message of a turn stay visible on either side
+    // of the fold, matching `firstAssistantMessageIdByTurn` /
+    // `terminalAssistantMessageIdByTurn`: a multi-answer turn reads as its
+    // opening line, the fold, and the answer it ended on.
+    val firstAssistantIdByTurn = mutableMapOf<String, String>()
+    val terminalAssistantIdByTurn = mutableMapOf<String, String>()
+    feed.forEach { entry ->
+        if (entry is FeedEntry.AgentMessage && entry.turnId != null) {
+            firstAssistantIdByTurn.putIfAbsent(entry.turnId!!, entry.id)
+            terminalAssistantIdByTurn[entry.turnId!!] = entry.id
+        }
+    }
+
     // Grouped in feed order, so "first row" and "last answer" are positional rather
     // than derived from timestamps, which tie.
     val groups = LinkedHashMap<String, MutableList<FeedEntry>>()
@@ -248,11 +263,30 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
     groups.forEach { (turnId, entries) ->
         if (turnId == openTurnId) return@forEach
         if (entries.any { it is FeedEntry.AgentMessage && it.streaming }) return@forEach
-        val answerId = entries.lastOrNull { it is FeedEntry.AgentMessage }?.id
-        val hidden = entries.filter { it.id != answerId }.map { it.id }.toSet()
+        // User-input records never hide — `isUserInputActivityGroup` in RN —
+        // and the first assistant message stays for the same reason the last does.
+        val hidden =
+            entries
+                .filter {
+                    it.id != firstAssistantIdByTurn[turnId] &&
+                        it.id != terminalAssistantIdByTurn[turnId] &&
+                        it !is FeedEntry.QuestionAnswer
+                }
+                .map { it.id }
+                .toSet()
         if (hidden.isEmpty()) return@forEach
-        val anchor = entries.first()
-        val answer = entries.lastOrNull { it.id == answerId }
+        // A turn whose hidden rows are only thoughts (or a lone compaction)
+        // does not collapse: "Worked for 40s" hiding nothing real is the lie RN
+        // guards on with `hidesFoldableWork`.
+        val hidesFoldableWork =
+            entries.any {
+                it.id in hidden &&
+                    it !is FeedEntry.Reasoning &&
+                    !(it is FeedEntry.Note && it.compaction)
+            }
+        if (!hidesFoldableWork) return@forEach
+        val anchor = entries.first { it.id in hidden }
+        val answer = entries.lastOrNull { it.id == terminalAssistantIdByTurn[turnId] }
         val interrupted = latestTurn?.turnId == turnId && latestTurn.interrupted
         // The turn record's own clock is only trusted when it has both ends, as in RN:
         // a started-but-not-completed record on a turn the feed says is finished is a
@@ -266,7 +300,9 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
                     val completed = turn.completedAtMillis
                     if (started != null && completed != null) started to completed else null
                 }
-        val startedAt = turnClock?.first ?: boundaries[turnId] ?: anchor.atMillis
+        // The fallback start is the turn's first row, not the anchor: RN uses
+        // `firstEntry.createdAt`, and the anchor moved to the first hidden row.
+        val startedAt = turnClock?.first ?: boundaries[turnId] ?: entries.first().atMillis
         val endedAt =
             turnClock?.second
                 ?: maxOf(answer?.endedAtMillis ?: 0L, entries.maxOf { it.endedAtMillis })
@@ -594,9 +630,12 @@ private fun summarizeToolGroup(entries: List<FeedEntry>): String {
             sources[entry.toolSourceName] = entry.toolSourceKind.orEmpty()
             continue
         }
+        // Thoughts never reach the verb summary: RN counts them into the
+        // hidden count only, and a run of nothing else labels itself "Thought".
+        if (entry is FeedEntry.Reasoning && entry.thought) continue
         val action =
             if (entry is FeedEntry.ToolCall) entry.groupAction()
-            // Non-tool rows folded into the run (thinking) count toward "other".
+            // Non-tool rows folded into the run (progress ticks) count toward "other".
             else ToolGroupAction.Other
         grouped.getOrPut(action) { mutableListOf() } += entry
     }
@@ -683,18 +722,39 @@ private fun workGroupSummary(group: List<FeedEntry>, workInFlight: Boolean): Str
         return when {
             single is FeedEntry.ToolCall && single.groupAction() != ToolGroupAction.Edit ->
                 singleToolCallLabel(single)
-            single is FeedEntry.Reasoning -> "Thinking"
+            single is FeedEntry.Reasoning -> reasoningLabel(single)
             else -> singleSummary(single)
         }
     }
-    return summarizeToolGroup(group)
+    return summarizeToolGroup(group).takeIf { it.isNotEmpty() } ?: thoughtGroupLabel(group)
+}
+
+/**
+ * The row label for a reasoning entry: a `task.progress` tick is the live
+ * "Thinking" line, a provider trace is "Thought", and merged consecutive traces
+ * count themselves — RN's `Thought (×N)`.
+ */
+fun reasoningLabel(entry: FeedEntry.Reasoning): String =
+    when {
+        !entry.thought -> "Thinking"
+        entry.extraParts.isEmpty() -> "Thought"
+        else -> "Thought (×${1 + entry.extraParts.size})"
+    }
+
+/** The count of messages a row stands for: a merged thought is still one row. */
+private val FeedEntry.thoughtParts: Int
+    get() = if (this is FeedEntry.Reasoning && thought) 1 + extraParts.size else 1
+
+private fun thoughtGroupLabel(group: List<FeedEntry>): String {
+    val count = group.sumOf { it.thoughtParts }
+    return if (count == 1) "Thought" else "Thought (×$count)"
 }
 
 /** `workEntry.label` fallback for a lone non-tool row inside a run. */
 private fun singleSummary(entry: FeedEntry): String =
     when (entry) {
         is FeedEntry.ToolCall -> entry.name
-        is FeedEntry.Reasoning -> "Thinking"
+        is FeedEntry.Reasoning -> reasoningLabel(entry)
         else -> ""
     }
 

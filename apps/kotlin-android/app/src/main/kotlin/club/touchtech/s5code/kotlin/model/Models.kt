@@ -116,6 +116,8 @@ data class EnvironmentCapabilities(
      * sidebar auto-settle writes, so Settings may offer the switches.
      */
     val threadAutoSettlement: Boolean = false,
+    /** `thread.auto-settle.set` exists — the row menu's Auto-settle submenu. */
+    val threadAutoSettleOptOut: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -204,6 +206,8 @@ data class ThreadSummary(
     /** Epoch millis of `unsettledAt`; re-entries surface above older actives. */
     val unsettledAtMillis: Long = 0,
     val pinned: Boolean = false,
+    /** `autoSettleDisabledAt != null`: the idle sweep skips this thread. */
+    val autoSettleDisabled: Boolean = false,
     /** Fractional arrangement key within the pinned block (`thread.pin.reorder`). */
     val pinOrderKey: String? = null,
     /** Fractional arrangement key within the active block (`thread.active.reorder`). */
@@ -312,8 +316,24 @@ sealed interface FeedEntry {
     data class Reasoning(
         override val id: String,
         val text: String,
+        /**
+         * Trailing messages when consecutive role-`reasoning` messages group
+         * into one row — RN's `groupConsecutiveReasoningMessages` renders them
+         * as one "Thought (×N)" disclosure. Empty for a lone thought or a
+         * progress tick.
+         */
+        val extraParts: List<String> = emptyList(),
+        /**
+         * True when this is a provider's thinking trace (role-`reasoning`
+         * messages), false for a `task.progress` tick. The distinction matters
+         * for folding: a lone thought stays visible, and a turn whose only
+         * hidden rows are thoughts does not collapse behind "Worked for …".
+         */
+        val thought: Boolean = false,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
+        /** `updatedAt` — a thought message can finish after its turn's tools. */
+        override val endedAtMillis: Long = atMillis,
     ) : FeedEntry
 
     data class PlanUpdate(
@@ -377,6 +397,12 @@ sealed interface FeedEntry {
         val message: String,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
+        /**
+         * True for `context-compaction` rows. A lone compaction stays visible —
+         * it only folds away inside a turn that already hides other work —
+         * matching `isContextCompactionActivityGroup` in the RN fold rules.
+         */
+        val compaction: Boolean = false,
     ) : FeedEntry
 
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
