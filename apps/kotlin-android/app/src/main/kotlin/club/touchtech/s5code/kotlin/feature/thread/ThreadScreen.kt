@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -51,6 +52,9 @@ import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.S5WaitPill
 import club.touchtech.s5code.kotlin.design.component.S5WaitState
+import club.touchtech.s5code.kotlin.design.component.ScrollAnchor
+import club.touchtech.s5code.kotlin.design.component.scrollAnchor
+import club.touchtech.s5code.kotlin.design.component.scrollToAnchor
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
@@ -217,6 +221,35 @@ fun ThreadScreen(
     // turns start folded, which is what makes a long transcript readable: the thing
     // worth reading is what the agent said, not the forty tool calls it took.
     var expandedTurns by remember(threadId) { mutableStateOf(emptySet<String>()) }
+    // Collapsing removes rows from the list, and `LazyColumn` anchors the viewport
+    // on the first visible item's key: if the fold you are closing was holding that
+    // item, the list keeps the bare index and you land on whatever slides under it —
+    // a screen of unrelated history. So expanding remembers where the transcript
+    // stood, and collapsing puts it back. Fallback is the toggle's own key, which
+    // always survives its fold.
+    val foldScrollAnchors = remember(threadId) { mutableStateMapOf<String, ScrollAnchor>() }
+    var pendingScrollRestore by
+        remember(threadId) { mutableStateOf<Pair<ScrollAnchor, String>?>(null) }
+    fun toggleFold(foldId: String, foldKey: String, currentlyExpanded: Boolean, mutate: () -> Unit) {
+        if (currentlyExpanded) {
+            foldScrollAnchors.remove(foldId)?.let { pendingScrollRestore = it to foldKey }
+        } else {
+            listState.scrollAnchor()?.let { foldScrollAnchors[foldId] = it }
+        }
+        mutate()
+    }
+    // The same jump, from a single row's own disclosure: a tool card expanded
+    // and scrolled into holds the anchor item, and collapsing it lets the list
+    // keep a scroll offset the shrunk row no longer spans. Record where the
+    // transcript stood on expand and put it back on collapse, as folds do.
+    var expandedEntries by remember(threadId) { mutableStateOf(emptySet<String>()) }
+    fun toggleEntryExpand(entryId: String) {
+        toggleFold("entry:$entryId", entryId, entryId in expandedEntries) {
+            expandedEntries =
+                if (entryId in expandedEntries) expandedEntries - entryId
+                else expandedEntries + entryId
+        }
+    }
     // The clock the "Working for 12s" row measures from, or null when nothing is
     // running. Only the start is derived here; the row ticks itself, so a live turn
     // does not rebuild the presented list once a second.
@@ -238,6 +271,26 @@ fun ThreadScreen(
                 activeWorkStartedAtMillis = activeWorkStartedAt,
             )
         }
+    // Keys in lazy-index order: the approval gate sits at index 0 (visual bottom
+    // of the reversed list), the feed rows reversed after it, "Load earlier" last.
+    val lazyKeys =
+        remember(rows, current.approval?.id, current.page?.hasMore, current.page?.beforeCursor) {
+            buildList<Any> {
+                current.approval?.let { add("approval-${it.id}") }
+                rows.asReversed().forEach { add(it.key) }
+                if (current.page?.hasMore == true && current.page.beforeCursor != null) {
+                    add("load-earlier")
+                }
+            }
+        }
+    // `expandedEntries` is a key even though `presentFeed` does not read it: a
+    // row-level collapse restores through here too, and its toggle leaves
+    // `rows` unchanged.
+    LaunchedEffect(rows, expandedEntries) {
+        val pending = pendingScrollRestore ?: return@LaunchedEffect
+        pendingScrollRestore = null
+        listState.scrollToAnchor(pending.first, lazyKeys, pending.second)
+    }
     // The tall title belongs to the top of the thread and nowhere else: the header
     // expands once the oldest entry is in view, and is compact everywhere below
     // that. The decision (including its hysteresis) lives in `atHistoryTop`.
@@ -730,18 +783,22 @@ fun ThreadScreen(
                                                 "&sizeBytes=${attachment.sizeBytes}"
                                         )
                                     },
+                                    expandedIds = expandedEntries,
+                                    onToggleExpand = { entry -> toggleEntryExpand(entry.id) },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             is FeedRow.WorkToggle ->
                                 WorkGroupToggleRow(
                                     row = row,
                                     onToggle = {
-                                        expandedWorkGroups =
-                                            if (row.groupId in expandedWorkGroups) {
-                                                expandedWorkGroups - row.groupId
-                                            } else {
-                                                expandedWorkGroups + row.groupId
-                                            }
+                                        toggleFold(row.groupId, row.key, row.groupId in expandedWorkGroups) {
+                                            expandedWorkGroups =
+                                                if (row.groupId in expandedWorkGroups) {
+                                                    expandedWorkGroups - row.groupId
+                                                } else {
+                                                    expandedWorkGroups + row.groupId
+                                                }
+                                        }
                                     },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
@@ -750,9 +807,11 @@ fun ThreadScreen(
                                 TurnFoldRow(
                                     row = row,
                                     onToggle = {
-                                        expandedTurns =
-                                            if (row.turnId in expandedTurns) expandedTurns - row.turnId
-                                            else expandedTurns + row.turnId
+                                        toggleFold(row.turnId, "turn-fold:${row.turnId}:header", row.turnId in expandedTurns) {
+                                            expandedTurns =
+                                                if (row.turnId in expandedTurns) expandedTurns - row.turnId
+                                                else expandedTurns + row.turnId
+                                        }
                                     },
                                     modifier = Modifier.fillMaxWidth(),
                                 )

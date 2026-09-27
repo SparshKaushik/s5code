@@ -36,9 +36,11 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
@@ -77,6 +79,9 @@ import club.touchtech.s5code.kotlin.design.component.S5StatusPill
 import club.touchtech.s5code.kotlin.design.component.S5TextField
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.S5WaitState
+import club.touchtech.s5code.kotlin.design.component.ScrollAnchor
+import club.touchtech.s5code.kotlin.design.component.scrollAnchor
+import club.touchtech.s5code.kotlin.design.component.scrollToAnchor
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
@@ -114,6 +119,13 @@ fun ReviewScreen(
     val (state, retry) =
         rememberRetryableRemote(environmentId, threadId) { store.workspace.review(env, id) }
     var collapsed by remember(threadId) { mutableStateOf(emptySet<String>()) }
+    // Expanding a diff adds a screen of lines under the card and collapsing
+    // removes them; without an anchor the list keeps the first visible *index*
+    // and the collapse teleports the reader. Record where the viewport stood on
+    // expand and put it back on collapse (see the thread feed's fold anchors).
+    val fileScrollAnchors = remember(threadId) { mutableStateMapOf<String, ScrollAnchor>() }
+    var pendingScrollRestore by
+        remember(threadId) { mutableStateOf<Pair<ScrollAnchor, String>?>(null) }
     var hideUnchanged by remember { mutableStateOf(false) }
     var selectedTarget by remember(threadId) { mutableStateOf<ReviewCommentTarget?>(null) }
     var rangeAnchor by remember(threadId) { mutableStateOf<ReviewCommentTarget?>(null) }
@@ -147,6 +159,11 @@ fun ReviewScreen(
         remember(files, hideUnchanged) {
             if (hideUnchanged) files.filter { it.additions + it.deletions > 0 } else files
         }
+    LaunchedEffect(visible) {
+        val pending = pendingScrollRestore ?: return@LaunchedEffect
+        pendingScrollRestore = null
+        listState.scrollToAnchor(pending.first, visible.map { it.path }, pending.second)
+    }
 
     S5Screen(
         title = "Review",
@@ -286,9 +303,15 @@ fun ReviewScreen(
                                     selectedTarget = target
                                 },
                                 onToggle = {
-                                    collapsed =
-                                        if (file.path in collapsed) collapsed - file.path
-                                        else collapsed + file.path
+                                    if (file.path in collapsed) {
+                                        listState.scrollAnchor()?.let { fileScrollAnchors[file.path] = it }
+                                        collapsed = collapsed - file.path
+                                    } else {
+                                        fileScrollAnchors.remove(file.path)?.let {
+                                            pendingScrollRestore = it to file.path
+                                        }
+                                        collapsed = collapsed + file.path
+                                    }
                                 },
                             )
                         }

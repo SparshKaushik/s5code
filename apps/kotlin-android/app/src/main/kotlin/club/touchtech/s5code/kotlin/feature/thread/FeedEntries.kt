@@ -84,6 +84,14 @@ fun FeedEntryRow(
     resolveTranscriptAttachment: suspend (String) -> String? = { null },
     /** Opens a sent attachment in the viewer route — file chips only; images keep the lightbox. */
     onOpenAttachment: (SentAttachment) -> Unit = {},
+    /**
+     * Hoisted disclosure state for the collapsible rows (tool calls, thoughts,
+     * subagents, answered prompts). Null means the row owns its own state; the
+     * thread feed hoists so a collapse can re-anchor the viewport — a row that
+     * shrinks entirely above it shifts what the reader is looking at otherwise.
+     */
+    expandedIds: Set<String>? = null,
+    onToggleExpand: (FeedEntry) -> Unit = {},
 ) {
     when (entry) {
         is FeedEntry.TurnDivider ->
@@ -115,15 +123,15 @@ fun FeedEntryRow(
                 onOpenAttachment,
             )
 
-        is FeedEntry.Reasoning -> ReasoningRow(entry, modifier)
+        is FeedEntry.Reasoning -> ReasoningRow(entry, expandedIds, onToggleExpand, modifier)
 
-        is FeedEntry.ToolCall -> ToolRow(entry, onCopy, modifier)
+        is FeedEntry.ToolCall -> ToolRow(entry, onCopy, expandedIds, onToggleExpand, modifier)
 
         is FeedEntry.PlanUpdate -> PlanCard(entry, modifier)
 
-        is FeedEntry.Subagent -> SubagentRow(entry, modifier)
+        is FeedEntry.Subagent -> SubagentRow(entry, expandedIds, onToggleExpand, modifier)
 
-        is FeedEntry.QuestionAnswer -> QuestionAnswerRow(entry, onOpenAttachment, modifier)
+        is FeedEntry.QuestionAnswer -> QuestionAnswerRow(entry, onOpenAttachment, expandedIds, onToggleExpand, modifier)
 
         is FeedEntry.Warning -> WarningRow(entry, modifier)
 
@@ -486,13 +494,29 @@ private fun ComposerAttachment.toSentAttachment(): SentAttachment =
         type = type,
     )
 
-/** Reasoning is collapsed by default: it is context, not the answer. */
+/**
+ * Reasoning is collapsed by default: it is context, not the answer. A provider
+ * thought trace reads "Thought (×N)" — `reasoningLabel`, matching
+ * `ThreadReasoningRow` — while a `task.progress` tick stays "Thinking".
+ */
 @Composable
-private fun ReasoningRow(entry: FeedEntry.Reasoning, modifier: Modifier) {
+private fun ReasoningRow(
+    entry: FeedEntry.Reasoning,
+    expandedIds: Set<String>?,
+    onToggleExpand: (FeedEntry) -> Unit,
+    modifier: Modifier,
+) {
     // Keyed on the entry: a reused row must not inherit the previous entry's
     // disclosure state when the list recycles it.
-    var expanded by remember(entry.id) { mutableStateOf(false) }
-    S5Card(tone = S5CardTone.Receded, onClick = { expanded = !expanded }, modifier = modifier.fillMaxWidth()) {
+    var localExpanded by remember(entry.id) { mutableStateOf(false) }
+    val expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded
+    val toggle: () -> Unit =
+        if (expandedIds != null) {
+            { onToggleExpand(entry) }
+        } else {
+            { localExpanded = !localExpanded }
+        }
+    S5Card(tone = S5CardTone.Receded, onClick = toggle, modifier = modifier.fillMaxWidth()) {
         Column(Modifier.padding(S5Theme.spacing.medium)) {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
@@ -505,7 +529,7 @@ private fun ReasoningRow(entry: FeedEntry.Reasoning, modifier: Modifier) {
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    "Thinking",
+                    reasoningLabel(entry),
                     style = MaterialTheme.typography.labelLarge,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -530,22 +554,36 @@ private fun ReasoningRow(entry: FeedEntry.Reasoning, modifier: Modifier) {
                 enter = fadeIn() + expandVertically(),
                 exit = fadeOut() + shrinkVertically(),
             ) {
-                Text(
-                    entry.text,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.padding(top = S5Theme.spacing.tiny),
-                )
+                // Merged traces render each message, as RN maps
+                // `reasoningMessages` into the card.
+                Column(
+                    Modifier.padding(top = S5Theme.spacing.tiny),
+                    verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                ) {
+                    listOf(entry.text).plus(entry.extraParts).forEach { part ->
+                        S5Markdown(
+                            source = part,
+                            textStyle = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             }
         }
     }
 }
 
 @Composable
-private fun ToolRow(entry: FeedEntry.ToolCall, onCopy: (String) -> Unit, modifier: Modifier) {
+private fun ToolRow(
+    entry: FeedEntry.ToolCall,
+    onCopy: (String) -> Unit,
+    expandedIds: Set<String>?,
+    onToggleExpand: (FeedEntry) -> Unit,
+    modifier: Modifier,
+) {
     // A chevron on a row with nothing behind it is a promise the row cannot keep.
     val canExpand = toolCallCanExpand(entry)
-    var expanded by remember(entry.id) { mutableStateOf(false) }
+    var localExpanded by remember(entry.id) { mutableStateOf(false) }
+    val expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded
     val tint =
         when (entry.state) {
             ToolState.Running -> S5Theme.status.working
@@ -554,7 +592,16 @@ private fun ToolRow(entry: FeedEntry.ToolCall, onCopy: (String) -> Unit, modifie
         }
     S5Card(
         tone = S5CardTone.Standard,
-        onClick = if (canExpand) ({ expanded = !expanded }) else null,
+        onClick =
+            if (canExpand) {
+                if (expandedIds != null) {
+                    { onToggleExpand(entry) }
+                } else {
+                    { localExpanded = !localExpanded }
+                }
+            } else {
+                null
+            },
         modifier = modifier.fillMaxWidth(),
     ) {
         Column(Modifier.padding(S5Theme.spacing.medium)) {
@@ -674,15 +721,29 @@ private fun PlanCard(entry: FeedEntry.PlanUpdate, modifier: Modifier) {
  * truncated one with no way to see the rest is useless.
  */
 @Composable
-private fun SubagentRow(entry: FeedEntry.Subagent, modifier: Modifier) {
+private fun SubagentRow(
+    entry: FeedEntry.Subagent,
+    expandedIds: Set<String>?,
+    onToggleExpand: (FeedEntry) -> Unit,
+    modifier: Modifier,
+) {
     // Only worth a disclosure when there is something the one-line form hides.
     val canExpand = entry.task.isNotBlank()
-    var expanded by remember(entry.id) { mutableStateOf(false) }
+    var localExpanded by remember(entry.id) { mutableStateOf(false) }
+    val expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded
     Column(
         modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
-            .then(if (canExpand) Modifier.clickable { expanded = !expanded } else Modifier)
+            .then(
+                if (canExpand) {
+                    Modifier.clickable {
+                        if (expandedIds != null) onToggleExpand(entry) else localExpanded = !localExpanded
+                    }
+                } else {
+                    Modifier
+                },
+            )
             .padding(vertical = S5Theme.spacing.tiny)
     ) {
         Row(
@@ -743,15 +804,26 @@ private fun SubagentRow(entry: FeedEntry.Subagent, modifier: Modifier) {
 private fun QuestionAnswerRow(
     entry: FeedEntry.QuestionAnswer,
     onOpenAttachment: (SentAttachment) -> Unit,
+    expandedIds: Set<String>?,
+    onToggleExpand: (FeedEntry) -> Unit,
     modifier: Modifier,
 ) {
     val canExpand = entry.lines.isNotEmpty()
-    var expanded by remember(entry.id) { mutableStateOf(false) }
+    var localExpanded by remember(entry.id) { mutableStateOf(false) }
+    val expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded
     Column(
         modifier
             .fillMaxWidth()
             .clip(MaterialTheme.shapes.small)
-            .then(if (canExpand) Modifier.clickable { expanded = !expanded } else Modifier)
+            .then(
+                if (canExpand) {
+                    Modifier.clickable {
+                        if (expandedIds != null) onToggleExpand(entry) else localExpanded = !localExpanded
+                    }
+                } else {
+                    Modifier
+                },
+            )
             .padding(vertical = S5Theme.spacing.tiny, horizontal = S5Theme.spacing.tiny),
     ) {
         Row(
