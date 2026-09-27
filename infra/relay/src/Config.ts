@@ -9,6 +9,20 @@ import * as Schema from "effect/Schema";
 export const ApnsEnvironment = Schema.Literals(["sandbox", "production"]);
 export type ApnsEnvironment = typeof ApnsEnvironment.Type;
 
+export const ManagedEndpointCleanupMode = Schema.Literals(["off", "dry-run", "enabled"]);
+export type ManagedEndpointCleanupMode = typeof ManagedEndpointCleanupMode.Type;
+const decodeManagedEndpointCleanupMode = Schema.decodeUnknownEffect(ManagedEndpointCleanupMode);
+
+export const managedEndpointCleanupModeConfig = Config.String("RELAY_TUNNEL_CLEANUP_MODE").pipe(
+  Config.withDefault("off"),
+  Config.map((value) => value.trim() || "off"),
+  Config.mapEffect((value) =>
+    decodeManagedEndpointCleanupMode(value).pipe(
+      Effect.mapError((error) => new Config.ConfigError(error)),
+    ),
+  ),
+);
+
 export interface ApnsCredentials {
   readonly teamId: string;
   readonly keyId: string;
@@ -18,12 +32,12 @@ export interface ApnsCredentials {
 }
 
 export const resolveApnsCredentials = Effect.gen(function* () {
-  const apnsEnabled = yield* Config.boolean("APNS_ENABLED").pipe(Config.withDefault(true));
+  const apnsEnabled = yield* Config.Boolean("APNS_ENABLED").pipe(Config.withDefault(true));
   if (!apnsEnabled) return null;
 
   const apnsEnvironmentRaw = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_ENVIRONMENT").pipe(Config.option),
+      yield* Config.String("APNS_ENVIRONMENT").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
@@ -33,25 +47,25 @@ export const resolveApnsCredentials = Effect.gen(function* () {
       : undefined;
   const apnsTeamId = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_TEAM_ID").pipe(Config.option),
+      yield* Config.String("APNS_TEAM_ID").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
   const apnsKeyId = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_KEY_ID").pipe(Config.option),
+      yield* Config.String("APNS_KEY_ID").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
   const apnsBundleId = Option.getOrUndefined(
     Option.filter(
-      yield* Config.string("APNS_BUNDLE_ID").pipe(Config.option),
+      yield* Config.String("APNS_BUNDLE_ID").pipe(Config.option),
       (value) => value.trim().length > 0,
     ),
   );
   const apnsPrivateKey = Option.getOrUndefined(
     Option.filter(
-      yield* Config.redacted("APNS_PRIVATE_KEY").pipe(Config.option),
+      yield* Config.Redacted("APNS_PRIVATE_KEY").pipe(Config.option),
       (value) => Redacted.value(value).trim().length > 0,
     ),
   );
@@ -88,6 +102,7 @@ export class RelayConfiguration extends Context.Service<
     readonly cloudMintPublicKey: string;
     readonly managedEndpointBaseDomain: string | undefined;
     readonly managedEndpointNamespace: string | undefined;
+    readonly managedEndpointCleanupMode?: ManagedEndpointCleanupMode;
   }
 >()("t3code-relay/Config/RelayConfiguration") {}
 

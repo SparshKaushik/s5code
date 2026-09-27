@@ -1,14 +1,14 @@
 /**
  * UsageService - scans provider transcripts and returns priced usage buckets.
  *
- * The scan reads the provider CLIs' own session files (Claude Code, Codex, and
- * Grok Build) rather than T3 Code's orchestration projections, so usage covers
- * turns driven outside T3 Code too. This is the approach `ccusage` takes.
+ * The scan reads native session files and databases, including work driven
+ * outside T3 Code. Cursor's local records provide only partial coverage.
  *
- * Transcripts are append-only, so parsed records are memoised per file by
+ * JSONL transcripts are append-only, so parsed records are memoised per file by
  * `(size, mtime)`. A cold 30-day scan of ~1.4 GB lands around 2-3 seconds; warm
  * scans only reparse files that changed, and a file that merely grew resumes
  * from its cached parse position so only the appended bytes are read.
+ * SQLite readers query live databases each scan so WAL writes remain visible.
  *
  * @module UsageService
  */
@@ -20,13 +20,14 @@ import {
   OpenCodeSettings,
   type ProviderInstanceConfig,
   USAGE_CONTRACT_VERSION,
+  ProviderInstanceId,
   type ServerSettings as ServerSettingsValue,
   type UsageCatalogModel,
   type UsageModelSearchInput,
   type UsageModelSearchResult,
-  type UsagePricing,
   type UsageProviderKind,
   type UsageSource,
+  type UsagePricing,
   type UsageSummary,
   type UsageSummaryInput,
   UsageReadError,
@@ -35,6 +36,7 @@ import { HostProcessEnvironment, HostProcessPlatform } from "@t3tools/shared/hos
 import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Context from "effect/Context";
+import * as Crypto from "effect/Crypto";
 import * as DateTime from "effect/DateTime";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
@@ -44,26 +46,19 @@ import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
-import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/unstable/http";
+import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
 import { ServerConfig } from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
-import {
-  CURSOR_USAGE_MAX_PAGES,
-  CURSOR_USAGE_PAGE_SIZE,
-  CURSOR_USAGE_URL,
-  parseCursorUsageEvent,
-  parseCursorUsagePage,
-  readCursorAppSession,
-  reconcileCursorUsagePages,
-  resolveCursorAuthDatabasePath,
-  type CursorUsagePage,
-} from "./usageCursor.ts";
+import { resolveAntigravityInstanceDirectories } from "../provider/antigravityAuthSupport.ts";
+import { PI_AGENT_DIR_ENV } from "../provider/pi/PiLaunch.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
+import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
+import { readAntigravityUsage } from "./antigravityUsageReader.ts";
+import { readCursorAccountUsage } from "./cursorUsageReader.ts";
 import { UsageAggregator } from "./usageAggregation.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
 import {
   EMPTY_CATALOG,
   parseModelCatalog,
@@ -76,7 +71,6 @@ import {
   UsagePricer,
   type RateTable,
 } from "./usagePricing.ts";
-import { readOpenCodeUsage, resolveOpenCodeDatabasePath } from "./usageOpenCode.ts";
 import {
   listTranscriptFiles,
   readDirectoryVolumeId,
@@ -89,16 +83,17 @@ import {
   pruneScanCache,
   type ScanCache,
 } from "./usageScanCache.ts";
+import type { UsageRecord } from "./usageTranscripts.ts";
+
 const LITELLM_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
 
 /**
  * models.dev's catalog, which is provider-scoped and therefore the only one
- * that can price a gateway's model names. Used for pi and for every user tag.
+ * that can price a gateway's model names. Used for pi and OpenCode records
+ * without a provider-reported cost, and for every user tag.
  */
 const MODELS_DEV_CATALOG_URL = "https://models.dev/api.json";
-
-const CURSOR_USAGE_TTL_MS = 60 * 60 * 1000;
 
 /** Most a catalog search returns. The picker is a list, not a database browser. */
 const MODEL_SEARCH_LIMIT = 50;
@@ -139,11 +134,17 @@ const encodeRatesCache = Schema.encodeEffect(
 const ScanCacheJson = Schema.fromJsonString(Schema.Unknown as unknown as Schema.Codec<unknown>);
 const decodeScanCacheFile = Schema.decodeUnknownEffect(ScanCacheJson);
 const encodeScanCacheFile = Schema.encodeEffect(ScanCacheJson);
+const encodeUsageRecordKey = Schema.encodeSync(ScanCacheJson);
+const CachedSource = Schema.Struct({ dir: Schema.String, volumeId: Schema.String });
+const decodeCachedSources = Schema.decodeUnknownOption(
+  Schema.Struct({ sources: Schema.Record(Schema.String, CachedSource) }),
+);
 
 export class UsageService extends Context.Service<
   UsageService,
   {
     readonly readSummary: (input: UsageSummaryInput) => Effect.Effect<UsageSummary, UsageReadError>;
+    /** Searches the models.dev catalog, for the tag-a-model picker. */
     readonly searchModels: (
       input: UsageModelSearchInput,
     ) => Effect.Effect<UsageModelSearchResult, UsageReadError>;
@@ -181,112 +182,32 @@ export const layerTest = Layer.succeed(
 );
 
 export const make = Effect.gen(function* () {
+  const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
-  const hostPlatform = yield* HostProcessPlatform;
   const hostEnvironment = yield* HostProcessEnvironment;
+  const platform = yield* HostProcessPlatform;
 
   const fileCache: ScanCache = new Map();
+  const sourceCache = new Map<string, typeof CachedSource.Type>();
   let cacheDirty = false;
+  const isWithinDirectory = (filePath: string, dir: string) => {
+    const relative = path.relative(dir, filePath);
+    return relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
+  };
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const catalogCachePath = path.join(config.stateDir, "usage-model-catalog.json");
   const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
-  let ratesStatus: UsageSummary["pricing"]["status"] = "unavailable";
+  let ratesStatus: UsagePricing["status"] = "unavailable";
   let catalog: ModelCatalog = EMPTY_CATALOG;
   let catalogFetchedAtMs: number | null = null;
-  let catalogStatus: UsageSummary["pricing"]["status"] = "unavailable";
-  const cursorUsageCache = new Map<
-    string,
-    {
-      readonly fetchedAtMs: number;
-      readonly records: readonly UsageRecord[];
-      readonly malformedRecords: number;
-    }
-  >();
-
-  const loadCachedRates = Effect.fn("UsageService.loadCachedRates")(function* () {
-    if (ratesFetchedAtMs !== null) return;
-    const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
-      Effect.flatMap((raw) => decodeRatesCache(raw)),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
-    if (fromDisk !== null) {
-      const parsed = parseRateTable(fromDisk.document);
-      if (parsed.size > 0) {
-        rates = parsed;
-        ratesFetchedAtMs = fromDisk.fetchedAtMs;
-        ratesStatus = "cached";
-      }
-    }
-  });
-
-  /**
-   * Same shape as the rates cache, but the models.dev document. The two share
-   * a TTL but live in separate files so a corrupted one cannot drag the other
-   * down with it.
-   */
-  const loadCachedCatalog = Effect.fn("UsageService.loadCachedCatalog")(function* () {
-    if (catalogFetchedAtMs !== null) return;
-    const fromDisk = yield* fileSystem.readFileString(catalogCachePath).pipe(
-      Effect.flatMap((raw) => decodeRatesCache(raw)),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
-    if (fromDisk !== null) {
-      const parsed = parseModelCatalog(fromDisk.document);
-      if (parsed.size > 0) {
-        catalog = parsed;
-        catalogFetchedAtMs = fromDisk.fetchedAtMs;
-        catalogStatus = "cached";
-      }
-    }
-  });
-
-  const fetchRates = Effect.fn("UsageService.fetchRates")(function* () {
-    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(10_000),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
-    if (fetched === null) return null;
-
-    const parsed = parseRateTable(fetched);
-    if (parsed.size === 0) return null;
-    return { document: fetched, parsed };
-  });
-
-  const fetchCatalog = Effect.fn("UsageService.fetchCatalog")(function* () {
-    const fetched = yield* httpClient.get(MODELS_DEV_CATALOG_URL).pipe(
-      Effect.flatMap(HttpClientResponse.filterStatusOk),
-      Effect.flatMap((response) => response.json),
-      Effect.timeout(10_000),
-      Effect.catchCause(() => Effect.succeed(null)),
-    );
-    if (fetched === null) return null;
-
-    const parsed = parseModelCatalog(fetched);
-    if (parsed.size === 0) return null;
-    return { document: fetched, parsed };
-  });
-
-  const persistRates = Effect.fn("UsageService.persistRates")(function* (
-    cachePath: string,
-    fetchedAtMs: number,
-    document: unknown,
-  ) {
-    // A snapshot we cannot write is a slower next start, not a failed read.
-    yield* encodeRatesCache({ fetchedAtMs, document }).pipe(
-      Effect.flatMap((serialized) => fileSystem.writeFileString(cachePath, serialized)),
-      Effect.catchCause(() => Effect.void),
-    );
-  });
-
+  let catalogStatus: UsagePricing["status"] = "unavailable";
   // One fetch at a time. A burst of refreshes from several clients waits on
   // the first fetch and then sees a table young enough to skip its own.
   const ratesLock = yield* Semaphore.make(1);
@@ -310,10 +231,28 @@ export const make = Effect.gen(function* () {
     const maxAgeMs = force ? RATES_REFRESH_FLOOR_MS : RATES_TTL_MS;
     if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
 
-    if (ratesFetchedAtMs === null) yield* loadCachedRates();
-    if (ratesFetchedAtMs !== null && now - ratesFetchedAtMs < maxAgeMs) return;
+    if (ratesFetchedAtMs === null) {
+      const fromDisk = yield* fileSystem.readFileString(ratesCachePath).pipe(
+        Effect.flatMap((raw) => decodeRatesCache(raw)),
+        Effect.catchCause(() => Effect.succeed(null)),
+      );
+      if (fromDisk !== null) {
+        const parsed = parseRateTable(fromDisk.document);
+        if (parsed.size > 0) {
+          rates = parsed;
+          ratesFetchedAtMs = fromDisk.fetchedAtMs;
+          ratesStatus = "cached";
+          if (now - fromDisk.fetchedAtMs < maxAgeMs) return;
+        }
+      }
+    }
 
-    const fetched = yield* fetchRates();
+    const fetched = yield* httpClient.get(LITELLM_RATES_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(10_000),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
     if (fetched === null) {
       // The refresh failed; whatever we are serving is now past its TTL and
       // must not keep claiming to be fresh.
@@ -321,47 +260,79 @@ export const make = Effect.gen(function* () {
       return;
     }
 
-    rates = fetched.parsed;
+    const parsed = parseRateTable(fetched);
+    if (parsed.size === 0) return;
+
+    rates = parsed;
     ratesFetchedAtMs = now;
     ratesStatus = "fresh";
 
-    yield* persistRates(ratesCachePath, now, fetched.document);
+    yield* encodeRatesCache({ fetchedAtMs: now, document: fetched }).pipe(
+      Effect.flatMap((serialized) => fileSystem.writeFileString(ratesCachePath, serialized)),
+      Effect.ignoreCause,
+    );
   });
 
-  /** Same lifecycle as {@link ensureRates}, for the models.dev catalog. */
-  const ensureCatalog = Effect.fn("UsageService.ensureCatalog")(function* () {
+  const ensureRates = (force: boolean) => ratesLock.withPermit(loadRates(force));
+
+  /**
+   * A snapshot we cannot write is a slower next start, not a failed read.
+   * Rates and the catalog share this shape but live in separate files so a
+   * corrupted one cannot drag the other down with it.
+   */
+  const persistDocument = (cachePath: string, fetchedAtMs: number, document: unknown) =>
+    encodeRatesCache({ fetchedAtMs, document }).pipe(
+      Effect.flatMap((serialized) => fileSystem.writeFileString(cachePath, serialized)),
+      Effect.ignoreCause,
+    );
+
+  /** Same lifecycle as {@link loadRates}, for the models.dev catalog. */
+  const loadCatalog = Effect.fn("UsageService.loadCatalog")(function* () {
     const now = yield* Clock.currentTimeMillis;
     if (catalogFetchedAtMs !== null && now - catalogFetchedAtMs < RATES_TTL_MS) return;
 
-    if (catalogFetchedAtMs === null) yield* loadCachedCatalog();
-    if (catalogFetchedAtMs !== null && now - catalogFetchedAtMs < RATES_TTL_MS) return;
+    if (catalogFetchedAtMs === null) {
+      const fromDisk = yield* fileSystem.readFileString(catalogCachePath).pipe(
+        Effect.flatMap((raw) => decodeRatesCache(raw)),
+        Effect.catchCause(() => Effect.succeed(null)),
+      );
+      if (fromDisk !== null) {
+        const parsed = parseModelCatalog(fromDisk.document);
+        if (parsed.size > 0) {
+          catalog = parsed;
+          catalogFetchedAtMs = fromDisk.fetchedAtMs;
+          catalogStatus = "cached";
+          if (now - fromDisk.fetchedAtMs < RATES_TTL_MS) return;
+        }
+      }
+    }
 
-    const fetched = yield* fetchCatalog();
+    const fetched = yield* httpClient.get(MODELS_DEV_CATALOG_URL).pipe(
+      Effect.flatMap(HttpClientResponse.filterStatusOk),
+      Effect.flatMap((response) => response.json),
+      Effect.timeout(10_000),
+      Effect.catchCause(() => Effect.succeed(null)),
+    );
     if (fetched === null) {
       if (catalog.size > 0) catalogStatus = "cached";
       return;
     }
 
-    catalog = fetched.parsed;
+    const parsed = parseModelCatalog(fetched);
+    if (parsed.size === 0) return;
+
+    catalog = parsed;
     catalogFetchedAtMs = now;
     catalogStatus = "fresh";
 
-    yield* persistRates(catalogCachePath, now, fetched.document);
+    yield* persistDocument(catalogCachePath, now, fetched);
   });
-
-  const ensureRates = (force: boolean) => ratesLock.withPermit(loadRates(force));
 
   const refreshRates = ensureRates(true).pipe(
     Effect.map(pricing),
     Effect.withSpan("UsageService.refreshRates"),
   );
 
-  const resolvePiAgentDir = (piSettings: { readonly agentDirPath: string }): string => {
-    const agentDirPath = piSettings.agentDirPath.trim();
-    return agentDirPath.length > 0
-      ? path.resolve(expandHomePath(agentDirPath))
-      : path.join(NodeOS.homedir(), ".pi", "agent");
-  };
   // A settings failure must not silently discard custom rates or transcript homes.
   const readSettings = settingsService.getSettings.pipe(
     Effect.catchCause(
@@ -374,48 +345,90 @@ export const make = Effect.gen(function* () {
     ),
   );
 
+  const resolvePiAgentDir = (
+    piSettings: { readonly agentDirPath: string },
+    environment: NodeJS.ProcessEnv,
+  ): string => {
+    const agentDirPath = piSettings.agentDirPath.trim();
+    if (agentDirPath.length > 0) return path.resolve(expandHomePath(agentDirPath));
+    // pi isolates per-instance state through PI_CODING_AGENT_DIR (see
+    // provider/pi/PiLaunch.ts); usage must read the same directory it launches
+    // with, or a configured instance reports empty history.
+    const environmentDir = environment[PI_AGENT_DIR_ENV]?.trim();
+    return environmentDir
+      ? path.resolve(expandHomePath(environmentDir))
+      : path.join(NodeOS.homedir(), ".pi", "agent");
+  };
+
   /**
-   * The local OpenCode databases to read, deduplicated by resolved path.
+   * Data directories and explicit database files each configured local
+   * OpenCode instance keeps its usage in.
    *
-   * OpenCode keeps session usage in one SQLite database per data directory
-   * rather than per-session files. Remote `serverUrl` instances report their
-   * usage on their own host, so they contribute no path here; each local
-   * instance's `OPENCODE_DB`/`XDG_DATA_HOME` environment is honoured.
+   * OpenCode stores session usage in one SQLite database per data directory.
+   * Remote `serverUrl` instances report their usage on their own host, so they
+   * contribute nothing here; each local instance's `OPENCODE_DB`,
+   * `OPENCODE_DATA_DIR`, and `XDG_DATA_HOME` environment is honoured the same
+   * way `opencode serve` resolves them. Explicit `OPENCODE_DB` paths stay file
+   * roots; everything else contributes a data directory that the reader scans
+   * for `opencode*.db` and legacy JSON history.
    */
-  const resolveOpenCodeDatabasePaths = Effect.fn("UsageService.resolveOpenCodeDatabasePaths")(
-    function* (settings: ServerSettingsValue) {
-      const paths: string[] = [];
-      const seen = new Set<string>();
-      const instances: Array<Pick<ProviderInstanceConfig, "config" | "environment">> =
-        Object.values(settings.providerInstances).filter(
-          (instance) => instance.driver === "opencode" || instance.driver === "opencode2",
-        );
-      if (!Object.hasOwn(settings.providerInstances, "opencode")) {
-        instances.push({ config: settings.providers.opencode });
+  const resolveOpenCodeRoots = Effect.fn("UsageService.resolveOpenCodeRoots")(function* (
+    settings: ServerSettingsValue,
+  ) {
+    const dataDirs = new Set<string>();
+    const dbFiles = new Set<string>();
+    const home = NodeOS.homedir();
+    const instances: Array<Pick<ProviderInstanceConfig, "config" | "environment">> = Object.values(
+      settings.providerInstances,
+    ).filter((instance) => instance.driver === "opencode" || instance.driver === "opencode2");
+    if (!Object.hasOwn(settings.providerInstances, "opencode")) {
+      instances.push({ config: settings.providers.opencode });
+    }
+    const canonicalize = (candidate: string) =>
+      fileSystem.realPath(candidate).pipe(Effect.orElseSucceed(() => candidate));
+    for (const instance of instances) {
+      const decoded = decodeOpenCodeSettings(instance.config ?? {});
+      if (Option.isNone(decoded)) continue;
+      // A remote server owns its own environment's usage.
+      if (decoded.value.serverUrl.trim().length > 0) continue;
+      const environment = mergeProviderInstanceEnvironment(instance.environment, hostEnvironment);
+      const dbOverride = environment["OPENCODE_DB"]?.trim();
+      if (dbOverride) {
+        const candidate = path.resolve(expandHomePath(dbOverride));
+        dbFiles.add(yield* canonicalize(candidate));
+        continue;
       }
-      for (const instance of instances) {
-        const decoded = decodeOpenCodeSettings(instance.config ?? {});
-        if (Option.isNone(decoded)) continue;
-        // A remote server owns its own environment's usage.
-        if (decoded.value.serverUrl.trim().length > 0) continue;
-        const environment = mergeProviderInstanceEnvironment(instance.environment, hostEnvironment);
-        const candidate = path.resolve(resolveOpenCodeDatabasePath(NodeOS.homedir(), environment));
-        const resolved = yield* fileSystem
-          .realPath(candidate)
-          .pipe(Effect.orElseSucceed(() => candidate));
-        if (seen.has(resolved)) continue;
-        seen.add(resolved);
-        paths.push(resolved);
+      const dataDirEnv = environment["OPENCODE_DATA_DIR"]?.trim();
+      const dataHome = environment["XDG_DATA_HOME"]?.trim();
+      const roots = dataDirEnv
+        ? dataDirEnv
+            .split(",")
+            .map((value) => value.trim())
+            .filter(Boolean)
+        : [
+            path.join(
+              dataHome && path.isAbsolute(dataHome) ? dataHome : path.join(home, ".local", "share"),
+              "opencode",
+            ),
+          ];
+      for (const root of roots) {
+        dataDirs.add(yield* canonicalize(path.resolve(expandHomePath(root))));
       }
-      return paths;
-    },
-  );
+    }
+    return { dataDirs, dbFiles };
+  });
 
   /** Resolves the transcript directory for each provider. */
   const resolveTranscriptDirs = Effect.fn("UsageService.resolveTranscriptDirs")(function* (
     settings: ServerSettingsValue,
+    retentionCutoffMs: number,
   ) {
-    const dirs: Array<{ provider: UsageProviderKind; dir: string; fileName?: string }> = [];
+    const dirs: Array<{
+      provider: UsageProviderKind;
+      dir: string;
+      volumeId: string;
+      fileName?: string;
+    }> = [];
     const seen = new Set<string>();
     for (const driver of ["claudeAgent", "codex", "grok"] as const) {
       // Disabled accounts still have history. Explicit default slots replace
@@ -453,23 +466,76 @@ export const make = Effect.gen(function* () {
           );
         }
         const directory = path.resolve(home, provider === "claude" ? "projects" : "sessions");
-        // Account aliases and Codex auth overlays can share the same history.
+        const sourceKey = provider + "\0" + directory;
+        const previous = sourceCache.get(sourceKey);
+        // Keep canonical paths and source fingerprints stable after root cleanup,
+        // including aliases and clients merging pre-cleanup environment summaries.
         const dir = yield* fileSystem
           .realPath(directory)
-          .pipe(Effect.orElseSucceed(() => directory));
+          .pipe(Effect.orElseSucceed(() => previous?.dir ?? directory));
+        const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+        const hasRetainedHistory = fileCache
+          .entries()
+          .some(
+            ([filePath, entry]) =>
+              entry.provider === provider &&
+              entry.mtimeMs >= retentionCutoffMs &&
+              entry.records.length + entry.tailRecords.length > 0 &&
+              isWithinDirectory(filePath, dir),
+          );
+        // A recreated directory still reports the retained history under its old identity.
+        const volumeId =
+          previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
+            ? previous.volumeId || currentVolumeId
+            : currentVolumeId;
+        if (previous?.dir !== dir || previous.volumeId !== volumeId) {
+          sourceCache.set(sourceKey, { dir, volumeId });
+          cacheDirty = true;
+        }
         const key = `${provider}\0${dir}`;
         if (seen.has(key)) continue;
         seen.add(key);
-        dirs.push({ provider, dir, ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}) });
+        dirs.push({
+          provider,
+          dir,
+          volumeId,
+          ...(provider === "grok" ? { fileName: "updates.jsonl" } : {}),
+        });
       }
     }
     if (settings.providers.pi) {
-      const piDir = path.join(resolvePiAgentDir(settings.providers.pi), "sessions");
-      const dir = yield* fileSystem.realPath(piDir).pipe(Effect.orElseSucceed(() => piDir));
-      const key = `pi\0${dir}`;
+      const piDir = path.join(
+        resolvePiAgentDir(settings.providers.pi, hostEnvironment),
+        "sessions",
+      );
+      const sourceKey = `pi\u0000${piDir}`;
+      const previous = sourceCache.get(sourceKey);
+      const dir = yield* fileSystem
+        .realPath(piDir)
+        .pipe(Effect.orElseSucceed(() => previous?.dir ?? piDir));
+      const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+      const hasRetainedHistory = fileCache
+        .entries()
+        .some(
+          ([filePath, entry]) =>
+            entry.provider === "pi" &&
+            entry.mtimeMs >= retentionCutoffMs &&
+            entry.records.length + entry.tailRecords.length > 0 &&
+            isWithinDirectory(filePath, dir),
+        );
+      // A recreated directory still reports the retained history under its old identity.
+      const volumeId =
+        previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
+          ? previous.volumeId || currentVolumeId
+          : currentVolumeId;
+      if (previous?.dir !== dir || previous.volumeId !== volumeId) {
+        sourceCache.set(sourceKey, { dir, volumeId });
+        cacheDirty = true;
+      }
+      const key = `pi\u0000${dir}`;
       if (!seen.has(key)) {
         seen.add(key);
-        dirs.push({ provider: "pi" as const, dir });
+        dirs.push({ provider: "pi", dir, volumeId });
       }
     }
     return dirs;
@@ -490,6 +556,11 @@ export const make = Effect.gen(function* () {
       );
       if (document === null) return;
       for (const [path, entry] of decodeScanCache(document)) fileCache.set(path, entry);
+      const sources = decodeCachedSources(document);
+      if (Option.isSome(sources)) {
+        for (const [key, source] of Object.entries(sources.value.sources))
+          sourceCache.set(key, source);
+      }
     }),
   );
 
@@ -497,13 +568,16 @@ export const make = Effect.gen(function* () {
     if (!cacheDirty) return;
     // Cleared only after the write lands, so a failed persist is retried on
     // the next scan instead of leaving disk permanently stale.
-    yield* encodeScanCacheFile(encodeScanCache(fileCache)).pipe(
+    yield* encodeScanCacheFile({
+      ...encodeScanCache(fileCache),
+      sources: Object.fromEntries(sourceCache),
+    }).pipe(
       Effect.flatMap((serialized) => fileSystem.writeFileString(scanCachePath, serialized)),
       Effect.map(() => {
         cacheDirty = false;
       }),
       // A cache we cannot write is a slower next start, not a failed read.
-      Effect.catchCause(() => Effect.void),
+      Effect.ignoreCause,
     );
   });
 
@@ -548,7 +622,8 @@ export const make = Effect.gen(function* () {
       );
       // A read failure is not an empty transcript: caching it under this
       // (size, mtime) would silently drop the file's usage until it changes.
-      if (parsed === null) return [];
+      if (parsed === null)
+        return cached?.provider === provider ? [...cached.records, ...cached.tailRecords] : [];
 
       // Stored already de-duplicated within the file, which is 99% of all
       // duplicates. The aggregator still runs the cross-file dedupe pass. One
@@ -571,151 +646,15 @@ export const make = Effect.gen(function* () {
       return tailRecords.length === 0 ? records : [...records, ...tailRecords];
     });
 
-  const readCursorUsage = Effect.fn("UsageService.readCursorUsage")(
-    function* (input: UsageSummaryInput, nowMs: number) {
-      const databasePath = resolveCursorAuthDatabasePath(
-        hostPlatform,
-        NodeOS.homedir(),
-        hostEnvironment,
-      );
-      const session = yield* Effect.promise(() => readCursorAppSession(nowMs, databasePath));
-      if (session === null) {
-        return {
-          records: [] as readonly UsageRecord[],
-          source: {
-            fingerprint: {
-              hostId: NodeOS.hostname(),
-              provider: "cursor" as const,
-              resolvedHomePath: databasePath,
-              volumeId: "",
-            },
-            status: "missing" as const,
-            scannedFiles: 0,
-            skippedFiles: 0,
-            malformedRecords: 0,
-            distinctSessions: 0,
-            message: "Cursor is not installed, signed in, or its session has expired.",
-          } satisfies UsageSource,
-        };
-      }
-
-      const sourceId = `cursor-account:${session.accountFingerprint}`;
-      const cacheKey = `${session.accountFingerprint}\u0000${input.sinceDay}\u0000${input.untilDay}`;
-      const cached = cursorUsageCache.get(cacheKey);
-      let records: readonly UsageRecord[];
-      let malformedRecords: number;
-
-      if (cached !== undefined && nowMs - cached.fetchedAtMs < CURSOR_USAGE_TTL_MS) {
-        records = cached.records;
-        malformedRecords = cached.malformedRecords;
-      } else {
-        const pages: CursorUsagePage[] = [];
-        let completed = false;
-        for (let page = 1; page <= CURSOR_USAGE_MAX_PAGES; page += 1) {
-          const document = yield* HttpClientRequest.post(CURSOR_USAGE_URL).pipe(
-            HttpClientRequest.setHeaders({
-              accept: "application/json",
-              cookie: session.cookieHeader,
-              origin: "https://cursor.com",
-            }),
-            HttpClientRequest.bodyJsonUnsafe({
-              page,
-              pageSize: CURSOR_USAGE_PAGE_SIZE,
-              startDate: String(Date.parse(`${input.sinceDay}T00:00:00Z`) - MTIME_SLACK_MS),
-              endDate: String(
-                Date.parse(`${input.untilDay}T00:00:00Z`) +
-                  24 * 60 * 60 * 1000 -
-                  1 +
-                  MTIME_SLACK_MS,
-              ),
-            }),
-            httpClient.execute,
-            Effect.flatMap(HttpClientResponse.filterStatusOk),
-            Effect.flatMap((response) => response.json),
-            Effect.timeout(30_000),
-          );
-          const parsed = parseCursorUsagePage(document);
-          if (parsed === null) {
-            return yield* new UsageReadError({
-              reason: "scanFailed",
-              detail: "Cursor returned an unrecognised usage response.",
-            });
-          }
-          pages.push(parsed);
-          if (parsed.events.length < CURSOR_USAGE_PAGE_SIZE) {
-            completed = true;
-            break;
-          }
-        }
-
-        const events = yield* Effect.try({
-          try: () => reconcileCursorUsagePages(pages, completed),
-          catch: (cause) =>
-            new UsageReadError({
-              reason: "scanFailed",
-              detail: "Cursor usage pagination was incomplete.",
-              cause,
-            }),
-        });
-        const parsedRecords: UsageRecord[] = [];
-        malformedRecords = 0;
-        for (const event of events) {
-          const parsed = parseCursorUsageEvent(event);
-          if (parsed._tag === "record") parsedRecords.push(parsed.record);
-          if (parsed._tag === "malformed") malformedRecords += 1;
-        }
-        records = parsedRecords;
-        cursorUsageCache.set(cacheKey, { fetchedAtMs: nowMs, records, malformedRecords });
-      }
-
-      return {
-        records,
-        source: {
-          fingerprint: {
-            hostId: NodeOS.hostname(),
-            provider: "cursor" as const,
-            resolvedHomePath: sourceId,
-            volumeId: "",
-          },
-          status: "ok" as const,
-          scannedFiles: 0,
-          skippedFiles: 0,
-          malformedRecords,
-          distinctSessions: 0,
-          message: "Account-wide usage from cursor.com.",
-        } satisfies UsageSource,
-      };
-    },
-    Effect.catchCause((cause) =>
-      Effect.succeed({
-        records: [] as readonly UsageRecord[],
-        source: {
-          fingerprint: {
-            hostId: NodeOS.hostname(),
-            provider: "cursor" as const,
-            resolvedHomePath: resolveCursorAuthDatabasePath(
-              hostPlatform,
-              NodeOS.homedir(),
-              hostEnvironment,
-            ),
-            volumeId: "",
-          },
-          status: "failed" as const,
-          scannedFiles: 0,
-          skippedFiles: 0,
-          malformedRecords: 0,
-          distinctSessions: 0,
-          message: `Cursor usage could not be read: ${String(Cause.squash(cause)).slice(0, 180)}`,
-        } satisfies UsageSource,
-      }),
-    ),
-  );
-
   /** One provider directory's walk and parse, before rates are involved. */
   interface ScannedDir {
     readonly provider: UsageProviderKind;
     readonly dir: string;
     readonly volumeId: string;
+    readonly hostId?: string;
+    readonly status?: UsageSource["status"];
+    readonly message?: string;
+    readonly action?: UsageSource["action"];
     /** Parsed records per file, or `null` when the directory does not exist. */
     readonly files:
       | readonly { readonly path: string; readonly records: readonly UsageRecord[] }[]
@@ -725,15 +664,15 @@ export const make = Effect.gen(function* () {
   const collectDirs = Effect.fn("UsageService.collectDirs")(function* (
     windowStartMs: number,
     settings: ServerSettingsValue,
+    retentionCutoffMs: number,
   ) {
     // The home resolvers ask for `Path` themselves; satisfy them from the
     // instance we already hold so the scan stays context-free.
-    const dirs = yield* resolveTranscriptDirs(settings).pipe(
+    const dirs = yield* resolveTranscriptDirs(settings, retentionCutoffMs).pipe(
       Effect.provideService(Path.Path, path),
     );
     const scanned: ScannedDir[] = [];
-    for (const { provider, dir, fileName } of dirs) {
-      const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
+    for (const { provider, dir, volumeId, fileName } of dirs) {
       const exists = yield* fileSystem
         .exists(dir)
         .pipe(Effect.catchCause(() => Effect.succeed(false)));
@@ -751,6 +690,194 @@ export const make = Effect.gen(function* () {
       }
       scanned.push({ provider, dir, volumeId, files: parsedFiles });
     }
+
+    const home = NodeOS.homedir();
+    const envRoots = Effect.fnUntraced(function* (key: string, defaults: readonly string[]) {
+      const roots = hostEnvironment[key]
+        ?.split(",")
+        .map((value) => value.trim())
+        .filter(Boolean);
+      const canonical = new Set<string>();
+      for (const root of roots?.length ? roots : defaults) {
+        const resolved = path.resolve(expandHomePath(root));
+        canonical.add(
+          yield* fileSystem.realPath(resolved).pipe(Effect.orElseSucceed(() => resolved)),
+        );
+      }
+      return [...canonical];
+    });
+    const dataHome = hostEnvironment["XDG_DATA_HOME"]?.trim();
+    const openCodeRoots = yield* resolveOpenCodeRoots(settings);
+    const openCodeDataDirs = new Set(
+      yield* envRoots("OPENCODE_DATA_DIR", [
+        path.join(
+          dataHome && path.isAbsolute(dataHome) ? dataHome : path.join(home, ".local", "share"),
+          "opencode",
+        ),
+      ]),
+    );
+    for (const dir of openCodeRoots.dataDirs) {
+      openCodeDataDirs.add(dir);
+    }
+    for (const dir of openCodeDataDirs) {
+      const result = yield* Effect.promise(() => readOpenCodeUsage(dir, windowStartMs));
+      scanned.push({
+        provider: "opencode",
+        dir,
+        volumeId: yield* Effect.promise(() => readDirectoryVolumeId(dir)),
+        files: result.missing && !result.error ? null : result.files,
+        status: result.error ? "partial" : "ok",
+        ...(result.error ? { message: "Some OpenCode history could not be read." } : {}),
+      });
+    }
+    // Explicit OPENCODE_DB paths are files, which the directory scan above
+    // already covers when they live inside a scanned data dir.
+    for (const dbPath of openCodeRoots.dbFiles) {
+      if (openCodeDataDirs.has(path.dirname(dbPath))) continue;
+      const result = yield* Effect.promise(() => readOpenCodeUsage(dbPath, windowStartMs));
+      scanned.push({
+        provider: "opencode",
+        dir: dbPath,
+        volumeId: yield* Effect.promise(() => readDirectoryVolumeId(dbPath)),
+        files: result.missing && !result.error ? null : result.files,
+        status: result.error ? "partial" : "ok",
+        ...(result.error ? { message: "Some OpenCode history could not be read." } : {}),
+      });
+    }
+    const antigravityRoots = yield* envRoots("ANTIGRAVITY_DATA_DIR", [
+      ...["antigravity", "antigravity-cli", "antigravity-ide", "antigravity-backup"].map((name) =>
+        path.join(home, ".gemini", name),
+      ),
+      path.join(home, ".config", "antigravity"),
+    ]);
+    for (const [instanceId, instance] of Object.entries(settings.providerInstances)) {
+      if (instance.driver === "antigravity") {
+        const directories = yield* resolveAntigravityInstanceDirectories(
+          config.stateDir,
+          ProviderInstanceId.make(instanceId),
+        ).pipe(
+          Effect.provideService(Crypto.Crypto, crypto),
+          Effect.provideService(Path.Path, path),
+          Effect.mapError(
+            (cause) =>
+              new UsageReadError({
+                reason: "scanFailed",
+                detail: "Antigravity profile directory could not be resolved.",
+                cause,
+              }),
+          ),
+        );
+        antigravityRoots.push(path.join(directories.profile, "antigravity-acp"));
+      }
+    }
+    const antigravityDirs = new Set<string>();
+    for (const root of antigravityRoots) {
+      const resolvedRoot = yield* fileSystem.realPath(root).pipe(Effect.orElseSucceed(() => root));
+      const nested = path.join(resolvedRoot, "conversations");
+      const dir = (yield* fileSystem
+        .exists(nested)
+        .pipe(Effect.catchCause(() => Effect.succeed(false))))
+        ? nested
+        : resolvedRoot;
+      antigravityDirs.add(yield* fileSystem.realPath(dir).pipe(Effect.orElseSucceed(() => dir)));
+    }
+    const antigravity = yield* Effect.promise(() =>
+      readAntigravityUsage([...antigravityDirs], windowStartMs),
+    );
+    for (const dir of antigravityDirs) {
+      const exists = yield* fileSystem
+        .exists(dir)
+        .pipe(Effect.catchCause(() => Effect.succeed(false)));
+      const failed = antigravity.errors.some(
+        (error) => error === dir || error.startsWith(`${dir}${path.sep}`),
+      );
+      scanned.push({
+        provider: "antigravity",
+        dir,
+        volumeId: yield* Effect.promise(() => readDirectoryVolumeId(dir)),
+        files: !exists && !failed ? null : antigravity.files.filter((file) => file.root === dir),
+        status: failed ? "partial" : "ok",
+        ...(failed ? { message: "Some Antigravity history could not be read." } : {}),
+      });
+    }
+    const cursorUserHome =
+      (platform === "win32" ? hostEnvironment["USERPROFILE"] : hostEnvironment["HOME"]) || home;
+    const configHome = hostEnvironment["XDG_CONFIG_HOME"]?.trim();
+    const cursorHome =
+      platform === "darwin"
+        ? path.join(cursorUserHome, "Library", "Application Support")
+        : platform === "win32"
+          ? hostEnvironment["APPDATA"] || path.join(cursorUserHome, "AppData", "Roaming")
+          : configHome && path.isAbsolute(configHome)
+            ? configHome
+            : path.join(cursorUserHome, ".config");
+    const cursorAuthPath =
+      platform === "darwin"
+        ? path.join(cursorUserHome, ".cursor", "auth.json")
+        : path.join(cursorHome, platform === "win32" ? "Cursor" : "cursor", "auth.json");
+    const credentialStore = hostEnvironment["AGENT_CLI_CREDENTIAL_STORE"];
+    const loginUnavailable =
+      Boolean(hostEnvironment["CURSOR_AUTH_TOKEN"]?.trim()) ||
+      Boolean(hostEnvironment["CURSOR_API_KEY"]?.trim()) ||
+      credentialStore === "memory";
+    if (
+      platform === "darwin" &&
+      credentialStore !== "file" &&
+      !loginUnavailable &&
+      !settings.cursorKeychainUsageEnabled
+    ) {
+      scanned.push({
+        provider: "cursor",
+        dir: cursorAuthPath,
+        volumeId: "",
+        files: null,
+        message: "Cursor account usage is off on this environment.",
+        action: "enableCursorKeychain",
+      });
+      return scanned;
+    }
+    const cursorUntilMs = yield* Clock.currentTimeMillis;
+    const account = loginUnavailable
+      ? {
+          accountKey: null,
+          records: [],
+          missing: true,
+          error: "Cursor account history needs a Cursor CLI login on this server.",
+        }
+      : yield* Effect.promise(() =>
+          readCursorAccountUsage(
+            platform === "darwin" && credentialStore !== "file"
+              ? { kind: "keychain" }
+              : cursorAuthPath,
+            windowStartMs,
+            cursorUntilMs,
+          ),
+        );
+    // No saved login means there is no account source to report, not a setup error.
+    if (account.missing && account.error === null) return scanned;
+    if (account.accountKey !== null && account.error === null && !account.missing) {
+      // The same account includes CLI and desktop history from every machine.
+      // A stable remote fingerprint prevents connected environments counting it twice.
+      const source = `cursor-account:${account.accountKey}`;
+      scanned.push({
+        provider: "cursor",
+        dir: source,
+        hostId: "cursor.com",
+        volumeId: account.accountKey,
+        files: [{ path: source, records: account.records }],
+        status: "ok",
+      });
+      return scanned;
+    }
+    scanned.push({
+      provider: "cursor",
+      dir: cursorAuthPath,
+      volumeId: yield* Effect.promise(() => readDirectoryVolumeId(cursorAuthPath)),
+      // Never combine a local fallback with another server's account-wide history.
+      files: null,
+      message:
+        account.error ?? "Cursor account history needs a Cursor CLI login saved on this server.",
+    });
     return scanned;
   });
 
@@ -790,18 +917,6 @@ export const make = Effect.gen(function* () {
     }
 
     const startedAtMs = yield* Clock.currentTimeMillis;
-    const openCodeDbPaths = yield* resolveOpenCodeDatabasePaths(settings);
-    // OpenCode and pi both price against the models.dev catalog, so it loads
-    // whenever a database that can carry them exists, not only when tags do.
-    let anyOpenCodeDb = false;
-    for (const dbPath of openCodeDbPaths) {
-      anyOpenCodeDb ||= yield* fileSystem
-        .exists(dbPath)
-        .pipe(Effect.catchCause(() => Effect.succeed(false)));
-    }
-    if (input.modelAliases.length > 0 || anyOpenCodeDb) {
-      yield* ensureCatalog();
-    }
     yield* ensureScanCacheLoaded;
 
     const hostId = NodeOS.hostname();
@@ -815,150 +930,128 @@ export const make = Effect.gen(function* () {
     const windowStartMs =
       (hourlyWindow?.sinceTimeMs ?? DateTime.toEpochMillis(windowStart.value)) - MTIME_SLACK_MS;
 
+    const retentionCutoffMs = startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000;
+
     // Pricing only matters once records are aggregated, so the rate table
     // loads while transcripts stream instead of gating them: a cold rates
     // fetch on a slow network no longer delays the scan by its own timeout.
     const [, scannedDirs] = yield* Effect.all(
-      [ensureRates(false), collectDirs(windowStartMs, settings)],
+      [ensureRates(false), collectDirs(windowStartMs, settings, retentionCutoffMs)],
       { concurrency: 2 },
     );
+
+    // OpenCode and pi both price against the models.dev catalog, so it loads
+    // whenever a source that can carry them was found, not only when tags do.
+    if (
+      input.modelAliases.length > 0 ||
+      scannedDirs.some(
+        (scanned) =>
+          (scanned.provider === "pi" || scanned.provider === "opencode") && scanned.files !== null,
+      ) ||
+      fileCache
+        .entries()
+        .some(
+          ([, entry]) =>
+            (entry.provider === "pi" || entry.provider === "opencode") &&
+            entry.mtimeMs >= retentionCutoffMs &&
+            entry.records.length + entry.tailRecords.length > 0,
+        )
+    ) {
+      yield* loadCatalog();
+    }
 
     const aggregator = new UsageAggregator({
       timeZone: input.timeZone,
       sinceDay: input.sinceDay,
       untilDay: input.untilDay,
+      resolution: input.resolution ?? "day",
+      ...hourlyWindow,
       pricer: new UsagePricer({
         rates,
         catalog,
         aliases: input.modelAliases,
         priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       }),
-      resolution: input.resolution ?? "day",
-      ...hourlyWindow,
     });
 
     const sources: UsageSource[] = [];
-    const cursor = yield* readCursorUsage(input, startedAtMs);
-    const cursorSessionIds = new Set<string>();
-    for (const record of cursor.records) {
-      if (aggregator.add(record) && record.sessionId.length > 0) {
-        cursorSessionIds.add(record.sessionId);
-      }
-    }
-    sources.push({ ...cursor.source, distinctSessions: cursorSessionIds.size });
-    const livePaths = new Set<string>();
-    const walkedRoots: string[] = [];
 
-    // OpenCode keeps usage in one database per data directory. Each path is
-    // read like a single "transcript", and its sessions become the source's
-    // session count via the same contributed-record rule the files use.
-    const openCodeUntilMs =
-      hourlyWindow?.untilTimeMs ?? Date.parse(`${input.untilDay}T00:00:00Z`) + 24 * 60 * 60 * 1000;
-    for (const dbPath of openCodeDbPaths) {
-      const volumeId = yield* Effect.promise(() => readDirectoryVolumeId(dbPath));
-      const exists = yield* fileSystem
-        .exists(dbPath)
-        .pipe(Effect.catchCause(() => Effect.succeed(false)));
-      if (!exists) {
-        sources.push({
-          fingerprint: { hostId, provider: "opencode", resolvedHomePath: dbPath, volumeId },
-          status: "missing",
-          scannedFiles: 0,
-          skippedFiles: 0,
-          malformedRecords: 0,
-          distinctSessions: 0,
-          message: "No OpenCode database on this environment.",
-        });
-        continue;
+    for (const {
+      provider,
+      dir,
+      volumeId,
+      files,
+      status,
+      message,
+      action,
+      hostId: sourceHostId,
+    } of scannedDirs) {
+      const retainedFiles = [...(files ?? [])];
+      const livePaths = new Set(retainedFiles.map((file) => file.path));
+      // Cleanup may remove transcripts, but the usage we already saved still
+      // contributes to this source. Keep the normal aggregation and dedupe path.
+      for (const [filePath, entry] of fileCache) {
+        if (
+          entry.provider !== provider ||
+          entry.mtimeMs < retentionCutoffMs ||
+          livePaths.has(filePath) ||
+          !isWithinDirectory(filePath, dir)
+        )
+          continue;
+        retainedFiles.push({ path: filePath, records: [...entry.records, ...entry.tailRecords] });
       }
-
-      const read = yield* Effect.sync(() =>
-        readOpenCodeUsage(dbPath, windowStartMs, openCodeUntilMs),
-      );
-      if (read === null) {
-        sources.push({
-          fingerprint: { hostId, provider: "opencode", resolvedHomePath: dbPath, volumeId },
-          status: "failed",
-          scannedFiles: 0,
-          skippedFiles: 0,
-          malformedRecords: 0,
-          distinctSessions: 0,
-          message: "The OpenCode database could not be read.",
-        });
-        continue;
-      }
-
-      const sessionIds = new Set<string>();
-      for (const record of read.records) {
-        if (aggregator.add(record) && record.sessionId.length > 0) {
-          sessionIds.add(record.sessionId);
-        }
-      }
-      sources.push({
-        fingerprint: { hostId, provider: "opencode", resolvedHomePath: dbPath, volumeId },
-        status: "ok",
-        scannedFiles: 1,
-        skippedFiles: 0,
-        malformedRecords: read.malformedRecords,
-        distinctSessions: sessionIds.size,
-        message: null,
-      });
-    }
-
-    for (const { provider, dir, volumeId, files } of scannedDirs) {
-      if (files === null) {
-        sources.push({
-          fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-          status: "missing",
-          scannedFiles: 0,
-          skippedFiles: 0,
-          malformedRecords: 0,
-          distinctSessions: 0,
-          message: "No transcript directory on this environment.",
-        });
-        continue;
-      }
-
-      walkedRoots.push(dir);
       let scannedFiles = 0;
       let skippedFiles = 0;
       // Distinct per directory. Buckets carry per-cell session counts, but a
       // session spans days and models, so clients total this figure instead.
       const sessionIds = new Set<string>();
 
-      for (const file of files) {
-        livePaths.add(file.path);
+      for (const file of retainedFiles) {
         if (file.records.length === 0) {
           skippedFiles += 1;
           continue;
         }
         scannedFiles += 1;
+        const codexEventOccurrences = new Map<string, number>();
         for (const record of file.records) {
-          // Only sessions that contributed in-window count: the mtime slack
-          // admits boundary files whose records fall outside the range.
-          if (aggregator.add(record) && record.sessionId.length > 0) {
+          let usageRecord = record;
+          if (record.provider === "codex" && record.sessionId.length > 0) {
+            // Match moved rollout copies without collapsing repeated equal events
+            // within one rollout (timestamps can have only second precision).
+            const key = encodeUsageRecordKey([
+              record.provider,
+              record.sessionId,
+              record.timestampMs,
+              record.model,
+              record.totals,
+            ]);
+            const occurrence = (codexEventOccurrences.get(key) ?? 0) + 1;
+            codexEventOccurrences.set(key, occurrence);
+            usageRecord = { ...record, dedupeKey: key + ":" + occurrence };
+          }
+          // Only sessions contributing in-window count; the mtime slack can
+          // admit boundary files whose records fall outside the range.
+          if (aggregator.add(usageRecord, dir) && record.sessionId.length > 0) {
             sessionIds.add(record.sessionId);
           }
         }
       }
 
       sources.push({
-        fingerprint: { hostId, provider, resolvedHomePath: dir, volumeId },
-        status: "ok",
+        fingerprint: { hostId: sourceHostId ?? hostId, provider, resolvedHomePath: dir, volumeId },
+        // Clients exclude missing sources, so saved records remain an available source.
+        status: files === null && scannedFiles === 0 ? "missing" : (status ?? "ok"),
         scannedFiles,
         skippedFiles,
         malformedRecords: 0,
         distinctSessions: sessionIds.size,
-        message: null,
+        message:
+          message ?? (files === null ? "No transcript directory on this environment." : null),
+        ...(action ? { action } : {}),
       });
     }
 
-    const pruned = pruneScanCache(fileCache, {
-      livePaths,
-      walkedRoots,
-      windowStartMs,
-      retentionCutoffMs: startedAtMs - CACHE_RETENTION_DAYS * 24 * 60 * 60 * 1000,
-    });
+    const pruned = pruneScanCache(fileCache, retentionCutoffMs);
     if (pruned > 0) cacheDirty = true;
     yield* persistScanCache();
 
@@ -987,24 +1080,6 @@ export const make = Effect.gen(function* () {
     } satisfies UsageSummary;
   });
 
-  const searchModels = Effect.fn("UsageService.searchModels")(function* (
-    input: UsageModelSearchInput,
-  ) {
-    yield* ensureCatalog();
-    return {
-      models: searchCatalog(catalog, input.query, MODEL_SEARCH_LIMIT).map(
-        (model) =>
-          ({
-            id: model.id,
-            providerName: model.providerName,
-            modelName: model.modelName,
-            inputCostPerMillion: model.inputCostPerMillion,
-            outputCostPerMillion: model.outputCostPerMillion,
-          }) as UsageCatalogModel,
-      ),
-    } satisfies UsageModelSearchResult;
-  });
-
   /**
    * In-flight scans by window and custom prices, so concurrent identical requests (the usage
    * page open on two clients at once) share one scan instead of racing over
@@ -1015,6 +1090,7 @@ export const make = Effect.gen(function* () {
   const scanKey = (
     input: UsageSummaryInput,
     priceOverrides: ServerSettingsValue["usagePriceOverrides"],
+    cursorKeychainUsageEnabled: boolean,
   ): string =>
     JSON.stringify([
       input.timeZone,
@@ -1025,11 +1101,12 @@ export const make = Effect.gen(function* () {
       input.untilTime ?? null,
       priceOverrides,
       input.modelAliases,
+      cursorKeychainUsageEnabled,
     ]);
 
   const readSummary = Effect.fn("UsageService.readSummary")(function* (input: UsageSummaryInput) {
     const settings = yield* readSettings;
-    const key = scanKey(input, settings.usagePriceOverrides);
+    const key = scanKey(input, settings.usagePriceOverrides, settings.cursorKeychainUsageEnabled);
     const deferred = yield* Effect.uninterruptible(
       Effect.gen(function* () {
         const existing = inflightScans.get(key);
@@ -1057,19 +1134,39 @@ export const make = Effect.gen(function* () {
     return yield* Deferred.await(deferred);
   });
 
+  const searchModels = Effect.fn("UsageService.searchModels")(function* (
+    input: UsageModelSearchInput,
+  ) {
+    yield* loadCatalog();
+    return {
+      models: searchCatalog(catalog, input.query, MODEL_SEARCH_LIMIT).map(
+        (model) =>
+          ({
+            id: model.id,
+            providerName: model.providerName,
+            modelName: model.modelName,
+            inputCostPerMillion: model.inputCostPerMillion,
+            outputCostPerMillion: model.outputCostPerMillion,
+          }) as UsageCatalogModel,
+      ),
+    } satisfies UsageModelSearchResult;
+  });
+
   return { readSummary, searchModels, refreshRates } as const;
 });
 
-const PRICING_STATUS_RANK: Record<UsageSummary["pricing"]["status"], number> = {
+export const layer = Layer.effect(UsageService, make);
+
+const PRICING_STATUS_RANK: Record<UsagePricing["status"], number> = {
   unavailable: 0,
   cached: 1,
   fresh: 2,
 };
 
 function weakerPricingStatus(
-  a: UsageSummary["pricing"]["status"],
-  b: UsageSummary["pricing"]["status"],
-): UsageSummary["pricing"]["status"] {
+  a: UsagePricing["status"],
+  b: UsagePricing["status"],
+): UsagePricing["status"] {
   return PRICING_STATUS_RANK[a] <= PRICING_STATUS_RANK[b] ? a : b;
 }
 
@@ -1079,5 +1176,3 @@ function formatOldestFetch(a: number | null, b: number | null): string | null {
   if (known.length === 0) return null;
   return DateTime.formatIso(DateTime.makeUnsafe(Math.min(...known)));
 }
-
-export const layer = Layer.effect(UsageService, make);

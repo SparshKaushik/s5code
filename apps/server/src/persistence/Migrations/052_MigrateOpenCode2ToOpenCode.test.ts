@@ -9,7 +9,7 @@ import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
-const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layerMemory()));
+const layer = it.layer(Layer.mergeAll(NodeSqliteClient.layer({ filename: ":memory:" })));
 
 layer("052_MigrateOpenCode2ToOpenCode", (it) => {
   it.effect("migrates opencode2 references to opencode across all tables and events", () =>

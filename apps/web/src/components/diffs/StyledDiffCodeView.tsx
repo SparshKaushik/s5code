@@ -1,3 +1,4 @@
+/* oxlint-disable eslint/no-restricted-imports -- This is the single styled adapter around Pierre's raw viewer. */
 import {
   CodeView,
   type CodeViewHandle,
@@ -5,6 +6,7 @@ import {
   type ControlledCodeViewProps,
   type UncontrolledCodeViewProps,
 } from "@pierre/diffs/react";
+/* oxlint-enable eslint/no-restricted-imports */
 import type { Ref } from "react";
 
 import { DIFF_SURFACE_THEME_UNSAFE_CSS } from "~/lib/diffRendering";

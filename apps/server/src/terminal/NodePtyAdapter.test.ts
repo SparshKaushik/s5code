@@ -5,7 +5,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import { beforeEach, vi } from "vite-plus/test";
+import { vi } from "vite-plus/test";
 
 import * as NodePtyAdapter from "./NodePtyAdapter.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
@@ -19,11 +19,7 @@ const spawn = vi.fn(() => ({
   onExit: vi.fn(() => ({ dispose: vi.fn() })),
 }));
 
-beforeEach(() => {
-  spawn.mockClear();
-});
-
-vi.mock("node-pty", () => ({ spawn }));
+const fakeNodePty = { spawn } as unknown as typeof import("node-pty");
 
 const makeTestLayer = (platform: NodeJS.Platform = "win32") =>
   NodePtyAdapter.layer.pipe(
@@ -32,6 +28,7 @@ const makeTestLayer = (platform: NodeJS.Platform = "win32") =>
         NodeServices.layer,
         Layer.succeed(HostProcessPlatform, platform),
         Layer.succeed(HostProcessArchitecture, "x64"),
+        Layer.succeed(NodePtyAdapter.NodePtyModuleLoaderRef, () => Promise.resolve(fakeNodePty)),
       ),
     ),
   );
@@ -72,6 +69,7 @@ for (const platform of ["win32", "linux", "darwin"] as const) {
 
 it.effect("spawns through the public adapter with the provided host references", () =>
   Effect.gen(function* () {
+    spawn.mockClear();
     const adapter = yield* PtyAdapter.PtyAdapter;
     const process = yield* adapter.spawn({
       shell: "powershell.exe",
@@ -101,7 +99,10 @@ it.effect("spawns through the public adapter with the provided host references",
 it.effect("reports native module load failures as structured startup defects", () =>
   Effect.gen(function* () {
     const cause = new Error("native binding could not be loaded");
-    const exit = yield* NodePtyAdapter.make(() => Promise.reject(cause)).pipe(Effect.exit);
+    const exit = yield* NodePtyAdapter.make().pipe(
+      Effect.provideService(NodePtyAdapter.NodePtyModuleLoaderRef, () => Promise.reject(cause)),
+      Effect.exit,
+    );
 
     assert.isTrue(Exit.isFailure(exit));
     if (Exit.isFailure(exit)) {

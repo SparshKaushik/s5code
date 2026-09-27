@@ -1,5 +1,6 @@
-// @effect-diagnostics nodeBuiltinImport:off - seeds real opencode-shaped
-// databases on disk, mirroring what the reader does in production.
+// Seeds real opencode-shaped databases on disk, mirroring what the reader
+// does in production.
+// @effect-diagnostics nodeBuiltinImport:off
 import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -7,7 +8,7 @@ import * as NodePath from "node:path";
 import { afterEach, assert, beforeEach, describe, expect, it } from "@effect/vitest";
 
 import { DatabaseSync } from "../provider/sqliteCompat.ts";
-import { readOpenCodeUsage, resolveOpenCodeDatabasePath } from "./usageOpenCode.ts";
+import { readOpenCodeUsage, resolveOpenCodeDatabasePath } from "./opencodeUsageReader.ts";
 
 let dir: string;
 
@@ -75,6 +76,14 @@ function seedDatabase(
   }
 }
 
+async function readAll(
+  root: string,
+  sinceMs: number,
+): Promise<readonly import("./usageTranscripts.ts").UsageRecord[]> {
+  const result = await readOpenCodeUsage(root, sinceMs);
+  return result.files.flatMap((file) => file.records);
+}
+
 describe("resolveOpenCodeDatabasePath", () => {
   it("honours OPENCODE_DB, then XDG_DATA_HOME, then ~/.local/share", () => {
     expect(resolveOpenCodeDatabasePath("/home/u", { OPENCODE_DB: "/custom/opencode.db" })).toBe(
@@ -95,11 +104,9 @@ describe("resolveOpenCodeDatabasePath", () => {
 
 describe("readOpenCodeUsage", () => {
   const SINCE = 1_789_000_000_000 - 36 * 60 * 60 * 1000;
-  const UNTIL = 1_789_000_000_000 + 24 * 60 * 60 * 1000;
 
-  it("parses assistant token payloads into usage records", () => {
-    const dbPath = NodePath.join(dir, "opencode.db");
-    seedDatabase(dbPath, [
+  it("parses assistant token payloads into usage records", async () => {
+    seedDatabase(NodePath.join(dir, "opencode.db"), [
       {
         id: "msg_1",
         sessionId: "ses_a",
@@ -120,34 +127,31 @@ describe("readOpenCodeUsage", () => {
       },
     ]);
 
-    const read = readOpenCodeUsage(dbPath, SINCE, UNTIL);
-    assert.isNotNull(read);
-    expect(read!.records).toHaveLength(2);
+    const records = await readAll(dir, SINCE);
+    expect(records).toHaveLength(2);
 
-    const first = read!.records[0]!;
+    const first = records[0]!;
     expect(first.provider).toBe("opencode");
     expect(first.timestampMs).toBe(1_789_000_001_000);
     expect(first.model).toBe("claude-sonnet-5");
     expect(first.apiProvider).toBe("anthropic");
     expect(first.sessionId).toBe("ses_a");
-    expect(first.dedupeKey).toBe("msg_1");
+    expect(first.dedupeKey).toBe("opencode:msg_1");
     expect(first.reportedCostUsd).toBe(0.0125);
     expect(first.totals).toEqual({
       uncachedInputTokens: 100,
       cachedInputTokens: 40,
       cacheCreationTokens: 10,
-      outputTokens: 20,
+      outputTokens: 25,
       reasoningTokens: 5,
     });
 
     // A zero cost is "OpenCode had no rate", not a real $0.
-    expect(read!.records[1]!.reportedCostUsd).toBeNull();
-    expect(read!.malformedRecords).toBe(0);
+    expect(records[1]!.reportedCostUsd).toBeNull();
   });
 
-  it("skips non-assistant rows and assistant rows without tokens without counting them malformed", () => {
-    const dbPath = NodePath.join(dir, "opencode.db");
-    seedDatabase(dbPath, [
+  it("skips non-assistant rows and assistant rows without tokens", async () => {
+    seedDatabase(NodePath.join(dir, "opencode.db"), [
       { id: "msg_u", sessionId: "ses_a", type: "user", seq: 1, data: "{}" },
       {
         id: "msg_err",
@@ -158,43 +162,36 @@ describe("readOpenCodeUsage", () => {
       { id: "msg_3", sessionId: "ses_a", seq: 3, data: assistantData() },
     ]);
 
-    const read = readOpenCodeUsage(dbPath, SINCE, UNTIL);
-    assert.isNotNull(read);
-    expect(read!.records).toHaveLength(1);
-    expect(read!.malformedRecords).toBe(0);
+    const records = await readAll(dir, SINCE);
+    expect(records).toHaveLength(1);
   });
 
-  it("counts unparseable payloads as malformed", () => {
-    const dbPath = NodePath.join(dir, "opencode.db");
-    seedDatabase(dbPath, [
+  it("skips unparseable payloads without failing the read", async () => {
+    seedDatabase(NodePath.join(dir, "opencode.db"), [
       { id: "msg_bad", sessionId: "ses_a", seq: 1, data: "not json" },
       { id: "msg_4", sessionId: "ses_a", seq: 2, data: assistantData() },
     ]);
 
-    const read = readOpenCodeUsage(dbPath, SINCE, UNTIL);
-    assert.isNotNull(read);
-    expect(read!.records).toHaveLength(1);
-    expect(read!.malformedRecords).toBe(1);
+    const records = await readAll(dir, SINCE);
+    expect(records).toHaveLength(1);
   });
 
-  it("simulates a rolling-prefix cache for Kiro context-style input, in seq order", () => {
-    const dbPath = NodePath.join(dir, "opencode.db");
+  it("simulates a rolling-prefix cache for Kiro context-style input, in seq order", async () => {
     const kiroData = (input: number, created: number) =>
       assistantData({
         model: { id: "claude-sonnet-5", providerID: "kiro", variant: "default" },
         time: { created, completed: created + 1 },
         tokens: { input, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
       });
-    seedDatabase(dbPath, [
+    seedDatabase(NodePath.join(dir, "opencode.db"), [
       { id: "msg_k1", sessionId: "ses_k", seq: 1, data: kiroData(1_000, 1_789_000_000_000) },
       { id: "msg_k2", sessionId: "ses_k", seq: 2, data: kiroData(1_800, 1_789_000_100_000) },
       // Compaction shrinks the context: the whole new input bills as fresh.
       { id: "msg_k3", sessionId: "ses_k", seq: 3, data: kiroData(600, 1_789_000_200_000) },
     ]);
 
-    const read = readOpenCodeUsage(dbPath, SINCE, UNTIL);
-    assert.isNotNull(read);
-    const splits = read!.records.map((record) => ({
+    const records = await readAll(dir, SINCE);
+    const splits = records.map((record) => ({
       uncached: record.totals.uncachedInputTokens,
       cached: record.totals.cachedInputTokens,
       estimated: record.inputTokensEstimated,
@@ -206,9 +203,8 @@ describe("readOpenCodeUsage", () => {
     ]);
   });
 
-  it("only reads sessions the window touched", () => {
-    const dbPath = NodePath.join(dir, "opencode.db");
-    seedDatabase(dbPath, [
+  it("only reads messages inside the window", async () => {
+    seedDatabase(NodePath.join(dir, "opencode.db"), [
       { id: "msg_new", sessionId: "ses_new", seq: 1, data: assistantData() },
       {
         id: "msg_old",
@@ -219,12 +215,21 @@ describe("readOpenCodeUsage", () => {
       },
     ]);
 
-    const read = readOpenCodeUsage(dbPath, SINCE, UNTIL);
-    assert.isNotNull(read);
-    expect(read!.records.map((record) => record.sessionId)).toEqual(["ses_new"]);
+    const records = await readAll(dir, SINCE);
+    expect(records.map((record) => record.sessionId)).toEqual(["ses_new"]);
   });
 
-  it("returns null when the database cannot be opened", () => {
-    expect(readOpenCodeUsage(NodePath.join(dir, "missing.db"), SINCE, UNTIL)).toBeNull();
+  it("reports a missing root as missing rather than an error", async () => {
+    const result = await readOpenCodeUsage(NodePath.join(dir, "nope"), SINCE);
+    expect(result.missing).toBe(true);
+    expect(result.error).toBe(false);
+  });
+
+  it("reads a database named directly, as an OPENCODE_DB override does", async () => {
+    const dbPath = NodePath.join(dir, "opencode.db");
+    seedDatabase(dbPath, [{ id: "msg_1", sessionId: "ses_a", seq: 1, data: assistantData() }]);
+
+    const records = await readAll(dbPath, SINCE);
+    expect(records).toHaveLength(1);
   });
 });

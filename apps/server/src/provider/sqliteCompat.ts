@@ -49,6 +49,19 @@ class StatementSyncShim {
   get(...params: unknown[]): unknown {
     return this.query.get(...params);
   }
+
+  /**
+   * Lazily yields rows like `node:sqlite`'s `StatementSync.iterate`.
+   * Bun's `Query` grew `iterate` in 1.2; older runtimes fall back to
+   * materialising the row set.
+   */
+  *iterate(...params: unknown[]): IterableIterator<unknown> {
+    if (typeof this.query.iterate === "function") {
+      yield* this.query.iterate(...params);
+      return;
+    }
+    yield* this.all(...params);
+  }
 }
 
 class BunDatabaseSync {

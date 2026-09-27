@@ -1,6 +1,7 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import {
+  AntigravityIcon,
   ClaudeAI,
   CursorIcon,
   GrokIcon,
@@ -27,23 +28,14 @@ export const PROVIDER_PRESENTATION = {
     color: "#d97757",
     mark: ClaudeAI,
   },
-  cursor: {
-    label: "Cursor",
-    color: "#8fa2b8",
-    mark: CursorIcon,
-  },
   grok: {
     label: "Grok Build",
     color: "color-mix(in oklab, var(--contrast-foreground) 72%, var(--background))",
     mark: GrokIcon,
   },
-  opencode: {
-    label: "OpenCode",
-    // OpenCode's mark is a third neutral; the 45% mix keeps the band readable
-    // on either theme without colliding with Codex or Grok.
-    color: "color-mix(in oklab, var(--contrast-foreground) 45%, var(--background))",
-    mark: OpenCodeIcon,
-  },
+  cursor: { label: "Cursor", color: "#8b8b8b", mark: CursorIcon },
+  opencode: { label: "OpenCode", color: "#5b9bbd", mark: OpenCodeIcon },
+  antigravity: { label: "Antigravity", color: "#8c7bd1", mark: AntigravityIcon },
   pi: {
     label: "pi",
     color: "#8b7cf6",

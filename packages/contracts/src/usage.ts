@@ -1,15 +1,14 @@
 /**
  * Usage reporting contract.
  *
- * Each environment scans the provider CLIs' own on-disk session transcripts
- * (`~/.claude/projects/**\/*.jsonl`, `~/.codex/sessions/**\/*.jsonl`,
- * `~/.grok/sessions/**\/updates.jsonl`, `~/.pi/agent/sessions/**\/*.jsonl`) plus
- * OpenCode's `opencode.db` and Cursor's account-wide dashboard API rather than
- * relying on T3 Code's own orchestration projections, so usage stays complete
- * even for turns that were never driven through T3 Code. This mirrors the
- * approach `ccusage` takes.
+ * Each environment scans native session files and databases — the provider
+ * CLIs' own transcripts plus OpenCode's `opencode.db`, Cursor's dashboard API,
+ * and pi's session files — including work driven outside T3 Code, so usage
+ * stays complete for turns that were never orchestrated here. This mirrors
+ * the approach `ccusage` takes. Source status describes gaps in local
+ * coverage.
  *
- * Environments return pre-aggregated `(day, hourStart?, provider, model)`
+ * Environments return pre-aggregated `(day, hourStart?, provider, model, sourcePath?)`
  * buckets. Raw transcript records never cross the wire.
  *
  * @module usage
@@ -17,30 +16,39 @@
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 
-import { NonNegativeInt, TrimmedNonEmptyString, TrimmedString } from "./baseSchemas.ts";
+import {
+  ForwardCompatibleArray,
+  NonNegativeInt,
+  TrimmedNonEmptyString,
+  TrimmedString,
+} from "./baseSchemas.ts";
 
 /**
  * Bumped whenever the shape of {@link UsageSummary} changes incompatibly. The
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
+ * Adding providers or other array-element variants is additive: unknown
+ * entries are skipped on decode and do not require a version bump.
  */
-export const USAGE_CONTRACT_VERSION = 8 as const;
+export const USAGE_CONTRACT_VERSION = 9 as const;
 
 /**
  * Oldest {@link UsageSummary} version a current client will still merge.
  *
- * Versions back to {@link USAGE_MERGE_COMPATIBLE_SINCE} remain valid, so
- * mixed-version environments keep those totals instead of treating every older
- * server as stale.
+ * v4-v6 buckets (Claude/Codex and the upstream provider additions) still
+ * decode because `apiProvider` has a decoding default, so mixed-version
+ * environments keep those totals instead of treating the older server as
+ * stale.
  */
-export const USAGE_MERGE_COMPATIBLE_SINCE = 6 as const;
+export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
 export const UsageProviderKind = Schema.Literals([
   "claude",
   "codex",
-  "cursor",
   "grok",
+  "cursor",
   "opencode",
+  "antigravity",
   "pi",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
@@ -146,12 +154,15 @@ export const UsageBucket = Schema.Struct({
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
   /**
-   * The upstream API provider, when the usage source names one. pi routes through
-   * gateways, so this is what separates `claude-opus-5` served by a reseller
-   * from the same name served by Anthropic. Empty for providers that speak to a
-   * single vendor.
+   * The upstream API provider, when the usage source names one. pi and other
+   * gateway-driven providers reuse model names across resellers, so this is
+   * what separates `claude-opus-5` sold by a reseller from the same name
+   * served by Anthropic. Empty for providers that speak to a single vendor.
+   * Optional at the wire level so pre-fork (upstream) buckets still decode.
    */
-  apiProvider: Schema.String,
+  apiProvider: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
+  /** Source directory, so overlapping multi-home environments merge once per source. */
+  sourcePath: Schema.optional(TrimmedNonEmptyString),
   totals: UsageTokenTotals,
   costUsd: Schema.Number,
   /**
@@ -194,11 +205,6 @@ export type UsageBucket = typeof UsageBucket.Type;
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
-  /**
-   * Stable source identity. Local transcript sources carry a filesystem path;
-   * account-wide APIs carry a non-secret account identifier such as
-   * `cursor-account:<hash>`.
-   */
   resolvedHomePath: TrimmedNonEmptyString,
   /**
    * Filesystem identity of a transcript directory, as `device:inode`. Empty
@@ -232,6 +238,8 @@ export const UsageSource = Schema.Struct({
    */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
+  /** An action the client can offer to make this source available. */
+  action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
 });
 export type UsageSource = typeof UsageSource.Type;
 
@@ -302,8 +310,8 @@ export const UsageSummary = Schema.Struct({
   timeZone: TrimmedNonEmptyString,
   sinceDay: UsageDay,
   untilDay: UsageDay,
-  buckets: Schema.Array(UsageBucket),
-  sources: Schema.Array(UsageSource),
+  buckets: ForwardCompatibleArray(UsageBucket),
+  sources: ForwardCompatibleArray(UsageSource),
   pricing: UsagePricing,
   /** Wall-clock cost of the scan, surfaced in diagnostics. */
   scanDurationMs: NonNegativeInt,

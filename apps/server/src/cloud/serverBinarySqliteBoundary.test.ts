@@ -7,7 +7,9 @@ import { expect, it } from "@effect/vitest";
 
 const SOURCE_ROOT = NodePath.resolve(NodeURL.fileURLToPath(new URL("..", import.meta.url)));
 
-const ALLOWED_STATIC_NODE_SQLITE_FILES = new Set(["usage/usageCursorNodeSqlite.ts"]);
+// No source file may statically import node:sqlite: it must stay off the
+// compiled binary's startup graph (sqliteCompat resolves it lazily).
+const ALLOWED_STATIC_NODE_SQLITE_FILES = new Set<string>();
 
 const STATIC_IMPORT_RE =
   /(?:import\s+(?:[\s\S]*?\s+from\s+)?|export\s+[\s\S]*?\s+from\s+)["']node:sqlite["']|require\s*\(\s*["']node:sqlite["']\s*\)/;

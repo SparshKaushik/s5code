@@ -67,7 +67,7 @@ export function UsageModelTagDialog({ target, onClose, onTag, onClear }: UsageMo
                 : "Pick the model this really is, and its rates apply to this usage everywhere."}
           </DialogDescription>
         </DialogHeader>
-        <DialogPanel className="space-y-3">
+        <DialogPanel>
           <Input
             autoFocus
             value={query}
