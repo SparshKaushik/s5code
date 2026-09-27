@@ -48,6 +48,7 @@ describe("ElectronProtocol", () => {
               supportFetchAPI: true,
               corsEnabled: true,
               stream: true,
+              codeCache: true,
             },
           },
           {

@@ -8,7 +8,6 @@ import {
   PlusIcon,
   SunIcon,
   Trash2Icon,
-  UploadIcon,
 } from "lucide-react";
 import { useCallback, useEffect, useState, type ReactElement } from "react";
 import { useEnvironmentThemeDefinitions } from "../../hooks/useEnvironmentTheme";
@@ -887,9 +886,8 @@ export function ThemeLibrary({
         </h3>
         <div className="flex flex-wrap items-center justify-end gap-2">
           <Button
-            className="h-7 rounded-md border border-border/70 bg-muted/30 px-2 text-xs font-medium text-foreground shadow-none hover:bg-accent/40"
             size="xs"
-            variant="ghost"
+            variant="outline"
             onClick={() =>
               openThemeEditor({
                 editingThemeId: null,
