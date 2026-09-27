@@ -281,7 +281,7 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
         val hidesFoldableWork =
             entries.any {
                 it.id in hidden &&
-                    it !is FeedEntry.Reasoning &&
+                    !(it is FeedEntry.Reasoning && it.thought) &&
                     !(it is FeedEntry.Note && it.compaction)
             }
         if (!hidesFoldableWork) return@forEach
