@@ -202,32 +202,27 @@ export async function readOpenCodeUsage(
     found = true;
     const file = { path: NodePath.join(rootDir, name), records: [] as UsageRecord[] };
     files.push(file);
-    let database:
-      | {
-          exec(sql: string): void;
-          prepare(sql: string): { all(...params: unknown[]): unknown[] };
-          close(): void;
-        }
-      | undefined;
+    let database: { close(): void } | undefined;
     try {
-      database = new DatabaseSync(NodePath.join(rootDir, name), { readOnly: true });
+      const db = new DatabaseSync(NodePath.join(rootDir, name), { readOnly: true });
+      database = db;
       // A busy live provider should fail this source promptly rather than
       // stalling the server while SQLite waits for its writer.
-      database.exec("PRAGMA busy_timeout = 100");
+      db.exec("PRAGMA busy_timeout = 100");
       const tables = new Set(
-        database
+        db
           .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
           .all()
-          .map((row) => (row as { name: string }).name),
+          .map((row: { name: string }) => row.name),
       );
       if (!tables.has("message") && !tables.has("session_message")) error = true;
       for (const table of ["message", "session_message"] as const) {
         if (!tables.has(table)) continue;
         const columns = new Set(
-          database
+          db
             .prepare(`PRAGMA table_info(${table})`)
             .all()
-            .map((row) => (row as { name: string }).name),
+            .map((row: { name: string }) => row.name),
         );
         const timestamp = columns.has("time_created") ? "time_created" : "NULL";
         const predicates = table === "session_message" ? ["type = 'assistant'"] : [];
@@ -240,7 +235,7 @@ export async function readOpenCodeUsage(
             ? " ORDER BY session_id, seq"
             : " ORDER BY session_id"
           : "";
-        const statement = database.prepare(
+        const statement = db.prepare(
           `SELECT id, session_id, data, ${timestamp} AS created FROM ${table}${where}${orderBy}`,
         );
         let count = 0;

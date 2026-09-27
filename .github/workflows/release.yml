@@ -401,7 +401,7 @@ jobs:
         run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
 
       # The fork's self-hosted relay does not publish a client tracing
-      # artifact, so there is no relay-client-tracing-config to load here.
+      # artifact, so there is nothing to download or load here.
 
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"

@@ -166,7 +166,7 @@ async function readDatabase(path: string, fallbackTimestamp: number): Promise<Us
       db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .all()
-        .map((row) => (row as { name: string }).name),
+        .map((row: { name: string }) => row.name),
     );
     if (!tables.has("gen_metadata") && !tables.has("steps")) {
       throw new Error("Missing Antigravity usage tables");
