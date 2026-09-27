@@ -5,7 +5,7 @@ import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Layer from "effect/Layer";
-import { beforeEach, vi } from "vite-plus/test";
+import { vi } from "vite-plus/test";
 
 import * as NodePtyAdapter from "./NodePtyAdapter.ts";
 import * as PtyAdapter from "./PtyAdapter.ts";
@@ -69,6 +69,7 @@ for (const platform of ["win32", "linux", "darwin"] as const) {
 
 it.effect("spawns through the public adapter with the provided host references", () =>
   Effect.gen(function* () {
+    spawn.mockClear();
     const adapter = yield* PtyAdapter.PtyAdapter;
     const process = yield* adapter.spawn({
       shell: "powershell.exe",
