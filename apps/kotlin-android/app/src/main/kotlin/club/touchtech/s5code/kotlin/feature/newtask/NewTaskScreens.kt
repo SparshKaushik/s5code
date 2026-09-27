@@ -866,7 +866,7 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
 
 /**
  * `filterNewTaskBranches`: a typed ref name searches every ref the server
- * listed — remote `origin/*` included — and the query itself is sanitized like
+ * listed — remote refs included — and the query itself is sanitized like
  * a branch name, so "my feature" finds `my-feature`.
  */
 fun filterNewTaskBranches(branches: List<BranchRef>, rawQuery: String): List<BranchRef> {
@@ -901,45 +901,45 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
                 placeholder = "Search branches",
                 modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
             )
-        when (remote) {
-            is Remote.Loading -> S5LoadingState("Listing branches…")
-            is Remote.Failed ->
-                Box(Modifier.padding(S5Theme.spacing.gutter)) {
-                    S5ErrorState(title = "Couldn't list branches", detail = remote.message, onRetry = retry)
-                }
-            is Remote.Loaded ->
-                LazyColumn(
-                    Modifier.fillMaxSize(),
-                    contentPadding =
-                        PaddingValues(
-                            horizontal = S5Theme.spacing.gutter,
-                            vertical = S5Theme.spacing.small,
-                        ),
-                    verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
-                ) {
-                    itemsIndexed(filtered, key = { _, branch -> branch.name }) { index, branch ->
-                        S5SelectableRow(
-                            label = branch.name,
-                            supporting =
-                                listOfNotNull(
-                                        if (branch.current) "current" else null,
-                                        if (branch.remote) "remote" else "local",
-                                        branch.ageLabel.takeIf { it.isNotBlank() },
-                                    )
-                                    .joinToString(" · "),
-                            selected = branch.name == draft.branch,
-                            onClick = {
-                                store.updateDraft { it.copy(branch = branch.name) }
-                                onBack()
-                            },
-                            leading = {
-                                Icon(Icons.AutoMirrored.Rounded.CallSplit, contentDescription = null)
-                            },
-                            position = rowPosition(index, filtered.size),
-                        )
+            when (remote) {
+                is Remote.Loading -> S5LoadingState("Listing branches…")
+                is Remote.Failed ->
+                    Box(Modifier.padding(S5Theme.spacing.gutter)) {
+                        S5ErrorState(title = "Couldn't list branches", detail = remote.message, onRetry = retry)
                     }
-                }
-        }
+                is Remote.Loaded ->
+                    LazyColumn(
+                        Modifier.fillMaxSize(),
+                        contentPadding =
+                            PaddingValues(
+                                horizontal = S5Theme.spacing.gutter,
+                                vertical = S5Theme.spacing.small,
+                            ),
+                        verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+                    ) {
+                        itemsIndexed(filtered, key = { _, branch -> branch.name }) { index, branch ->
+                            S5SelectableRow(
+                                label = branch.name,
+                                supporting =
+                                    listOfNotNull(
+                                            if (branch.current) "current" else null,
+                                            if (branch.remote) "remote" else "local",
+                                            branch.ageLabel.takeIf { it.isNotBlank() },
+                                        )
+                                        .joinToString(" · "),
+                                selected = branch.name == draft.branch,
+                                onClick = {
+                                    store.updateDraft { it.copy(branch = branch.name) }
+                                    onBack()
+                                },
+                                leading = {
+                                    Icon(Icons.AutoMirrored.Rounded.CallSplit, contentDescription = null)
+                                },
+                                position = rowPosition(index, filtered.size),
+                            )
+                        }
+                    }
+            }
         }
     }
 }
