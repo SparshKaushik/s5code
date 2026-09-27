@@ -10,17 +10,67 @@
 import { OpenCode as OpenCodeClient } from "@opencode-ai/client-v2";
 import { OpenCodeSettings, ProviderDriverKind, ProviderInstanceId } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodeFS from "node:fs";
+import * as NodeOS from "node:os";
+// @effect-diagnostics-next-line nodeBuiltinImport:off
+import * as NodePath from "node:path";
 
 import { ProviderDriverError } from "./Errors.ts";
 import { isOpenCodeVersionSupported } from "./Layers/OpenCodeProvider.ts";
 
 export type OpenCodeClientFacade = ReturnType<typeof OpenCodeClient.make>;
 
+// Released daemons (v2.0.8) decode permission replies from a `decision` key,
+// while dev daemons decode `reply`. Both ignore unknown payload keys, so
+// sending both keeps the endpoint working across the rename.
+const PERMISSION_REPLY_PATH_PATTERN = /\/api\/session\/[^/]+\/permission\/[^/]+\/reply$/;
+
+function withPermissionReplyCompat(
+  fetchImpl: (input: string | URL | Request, init?: RequestInit) => Promise<Response>,
+): typeof fetch {
+  return (async (input: string | URL | Request, init?: RequestInit) => {
+    try {
+      const url =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+      if (
+        method.toUpperCase() === "POST" &&
+        PERMISSION_REPLY_PATH_PATTERN.test(new URL(url).pathname) &&
+        typeof init?.body === "string"
+      ) {
+        const body: unknown = JSON.parse(init.body);
+        if (
+          body !== null &&
+          typeof body === "object" &&
+          "reply" in body &&
+          !("decision" in body) &&
+          typeof body.reply === "string"
+        ) {
+          init = {
+            ...init,
+            body: JSON.stringify({ ...body, decision: body.reply }),
+          };
+        }
+      }
+    } catch {
+      // Malformed URLs or non-JSON bodies pass through untouched.
+    }
+    return fetchImpl(input, init);
+  }) as typeof fetch;
+}
+
 export interface OpenCodeHostHandle {
   readonly instanceId: ProviderInstanceId;
   readonly client: OpenCodeClientFacade;
   readonly isRemote: boolean;
   readonly databasePath: string | null;
+  /**
+   * Daemon version reported by the service registration file. Only set for the
+   * local `--service` daemon; it is the status probe's version fallback because
+   * released daemons (v2.0.8) do not mount the SDK's `/api/health` endpoint.
+   */
+  readonly serviceVersion: string | null;
 }
 
 export interface MakeOpenCodeHostOptions {
@@ -63,7 +113,7 @@ export function makeOpenCodeHost(
       const client = OpenCodeClient.make({
         baseUrl: serverUrl,
         ...(Object.keys(headers).length > 0 ? { headers } : {}),
-        ...(options.fetch ? { fetch: options.fetch } : {}),
+        fetch: withPermissionReplyCompat(options.fetch ?? globalThis.fetch),
       }) as OpenCodeClientFacade;
 
       return {
@@ -71,21 +121,33 @@ export function makeOpenCodeHost(
         client,
         isRemote: true,
         databasePath: null,
+        serviceVersion: null,
       } satisfies OpenCodeHostHandle;
     }
 
-    const binary = options.config.binaryPath?.trim() || "opencode";
+    let binary = options.config.binaryPath?.trim() || "opencode";
+    if (binary === "opencode") {
+      const homedir = process.env.HOME;
+      if (homedir) {
+        const opencodeUserBin = `${homedir}/.opencode/bin/opencode`;
+        if (NodeFS.existsSync(opencodeUserBin)) {
+          binary = opencodeUserBin;
+        }
+      }
+    }
 
-    const localService = yield* Effect.tryPromise({
-      try: async () => {
-        const service = await import("@opencode-ai/client-v2/service");
-        const endpoint = await service.ensure({
-          command: [binary, "serve", "--service"],
-          version: (v: string) => isOpenCodeVersionSupported(v),
-          ...(options.environment ? { env: options.environment } : {}),
-        });
-        return { endpoint, headers: service.headers(endpoint) };
-      },
+    const fetchServiceEndpoint = async () => {
+      const service = await import("@opencode-ai/client-v2/service");
+      const endpoint = await service.ensure({
+        command: [binary, "serve", "--service"],
+        version: (v: string) => isOpenCodeVersionSupported(v),
+        ...(options.environment ? { env: options.environment } : {}),
+      });
+      return { endpoint, headers: service.headers(endpoint) };
+    };
+
+    let currentService = yield* Effect.tryPromise({
+      try: fetchServiceEndpoint,
       catch: (cause) =>
         new ProviderDriverError({
           driver: ProviderDriverKind.make("opencode"),
@@ -97,17 +159,117 @@ export function makeOpenCodeHost(
         }),
     });
 
+    let refreshPromise: Promise<typeof currentService> | null = null;
+    const refreshService = async () => {
+      if (refreshPromise) return refreshPromise;
+      refreshPromise = (async () => {
+        try {
+          const updated = await fetchServiceEndpoint();
+          currentService = updated;
+          return updated;
+        } finally {
+          refreshPromise = null;
+        }
+      })();
+      return refreshPromise;
+    };
+
+    const rewriteRequest = (
+      input: string | URL | Request,
+      init: RequestInit | undefined,
+      svc: typeof currentService,
+    ) => {
+      const inputUrl =
+        typeof input === "string" ? input : input instanceof URL ? input.toString() : input.url;
+      const targetBase = new URL(svc.endpoint.url);
+      const parsed = new URL(inputUrl, targetBase);
+      parsed.protocol = targetBase.protocol;
+      parsed.host = targetBase.host;
+
+      const headers = new Headers(
+        init?.headers ??
+          (typeof input === "object" && "headers" in input
+            ? (input as Request).headers
+            : undefined),
+      );
+      if (svc.headers) {
+        for (const [key, val] of Object.entries(svc.headers)) {
+          if (val) {
+            headers.set(key, val);
+          }
+        }
+      }
+
+      return {
+        url: parsed.toString(),
+        init: {
+          ...init,
+          headers,
+        },
+      };
+    };
+
+    const resilientFetch: (
+      input: string | URL | Request,
+      init?: RequestInit,
+    ) => Promise<Response> = async (input, init) => {
+      const baseFetch = withPermissionReplyCompat(options.fetch ?? globalThis.fetch);
+      const first = rewriteRequest(input, init, currentService);
+      try {
+        const res = await baseFetch(first.url, first.init);
+        if (res.status === 401 && !init?.signal?.aborted) {
+          const refreshed = await refreshService();
+          const second = rewriteRequest(input, init, refreshed);
+          return await baseFetch(second.url, second.init);
+        }
+        return res;
+      } catch (err) {
+        if (init?.signal?.aborted) {
+          throw err;
+        }
+        try {
+          const refreshed = await refreshService();
+          const second = rewriteRequest(input, init, refreshed);
+          return await baseFetch(second.url, second.init);
+        } catch {
+          throw err;
+        }
+      }
+    };
+
     const client = OpenCodeClient.make({
-      baseUrl: localService.endpoint.url,
-      ...(localService.headers ? { headers: localService.headers } : {}),
-      ...(options.fetch ? { fetch: options.fetch } : {}),
+      baseUrl: currentService.endpoint.url,
+      ...(currentService.headers ? { headers: currentService.headers } : {}),
+      fetch: resilientFetch as unknown as typeof fetch,
     }) as OpenCodeClientFacade;
+
+    // The registration file is the daemon's own version record; `health.get`
+    // alone cannot supply it on daemons that predate the endpoint.
+    const serviceVersion = (() => {
+      const registrationPath = NodePath.join(
+        process.env["XDG_STATE_HOME"] ?? NodePath.join(NodeOS.homedir(), ".local", "state"),
+        "opencode",
+        "service.json",
+      );
+      try {
+        const info: unknown = JSON.parse(NodeFS.readFileSync(registrationPath, "utf8"));
+        return info !== null &&
+          typeof info === "object" &&
+          "version" in info &&
+          typeof info.version === "string"
+          ? info.version
+          : null;
+      } catch {
+        return null;
+      }
+    })();
 
     return {
       instanceId: options.instanceId,
       client,
       isRemote: false,
       databasePath: null,
+      serviceVersion,
     } satisfies OpenCodeHostHandle;
   });
 }

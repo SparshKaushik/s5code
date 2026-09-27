@@ -65,6 +65,18 @@ interface SubagentState {
   lastToolName?: string;
 }
 
+interface PendingSend {
+  turnId: TurnId;
+  model?: string | undefined;
+  /** inboxID once the prompt RPC resolves; `session.inbox.delivered` can
+   * outrun the response, so a send without an id adopts its delivery. */
+  inboxId?: string;
+  /** `session.command` returns no inbox id and some daemons emit no
+   * `inbox.delivered` for commands, so a command send may stay unbound
+   * forever; a later prompt's delivery must not be claimed by it. */
+  isCommand?: boolean;
+}
+
 interface OpenCodeSessionContext {
   readonly threadId: ThreadId;
   readonly sessionId: string;
@@ -77,7 +89,18 @@ interface OpenCodeSessionContext {
   activeTurnStatus: "idle" | "running" | "interrupted" | "failed";
   hasSubagents: boolean;
   subagents: Map<string, SubagentState>;
-  pendingInboxItems: Set<string>;
+  /** sendTurn calls whose inbox item has not been delivered into the agent
+   * loop yet. An OpenCode turn starts at `session.inbox.delivered`, not at
+   * sendTurn — a queued follow-up can sit behind the running turn for a long
+   * time and must not steal it. */
+  pendingSends: Array<PendingSend>;
+  /** Monotonic suffix for minted turn ids so two sendTurn calls inside one
+   * millisecond cannot collide. */
+  nextTurnSeq: number;
+  /** OpenCode execution events carry no turn identity; an assistant message id
+   * stays bound to the turn that produced it so late text/tool events still
+   * land on their own turn after a follow-up starts a new one. */
+  messageIdToTurnId: Map<string, TurnId>;
   /** Permission/form requests remember the session that owns them on the
    * OpenCode side: subagents ask through their own child session, and the
    * reply endpoint rejects a session mismatch with "Permission request not
@@ -107,7 +130,9 @@ function toToolLifecycleItemType(
   if (
     normalized.includes("bash") ||
     normalized.includes("shell") ||
-    normalized.includes("command")
+    normalized.includes("command") ||
+    normalized.includes("terminal") ||
+    normalized.includes("exec")
   ) {
     return "command_execution";
   }
@@ -137,7 +162,13 @@ function summarizeToolCallInput(toolName: string, input: unknown): string | unde
     return undefined;
   };
   const normalized = toolName.toLowerCase();
-  if (normalized.includes("bash") || normalized.includes("shell")) {
+  if (
+    normalized.includes("bash") ||
+    normalized.includes("shell") ||
+    normalized.includes("command") ||
+    normalized.includes("terminal") ||
+    normalized.includes("exec")
+  ) {
     return firstString("command", "script", "cmd");
   }
   if (normalized.includes("edit") || normalized.includes("write") || normalized.includes("patch")) {
@@ -197,10 +228,30 @@ function structuredErrorMessage(error: unknown): string | undefined {
 }
 
 /** OpenCode client errors often stringify as "[object Object]"; dig for the message. */
-function openCodeClientErrorMessage(cause: unknown): string {
-  return (
-    structuredErrorMessage(cause) ?? structuredErrorMessage((cause as any)?.cause) ?? String(cause)
-  );
+export function openCodeClientErrorMessage(cause: unknown): string {
+  if (!cause) return "Unknown error";
+  let current: any = cause;
+  const messages: string[] = [];
+  while (current && typeof current === "object") {
+    const msg =
+      (typeof current.message === "string" && current.message.trim().length > 0
+        ? current.message.trim()
+        : null) ??
+      (typeof current.detail === "string" && current.detail.trim().length > 0
+        ? current.detail.trim()
+        : null) ??
+      (typeof current.reason === "string" && current.reason.trim().length > 0
+        ? current.reason.trim()
+        : null);
+    if (msg && !messages.includes(msg)) {
+      messages.push(msg);
+    }
+    current = current.cause;
+  }
+  if (messages.length > 0) {
+    return messages.join(": ");
+  }
+  return String(cause);
 }
 
 function parseModelSlug(slug: string): { providerID: string; modelID: string } | null {
@@ -419,7 +470,7 @@ export function makeOpenCodeAdapter(
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "event.subscribe",
-            detail: `Failed to subscribe: ${String(cause)}`,
+            detail: `Failed to subscribe: ${openCodeClientErrorMessage(cause)}`,
             cause,
           }),
       }).pipe(Effect.orElseSucceed(() => null));
@@ -432,7 +483,7 @@ export function makeOpenCodeAdapter(
           new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "event.stream",
-            detail: String(cause),
+            detail: openCodeClientErrorMessage(cause),
             cause,
           }),
       ).pipe(
@@ -470,13 +521,86 @@ export function makeOpenCodeAdapter(
 
             if (!threadId || !parentContext) return;
 
-            const turnId =
-              parentContext.activeTurnId ??
-              // Events that trail a closed turn (out-of-order tool results,
-              // steers) belong to that turn. Attributing them to a synthetic
-              // turn makes the UI fold them into a bogus second response.
-              parentContext.lastTurnId ??
-              null;
+            // OpenCode events are execution-scoped, not turn-scoped. Assistant
+            // messages stay bound to the turn they first appeared under so a
+            // message's trailing events never migrate into a newer turn.
+            const rawMessageId =
+              typeof data.assistantMessageID === "string" && data.assistantMessageID.length > 0
+                ? data.assistantMessageID
+                : typeof data.messageID === "string" && data.messageID.length > 0
+                  ? data.messageID
+                  : undefined;
+            let turnId = rawMessageId
+              ? (parentContext.messageIdToTurnId.get(rawMessageId) ?? null)
+              : null;
+            if (!turnId) {
+              turnId =
+                parentContext.activeTurnId ??
+                // Events that trail a closed turn (out-of-order tool results,
+                // steers) belong to that turn. Attributing them to a synthetic
+                // turn makes the UI fold them into a bogus second response.
+                parentContext.lastTurnId ??
+                null;
+            }
+
+            // A user inbox item entering the agent loop is the real turn
+            // boundary: queued follow-ups deliver only after the previous
+            // assistant work ends, so the pending send owning this delivery
+            // starts a fresh turn now (superseding whatever is still marked
+            // active). Delivered items nobody sent (compaction, synthetic)
+            // stay on the current turn.
+            if (eventType === "session.inbox.delivered" && !isChildSession) {
+              const inboxId = typeof data.inboxID === "string" ? data.inboxID : undefined;
+              let sendIndex = inboxId
+                ? parentContext.pendingSends.findIndex((send) => send.inboxId === inboxId)
+                : -1;
+              // The delivery often lands before session.prompt resolves, so
+              // the pending send has no id yet — take the oldest unbound one.
+              // Command sends stay unbound forever on daemons that emit no
+              // delivery for them, so a real prompt's delivery skips them
+              // unless nothing else can claim it.
+              if (sendIndex === -1) {
+                sendIndex = parentContext.pendingSends.findIndex(
+                  (send) => send.inboxId === undefined && send.isCommand !== true,
+                );
+                if (sendIndex === -1) {
+                  sendIndex = parentContext.pendingSends.findIndex(
+                    (send) => send.inboxId === undefined,
+                  );
+                }
+              }
+              if (sendIndex !== -1) {
+                const send = parentContext.pendingSends[sendIndex]!;
+                if (inboxId) send.inboxId = inboxId;
+                parentContext.pendingSends.splice(sendIndex, 1);
+                if (parentContext.activeTurnId === send.turnId) {
+                  // Sent while idle: sendTurn already opened the turn.
+                  parentContext.activeTurnStatus = "running";
+                } else {
+                  const supersededTurnId = parentContext.activeTurnId;
+                  if (supersededTurnId !== null) {
+                    yield* emit({
+                      ...(yield* buildEventBase({
+                        threadId,
+                        turnId: supersededTurnId,
+                        raw: rawEvent,
+                      })),
+                      type: "turn.completed",
+                      payload: { state: "cancelled" },
+                    });
+                  }
+                  parentContext.activeTurnId = send.turnId;
+                  parentContext.lastTurnId = send.turnId;
+                  parentContext.activeTurnStatus = "running";
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId: send.turnId, raw: rawEvent })),
+                    type: "turn.started",
+                    payload: send.model ? { model: send.model } : {},
+                  });
+                }
+                turnId = send.turnId;
+              }
+            }
 
             // v2 tool events carry no tool name; input.started does.
             if (eventType === "session.tool.input.started") {
@@ -529,11 +653,13 @@ export function makeOpenCodeAdapter(
 
             if (!turnId) return;
 
-            const observedMessageId = data.assistantMessageID ?? data.messageID;
-            if (typeof observedMessageId === "string" && observedMessageId.length > 0) {
-              parentContext.turnToMessageId.set(turnId, observedMessageId);
-              if (!parentContext.messageIds.includes(observedMessageId)) {
-                parentContext.messageIds.push(observedMessageId);
+            if (rawMessageId) {
+              if (!parentContext.messageIdToTurnId.has(rawMessageId)) {
+                parentContext.messageIdToTurnId.set(rawMessageId, turnId);
+              }
+              parentContext.turnToMessageId.set(turnId, rawMessageId);
+              if (!parentContext.messageIds.includes(rawMessageId)) {
+                parentContext.messageIds.push(rawMessageId);
               }
             }
 
@@ -683,9 +809,7 @@ export function makeOpenCodeAdapter(
                 const toolName =
                   (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
                 const input = data.input ?? tracked?.input;
-                if (tracked && data.input !== undefined) {
-                  tracked.input = data.input;
-                }
+                parentContext.toolCallByCallId.set(callId, { name: toolName, input });
                 const inputSummary = summarizeToolCallInput(toolName, input);
                 const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
@@ -711,18 +835,27 @@ export function makeOpenCodeAdapter(
                 const tracked = parentContext.toolCallByCallId.get(callId);
                 const toolName =
                   (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
-                const inputSummary = summarizeToolCallInput(toolName, tracked?.input);
+                const input = data.input ?? tracked?.input;
+                const inputSummary = summarizeToolCallInput(toolName, input);
                 parentContext.toolCallByCallId.delete(callId);
                 const output = toolContentText(data.content);
+                const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.completed",
                   payload: {
-                    itemType: toToolLifecycleItemType(toolName),
+                    itemType,
                     status: "completed",
                     title: inputSummary ?? toolName,
                     ...(output ? { detail: output } : {}),
-                    data: { tool: toolName, toolName },
+                    data: {
+                      tool: toolName,
+                      toolName,
+                      ...(itemType === "command_execution" && inputSummary !== undefined
+                        ? { command: inputSummary }
+                        : {}),
+                      ...(output ? { rawOutput: { output, content: output } } : {}),
+                    },
                   },
                 });
                 break;
@@ -733,16 +866,25 @@ export function makeOpenCodeAdapter(
                 const tracked = parentContext.toolCallByCallId.get(callId);
                 const toolName =
                   (typeof data.tool === "string" && data.tool) || tracked?.name || "tool";
+                const input = data.input ?? tracked?.input;
+                const inputSummary = summarizeToolCallInput(toolName, input);
                 parentContext.toolCallByCallId.delete(callId);
+                const itemType = toToolLifecycleItemType(toolName);
                 yield* emit({
                   ...(yield* buildEventBase({ threadId, turnId, itemId: callId, raw: rawEvent })),
                   type: "item.completed",
                   payload: {
-                    itemType: toToolLifecycleItemType(toolName),
+                    itemType,
                     status: "failed",
-                    title: summarizeToolCallInput(toolName, tracked?.input) ?? toolName,
+                    title: inputSummary ?? toolName,
                     detail: structuredErrorMessage(data.error) ?? "Tool failed",
-                    data: { tool: toolName, toolName },
+                    data: {
+                      tool: toolName,
+                      toolName,
+                      ...(itemType === "command_execution" && inputSummary !== undefined
+                        ? { command: inputSummary }
+                        : {}),
+                    },
                   },
                 });
                 break;
@@ -754,15 +896,19 @@ export function makeOpenCodeAdapter(
                 break;
 
               case "session.inbox.delivered": {
-                if (data.inboxID) {
-                  parentContext.pendingInboxItems.delete(data.inboxID);
-                }
+                // Handled above the turn guard: a delivered send may open its
+                // own turn.
                 break;
               }
 
               case "session.inbox.cancelled": {
                 if (data.inboxID) {
-                  parentContext.pendingInboxItems.delete(data.inboxID);
+                  const sendIndex = parentContext.pendingSends.findIndex(
+                    (send) => send.inboxId === data.inboxID,
+                  );
+                  if (sendIndex !== -1) {
+                    parentContext.pendingSends.splice(sendIndex, 1);
+                  }
                 }
                 break;
               }
@@ -771,14 +917,18 @@ export function makeOpenCodeAdapter(
                 parentContext.activeTurnStatus = "idle";
                 parentContext.lastTurnId = turnId;
                 parentContext.toolCallByCallId.clear();
-                yield* emit({
-                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
-                  type: "turn.completed",
-                  payload: {
-                    state: "completed",
-                  },
-                });
-                parentContext.activeTurnId = null;
+                // A turn that was superseded by a delivered follow-up already
+                // emitted turn.completed; only close the turn still running.
+                if (parentContext.activeTurnId === turnId) {
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                    type: "turn.completed",
+                    payload: {
+                      state: "completed",
+                    },
+                  });
+                  parentContext.activeTurnId = null;
+                }
                 break;
               }
 
@@ -786,15 +936,20 @@ export function makeOpenCodeAdapter(
                 parentContext.activeTurnStatus = "failed";
                 parentContext.lastTurnId = turnId;
                 parentContext.toolCallByCallId.clear();
-                yield* emit({
-                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
-                  type: "turn.completed",
-                  payload: {
-                    state: "failed",
-                    errorMessage: structuredErrorMessage(data.error) ?? "Turn execution failed",
-                  },
-                });
-                parentContext.activeTurnId = null;
+                // The run aborted: queued sends will never be delivered, so
+                // they must not start phantom turns on a later delivery.
+                parentContext.pendingSends.length = 0;
+                if (parentContext.activeTurnId === turnId) {
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                    type: "turn.completed",
+                    payload: {
+                      state: "failed",
+                      errorMessage: structuredErrorMessage(data.error) ?? "Turn execution failed",
+                    },
+                  });
+                  parentContext.activeTurnId = null;
+                }
                 break;
               }
 
@@ -802,14 +957,17 @@ export function makeOpenCodeAdapter(
                 parentContext.activeTurnStatus = "interrupted";
                 parentContext.lastTurnId = turnId;
                 parentContext.toolCallByCallId.clear();
-                yield* emit({
-                  ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
-                  type: "turn.completed",
-                  payload: {
-                    state: "cancelled",
-                  },
-                });
-                parentContext.activeTurnId = null;
+                parentContext.pendingSends.length = 0;
+                if (parentContext.activeTurnId === turnId) {
+                  yield* emit({
+                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                    type: "turn.completed",
+                    payload: {
+                      state: "cancelled",
+                    },
+                  });
+                  parentContext.activeTurnId = null;
+                }
                 break;
               }
             }
@@ -869,7 +1027,7 @@ export function makeOpenCodeAdapter(
               new ProviderAdapterRequestError({
                 provider: PROVIDER,
                 method: "session.create",
-                detail: `Failed to create OpenCode session: ${String(cause)}`,
+                detail: `Failed to create OpenCode session: ${openCodeClientErrorMessage(cause)}`,
                 cause,
               }),
           });
@@ -889,7 +1047,9 @@ export function makeOpenCodeAdapter(
           activeTurnStatus: "idle",
           hasSubagents: false,
           subagents: new Map(),
-          pendingInboxItems: new Set(),
+          pendingSends: [],
+          nextTurnSeq: 0,
+          messageIdToTurnId: new Map(),
           requestSessionIdByRequestId: new Map(),
           resolvedRequestIds: new Set(),
           toolCallByCallId: new Map(),
@@ -937,138 +1097,239 @@ export function makeOpenCodeAdapter(
         }
 
         const nowMillis = yield* Clock.currentTimeMillis;
-        const turnId = TurnId.make(`turn-${nowMillis}`);
-        context.activeTurnId = turnId;
-        context.lastTurnId = turnId;
-        context.activeTurnStatus = "running";
+        const turnId = TurnId.make(`turn-${nowMillis}-${context.nextTurnSeq++}`);
+        // A turn only opens when its inbox item is delivered into the agent
+        // loop. While a turn is active (or another send is still waiting for
+        // its delivery), the send stays pending — activating it early would
+        // pull the running turn's trailing text and its terminal event onto
+        // the wrong turn.
+        const send: PendingSend = { turnId };
+        context.pendingSends.push(send);
+        // A queued send ahead of this one means its delivery will start the
+        // next turn; this send must queue behind it even though no turn is
+        // active right now.
+        const opensImmediately = context.activeTurnId === null && context.pendingSends.length === 1;
+        if (opensImmediately) {
+          context.activeTurnId = turnId;
+          context.lastTurnId = turnId;
+          context.activeTurnStatus = "running";
+        }
 
-        const selectedVariant = input.modelSelection
-          ? getModelSelectionStringOptionValue(input.modelSelection, "variant")
-          : undefined;
-        const selectedAgent = input.modelSelection
-          ? getModelSelectionStringOptionValue(input.modelSelection, "agent")
-          : undefined;
-
-        // `session.prompt` carries no model field; the session's model (and
-        // agent) must be switched explicitly before the turn is admitted.
-        const modelSlug = input.modelSelection?.model;
-        if (modelSlug) {
-          const catalogModel = yield* resolveCatalogModel(context.directory, modelSlug);
-          if (catalogModel) {
-            // Only pass a variant if the target model actually supports it in its catalog.
-            // Passing an unsupported variant (e.g. "high" on Qwen3.8-27B or models without
-            // variants) makes OpenCode fail with 'Variant unavailable'.
-            const validVariant =
-              selectedVariant && catalogModel.variants.has(selectedVariant)
-                ? selectedVariant
-                : undefined;
-
-            const switchModelWith = (variant?: string) =>
-              Effect.tryPromise({
-                try: () =>
-                  hostHandle.client.session.switchModel({
-                    sessionID: context.sessionId,
-                    model: {
-                      id: catalogModel.modelID,
-                      providerID: catalogModel.providerID,
-                      ...(variant ? { variant } : {}),
-                    },
-                  }),
-                catch: (cause) =>
-                  new ProviderAdapterRequestError({
-                    provider: PROVIDER,
-                    method: "session.switchModel",
-                    detail: `Failed to switch OpenCode model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
-                    cause,
-                  }),
+        const failSend = (error: ProviderAdapterRequestError) =>
+          Effect.gen(function* () {
+            const sendIndex = context.pendingSends.indexOf(send);
+            if (sendIndex !== -1) context.pendingSends.splice(sendIndex, 1);
+            if (opensImmediately && context.activeTurnId === turnId) {
+              context.activeTurnStatus = "failed";
+              yield* emit({
+                ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+                type: "turn.completed",
+                payload: {
+                  state: "failed",
+                  errorMessage: error.detail,
+                },
               });
+              context.activeTurnId = null;
+            }
+            return yield* Effect.fail(error);
+          });
 
-            if (validVariant) {
-              yield* switchModelWith(validVariant).pipe(
-                Effect.catchIf(
-                  (err) => err.detail.toLowerCase().includes("variant unavailable"),
-                  () => switchModelWith(undefined),
-                ),
-              );
-            } else {
-              yield* switchModelWith(undefined);
+        return yield* Effect.gen(function* () {
+          const selectedVariant = input.modelSelection
+            ? getModelSelectionStringOptionValue(input.modelSelection, "variant")
+            : undefined;
+          const selectedAgent = input.modelSelection
+            ? getModelSelectionStringOptionValue(input.modelSelection, "agent")
+            : undefined;
+
+          // `session.prompt` carries no model field; the session's model (and
+          // agent) must be switched explicitly before the turn is admitted.
+          const modelSlug = input.modelSelection?.model;
+          if (modelSlug) {
+            const catalogModel = yield* resolveCatalogModel(context.directory, modelSlug);
+            if (catalogModel) {
+              // Only pass a variant if the target model actually supports it in its catalog.
+              // Passing an unsupported variant (e.g. "high" on Qwen3.8-27B or models without
+              // variants) makes OpenCode fail with 'Variant unavailable'.
+              const validVariant =
+                selectedVariant && catalogModel.variants.has(selectedVariant)
+                  ? selectedVariant
+                  : undefined;
+
+              const switchModelWith = (variant?: string) =>
+                Effect.tryPromise({
+                  try: () =>
+                    hostHandle.client.session.switchModel({
+                      sessionID: context.sessionId,
+                      model: {
+                        id: catalogModel.modelID,
+                        providerID: catalogModel.providerID,
+                        ...(variant ? { variant } : {}),
+                      },
+                    }),
+                  catch: (cause) =>
+                    new ProviderAdapterRequestError({
+                      provider: PROVIDER,
+                      method: "session.switchModel",
+                      detail: `Failed to switch OpenCode model to '${modelSlug}': ${openCodeClientErrorMessage(cause)}`,
+                      cause,
+                    }),
+                });
+
+              if (validVariant) {
+                yield* switchModelWith(validVariant).pipe(
+                  Effect.catchIf(
+                    (err) => err.detail.toLowerCase().includes("variant unavailable"),
+                    () => switchModelWith(undefined),
+                  ),
+                );
+              } else {
+                yield* switchModelWith(undefined);
+              }
             }
           }
-        }
-        if (selectedAgent) {
-          // OpenCode agent IDs are lowercase (e.g. "build", "plan"). If a UI selection
-          // or persisted model option passes a title-cased name like "Build", normalize it.
-          const agentId = selectedAgent.toLowerCase();
-          yield* Effect.tryPromise({
-            try: () =>
-              hostHandle.client.session.switchAgent({
-                sessionID: context.sessionId,
-                agent: agentId,
-              }),
-            catch: (cause) =>
-              new ProviderAdapterRequestError({
-                provider: PROVIDER,
-                method: "session.switchAgent",
-                detail: `Failed to switch OpenCode agent to '${agentId}': ${openCodeClientErrorMessage(cause)}`,
-                cause,
-              }),
-          });
-        }
-
-        const delivery = input.delivery ?? "steer";
-
-        if (hostHandle.isRemote && input.attachments && input.attachments.length > 0) {
-          return yield* new ProviderAdapterRequestError({
-            provider: PROVIDER,
-            method: "session.prompt",
-            detail: "Attachments are not supported when connecting to a remote OpenCode server.",
-          });
-        }
-
-        const files = input.attachments
-          ? input.attachments
-              .filter((a) => a.type === "file" || a.type === "image")
-              .map((attachment) => {
-                const filePath = resolveAttachmentPath({
-                  attachmentsDir: serverConfig.attachmentsDir,
-                  attachment,
-                });
-                return {
-                  uri: `file://${filePath}`,
-                  name: attachment.name,
-                };
-              })
-          : undefined;
-
-        yield* emit({
-          ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
-          type: "turn.started",
-          payload: modelSlug ? { model: modelSlug } : {},
-        });
-
-        yield* Effect.tryPromise({
-          try: async () => {
-            await hostHandle.client.session.prompt({
-              sessionID: context.sessionId,
-              text: input.input ?? "",
-              delivery,
-              ...(files && files.length > 0 ? { files } : {}),
+          if (selectedAgent) {
+            // OpenCode agent IDs are lowercase (e.g. "build", "plan"). If a UI selection
+            // or persisted model option passes a title-cased name like "Build", normalize it.
+            const agentId = selectedAgent.toLowerCase();
+            yield* Effect.tryPromise({
+              try: () =>
+                hostHandle.client.session.switchAgent({
+                  sessionID: context.sessionId,
+                  agent: agentId,
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session.switchAgent",
+                  detail: `Failed to switch OpenCode agent to '${agentId}': ${openCodeClientErrorMessage(cause)}`,
+                  cause,
+                }),
             });
-          },
-          catch: (cause) =>
-            new ProviderAdapterRequestError({
+          }
+
+          const delivery = input.delivery ?? "steer";
+
+          if (hostHandle.isRemote && input.attachments && input.attachments.length > 0) {
+            return yield* new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.prompt",
-              detail: `Failed to send turn to OpenCode: ${String(cause)}`,
-              cause,
-            }),
-        });
+              detail: "Attachments are not supported when connecting to a remote OpenCode server.",
+            });
+          }
 
-        return {
-          threadId: input.threadId,
-          turnId,
-          resumeCursor: { sessionID: context.sessionId, durableSeq: 0 },
-        };
+          const files = input.attachments
+            ? input.attachments
+                .filter((a) => a.type === "file" || a.type === "image")
+                .map((attachment) => {
+                  const filePath = resolveAttachmentPath({
+                    attachmentsDir: serverConfig.attachmentsDir,
+                    attachment,
+                  });
+                  return {
+                    uri: `file://${filePath}`,
+                    name: attachment.name,
+                  };
+                })
+            : undefined;
+
+          const text = input.input?.trim();
+          const commandMatch = text?.match(/^\/([^\s/]+)(?:\s+([\s\S]*))?$/);
+          // Native commands expand provider-owned templates inside the daemon.
+          // Only treat a leading slash as a command when the daemon actually
+          // registers one; unknown slash text stays a plain prompt.
+          const nativeCommand = commandMatch
+            ? yield* Effect.tryPromise({
+                try: () =>
+                  hostHandle.client.command.list({
+                    location: { directory: context.directory },
+                  }),
+                catch: () =>
+                  new ProviderAdapterRequestError({
+                    provider: PROVIDER,
+                    method: "command.list",
+                    detail: "command.list unavailable",
+                  }),
+              }).pipe(
+                Effect.timeout("10 seconds"),
+                Effect.map((res) =>
+                  ((res as { data?: Array<{ name?: unknown }> }).data ?? []).some(
+                    (command) => command.name === commandMatch[1],
+                  ),
+                ),
+                Effect.orElseSucceed(() => false),
+              )
+            : false;
+          send.isCommand = nativeCommand;
+
+          if (opensImmediately) {
+            yield* emit({
+              ...(yield* buildEventBase({ threadId: input.threadId, turnId })),
+              type: "turn.started",
+              payload: modelSlug ? { model: modelSlug } : {},
+            });
+          } else {
+            // turn.started is emitted when this inbox item is delivered; keep
+            // the model for that event.
+            send.model = modelSlug;
+          }
+
+          if (nativeCommand && commandMatch) {
+            yield* Effect.tryPromise({
+              try: () =>
+                hostHandle.client.session.command({
+                  sessionID: context.sessionId,
+                  command: commandMatch[1]!,
+                  text: commandMatch[2] ?? "",
+                  delivery,
+                  ...(files && files.length > 0 ? { files } : {}),
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session.command",
+                  detail: `Failed to send turn to OpenCode: ${openCodeClientErrorMessage(cause)}`,
+                  cause,
+                }),
+            }).pipe(
+              // `session.command` waits for the command to finish on some
+              // daemons; cap the wait so sendTurn does not pin the RPC open
+              // for the command's whole duration. The command keeps running
+              // and its events still flow through the event stream.
+              Effect.timeout("10 seconds"),
+              Effect.catchTag("TimeoutError", () => Effect.void),
+            );
+          } else {
+            const promptResult = yield* Effect.tryPromise({
+              try: () =>
+                hostHandle.client.session.prompt({
+                  sessionID: context.sessionId,
+                  text: input.input ?? "",
+                  delivery,
+                  ...(files && files.length > 0 ? { files } : {}),
+                }),
+              catch: (cause) =>
+                new ProviderAdapterRequestError({
+                  provider: PROVIDER,
+                  method: "session.prompt",
+                  detail: `Failed to send turn to OpenCode: ${openCodeClientErrorMessage(cause)}`,
+                  cause,
+                }),
+            });
+            // The inbox item id lets session.inbox.delivered attribute this
+            // send exactly, even when several sends are queued at once.
+            const inboxId = (promptResult as { id?: unknown })?.id;
+            if (typeof inboxId === "string" && inboxId.length > 0) {
+              send.inboxId = inboxId;
+            }
+          }
+
+          return {
+            threadId: input.threadId,
+            turnId,
+            resumeCursor: { sessionID: context.sessionId, durableSeq: 0 },
+          };
+        }).pipe(Effect.catch(failSend));
       });
 
     const interruptTurn = (
@@ -1085,7 +1346,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.interrupt",
-              detail: `Failed to interrupt turn: ${String(cause)}`,
+              detail: `Failed to interrupt turn: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1106,7 +1367,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.compact",
-              detail: `Failed to compact thread: ${String(cause)}`,
+              detail: `Failed to compact thread: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1152,7 +1413,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.fork",
-              detail: `Failed to fork session: ${String(cause)}`,
+              detail: `Failed to fork session: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1173,9 +1434,11 @@ export function makeOpenCodeAdapter(
             break;
           }
         }
+        const forkedMessageIdToTurnId = new Map<string, TurnId>();
         for (const [tId, mId] of sourceContext.turnToMessageId.entries()) {
           if (forkedMessageIds.includes(mId)) {
             forkedTurnToMessageId.set(tId, mId);
+            forkedMessageIdToTurnId.set(mId, tId);
           }
         }
 
@@ -1189,7 +1452,9 @@ export function makeOpenCodeAdapter(
           activeTurnStatus: "idle",
           hasSubagents: false,
           subagents: new Map(),
-          pendingInboxItems: new Set(),
+          pendingSends: [],
+          nextTurnSeq: 0,
+          messageIdToTurnId: forkedMessageIdToTurnId,
           requestSessionIdByRequestId: new Map(),
           resolvedRequestIds: new Set(),
           toolCallByCallId: new Map(),
@@ -1223,7 +1488,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.inbox.cancel",
-              detail: `Failed to cancel inbox item: ${String(cause)}`,
+              detail: `Failed to cancel inbox item: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1253,7 +1518,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: `session.inbox.${delivery}`,
-              detail: `Failed to change inbox delivery: ${String(cause)}`,
+              detail: `Failed to change inbox delivery: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });
@@ -1300,7 +1565,7 @@ export function makeOpenCodeAdapter(
             new ProviderAdapterRequestError({
               provider: PROVIDER,
               method: "session.revert",
-              detail: `Failed to rollback session: ${String(cause)}`,
+              detail: `Failed to rollback session: ${openCodeClientErrorMessage(cause)}`,
               cause,
             }),
         });

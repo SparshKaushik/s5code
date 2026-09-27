@@ -7,14 +7,16 @@ import {
   ThreadId,
   TurnId,
 } from "@t3tools/contracts";
+import * as Cause from "effect/Cause";
 import * as Clock from "effect/Clock";
 import * as Effect from "effect/Effect";
+import * as Exit from "effect/Exit";
 import * as Queue from "effect/Queue";
 import * as Stream from "effect/Stream";
 import * as Layer from "effect/Layer";
 
 import { ServerConfig } from "../../config.ts";
-import { makeOpenCodeAdapter } from "./OpenCodeAdapter.ts";
+import { makeOpenCodeAdapter, openCodeClientErrorMessage } from "./OpenCodeAdapter.ts";
 import { type OpenCodeClientFacade, type OpenCodeHostHandle } from "../OpenCodeHost.ts";
 
 const testLayer = Layer.merge(
@@ -105,7 +107,7 @@ function createMockHost() {
       },
       prompt: async (params: any) => {
         calls.prompts.push(params);
-        return { id: "prompt-1" };
+        return { id: `prompt-${calls.prompts.length}` };
       },
       interrupt: async (params: any) => {
         calls.interrupts.push(params);
@@ -152,6 +154,7 @@ function createMockHost() {
     client,
     isRemote: false,
     databasePath: null,
+    serviceVersion: null,
   };
 
   return { handle, emit, calls };
@@ -750,6 +753,8 @@ describe("OpenCodeAdapter", () => {
       expect((completed.payload as any).title).toBe("ls -la");
       expect((completed.payload as any).detail).toBe("file-a\nfile-b");
       expect((completed.payload as any).data.tool).toBe("bash");
+      expect((completed.payload as any).data.command).toBe("ls -la");
+      expect((completed.payload as any).data.rawOutput?.output).toBe("file-a\nfile-b");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
@@ -817,6 +822,106 @@ describe("OpenCodeAdapter", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect(
+    "defers a mid-turn follow-up until its inbox item is delivered and splits the turns",
+    () =>
+      Effect.gen(function* () {
+        const { handle, emit } = createMockHost();
+        const adapter = yield* makeOpenCodeAdapter(handle);
+
+        const threadId = ThreadId.make("thread-deferred");
+        const session = yield* adapter.startSession({
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        });
+        const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+        const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+        const deltas: Array<{ turnId: string | undefined; delta: string }> = [];
+        yield* Effect.forkScoped(
+          Stream.runForEach(adapter.streamEvents, (event) =>
+            Effect.gen(function* () {
+              if (event.type === "content.delta") {
+                deltas.push({
+                  turnId: event.turnId === undefined ? undefined : String(event.turnId),
+                  delta: (event.payload as any).delta,
+                });
+              }
+              yield* Queue.offer(canonicalEvents, event);
+            }),
+          ),
+        );
+        const waitForEvent = Effect.fn("waitForEvent")(function* (
+          predicate: (event: ProviderRuntimeEvent) => boolean,
+        ) {
+          while (true) {
+            const event = yield* Queue.take(canonicalEvents);
+            if (predicate(event)) return event;
+          }
+        });
+
+        const firstTurn = yield* adapter.sendTurn({ threadId, input: "first" });
+        emit({
+          type: "session.inbox.delivered",
+          data: { sessionID: sessionId, inboxID: "prompt-1" },
+        });
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "one " },
+        });
+
+        // A second send while the turn runs must not open its turn yet.
+        const secondTurn = yield* adapter.sendTurn({ threadId, input: "second" });
+        expect(secondTurn.turnId).not.toBe(firstTurn.turnId);
+        const runningSessions = yield* adapter.listSessions();
+        expect(runningSessions[0]?.activeTurnId).toBe(firstTurn.turnId);
+
+        // More text from the first assistant message still belongs to turn 1.
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "one more " },
+        });
+
+        // The queued item is delivered mid-execution: the first turn ends and
+        // the follow-up turn begins there.
+        emit({
+          type: "session.inbox.delivered",
+          data: { sessionID: sessionId, inboxID: "prompt-2" },
+        });
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: "msg-b", delta: "two" },
+        });
+        emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+
+        const superseded = yield* waitForEvent(
+          (e) => e.type === "turn.completed" && e.turnId === firstTurn.turnId,
+        );
+        expect((superseded.payload as any).state).toBe("cancelled");
+
+        const secondStarted = yield* waitForEvent(
+          (e) => e.type === "turn.started" && e.turnId === secondTurn.turnId,
+        );
+        expect(secondStarted).toBeDefined();
+
+        // The execution terminal closes only the follow-up turn — the
+        // superseded turn already emitted its own turn.completed.
+        const finalCompleted = yield* waitForEvent(
+          (e) =>
+            e.type === "turn.completed" &&
+            e.turnId === secondTurn.turnId &&
+            (e.payload as any).state === "completed",
+        );
+        expect(finalCompleted).toBeDefined();
+        expect(deltas).toEqual([
+          { turnId: firstTurn.turnId, delta: "one " },
+          { turnId: firstTurn.turnId, delta: "one more " },
+          { turnId: secondTurn.turnId, delta: "two" },
+        ]);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("reports native compaction completion without an active turn", () =>
     Effect.gen(function* () {
       const { handle, emit } = createMockHost();
@@ -878,6 +983,69 @@ describe("OpenCodeAdapter", () => {
         .pipe(Effect.exit);
 
       expect(exit._tag).toBe("Failure");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  describe("openCodeClientErrorMessage", () => {
+    it("unpacks nested cause chains", () => {
+      const err = new Error("Transport", {
+        cause: new TypeError("fetch failed", {
+          cause: new Error("connect ECONNREFUSED 127.0.0.1:49374"),
+        }),
+      });
+      expect(openCodeClientErrorMessage(err)).toBe(
+        "Transport: fetch failed: connect ECONNREFUSED 127.0.0.1:49374",
+      );
+    });
+
+    it("deduplicates identical messages in the cause chain", () => {
+      const err = new Error("Connection failed", {
+        cause: new Error("Connection failed", {
+          cause: new Error("Server offline"),
+        }),
+      });
+      expect(openCodeClientErrorMessage(err)).toBe("Connection failed: Server offline");
+    });
+
+    it("extracts detail and reason properties from structured errors", () => {
+      expect(openCodeClientErrorMessage({ detail: "Token expired" })).toBe("Token expired");
+      expect(openCodeClientErrorMessage({ reason: "Rate limited" })).toBe("Rate limited");
+    });
+
+    it("returns Unknown error for null or undefined", () => {
+      expect(openCodeClientErrorMessage(null)).toBe("Unknown error");
+      expect(openCodeClientErrorMessage(undefined)).toBe("Unknown error");
+    });
+  });
+
+  it.effect("surfaces nested transport errors cleanly when startSession fails", () =>
+    Effect.gen(function* () {
+      const { handle } = createMockHost();
+      (handle.client.session as any).create = async () => {
+        throw new Error("Transport", {
+          cause: new TypeError("fetch failed", {
+            cause: new Error("connect ECONNREFUSED 127.0.0.1:49374"),
+          }),
+        });
+      };
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-fail-create");
+      const exit = yield* adapter
+        .startSession({
+          threadId,
+          cwd: "/tmp/project",
+          runtimeMode: "full-access",
+        })
+        .pipe(Effect.exit);
+
+      expect(Exit.isFailure(exit)).toBe(true);
+      if (Exit.isFailure(exit)) {
+        const failureStr = Cause.pretty(exit.cause);
+        expect(failureStr).toContain(
+          "Failed to create OpenCode session: Transport: fetch failed: connect ECONNREFUSED 127.0.0.1:49374",
+        );
+      }
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });

@@ -120,7 +120,7 @@ export class UsageAggregator {
    * can derive per-window facts (distinct sessions, for one) from the records
    * that landed rather than everything the mtime prefilter happened to admit.
    */
-  add(record: UsageRecord): boolean {
+  add(record: UsageRecord, sourcePath?: string): boolean {
     if (record.dedupeKey !== null) {
       if (this.#seen.has(record.dedupeKey)) {
         this.#duplicatesDropped += 1;
@@ -155,10 +155,11 @@ export class UsageAggregator {
               Math.floor((record.timestampMs - this.#hourlyWindow.sinceTimeMs) / HOUR_MS) * HOUR_MS,
           ).toISOString();
 
-    // The api provider is part of a pi model's identity for pricing, so two
-    // gateways serving the same model name stay separate cells rather than
-    // one blended row a user could not tag apart.
-    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.apiProvider}`;
+    // The api provider is part of a pi/opencode model's identity for pricing,
+    // so two gateways serving the same model name stay separate cells rather
+    // than one blended row a user could not tag apart. The source path keeps
+    // overlapping multi-home environments' same-name cells distinct too.
+    const key = `${day}\u0000${hourStart}\u0000${record.provider}\u0000${record.model}\u0000${record.apiProvider}\u0000${sourcePath ?? ""}`;
     let bucket = this.#buckets.get(key);
     if (bucket === undefined) {
       bucket = {
@@ -196,14 +197,21 @@ export class UsageAggregator {
   finish(): AggregateResult {
     const buckets: UsageBucket[] = [];
     for (const [key, bucket] of this.#buckets) {
-      const [day = "", hourStart = "", provider = "", model = "", apiProvider = ""] =
-        key.split("\u0000");
+      const [
+        day = "",
+        hourStart = "",
+        provider = "",
+        model = "",
+        apiProvider = "",
+        sourcePath = "",
+      ] = key.split("\u0000");
       buckets.push({
         day: day as UsageDay,
         ...(hourStart === "" ? {} : { hourStart }),
         provider: provider as UsageBucket["provider"],
         model,
-        apiProvider: bucket.apiProvider,
+        apiProvider,
+        ...(sourcePath === "" ? {} : { sourcePath }),
         totals: bucket.totals,
         costUsd: bucket.costUsd,
         cacheSavingsUsd: bucket.cacheSavingsUsd,

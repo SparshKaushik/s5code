@@ -127,15 +127,15 @@ const migrateData = Effect.fn("cli.migrateData")(function* (input: {
 });
 
 export const migrateDataCommand = Command.make("migrate-data", {
-  source: Flag.string("source").pipe(
+  source: Flag.String("source").pipe(
     Flag.withDescription("Legacy T3 home to copy from (default ~/.t3)."),
     Flag.optional,
   ),
-  target: Flag.string("target").pipe(
+  target: Flag.String("target").pipe(
     Flag.withDescription("S5 Code home to copy into (default ~/.s5code)."),
     Flag.optional,
   ),
-  force: Flag.boolean("force").pipe(
+  force: Flag.Boolean("force").pipe(
     Flag.withDescription("Overwrite an existing non-empty target."),
     Flag.withDefault(false),
   ),

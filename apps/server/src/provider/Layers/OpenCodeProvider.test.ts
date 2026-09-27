@@ -1,13 +1,17 @@
-import type { SelectProviderOptionDescriptor } from "@t3tools/contracts";
+import { ServerProviderSkill, type SelectProviderOptionDescriptor } from "@t3tools/contracts";
 import { describe, expect, it } from "@effect/vitest";
+import * as Schema from "effect/Schema";
 
 import {
   formatVariantLabel,
   isOpenCodeVersionSupported,
   openCodeCapabilitiesForModel,
+  openCodeSkillsToServerProviderSkills,
   parseModelVariants,
   titleCaseSlug,
 } from "./OpenCodeProvider.ts";
+
+const decodeSkill = Schema.decodeSync(ServerProviderSkill);
 
 function variantDescriptor(
   capabilities: ReturnType<typeof openCodeCapabilitiesForModel>,
@@ -129,6 +133,81 @@ describe("openCodeCapabilitiesForModel", () => {
 
     const variantDesc = capabilities.optionDescriptors?.find((d) => d.id === "variant");
     expect(variantDesc).toBeUndefined();
+  });
+});
+
+describe("openCodeSkillsToServerProviderSkills", () => {
+  it("reads the v2.0.8 wire `path` field, falling back to `location`", () => {
+    // OpenCode v2.0.8's `/api/skill` returns `path` (including `/builtin/*.md`
+    // for built-in skills) where the SDK type still declares `location`.
+    // Mapping `location` unchecked produced a `ServerProviderSkill` without
+    // `path`, which failed contract decode on every connected client, killing
+    // the config stream and looping "connection failed unexpectedly".
+    const skills = openCodeSkillsToServerProviderSkills([
+      { name: "OpenCode", description: "Built-in daemon skill", path: "/builtin/opencode.md" },
+      { name: "Report", description: "Another built-in", path: "/builtin/report.md" },
+      { name: "legacy", location: "/skills/legacy/SKILL.md" },
+    ]);
+
+    expect(skills.map((skill) => skill.path)).toEqual([
+      "/skills/legacy/SKILL.md",
+      "/builtin/opencode.md",
+      "/builtin/report.md",
+    ]);
+    for (const skill of skills) {
+      expect(() => decodeSkill(skill)).not.toThrow();
+    }
+  });
+
+  it("drops skills without a usable name or path", () => {
+    const skills = openCodeSkillsToServerProviderSkills([
+      { name: "OpenCode", description: "No path or location at all" },
+      { name: "  ", path: "/skills/blank-name/SKILL.md" },
+      { path: "/skills/unnamed/SKILL.md" },
+      { name: "no-path", path: "   ", location: "   " },
+      { name: "null-path", path: null },
+      "not-an-object",
+      null,
+    ]);
+
+    expect(skills).toEqual([]);
+  });
+
+  it("maps valid skills into contract-decodable entries sorted by name", () => {
+    const skills = openCodeSkillsToServerProviderSkills([
+      {
+        name: "review-diff",
+        location: "/home/user/.config/opencode/skills/review-diff/SKILL.md",
+        description: "Review the current diff",
+        slash: false,
+      },
+      { name: "commit", location: "/project/.opencode/skills/commit/SKILL.md" },
+    ]);
+
+    expect(skills).toEqual([
+      {
+        name: "commit",
+        description: "commit",
+        path: "/project/.opencode/skills/commit/SKILL.md",
+        enabled: true,
+        displayName: "Commit",
+        userInvocationOnly: false,
+        userInvocable: true,
+      },
+      {
+        name: "review-diff",
+        description: "Review the current diff",
+        path: "/home/user/.config/opencode/skills/review-diff/SKILL.md",
+        enabled: true,
+        displayName: "Review Diff",
+        userInvocationOnly: false,
+        userInvocable: false,
+      },
+    ]);
+
+    for (const skill of skills) {
+      expect(() => decodeSkill(skill)).not.toThrow();
+    }
   });
 });
 

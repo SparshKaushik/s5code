@@ -1,0 +1,62 @@
+diff --git a/dist/promise/service.js b/dist/promise/service.js
+index 5f1ab85b4e18c8e6f510818dd4d3e6a49ebe4eb4..d2abe1f9d669567f7600c6f402b8c389501faa36 100644
+--- a/dist/promise/service.js
++++ b/dist/promise/service.js
+@@ -159,14 +159,16 @@ async function probeResult(info, allowLegacy = false, timeout = defaultEnsureTim
+     })
+         .then(async (response) => ({
+         response,
+-        body: (await response.json()),
++        // Older releases serve the web UI instead of JSON here; the status
++        // code still distinguishes "endpoint missing" from a dead service.
++        body: (await response.json().catch(() => undefined)),
+     }))
+         .then((value) => ({ value }), (cause) => ({ cause }));
+     if ("cause" in result)
+         return { service: undefined, timedOut: signal.aborted };
+     const response = result.value.response;
+     const body = result.value.body;
+-    if (body !== undefined && "version" in body && "pid" in body) {
++    if (body !== null && typeof body === "object" && "version" in body && "pid" in body) {
+         if (body.pid !== info.pid)
+             return { service: undefined, timedOut: false };
+         if (info.version !== undefined && body.version !== info.version)
+@@ -182,10 +184,36 @@ async function probeResult(info, allowLegacy = false, timeout = defaultEnsureTim
+             timedOut: false,
+         };
+     }
+-    if (!allowLegacy || body?.healthy !== true)
++    if (allowLegacy && body?.healthy === true)
++        return {
++            service: { info, endpoint, state: "ready", legacy: true },
++            timedOut: false,
++        };
++    // Released daemons (v2.0.8) do not mount `/api/health` at all even though
++    // they serve the rest of the API. Without this fallback a healthy daemon
++    // reads as unresponsive and is terminated after repeated probe timeouts.
++    return probeHealthlessService(info, endpoint, timeout);
++}
++async function probeHealthlessService(info, endpoint, timeout) {
++    const timeoutSignal = AbortSignal.timeout(timeout);
++    const probe = await fetch(new URL("/api/location", info.url), {
++        headers: headers(endpoint),
++        signal: timeoutSignal,
++    }).then((response) => ({ response }), (cause) => ({ cause }));
++    if ("cause" in probe)
++        return { service: undefined, timedOut: timeoutSignal.aborted };
++    // The pid check rejects foreign processes squatting on the stale port.
++    if (typeof info.pid === "number" && stopped(info.pid))
+         return { service: undefined, timedOut: false };
++    const status = probe.response.status;
+     return {
+-        service: { info, endpoint, state: "ready", legacy: true },
++        service: {
++            info,
++            endpoint,
++            version: info.version,
++            state: status >= 200 && status < 300 ? "ready" : status >= 500 ? "failed" : "waiting",
++            legacy: false,
++        },
+         timedOut: false,
+     };
+ }

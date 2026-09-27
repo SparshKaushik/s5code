@@ -19,9 +19,12 @@ import { ServerConfig } from "../../config.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { ProviderDriverError } from "../Errors.ts";
 import { makeOpenCodeAdapter } from "../Layers/OpenCodeAdapter.ts";
+import { readOpenCodeGoUsageLimits } from "../Layers/openCodeUsageLimits.ts";
 import {
   checkOpenCodeProviderStatus,
   makePendingOpenCodeProvider,
+  openCodeSkillsToServerProviderSkills,
+  openCodeCommandsToServerProviderSlashCommands,
 } from "../Layers/OpenCodeProvider.ts";
 import { makeManagedServerProvider } from "../makeManagedServerProvider.ts";
 import { makeOpenCodeHost } from "../OpenCodeHost.ts";
@@ -100,11 +103,53 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
 
       const textGeneration = makeOpenCodeTextGeneration(hostHandle, effectiveConfig);
 
-      const checkProvider = checkOpenCodeProviderStatus(
-        hostHandle,
-        effectiveConfig,
-        serverConfig.cwd,
-      ).pipe(Effect.map(stampIdentity));
+      const fileSystem = yield* FileSystem.FileSystem;
+      const pathService = yield* Path.Path;
+      const httpClient = yield* HttpClient.HttpClient;
+
+      const checkProvider = Effect.all(
+        {
+          provider: checkOpenCodeProviderStatus(hostHandle, effectiveConfig, serverConfig.cwd),
+          usageLimits: readOpenCodeGoUsageLimits({
+            enabled: effectiveConfig.enabled,
+            serverUrl: effectiveConfig.serverUrl,
+            environment: processEnv,
+          }),
+        },
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.map(({ provider, usageLimits }) => ({ ...provider, usageLimits })),
+        Effect.map(stampIdentity),
+        Effect.provideService(FileSystem.FileSystem, fileSystem),
+        Effect.provideService(Path.Path, pathService),
+        Effect.provideService(HttpClient.HttpClient, httpClient),
+      );
+      // Per-workspace inventory rides the host client's `location` parameter,
+      // so one daemon serves any project directory.
+      const loadWorkspaceForCwd = (cwd: string) =>
+        Effect.tryPromise({
+          try: async () => {
+            const [commandsRes, skillsRes] = await Promise.all([
+              hostHandle.client.command
+                .list({ location: { directory: cwd } })
+                .catch(() => ({ data: [] })),
+              hostHandle.client.skill
+                .list({ location: { directory: cwd } })
+                .catch(() => ({ data: [] })),
+            ]);
+            return {
+              commands: (commandsRes as { data?: unknown[] }).data ?? [],
+              skills: (skillsRes as { data?: unknown[] }).data ?? [],
+            };
+          },
+          catch: (cause) =>
+            new ProviderDriverError({
+              driver: DRIVER_KIND,
+              instanceId,
+              detail: `Failed to probe OpenCode commands and skills for '${cwd}'`,
+              cause,
+            }),
+        }).pipe(Effect.timeout("20 seconds"));
 
       const snapshotSettings = makeProviderSnapshotSettingsSource(effectiveConfig, serverSettings);
 
@@ -147,6 +192,26 @@ export const OpenCodeDriver: ProviderDriver<OpenCodeSettings, OpenCodeDriverEnv>
         accentColor,
         enabled,
         snapshot,
+        snapshotForCwd: (cwd) =>
+          !effectiveConfig.enabled
+            ? snapshot.getSnapshot
+            : Effect.all([snapshot.getSnapshot, loadWorkspaceForCwd(cwd)]).pipe(
+                Effect.map(([machineSnapshot, { skills, commands }]) => ({
+                  ...machineSnapshot,
+                  skills: openCodeSkillsToServerProviderSkills(skills),
+                  slashCommands: openCodeCommandsToServerProviderSlashCommands(commands),
+                })),
+                Effect.mapError((cause) =>
+                  Schema.is(ProviderDriverError)(cause)
+                    ? cause
+                    : new ProviderDriverError({
+                        driver: DRIVER_KIND,
+                        instanceId,
+                        detail: `Failed to probe OpenCode commands and skills for '${cwd}'`,
+                        cause,
+                      }),
+                ),
+              ),
         adapter,
         textGeneration,
       } satisfies ProviderInstance;

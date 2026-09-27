@@ -74,9 +74,11 @@ These are the things a sync must never regress. Grep for them after a merge:
   `apps/mobile/app.config.ts`, `apps/web/index.html`, `packages/shared/src/devHome.ts`.
 - **Compaction** — `/compact` command (pi harness).
 - **Usage tags** — `UsageModelAlias`, `UsageCatalogModelId`, `userTagged` cost
-  source, `pi`/`cursor` provider kinds, `UsagePricer`. Files:
+  source, `pi`/`opencode` provider kinds, `UsagePricer`. Files:
   `packages/contracts/src/usage.ts`, `apps/server/src/usage/usagePricing.ts`,
-  `apps/web/src/components/usage/`.
+  `apps/web/src/components/usage/`. (The fork's Cursor dashboard-usage adapter
+  was removed: `usageCursor.ts` and friends are gone, and `cursor` is no longer
+  a `UsageProviderKind`.)
 - **Binary self-update** — `"binary"` in `ServerSelfUpdateMethod`/`Capability`,
   `apps/server/src/cloud/binaryUpdate.ts`.
 - **Self-hosted relay** — `infra/relay/`, `.github/workflows/deploy-relay.yml`.
@@ -88,7 +90,9 @@ These upstream files were removed on purpose. A sync that re-adds them is a bug:
 - `.github/workflows/mobile-fingerprint-check.yml` (fork has its own CI).
 - `apps/mobile/plugins/withAndroidTabletOrientation.cjs`.
 - `apps/mobile/src/components/T3Wordmark.tsx` (rebrand).
-- `apps/mobile/src/features/threads/GitActionProgressOverlay.tsx`.
+- `apps/mobile/src/features/threads/GitActionProgressOverlay.tsx` — fork renamed it to
+  `ThreadActionProgressOverlay.tsx`; upstream still imports the old path, so the file now
+  exists only as a re-export shim. Do not delete it.
 - `infra/relay/src/dbConfig.ts` (+ test) — fork's relay rewrite.
 
 ## The pull-request feature

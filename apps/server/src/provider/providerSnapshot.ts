@@ -71,12 +71,6 @@ export interface ServerProviderPresentation {
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
 
-export function nonEmptyTrimmed(value: string | undefined): string | undefined {
-  if (!value) return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
-}
-
 export function isCommandMissingCause(error: unknown): boolean {
   if (isProviderCommandNotFoundError(error)) return true;
   return error instanceof PlatformError.PlatformError && error.reason._tag === "NotFound";
@@ -107,8 +101,14 @@ export const spawnAndCollect = (binaryPath: string, command: ChildProcess.Comman
     return result;
   }).pipe(Effect.scoped);
 
+/**
+ * Return the first semantic version found in CLI output, or null. Accepts a
+ * leading "v" (for example `opencode v2.0.3`).
+ */
 export function parseGenericCliVersion(output: string): string | null {
-  const match = output.match(/\b(\d+\.\d+\.\d+)\b/);
+  // "opencode v2.0.3"-style output: the optional "v" has to be consumed first,
+  // since "v2" itself contains no word boundary.
+  const match = output.match(/\bv?(\d+\.\d+\.\d+)\b/);
   return match?.[1] ?? null;
 }
 

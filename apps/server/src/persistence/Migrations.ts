@@ -68,6 +68,9 @@ import Migration0049 from "./Migrations/049_ProjectionThreadsActiveOrderKey.ts";
 import Migration0050 from "./Migrations/050_ProjectionThreadPullRequests.ts";
 import Migration0051 from "./Migrations/051_ProjectionThreadMessageContext.ts";
 import Migration0052 from "./Migrations/052_MigrateOpenCode2ToOpenCode.ts";
+import Migration0053 from "./Migrations/053_ProjectionThreadTitleState.ts";
+import Migration0054 from "./Migrations/054_PullRequestFilesViewed.ts";
+import Migration0055 from "./Migrations/055_ProjectionThreadsAutoSettleDisabledAt.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -132,6 +135,9 @@ const migrationEntries = [
   [50, "ProjectionThreadPullRequests", Migration0050],
   [51, "ProjectionThreadMessageContext", Migration0051],
   [52, "MigrateOpenCode2ToOpenCode", Migration0052],
+  [53, "ProjectionThreadTitleState", Migration0053],
+  [54, "PullRequestFilesViewed", Migration0054],
+  [55, "ProjectionThreadsAutoSettleDisabledAt", Migration0055],
 ] as const;
 
 export const migrationManifest = migrationEntries.map(([id, name]) => [id, name] as const);
@@ -161,12 +167,19 @@ export interface RunMigrationsOptions {
  * In earlier S5 Code fork releases:
  * - Migration 38 was inserted as RewindEntries, shifting upstream 38–40 to 39–41.
  * - Earlier builds also had migration 35 recorded as RewindEntries.
+ * - The fork inserted MigrateOpenCode2ToOpenCode at id 52, so upstream's 52/53
+ *   (ProjectionThreadTitleState, PullRequestFilesViewed) were renumbered to
+ *   53/54, and upstream's 54 (ProjectionThreadsAutoSettleDisabledAt) to 55.
+ *   Databases adopted from upstream still record the upstream ids.
  *
  * If a database has RewindEntries in effect_sql_migrations, the migrator would
  * see latestMigrationId as 41 and skip future migrations (such as 41).
+ * If a database records upstream's 52/53/54 ids, the migrator would skip the
+ * renumbered migrations or run them under the wrong recorded id.
  *
- * This recovery aligns the migration table back with upstream (38, 39, 40)
- * and drops the discontinued rewind_entries table and its indexes.
+ * This recovery aligns the migration table back with upstream (38, 39, 40),
+ * remaps upstream-numbered 52/53/54 rows to the fork's 53/54/55, and drops the
+ * discontinued rewind_entries table and its indexes.
  */
 const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* () {
   const sql = yield* SqlClient.SqlClient;
@@ -182,50 +195,80 @@ const recoverLegacyMigrations = Effect.fn("recoverLegacyMigrations")(function* (
     SELECT migration_id, name FROM effect_sql_migrations
   `;
   const hasRewindEntries = rows.some((r) => r.name === "RewindEntries");
-  if (!hasRewindEntries) {
+  const nameById = new Map(rows.map((r) => [r.migration_id, r.name]));
+  // Databases adopted from upstream recorded these under upstream's ids; the
+  // fork renumbered them when it inserted MigrateOpenCode2ToOpenCode at 52.
+  // Remap highest-first so the updates cannot collide on the unique id.
+  const hasUpstreamNumbering =
+    nameById.get(52) === "ProjectionThreadTitleState" ||
+    nameById.get(53) === "PullRequestFilesViewed" ||
+    nameById.get(54) === "ProjectionThreadsAutoSettleDisabledAt";
+  if (!hasRewindEntries && !hasUpstreamNumbering) {
     return;
   }
 
-  const nameById = new Map(rows.map((r) => [r.migration_id, r.name]));
-
   yield* sql.withTransaction(
     Effect.gen(function* () {
-      yield* sql`
-        DELETE FROM effect_sql_migrations WHERE name = 'RewindEntries'
-      `;
-
-      // If migration 38 was RewindEntries, migrations 39-41 were shifted by +1
-      // and need to be shifted back to 38-40. For older ID-35 databases,
-      // migrations 38-40 are already recorded with upstream IDs, so no shift is applied.
-      if (nameById.get(38) === "RewindEntries") {
-        if (nameById.get(39) === "ProjectionThreadsPinOrderKey") {
-          yield* sql`
-            UPDATE effect_sql_migrations
-            SET migration_id = 38
-            WHERE migration_id = 39 AND name = 'ProjectionThreadsPinOrderKey'
-          `;
-        }
-
-        if (nameById.get(40) === "ProjectionProjectsDefaultThreadEnvMode") {
-          yield* sql`
-            UPDATE effect_sql_migrations
-            SET migration_id = 39
-            WHERE migration_id = 40 AND name = 'ProjectionProjectsDefaultThreadEnvMode'
-          `;
-        }
-
-        if (nameById.get(41) === "ProjectionProjectFaviconPath") {
-          yield* sql`
-            UPDATE effect_sql_migrations
-            SET migration_id = 40
-            WHERE migration_id = 41 AND name = 'ProjectionProjectFaviconPath'
-          `;
-        }
+      if (nameById.get(54) === "ProjectionThreadsAutoSettleDisabledAt") {
+        yield* sql`
+          UPDATE effect_sql_migrations
+          SET migration_id = 55
+          WHERE migration_id = 54 AND name = 'ProjectionThreadsAutoSettleDisabledAt'
+        `;
+      }
+      if (nameById.get(53) === "PullRequestFilesViewed") {
+        yield* sql`
+          UPDATE effect_sql_migrations
+          SET migration_id = 54
+          WHERE migration_id = 53 AND name = 'PullRequestFilesViewed'
+        `;
+      }
+      if (nameById.get(52) === "ProjectionThreadTitleState") {
+        yield* sql`
+          UPDATE effect_sql_migrations
+          SET migration_id = 53
+          WHERE migration_id = 52 AND name = 'ProjectionThreadTitleState'
+        `;
       }
 
-      yield* sql`
-        DROP TABLE IF EXISTS rewind_entries
-      `;
+      if (hasRewindEntries) {
+        yield* sql`
+          DELETE FROM effect_sql_migrations WHERE name = 'RewindEntries'
+        `;
+
+        // If migration 38 was RewindEntries, migrations 39-41 were shifted by +1
+        // and need to be shifted back to 38-40. For older ID-35 databases,
+        // migrations 38-40 are already recorded with upstream IDs, so no shift is applied.
+        if (nameById.get(38) === "RewindEntries") {
+          if (nameById.get(39) === "ProjectionThreadsPinOrderKey") {
+            yield* sql`
+              UPDATE effect_sql_migrations
+              SET migration_id = 38
+              WHERE migration_id = 39 AND name = 'ProjectionThreadsPinOrderKey'
+            `;
+          }
+
+          if (nameById.get(40) === "ProjectionProjectsDefaultThreadEnvMode") {
+            yield* sql`
+              UPDATE effect_sql_migrations
+              SET migration_id = 39
+              WHERE migration_id = 40 AND name = 'ProjectionProjectsDefaultThreadEnvMode'
+            `;
+          }
+
+          if (nameById.get(41) === "ProjectionProjectFaviconPath") {
+            yield* sql`
+              UPDATE effect_sql_migrations
+              SET migration_id = 40
+              WHERE migration_id = 41 AND name = 'ProjectionProjectFaviconPath'
+            `;
+          }
+        }
+
+        yield* sql`
+          DROP TABLE IF EXISTS rewind_entries
+        `;
+      }
     }),
   );
 

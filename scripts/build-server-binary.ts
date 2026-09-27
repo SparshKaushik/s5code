@@ -77,14 +77,14 @@ const archToTarget = {
 const DEFAULT_RELEASE_REPO = "SparshKaushik/s5code";
 
 const ServerBinaryEnvConfig = Config.all({
-  arch: Config.string("T3CODE_SERVER_ARCH").pipe(Config.option),
-  outputDir: Config.string("T3CODE_SERVER_OUTPUT_DIR").pipe(Config.option),
-  buildVersion: Config.string("T3CODE_SERVER_VERSION").pipe(Config.option),
-  skipBuild: Config.boolean("T3CODE_SERVER_SKIP_BUILD").pipe(Config.option),
-  verbose: Config.boolean("T3CODE_SERVER_VERBOSE").pipe(Config.option),
+  arch: Config.String("T3CODE_SERVER_ARCH").pipe(Config.option),
+  outputDir: Config.String("T3CODE_SERVER_OUTPUT_DIR").pipe(Config.option),
+  buildVersion: Config.String("T3CODE_SERVER_VERSION").pipe(Config.option),
+  skipBuild: Config.Boolean("T3CODE_SERVER_SKIP_BUILD").pipe(Config.option),
+  verbose: Config.Boolean("T3CODE_SERVER_VERBOSE").pipe(Config.option),
   /** owner/repo the built binary checks for self-update releases. */
-  releaseRepo: Config.string("T3CODE_SERVER_BINARY_REPO").pipe(Config.option),
-  githubRepository: Config.string("GITHUB_REPOSITORY").pipe(Config.option),
+  releaseRepo: Config.String("T3CODE_SERVER_BINARY_REPO").pipe(Config.option),
+  githubRepository: Config.String("GITHUB_REPOSITORY").pipe(Config.option),
 });
 
 const RepoRoot = Effect.service(Path.Path).pipe(
@@ -414,31 +414,31 @@ function containsBytes(haystack: Uint8Array, needle: string): boolean {
 }
 
 const buildServerBinaryCli = Command.make("build-server-binary", {
-  arch: Flag.choice("arch", ServerBinaryArch.literals).pipe(
+  arch: Flag.Literals("arch", ["x64", "arm64"]).pipe(
     Flag.withDescription("Target Linux arch: x64 or arm64 (env: T3CODE_SERVER_ARCH)."),
     Flag.optional,
   ),
-  outputDir: Flag.string("output-dir").pipe(
+  outputDir: Flag.String("output-dir").pipe(
     Flag.withDescription("Output directory for the binary (env: T3CODE_SERVER_OUTPUT_DIR)."),
     Flag.optional,
   ),
-  buildVersion: Flag.string("build-version").pipe(
+  buildVersion: Flag.String("build-version").pipe(
     Flag.withDescription("Version string baked into the binary name (env: T3CODE_SERVER_VERSION)."),
     Flag.optional,
   ),
-  releaseRepo: Flag.string("release-repo").pipe(
+  releaseRepo: Flag.String("release-repo").pipe(
     Flag.withDescription(
       "owner/repo the binary checks for self-update releases (env: T3CODE_SERVER_BINARY_REPO, GITHUB_REPOSITORY).",
     ),
     Flag.optional,
   ),
-  skipBuild: Flag.boolean("skip-build").pipe(
+  skipBuild: Flag.Boolean("skip-build").pipe(
     Flag.withDescription(
       "Skip `vp run --filter t3 build` and use existing apps/server/dist artifacts (env: T3CODE_SERVER_SKIP_BUILD).",
     ),
     Flag.optional,
   ),
-  verbose: Flag.boolean("verbose").pipe(
+  verbose: Flag.Boolean("verbose").pipe(
     Flag.withDescription("Stream subprocess stdout (env: T3CODE_SERVER_VERBOSE)."),
     Flag.optional,
   ),
