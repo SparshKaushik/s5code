@@ -7,12 +7,13 @@ import { expect, it } from "@effect/vitest";
 
 const SOURCE_ROOT = NodePath.resolve(NodeURL.fileURLToPath(new URL("..", import.meta.url)));
 
-// No source file may statically import node:sqlite: it must stay off the
-// compiled binary's startup graph (sqliteCompat resolves it lazily).
+// No source file may statically import a Node builtin Bun lacks (node:sqlite,
+// node:sea): it must stay off the compiled binary's startup graph (sqliteCompat
+// resolves node:sqlite lazily; hostProcess probes node:sea lazily).
 const ALLOWED_STATIC_NODE_SQLITE_FILES = new Set<string>();
 
 const STATIC_IMPORT_RE =
-  /(?:import\s+(?:[\s\S]*?\s+from\s+)?|export\s+[\s\S]*?\s+from\s+)["']node:sqlite["']|require\s*\(\s*["']node:sqlite["']\s*\)/;
+  /(?:import\s+(?:[\s\S]*?\s+from\s+)?|export\s+[\s\S]*?\s+from\s+)["']node:(?:sqlite|sea)["']|require\s*\(\s*["']node:(?:sqlite|sea)["']\s*\)/;
 
 function listTypeScriptFiles(directory: string): ReadonlyArray<string> {
   const entries = NodeFS.readdirSync(directory, { withFileTypes: true });
