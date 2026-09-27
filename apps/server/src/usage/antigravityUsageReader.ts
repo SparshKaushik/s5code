@@ -166,7 +166,7 @@ async function readDatabase(path: string, fallbackTimestamp: number): Promise<Us
       db
         .prepare("SELECT name FROM sqlite_master WHERE type = 'table'")
         .all()
-        .map((row) => row.name),
+        .map((row) => (row as { name: string }).name),
     );
     if (!tables.has("gen_metadata") && !tables.has("steps")) {
       throw new Error("Missing Antigravity usage tables");
@@ -230,6 +230,8 @@ async function readDatabase(path: string, fallbackTimestamp: number): Promise<Us
           });
           const record: UsageRecord = {
             provider: "antigravity",
+            apiProvider: "",
+            inputTokensEstimated: false,
             sessionId,
             timestampMs: entry.timestampMs ?? trajectoryTimestamp ?? fallbackTimestamp,
             model:

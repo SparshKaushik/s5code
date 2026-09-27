@@ -468,6 +468,7 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
     totals,
     inputTokensEstimated,
     reportedCostUsd,
+    fast: false,
     // The upstream response id survives a session fork, which copies messages
     // into a new file. pi's own message ids are short and only unique per file.
     dedupeKey: responseId,

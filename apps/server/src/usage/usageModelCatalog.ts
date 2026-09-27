@@ -105,6 +105,7 @@ export function parseModelCatalog(document: unknown): ModelCatalog {
           cacheReadCostPerToken: (finiteNumber(costRecord["cache_read"]) ?? input) / PER_MILLION,
           cacheCreationCostPerToken:
             (finiteNumber(costRecord["cache_write"]) ?? input) / PER_MILLION,
+          fastMultiplier: 1,
         },
       };
 
