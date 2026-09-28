@@ -162,6 +162,8 @@ fun HomeScreen(
     var submittingRequestKey by remember { mutableStateOf<String?>(null) }
     var searchMatches by remember { mutableStateOf(emptyList<ThreadSearchMatch>()) }
     var searchLoading by remember { mutableStateOf(false) }
+    // The row the Custom… snooze sheet was opened for; it snoozes on confirm.
+    var customSnoozeFor by remember { mutableStateOf<ThreadSummary?>(null) }
 
     LaunchedEffect(hardwareShortcut?.id) {
         when (hardwareShortcut?.shortcut) {
@@ -931,7 +933,13 @@ fun HomeScreen(
                                                         val runAction = {
                                                             launchThreadAction(item.thread, action)
                                                         }
-                                                        if (action == "delete") {
+                                                        if (action == "snooze:custom") {
+                                                            // The date/duration
+                                                            // sheet resolves to
+                                                            // an instant first.
+                                                            customSnoozeFor =
+                                                                item.thread
+                                                        } else if (action == "delete") {
                                                             confirmController.show(
                                                                 S5ConfirmDialogRequest(
                                                                     title = "Delete thread?",
@@ -969,6 +977,24 @@ fun HomeScreen(
                 }
             }
         }
+    }
+
+    customSnoozeFor?.let { thread ->
+        CustomSnoozeDialog(
+            onDismiss = { customSnoozeFor = null },
+            onSnooze = { untilIso ->
+                val target = thread
+                customSnoozeFor = null
+                scope.launch {
+                    runCatching {
+                            store.workspace.setSnoozed(
+                                target.environmentId, target.id, true, untilIso,
+                            )
+                        }
+                        .onFailure { store.showError(it.message ?: "Snooze failed.") }
+                }
+            },
+        )
     }
 }
 
@@ -1095,7 +1121,15 @@ internal fun threadMenuOptions(
                                         label = preset.label,
                                         supporting = preset.whenLabel,
                                     )
-                                },
+                                } +
+                                    // RN's `snooze:custom` opens a date/duration
+                                    // picker instead of dispatching directly.
+                                    listOf(
+                                        S5MenuOption(
+                                            id = "snooze:custom",
+                                            label = "Custom…",
+                                        )
+                                    ),
                         )
                     )
                 }
