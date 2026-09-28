@@ -46,6 +46,7 @@
     "@t3tools/ssh": "workspace:*",
     "@t3tools/tailscale": "workspace:*",
     "@t3tools/web": "workspace:*",
+    "@types/bun": "^1.4.1",
     "@types/node": "catalog:",
     "@types/yauzl": "^3.4.0",
     "effect-acp": "workspace:*",
