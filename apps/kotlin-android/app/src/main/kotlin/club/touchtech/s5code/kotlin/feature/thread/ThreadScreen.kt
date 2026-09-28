@@ -41,7 +41,10 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
+import club.touchtech.s5code.kotlin.data.clampFileAttachmentUploadBytes
+import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
 import club.touchtech.s5code.kotlin.data.formatComposerContextReference
+import club.touchtech.s5code.kotlin.data.persistPastedTextAttachment
 import club.touchtech.s5code.kotlin.data.pullRequestComposerContext
 import club.touchtech.s5code.kotlin.data.resolveVisibleWorktreeSetup
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
@@ -101,6 +104,7 @@ fun ThreadScreen(
 ) {
     val id = remember(threadId) { ThreadId(threadId) }
     val env = remember(environmentId) { EnvironmentId(environmentId) }
+    val context = androidx.compose.ui.platform.LocalContext.current
     // Subscribing is what starts this thread's stream, so it is keyed by both ids:
     // thread ids are only unique within one environment.
     val detail by
@@ -254,6 +258,13 @@ fun ThreadScreen(
         store.workspace
             .providerSkills(env, effectiveSettings.provider, workspaceRoot)
             .collectAsStateWithLifecycle()
+    // RN's canAttach for folded pastes: uploads exist, the draft has a slot,
+    // and the server's per-file ceiling is known.
+    val pastedTextMaxBytes =
+        environment?.capabilities
+            ?.takeIf { it.attachmentUploads }
+            ?.fileAttachments?.maxUploadBytes
+            ?.let { clampFileAttachmentUploadBytes(it) }
     val pullRequestRepository =
         project?.repositoryIdentity?.displayName
             ?.takeIf { environment?.capabilities?.pullRequests == true }
@@ -723,6 +734,35 @@ fun ThreadScreen(
                     store.workspace.refreshProviderWorkspaceSnapshot(
                         env, effectiveSettings.provider, workspaceRoot,
                     )
+                },
+                canAttachPastedText = {
+                    pastedTextMaxBytes != null &&
+                        draft.attachments.size < ComposerAttachmentLimits.MAX_ATTACHMENTS
+                },
+                onPastedText = onPastedText@{ text ->
+                    val maxBytes = pastedTextMaxBytes
+                    if (maxBytes == null) {
+                        store.showError("This server does not support file attachments.")
+                        return@onPastedText
+                    }
+                    val bytes = text.toByteArray(Charsets.UTF_8).size.toLong()
+                    if (bytes > maxBytes) {
+                        store.showError(fileAttachmentTooLargeMessage("pasted-text.txt", maxBytes))
+                        return@onPastedText
+                    }
+                    scope.launch {
+                        val attachment =
+                            persistPastedTextAttachment(
+                                context.cacheDir,
+                                text,
+                                draft.attachments.map { it.name },
+                            )
+                        if (attachment == null) {
+                            store.showError("Could not attach pasted text.")
+                        } else {
+                            store.addThreadDraftAttachment(environmentId, threadId, attachment)
+                        }
+                    }
                 },
                 hasCompactableConversation = hasCompactableConversation,
                 onValueChange = { store.setThreadDraft(environmentId, threadId, it) },

@@ -17,6 +17,8 @@ import club.touchtech.s5code.kotlin.data.IncomingShareDraft
 import club.touchtech.s5code.kotlin.data.IncomingShareStore
 import club.touchtech.s5code.kotlin.data.IncomingShareAttachmentType
 import club.touchtech.s5code.kotlin.data.hasIncomingShareContent
+import club.touchtech.s5code.kotlin.data.clampFileAttachmentUploadBytes
+import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
 import club.touchtech.s5code.kotlin.data.incomingShareIdFor
 import club.touchtech.s5code.kotlin.data.referencedComposerContextRecords
 import club.touchtech.s5code.kotlin.data.selectIncomingShareAttachments
@@ -130,6 +132,8 @@ data class NewTaskDraft(
      */
     val worktreePath: String? = null,
     val settings: ThreadSettings = ThreadSettings(),
+    /** `#` mention payloads the prompt references, as on a thread draft. */
+    val contextRecords: List<ComposerContextRecord> = emptyList(),
     /**
      * Share ids already merged into this draft. The draft persists between
      * process death and the next picker visit, so the receipt travels with it:
@@ -671,6 +675,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     approvalPolicy = storedApprovalPolicy(approvalPolicy),
                     options = storedProviderOptions(options),
                 ),
+            contextRecords = contextRecords,
             importedShareIds = importedShareIds,
         )
 
@@ -688,6 +693,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             runtimeMode = settings.runtimeMode.name,
             approvalPolicy = settings.approvalPolicy.name,
             options = settings.options.associate { it.toStored() },
+            contextRecords = contextRecords,
             importedShareIds = importedShareIds,
         )
 
@@ -820,10 +826,11 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             } else {
                 draft.settings.copy(runtimeMode = RuntimeMode.Default)
             }
+        val trimmedPrompt = draft.prompt.trim()
         val message =
             newQueuedThreadMessage(
                 environmentId = draft.environmentId,
-                text = draft.prompt.trim(),
+                text = trimmedPrompt,
                 attachments = draft.attachments,
                 settings = settings,
                 creation =
@@ -833,6 +840,8 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         newWorktree = draft.workspaceMode == WorkspaceMode.NewWorktree,
                         worktreePath = draft.worktreePath,
                     ),
+                contextRecords =
+                    referencedComposerContextRecords(trimmedPrompt, draft.contextRecords),
             )
         val durable = outboxStore.enqueue(message)
         if (durable.creation != null) {
@@ -844,7 +853,9 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         outboxMutation.withLock {
             _outbox.update { current -> (current + durable).sortedBy { it.delivery.createdAt } }
         }
-        updateDraft { it.copy(prompt = "", attachments = emptyList(), importedShareIds = emptyList()) }
+        updateDraft {
+            it.copy(prompt = "", attachments = emptyList(), contextRecords = emptyList(), importedShareIds = emptyList())
+        }
         val project = workspace.projects.value.firstOrNull {
             it.environmentId == draft.environmentId && it.id.value == draft.projectKey
         }
@@ -949,6 +960,41 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             var attempt = 0
             while (true) {
                 try {
+                    // RN's resolveThreadOutboxDispatchStep: a queued file
+                    // attachment asks whether the server takes uploads at all
+                    // before dispatch, and restores the draft rather than fail.
+                    val fileAttachments = message.attachments.filter { it.type == "file" }
+                    if (fileAttachments.isNotEmpty()) {
+                        val environment =
+                            workspace.environments.value.firstOrNull {
+                                it.id == message.environmentId
+                            }
+                        val maxFileBytes =
+                            environment?.capabilities
+                                ?.takeIf { it.attachmentUploads }
+                                ?.fileAttachments?.maxUploadBytes
+                        val oversized =
+                            fileAttachments.firstOrNull {
+                                it.sizeBytes > clampFileAttachmentUploadBytes(maxFileBytes ?: 0)
+                            }
+                        val reason =
+                            when {
+                                maxFileBytes == null ->
+                                    "This server does not support file attachments."
+                                oversized != null ->
+                                    fileAttachmentTooLargeMessage(
+                                        oversized.name,
+                                        clampFileAttachmentUploadBytes(maxFileBytes),
+                                    )
+                                else -> null
+                            }
+                        if (reason != null) {
+                            restoreQueuedMessageToDraft(message)
+                            completeQueuedMessage(message, creationAccepted = false)
+                            showError(reason)
+                            return
+                        }
+                    }
                     if (message.creation != null) {
                         workspace.createThread(
                             environmentId = message.environmentId,
@@ -998,6 +1044,43 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     val environment = workspace.environments.value.firstOrNull { it.id == message.environmentId }
                     if (environment?.state != club.touchtech.s5code.kotlin.model.ConnectionState.Connected) return
                 }
+            }
+        }
+    }
+
+    /**
+     * RN's `restoreQueuedMessage`: puts a queued send back where the user can
+     * fix it — the thread draft for an existing thread, the new-task draft for
+     * a creation — rather than dropping the payload on the floor.
+     */
+    private fun restoreQueuedMessageToDraft(message: QueuedThreadMessage) {
+        if (message.creation != null) {
+            updateDraft { draft ->
+                draft.copy(
+                    environmentId = message.environmentId,
+                    projectKey = message.creation.projectKey,
+                    branch = message.creation.branch,
+                    prompt = message.text,
+                    attachments = draft.attachments + message.attachments,
+                    contextRecords = draft.contextRecords + message.contextRecords,
+                    settings = message.settings,
+                    workspaceMode =
+                        if (message.creation.newWorktree) WorkspaceMode.NewWorktree
+                        else WorkspaceMode.CurrentCheckout,
+                    worktreePath = message.creation.worktreePath,
+                )
+            }
+        } else {
+            updateThreadDraft(
+                message.environmentId.value,
+                message.threadId.value,
+            ) { draft ->
+                draft.copy(
+                    text = message.text,
+                    attachments = draft.attachments + message.attachments,
+                    contextRecords = draft.contextRecords + message.contextRecords,
+                    settings = message.settings,
+                )
             }
         }
     }
@@ -1060,6 +1143,43 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         attachmentId: String,
     ) = updateThreadDraft(environmentId, threadId) { draft ->
         draft.copy(attachments = draft.attachments.filterNot { it.id == attachmentId })
+    }
+
+    /**
+     * A folded paste arrives already written to disk — only the slot count is
+     * checked, mirroring RN's "You can attach up to N files" rejection.
+     */
+    fun addThreadDraftAttachment(
+        environmentId: String,
+        threadId: String,
+        attachment: ComposerAttachment,
+    ) {
+        var error: String? = null
+        updateThreadDraft(environmentId, threadId) { draft ->
+            if (draft.attachments.size >= ComposerAttachmentLimits.MAX_ATTACHMENTS) {
+                error =
+                    "You can attach up to ${ComposerAttachmentLimits.MAX_ATTACHMENTS} files per message."
+                draft
+            } else {
+                draft.copy(attachments = draft.attachments + attachment)
+            }
+        }
+        _attachmentError.value = error
+    }
+
+    /** The same slot check for the new-task draft's own attachments. */
+    fun addNewTaskDraftAttachment(attachment: ComposerAttachment) {
+        var error: String? = null
+        _draft.update { draft ->
+            if (draft.attachments.size >= ComposerAttachmentLimits.MAX_ATTACHMENTS) {
+                error =
+                    "You can attach up to ${ComposerAttachmentLimits.MAX_ATTACHMENTS} files per message."
+                draft
+            } else {
+                draft.copy(attachments = draft.attachments + attachment)
+            }
+        }
+        _attachmentError.value = error
     }
 
     /** Same validation for the new-task draft, which has its own attachments. */

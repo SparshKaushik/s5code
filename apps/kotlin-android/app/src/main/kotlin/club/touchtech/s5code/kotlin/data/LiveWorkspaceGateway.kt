@@ -1576,8 +1576,7 @@ class LiveWorkspaceGateway(
             Commands.startTurn(
                 threadId = id.value,
                 text = text,
-                attachments = attachments,
-                attachmentDataUrls = encodeAttachments(context, attachments),
+                attachments = wireAttachments(environmentId, attachments),
                 settings = effective,
                 contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
@@ -1704,8 +1703,7 @@ class LiveWorkspaceGateway(
                 projectCwd = project.workspaceRoot,
                 title = titleFromPrompt(prompt),
                 text = prompt,
-                attachments = attachments,
-                attachmentDataUrls = encodeAttachments(context, attachments),
+                attachments = wireAttachments(environmentId, attachments),
                 instanceId = settings.provider.instanceId,
                 model = settings.model,
                 options = settings.options,
@@ -2013,6 +2011,76 @@ class LiveWorkspaceGateway(
         return assetOrigin(environmentId).trimEnd('/') +
             "/" + result.relativeUrl.trimStart('/')
     }
+
+    /**
+     * Wire attachment shapes for `turn.start`: images inline their bytes as a
+     * `dataUrl` (the server persists them and mints the id), while files —
+     * folded pastes today — go through `attachments.createUploadUrl` first and
+     * arrive as an id reference. A file that fails to upload drops out of the
+     * message rather than sending a dangling reference.
+     */
+    private suspend fun wireAttachments(
+        environmentId: EnvironmentId,
+        attachments: List<ComposerAttachment>,
+    ): List<JsonObject> =
+        attachments.mapNotNull { attachment ->
+            if (attachment.type == "file") {
+                val file = readAttachmentFile(attachment) ?: return@mapNotNull null
+                try {
+                    val attachmentId =
+                        uploadPendingAttachment(
+                            environmentId,
+                            "file",
+                            attachment.name,
+                            attachment.mimeType,
+                            file,
+                        )
+                    buildJsonObject {
+                        put("type", "file")
+                        put("id", attachmentId)
+                        put("name", attachment.name)
+                        put("mimeType", attachment.mimeType)
+                        put("sizeBytes", attachment.sizeBytes)
+                        if (attachment.pastedText) {
+                            putJsonObject("source") { put("_tag", "pasted-text") }
+                        }
+                    }
+                } catch (_: Exception) {
+                    null
+                }
+            } else {
+                attachmentDataUrl(context, attachment)?.let { dataUrl ->
+                    buildJsonObject {
+                        put("type", "image")
+                        put("name", attachment.name)
+                        put("mimeType", attachment.mimeType)
+                        put("sizeBytes", attachment.sizeBytes)
+                        put("dataUrl", dataUrl)
+                    }
+                }
+            }
+        }
+
+    /** Reads an attachment's bytes into a temp file for the upload POST. */
+    private suspend fun readAttachmentFile(attachment: ComposerAttachment): java.io.File? =
+        withContext(Dispatchers.IO) {
+            runCatching {
+                    val bytes =
+                        context.contentResolver
+                            .openInputStream(attachment.uri.toUri())
+                            ?.use { it.readBytes() }
+                            ?: return@withContext null
+                    val target =
+                        java.io.File.createTempFile(
+                            "upload-",
+                            "-" + attachment.name.takeLast(32),
+                            context.cacheDir,
+                        )
+                    target.writeBytes(bytes)
+                    target
+                }
+                .getOrNull()
+        }
 
     /** The live session's HTTP origin, falling back to the saved row. */
     private fun assetOrigin(environmentId: EnvironmentId): String =

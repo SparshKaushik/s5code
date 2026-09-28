@@ -9,7 +9,8 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
 /**
- * Encodes composer attachments as the data URLs `UploadChatAttachment` expects.
+ * The `UploadChatImageAttachment` wire shape: inline `dataUrl`, no server id —
+ * the server persists the bytes and mints one itself.
  *
  * The contract has no separate upload endpoint for chat images: the bytes travel
  * inside the `thread.turn.start` command. That is why the intake step already
@@ -21,22 +22,22 @@ import kotlinx.coroutines.withContext
  * turn still goes out with its text, which is better than failing a message
  * because a cache file was evicted.
  */
-suspend fun encodeAttachments(
+ * The `UploadChatImageAttachment` wire shape: inline `dataUrl`, no server id —
+ * the server persists the bytes and mints one itself.
+ */
+internal suspend fun attachmentDataUrl(
     context: Context,
-    attachments: List<ComposerAttachment>,
-): Map<String, String> =
+    attachment: ComposerAttachment,
+): String? =
     withContext(Dispatchers.IO) {
-        attachments.mapNotNull { attachment ->
-            if (attachment.sizeBytes > ComposerAttachmentLimits.MAX_IMAGE_BYTES) return@mapNotNull null
-            val bytes =
-                runCatching {
-                        context.contentResolver
-                            .openInputStream(attachment.uri.toUri())
-                            ?.use { it.readBytes() }
-                    }
-                    .getOrNull() ?: return@mapNotNull null
-            val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
-            attachment.id to "data:${attachment.mimeType};base64,$encoded"
-        }
-            .toMap()
+        if (attachment.sizeBytes > ComposerAttachmentLimits.MAX_IMAGE_BYTES) return@withContext null
+        val bytes =
+            runCatching {
+                    context.contentResolver
+                        .openInputStream(attachment.uri.toUri())
+                        ?.use { it.readBytes() }
+                }
+                .getOrNull() ?: return@withContext null
+        val encoded = Base64.encodeToString(bytes, Base64.NO_WRAP)
+        "data:${attachment.mimeType};base64,$encoded"
     }

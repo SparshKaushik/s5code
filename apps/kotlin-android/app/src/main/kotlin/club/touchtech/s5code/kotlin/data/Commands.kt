@@ -1,6 +1,5 @@
 package club.touchtech.s5code.kotlin.data
 
-import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
 import club.touchtech.s5code.kotlin.model.ProviderOptionValue
 import club.touchtech.s5code.kotlin.model.RuntimeMode
@@ -72,8 +71,8 @@ object Commands {
     fun startTurn(
         threadId: String,
         text: String,
-        attachments: List<ComposerAttachment>,
-        attachmentDataUrls: Map<String, String>,
+        /** Already-shaped wire attachments: upload images carry `dataUrl`, files a server id. */
+        attachments: List<JsonObject>,
         settings: ThreadSettings,
         contextRecords: List<JsonObject> = emptyList(),
         commandId: String = newCommandId(),
@@ -96,16 +95,7 @@ object Commands {
                 }
             }
             putJsonArray("attachments") {
-                attachments.forEach { attachment ->
-                    val dataUrl = attachmentDataUrls[attachment.id] ?: return@forEach
-                    addJsonObject {
-                        put("type", "image")
-                        put("name", attachment.name)
-                        put("mimeType", attachment.mimeType)
-                        put("sizeBytes", attachment.sizeBytes)
-                        put("dataUrl", dataUrl)
-                    }
-                }
+                attachments.forEach { add(it) }
             }
         }
         putModelSelection(settings.provider.instanceId, settings.model, settings.options)
@@ -126,8 +116,7 @@ object Commands {
         projectCwd: String,
         title: String,
         text: String,
-        attachments: List<ComposerAttachment>,
-        attachmentDataUrls: Map<String, String>,
+        attachments: List<JsonObject>,
         instanceId: String,
         model: String,
         options: List<ProviderOptionSelection>,
@@ -157,16 +146,8 @@ object Commands {
                 }
             }
             putJsonArray("attachments") {
-                attachments.forEach { attachment ->
-                    val dataUrl = attachmentDataUrls[attachment.id] ?: return@forEach
-                    addJsonObject {
-                        put("type", "image")
-                        put("name", attachment.name)
-                        put("mimeType", attachment.mimeType)
-                        put("sizeBytes", attachment.sizeBytes)
-                        put("dataUrl", dataUrl)
-                    }
-                }
+            putJsonArray("attachments") {
+                attachments.forEach { add(it) }
             }
         }
         putModelSelection(instanceId, model, options)

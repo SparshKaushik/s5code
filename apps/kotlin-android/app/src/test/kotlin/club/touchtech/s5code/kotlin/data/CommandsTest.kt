@@ -44,7 +44,6 @@ class CommandsTest {
                 threadId = "thread-1",
                 text = "Retry me",
                 attachments = emptyList(),
-                attachmentDataUrls = emptyMap(),
                 settings = settings,
                 commandId = "command-stable",
                 messageId = "message-stable",
@@ -82,7 +81,6 @@ class CommandsTest {
                 threadId = "thread-1",
                 text = "Use the new model",
                 attachments = emptyList(),
-                attachmentDataUrls = emptyMap(),
                 settings = settings,
             )
 

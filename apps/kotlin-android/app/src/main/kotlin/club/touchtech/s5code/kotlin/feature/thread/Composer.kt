@@ -71,8 +71,10 @@ import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import kotlinx.coroutines.delay
+import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
 import club.touchtech.s5code.kotlin.platform.active
 import club.touchtech.s5code.kotlin.platform.composerImageReceiver
+import club.touchtech.s5code.kotlin.platform.composerPastedTextReceiver
 
 /** Radius of the collapsed pill. Half the collapsed height, so it is fully round. */
 private val COLLAPSED_RADIUS = 24.dp
@@ -133,6 +135,14 @@ fun ThreadComposer(
      * the composer first asks.
      */
     onRefreshWorkspaceSnapshot: () -> Unit = {},
+    /**
+     * `pastedTextDisposition`: whether a text paste may become an attachment —
+     * the caller knows the draft's remaining slots and the server's upload
+     * capability, neither of which the receiver can suspend to ask.
+     */
+    canAttachPastedText: () -> Boolean = { false },
+    /** Receives clipboard text that was folded out of the field. */
+    onPastedText: (String) -> Unit = {},
     /**
      * Whether the thread holds anything `/compact` could act on — RN hides the
      * row on an empty conversation.
@@ -450,6 +460,12 @@ fun ThreadComposer(
                             Modifier.weight(1f)
                                 .heightIn(min = 40.dp)
                                 .padding(start = fieldStartPadding)
+                                .composerPastedTextReceiver(
+                                    shouldFold = { text ->
+                                        pastedTextShouldFold(text, canAttachPastedText())
+                                    },
+                                    onFolded = onPastedText,
+                                )
                                 .composerImageReceiver(onAddImages),
                     )
                     // Collapsed keeps the mic and one action in the pill. If a
@@ -690,7 +706,7 @@ private fun rankProviderSkill(skill: ProviderSkill, query: String): RankedSkill?
                 exactBase = 30, prefixBase = 32, boundaryBase = 34, includesBase = 36,
             ),
         ).minOrNull() ?: return null
-    return RankedSkill(skill, score, "$displayLabel ${skill.name}")
+    return RankedSkill(skill, score, "$displayLabel\u0000${skill.name}")
 }
 
 /**

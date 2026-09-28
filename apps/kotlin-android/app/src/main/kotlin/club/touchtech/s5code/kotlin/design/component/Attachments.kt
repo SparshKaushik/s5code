@@ -5,15 +5,19 @@ import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Description
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -28,6 +32,7 @@ import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
@@ -72,7 +77,10 @@ private fun AttachmentThumbnail(
     onRemove: () -> Unit,
 ) {
     val sizePx = with(LocalDensity.current) { size.roundToPx() }
-    val thumbnail = rememberImageThumbnail(attachment.uri, sizePx)
+    // Files (folded pastes) have nothing to decode; the tile is an icon and a
+    // name so a paste chip reads as a document, not a broken image.
+    val thumbnail =
+        if (attachment.type == "file") null else rememberImageThumbnail(attachment.uri, sizePx)
     Box(contentAlignment = Alignment.TopEnd) {
         Surface(
             onClick = onPreview,
@@ -80,7 +88,27 @@ private fun AttachmentThumbnail(
             shape = RoundedCornerShape(12.dp),
             color = MaterialTheme.colorScheme.surfaceContainerHighest,
         ) {
-            if (thumbnail != null) {
+            if (attachment.type == "file") {
+                Column(
+                    Modifier.size(size).padding(6.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    Icon(
+                        Icons.Rounded.Description,
+                        contentDescription = attachment.name,
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Text(
+                        attachment.name,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            } else if (thumbnail != null) {
                 Image(
                     bitmap = thumbnail,
                     contentDescription = attachment.name,

@@ -143,10 +143,16 @@ fun RuntimePreferences.toStored(): StoredPreferences =
     )
 
 fun ComposerAttachment.toStored(): StoredAttachment =
-    StoredAttachment(id = id, name = name, mimeType = mimeType, sizeBytes = sizeBytes, uri = uri)
+    StoredAttachment(
+        id = id, name = name, mimeType = mimeType, sizeBytes = sizeBytes, uri = uri,
+        type = type, pastedText = pastedText,
+    )
 
 fun StoredAttachment.toRuntime(): ComposerAttachment =
-    ComposerAttachment(id = id, name = name, mimeType = mimeType, sizeBytes = sizeBytes, uri = uri)
+    ComposerAttachment(
+        id = id, name = name, mimeType = mimeType, sizeBytes = sizeBytes, uri = uri,
+        type = type, pastedText = pastedText,
+    )
 
 fun StoredThreadSettings.toRuntimeThreadSettings(): ThreadSettings =
     ThreadSettings(

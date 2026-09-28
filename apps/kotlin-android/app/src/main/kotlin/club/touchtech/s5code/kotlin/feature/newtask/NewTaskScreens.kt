@@ -55,6 +55,10 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Remote
+import club.touchtech.s5code.kotlin.data.clampFileAttachmentUploadBytes
+import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
+import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
+import club.touchtech.s5code.kotlin.data.persistPastedTextAttachment
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5AttachmentPreviewDialog
@@ -106,6 +110,7 @@ import club.touchtech.s5code.kotlin.model.ThreadSort
 import club.touchtech.s5code.kotlin.model.WorkspaceMode
 import club.touchtech.s5code.kotlin.platform.active
 import club.touchtech.s5code.kotlin.platform.composerImageReceiver
+import club.touchtech.s5code.kotlin.platform.composerPastedTextReceiver
 import club.touchtech.s5code.kotlin.platform.rememberComposerImageIntake
 import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
 import kotlinx.coroutines.CancellationException
@@ -376,6 +381,7 @@ fun NewTaskDraftScreen(
             }
         }
     val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     var creating by remember { mutableStateOf(false) }
     var failure by remember { mutableStateOf<String?>(null) }
     var previewAttachment by remember { mutableStateOf<ComposerAttachment?>(null) }
@@ -418,6 +424,13 @@ fun NewTaskDraftScreen(
 
     val project = remember(projects, draft) { projects.firstOrNull { it.id.value == draft.projectKey } }
     val environment = remember(environments, draft) { environments.firstOrNull { it.id == draft.environmentId } }
+    // Same fold as the thread composer: a large paste becomes a file upload
+    // where the environment takes them at all.
+    val pastedTextMaxBytes =
+        environment?.capabilities
+            ?.takeIf { it.attachmentUploads }
+            ?.fileAttachments?.maxUploadBytes
+            ?.let { clampFileAttachmentUploadBytes(it) }
     // Switching away is only a choice while a second enabled environment exists.
     val enabledEnvironmentCount = remember(environments) { environments.count { it.isEnabled } }
     val canStart = draft.prompt.isNotBlank() && !creating && environment?.isEnabled != false
@@ -455,6 +468,35 @@ fun NewTaskDraftScreen(
                 onPreviewAttachment = { previewAttachment = it },
                 onAddImages = addImages,
                 onPickImages = pickImages,
+                canAttachPastedText = {
+                    pastedTextMaxBytes != null &&
+                        draft.attachments.size < ComposerAttachmentLimits.MAX_ATTACHMENTS
+                },
+                onPastedText = onPastedText@{ text ->
+                    val maxBytes = pastedTextMaxBytes
+                    if (maxBytes == null) {
+                        store.showError("This server does not support file attachments.")
+                        return@onPastedText
+                    }
+                    val bytes = text.toByteArray(Charsets.UTF_8).size.toLong()
+                    if (bytes > maxBytes) {
+                        store.showError(fileAttachmentTooLargeMessage("pasted-text.txt", maxBytes))
+                        return@onPastedText
+                    }
+                    scope.launch {
+                        val attachment =
+                            persistPastedTextAttachment(
+                                context.cacheDir,
+                                text,
+                                draft.attachments.map { it.name },
+                            )
+                        if (attachment == null) {
+                            store.showError("Could not attach pasted text.")
+                        } else {
+                            store.addNewTaskDraftAttachment(attachment)
+                        }
+                    }
+                },
                 workspaceMode = draft.workspaceMode,
                 onToggleWorkspaceMode = {
                     store.updateDraft {
@@ -667,6 +709,10 @@ private fun NewTaskComposerDock(
     onPreviewAttachment: (ComposerAttachment) -> Unit,
     onAddImages: (List<ComposerImageCandidate>) -> Unit,
     onPickImages: () -> Unit,
+    /** `pastedTextDisposition` gate: may a large paste fold into a file chip. */
+    canAttachPastedText: () -> Boolean,
+    /** Receives clipboard text that was folded out of the field. */
+    onPastedText: (String) -> Unit,
     workspaceMode: WorkspaceMode,
     onToggleWorkspaceMode: () -> Unit,
     branch: String,
@@ -738,6 +784,12 @@ private fun NewTaskComposerDock(
                         Modifier.fillMaxWidth()
                             .heightIn(min = 72.dp)
                             .padding(horizontal = S5Theme.spacing.tiny)
+                            .composerPastedTextReceiver(
+                                shouldFold = { text ->
+                                    pastedTextShouldFold(text, canAttachPastedText())
+                                },
+                                onFolded = onPastedText,
+                            )
                             .composerImageReceiver(onAddImages),
                 )
 

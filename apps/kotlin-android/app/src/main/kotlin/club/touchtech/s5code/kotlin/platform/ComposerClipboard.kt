@@ -152,6 +152,36 @@ fun Modifier.composerImageReceiver(onImages: (List<ComposerImageCandidate>) -> U
     }
 
 /**
+ * Clipboard text pastes folded into file attachments, the Kotlin port of
+ * `pastedTextDisposition`: once a paste crosses the byte threshold the agent is
+ * better served by a file it can read selectively than by thirty kilobytes of
+ * inline prompt.
+ *
+ * [shouldFold] answers synchronously whether a text item should leave the
+ * field — the receiver runs mid-commit and cannot suspend. [onFolded] receives
+ * the text when it was taken; the caller does the file write off the main
+ * thread. Text the caller refuses (attachment cap, missing upload support)
+ * falls through and pastes inline, matching RN's fallback.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+fun Modifier.composerPastedTextReceiver(
+    shouldFold: (String) -> Boolean,
+    onFolded: (String) -> Unit,
+): Modifier =
+    composed {
+        contentReceiver { content ->
+            val remaining =
+                content.consume { item ->
+                    val text = item.text?.toString() ?: return@consume false
+                    if (!shouldFold(text)) return@consume false
+                    onFolded(text)
+                    true
+                }
+            remaining
+        }
+    }
+
+/**
  * Candidate for every clip item that resolves to an image. Non-image items are
  * left alone, so a mixed clip still pastes its text through the text field.
  */

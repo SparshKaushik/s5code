@@ -29,6 +29,12 @@ data class ComposerAttachment(
     val sizeBytes: Long,
     val uri: String,
     val type: String = "image",
+    /**
+     * `PastedTextAttachmentSource` on the wire: clipboard text folded into a
+     * file so the agent reads it selectively instead of spending the context
+     * inline. Providers keep these path-only.
+     */
+    val pastedText: Boolean = false,
 )
 
 /**

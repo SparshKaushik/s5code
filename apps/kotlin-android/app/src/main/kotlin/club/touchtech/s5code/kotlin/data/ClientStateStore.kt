@@ -80,6 +80,10 @@ data class StoredAttachment(
     val mimeType: String,
     val sizeBytes: Long,
     val uri: String,
+    /** "image" | "file"; records written before file attachments default to image. */
+    val type: String = "image",
+    /** Whether the file was a folded clipboard paste (`pasted-text` source). */
+    val pastedText: Boolean = false,
 )
 
 /** The new-task draft, which carries its own context alongside the prompt. */
@@ -111,6 +115,8 @@ data class StoredNewTaskDraft(
      * `providerOptionDescriptors` drops it on the way to the UI.
      */
     val options: Map<String, StoredOptionValue> = emptyMap(),
+    /** `#` mention payloads the prompt references; absent on older files. */
+    val contextRecords: List<club.touchtech.s5code.kotlin.model.ComposerContextRecord> = emptyList(),
     /**
      * Sharesheet ids already merged into the draft. Persisted so a share
      * consumed before a process death cannot be re-imported as duplicate text.
