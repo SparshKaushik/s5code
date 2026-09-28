@@ -140,6 +140,13 @@ data class NewTaskDraft(
      * re-entering must not merge the same share's text a second time.
      */
     val importedShareIds: List<String> = emptyList(),
+    /**
+     * Set when Add Project started a tracked clone for `projectKey` and handed
+     * off before the clone stream's first list — `initialProjectRef.cloning`
+     * on RN. Memory-only: a persisted draft re-derives clone state from the
+     * stream, which by then has delivered.
+     */
+    val cloning: Boolean = false,
 )
 
 /** Per-thread composer draft: prompt text plus its pending attachments. */

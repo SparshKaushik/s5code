@@ -25,15 +25,23 @@ import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.CreateNewFolder
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Folder
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.size
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import kotlinx.coroutines.delay
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -60,6 +68,19 @@ import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
 import club.touchtech.s5code.kotlin.data.isUsageLimitsCommand
 import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
 import club.touchtech.s5code.kotlin.data.persistPastedTextAttachment
+import club.touchtech.s5code.kotlin.model.projectCloneDisplayName
+import club.touchtech.s5code.kotlin.model.projectCloneProgressSummary
+import club.touchtech.s5code.kotlin.data.formatComposerContextReference
+import club.touchtech.s5code.kotlin.data.pullRequestComposerContext
+import club.touchtech.s5code.kotlin.feature.thread.ComposerSuggestion
+import club.touchtech.s5code.kotlin.feature.thread.ComposerTriggerKind
+import club.touchtech.s5code.kotlin.feature.thread.SuggestionPopover
+import club.touchtech.s5code.kotlin.feature.thread.detectComposerTrigger
+import club.touchtech.s5code.kotlin.feature.thread.rankComposerPaths
+import club.touchtech.s5code.kotlin.feature.thread.rankProviderSkill
+import club.touchtech.s5code.kotlin.feature.thread.rankSlashCommands
+import club.touchtech.s5code.kotlin.feature.thread.replaceComposerTextRange
+import club.touchtech.s5code.kotlin.feature.thread.suggestion
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5AttachmentPreviewDialog
@@ -104,9 +125,14 @@ import club.touchtech.s5code.kotlin.model.BranchRef
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
+import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.EnvironmentKind
+import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ProviderSkill
+import club.touchtech.s5code.kotlin.model.RuntimeMode
+import club.touchtech.s5code.kotlin.model.SlashCommand
 import club.touchtech.s5code.kotlin.model.ThreadSort
 import club.touchtech.s5code.kotlin.model.WorkspaceMode
 import club.touchtech.s5code.kotlin.platform.active
@@ -425,6 +451,24 @@ fun NewTaskDraftScreen(
 
     val project = remember(projects, draft) { projects.firstOrNull { it.id.value == draft.projectKey } }
     val environment = remember(environments, draft) { environments.firstOrNull { it.id == draft.environmentId } }
+    // RN's composerWorkspaceCwd: the worktree when one is chosen, else the
+    // project's root — `@`, `$`, `/`, and `#` all resolve against it.
+    val composerWorkspaceCwd =
+        remember(project, draft) {
+            // In worktree mode the worktree does not exist yet, so the project
+            // root stands in — same as RN's composerWorkspaceCwd.
+            when {
+                draft.workspaceMode == WorkspaceMode.NewWorktree -> project?.workspaceRoot
+                else -> draft.worktreePath ?: project?.workspaceRoot
+            }?.takeIf { it.isNotEmpty() }
+        }
+    val composerSkills by
+        store.workspace
+            .providerSkills(draft.environmentId, draft.settings.provider, composerWorkspaceCwd)
+            .collectAsStateWithLifecycle()
+    val pullRequestRepository =
+        project?.repositoryIdentity?.displayName
+            ?.takeIf { environment?.capabilities?.pullRequests == true }
     // Same fold as the thread composer: a large paste becomes a file upload
     // where the environment takes them at all.
     val pastedTextMaxBytes =
@@ -434,13 +478,32 @@ fun NewTaskDraftScreen(
             ?.let { clampFileAttachmentUploadBytes(it) }
     // Switching away is only a choice while a second enabled environment exists.
     val enabledEnvironmentCount = remember(environments) { environments.count { it.isEnabled } }
-    val canStart = draft.prompt.isNotBlank() && !creating && environment?.isEnabled != false
     // T3 owns /usage-limits only where Limits has data; a new task would send
     // it to the agent, so the prompt is refused instead — as RN does.
     val offersUsageLimits by
         store.workspace
             .usageLimitsOffered(draft.environmentId, draft.settings.provider.driver)
             .collectAsStateWithLifecycle()
+
+    // A project added by cloning exists before its files do: the prompt can be
+    // written meanwhile, but Start waits for the clone. Null means the stream
+    // has not delivered — "pending" in RN's useProjectClone — which only gates
+    // when this draft was opened by the clone flow itself.
+    val projectClones by
+        remember(draft.environmentId) { store.workspace.projectClones(draft.environmentId) }
+            .collectAsStateWithLifecycle()
+    val projectClone =
+        remember(projectClones, draft.projectKey) {
+            projectClones?.firstOrNull { it.projectId == draft.projectKey }
+        }
+    val awaitingKnownClone =
+        projectClones == null && draft.cloning &&
+            project != null && project.id.value == draft.projectKey
+    val cloneBlocksStart =
+        awaitingKnownClone || (projectClone != null && projectClone.phase != "done")
+    val canStart =
+        draft.prompt.isNotBlank() && !creating &&
+            environment?.isEnabled != false && !cloneBlocksStart
 
     val start: () -> Unit = start@{
         if (
@@ -478,6 +541,8 @@ fun NewTaskDraftScreen(
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
         bottomBar = {
+            val visibleClone = projectClone?.takeIf { it.phase != "done" }
+            val cloneProject = project
             NewTaskComposerDock(
                 promptState = promptState,
                 dictation = rememberDictation("new-task", promptState),
@@ -542,6 +607,131 @@ fun NewTaskDraftScreen(
                 creating = creating,
                 canStart = canStart,
                 onStart = start,
+                commands =
+                    remember(draft.settings.provider, composerWorkspaceCwd) {
+                        store.workspace.slashCommands(
+                            draft.settings.provider, composerWorkspaceCwd,
+                        )
+                    },
+                skills = composerSkills,
+                interactionModeAllowed =
+                    preferences.planModeEnabled &&
+                        machineCatalog
+                            .firstOrNull {
+                                it.instance.instanceId == draft.settings.provider.instanceId
+                            }
+                            ?.interactionModeToggle != false,
+                onInteractionMode = { mode ->
+                    store.updateDraft {
+                        it.copy(settings = it.settings.copy(runtimeMode = mode))
+                    }
+                },
+                onSearchPaths = { query ->
+                    val cwd = composerWorkspaceCwd ?: return@NewTaskComposerDock emptyList()
+                    store.workspace.searchPathsIn(draft.environmentId, cwd, query)
+                },
+                onSearchPullRequests =
+                    pullRequestRepository?.let { repository ->
+                        { query: String ->
+                            store.workspace.searchComposerPullRequests(
+                                draft.environmentId,
+                                ProjectId(draft.projectKey),
+                                repository,
+                                query,
+                            )
+                        }
+                    },
+                onPickPullRequest = onPickPr@{ pullRequest, rangeStart, rangeEnd ->
+                    // COMPOSER_CONTEXT_MAX_RECORDS — a draft carries at most
+                    // this many context payloads.
+                    if (draft.contextRecords.size >= 200) {
+                        store.showError(
+                            "Too many context items. Remove some context from the draft and try again.",
+                        )
+                        return@onPickPr
+                    }
+                    val record = pullRequestComposerContext(pullRequest)
+                    val nextText =
+                        replaceComposerTextRange(
+                            draft.prompt,
+                            rangeStart,
+                            rangeEnd,
+                            formatComposerContextReference(record) + " ",
+                        )
+                    store.updateDraft {
+                        it.copy(
+                            prompt = nextText,
+                            contextRecords = it.contextRecords + record,
+                        )
+                    }
+                },
+                onRefreshWorkspaceSnapshot = {
+                    store.workspace.refreshProviderWorkspaceSnapshot(
+                        draft.environmentId, draft.settings.provider, composerWorkspaceCwd,
+                    )
+                },
+                belowSuggestions = {
+                    // Above the workspace controls so they keep their place
+                    // relative to the composer when the banner goes away once
+                    // the clone lands.
+                    if (visibleClone != null && cloneProject != null) {
+                        ProjectCloneBanner(
+                            clone = visibleClone,
+                            onCancel = {
+                                scope.launch {
+                                    runCatching {
+                                            store.workspace.projectCloneAction(
+                                                draft.environmentId,
+                                                cloneProject.id,
+                                                retry = false,
+                                            )
+                                        }
+                                        .onFailure {
+                                            store.showError(
+                                                it.message ?: "Failed to cancel clone"
+                                            )
+                                        }
+                                }
+                            },
+                            onRetry = {
+                                scope.launch {
+                                    runCatching {
+                                            store.workspace.projectCloneAction(
+                                                draft.environmentId,
+                                                cloneProject.id,
+                                                retry = true,
+                                            )
+                                        }
+                                        .onFailure {
+                                            store.showError(
+                                                it.message ?: "Failed to retry clone"
+                                            )
+                                        }
+                                }
+                            },
+                            onRemove = {
+                                scope.launch {
+                                    runCatching {
+                                            store.workspace.removeProject(
+                                                draft.environmentId, cloneProject.id,
+                                            )
+                                        }
+                                        .onSuccess {
+                                            // The draft's project is gone; leave
+                                            // like RN's replace("Home").
+                                            onBack()
+                                        }
+                                        .onFailure {
+                                            store.showError(
+                                                it.message ?: "Failed to remove project"
+                                            )
+                                        }
+                                }
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                        )
+                    }
+                },
             )
         },
         loading = creating,
@@ -742,7 +932,154 @@ private fun NewTaskComposerDock(
     creating: Boolean,
     canStart: Boolean,
     onStart: () -> Unit,
+    /** `/` rows for the draft's cwd — the provider's list plus T3's own. */
+    commands: List<SlashCommand> = emptyList(),
+    /** `providerSkills` for the draft's cwd — `$` trigger plus `skill:` rows. */
+    skills: List<ProviderSkill> = emptyList(),
+    interactionModeAllowed: Boolean = false,
+    onInteractionMode: (RuntimeMode) -> Unit = {},
+    /** `@` path search against the project's workspace. */
+    onSearchPaths: suspend (String) -> List<String> = { emptyList() },
+    /** `#` mention search; null leaves the trigger as plain text. */
+    onSearchPullRequests:
+        (suspend (String) -> List<ComposerPullRequestCandidate>)? = null,
+    /**
+     * The pick writes the mention link into the draft and appends its context
+     * record; the ranges index the current prompt text.
+     */
+    onPickPullRequest: (ComposerPullRequestCandidate, Int, Int) -> Unit = { _, _, _ -> },
+    /** Backfills the per-cwd provider snapshot when the picker opens empty. */
+    onRefreshWorkspaceSnapshot: suspend () -> Unit = {},
+    /** Renders between the suggestion list and the workspace controls — the clone banner's slot on RN. */
+    belowSuggestions: @Composable () -> Unit = {},
 ) {
+    // `detectComposerTrigger` on the live field text, same as the thread
+    // composer: the run of non-whitespace at the caret classifies the token.
+    val promptText = promptState.text.toString()
+    val trigger = remember(promptText) { detectComposerTrigger(promptText) }
+    val atMessageStart = trigger?.rangeStart == 0
+
+    val commandSuggestions =
+        remember(trigger, commands, skills, interactionModeAllowed) {
+            if (trigger?.kind != ComposerTriggerKind.SlashCommand) {
+                return@remember emptyList<ComposerSuggestion>()
+            }
+            val query = trigger.query.lowercase()
+            buildList<ComposerSuggestion> {
+                if ("model".contains(query)) {
+                    add(ComposerSuggestion("/model", "Switch model", null, "/model "))
+                }
+                if (interactionModeAllowed) {
+                    if ("plan".contains(query)) {
+                        add(
+                            ComposerSuggestion(
+                                "/plan", "Switch to plan mode", null, "",
+                                interactionMode = RuntimeMode.Plan,
+                            )
+                        )
+                    }
+                    if ("default".contains(query)) {
+                        add(
+                            ComposerSuggestion(
+                                "/default", "Switch to default mode", null, "",
+                                interactionMode = RuntimeMode.Default,
+                            )
+                        )
+                    }
+                }
+                if (atMessageStart) {
+                    val skillNames = skills.mapTo(HashSet()) { it.name.trim().lowercase() }
+                    val visible =
+                        commands.filter {
+                            it.name.removePrefix("/").lowercase() !in skillNames
+                        }
+                    rankSlashCommands(visible, trigger.query).forEach { command ->
+                        add(
+                            ComposerSuggestion(
+                                command.name, command.description,
+                                Icons.Rounded.Terminal, "${command.name} ",
+                            )
+                        )
+                    }
+                }
+                val skillQuery =
+                    when {
+                        query == "skill" -> ""
+                        query.startsWith("skill:") -> query.removePrefix("skill:")
+                        else -> query
+                    }
+                skills
+                    .filter { skill ->
+                        skill.enabled &&
+                            (
+                                skillQuery.isEmpty() ||
+                                    listOfNotNull(
+                                        skill.name, skill.displayName,
+                                        skill.shortDescription, skill.description,
+                                    ).any { it.lowercase().contains(skillQuery) }
+                            )
+                    }
+                    .take(20)
+                    .forEach { skill ->
+                        add(
+                            ComposerSuggestion(
+                                "skill:${skill.name}",
+                                skill.shortDescription ?: skill.description.orEmpty(),
+                                Icons.Rounded.AutoAwesome,
+                                "\$${skill.name} ",
+                            )
+                        )
+                    }
+            }
+        }
+
+    val skillSuggestions =
+        remember(trigger, skills) {
+            if (trigger?.kind != ComposerTriggerKind.Skill) {
+                return@remember emptyList<ComposerSuggestion>()
+            }
+            val query =
+                trigger.query.trim()
+                    .replace(Regex("""^[\p{Sc}]+"""), "")
+                    .lowercase()
+            if (query.isEmpty()) {
+                return@remember skills.take(20).map { it.suggestion() }
+            }
+            skills
+                .mapNotNull { skill -> rankProviderSkill(skill, query) }
+                .sortedWith(compareBy({ it.score }, { it.tieBreaker }))
+                .take(20)
+                .map { it.skill.suggestion() }
+        }
+
+    var pathSuggestions by remember { mutableStateOf(emptyList<String>()) }
+    var pullRequestSuggestions by
+        remember { mutableStateOf(emptyList<ComposerPullRequestCandidate>()) }
+    LaunchedEffect(trigger) {
+        if (trigger?.kind != ComposerTriggerKind.Path) {
+            pathSuggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(160)
+        pathSuggestions =
+            runCatching { onSearchPaths(trigger.query) }
+                .map { rankComposerPaths(it, trigger.query) }
+                .getOrDefault(emptyList())
+    }
+    LaunchedEffect(trigger) {
+        val search = onSearchPullRequests
+        if (trigger?.kind != ComposerTriggerKind.PullRequest || search == null) {
+            pullRequestSuggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(180)
+        pullRequestSuggestions =
+            runCatching { search(trigger.query) }.getOrDefault(emptyList())
+    }
+    // First visit usually precedes the per-cwd snapshot; the gateway's own
+    // cooldown covers a failure.
+    LaunchedEffect(Unit) { onRefreshWorkspaceSnapshot() }
+
     Column(
         Modifier.fillMaxWidth()
             .imePadding()
@@ -750,6 +1087,39 @@ private fun NewTaskComposerDock(
             .padding(horizontal = S5Theme.spacing.gutter, vertical = S5Theme.spacing.small),
         verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
     ) {
+        // Above the workspace controls so a pick does not move the row the
+        // user is aiming at — same popover the thread composer renders.
+        SuggestionPopover(
+            commands = commandSuggestions + skillSuggestions,
+            paths = pathSuggestions,
+            pullRequests = pullRequestSuggestions,
+            groupLabel =
+                when (trigger?.kind) {
+                    ComposerTriggerKind.PullRequest -> "Pull requests"
+                    ComposerTriggerKind.Skill -> "Skills"
+                    ComposerTriggerKind.Path -> "Files"
+                    else -> "Commands"
+                },
+            onPick = onPickRow@{ suggestion ->
+                val range = trigger ?: return@onPickRow
+                if (suggestion.interactionMode != null) {
+                    promptState.edit { replace(range.rangeStart, range.rangeEnd, "") }
+                    onInteractionMode(suggestion.interactionMode)
+                } else {
+                    promptState.edit {
+                        replace(range.rangeStart, range.rangeEnd, suggestion.replacement)
+                    }
+                }
+            },
+            onPickPullRequest = onPick@{ pullRequest ->
+                val range = trigger ?: return@onPick
+                if (range.kind != ComposerTriggerKind.PullRequest) return@onPick
+                onPickPullRequest(pullRequest, range.rangeStart, range.rangeEnd)
+            },
+        )
+
+        belowSuggestions()
+
         S5ComposerToolbarRow {
             S5ComposerControl(
                 label =
@@ -1009,6 +1379,102 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
                             )
                         }
                     }
+            }
+        }
+    }
+}
+
+/**
+ * `ProjectCloneBanner`: live state of the clone backing a freshly added
+ * project, above the composer while the draft waits for its files. Running
+ * clones offer Cancel; failed or cancelled ones offer Retry and Remove.
+ */
+@Composable
+private fun ProjectCloneBanner(
+    clone: club.touchtech.s5code.kotlin.model.ProjectClone,
+    onCancel: () -> Unit,
+    onRetry: () -> Unit,
+    onRemove: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val name = projectCloneDisplayName(clone)
+    if (clone.phase == "running") {
+        Surface(
+            modifier,
+            shape = MaterialTheme.shapes.large,
+            color = MaterialTheme.colorScheme.surfaceContainerLow,
+            border =
+                androidx.compose.foundation.BorderStroke(
+                    1.dp,
+                    MaterialTheme.colorScheme.outlineVariant,
+                ),
+        ) {
+            Row(
+                Modifier.padding(S5Theme.spacing.small),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+            ) {
+                CircularProgressIndicator(Modifier.size(20.dp), strokeWidth = 2.dp)
+                Column(Modifier.weight(1f)) {
+                    Text(
+                        "Cloning $name",
+                        style = MaterialTheme.typography.bodyMedium,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    Text(
+                        projectCloneProgressSummary(clone),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+                TextButton(onClick = onCancel) { Text("Cancel") }
+            }
+        }
+        return
+    }
+    val cancelled = clone.phase == "cancelled"
+    Surface(
+        modifier,
+        shape = MaterialTheme.shapes.large,
+        color =
+            if (cancelled) MaterialTheme.colorScheme.tertiaryContainer
+            else MaterialTheme.colorScheme.errorContainer,
+        border =
+            androidx.compose.foundation.BorderStroke(
+                1.dp,
+                if (cancelled) MaterialTheme.colorScheme.outlineVariant
+                else MaterialTheme.colorScheme.error,
+            ),
+    ) {
+        Column(Modifier.padding(S5Theme.spacing.small)) {
+            Text(
+                if (cancelled) "Cancelled cloning $name" else "Failed to clone $name",
+                style = MaterialTheme.typography.bodyMedium,
+                color =
+                    if (cancelled) MaterialTheme.colorScheme.onTertiaryContainer
+                    else MaterialTheme.colorScheme.onErrorContainer,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            clone.error?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.labelSmall,
+                    color =
+                        if (cancelled) MaterialTheme.colorScheme.onTertiaryContainer
+                        else MaterialTheme.colorScheme.onErrorContainer,
+                    maxLines = 3,
+                )
+            }
+            Row(
+                Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.End,
+            ) {
+                TextButton(onClick = onRemove) { Text("Remove project") }
+                TextButton(onClick = onRetry) { Text("Retry") }
             }
         }
     }

@@ -72,7 +72,9 @@ import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 
 /* ── Shared flow pieces ──────────────────────────────────────────────── */
 
@@ -790,7 +792,8 @@ fun AddProjectDestinationScreen(
     repositoryTitle: String?,
     repositoryName: String,
     onBack: () -> Unit,
-    onCreated: (environmentId: String, projectId: String) -> Unit,
+    /** `cloning` marks a tracked clone still running — the draft gates Start on it. */
+    onCreated: (environmentId: String, projectId: String, cloning: Boolean) -> Unit,
     onAddEnvironment: () -> Unit,
 ) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
@@ -822,6 +825,46 @@ fun AddProjectDestinationScreen(
         }
         submitting = true
         scope.launch {
+            if (env.environment.capabilities.projectCloneTracking) {
+                // The server creates the project and clones in the background;
+                // the draft shows progress and holds Start until files land.
+                val outcome =
+                    runCatching {
+                        store.workspace.startTrackedProjectClone(
+                            env.environment.id, url, path,
+                        )
+                    }
+                outcome.fold(
+                    onSuccess = { (projectId, _) ->
+                        // The draft resolves its project from the store, so it
+                        // must not open before the create event has arrived (it
+                        // would fall back to the project picker and lose the
+                        // clone controls). The clone keeps running either way.
+                        val arrivedOk =
+                            withTimeoutOrNull(15_000) {
+                                store.workspace.projects.first { list ->
+                                    list.any {
+                                        it.environmentId == env.environment.id &&
+                                            it.id.value == projectId.value
+                                    }
+                                }
+                            } != null
+                        submitting = false
+                        if (!arrivedOk) {
+                            error =
+                                "The project was created but has not reached this device yet. " +
+                                    "It will appear in the project list once the connection catches up."
+                        } else {
+                            onCreated(env.environment.id.value, projectId.value, cloning = true)
+                        }
+                    },
+                    onFailure = { cause ->
+                        submitting = false
+                        error = cause.message ?: "An error occurred."
+                    },
+                )
+                return@launch
+            }
             val outcome =
                 runCatching {
                     val (projectId, cwd) =
@@ -844,7 +887,7 @@ fun AddProjectDestinationScreen(
                         existingProjectTitle = existing.title
                         existingProjectTarget = env.environment.id.value to existing.id.value
                     } else {
-                        onCreated(env.environment.id.value, projectId.value)
+                        onCreated(env.environment.id.value, projectId.value, cloning = false)
                     }
                 },
                 onFailure = { cause -> error = cause.message ?: "An error occurred." },

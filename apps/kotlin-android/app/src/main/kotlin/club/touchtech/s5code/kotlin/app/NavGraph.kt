@@ -340,11 +340,12 @@ fun S5NavGraph(
                 repositoryTitle = entry.arguments?.getString("repositoryTitle"),
                 repositoryName = entry.arguments?.getString("repositoryName").orEmpty(),
                 onBack = navController::popBackStack,
-                onCreated = { environmentId, projectId ->
+                onCreated = { environmentId, projectId, cloning ->
                     store.updateDraft {
                         it.copy(
                             environmentId = EnvironmentId(environmentId),
                             projectKey = projectId,
+                            cloning = cloning,
                         )
                     }
                     navController.navigate(Routes.NewTaskDraft) {
@@ -368,6 +369,7 @@ fun S5NavGraph(
                         it.copy(
                             environmentId = EnvironmentId(environmentId),
                             projectKey = projectId,
+                            cloning = false,
                         )
                     }
                     navController.navigate(Routes.NewTaskDraft) {
