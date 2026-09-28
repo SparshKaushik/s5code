@@ -855,7 +855,7 @@ fun AddProjectDestinationScreen(
                                 "The project was created but has not reached this device yet. " +
                                     "It will appear in the project list once the connection catches up."
                         } else {
-                            onCreated(env.environment.id.value, projectId.value, cloning = true)
+                            onCreated(env.environment.id.value, projectId.value, true)
                         }
                     },
                     onFailure = { cause ->
@@ -887,7 +887,7 @@ fun AddProjectDestinationScreen(
                         existingProjectTitle = existing.title
                         existingProjectTarget = env.environment.id.value to existing.id.value
                     } else {
-                        onCreated(env.environment.id.value, projectId.value, cloning = false)
+                        onCreated(env.environment.id.value, projectId.value, false)
                     }
                 },
                 onFailure = { cause -> error = cause.message ?: "An error occurred." },
@@ -971,7 +971,7 @@ fun AddProjectDestinationScreen(
         AlertDialog(
             onDismissRequest = {
                 existingProjectTitle = null
-                existingProjectTarget?.let { (envId, projectId) -> onCreated(envId, projectId) }
+                existingProjectTarget?.let { (envId, projectId) -> onCreated(envId, projectId, false) }
             },
             title = { Text("Project already exists") },
             text = { Text(title) },
@@ -980,7 +980,7 @@ fun AddProjectDestinationScreen(
                     onClick = {
                         existingProjectTitle = null
                         existingProjectTarget?.let { (envId, projectId) ->
-                            onCreated(envId, projectId)
+                            onCreated(envId, projectId, false)
                         }
                     }
                 ) {

@@ -22,9 +22,6 @@ import kotlinx.coroutines.withContext
  * turn still goes out with its text, which is better than failing a message
  * because a cache file was evicted.
  */
- * The `UploadChatImageAttachment` wire shape: inline `dataUrl`, no server id —
- * the server persists the bytes and mints one itself.
- */
 internal suspend fun attachmentDataUrl(
     context: Context,
     attachment: ComposerAttachment,

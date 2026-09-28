@@ -442,16 +442,19 @@ private fun DeviceStream(
     var status by remember(attempt) { mutableStateOf("connecting") }
     var error by remember(attempt) { mutableStateOf<String?>(null) }
 
+    // `remember`'s lambda cannot call @Composable MaterialTheme, so the color
+    // scheme is read during composition and only hex strings enter the cache.
+    val scheme = MaterialTheme.colorScheme
     val configuration =
-        remember(access, platform, deviceId) {
+        remember(access, platform, deviceId, scheme) {
             val colors =
                 mapOf(
-                    "background" to hexOf(MaterialTheme.colorScheme.surface),
-                    "foreground" to hexOf(MaterialTheme.colorScheme.onSurface),
-                    "muted" to hexOf(MaterialTheme.colorScheme.onSurfaceVariant),
-                    "buttonBackground" to hexOf(MaterialTheme.colorScheme.secondaryContainer),
-                    "buttonForeground" to hexOf(MaterialTheme.colorScheme.onSecondaryContainer),
-                    "buttonBorder" to hexOf(MaterialTheme.colorScheme.outlineVariant),
+                    "background" to hexOf(scheme.surface),
+                    "foreground" to hexOf(scheme.onSurface),
+                    "muted" to hexOf(scheme.onSurfaceVariant),
+                    "buttonBackground" to hexOf(scheme.secondaryContainer),
+                    "buttonForeground" to hexOf(scheme.onSecondaryContainer),
+                    "buttonBorder" to hexOf(scheme.outlineVariant),
                 )
             // Plain JSON: configuration is opaque to the bridge.
             buildString {

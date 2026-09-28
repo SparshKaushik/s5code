@@ -132,7 +132,7 @@ internal fun detectComposerTrigger(text: String): ComposerTrigger? {
         )
     }
     val first = token.firstOrNull()
-    if (first != null && Character.getType(first) == Character.CURRENCY_SYMBOL) {
+    if (first != null && first.category == CharCategory.CURRENCY_SYMBOL) {
         return ComposerTrigger(
             ComposerTriggerKind.Skill,
             token.substring(1),

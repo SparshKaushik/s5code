@@ -146,7 +146,6 @@ object Commands {
                 }
             }
             putJsonArray("attachments") {
-            putJsonArray("attachments") {
                 attachments.forEach { add(it) }
             }
         }

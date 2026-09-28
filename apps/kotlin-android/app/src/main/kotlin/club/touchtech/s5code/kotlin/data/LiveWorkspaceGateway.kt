@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.data
 
 import android.content.Context
+import androidx.core.net.toUri
 import club.touchtech.s5code.kotlin.model.BranchRef
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerContextRecord
@@ -42,6 +43,7 @@ import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageDay
 import club.touchtech.s5code.kotlin.model.UsageLimitsView
+import club.touchtech.s5code.kotlin.model.WorktreeSetupSnapshot
 import club.touchtech.s5code.kotlin.model.UsageModelBreakdown
 import club.touchtech.s5code.kotlin.model.UsageProviderBreakdown
 import club.touchtech.s5code.kotlin.model.UsageTotals
@@ -115,6 +117,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.async
@@ -131,6 +134,7 @@ import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
 import okhttp3.OkHttpClient
 import okhttp3.RequestBody
 import okhttp3.MediaType.Companion.toMediaType

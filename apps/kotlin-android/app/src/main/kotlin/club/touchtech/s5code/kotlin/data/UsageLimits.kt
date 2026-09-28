@@ -34,8 +34,7 @@ data class LimitEnvironmentPresentation(
 
 /* ── DTO → model ─────────────────────────────────────────────────────── */
 
-private fun parseLimitInstant(value: String?): Long? =
-    value?.let { runCatching { parseInstant(it).toEpochMilli() }.getOrNull() }
+private fun parseLimitInstant(value: String?): Long? = parseInstant(value)
 
 private fun UsageWindowDto.toModel(): UsageLimitWindow =
     UsageLimitWindow(
