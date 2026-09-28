@@ -18,6 +18,7 @@ import club.touchtech.s5code.kotlin.data.IncomingShareStore
 import club.touchtech.s5code.kotlin.data.IncomingShareAttachmentType
 import club.touchtech.s5code.kotlin.data.hasIncomingShareContent
 import club.touchtech.s5code.kotlin.data.incomingShareIdFor
+import club.touchtech.s5code.kotlin.data.referencedComposerContextRecords
 import club.touchtech.s5code.kotlin.data.selectIncomingShareAttachments
 import club.touchtech.s5code.kotlin.data.RuntimePreferences
 import club.touchtech.s5code.kotlin.data.StoredDraft
@@ -49,6 +50,7 @@ import club.touchtech.s5code.kotlin.model.AppErrorNotice
 import club.touchtech.s5code.kotlin.model.ApprovalPolicy
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
+import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ModelFavorite
@@ -141,6 +143,11 @@ data class NewTaskDraft(
 data class ThreadDraft(
     val text: String = "",
     val attachments: List<ComposerAttachment> = emptyList(),
+    /**
+     * `#` mention payloads the text references (`t3-context://` links). In-memory
+     * like the rest of the draft; the outbox re-serializes them on send.
+     */
+    val contextRecords: List<ComposerContextRecord> = emptyList(),
     /**
      * Existing-thread settings are staged with the composer, matching RN. They
      * become authoritative when the next turn is sent, so choosing a model does
@@ -725,6 +732,18 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     fun setThreadDraft(environmentId: String, threadId: String, text: String) =
         updateThreadDraft(environmentId, threadId) { it.copy(text = text) }
 
+    /**
+     * Sets the draft's text and context records together — a `#` pick inserts
+     * its link and its payload in the same mutation, so the two can never
+     * disagree between recompositions.
+     */
+    fun setThreadDraftWithContext(
+        environmentId: String,
+        threadId: String,
+        text: String,
+        contextRecords: List<ComposerContextRecord>,
+    ) = updateThreadDraft(environmentId, threadId) { it.copy(text = text, contextRecords = contextRecords) }
+
     /** Adds a structured review comment to the durable thread composer draft. */
     fun appendThreadDraft(
         environmentId: String,
@@ -743,7 +762,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         _threadDrafts.update { drafts ->
             val key = threadDraftKey(environmentId, threadId)
             val draft = drafts[key] ?: drafts[threadId] ?: return@update drafts
-            val retained = draft.copy(text = "", attachments = emptyList())
+            val retained = draft.copy(text = "", attachments = emptyList(), contextRecords = emptyList())
             val migrated = drafts - threadId
             if (retained.settings == null) migrated - key else migrated + (key to retained)
         }
@@ -764,14 +783,17 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         text: String,
         attachments: List<ComposerAttachment>,
         settings: ThreadSettings,
+        contextRecords: List<ComposerContextRecord> = emptyList(),
     ) {
+        val trimmed = text.trim()
         val message =
             newQueuedThreadMessage(
                 environmentId = EnvironmentId(environmentId),
-                text = text.trim(),
+                text = trimmed,
                 attachments = attachments,
                 settings = settings,
                 threadId = ThreadId(threadId),
+                contextRecords = referencedComposerContextRecords(trimmed, contextRecords),
             )
         val durable = outboxStore.enqueue(message)
         outboxMutation.withLock {
@@ -937,6 +959,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                             newWorktree = message.creation.newWorktree,
                             attachments = message.attachments,
                             worktreePath = message.creation.worktreePath,
+                            contextRecords = message.contextRecords,
                             threadId = message.threadId,
                             delivery = message.delivery,
                         )
@@ -948,6 +971,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                             attachments = message.attachments,
                             settings = message.settings,
                             delivery = message.delivery,
+                            contextRecords = message.contextRecords,
                         )
                     }
                     completeQueuedMessage(message)

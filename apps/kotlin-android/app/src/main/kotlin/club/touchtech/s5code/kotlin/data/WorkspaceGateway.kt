@@ -2,6 +2,8 @@ package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.model.BranchRef
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
+import club.touchtech.s5code.kotlin.model.ComposerContextRecord
+import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.FileNode
@@ -12,6 +14,7 @@ import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ProviderSkill
 import club.touchtech.s5code.kotlin.model.ProviderStatus
 import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.model.SentAttachment
@@ -126,7 +129,44 @@ interface WorkspaceGateway {
      * merged. Not suspend: these ride along with the provider config the session
      * already holds, so the composer can filter them while the user types.
      */
-    fun slashCommands(provider: ProviderInstance): List<SlashCommand>
+    fun slashCommands(provider: ProviderInstance, cwd: String? = null): List<SlashCommand>
+
+    /**
+     * Skills the composer may offer for [provider] in [cwd], resolved per
+     * `resolveProviderSkillsForCwd`: the matching workspace snapshot wins over
+     * the provider-level list, then the user-invocable survivors dedupe by name.
+     * Reactive, so the snapshot refresh below lands in the menu.
+     */
+    fun providerSkills(
+        environmentId: EnvironmentId,
+        provider: ProviderInstance,
+        cwd: String?,
+    ): StateFlow<List<ProviderSkill>>
+
+    /**
+     * RN's workspace-snapshot kick: when the provider has no snapshot for [cwd],
+     * `server.refreshProviders` fills it so the composer offers the workspace's
+     * own skills and commands. Rate-limited and failure-swallowing — the menu
+     * works off what it already has either way.
+     */
+    fun refreshProviderWorkspaceSnapshot(
+        environmentId: EnvironmentId,
+        provider: ProviderInstance,
+        cwd: String?,
+    )
+
+    /**
+     * `useComposerPullRequestSearch` on the RN client: `#` token candidates for
+     * one repository — a debounced `pullRequests.list` (all states, paged wide),
+     * plus `pullRequests.detail` when the query is a number the page lacks.
+     */
+    suspend fun searchComposerPullRequests(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        repository: String,
+        query: String,
+        limit: Int = 20,
+    ): List<ComposerPullRequestCandidate>
 
     /**
      * The thread's live detail. Subscribing is what starts the per-thread stream,
@@ -212,6 +252,8 @@ interface WorkspaceGateway {
         attachments: List<ComposerAttachment> = emptyList(),
         settings: ThreadSettings? = null,
         delivery: TurnDeliveryMetadata? = null,
+        /** `#` mention records referenced by [text], sent as `message.context`. */
+        contextRecords: List<ComposerContextRecord> = emptyList(),
     )
 
     suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId)
@@ -270,6 +312,7 @@ interface WorkspaceGateway {
         attachments: List<ComposerAttachment> = emptyList(),
         /** An existing worktree the thread should open in; ignored when [newWorktree]. */
         worktreePath: String? = null,
+        contextRecords: List<ComposerContextRecord> = emptyList(),
         threadId: ThreadId? = null,
         delivery: TurnDeliveryMetadata? = null,
     ): ThreadId

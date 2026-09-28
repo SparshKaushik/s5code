@@ -2,6 +2,7 @@ package club.touchtech.s5code.kotlin.transport.wire
 
 import club.touchtech.s5code.kotlin.transport.EnvironmentPlatformDto
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
@@ -76,6 +77,36 @@ data class ServerProviderSlashCommandDto(
     val description: String? = null,
 )
 
+/** `ServerProviderSkill`: a composer's slash/skill-menu candidate. */
+@Serializable
+data class ServerProviderSkillDto(
+    val name: String = "",
+    val description: String? = null,
+    val path: String = "",
+    val scope: String? = null,
+    val enabled: Boolean = false,
+    val displayName: String? = null,
+    val shortDescription: String? = null,
+    /** Hidden from the agent's own tool, so only the user can start it. */
+    val userInvocationOnly: Boolean? = null,
+    /** `false` reserves the skill for the agent; composers must not offer it. */
+    val userInvocable: Boolean? = null,
+)
+
+/**
+ * `ServerProviderWorkspaceSnapshot`: the commands and skills live in one
+ * workspace directory. A provider picks them up per project root, so the
+ * composer resolves against the thread's cwd before falling back to the
+ * provider-level lists.
+ */
+@Serializable
+data class ServerProviderWorkspaceSnapshotDto(
+    val cwd: String = "",
+    val checkedAt: String = "",
+    val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
+    val skills: List<ServerProviderSkillDto> = emptyList(),
+)
+
 @Serializable
 data class ServerProviderAuthDto(
     /** `authenticated` | `unauthenticated` | `unknown`. Unknown is not a refusal. */
@@ -113,6 +144,11 @@ data class ServerProviderDto(
     val requiresNewThreadForModelChange: Boolean = false,
     val models: List<ServerProviderModelDto> = emptyList(),
     val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
+    val skills: List<ServerProviderSkillDto> = emptyList(),
+    /** Per-directory snapshots; a cwd match replaces the provider-level lists. */
+    val workspaceSnapshots: List<ServerProviderWorkspaceSnapshotDto> = emptyList(),
+    /** Present when this provider reports subscription usage to the limits view. */
+    val usageLimits: JsonElement? = null,
     /** Human-readable provider problem, when the server has one to report. */
     val message: String? = null,
     val versionAdvisory: ProviderVersionAdvisoryDto? = null,

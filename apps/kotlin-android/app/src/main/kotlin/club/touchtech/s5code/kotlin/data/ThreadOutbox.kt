@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.data
 import android.content.Context
 import androidx.core.net.toUri
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
+import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadSettings
@@ -34,6 +35,11 @@ data class QueuedThreadMessage(
     val settings: ThreadSettings,
     val delivery: TurnDeliveryMetadata,
     val creation: StoredQueuedThreadCreation? = null,
+    /**
+     * Composer context records (`#` pull-request mentions) to send alongside
+     * the text. Serialized with the queue so they survive process death.
+     */
+    val contextRecords: List<ComposerContextRecord> = emptyList(),
 ) {
     val key: String get() = "${environmentId.value}/${threadId.value}"
 }
@@ -173,6 +179,7 @@ fun newQueuedThreadMessage(
     attachments: List<ComposerAttachment>,
     settings: ThreadSettings,
     creation: StoredQueuedThreadCreation? = null,
+    contextRecords: List<ComposerContextRecord> = emptyList(),
     threadId: ThreadId = ThreadId(UUID.randomUUID().toString()),
 ): QueuedThreadMessage =
     QueuedThreadMessage(
@@ -182,6 +189,7 @@ fun newQueuedThreadMessage(
         attachments = attachments,
         settings = settings,
         creation = creation,
+        contextRecords = contextRecords,
         delivery =
             TurnDeliveryMetadata(
                 commandId = UUID.randomUUID().toString(),
@@ -214,6 +222,8 @@ private data class StoredQueuedThreadMessage(
     val attachments: List<StoredAttachment>,
     val settings: StoredThreadSettings,
     val creation: StoredQueuedThreadCreation? = null,
+    /** Records absent on outbox files written before composer context existed. */
+    val contextRecords: List<ComposerContextRecord> = emptyList(),
 )
 
 private val outboxJson = Json { ignoreUnknownKeys = true; encodeDefaults = true }
@@ -230,6 +240,7 @@ internal fun encodeQueuedThreadMessage(message: QueuedThreadMessage): String =
             attachments = message.attachments.map { it.toStored() },
             settings = message.settings.toStoredThreadSettings(),
             creation = message.creation,
+            contextRecords = message.contextRecords,
         )
     )
 
@@ -246,6 +257,7 @@ internal fun decodeQueuedThreadMessage(raw: String): QueuedThreadMessage {
         attachments = stored.attachments.map { it.toRuntime() },
         settings = stored.settings.toRuntimeThreadSettings(),
         creation = stored.creation,
+        contextRecords = stored.contextRecords,
         delivery = TurnDeliveryMetadata(stored.commandId, stored.messageId, stored.createdAt),
     )
 }

@@ -3,6 +3,8 @@ package club.touchtech.s5code.kotlin.data
 import android.content.Context
 import club.touchtech.s5code.kotlin.model.BranchRef
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
+import club.touchtech.s5code.kotlin.model.ComposerContextRecord
+import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentCapabilities
@@ -14,6 +16,7 @@ import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ProviderSkill
 import club.touchtech.s5code.kotlin.model.ProviderStatus
 import club.touchtech.s5code.kotlin.model.PullRequestRef
 import club.touchtech.s5code.kotlin.model.PullRequestState
@@ -58,6 +61,8 @@ import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseResultDto
 import club.touchtech.s5code.kotlin.transport.wire.GitActionProgressEventDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectListEntriesResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectReadFileResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ReviewDiffPreviewResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SearchThreadsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto
@@ -264,15 +269,195 @@ class LiveWorkspaceGateway(
      * Slash commands for a provider instance, merged across environments and
      * de-duplicated by name. Two machines running the same instance advertise the
      * same commands, and the composer should offer each once.
+     *
+     * [cwd] resolves `resolveProviderSlashCommandsForCwd`: a workspace snapshot
+     * for that directory replaces the provider-level list.
      */
-    override fun slashCommands(provider: ProviderInstance): List<SlashCommand> =
+    override fun slashCommands(provider: ProviderInstance, cwd: String?): List<SlashCommand> =
         sessions.value.values
             .flatMap { it.session.providers.value }
             .filter { it.instanceId == provider.instanceId }
-            .flatMap { it.slashCommands }
+            .flatMap { dto -> dto.commandsForCwd(cwd) }
             .distinctBy { it.name }
             .map { SlashCommand(name = "/${it.name.removePrefix("/")}", description = it.description.orEmpty()) }
             .sortedBy { it.name }
+
+    /** Per-environment skills streams, the same caching shape as [providerStatuses]. */
+    private val providerSkillsFlows =
+        mutableMapOf<String, StateFlow<List<ProviderSkill>>>()
+
+    override fun providerSkills(
+        environmentId: EnvironmentId,
+        provider: ProviderInstance,
+        cwd: String?,
+    ): StateFlow<List<ProviderSkill>> {
+        val session =
+            sessions.value[environmentId.value]?.session
+                ?: return MutableStateFlow(emptyList())
+        val key = "${environmentId.value}/${provider.instanceId}/${cwd.orEmpty()}"
+        return providerSkillsFlows.getOrPut(key) {
+            session.providers
+                .map { providers ->
+                    providers
+                        .filter { it.instanceId == provider.instanceId }
+                        .flatMap { dto -> dto.skillsForCwd(cwd) }
+                        .filter { it.enabled && it.userInvocable != false }
+                        .distinctBy { it.name.trim().lowercase() }
+                        .map { skill ->
+                            ProviderSkill(
+                                name = skill.name,
+                                description = skill.description,
+                                shortDescription = skill.shortDescription,
+                                displayName = skill.displayName,
+                                enabled = skill.enabled,
+                                userInvocable = skill.userInvocable,
+                            )
+                        }
+                }
+                .stateIn(scope, SharingStarted.Eagerly, emptyList())
+        }
+    }
+
+    /**
+     * Cooldown per (environment, instance, cwd): RN retries a missing snapshot
+     * every 10s rather than on every composer visit.
+     */
+    private val workspaceSnapshotRetries = mutableMapOf<String, Long>()
+
+    override fun refreshProviderWorkspaceSnapshot(
+        environmentId: EnvironmentId,
+        provider: ProviderInstance,
+        cwd: String?,
+    ) {
+        if (cwd.isNullOrBlank()) return
+        val session = sessions.value[environmentId.value]?.session ?: return
+        val snapshotMissing =
+            session.providers.value
+                .none { it.instanceId == provider.instanceId } ||
+                session.providers.value
+                    .filter { it.instanceId == provider.instanceId }
+                    .none { dto -> dto.workspaceSnapshots.any { it.cwd == cwd } }
+        if (!snapshotMissing) return
+        val key = "${environmentId.value}/${provider.instanceId}/$cwd"
+        val now = System.currentTimeMillis()
+        if (now < (workspaceSnapshotRetries[key] ?: 0L)) return
+        workspaceSnapshotRetries[key] = now + WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS
+        scope.launch {
+            runCatching { session.refreshProviderWorkspace(provider.instanceId, cwd) }
+                .onFailure {
+                    // A failed probe becomes eligible again on the next visit
+                    // rather than pinning the cooldown for a success that never
+                    // landed.
+                    workspaceSnapshotRetries.remove(key)
+                }
+        }
+    }
+
+    /**
+     * `pullRequests.list` + `pullRequests.detail` behind the `#` menu, matching
+     * `useComposerPullRequestSearch`: numeric queries match by number substring
+     * with an exact-number detail fallback, word queries match title/branches.
+     */
+    override suspend fun searchComposerPullRequests(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        repository: String,
+        query: String,
+        limit: Int,
+    ): List<ComposerPullRequestCandidate> {
+        val session = sessionFor(environmentId)
+        val numeric = query.all { it.isDigit() }
+        val list =
+            runCatching {
+                    session.request(
+                        WsMethods.PullRequestsList,
+                        buildJsonObject {
+                            put("projectId", projectId.value)
+                            put("state", "all")
+                            put("limit", 200)
+                            if (!numeric && query.isNotBlank()) put("query", query)
+                        },
+                        PullRequestListResultDto.serializer(),
+                    )
+                }
+                .getOrNull()?.entries ?: emptyList()
+        val candidates = mutableListOf<ComposerPullRequestCandidate>()
+        // The listing never holds the whole history; a numeric query that the
+        // page lacks resolves through `pullRequests.detail`, same as RN.
+        val exact =
+            if (numeric && query.isNotEmpty() &&
+                list.none { it.number.toString() == query && it.repository.equals(repository, true) }
+            ) {
+                runCatching {
+                        session.request(
+                            WsMethods.PullRequestsDetail,
+                            buildJsonObject {
+                                put("projectId", projectId.value)
+                                put("repository", repository)
+                                put("number", query.toInt())
+                            },
+                            PullRequestDetailDto.serializer(),
+                        )
+                    }
+                    .getOrNull()
+            } else {
+                null
+            }
+        candidates += exact?.let { detail ->
+            ComposerPullRequestCandidate(
+                projectId = detail.projectId,
+                repository = detail.repository,
+                number = detail.number,
+                title = detail.title,
+                url = detail.url,
+                headBranch = detail.headBranch,
+                baseBranch = detail.baseBranch,
+                state = detail.state,
+                isDraft = detail.isDraft,
+                updatedAt = detail.updatedAt,
+            )
+        }.let { listOfNotNull(it) }
+        candidates += list.map { entry ->
+            ComposerPullRequestCandidate(
+                projectId = entry.projectId,
+                repository = entry.repository,
+                number = entry.number,
+                title = entry.title,
+                url = entry.url,
+                headBranch = entry.headBranch,
+                baseBranch = entry.baseBranch,
+                state = entry.state,
+                isDraft = entry.isDraft,
+                updatedAt = entry.updatedAt,
+            )
+        }
+        if (numeric) {
+            return filterComposerPullRequestMatches(
+                entries = candidates,
+                projectId = projectId.value,
+                repository = repository,
+                query = query,
+                limit = limit,
+            )
+        }
+        // Word queries match the title and both branch names, newest first.
+        val words = query.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
+        return candidates
+            .asSequence()
+            .filter { entry ->
+                entry.projectId == projectId.value &&
+                    entry.repository.equals(repository, ignoreCase = true) &&
+                    words.all { word ->
+                        "${entry.title} ${entry.headBranch} ${entry.baseBranch}"
+                            .lowercase()
+                            .contains(word)
+                    }
+            }
+            .distinctBy { it.number }
+            .sortedByDescending { it.updatedAt }
+            .take(limit)
+            .toList()
+    }
 
     init {
         scope.launch {
@@ -542,6 +727,7 @@ class LiveWorkspaceGateway(
                             threadActiveReorder = state?.capabilities?.threadActiveReorder == true,
                             threadTitleRegeneration =
                                 state?.capabilities?.threadTitleRegeneration == true,
+                            pullRequests = state?.capabilities?.pullRequests == true,
                             attachmentUploads = state?.capabilities?.attachmentUploads == true,
                             questionAttachments = state?.capabilities?.questionAttachments == true,
                             fileAttachments =
@@ -1369,6 +1555,7 @@ class LiveWorkspaceGateway(
         attachments: List<ComposerAttachment>,
         settings: ThreadSettings?,
         delivery: TurnDeliveryMetadata?,
+        contextRecords: List<ComposerContextRecord>,
     ) {
         val detail = details["${environmentId.value}/${id.value}"]?.value
         val effective = settings ?: detail?.settings ?: ThreadSettings()
@@ -1392,6 +1579,7 @@ class LiveWorkspaceGateway(
                 attachments = attachments,
                 attachmentDataUrls = encodeAttachments(context, attachments),
                 settings = effective,
+                contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
                 messageId = delivery?.messageId ?: UUID.randomUUID().toString(),
                 createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
@@ -1499,6 +1687,7 @@ class LiveWorkspaceGateway(
         newWorktree: Boolean,
         attachments: List<ComposerAttachment>,
         worktreePath: String?,
+        contextRecords: List<ComposerContextRecord>,
         threadId: ThreadId?,
         delivery: TurnDeliveryMetadata?,
     ): ThreadId {
@@ -1525,6 +1714,7 @@ class LiveWorkspaceGateway(
                 branch = branch.takeIf { it.isNotBlank() },
                 newWorktree = newWorktree,
                 worktreePath = worktreePath,
+                contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
                 messageId = delivery?.messageId ?: UUID.randomUUID().toString(),
                 createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
@@ -2727,6 +2917,9 @@ class LiveWorkspaceGateway(
 
         /** A preview read should answer quickly or fail; it is retryable. */
         const val ASSET_READ_TIMEOUT_MS = 30_000L
+
+        /** RN's `WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS` for missing per-cwd snapshots. */
+        const val WORKSPACE_SNAPSHOT_RETRY_COOLDOWN_MS = 10_000L
 
         /**
          * Cap on the HTTP snapshot fast-path, matching client-runtime's 6s. A

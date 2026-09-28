@@ -703,6 +703,23 @@ class EnvironmentSession(
     }
 
     /**
+     * Scoped refresh: fills the per-workspace snapshot (skills and commands
+     * bound to one directory) without touching model discovery.
+     */
+    suspend fun refreshProviderWorkspace(instanceId: String, cwd: String) {
+        val updated =
+            request(
+                WsMethods.ServerRefreshProviders,
+                buildJsonObject {
+                    put("instanceId", instanceId)
+                    put("cwd", cwd)
+                },
+                ServerProvidersUpdatedDto.serializer(),
+            )
+        _providers.value = updated.providers
+    }
+
+    /**
      * Issues a unary RPC on the current connection, waiting briefly for one if
      * the socket is mid-reconnect. Waiting rather than failing immediately is
      * what keeps a tap that lands during a reconnect from surfacing an error the

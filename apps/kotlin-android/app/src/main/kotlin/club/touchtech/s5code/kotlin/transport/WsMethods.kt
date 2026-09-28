@@ -33,6 +33,9 @@ internal object WsMethods {
     const val ProjectsReadFile = "projects.readFile"
     const val ProjectsSearchEntries = "projects.searchEntries"
 
+    const val PullRequestsList = "pullRequests.list"
+    const val PullRequestsDetail = "pullRequests.detail"
+
     const val AssetsCreateUrl = "assets.createUrl"
     const val AttachmentsCreateUploadUrl = "attachments.createUploadUrl"
     const val AttachmentsDelete = "attachments.delete"

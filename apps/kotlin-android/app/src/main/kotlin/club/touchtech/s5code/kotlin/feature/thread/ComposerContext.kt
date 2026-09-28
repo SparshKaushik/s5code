@@ -63,3 +63,95 @@ fun replaceComposerContextReferences(
     result.append(text, cursor, text.length)
     return result.toString()
 }
+
+
+/* ── Trigger detection ────────────────────────────────────────────────── */
+
+/**
+ * `detectComposerTrigger` from `packages/shared/src/composerTrigger.ts`, with
+ * the cursor pinned to the end of the text — the Kotlin field owns caret
+ * handling, so the menu only ever asks about the tail.
+ */
+enum class ComposerTriggerKind { Path, PullRequest, SlashCommand, SlashModel, Skill }
+
+data class ComposerTrigger(
+    val kind: ComposerTriggerKind,
+    val query: String,
+    /** Range the pick replaces: the token plus its trigger character. */
+    val rangeStart: Int,
+    val rangeEnd: Int,
+)
+
+private val PULL_REQUEST_TOKEN =
+    Regex("""^#([\p{L}\p{N}][\p{L}\p{N}_-]*)?$""")
+
+private val SLASH_TOKEN = Regex("""^/(\S*)$""")
+
+private val SLASH_MODEL_PREFIX = Regex("""^/model(?:\s+(.*))?$""")
+
+/**
+ * The trigger under the end of [text], or null when no token is live. A `/`
+ * counts only at the start of its line — mid-word it is a path character — and
+ * a `$`-family currency prefix starts a skill token whether or not a query
+ * follows it.
+ */
+internal fun detectComposerTrigger(text: String): ComposerTrigger? {
+    val cursor = text.length
+    val lineStart = text.lastIndexOf('\n', maxOf(0, cursor - 1)) + 1
+    val linePrefix = text.substring(lineStart, cursor)
+
+    if (linePrefix.startsWith("/")) {
+        val commandMatch = SLASH_TOKEN.find(linePrefix)
+        if (commandMatch != null) {
+            val commandQuery = commandMatch.groupValues[1]
+            if (commandQuery.equals("model", ignoreCase = true)) {
+                return ComposerTrigger(
+                    ComposerTriggerKind.SlashModel, "", lineStart, cursor,
+                )
+            }
+            return ComposerTrigger(
+                ComposerTriggerKind.SlashCommand, commandQuery, lineStart, cursor,
+            )
+        }
+        if (SLASH_MODEL_PREFIX.matches(linePrefix)) {
+            val query = SLASH_MODEL_PREFIX.find(linePrefix)?.groupValues?.getOrNull(1).orEmpty().trim()
+            return ComposerTrigger(ComposerTriggerKind.SlashModel, query, lineStart, cursor)
+        }
+    }
+
+    val tokenStart = (cursor - 1 downTo 0).firstOrNull { text[it].isWhitespace() }
+        ?.plus(1) ?: 0
+    val token = text.substring(tokenStart, cursor)
+
+    PULL_REQUEST_TOKEN.matchEntire(token)?.let { match ->
+        return ComposerTrigger(
+            ComposerTriggerKind.PullRequest,
+            match.groupValues[1],
+            tokenStart,
+            cursor,
+        )
+    }
+    val first = token.firstOrNull()
+    if (first != null && Character.getType(first) == Character.CURRENCY_SYMBOL) {
+        return ComposerTrigger(
+            ComposerTriggerKind.Skill,
+            token.substring(1),
+            tokenStart,
+            cursor,
+        )
+    }
+    if (!token.startsWith("@")) return null
+    return ComposerTrigger(ComposerTriggerKind.Path, token.substring(1), tokenStart, cursor)
+}
+
+/** `replaceTextRange`: splice [replacement] over the trigger's range. */
+internal fun replaceComposerTextRange(
+    text: String,
+    rangeStart: Int,
+    rangeEnd: Int,
+    replacement: String,
+): String {
+    val safeStart = rangeStart.coerceIn(0, text.length)
+    val safeEnd = rangeEnd.coerceIn(safeStart, text.length)
+    return text.substring(0, safeStart) + replacement + text.substring(safeEnd)
+}

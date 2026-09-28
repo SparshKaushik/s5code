@@ -22,9 +22,11 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AlternateEmail
+import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Sync
@@ -40,6 +42,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,8 +63,10 @@ import club.touchtech.s5code.kotlin.design.component.rememberDraftTextFieldState
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
+import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ProviderSkill
 import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
@@ -103,8 +108,36 @@ fun ThreadComposer(
     value: String,
     /** Slash commands the thread's provider advertises. */
     commands: List<SlashCommand>,
+    /**
+     * Skills the provider resolved for the thread's cwd (`$` trigger plus the
+     * `skill:` rows inside the slash menu), already filtered to the ones a user
+     * may invoke and de-duplicated by name.
+     */
+    skills: List<ProviderSkill> = emptyList(),
     /** Resolves `@` mentions to workspace paths. Suspend: it hits the file index. */
     onSearchPaths: suspend (String) -> List<String>,
+    /**
+     * Resolves a `#` token to pull requests in the thread's repository. Null
+     * when the server has no `pullRequests` capability or the project has no
+     * repository — the trigger then behaves like plain text.
+     */
+    onSearchPullRequests: (suspend (String) -> List<ComposerPullRequestCandidate>)? = null,
+    /**
+     * A `#` row was tapped: splice `formatComposerContextReference` over the
+     * `[rangeStart, rangeEnd)` token and store the record with the draft.
+     */
+    onPickPullRequest: (ComposerPullRequestCandidate, Int, Int) -> Unit = { _, _, _ -> },
+    /**
+     * Kicks `server.refreshProviders` for the thread's cwd when the provider has
+     * no snapshot for it — the per-workspace skills list arrives a beat after
+     * the composer first asks.
+     */
+    onRefreshWorkspaceSnapshot: () -> Unit = {},
+    /**
+     * Whether the thread holds anything `/compact` could act on — RN hides the
+     * row on an empty conversation.
+     */
+    hasCompactableConversation: Boolean = true,
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     onCancel: () -> Unit,
@@ -135,28 +168,19 @@ fun ThreadComposer(
     /** Resets the field's own text state, e.g. per thread. */
     draftKey: Any?,
 ) {
-    // Token detection follows `detectComposerTrigger`: a trigger is the run of
-    // non-whitespace under the cursor (end of text here), not just the tail of
-    // the last space-separated word.
-    val activeToken =
-        remember(value) { value.takeLastWhile { !it.isWhitespace() } }
-    // A slash trigger exists only where the token sits at the start of its line —
-    // `/` mid-word is a path character, not a command. Provider commands
-    // additionally require the very first line, matching `atMessageStart`.
-    val slashActive =
-        remember(value, activeToken) {
-            activeToken.startsWith("/") &&
-                value.dropLast(activeToken.length).let { prefix ->
-                    prefix.isEmpty() || prefix.endsWith("\n")
-                }
-        }
-    val atMessageStart = remember(value, activeToken) {
-        slashActive && value == activeToken
-    }
+    // `detectComposerTrigger`: the run of non-whitespace under the caret (end
+    // of text here) classifies as a path, pull-request, skill, or slash token.
+    val trigger = remember(value) { detectComposerTrigger(value) }
+    // A stale live token — providers expand their own commands only at the very
+    // start of a message, while T3's own act anywhere.
+    val atMessageStart = trigger?.rangeStart == 0
+
     val commandSuggestions =
-        remember(activeToken, commands, slashActive, atMessageStart, interactionModeAllowed) {
-            if (!slashActive) return@remember emptyList()
-            val query = activeToken.removePrefix("/").lowercase()
+        remember(trigger, commands, skills, interactionModeAllowed, hasCompactableConversation) {
+            if (trigger?.kind != ComposerTriggerKind.SlashCommand) {
+                return@remember emptyList<ComposerSuggestion>()
+            }
+            val query = trigger.query.lowercase()
             buildList<ComposerSuggestion> {
                 // T3's own commands act locally, ahead of provider ones.
                 if ("model".contains(query)) {
@@ -182,8 +206,16 @@ fun ThreadComposer(
                         )
                     }
                 }
+                // Providers expand commands only at the start of a message.
                 if (atMessageStart) {
-                    rankSlashCommands(commands, activeToken).forEach { command ->
+                    // A skill of the same name shadows the provider's command —
+                    // the skill wins its own dispatch form.
+                    val skillNames = skills.mapTo(HashSet()) { it.name.trim().lowercase() }
+                    val visible = commands.filter {
+                        it.name.removePrefix("/").lowercase() !in skillNames &&
+                            !(it.name.removePrefix("/") == "compact" && !hasCompactableConversation)
+                    }
+                    rankSlashCommands(visible, trigger.query).forEach { command ->
                         add(
                             ComposerSuggestion(
                                 command.name, command.description,
@@ -192,22 +224,91 @@ fun ThreadComposer(
                         )
                     }
                 }
+                // `matchesSlashSkillQuery`: enabled skills whose name or
+                // descriptions carry the query, listed as `skill:<name>`.
+                val skillQuery =
+                    when {
+                        query == "skill" -> ""
+                        query.startsWith("skill:") -> query.removePrefix("skill:")
+                        else -> query
+                    }
+                skills
+                    .filter { skill ->
+                        skill.enabled &&
+                            (
+                                skillQuery.isEmpty() ||
+                                    listOfNotNull(
+                                        skill.name, skill.displayName,
+                                        skill.shortDescription, skill.description,
+                                    ).any { it.lowercase().contains(skillQuery) }
+                            )
+                    }
+                    .take(20)
+                    .forEach { skill ->
+                        add(
+                            ComposerSuggestion(
+                                "skill:${skill.name}",
+                                skill.shortDescription ?: skill.description.orEmpty(),
+                                Icons.Rounded.AutoAwesome,
+                                "\$${skill.name} ",
+                            )
+                        )
+                    }
             }
         }
-    // Path lookup is a server round trip, so it is debounced and cancels itself
-    // on the next keystroke rather than firing per character.
+
+    val skillSuggestions =
+        remember(trigger, skills) {
+            if (trigger?.kind != ComposerTriggerKind.Skill) {
+                return@remember emptyList<ComposerSuggestion>()
+            }
+            val query =
+                trigger.query.trim()
+                    .replace(Regex("""^[\p{Sc}]+"""), "")
+                    .lowercase()
+            if (query.isEmpty()) {
+                return@remember skills.take(20).map { skill -> skill.suggestion() }
+            }
+            skills
+                .mapNotNull { skill -> rankProviderSkill(skill, query) }
+                .sortedWith(compareBy({ it.score }, { it.tieBreaker }))
+                .take(20)
+                .map { it.skill.suggestion() }
+        }
+
+    // Server round trips are debounced and cancel on the next keystroke rather
+    // than firing per character.
     var pathSuggestions by remember { mutableStateOf(emptyList<String>()) }
+    var pullRequestSuggestions by
+        remember { mutableStateOf(emptyList<ComposerPullRequestCandidate>()) }
     var previewAttachment by remember { mutableStateOf<ComposerAttachment?>(null) }
-    LaunchedEffect(activeToken) {
-        if (!activeToken.startsWith("@")) {
+    LaunchedEffect(trigger) {
+        if (trigger?.kind != ComposerTriggerKind.Path) {
             pathSuggestions = emptyList()
             return@LaunchedEffect
         }
         delay(160)
         pathSuggestions =
-            runCatching { onSearchPaths(activeToken.drop(1)) }
-                .map { rankComposerPaths(it, activeToken) }
+            runCatching { onSearchPaths(trigger.query) }
+                .map { rankComposerPaths(it, trigger.query) }
                 .getOrDefault(emptyList())
+    }
+    LaunchedEffect(trigger) {
+        val search = onSearchPullRequests
+        if (trigger?.kind != ComposerTriggerKind.PullRequest || search == null) {
+            pullRequestSuggestions = emptyList()
+            return@LaunchedEffect
+        }
+        delay(180)
+        pullRequestSuggestions =
+            runCatching { search(trigger.query) }.getOrDefault(emptyList())
+    }
+    // The first composer visit for a workspace usually precedes its per-cwd
+    // provider snapshot; one refresh per draft fills the skills list, with the
+    // gateway's own cooldown covering a failure.
+    val refreshSnapshot by rememberUpdatedState(onRefreshWorkspaceSnapshot)
+    LaunchedEffect(draftKey) {
+        refreshSnapshot()
     }
     // The field owns its text so keyboard content commits (Gboard clipboard,
     // stickers, GIFs) reach it; the draft outside still wins on external change.
@@ -264,18 +365,37 @@ fun ThreadComposer(
         )
 
         SuggestionPopover(
-            commands = commandSuggestions,
+            commands = commandSuggestions + skillSuggestions,
             paths = pathSuggestions,
-            onPick = { suggestion ->
+            pullRequests = pullRequestSuggestions,
+            groupLabel =
+                when (trigger?.kind) {
+                    ComposerTriggerKind.PullRequest -> "Pull requests"
+                    ComposerTriggerKind.Skill -> "Skills"
+                    ComposerTriggerKind.Path -> "Files"
+                    else -> "Commands"
+                },
+            onPick = onPickRow@{ suggestion ->
+                val range = trigger ?: return@onPickRow
                 if (suggestion.interactionMode != null) {
                     // A mode command consumes the token rather than inserting text.
-                    onValueChange(value.dropLast(activeToken.length))
+                    onValueChange(
+                        replaceComposerTextRange(value, range.rangeStart, range.rangeEnd, ""),
+                    )
                     onInteractionMode?.invoke(suggestion.interactionMode)
                 } else {
                     onValueChange(
-                        value.dropLast(activeToken.length) + suggestion.replacement,
+                        replaceComposerTextRange(
+                            value, range.rangeStart, range.rangeEnd,
+                            suggestion.replacement,
+                        ),
                     )
                 }
+            },
+            onPickPullRequest = onPick@{ pullRequest ->
+                val range = trigger ?: return@onPick
+                if (range.kind != ComposerTriggerKind.PullRequest) return@onPick
+                onPickPullRequest(pullRequest, range.rangeStart, range.rangeEnd)
             },
         )
 
@@ -522,6 +642,57 @@ private data class ComposerSuggestion(
     val interactionMode: RuntimeMode? = null,
 )
 
+/** One ranked `skill` trigger candidate. */
+private data class RankedSkill(
+    val skill: ProviderSkill,
+    val score: Int,
+    val tieBreaker: String,
+)
+
+private fun ProviderSkill.suggestion(): ComposerSuggestion =
+    ComposerSuggestion(
+        label = displayName ?: name,
+        description = shortDescription ?: description.orEmpty(),
+        icon = Icons.Rounded.AutoAwesome,
+        replacement = "\$${name} ",
+    )
+
+/**
+ * The `skill` trigger's ranking, ported from `use-composer-command-menu`: the
+ * name wins tiers over the display label, then short and long descriptions —
+ * fuzzy subsequence only on the two name fields, never in prose.
+ */
+private fun rankProviderSkill(skill: ProviderSkill, query: String): RankedSkill? {
+    val displayLabel = (skill.displayName ?: skill.name).lowercase()
+    val score =
+        listOfNotNull(
+            scoreQueryMatch(
+                value = skill.name.lowercase(),
+                query = query,
+                exactBase = 0, prefixBase = 2, boundaryBase = 4,
+                includesBase = 6, fuzzyBase = 100,
+                boundaryMarkers = listOf("-", "_", "/"),
+            ),
+            scoreQueryMatch(
+                value = displayLabel,
+                query = query,
+                exactBase = 1, prefixBase = 3, boundaryBase = 5,
+                includesBase = 7, fuzzyBase = 110,
+            ),
+            scoreQueryMatch(
+                value = skill.shortDescription?.lowercase().orEmpty(),
+                query = query,
+                exactBase = 20, prefixBase = 22, boundaryBase = 24, includesBase = 26,
+            ),
+            scoreQueryMatch(
+                value = skill.description?.lowercase().orEmpty(),
+                query = query,
+                exactBase = 30, prefixBase = 32, boundaryBase = 34, includesBase = 36,
+            ),
+        ).minOrNull() ?: return null
+    return RankedSkill(skill, score, "$displayLabel ${skill.name}")
+}
+
 /**
  * Slash-command and path-mention discovery. Sits above the composer so the field
  * stays put while the list changes under the token.
@@ -534,7 +705,10 @@ private data class ComposerSuggestion(
 private fun SuggestionPopover(
     commands: List<ComposerSuggestion>,
     paths: List<String>,
+    pullRequests: List<ComposerPullRequestCandidate>,
+    groupLabel: String,
     onPick: (ComposerSuggestion) -> Unit,
+    onPickPullRequest: (ComposerPullRequestCandidate) -> Unit,
 ) {
     val pathSuggestions =
         paths.map { path ->
@@ -547,7 +721,9 @@ private fun SuggestionPopover(
                 replacement = serializeComposerFileLink(path) + " ",
             )
         }
-    AnimatedVisibility(commands.isNotEmpty() || pathSuggestions.isNotEmpty()) {
+    AnimatedVisibility(
+        commands.isNotEmpty() || pathSuggestions.isNotEmpty() || pullRequests.isNotEmpty()
+    ) {
         Surface(
             Modifier.fillMaxWidth(),
             shape = MaterialTheme.shapes.large,
@@ -555,7 +731,7 @@ private fun SuggestionPopover(
         ) {
             Column {
                 Text(
-                    if (commands.isNotEmpty()) "Commands" else "Files",
+                    groupLabel,
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier =
@@ -578,7 +754,17 @@ private fun SuggestionPopover(
                             description = suggestion.description,
                             icon = suggestion.icon ?: Icons.Rounded.Terminal,
                             onClick = { onPick(suggestion) },
-                            divided = index != rows.lastIndex,
+                            divided = index != rows.lastIndex + pullRequests.size,
+                        )
+                    }
+                    pullRequests.forEachIndexed { index, pullRequest ->
+                        SuggestionRow(
+                            label = "#${pullRequest.number}",
+                            description =
+                                "${if (pullRequest.isDraft) "Draft" else pullRequest.state} · ${pullRequest.title}",
+                            icon = Icons.AutoMirrored.Rounded.CallSplit,
+                            onClick = { onPickPullRequest(pullRequest) },
+                            divided = index != pullRequests.lastIndex,
                         )
                     }
                 }

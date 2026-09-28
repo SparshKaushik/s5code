@@ -41,6 +41,8 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
+import club.touchtech.s5code.kotlin.data.formatComposerContextReference
+import club.touchtech.s5code.kotlin.data.pullRequestComposerContext
 import club.touchtech.s5code.kotlin.data.resolveVisibleWorktreeSetup
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5FloatingAction
@@ -227,14 +229,34 @@ fun ThreadScreen(
         )
     }
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
+    val project =
+        remember(projects, summary.projectId, environmentId) {
+            projects.firstOrNull {
+                it.environmentId.value == environmentId && it.id == summary.projectId
+            }
+        }
     val workspaceRoot =
         remember(projects, summary.projectId, environmentId, current) {
-            current.workspaceRoot
-                ?: projects.firstOrNull {
-                    it.environmentId.value == environmentId && it.id == summary.projectId
-                }?.workspaceRoot
+            current.workspaceRoot ?: project?.workspaceRoot
+        }
+    // `/compact` only makes sense once there is a conversation to compact; a
+    // paged-out history counts the same way RN's loadEarlier check does.
+    val hasCompactableConversation =
+        remember(current.feed, current.page?.hasMore) {
+            current.feed.any { entry ->
+                entry is FeedEntry.UserMessage &&
+                    (entry.attachments.isNotEmpty() ||
+                        entry.text.trim().lowercase() != "/compact")
+            } || current.page?.hasMore == true
         }
     val effectiveSettings = draft.settings ?: current.settings
+    val skills by
+        store.workspace
+            .providerSkills(env, effectiveSettings.provider, workspaceRoot)
+            .collectAsStateWithLifecycle()
+    val pullRequestRepository =
+        project?.repositoryIdentity?.displayName
+            ?.takeIf { environment?.capabilities?.pullRequests == true }
     val working = summary.status == ThreadStatus.Working
     val plan = remember(current.feed) { activePlan(current.feed) }
     // Long runs of tool calls fold behind a disclosure row, as they do in the RN
@@ -659,12 +681,55 @@ fun ThreadScreen(
             } else {
             ThreadComposer(
                 value = draft.text,
-                commands = remember(summary.provider) { store.workspace.slashCommands(summary.provider) },
+                commands =
+                    remember(effectiveSettings.provider, workspaceRoot) {
+                        store.workspace.slashCommands(effectiveSettings.provider, workspaceRoot)
+                    },
+                skills = skills,
                 onSearchPaths = { query -> store.workspace.searchPaths(env, id, query) },
+                onSearchPullRequests =
+                    pullRequestRepository?.let { repository ->
+                        { query: String ->
+                            store.workspace.searchComposerPullRequests(
+                                env, summary.projectId, repository, query,
+                            )
+                        }
+                    },
+                onPickPullRequest = pickPullRequest@{ pullRequest, rangeStart, rangeEnd ->
+                    // RN's COMPOSER_CONTEXT_MAX_RECORDS — a draft carries at most
+                    // this many context payloads.
+                    if (draft.contextRecords.size >= 200) {
+                        store.showError(
+                            "Too many context items. Remove some context from the draft and try again.",
+                        )
+                        return@pickPullRequest
+                    }
+                    val record = pullRequestComposerContext(pullRequest)
+                    val nextText =
+                        replaceComposerTextRange(
+                            draft.text,
+                            rangeStart,
+                            rangeEnd,
+                            formatComposerContextReference(record) + " ",
+                        )
+                    store.setThreadDraftWithContext(
+                        environmentId,
+                        threadId,
+                        nextText,
+                        draft.contextRecords + record,
+                    )
+                },
+                onRefreshWorkspaceSnapshot = {
+                    store.workspace.refreshProviderWorkspaceSnapshot(
+                        env, effectiveSettings.provider, workspaceRoot,
+                    )
+                },
+                hasCompactableConversation = hasCompactableConversation,
                 onValueChange = { store.setThreadDraft(environmentId, threadId, it) },
                 onSend = {
                     val text = draft.text
                     val images = draft.attachments
+                    val contextRecords = draft.contextRecords
                     scope.launch {
                         try {
                             store.enqueueThreadMessage(
@@ -673,6 +738,7 @@ fun ThreadScreen(
                                 text = text,
                                 attachments = images,
                                 settings = effectiveSettings,
+                                contextRecords = contextRecords,
                             )
                             following = true
                         } catch (error: Exception) {

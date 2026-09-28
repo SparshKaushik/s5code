@@ -75,6 +75,7 @@ object Commands {
         attachments: List<ComposerAttachment>,
         attachmentDataUrls: Map<String, String>,
         settings: ThreadSettings,
+        contextRecords: List<JsonObject> = emptyList(),
         commandId: String = newCommandId(),
         messageId: String = UUID.randomUUID().toString(),
         createdAt: String = now(),
@@ -86,6 +87,14 @@ object Commands {
             put("messageId", messageId)
             put("role", "user")
             put("text", text)
+            if (contextRecords.isNotEmpty()) {
+                putJsonObject("context") {
+                    put("version", 1)
+                    putJsonArray("records") {
+                        contextRecords.forEach { add(it) }
+                    }
+                }
+            }
             putJsonArray("attachments") {
                 attachments.forEach { attachment ->
                     val dataUrl = attachmentDataUrls[attachment.id] ?: return@forEach
@@ -127,6 +136,7 @@ object Commands {
         branch: String?,
         newWorktree: Boolean,
         worktreePath: String? = null,
+        contextRecords: List<JsonObject> = emptyList(),
         commandId: String = newCommandId(),
         messageId: String = UUID.randomUUID().toString(),
         createdAt: String = now(),
@@ -138,6 +148,14 @@ object Commands {
             put("messageId", messageId)
             put("role", "user")
             put("text", text)
+            if (contextRecords.isNotEmpty()) {
+                putJsonObject("context") {
+                    put("version", 1)
+                    putJsonArray("records") {
+                        contextRecords.forEach { add(it) }
+                    }
+                }
+            }
             putJsonArray("attachments") {
                 attachments.forEach { attachment ->
                     val dataUrl = attachmentDataUrls[attachment.id] ?: return@forEach

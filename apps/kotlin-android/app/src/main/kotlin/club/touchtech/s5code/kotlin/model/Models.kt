@@ -104,6 +104,8 @@ data class EnvironmentCapabilities(
     val threadPinReorder: Boolean = false,
     val threadActiveReorder: Boolean = false,
     val threadTitleRegeneration: Boolean = false,
+    /** `pullRequests.*` methods exist — the `#` composer mention is offered. */
+    val pullRequests: Boolean = false,
     /** `attachments.createUploadUrl`/`attachments.delete` exist on this server. */
     val attachmentUploads: Boolean = false,
     /** Question answers may carry uploaded attachments. */
@@ -1048,6 +1050,63 @@ data class ModelFavorite(val instanceId: String, val model: String)
 
 /** One `/command` a provider advertises, as the composer's popover renders it. */
 data class SlashCommand(val name: String, val description: String)
+
+/**
+ * `ServerProviderSkill` distilled for the composer: a `$`-triggered or
+ * `skill:`-slash pick inserts the skill's name as a prompt.
+ */
+data class ProviderSkill(
+    val name: String,
+    val description: String?,
+    val shortDescription: String?,
+    val displayName: String?,
+    val enabled: Boolean,
+    /**
+     * `false` reserves the skill for the agent itself (Claude Code's
+     * `user-invocable: false`), so the composer never offers it.
+     */
+    val userInvocable: Boolean?,
+)
+
+/** One `#`-mention search result, distilled from the pull-request listing row. */
+data class ComposerPullRequestCandidate(
+    val projectId: String,
+    val repository: String,
+    val number: Int,
+    val title: String,
+    val url: String,
+    val headBranch: String,
+    val baseBranch: String,
+    /** `open` | `closed` | `merged`. */
+    val state: String,
+    val isDraft: Boolean,
+    val updatedAt: String,
+)
+
+/**
+ * One composer context record, kept as a serializable value so a queued message
+ * carries its records through process death. Today only the review-comment
+ * shape exists — what `pullRequestComposerContext` builds for a `#` pick — and
+ * [kind]/[contextId] are what the `t3-context://v1/` link resolves against.
+ */
+@kotlinx.serialization.Serializable
+data class ComposerContextRecord(
+    val kind: String,
+    val contextId: String,
+    val label: String,
+    val sectionId: String,
+    val sectionTitle: String,
+    val filePath: String,
+    val rangeLabel: String,
+    val text: String,
+    val pullRequestNumber: Int,
+    val pullRequestTitle: String,
+    val pullRequestUrl: String,
+    val pullRequestHeadBranch: String,
+    val pullRequestBaseBranch: String,
+    val pullRequestState: String,
+    val pullRequestIsDraft: Boolean,
+)
 
 
 /* ── Home list layout ────────────────────────────────────────────────── */
