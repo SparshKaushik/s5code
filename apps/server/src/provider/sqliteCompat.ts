@@ -17,7 +17,7 @@ interface DatabaseSyncOptions {
   readonly open?: boolean | undefined;
 }
 
-class StatementSyncShim {
+export class StatementSyncShim {
   private readonly query: any;
   private returnArrays = false;
 
@@ -29,6 +29,30 @@ class StatementSyncShim {
     if (typeof this.query.safeIntegers === "function") {
       this.query.safeIntegers(Boolean(value));
     }
+  }
+
+  /**
+   * Mirrors `node:sqlite`'s `StatementSync.columns()`. The Effect SQL client
+   * uses the length to decide between `.all()` (row-returning) and `.run()`
+   * (writes), so an absent method breaks every statement on Bun. Bun exposes
+   * the result column names as `Query.columnNames`; the richer per-column
+   * metadata Node reports is not available, so those fields are null.
+   */
+  columns(): ReadonlyArray<{
+    column: string;
+    database: string | null;
+    name: string;
+    table: string | null;
+    type: string | null;
+  }> {
+    const names: ReadonlyArray<string> = this.query.columnNames ?? [];
+    return names.map((name) => ({
+      column: name,
+      database: null,
+      name,
+      table: null,
+      type: null,
+    }));
   }
 
   setReturnArrays(value: boolean): void {
