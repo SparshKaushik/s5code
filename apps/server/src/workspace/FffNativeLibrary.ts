@@ -73,7 +73,7 @@ function embeddedFffLibrary(): FffLibraryAsset | undefined {
   const files =
     typeof Bun === "undefined"
       ? undefined
-      : (Bun.embeddedFiles as ReadonlyArray<Blob> as ReadonlyArray<FffLibraryAsset>);
+      : (Bun.embeddedFiles as unknown as ReadonlyArray<FffLibraryAsset>);
   return files?.find((file) => isFffLibraryAsset(file.name));
 }
 
