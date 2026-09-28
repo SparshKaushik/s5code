@@ -44,6 +44,7 @@ import club.touchtech.s5code.kotlin.app.ThreadDraft
 import club.touchtech.s5code.kotlin.data.clampFileAttachmentUploadBytes
 import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
 import club.touchtech.s5code.kotlin.data.formatComposerContextReference
+import club.touchtech.s5code.kotlin.data.isUsageLimitsCommand
 import club.touchtech.s5code.kotlin.data.persistPastedTextAttachment
 import club.touchtech.s5code.kotlin.data.pullRequestComposerContext
 import club.touchtech.s5code.kotlin.data.resolveVisibleWorktreeSetup
@@ -68,6 +69,7 @@ import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.connections.waitPillLabel
 import club.touchtech.s5code.kotlin.feature.settings.TaskSettingsSheet
+import club.touchtech.s5code.kotlin.feature.usage.ComposerUsageLimitsCard
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.FeedEntry
@@ -265,6 +267,27 @@ fun ThreadScreen(
             ?.takeIf { it.attachmentUploads }
             ?.fileAttachments?.maxUploadBytes
             ?.let { clampFileAttachmentUploadBytes(it) }
+    // The provider's own "this agent is unsupported/broken" advisory — a line
+    // above the composer, as RN renders it.
+    val providerStatuses by
+        store.workspace.providerStatuses(env).collectAsStateWithLifecycle()
+    // Limits data for this driver is what makes `/usage-limits` T3's command.
+    val offersUsageLimits by
+        store.workspace
+            .usageLimitsOffered(env, effectiveSettings.provider.driver)
+            .collectAsStateWithLifecycle()
+    var usageLimitsOpen by remember(threadId) { mutableStateOf(false) }
+    val usageLimitsView by store.workspace.usageLimits.collectAsStateWithLifecycle()
+    val providerAdvisory =
+        remember(providerStatuses, effectiveSettings.provider) {
+            providerStatuses
+                .firstOrNull { it.instanceId == effectiveSettings.provider.instanceId }
+                ?.takeIf {
+                    it.compatibilityStatus == "unsupported" ||
+                        it.compatibilityStatus == "broken"
+                }
+                ?.compatibilityMessage
+        }
     val pullRequestRepository =
         project?.repositoryIdentity?.displayName
             ?.takeIf { environment?.capabilities?.pullRequests == true }
@@ -690,6 +713,48 @@ fun ThreadScreen(
                 }
                 }
             } else {
+            if (usageLimitsOpen && offersUsageLimits) {
+                // Docked above the composer like RN's ComposerUsageLimits —
+                // opaque, one size down from the Limits tab's cards.
+                ComposerUsageLimitsCard(
+                    view = usageLimitsView,
+                    driver = effectiveSettings.provider.driver,
+                    now = System.currentTimeMillis(),
+                    onRedeemCredit = { account ->
+                        val redeem = account.redeem ?: return@ComposerUsageLimitsCard
+                        scope.launch {
+                            runCatching {
+                                    store.workspace.consumeResetCredit(
+                                        redeem.environmentId, redeem,
+                                    )
+                                }
+                                .onSuccess { result ->
+                                    store.showError(
+                                        when (result.outcome) {
+                                            "reset" -> "Usage limits reset."
+                                            "alreadyRedeemed" -> "That credit was already used."
+                                            "noCredit" -> "No reset credit is available."
+                                            "nothingToReset" -> "There is nothing to reset."
+                                            else -> result.warning ?: "Reset credit failed."
+                                        }
+                                    )
+                                }
+                                .onFailure {
+                                    store.showError(
+                                        it.message ?: "The reset credit could not be used.",
+                                    )
+                                }
+                        }
+                    },
+                    onClose = { usageLimitsOpen = false },
+                    modifier =
+                        Modifier.fillMaxWidth()
+                            .padding(
+                                horizontal = S5Theme.spacing.gutter,
+                                vertical = S5Theme.spacing.tiny,
+                            ),
+                )
+            }
             ThreadComposer(
                 value = draft.text,
                 commands =
@@ -765,11 +830,25 @@ fun ThreadScreen(
                     }
                 },
                 hasCompactableConversation = hasCompactableConversation,
+                providerAdvisory = providerAdvisory,
+                offersUsageLimits = offersUsageLimits,
+                onUsageLimits = { usageLimitsOpen = true },
                 onValueChange = { store.setThreadDraft(environmentId, threadId, it) },
                 onSend = {
                     val text = draft.text
                     val images = draft.attachments
                     val contextRecords = draft.contextRecords
+                    // The command typed in full, no attachments: T3 answers it
+                    // locally rather than spending a turn.
+                    if (
+                        offersUsageLimits &&
+                        isUsageLimitsCommand(text) &&
+                        images.isEmpty()
+                    ) {
+                        store.setThreadDraft(environmentId, threadId, "")
+                        usageLimitsOpen = true
+                        return@ThreadComposer
+                    }
                     scope.launch {
                         try {
                             store.enqueueThreadMessage(

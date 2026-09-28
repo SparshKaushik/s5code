@@ -977,10 +977,24 @@ data class ProviderStatus(
     val canUpdate: Boolean,
     /** unknown | supported | graceful | unsupported | broken, of the latest release. */
     val latestCompatibility: String?,
+    /** The advisory's own verdict on the installed provider. */
+    val compatibilityStatus: String?,
     val compatibilityMessage: String?,
     /** idle | queued | running | succeeded | failed | unchanged, or null. */
     val updateStatus: String?,
     val updateMessage: String?,
+    /** The signed-in account's address, when the provider reports one. */
+    val authEmail: String? = null,
+    /** The account's plan label (e.g. "ChatGPT Pro 20x Subscription"). */
+    val authLabel: String? = null,
+    /** The instance's brand tint for limit bars. */
+    val accentColor: String? = null,
+    /**
+     * Subscription quota the provider knows, or null for providers without
+     * one. `unavailableReason` separates "can never report" (API key) from a
+     * probe that failed this once.
+     */
+    val usageLimits: ProviderUsageLimits? = null,
 ) {
     /**
      * `canUpdateEnvironmentProvider` in `environment-maintenance.ts`: installed,
@@ -1050,6 +1064,132 @@ data class ModelFavorite(val instanceId: String, val model: String)
 
 /** One `/command` a provider advertises, as the composer's popover renders it. */
 data class SlashCommand(val name: String, val description: String)
+
+/* ── Usage limits ─────────────────────────────────────────────────────── */
+
+/** `ServerProviderUsageWindow`: one rolling quota window (session, weekly…). */
+data class UsageLimitWindow(
+    val id: String,
+    /** session | weekly | monthly | other */
+    val kind: String,
+    val label: String,
+    val usedPercent: Double,
+    val resetsAtMillis: Long?,
+    val windowDurationMins: Long?,
+)
+
+/** `ServerProviderResetCredits`: banked clears for a rate-limited account. */
+data class UsageResetCredits(
+    val availableCount: Int,
+    val nextExpiresAtMillis: Long?,
+    /** Pins redemption to this exact credit across clients. */
+    val nextCreditId: String?,
+)
+
+/** `ServerProviderUsageLimits` as the view needs it. */
+data class ProviderUsageLimits(
+    val checkedAtMillis: Long?,
+    val windows: List<UsageLimitWindow>,
+    val resetCredits: UsageResetCredits?,
+    /** unsupported | probeFailed */
+    val unavailableReason: String?,
+    val unavailableMessage: String?,
+)
+
+/** `UsageLimitSourceAccount`: one account a usage-limit hub reports on. */
+data class UsageLimitSourceAccount(
+    val id: String,
+    val driver: String,
+    val email: String?,
+    val plan: String?,
+    val limits: ProviderUsageLimits,
+)
+
+/** `UsageLimitSourceSnapshot`: one configured source's published read. */
+data class UsageLimitSource(
+    val id: String,
+    val label: String,
+    val accounts: List<UsageLimitSourceAccount>,
+    val error: String?,
+)
+
+/**
+ * Where a reset credit redeems: natively on the instance, or through the hub
+ * that reported it (`sourceId`/`accountId`/`creditId`). The hub wins when both
+ * paths exist because only it clears the routing cooldown it holds.
+ */
+sealed interface ResetCreditTarget {
+    val environmentId: EnvironmentId
+
+    data class Instance(override val environmentId: EnvironmentId, val instanceId: String) :
+        ResetCreditTarget
+
+    data class Hub(
+        override val environmentId: EnvironmentId,
+        val sourceId: String,
+        val accountId: String,
+        val creditId: String,
+    ) : ResetCreditTarget
+}
+
+/** One subscription account across environments, as `collectLimitAccounts` pools it. */
+data class LimitAccount(
+    /** Stable identity for merging and ordering. */
+    val key: String,
+    val driver: String,
+    val displayName: String?,
+    val email: String?,
+    val plan: String?,
+    val accentColor: String?,
+    /** Environment labels this account is signed in on; empty for hub-only. */
+    val environments: List<String>,
+    /** The hub that reported it, when no environment has it natively. */
+    val sourceLabel: String?,
+    val redeem: ResetCreditTarget?,
+    val limits: ProviderUsageLimits,
+)
+
+data class LimitPoolReset(
+    val accountKey: String,
+    val atMillis: Long,
+    /** Points of the pool the reset restores: the member's used share over the member count. */
+    val restoresPercent: Int,
+)
+
+/** One window id pooled across every account that reports it. */
+data class LimitPoolWindow(
+    val id: String,
+    val kind: String,
+    val label: String,
+    val members: List<Pair<LimitAccount, UsageLimitWindow>>,
+    /** Account positions across rows; a null window leaves a gap. */
+    val columns: List<Pair<LimitAccount, UsageLimitWindow?>>,
+    val remainingPercent: Int,
+    val usedPercent: Int,
+    /** ahead | on | under, or null without a clock to judge against. */
+    val pace: String?,
+    val resets: List<LimitPoolReset>,
+)
+
+/** Accounts grouped by driver with their windows pooled by kind and id. */
+data class LimitPool(
+    val driver: String,
+    val accounts: List<LimitAccount>,
+    val windows: List<LimitPoolWindow>,
+)
+
+/** Everything the Limits tab renders: pools plus the notices bars cannot draw. */
+data class UsageLimitsView(
+    val pools: List<LimitPool>,
+    val notices: List<String>,
+)
+
+/** `ProviderConsumeResetCreditResult`: the redeem outcome plus a soft warning. */
+data class ConsumeResetCreditResult(
+    /** reset | nothingToReset | noCredit | alreadyRedeemed */
+    val outcome: String,
+    val warning: String?,
+)
 
 /**
  * `ServerProviderSkill` distilled for the composer: a `$`-triggered or

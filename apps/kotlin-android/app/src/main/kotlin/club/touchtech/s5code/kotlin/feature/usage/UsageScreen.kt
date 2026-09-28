@@ -15,7 +15,9 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -41,8 +43,11 @@ import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageWindow
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import kotlinx.coroutines.launch
 
 /** Cost/token mode for the usage view. */
 private enum class UsageMode(val label: String) {
@@ -50,9 +55,16 @@ private enum class UsageMode(val label: String) {
     Tokens("Tokens"),
 }
 
+/** Activity | Limits — the two halves of the Usage screen, matching RN's tabs. */
+private enum class UsageTab(val label: String) {
+    Activity("Activity"),
+    Limits("Limits"),
+}
+
 /** Usage totals, a daily bar chart, and per-provider/model breakdown. */
 @Composable
 fun UsageScreen(store: AppStore, onBack: () -> Unit) {
+    var tab by remember { mutableStateOf(UsageTab.Activity) }
     var window by remember { mutableStateOf(UsageWindow.Month) }
     var mode by remember { mutableStateOf(UsageMode.Cost) }
     // Usage is read per environment and summed, so it is a request rather than a
@@ -60,6 +72,22 @@ fun UsageScreen(store: AppStore, onBack: () -> Unit) {
     // new request, which is why it keys the read.
     val (state, retry) = rememberRetryableRemote(window) { store.workspace.usage(window) }
     val remote = state.value
+    val limitsView by store.workspace.usageLimits.collectAsStateWithLifecycle()
+    val connectedEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    // The Limits tab probes each connected environment on entry, the way
+    // `useRefreshLimits` refreshes on focus — a stale bar is better than an
+    // empty one, so this only adds data.
+    LaunchedEffect(tab, connectedEnvironments.size) {
+        if (tab == UsageTab.Limits) {
+            store.workspace.refreshUsageLimits(
+                connectedEnvironments
+                    .filter { it.state == ConnectionState.Connected }
+                    .map { it.id },
+                automatic = true,
+            )
+        }
+    }
 
     S5Screen(
         title = "Usage",
@@ -68,6 +96,58 @@ fun UsageScreen(store: AppStore, onBack: () -> Unit) {
         onBack = onBack,
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
+            Box(
+                Modifier.padding(
+                    horizontal = S5Theme.spacing.gutter,
+                    vertical = S5Theme.spacing.small,
+                )
+            ) {
+                S5ConnectedButtonGroup(
+                    options = UsageTab.entries,
+                    selected = tab,
+                    onSelect = { tab = it },
+                    label = { it.label },
+                )
+            }
+            if (tab == UsageTab.Limits) {
+                Column(
+                    Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                        .padding(horizontal = S5Theme.spacing.gutter),
+                ) {
+                    UsageLimitsContent(
+                        view = limitsView,
+                        now = System.currentTimeMillis(),
+                        onRedeemCredit = { account ->
+                            val redeem = account.redeem ?: return@UsageLimitsContent
+                            scope.launch {
+                                runCatching {
+                                        store.workspace.consumeResetCredit(
+                                            redeem.environmentId,
+                                            redeem,
+                                        )
+                                    }
+                                    .onSuccess { result ->
+                                        store.showError(
+                                            when (result.outcome) {
+                                                "reset" -> "Usage limits reset."
+                                                "alreadyRedeemed" -> "That credit was already used."
+                                                "noCredit" -> "No reset credit is available."
+                                                "nothingToReset" -> "There is nothing to reset."
+                                                else -> result.warning ?: "Reset credit failed."
+                                            }
+                                        )
+                                    }
+                                    .onFailure {
+                                        store.showError(
+                                            it.message ?: "The reset credit could not be used.",
+                                        )
+                                    }
+                            }
+                        },
+                    )
+                }
+                return@Column
+            }
             // Outside the loading branch on purpose: the window control must stay put
             // while the new window loads, or every switch collapses the screen to a
             // spinner and the user loses the row they were aiming at.

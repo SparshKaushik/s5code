@@ -6,6 +6,7 @@ import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.ConnectionState
+import club.touchtech.s5code.kotlin.model.ConsumeResetCreditResult
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentCapabilities
 import club.touchtech.s5code.kotlin.model.EnvironmentId
@@ -18,6 +19,7 @@ import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.ProviderSkill
 import club.touchtech.s5code.kotlin.model.ProviderStatus
+import club.touchtech.s5code.kotlin.model.ResetCreditTarget
 import club.touchtech.s5code.kotlin.model.PullRequestRef
 import club.touchtech.s5code.kotlin.model.PullRequestState
 import club.touchtech.s5code.kotlin.model.ReviewFile
@@ -36,6 +38,7 @@ import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageDay
+import club.touchtech.s5code.kotlin.model.UsageLimitsView
 import club.touchtech.s5code.kotlin.model.UsageModelBreakdown
 import club.touchtech.s5code.kotlin.model.UsageProviderBreakdown
 import club.touchtech.s5code.kotlin.model.UsageTotals
@@ -61,6 +64,7 @@ import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseResultDto
 import club.touchtech.s5code.kotlin.transport.wire.GitActionProgressEventDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectListEntriesResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectReadFileResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ConsumeResetCreditResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ReviewDiffPreviewResultDto
@@ -96,7 +100,9 @@ import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
@@ -106,6 +112,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -471,6 +478,7 @@ class LiveWorkspaceGateway(
         store.environments
             .onEach { reconcile(it) }
             .launchIn(scope)
+        startUsageLimitsCollection()
     }
 
     /* ── Session lifecycle ───────────────────────────────────────────── */
@@ -1057,6 +1065,154 @@ class LiveWorkspaceGateway(
         return result.targetVersion
     }
 
+    /* ── Usage limits ────────────────────────────────────────────────── */
+
+    /**
+     * Presentations combine over the session map, each session's providers and
+     * sources, and the saved labels. A source update alone refreshes the bars;
+     * so does a provider re-probe.
+     */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val usageLimitPresentations: Flow<List<LimitEnvironmentPresentation>> =
+        combine(sessions, store.environments) { entries, saved ->
+            val labelById = saved.associateBy({ it.environmentId }, { it.label })
+            entries.mapNotNull { (environmentId, connected) ->
+                connected.session to labelById[environmentId].orEmpty()
+            }
+        }.flatMapLatest { sessionsAndLabels ->
+            if (sessionsAndLabels.isEmpty()) {
+                return@flatMapLatest flowOf(emptyList())
+            }
+            combine(
+                sessionsAndLabels.map { (session, label) ->
+                    combine(session.providers, session.usageLimitSources) { providers, sources ->
+                        Triple(session, providers, sources) to label
+                    }
+                },
+            ) { per ->
+                per.map { (sessionTriple, label) ->
+                    val (session, providers, sources) = sessionTriple
+                    val environmentId = EnvironmentId(session.environmentId)
+                    LimitEnvironmentPresentation(
+                        environmentId = environmentId,
+                        label = label.ifBlank { environmentId.value },
+                        providers = providers,
+                        sources = sources,
+                    )
+                }
+            }
+        }
+
+    private val _usageLimits =
+        MutableStateFlow(UsageLimitsView(pools = emptyList(), notices = emptyList()))
+    override val usageLimits: StateFlow<UsageLimitsView> = _usageLimits.asStateFlow()
+
+    private fun startUsageLimitsCollection() {
+        scope.launch {
+            usageLimitPresentations.collect { presentations ->
+                val now = System.currentTimeMillis()
+                _usageLimits.value =
+                    UsageLimitsView(
+                        pools = collectLimitPools(collectLimitAccounts(presentations), now),
+                        notices = collectLimitNotices(presentations),
+                    )
+            }
+        }
+    }
+
+    private val usageLimitsOfferedFlows = mutableMapOf<String, StateFlow<Boolean>>()
+
+    override fun usageLimitsOffered(
+        environmentId: EnvironmentId,
+        driver: String,
+    ): StateFlow<Boolean> {
+        val key = "${environmentId.value}/$driver"
+        return usageLimitsOfferedFlows.getOrPut(key) {
+            val session = sessions.value[environmentId.value]?.session
+            if (session == null) {
+                MutableStateFlow(false)
+            } else {
+                combine(session.providers, session.usageLimitSources) { providers, sources ->
+                    hasProviderUsageLimits(driver, providers, sources)
+                }.stateIn(scope, SharingStarted.Eagerly, false)
+            }
+        }
+    }
+
+    /**
+     * RN's `refreshUsageLimits`: dedupes an in-flight probe per environment,
+     * throttles automatic calls to every five minutes, and lets an explicit
+     * retry run right after a pending probe finishes.
+     */
+    private val usageLimitsRefreshes = mutableMapOf<String, Job>()
+    private val usageLimitsRefreshAfter = mutableMapOf<String, Long>()
+
+    override suspend fun refreshUsageLimits(
+        environmentIds: List<EnvironmentId>,
+        automatic: Boolean,
+        afterPending: Boolean,
+    ) {
+        coroutineScope {
+            environmentIds.map { environmentId ->
+                async {
+                    val key = environmentId.value
+                    // Completed jobs linger in the map until their own frame
+                    // removes them; only an active one counts as in-flight.
+                    val pending = usageLimitsRefreshes[key]?.takeIf { it.isActive }
+                    if (pending != null) {
+                        if (afterPending) {
+                            runCatching { pending.join() }
+                            refreshUsageLimits(listOf(environmentId), automatic = false, afterPending = true)
+                        } else if (!automatic) {
+                            runCatching { pending.join() }
+                        }
+                        // An automatic call while one is in flight does not repeat it.
+                        return@async
+                    }
+                    if (automatic &&
+                        System.currentTimeMillis() < (usageLimitsRefreshAfter[key] ?: 0L)
+                    ) {
+                        return@async
+                    }
+                    val job =
+                        launch {
+                            runCatching {
+                                sessionFor(environmentId).refreshProviders()
+                            }
+                        }
+                    usageLimitsRefreshes[key] = job
+                    job.join()
+                    usageLimitsRefreshes.remove(key)
+                    usageLimitsRefreshAfter[key] = System.currentTimeMillis() + 5 * 60_000L
+                }
+            }.awaitAll()
+        }
+    }
+
+    override suspend fun consumeResetCredit(
+        environmentId: EnvironmentId,
+        target: ResetCreditTarget,
+    ): ConsumeResetCreditResult {
+        val payload =
+            buildJsonObject {
+                when (target) {
+                    is ResetCreditTarget.Instance -> put("instanceId", target.instanceId)
+                    is ResetCreditTarget.Hub -> {
+                        put("sourceId", target.sourceId)
+                        put("accountId", target.accountId)
+                        put("creditId", target.creditId)
+                    }
+                }
+            }
+        val result =
+            sessionFor(environmentId).request(
+                WsMethods.ProviderConsumeResetCredit,
+                payload,
+                ConsumeResetCreditResultDto.serializer(),
+            )
+        return ConsumeResetCreditResult(outcome = result.outcome, warning = result.warning)
+    }
+
     override suspend fun updateProvider(
         environmentId: EnvironmentId,
         driver: String,
@@ -1089,6 +1245,7 @@ class LiveWorkspaceGateway(
             latestVersion = dto.versionAdvisory?.latestVersion,
             canUpdate = dto.versionAdvisory?.canUpdate == true,
             latestCompatibility = dto.compatibilityAdvisory?.latestVersionStatus,
+            compatibilityStatus = dto.compatibilityAdvisory?.status,
             compatibilityMessage = dto.compatibilityAdvisory?.message,
             updateStatus = dto.updateState?.status,
             updateMessage = dto.updateState?.message,

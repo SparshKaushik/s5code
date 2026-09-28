@@ -568,7 +568,17 @@ class EnvironmentSession(
             scope.launch {
                 try {
                     opened
-                        .stream(WsMethods.SubscribeServerConfig, JsonObject(emptyMap()))
+                        .stream(
+                            WsMethods.SubscribeServerConfig,
+                            buildJsonObject {
+                                // Opt-ins the server gates new events and
+                                // command injection on: sources ride their own
+                                // event (never the snapshot), and /usage-limits
+                                // is answered client-side from the same data.
+                                put("usageLimitSources", true)
+                                put("usageLimitsCommand", true)
+                            },
+                        )
                         .collect { element ->
                             val event =
                                 TransportJson.decodeFromJsonElement(
@@ -598,6 +608,11 @@ class EnvironmentSession(
                                 }
                                 event.type == "providerStatuses" -> {
                                     event.payload?.providers?.let { _providers.value = it }
+                                }
+                                event.type == "usageLimitSourcesUpdated" -> {
+                                    event.payload?.sources?.let {
+                                        _usageLimitSources.value = it
+                                    }
                                 }
                                 else -> Unit
                             }
@@ -683,6 +698,19 @@ class EnvironmentSession(
     /** The environment's configured provider instances, empty while disconnected. */
     val providers: StateFlow<List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>> =
         _providers.asStateFlow()
+
+    /**
+     * Configured `usageLimitSources` as the hub reports them. Event-only on the
+     * wire — the config snapshot never carries sources — so this stays empty
+     * until the first `usageLimitSourcesUpdated` frame.
+     */
+    private val _usageLimitSources =
+        MutableStateFlow<List<club.touchtech.s5code.kotlin.transport.wire.UsageLimitSourceDto>>(
+            emptyList(),
+        )
+    val usageLimitSources:
+        StateFlow<List<club.touchtech.s5code.kotlin.transport.wire.UsageLimitSourceDto>> =
+        _usageLimitSources.asStateFlow()
 
     /**
      * Re-runs provider discovery on the server, including a fresh model list.

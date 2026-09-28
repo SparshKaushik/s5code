@@ -28,7 +28,10 @@ import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
+import club.touchtech.s5code.kotlin.model.ConsumeResetCreditResult
+import club.touchtech.s5code.kotlin.model.ResetCreditTarget
 import club.touchtech.s5code.kotlin.model.Usage
+import club.touchtech.s5code.kotlin.model.UsageLimitsView
 import club.touchtech.s5code.kotlin.model.UsageWindow
 import club.touchtech.s5code.kotlin.model.WorkspaceAsset
 import club.touchtech.s5code.kotlin.model.WorktreeSetupSnapshot
@@ -491,6 +494,38 @@ interface WorkspaceGateway {
      * screen shows a loading state for it.
      */
     suspend fun usage(window: UsageWindow = UsageWindow.Month): Usage
+
+    /**
+     * The pooled subscription-quota view (`collectLimitPools` over every
+     * connected environment's providers and usage-limit sources). Powers the
+     * Limits tab and the composer's `/usage-limits` answer.
+     */
+    val usageLimits: StateFlow<UsageLimitsView>
+
+    /**
+     * Whether Limits has anything to say about [driver] on [environmentId] —
+     * the `/usage-limits` menu row's gate. Reactive because provider updates
+     * and source reads land over the streams.
+     */
+    fun usageLimitsOffered(environmentId: EnvironmentId, driver: String): StateFlow<Boolean>
+
+    /**
+     * `useRefreshLimits`: re-probe every connected environment's limits, once
+     * at a time per environment, with a five-minute cooldown for automatic
+     * calls. [afterPending] is the enable flow's "probe again once the first
+     * answers" pass.
+     */
+    suspend fun refreshUsageLimits(
+        environmentIds: List<EnvironmentId>,
+        automatic: Boolean = false,
+        afterPending: Boolean = false,
+    )
+
+    /** `provider.consumeResetCredit` — native (`instanceId`) or hub (`sourceId`) path. */
+    suspend fun consumeResetCredit(
+        environmentId: EnvironmentId,
+        target: ResetCreditTarget,
+    ): ConsumeResetCreditResult
 
     /**
      * `sourceControl.lookupRepository` — validates one `owner/name` reference on

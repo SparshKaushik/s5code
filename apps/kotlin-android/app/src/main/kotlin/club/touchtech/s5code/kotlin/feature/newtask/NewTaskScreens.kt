@@ -57,6 +57,7 @@ import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Remote
 import club.touchtech.s5code.kotlin.data.clampFileAttachmentUploadBytes
 import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
+import club.touchtech.s5code.kotlin.data.isUsageLimitsCommand
 import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
 import club.touchtech.s5code.kotlin.data.persistPastedTextAttachment
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
@@ -434,8 +435,25 @@ fun NewTaskDraftScreen(
     // Switching away is only a choice while a second enabled environment exists.
     val enabledEnvironmentCount = remember(environments) { environments.count { it.isEnabled } }
     val canStart = draft.prompt.isNotBlank() && !creating && environment?.isEnabled != false
+    // T3 owns /usage-limits only where Limits has data; a new task would send
+    // it to the agent, so the prompt is refused instead — as RN does.
+    val offersUsageLimits by
+        store.workspace
+            .usageLimitsOffered(draft.environmentId, draft.settings.provider.driver)
+            .collectAsStateWithLifecycle()
 
-    val start: () -> Unit = {
+    val start: () -> Unit = start@{
+        if (
+            canStart &&
+            offersUsageLimits &&
+            isUsageLimitsCommand(draft.prompt) &&
+            draft.attachments.isEmpty()
+        ) {
+            store.showError(
+                "Send /usage-limits inside a thread, or open Settings → Usage → Limits.",
+            )
+            return@start
+        }
         if (canStart) {
             creating = true
             scope.launch {

@@ -2,7 +2,6 @@ package club.touchtech.s5code.kotlin.transport.wire
 
 import club.touchtech.s5code.kotlin.transport.EnvironmentPlatformDto
 import kotlinx.serialization.Serializable
-import kotlinx.serialization.json.JsonElement
 import kotlinx.serialization.json.JsonPrimitive
 
 /**
@@ -126,6 +125,8 @@ data class ServerProviderDto(
     val instanceId: String = "",
     val driver: String = "",
     val displayName: String? = null,
+    /** The instance's brand tint, for usage/limit bar colors. */
+    val accentColor: String? = null,
     val badgeLabel: String? = null,
     val enabled: Boolean = false,
     val installed: Boolean = false,
@@ -148,7 +149,7 @@ data class ServerProviderDto(
     /** Per-directory snapshots; a cwd match replaces the provider-level lists. */
     val workspaceSnapshots: List<ServerProviderWorkspaceSnapshotDto> = emptyList(),
     /** Present when this provider reports subscription usage to the limits view. */
-    val usageLimits: JsonElement? = null,
+    val usageLimits: UsageLimitsDto? = null,
     /** Human-readable provider problem, when the server has one to report. */
     val message: String? = null,
     val versionAdvisory: ProviderVersionAdvisoryDto? = null,
@@ -273,6 +274,8 @@ data class ServerConfigStreamEventDto(
 data class ServerConfigStreamPayloadDto(
     /** `providerStatuses` payload — the full provider list, not a delta. */
     val providers: List<ServerProviderDto>? = null,
+    /** `usageLimitSourcesUpdated` payload — the full configured source set. */
+    val sources: List<UsageLimitSourceDto>? = null,
 )
 
 @Serializable

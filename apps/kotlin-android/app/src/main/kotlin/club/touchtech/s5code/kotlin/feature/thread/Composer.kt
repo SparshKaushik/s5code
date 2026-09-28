@@ -148,6 +148,19 @@ fun ThreadComposer(
      * row on an empty conversation.
      */
     hasCompactableConversation: Boolean = true,
+    /**
+     * The provider's `compatibilityAdvisory` line when it says the installed
+     * agent is unsupported or broken — shown above the field, matching RN's
+     * inline notice.
+     */
+    providerAdvisory: String? = null,
+    /**
+     * Limits has data for this provider (`hasProviderUsageLimits`), so T3 owns
+     * the `/usage-limits` command: picking it — or sending the bare command
+     * with no attachments — opens the limits card instead of a turn.
+     */
+    offersUsageLimits: Boolean = false,
+    onUsageLimits: () -> Unit = {},
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     onCancel: () -> Unit,
@@ -222,14 +235,21 @@ fun ThreadComposer(
                     // the skill wins its own dispatch form.
                     val skillNames = skills.mapTo(HashSet()) { it.name.trim().lowercase() }
                     val visible = commands.filter {
-                        it.name.removePrefix("/").lowercase() !in skillNames &&
-                            !(it.name.removePrefix("/") == "compact" && !hasCompactableConversation)
+                        val name = it.name.removePrefix("/").lowercase()
+                        name !in skillNames &&
+                            !(name == "compact" && !hasCompactableConversation)
                     }
                     rankSlashCommands(visible, trigger.query).forEach { command ->
                         add(
                             ComposerSuggestion(
                                 command.name, command.description,
                                 Icons.Rounded.Terminal, "${command.name} ",
+                                // The server injects its usage-limits row only
+                                // for clients answering it; intercepting it here
+                                // is what makes that answer local.
+                                opensUsageLimits =
+                                    offersUsageLimits &&
+                                        command.name.removePrefix("/") == "usage-limits",
                             )
                         )
                     }
@@ -387,6 +407,16 @@ fun ThreadComposer(
                 },
             onPick = onPickRow@{ suggestion ->
                 val range = trigger ?: return@onPickRow
+                if (suggestion.opensUsageLimits && attachments.isEmpty()) {
+                    // The row belongs to T3: the token leaves the draft and the
+                    // card opens without a turn. With attachments the prompt is
+                    // real input, so the row inserts like any other command.
+                    onValueChange(
+                        replaceComposerTextRange(value, range.rangeStart, range.rangeEnd, ""),
+                    )
+                    onUsageLimits()
+                    return@onPickRow
+                }
                 if (suggestion.interactionMode != null) {
                     // A mode command consumes the token rather than inserting text.
                     onValueChange(
@@ -408,6 +438,19 @@ fun ThreadComposer(
                 onPickPullRequest(pullRequest, range.rangeStart, range.rangeEnd)
             },
         )
+
+        if (providerAdvisory != null) {
+            Text(
+                providerAdvisory,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurface,
+                modifier =
+                    Modifier.padding(
+                        horizontal = S5Theme.spacing.medium,
+                        vertical = S5Theme.spacing.tiny,
+                    ),
+            )
+        }
 
         S5ComposerSurface(cornerRadius = radius) {
             // The toolbar appearing changes the surface's height, and growing the
@@ -656,6 +699,8 @@ private data class ComposerSuggestion(
     val icon: ImageVector?,
     val replacement: String,
     val interactionMode: RuntimeMode? = null,
+    /** `/usage-limits` answers locally instead of inserting text. */
+    val opensUsageLimits: Boolean = false,
 )
 
 /** One ranked `skill` trigger candidate. */
