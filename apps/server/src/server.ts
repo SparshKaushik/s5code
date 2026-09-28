@@ -255,6 +255,24 @@ const RelayClientLive = Layer.unwrap(
 const HttpServerLive = Layer.unwrap(
   Effect.gen(function* () {
     const config = yield* ServerConfig.ServerConfig;
+    // Under Bun, node:http upgrade sockets must be claimed synchronously inside
+    // the "upgrade" event; the Effect request pipeline always reaches
+    // `request.upgrade` asynchronously, so `NodeHttpServer`'s `handleUpgrade`
+    // writes the 101 into a dead socket (observed: write() returns true,
+    // bytesWritten stays 0, client hangs). BunHttpServer upgrades through
+    // `Bun.serve` + `server.upgrade()`, which Bun supports from an async fetch
+    // handler, so the compiled binary and `bun dist/bin.mjs` need it.
+    if (typeof Bun !== "undefined") {
+      const BunHttpServer = yield* Effect.promise(
+        () => import("@effect/platform-bun/BunHttpServer"),
+      );
+      return BunHttpServer.layer({
+        hostname: config.host ?? "127.0.0.1",
+        port: config.port,
+        gracefulShutdownTimeout: HTTP_PREEMPTIVE_SHUTDOWN_GRACE_MS,
+        websocket: { perMessageDeflate: true },
+      });
+    }
     return NodeHttpServer.layer(() => guardHttpResponseWriteErrors(NodeHttp.createServer()), {
       host: config.host ?? "127.0.0.1",
       port: config.port,
