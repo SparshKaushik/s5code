@@ -39,7 +39,6 @@ import { guardHttpResponseWriteErrors } from "./httpResponseErrorGuard.ts";
 import { fixPath } from "./os-jank.ts";
 import { websocketRpcRouteLayer } from "./ws.ts";
 import * as ExternalLauncher from "./process/externalLauncher.ts";
-import * as NodePtyAdapter from "./terminal/NodePtyAdapter.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import * as PullRequestFilesViewed from "./persistence/PullRequestFilesViewed.ts";
 import * as ServerLifecycleEvents from "./serverLifecycleEvents.ts";
@@ -192,7 +191,18 @@ const ApplicationObservabilityLive = EventLoopMonitor.layer.pipe(
   Layer.provideMerge(ResourceAttributionLayerLive),
 );
 
-const PtyAdapterLive = NodePtyAdapter.layer;
+// The compiled Bun binary cannot embed node-pty's native addon, so it uses
+// Bun's built-in PTY. Node (including the single-executable) keeps node-pty.
+const PtyAdapterLive = Layer.unwrap(
+  Effect.gen(function* () {
+    if (typeof Bun !== "undefined") {
+      const BunPtyAdapter = yield* Effect.promise(() => import("./terminal/BunPtyAdapter.ts"));
+      return BunPtyAdapter.layer;
+    }
+    const NodePtyAdapter = yield* Effect.promise(() => import("./terminal/NodePtyAdapter.ts"));
+    return NodePtyAdapter.layer;
+  }),
+);
 
 const ServerSettingsLayerLive = ServerSettings.layer.pipe(
   Layer.provide(ServerSecretStore.layer),
