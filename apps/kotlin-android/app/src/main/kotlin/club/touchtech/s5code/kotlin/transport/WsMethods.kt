@@ -19,6 +19,9 @@ internal object WsMethods {
     const val OrchestrationSearchThreads = "orchestration.searchThreads"
     const val OrchestrationGetArchivedShellSnapshot = "orchestration.getArchivedShellSnapshot"
 
+    const val SubscribeWorktreeSetup = "subscribeWorktreeSetup"
+    const val WorktreeSetupCancel = "worktreeSetup.cancel"
+
     const val VcsRefreshStatus = "vcs.refreshStatus"
     const val VcsListRefs = "vcs.listRefs"
     const val VcsCreateRef = "vcs.createRef"
@@ -54,4 +57,6 @@ internal object WsMethods {
     const val SourceControlCloneRepository = "sourceControl.cloneRepository"
     const val ServerDiscoverSourceControl = "server.discoverSourceControl"
     const val ServerUpdateSettings = "server.updateSettings"
+    const val ServerUpdateServer = "server.updateServer"
+    const val ServerUpdateProvider = "server.updateProvider"
 }

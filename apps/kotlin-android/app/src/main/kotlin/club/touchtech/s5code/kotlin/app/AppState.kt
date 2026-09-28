@@ -813,7 +813,12 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     ),
             )
         val durable = outboxStore.enqueue(message)
-        if (durable.creation != null) workspace.setPendingThreadCreations(setOf(durable.key))
+        if (durable.creation != null) {
+            workspace.setPendingThreadCreations(setOf(durable.key))
+            // Kept after the outbox record drains so a cancelled worktree
+            // bootstrap can be resent in local mode ("Work locally").
+            workspace.retainThreadCreations(listOf(durable))
+        }
         outboxMutation.withLock {
             _outbox.update { current -> (current + durable).sortedBy { it.delivery.createdAt } }
         }
@@ -833,6 +838,45 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             it.environmentId.value == environmentId && it.threadId.value == threadId
         }
 
+    /**
+     * RN's "Work locally": cancel the running worktree bootstrap and re-enqueue
+     * the same first message as a local-mode creation under a fresh thread id.
+     * Returns the replacement thread's id, or null when the server had nothing
+     * running to cancel or the creation payload is no longer retained.
+     */
+    suspend fun workLocally(environmentId: String, threadId: String): ThreadId? {
+        val env = EnvironmentId(environmentId)
+        val id = ThreadId(threadId)
+        if (!workspace.cancelWorktreeSetup(env, id)) return null
+        val original =
+            workspace.retainedThreadCreation(env, id)
+                ?: return null
+        val creation =
+            original.creation!!.copy(
+                // "local" mode: no branch, no worktree, no setup script.
+                branch = "",
+                newWorktree = false,
+                worktreePath = null,
+            )
+        workspace.dropRetainedThreadCreation(original.key)
+        val replacement =
+            newQueuedThreadMessage(
+                environmentId = env,
+                text = original.text,
+                attachments = original.attachments,
+                settings = original.settings,
+                creation = creation,
+            )
+        val durable = outboxStore.enqueue(replacement)
+        workspace.setPendingThreadCreations(setOf(durable.key))
+        outboxMutation.withLock {
+            _outbox.update { current ->
+                (current + durable).sortedBy { it.delivery.createdAt }
+            }
+        }
+        return durable.threadId
+    }
+
     private fun restoreAndDrainOutbox() {
         viewModelScope.launch {
             val restored = outboxStore.load()
@@ -841,6 +885,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     .filter { it.creation != null }
                     .mapTo(mutableSetOf(), QueuedThreadMessage::key)
             )
+            workspace.retainThreadCreations(restored.filter { it.creation != null })
             _outbox.value = restored
             combine(workspace.environments, workspace.threads, _outbox) { environments, threads, queued ->
                     Triple(environments, threads, queued)

@@ -113,12 +113,71 @@ data class ServerProviderDto(
     val requiresNewThreadForModelChange: Boolean = false,
     val models: List<ServerProviderModelDto> = emptyList(),
     val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
+    /** Human-readable provider problem, when the server has one to report. */
+    val message: String? = null,
+    val versionAdvisory: ProviderVersionAdvisoryDto? = null,
+    val compatibilityAdvisory: ProviderCompatibilityAdvisoryDto? = null,
+    /** Live result of `server.updateProvider` while the environment runs it. */
+    val updateState: ProviderUpdateStateDto? = null,
+)
+
+/**
+ * `ServerProviderVersionAdvisory`: the server's own "is this provider stale"
+ * verdict. `canUpdate` means `server.updateProvider` will be honored; behind
+ * without it is a manual-update hint.
+ */
+@Serializable
+data class ProviderVersionAdvisoryDto(
+    /** unknown | current | behind_latest */
+    val status: String = "unknown",
+    val currentVersion: String? = null,
+    val latestVersion: String? = null,
+    val updateCommand: String? = null,
+    val canUpdate: Boolean = false,
+    val checkedAt: String? = null,
+    val message: String? = null,
+)
+
+/** `ServerProviderCompatibilityAdvisory`: whether this server still trusts the provider. */
+@Serializable
+data class ProviderCompatibilityAdvisoryDto(
+    /** unknown | supported | graceful | unsupported | broken */
+    val status: String = "unknown",
+    val latestVersionStatus: String? = null,
+    val message: String? = null,
+    val recommendedVersion: String? = null,
+    val recommendedRange: String? = null,
+)
+
+/** `ServerProviderUpdateState`: queued/running/succeeded/failed bookkeeping. */
+@Serializable
+data class ProviderUpdateStateDto(
+    /** idle | queued | running | succeeded | failed | unchanged */
+    val status: String = "idle",
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
+    val message: String? = null,
+    val output: String? = null,
 )
 
 /** `server.refreshProviders` answer: the full list, not a delta. */
 @Serializable
 data class ServerProvidersUpdatedDto(
     val providers: List<ServerProviderDto> = emptyList(),
+)
+
+/**
+ * `server.updateServer` acknowledgement: the artifact is installed and the
+ * server restarts into it moments later — the connection drops and the
+ * supervisor reconnects on its own.
+ */
+@Serializable
+data class ServerSelfUpdateResultDto(
+    val targetVersion: String = "",
+    /** boot-service | binary | respawn | desktop-managed */
+    val method: String = "",
+    val updateId: String? = null,
+    val desktopUpdateToken: String? = null,
 )
 
 @Serializable
@@ -144,6 +203,11 @@ data class ServerConfigSettingsDto(
     /** Server-side auto-settle defaults; `null` days means the idle sweep is off. */
     val sidebarAutoSettleOnMerge: Boolean = true,
     val sidebarAutoSettleAfterDays: Int? = 3,
+    /**
+     * The user's "keep running turns across a server update" preference —
+     * sent as `continueRunningThreads` when the server supports it.
+     */
+    val continueThreadsAfterServerUpdate: Boolean? = null,
 )
 
 @Serializable
@@ -198,6 +262,18 @@ data class ServerCapabilitiesDto(
     val threadAutoSettlement: Boolean = false,
     /** `thread.auto-settle.set` is accepted (per-thread auto-settle opt-out). */
     val threadAutoSettleOptOut: Boolean = false,
+    /**
+     * `serverSelfUpdate`: the update path to offer — boot-service, binary,
+     * respawn, or desktop-managed. Absent means the server cannot self-update
+     * (dev checkouts, Windows foreground runs, old servers).
+     */
+    val serverSelfUpdate: String? = null,
+    /** `server.updateServer` exists with streaming progress; unused by this client. */
+    val serverSelfUpdateProgress: Boolean? = null,
+    /** `continueRunningThreads` on `server.updateServer` is honored. */
+    val serverUpdateThreadContinuation: Boolean? = null,
+    /** The supervising desktop app accepts `server.updateServer`. */
+    val desktopAppUpdate: Boolean? = null,
 )
 
 /** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */

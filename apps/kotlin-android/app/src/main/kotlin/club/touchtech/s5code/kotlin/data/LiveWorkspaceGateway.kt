@@ -14,6 +14,7 @@ import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ProviderStatus
 import club.touchtech.s5code.kotlin.model.PullRequestRef
 import club.touchtech.s5code.kotlin.model.PullRequestState
 import club.touchtech.s5code.kotlin.model.ReviewFile
@@ -59,6 +60,8 @@ import club.touchtech.s5code.kotlin.transport.wire.ProjectListEntriesResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectReadFileResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ReviewDiffPreviewResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SearchThreadsResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerSelfUpdateResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlCloneResultDto
@@ -71,6 +74,7 @@ import club.touchtech.s5code.kotlin.transport.wire.TerminalSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.UsageSummaryDto
+import club.touchtech.s5code.kotlin.transport.wire.WorktreeSetupSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsListRefsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsStatusDto
 import java.util.UUID
@@ -83,7 +87,9 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.launchIn
@@ -91,7 +97,9 @@ import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.retryWhen
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.supervisorScope
 import kotlinx.coroutines.async
@@ -99,7 +107,10 @@ import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
+import kotlinx.serialization.builtins.nullable
 import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
+import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
@@ -201,6 +212,20 @@ class LiveWorkspaceGateway(
     /** Live thread details, keyed by environment and thread. */
     private val details = mutableMapOf<String, MutableStateFlow<ThreadDetail?>>()
     private val detailSyncPhases = mutableMapOf<String, MutableStateFlow<ThreadSyncPhase>>()
+
+    /**
+     * Live `subscribeWorktreeSetup` snapshots, keyed like [details]. The server
+     * tracks a bootstrap setup only while a thread's first turn is being
+     * prepared; a null stream frame means "nothing tracked".
+     */
+    private val worktreeSetups = mutableMapOf<String, MutableStateFlow<WorktreeSetupSnapshot?>>()
+
+    /**
+     * Creation payloads retained after their outbox record drains, so a
+     * cancelled worktree bootstrap can be re-enqueued in local mode ("Work
+     * locally"). Released when the setup resolves or the subscription drops.
+     */
+    private val retainedCreations = mutableMapOf<String, QueuedThreadMessage>()
     /**
      * A client-generated thread can be opened before its queued bootstrap reaches
      * the server. Its detail subscription gets a normal not-found response in
@@ -528,7 +553,16 @@ class LiveWorkspaceGateway(
                                 state?.capabilities?.threadAutoSettlement == true,
                             threadAutoSettleOptOut =
                                 state?.capabilities?.threadAutoSettleOptOut == true,
+                            sessionAuthenticated = state?.authenticated == true,
+                            sessionCanOperate =
+                                state?.scopes?.contains("orchestration:operate") == true,
+                            serverSelfUpdate = state?.capabilities?.serverSelfUpdate,
+                            desktopAppUpdate = state?.capabilities?.desktopAppUpdate == true,
+                            serverUpdateThreadContinuation =
+                                state?.capabilities?.serverUpdateThreadContinuation == true,
                         ),
+                    continueThreadsAfterServerUpdate =
+                        state?.continueThreadsAfterServerUpdate == true,
                     addProjectBaseDirectory = state?.addProjectBaseDirectory.orEmpty(),
                     autoSettleOnMerge = state?.autoSettleOnMerge ?: true,
                     autoSettleAfterDays = state?.autoSettleAfterDays,
@@ -759,6 +793,121 @@ class LiveWorkspaceGateway(
         return ensureThreadSubscription(environmentId, id)
     }
 
+    override fun worktreeSetup(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+    ): StateFlow<WorktreeSetupSnapshot?> {
+        val key = "${environmentId.value}/${id.value}"
+        // The stream lives inside the detail subscription — opening it must
+        // start that first.
+        ensureThreadSubscription(environmentId, id)
+        return worktreeSetups.getOrPut(key) { MutableStateFlow(null) }.asStateFlow()
+    }
+
+    override suspend fun cancelWorktreeSetup(environmentId: EnvironmentId, id: ThreadId): Boolean {
+        val result =
+            sessionFor(environmentId).request(
+                WsMethods.WorktreeSetupCancel,
+                buildJsonObject { put("threadId", id.value) },
+                kotlinx.serialization.json.JsonObject.serializer(),
+            )
+        return (result["cancelled"] as? JsonPrimitive)?.booleanOrNull == true
+    }
+
+    override fun retainedThreadCreation(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+    ): QueuedThreadMessage? = retainedCreations["${environmentId.value}/${id.value}"]
+
+    override fun retainThreadCreations(messages: List<QueuedThreadMessage>) {
+        messages.forEach { message ->
+            if (message.creation != null) retainedCreations[message.key] = message
+        }
+    }
+
+    override fun dropRetainedThreadCreation(key: String) {
+        retainedCreations.remove(key)
+    }
+
+    /* ── Environment maintenance ───────────────────────────────────── */
+
+    /**
+     * The provider list with update state, mapped for the environment detail
+     * screen. Kept per-environment like the session's own flow, derived eagerly
+     * so a screen entering late still sees the latest statuses.
+     */
+    private val providerStatuses = mutableMapOf<String, StateFlow<List<ProviderStatus>>>()
+
+    override fun providerStatuses(environmentId: EnvironmentId): StateFlow<List<ProviderStatus>> {
+        val session =
+            sessions.value[environmentId.value]?.session
+                // An unpaired environment has no session; an empty list beats a
+                // thrown getter on a screen that also renders "removed".
+                ?: return MutableStateFlow(emptyList())
+        return providerStatuses.getOrPut(environmentId.value) {
+            session.providers
+                .map { providers -> providers.map(::providerStatusFrom) }
+                .stateIn(scope, SharingStarted.Eagerly, emptyList())
+        }
+    }
+
+    override suspend fun checkEnvironmentUpdate(currentVersion: String): String? =
+        findEnvironmentUpdate(client, currentVersion)
+
+    override suspend fun updateServer(
+        environmentId: EnvironmentId,
+        targetVersion: String,
+        continueRunningThreads: Boolean,
+    ): String {
+        val result =
+            sessionFor(environmentId).request(
+                WsMethods.ServerUpdateServer,
+                buildJsonObject {
+                    put("targetVersion", targetVersion)
+                    if (continueRunningThreads) put("continueRunningThreads", true)
+                },
+                ServerSelfUpdateResultDto.serializer(),
+            )
+        return result.targetVersion
+    }
+
+    override suspend fun updateProvider(
+        environmentId: EnvironmentId,
+        driver: String,
+        instanceId: String,
+        targetVersion: String?,
+    ) {
+        sessionFor(environmentId).request(
+            WsMethods.ServerUpdateProvider,
+            buildJsonObject {
+                put("provider", driver)
+                put("instanceId", instanceId)
+                if (targetVersion != null) put("targetVersion", targetVersion)
+            },
+            JsonObject.serializer(),
+        )
+    }
+
+    private fun providerStatusFrom(dto: ServerProviderDto): ProviderStatus =
+        ProviderStatus(
+            instanceId = dto.instanceId,
+            driver = dto.driver,
+            displayName = dto.displayName,
+            enabled = dto.enabled,
+            installed = dto.installed,
+            availability = dto.availability,
+            unavailableReason = dto.unavailableReason,
+            version = dto.version,
+            message = dto.message,
+            versionStatus = dto.versionAdvisory?.status ?: "unknown",
+            latestVersion = dto.versionAdvisory?.latestVersion,
+            canUpdate = dto.versionAdvisory?.canUpdate == true,
+            latestCompatibility = dto.compatibilityAdvisory?.latestVersionStatus,
+            compatibilityMessage = dto.compatibilityAdvisory?.message,
+            updateStatus = dto.updateState?.status,
+            updateMessage = dto.updateState?.message,
+        )
+
     override fun threadSyncPhase(
         environmentId: EnvironmentId,
         id: ThreadId,
@@ -813,6 +962,10 @@ class LiveWorkspaceGateway(
         detailOlderLoaders.remove(key)
         details.remove(key)
         detailSyncPhases.remove(key)
+        worktreeSetups.remove(key)
+        // A thread nobody is watching cannot act on "Work locally"; the
+        // retained payload would only leak.
+        retainedCreations.remove(key)
     }
 
     /**
@@ -927,6 +1080,54 @@ class LiveWorkspaceGateway(
         // cached/live detail already visible from the prior connection.
         sync.value = if (target.value == null) ThreadSyncPhase.Loading else ThreadSyncPhase.Syncing
         val session = sessionFor(environmentId)
+        // The worktree setup stream (`vcsEnvironment.worktreeSetup` in RN) is a
+        // child of this subscription: it is wanted only while a setup could
+        // plausibly exist — a queued creation heading toward the server, the
+        // recorded activity still saying running, or the live stream reporting
+        // running. Without the gate every open thread would hold a dead RPC
+        // stream on servers that predate it.
+        val setupFlow = worktreeSetups.getOrPut(key) { MutableStateFlow(null) }
+        val wire = MutableStateFlow<ThreadDto?>(null)
+        // A sibling coroutine on this subscription's job, so it is cancelled
+        // with it and keeps running while the stream collect blocks below.
+        CoroutineScope(coroutineContext).launch {
+            combine(
+                    wire,
+                    pendingCreationKeys,
+                    setupFlow,
+                ) { current, pending, live ->
+                    val recordedRunning =
+                        current
+                            ?.let { thread ->
+                                findRecordedWorktreeSetup(thread.activities, thread.id)
+                            }
+                            ?.isRunning == true
+                    // A terminal setup means the retained creation can no longer
+                    // be resent — the bootstrap already settled one way or the
+                    // other.
+                    if (live != null && !live.isRunning) retainedCreations.remove(key)
+                    key in pending || recordedRunning || live?.isRunning == true
+                }
+                .distinctUntilChanged()
+                .collectLatest { wanted ->
+                    if (!wanted) return@collectLatest
+                    try {
+                        session
+                            .subscribe(
+                                WsMethods.SubscribeWorktreeSetup,
+                                payload = buildJsonObject { put("threadId", id.value) },
+                                WorktreeSetupSnapshotDto.serializer().nullable,
+                            )
+                            .collect { snapshotDto -> setupFlow.value = snapshotDto?.toModel() }
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (expected: Exception) {
+                        // A dead setup stream is cosmetic, not fatal: the recorded
+                        // activity still renders, and the thread subscription
+                        // this coroutine shadows must not die with it.
+                    }
+                }
+        }
         val paginationSupported = session.state.value.capabilities.threadSnapshotPagination
         val completionMarkerSupported =
             session.state.value.capabilities.threadResumeCompletionMarker
@@ -1103,6 +1304,10 @@ class LiveWorkspaceGateway(
                             }
                         }
                     }
+                    // The setup watcher's gate reads the wire thread, not the
+                    // projection: the `worktree-setup` activity does not reach
+                    // the feed.
+                    wire.value = snapshot
                     snapshot?.let { thread ->
                         if (item.kind == "event") {
                             snapshotStore.saveThread(environmentId, thread, page)

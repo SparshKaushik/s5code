@@ -74,6 +74,16 @@ sealed interface FeedRow {
         override val key: String
             get() = "working-indicator"
     }
+
+    /**
+     * The bootstrap worktree's progress card, spliced into the presented rows by
+     * the screen (it carries live subscription state, which `presentFeed` does
+     * not know). It is not an entry: nothing about it is work the folds group.
+     */
+    data object WorktreeSetup : FeedRow {
+        override val key: String
+            get() = "worktree-setup"
+    }
 }
 
 /**

@@ -18,6 +18,7 @@ import androidx.compose.material.icons.rounded.Computer
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.Hub
 import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.SystemUpdate
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -58,8 +59,10 @@ import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentKind
+import club.touchtech.s5code.kotlin.model.formatProviderDriverName
 import kotlinx.coroutines.launch
 
 /** Environment list: status, add, reconnect, open detail. */
@@ -513,6 +516,12 @@ fun ConnectionDetailScreen(
                 )
             }
 
+            EnvironmentMaintenance(
+                store = store,
+                environment = environment,
+                scope = scope,
+            )
+
             Row(
                 Modifier.fillMaxWidth().padding(S5Theme.spacing.gutter),
                 horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
@@ -558,6 +567,246 @@ fun ConnectionDetailScreen(
                     emphasis = S5ActionEmphasis.Primary,
                     style = S5ButtonStyle.Outlined,
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Environment maintenance, matching `SettingsEnvironmentDetailRouteScreen` in
+ * the RN client: a "T3 Code" section for the release check and self-update, and
+ * a "Providers" section for health plus per-instance updates.
+ *
+ * Everything is gated on `canMaintainEnvironment` — a connected session whose
+ * token carries `orchestration:operate`. A narrower token gets the explanation
+ * rather than a row that would fail its write and kill the socket.
+ */
+@Composable
+private fun EnvironmentMaintenance(
+    store: AppStore,
+    environment: Environment,
+    scope: kotlinx.coroutines.CoroutineScope,
+) {
+    val connected = environment.isEnabled &&
+        environment.state == ConnectionState.Connected
+    val providerStatuses by
+        remember(environment.id) { store.workspace.providerStatuses(environment.id) }
+            .collectAsStateWithLifecycle()
+    val caps = environment.capabilities
+    val allowed = connected && caps.sessionAuthenticated && caps.sessionCanOperate
+    var pending by remember(environment.id) { mutableStateOf<String?>(null) }
+    var checkedRelease by remember(environment.id) { mutableStateOf<String?>(null) }
+    var upToDate by remember(environment.id) { mutableStateOf(false) }
+    var notice by remember(environment.id) { mutableStateOf<String?>(null) }
+    var updateError by remember(environment.id) { mutableStateOf<String?>(null) }
+    val providerBusy =
+        providerStatuses.any { it.updateStatus == "running" || it.updateStatus == "queued" }
+    val disabled = !allowed || pending != null || providerBusy
+    // A checked release only describes the version it was checked against —
+    // after an update lands, "Version X is available" beside Version X is a lie.
+    val release =
+        checkedRelease?.takeIf { environment.serverVersion.isNotBlank() }
+
+    fun run(label: String, block: suspend () -> Unit) {
+        if (pending != null) return
+        pending = label
+        updateError = null
+        notice = null
+        scope.launch {
+            try {
+                block()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                updateError = error.message ?: "The action could not be completed. Try again."
+            } finally {
+                pending = null
+            }
+        }
+    }
+
+    if (!connected) {
+        Text(
+            "Connect this environment to manage it.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+        )
+        return
+    }
+    if (!allowed) {
+        Text(
+            "This connection does not have permission to manage the environment.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+        )
+        return
+    }
+
+    Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+        if (updateError != null) {
+            Text(
+                updateError.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.error,
+                modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+            )
+        }
+        if (notice != null) {
+            Text(
+                notice.orEmpty(),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+            )
+        }
+
+        val canSelfUpdate =
+            caps.serverSelfUpdate != null &&
+                (caps.serverSelfUpdate != "desktop-managed" || caps.desktopAppUpdate)
+        S5RowGroup(title = "T3 Code") {
+            S5SettingsRow(
+                icon = Icons.Rounded.SystemUpdate,
+                label = "Version ${environment.serverVersion.ifBlank { "unknown" }}",
+                supporting =
+                    when {
+                        release != null -> "Version $release is available."
+                        upToDate -> "You are up to date."
+                        !canSelfUpdate ->
+                            if (caps.serverSelfUpdate == "desktop-managed") {
+                                "Update the desktop app on this machine."
+                            } else {
+                                "Update and restart T3 Code on this machine."
+                            }
+                        else -> null
+                    },
+                onClick = null,
+            )
+        }
+        Row(
+            Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            S5Button(
+                text = if (pending == "check") "Checking…" else "Check for updates",
+                onClick = {
+                    run("check") {
+                        val target = store.workspace.checkEnvironmentUpdate(environment.serverVersion)
+                        checkedRelease = target
+                        upToDate = target == null
+                    }
+                },
+                icon = Icons.Rounded.Refresh,
+                emphasis = S5ActionEmphasis.Secondary,
+                style = S5ButtonStyle.Outlined,
+                enabled = !disabled,
+            )
+            if (release != null && canSelfUpdate) {
+                S5Button(
+                    text =
+                        if (pending == "server") "Updating…" else "Update to $release",
+                    onClick = {
+                        run("server") {
+                            val updated =
+                                store.workspace.updateServer(
+                                    environment.id,
+                                    release,
+                                    continueRunningThreads =
+                                        caps.serverUpdateThreadContinuation &&
+                                            environment.continueThreadsAfterServerUpdate,
+                                )
+                            checkedRelease = null
+                            notice = "Updated to $updated. The server will restart and reconnect."
+                        }
+                    },
+                    icon = Icons.Rounded.SystemUpdate,
+                    emphasis = S5ActionEmphasis.Secondary,
+                    enabled = !disabled,
+                )
+            }
+        }
+
+        val enabledProviders = providerStatuses.filter { it.enabled }
+        if (enabledProviders.isNotEmpty()) {
+            S5RowGroup(title = "Providers") {
+                enabledProviders.forEachIndexed { index, provider ->
+                    S5SettingsRow(
+                        icon = Icons.Rounded.Hub,
+                        label = provider.displayName ?: formatProviderDriverName(provider.driver),
+                        supporting =
+                            buildString {
+                                append(
+                                    if (provider.installed) provider.version ?: "Version unknown"
+                                    else "Not installed"
+                                )
+                                provider.latestVersion?.let { append(" · Latest $it") }
+                                if (provider.updateStatus != null &&
+                                    provider.updateStatus != "idle"
+                                ) {
+                                    append(
+                                        "\n" +
+                                            (provider.updateMessage
+                                                ?: "Update ${provider.updateStatus}")
+                                    )
+                                }
+                                provider.compatibilityMessage?.let { append("\n$it") }
+                                provider.unavailableReason?.let { append("\n$it") }
+                                provider.message?.let { append("\n$it") }
+                                if (provider.versionStatus == "behind_latest" &&
+                                    !provider.canUpdate
+                                ) {
+                                    append("\nUpdate this provider on the environment's machine.")
+                                }
+                            },
+                        onClick = null,
+                        position = rowPosition(index, enabledProviders.size),
+                    )
+                }
+            }
+            Row(
+                Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
+                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+            ) {
+                S5Button(
+                    text = if (pending == "refresh") "Refreshing…" else "Refresh providers",
+                    onClick = {
+                        run("refresh") {
+                            store.workspace.refreshProviders(environment.id)
+                            notice = "Provider status refreshed."
+                        }
+                    },
+                    icon = Icons.Rounded.Refresh,
+                    emphasis = S5ActionEmphasis.Secondary,
+                    style = S5ButtonStyle.Outlined,
+                    enabled = !disabled,
+                )
+            }
+            enabledProviders.filter { it.updateAvailable }.forEach { provider ->
+                Row(
+                    Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
+                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                ) {
+                    val name = provider.displayName ?: formatProviderDriverName(provider.driver)
+                    S5Button(
+                        text =
+                            if (pending == provider.instanceId) "Updating…"
+                            else "Update $name",
+                        onClick = {
+                            run(provider.instanceId) {
+                                store.workspace.updateProvider(
+                                    environment.id,
+                                    provider.driver,
+                                    provider.instanceId,
+                                    provider.latestVersion,
+                                )
+                            }
+                        },
+                        icon = Icons.Rounded.SystemUpdate,
+                        emphasis = S5ActionEmphasis.Secondary,
+                        enabled = !disabled,
+                    )
+                }
             }
         }
     }

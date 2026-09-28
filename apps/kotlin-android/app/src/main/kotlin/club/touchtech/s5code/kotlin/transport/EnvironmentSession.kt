@@ -68,12 +68,22 @@ data class SessionState(
     val machineKind: String? = null,
     val capabilities: ServerCapabilities = ServerCapabilities(),
     /**
+     * `GET /api/auth/session` after connect: whether the credential is valid
+     * and which scopes it carries. Maintenance actions (server update) need
+     * `orchestration:operate`; a token from a narrower pair is refused politely
+     * instead of killing the socket with an unauthorized write.
+     */
+    val authenticated: Boolean = false,
+    val scopes: List<String>? = null,
+    /**
      * Server settings the screens read: the add-project base directory and the
      * auto-settle defaults Settings edits through `server.updateSettings`.
      */
     val addProjectBaseDirectory: String = "",
     val autoSettleOnMerge: Boolean = true,
     val autoSettleAfterDays: Int? = 3,
+    /** The user's `continueThreadsAfterServerUpdate` preference, from server settings. */
+    val continueThreadsAfterServerUpdate: Boolean = false,
 )
 
 /**
@@ -110,6 +120,15 @@ data class ServerCapabilities(
     val threadAutoSettlement: Boolean = false,
     /** `thread.auto-settle.set` exists — the per-thread Auto-settle menu item. */
     val threadAutoSettleOptOut: Boolean = false,
+    /**
+     * `serverSelfUpdate`: the update path to offer — boot-service, binary,
+     * respawn, desktop-managed. Null means the server cannot self-update.
+     */
+    val serverSelfUpdate: String? = null,
+    /** `continueRunningThreads` on `server.updateServer` is honored. */
+    val serverUpdateThreadContinuation: Boolean = false,
+    /** The supervising desktop app accepts `server.updateServer`. */
+    val desktopAppUpdate: Boolean = false,
 )
 
 /**
@@ -452,11 +471,41 @@ class EnvironmentSession(
                             threadAutoSettlement = descriptor.capabilities.threadAutoSettlement,
                             threadAutoSettleOptOut =
                                 descriptor.capabilities.threadAutoSettleOptOut,
+                            serverSelfUpdate = descriptor.capabilities.serverSelfUpdate,
+                            serverUpdateThreadContinuation =
+                                descriptor.capabilities.serverUpdateThreadContinuation == true,
+                            desktopAppUpdate = descriptor.capabilities.desktopAppUpdate == true,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     autoSettleOnMerge = config.settings.sidebarAutoSettleOnMerge,
                     autoSettleAfterDays = config.settings.sidebarAutoSettleAfterDays,
+                    continueThreadsAfterServerUpdate =
+                        config.settings.continueThreadsAfterServerUpdate == true,
                 )
+            // `canMaintainEnvironment` asks the session record, not the
+            // credential store: a token minted before scopes existed would fail
+            // every maintenance write with a protocol error. The read is
+            // best-effort — a failed lookup leaves authenticated false, which
+            // merely hides the maintenance rows rather than blocking the
+            // connection.
+            _state.value = _state.value.copy(authenticated = false, scopes = null)
+            val sessionAuth =
+                authorized?.let { auth ->
+                    try {
+                        http.session(auth.httpBaseUrl, auth.credential)
+                    } catch (cancelled: CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        null
+                    }
+                }
+            if (sessionAuth != null) {
+                _state.value =
+                    _state.value.copy(
+                        authenticated = sessionAuth.authenticated,
+                        scopes = sessionAuth.scopes,
+                    )
+            }
             probeSupported = descriptor.capabilities.connectionProbe
             connection.value = opened
             _providers.value = config.providers

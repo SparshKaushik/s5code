@@ -408,6 +408,9 @@ fun S5NavGraph(
                         navController.navigate(route)
                     }
                 },
+                onOpenThread = { envId, nextThreadId ->
+                    navController.navigate(Routes.thread(envId, nextThreadId))
+                },
             )
         }
         composable(Routes.ThreadRewind, arguments = listOf(environmentArg, threadArg)) { entry ->

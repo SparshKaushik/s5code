@@ -12,6 +12,7 @@ import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
+import club.touchtech.s5code.kotlin.model.ProviderStatus
 import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.SlashCommand
@@ -27,6 +28,7 @@ import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageWindow
 import club.touchtech.s5code.kotlin.model.WorkspaceAsset
+import club.touchtech.s5code.kotlin.model.WorktreeSetupSnapshot
 import club.touchtech.s5code.kotlin.model.UserInputAnswer
 import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseEntryDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
@@ -131,6 +133,51 @@ interface WorkspaceGateway {
      * so this is called only by screens that render a transcript.
      */
     fun thread(environmentId: EnvironmentId, id: ThreadId): StateFlow<ThreadDetail?>
+
+    /**
+     * The live `subscribeWorktreeSetup` stream for a thread — null until the
+     * server begins tracking a bootstrap setup, and again once it drops it.
+     * `resolveVisibleWorktreeSetup` in `data/WorktreeSetup.kt` decides whether
+     * this or the recorded activity renders.
+     */
+    fun worktreeSetup(environmentId: EnvironmentId, id: ThreadId): StateFlow<WorktreeSetupSnapshot?>
+
+    /** `worktreeSetup.cancel`: stops a running bootstrap setup. */
+    suspend fun cancelWorktreeSetup(environmentId: EnvironmentId, id: ThreadId): Boolean
+
+    /**
+     * The durable creation payload of an in-flight first send, keyed by thread —
+     * what "Work locally" needs to re-enqueue a cancelled worktree bootstrap in
+     * local mode. Retained until the setup resolves; `dropRetainedThreadCreation`
+     * releases it.
+     */
+    fun retainedThreadCreation(environmentId: EnvironmentId, id: ThreadId): QueuedThreadMessage?
+
+    /** Records the creation payloads of sends currently owned by the outbox. */
+    fun retainThreadCreations(messages: List<QueuedThreadMessage>)
+
+    fun dropRetainedThreadCreation(key: String)
+
+    /* ── Environment maintenance ───────────────────────────────────── */
+
+    /** Live provider health (`subscribeServerConfig`'s `providerStatuses`). */
+    fun providerStatuses(environmentId: EnvironmentId): StateFlow<List<ProviderStatus>>
+
+    /**
+     * The newest `t3` release on the server's channel newer than it, or null
+     * when current — GitHub releases, same check the RN settings screen runs.
+     */
+    suspend fun checkEnvironmentUpdate(currentVersion: String): String?
+
+    /**
+     * `server.updateServer`. The acknowledgement means the artifact is
+     * installed and the server is about to restart — the session drops and
+     * reconnects on its own afterward.
+     */
+    suspend fun updateServer(environmentId: EnvironmentId, targetVersion: String, continueRunningThreads: Boolean): String
+
+    /** `server.updateProvider` for one instance; the advisory decides what to send. */
+    suspend fun updateProvider(environmentId: EnvironmentId, driver: String, instanceId: String, targetVersion: String?)
 
     /**
      * Per-thread stream reconciliation phase. A cached transcript can be rendered

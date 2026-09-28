@@ -86,6 +86,8 @@ data class Environment(
     /** `settings.sidebarAutoSettle*` — the defaults Settings edits per environment. */
     val autoSettleOnMerge: Boolean = true,
     val autoSettleAfterDays: Int? = 3,
+    /** `settings.continueThreadsAfterServerUpdate` — the user's restart-recovery preference. */
+    val continueThreadsAfterServerUpdate: Boolean = false,
 )
 
 /**
@@ -118,6 +120,20 @@ data class EnvironmentCapabilities(
     val threadAutoSettlement: Boolean = false,
     /** `thread.auto-settle.set` exists — the row menu's Auto-settle submenu. */
     val threadAutoSettleOptOut: Boolean = false,
+    /** `/api/auth/session` answer on the live connection, for maintenance gating. */
+    val sessionAuthenticated: Boolean = false,
+    /** The session token carries `orchestration:operate`. */
+    val sessionCanOperate: Boolean = false,
+    /**
+     * `serverSelfUpdate`: the update path this server can take
+     * ("boot-service" | "binary" | "respawn" | "desktop-managed"), or null when
+     * it must be relaunched by hand.
+     */
+    val serverSelfUpdate: String? = null,
+    /** The supervising desktop app accepts `server.updateServer`. */
+    val desktopAppUpdate: Boolean = false,
+    /** `continueRunningThreads` on `server.updateServer` is honored. */
+    val serverUpdateThreadContinuation: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -558,6 +574,12 @@ data class ThreadDetail(
      * turns" affordance at the top of the transcript.
      */
     val page: ThreadPage? = null,
+    /**
+     * The worktree setup the server recorded on the thread (the `worktree-setup`
+     * activity), decoded but not yet resolved against the live stream —
+     * `resolveVisibleWorktreeSetup` in `data/WorktreeSetup.kt` makes that call.
+     */
+    val recordedWorktreeSetup: WorktreeSetupSnapshot? = null,
     val latestTurn: TurnInfo? = null,
     /**
      * The provider session's own status (`idle`, `starting`, `running`, `ready`,
@@ -618,6 +640,56 @@ data class Checkpoint(
     val filesChanged: Int,
     val current: Boolean = false,
 )
+
+/**
+ * `WorktreeSetupSnapshot` from `contracts/worktreeSetup.ts`: live progress of a
+ * bootstrap worktree creation — the stages from fetch through starting the
+ * agent. The live stream carries it while setup runs; the settled outcome is
+ * re-recorded on the thread as a `worktree-setup` activity, which is what a
+ * reload or second client renders from.
+ */
+data class WorktreeSetupSnapshot(
+    val threadId: String,
+    /** running | done | failed | cancelled */
+    val phase: String,
+    val startedAtMillis: Long? = null,
+    val endedAtMillis: Long? = null,
+    val branch: String? = null,
+    val baseRef: String? = null,
+    val worktreePath: String? = null,
+    val setupScript: WorktreeSetupScript? = null,
+    val stages: List<WorktreeSetupStage> = emptyList(),
+    val error: String? = null,
+    val sequence: Int = 0,
+) {
+    /** Which snapshot wins: the live stream only while it is at least as fresh. */
+    val isRunning get() = phase == "running"
+
+    /** The agent stage finishing means the turn took over — the header handoff. */
+    val agentStarted get() = stages.any { it.id == "agent" && it.status == "done" }
+}
+
+data class WorktreeSetupScript(
+    val name: String,
+    val command: String,
+    val terminalId: String,
+)
+
+data class WorktreeSetupStage(
+    /** fetch | checkout | submodules | setup-script | agent */
+    val id: String,
+    /** pending | running | done | skipped | warning | failed */
+    val status: String,
+    val startedAtMillis: Long? = null,
+    val endedAtMillis: Long? = null,
+    /** `checkout` is the only stage with a real percentage (git's Updating files). */
+    val percent: Int? = null,
+    val detail: String? = null,
+    /** Last few setup-script output lines, ANSI stripped, newest last. */
+    val tail: List<String> = emptyList(),
+) {
+    val isFailed get() = status == "failed"
+}
 
 /* ── Workspace tools ─────────────────────────────────────────────────── */
 
@@ -880,6 +952,52 @@ data class ThreadSettings(
  * authenticated make it into the catalog, so the picker cannot offer an agent a
  * turn start would be refused for.
  */
+/**
+ * A provider instance's health and update state, for the environment detail
+ * screen — `ServerProvider` in the contract. Unlike `ProviderCatalogEntry`
+ * (which is a model picker row), this carries the maintenance surface:
+ * version, advisories, and the live `server.updateProvider` result.
+ */
+data class ProviderStatus(
+    val instanceId: String,
+    val driver: String,
+    val displayName: String?,
+    val enabled: Boolean,
+    val installed: Boolean,
+    val availability: String?,
+    val unavailableReason: String?,
+    val version: String?,
+    val message: String?,
+    /** unknown | current | behind_latest */
+    val versionStatus: String,
+    val latestVersion: String?,
+    /** Whether `server.updateProvider` will be honored for this instance. */
+    val canUpdate: Boolean,
+    /** unknown | supported | graceful | unsupported | broken, of the latest release. */
+    val latestCompatibility: String?,
+    val compatibilityMessage: String?,
+    /** idle | queued | running | succeeded | failed | unchanged, or null. */
+    val updateStatus: String?,
+    val updateMessage: String?,
+) {
+    /**
+     * `canUpdateEnvironmentProvider` in `environment-maintenance.ts`: installed,
+     * available, behind latest, updatable, and compatible — and not already
+     * mid-update.
+     */
+    val updateAvailable: Boolean
+        get() =
+            installed &&
+                availability != "unavailable" &&
+                versionStatus == "behind_latest" &&
+                canUpdate &&
+                latestVersion != null &&
+                latestCompatibility != "broken" &&
+                latestCompatibility != "unsupported" &&
+                updateStatus != "running" &&
+                updateStatus != "queued"
+}
+
 data class ProviderCatalogEntry(
     val instance: ProviderInstance,
     val models: List<String>,

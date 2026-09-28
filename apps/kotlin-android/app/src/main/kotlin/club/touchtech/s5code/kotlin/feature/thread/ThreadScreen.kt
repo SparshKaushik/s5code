@@ -41,6 +41,7 @@ import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
+import club.touchtech.s5code.kotlin.data.resolveVisibleWorktreeSetup
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5FloatingAction
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
@@ -64,6 +65,7 @@ import club.touchtech.s5code.kotlin.feature.connections.waitPillLabel
 import club.touchtech.s5code.kotlin.feature.settings.TaskSettingsSheet
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.EnvironmentId
+import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
@@ -92,6 +94,8 @@ fun ThreadScreen(
     threadId: String,
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
+    /** "Work locally" replaces this thread with a new one — a full navigate, not a subroute. */
+    onOpenThread: (environmentId: String, threadId: String) -> Unit = { _, _ -> },
 ) {
     val id = remember(threadId) { ThreadId(threadId) }
     val env = remember(environmentId) { EnvironmentId(environmentId) }
@@ -103,6 +107,9 @@ fun ThreadScreen(
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val syncPhase by
         remember(environmentId, threadId) { store.workspace.threadSyncPhase(env, id) }
+            .collectAsStateWithLifecycle()
+    val liveWorktreeSetup by
+        remember(environmentId, threadId) { store.workspace.worktreeSetup(env, id) }
             .collectAsStateWithLifecycle()
     val threadDrafts by store.threadDrafts.collectAsStateWithLifecycle()
     val queuedMessages by store.outbox.collectAsStateWithLifecycle()
@@ -191,6 +198,24 @@ fun ThreadScreen(
     }
 
     val summary = current.summary
+    // The bootstrap worktree card: the live stream wins while it is at least as
+    // fresh as the recorded activity, and the whole row hides once a follow-up
+    // turn makes the setup history (`resolveVisibleWorktreeSetup` in
+    // client-runtime). A running setup before the thread exists is covered by
+    // the gateway's gate on pendingCreationKeys.
+    val worktreeSetup =
+        remember(liveWorktreeSetup, current.recordedWorktreeSetup, current.latestTurn, current.feed, queuedMessages) {
+            resolveVisibleWorktreeSetup(
+                live = liveWorktreeSetup,
+                recorded = current.recordedWorktreeSetup,
+                turnStarted = current.latestTurn?.startedAtMillis != null,
+                followUpSent =
+                    current.feed.count { it is FeedEntry.UserMessage } +
+                        queuedMessages.count {
+                            it.environmentId == env && it.threadId == id
+                        } > 1,
+            )
+        }
     // Files staged on a request that resolved elsewhere (another client, a
     // dismissed card) are released once the pending set no longer retains them —
     // RN's `questionAttachmentDraftPrefix` sweep.
@@ -262,25 +287,97 @@ fun ThreadScreen(
             )
         }
     val rows =
-        remember(current.feed, expandedWorkGroups, expandedTurns, current.latestTurn, activeWorkStartedAt) {
-            presentFeed(
-                feed = current.feed,
-                expandedGroups = expandedWorkGroups,
-                latestTurn = current.latestTurn,
-                expandedTurns = expandedTurns,
-                activeWorkStartedAtMillis = activeWorkStartedAt,
-            )
+        remember(
+            current.feed,
+            expandedWorkGroups,
+            expandedTurns,
+            current.latestTurn,
+            activeWorkStartedAt,
+            worktreeSetup,
+        ) {
+            val presented =
+                presentFeed(
+                    feed = current.feed,
+                    expandedGroups = expandedWorkGroups,
+                    latestTurn = current.latestTurn,
+                    expandedTurns = expandedTurns,
+                    activeWorkStartedAtMillis = activeWorkStartedAt,
+                )
+            if (worktreeSetup == null) return@remember presented
+            // RN anchors the card on the first user message (the prompt whose
+            // turn is being set up). With no messages it floats to the visual
+            // top instead — handled as a trailing lazy item, not a row.
+            val anchor =
+                presented.indexOfFirst {
+                    it is FeedRow.Entry && it.entry is FeedEntry.UserMessage
+                }
+            if (anchor >= 0) {
+                presented.toMutableList().also { it.add(anchor, FeedRow.WorktreeSetup) }
+            } else {
+                presented
+            }
+        }
+    // True when the setup card renders as the unanchored top item rather than
+    // spliced under the first prompt.
+    val setupAtTop = worktreeSetup != null && rows.none { it is FeedRow.WorktreeSetup }
+    // One card body for both placements: the spliced row and the floating top
+    // item differ only in where the list puts them.
+    val setupCard: (@Composable () -> Unit)? =
+        worktreeSetup?.let { setup ->
+            {
+                WorktreeSetupCard(
+                    snapshot = setup,
+                    turnStarted = current.latestTurn?.startedAtMillis != null,
+                    turnStartedAtMillis = current.latestTurn?.startedAtMillis,
+                    working = activeWorkStartedAt != null,
+                    onCancel = {
+                        scope.launch {
+                            runCatching { store.workspace.cancelWorktreeSetup(env, id) }
+                                .onFailure {
+                                    store.showError(
+                                        it.message ?: "The setup could not be cancelled."
+                                    )
+                                }
+                        }
+                    },
+                    onWorkLocally =
+                        if (store.workspace.retainedThreadCreation(env, id) != null) {
+                            {
+                                scope.launch {
+                                    store
+                                        .workLocally(environmentId, threadId)
+                                        ?.let { onOpenThread(environmentId, it.value) }
+                                        ?: store.showError(
+                                            "The setup could not be switched to a local workspace."
+                                        )
+                                }
+                            }
+                        } else {
+                            null
+                        },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+            }
         }
     // Keys in lazy-index order: the approval gate sits at index 0 (visual bottom
     // of the reversed list), the feed rows reversed after it, "Load earlier" last.
     val lazyKeys =
-        remember(rows, current.approval?.id, current.page?.hasMore, current.page?.beforeCursor) {
+        remember(
+            rows,
+            current.approval?.id,
+            current.page?.hasMore,
+            current.page?.beforeCursor,
+            setupAtTop,
+        ) {
             buildList<Any> {
                 current.approval?.let { add("approval-${it.id}") }
                 rows.asReversed().forEach { add(it.key) }
                 if (current.page?.hasMore == true && current.page.beforeCursor != null) {
                     add("load-earlier")
                 }
+                // The reversed list's visual top: the floating setup card sits
+                // above "Load earlier", matching RN's ListHeaderComponent order.
+                if (setupAtTop) add("worktree-setup")
             }
         }
     // `expandedEntries` is a key even though `presentFeed` does not read it: a
@@ -754,6 +851,7 @@ fun ThreadScreen(
                                 is FeedRow.WorkToggle -> "toggle"
                                 is FeedRow.TurnFold -> "turn-fold"
                                 is FeedRow.Working -> "working"
+                                is FeedRow.WorktreeSetup -> "worktree-setup"
                                 is FeedRow.Entry -> "entry"
                             }
                         },
@@ -815,6 +913,7 @@ fun ThreadScreen(
                                     },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
+                            is FeedRow.WorktreeSetup -> setupCard?.invoke()
                             }
                         }
                     }
@@ -840,6 +939,15 @@ fun ThreadScreen(
                                     style = S5ButtonStyle.Outlined,
                                     enabled = !page.loadingOlder,
                                 )
+                            }
+                        }
+                    }
+                    // No prompt row to anchor on (a bootstrap still writing the
+                    // thread): the card sits at the very top, above the pager.
+                    if (setupAtTop) {
+                        item(key = "worktree-setup") {
+                            Box(Modifier.fillMaxWidth().animateItem()) {
+                                setupCard?.invoke()
                             }
                         }
                     }

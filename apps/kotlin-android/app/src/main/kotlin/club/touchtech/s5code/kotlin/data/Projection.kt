@@ -503,6 +503,7 @@ fun threadDetailFrom(
                     loadingOlder = loadingOlder,
                 )
             },
+        recordedWorktreeSetup = findRecordedWorktreeSetup(thread.activities, thread.id),
         latestTurn =
             thread.latestTurn?.let { turn ->
                 TurnInfo(

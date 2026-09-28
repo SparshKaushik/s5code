@@ -427,6 +427,11 @@ data class AccessTokenDto(
     val scope: String = "",
 )
 
-@Serializable data class AuthSessionDto(val authenticated: Boolean = false)
+@Serializable
+data class AuthSessionDto(
+    val authenticated: Boolean = false,
+    /** `AuthSessionState.scopes`; absent on servers older than scoped tokens. */
+    val scopes: List<String>? = null,
+)
 
 @Serializable data class WebSocketTicketDto(val ticket: String)
