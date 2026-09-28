@@ -48,6 +48,7 @@ import club.touchtech.s5code.kotlin.data.isUsageLimitsCommand
 import club.touchtech.s5code.kotlin.data.persistPastedTextAttachment
 import club.touchtech.s5code.kotlin.data.pullRequestComposerContext
 import club.touchtech.s5code.kotlin.data.resolveVisibleWorktreeSetup
+import club.touchtech.s5code.kotlin.data.threadDevicePreviews
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5FloatingAction
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
@@ -278,6 +279,12 @@ fun ThreadScreen(
             .collectAsStateWithLifecycle()
     var usageLimitsOpen by remember(threadId) { mutableStateOf(false) }
     val usageLimitsView by store.workspace.usageLimits.collectAsStateWithLifecycle()
+    // `devicePreviews`: how many devices this thread holds open — the composer
+    // button count and the preview screen's picker read the same list.
+    val deviceState by
+        remember(environmentId) { store.workspace.deviceState(env) }
+            .collectAsStateWithLifecycle()
+    val devicePreviews = remember(deviceState, threadId) { threadDevicePreviews(deviceState, threadId) }
     val providerAdvisory =
         remember(providerStatuses, effectiveSettings.provider) {
             providerStatuses
@@ -833,6 +840,8 @@ fun ThreadScreen(
                 providerAdvisory = providerAdvisory,
                 offersUsageLimits = offersUsageLimits,
                 onUsageLimits = { usageLimitsOpen = true },
+                devicePreviewCount = devicePreviews.size,
+                onOpenDevicePreview = { onOpen("devices") },
                 onValueChange = { store.setThreadDraft(environmentId, threadId, it) },
                 onSend = {
                     val text = draft.text

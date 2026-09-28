@@ -35,6 +35,7 @@ object Routes {
     const val AddProjectLocal = "new/add-project/local?environmentId={environmentId}"
 
     const val Thread = "threads/{environmentId}/{threadId}"
+    const val ThreadDevices = "threads/{environmentId}/{threadId}/devices"
     const val ThreadRewind = "threads/{environmentId}/{threadId}/rewind"
     const val ThreadFiles = "threads/{environmentId}/{threadId}/files"
     // File viewers carry the path as a query parameter so a deep link (or a

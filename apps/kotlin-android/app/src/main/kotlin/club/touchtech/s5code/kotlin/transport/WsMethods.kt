@@ -37,6 +37,15 @@ internal object WsMethods {
     const val PullRequestsList = "pullRequests.list"
     const val PullRequestsDetail = "pullRequests.detail"
 
+    const val SubscribeDeviceState = "subscribeDeviceState"
+    const val DeviceList = "device.list"
+    const val DeviceShutdown = "device.shutdown"
+
+    const val SubscribeProjectClones = "subscribeProjectClones"
+    const val ProjectCloneStart = "projectClone.start"
+    const val ProjectCloneCancel = "projectClone.cancel"
+    const val ProjectCloneRetry = "projectClone.retry"
+
     const val AssetsCreateUrl = "assets.createUrl"
     const val AttachmentsCreateUploadUrl = "attachments.createUploadUrl"
     const val AttachmentsDelete = "attachments.delete"

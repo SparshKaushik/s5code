@@ -313,6 +313,12 @@ data class ServerCapabilitiesDto(
     val serverUpdateThreadContinuation: Boolean? = null,
     /** The supervising desktop app accepts `server.updateServer`. */
     val desktopAppUpdate: Boolean? = null,
+    /**
+     * The environment tracks project clones and streams their progress
+     * (`subscribeProjectClones`). Absent means `projects.remove` alone decides;
+     * Start does not wait on a stream this server never emits.
+     */
+    val projectCloneTracking: Boolean? = null,
 )
 
 /** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */

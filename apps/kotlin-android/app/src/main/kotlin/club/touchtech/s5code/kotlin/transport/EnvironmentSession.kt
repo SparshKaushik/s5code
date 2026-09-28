@@ -2,6 +2,11 @@ package club.touchtech.s5code.kotlin.transport
 
 import club.touchtech.s5code.kotlin.data.EnvironmentStore
 import club.touchtech.s5code.kotlin.data.SavedEnvironment
+import club.touchtech.s5code.kotlin.model.DeviceHubAccess
+import club.touchtech.s5code.kotlin.transport.wire.DeviceServiceStateDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneActionResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneSnapshotDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneStartResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigStreamEventDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProvidersUpdatedDto
@@ -125,6 +130,8 @@ data class ServerCapabilities(
      * respawn, desktop-managed. Null means the server cannot self-update.
      */
     val serverSelfUpdate: String? = null,
+    /** `subscribeProjectClones` exists — the new-task Start gate reads it. */
+    val projectCloneTracking: Boolean = false,
     /** `continueRunningThreads` on `server.updateServer` is honored. */
     val serverUpdateThreadContinuation: Boolean = false,
     /** The supervising desktop app accepts `server.updateServer`. */
@@ -475,6 +482,8 @@ class EnvironmentSession(
                             serverUpdateThreadContinuation =
                                 descriptor.capabilities.serverUpdateThreadContinuation == true,
                             desktopAppUpdate = descriptor.capabilities.desktopAppUpdate == true,
+                            projectCloneTracking =
+                                descriptor.capabilities.projectCloneTracking == true,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     autoSettleOnMerge = config.settings.sidebarAutoSettleOnMerge,
@@ -746,6 +755,103 @@ class EnvironmentSession(
             )
         _providers.value = updated.providers
     }
+
+    /* ── Devices ─────────────────────────────────────────────────────── */
+
+    /** `deviceEnvironment.state`: the live device inventory stream. */
+    fun subscribeDeviceState(): Flow<DeviceServiceStateDto> =
+        subscribe(
+            WsMethods.SubscribeDeviceState,
+            JsonObject(emptyMap()),
+            DeviceServiceStateDto.serializer(),
+        )
+
+    /**
+     * `resolveDeviceHubAccess`. Preview media (`img`, `EventSource`, the input
+     * socket) cannot send bearer or DPoP headers, so hub requests authenticate
+     * with a fresh WebSocket ticket in the query. Kotlin environments always
+     * carry a credential, so this never takes the cookie path.
+     */
+    suspend fun deviceHubAccess(hostId: String, hubBasePath: String): DeviceHubAccess {
+        val auth =
+            authorized
+                ?: throw IllegalStateException("Environment is not connected; hub access is unavailable.")
+        val httpBase = auth.httpBaseUrl.trimEnd('/') + hubBasePath
+        val wsBase = httpBase.replaceFirst(Regex("^http"), "ws")
+        val ticket = http.webSocketTicket(auth.httpBaseUrl, auth.credential).ticket
+        return DeviceHubAccess(
+            httpBase = httpBase,
+            wsBase = wsBase,
+            query = mapOf("hostId" to hostId, "wsTicket" to ticket),
+        )
+    }
+
+    /** `device.list` — [retryHostId] retries a failed host like the RN menu does. */
+    suspend fun listDevices(
+        retryHostId: String? = null,
+        inspectOnly: Boolean = false,
+    ): DeviceServiceStateDto =
+        request(
+            WsMethods.DeviceList,
+            buildJsonObject {
+                retryHostId?.let { put("retryHostId", it) }
+                if (inspectOnly) put("inspectOnly", true)
+            },
+            DeviceServiceStateDto.serializer(),
+        )
+
+    /** `device.shutdown` — powers the device off; the session stream reflects it. */
+    suspend fun shutdownDevice(hostId: String, deviceId: String, platform: String) {
+        execute(
+            WsMethods.DeviceShutdown,
+            buildJsonObject {
+                put("hostId", hostId)
+                put("deviceId", deviceId)
+                put("platform", platform)
+            },
+        )
+    }
+
+    /* ── Project clones ──────────────────────────────────────────────── */
+
+    /** `sourceControlEnvironment.projectClones`: the full tracked list. */
+    fun subscribeProjectClones(): Flow<List<ProjectCloneSnapshotDto>> =
+        subscribe(
+            WsMethods.SubscribeProjectClones,
+            JsonObject(emptyMap()),
+            kotlinx.serialization.builtins.ListSerializer(ProjectCloneSnapshotDto.serializer()),
+        )
+
+    /**
+     * `projectClone.start`: the server creates the project and clones in the
+     * background, returning once the project exists; progress arrives on the
+     * subscription.
+     */
+    suspend fun startProjectClone(
+        projectId: String,
+        title: String,
+        remoteUrl: String,
+        destinationPath: String,
+    ): ProjectCloneStartResultDto =
+        request(
+            WsMethods.ProjectCloneStart,
+            buildJsonObject {
+                put("projectId", projectId)
+                put("title", title)
+                put("createdAt", java.time.Instant.now().toString())
+                put("remoteUrl", remoteUrl)
+                put("destinationPath", destinationPath)
+            },
+            ProjectCloneStartResultDto.serializer(),
+        )
+
+    /** `projectClone.cancel`/`retry`: `true` when the server applied it. */
+    suspend fun projectCloneAction(projectId: String, retry: Boolean): Boolean =
+        request(
+            if (retry) WsMethods.ProjectCloneRetry else WsMethods.ProjectCloneCancel,
+            buildJsonObject { put("projectId", projectId) },
+            ProjectCloneActionResultDto.serializer(),
+        ).applied
 
     /**
      * Issues a unary RPC on the current connection, waiting briefly for one if

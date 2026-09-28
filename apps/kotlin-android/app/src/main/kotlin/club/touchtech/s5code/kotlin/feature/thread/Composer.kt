@@ -29,9 +29,12 @@ import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -161,6 +164,12 @@ fun ThreadComposer(
      */
     offersUsageLimits: Boolean = false,
     onUsageLimits: () -> Unit = {},
+    /**
+     * `devicePreviews`: how many devices this thread holds open. Nonzero shows
+     * the preview button; the count is the accessibility label's plural.
+     */
+    devicePreviewCount: Int = 0,
+    onOpenDevicePreview: () -> Unit = {},
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     onCancel: () -> Unit,
@@ -551,6 +560,26 @@ fun ThreadComposer(
                                 modifier = Modifier.widthIn(max = 180.dp),
                             )
                             Box(Modifier.weight(1f))
+                            if (devicePreviewCount > 0) {
+                                // The device stream opens from the toolbar,
+                                // badged like RN when several are open.
+                                BadgedBox(
+                                    badge = {
+                                        if (devicePreviewCount > 1) {
+                                            Badge { Text("$devicePreviewCount") }
+                                        }
+                                    },
+                                ) {
+                                    S5ComposerControl(
+                                        label = null,
+                                        icon = Icons.Rounded.Smartphone,
+                                        contentDescription =
+                                            if (devicePreviewCount == 1) "View device"
+                                            else "View $devicePreviewCount devices",
+                                        onClick = onOpenDevicePreview,
+                                    )
+                                }
+                            }
                             DictationMicControl(dictation)
                             if (working) {
                                 S5ComposerAction(
@@ -693,7 +722,7 @@ private fun SendOrStop(
  * — already serialized, so a path pick carries its Markdown link. When
  * [interactionMode] is set the pick is a mode switch, not an insertion.
  */
-private data class ComposerSuggestion(
+internal data class ComposerSuggestion(
     val label: String,
     val description: String,
     val icon: ImageVector?,
@@ -704,13 +733,13 @@ private data class ComposerSuggestion(
 )
 
 /** One ranked `skill` trigger candidate. */
-private data class RankedSkill(
+internal data class RankedSkill(
     val skill: ProviderSkill,
     val score: Int,
     val tieBreaker: String,
 )
 
-private fun ProviderSkill.suggestion(): ComposerSuggestion =
+internal fun ProviderSkill.suggestion(): ComposerSuggestion =
     ComposerSuggestion(
         label = displayName ?: name,
         description = shortDescription ?: description.orEmpty(),
@@ -723,7 +752,7 @@ private fun ProviderSkill.suggestion(): ComposerSuggestion =
  * name wins tiers over the display label, then short and long descriptions —
  * fuzzy subsequence only on the two name fields, never in prose.
  */
-private fun rankProviderSkill(skill: ProviderSkill, query: String): RankedSkill? {
+internal fun rankProviderSkill(skill: ProviderSkill, query: String): RankedSkill? {
     val displayLabel = (skill.displayName ?: skill.name).lowercase()
     val score =
         listOfNotNull(
@@ -763,7 +792,7 @@ private fun rankProviderSkill(skill: ProviderSkill, query: String): RankedSkill?
  * box in a box. The popover is one container, like the RN client's.
  */
 @Composable
-private fun SuggestionPopover(
+internal fun SuggestionPopover(
     commands: List<ComposerSuggestion>,
     paths: List<String>,
     pullRequests: List<ComposerPullRequestCandidate>,
@@ -835,7 +864,7 @@ private fun SuggestionPopover(
 }
 
 @Composable
-private fun SuggestionRow(
+internal fun SuggestionRow(
     label: String,
     description: String,
     icon: ImageVector,

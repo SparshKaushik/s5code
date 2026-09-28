@@ -7,6 +7,8 @@ import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.ConsumeResetCreditResult
+import club.touchtech.s5code.kotlin.model.DeviceHubAccess
+import club.touchtech.s5code.kotlin.model.DeviceServiceSnapshot
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentCapabilities
 import club.touchtech.s5code.kotlin.model.EnvironmentId
@@ -14,6 +16,7 @@ import club.touchtech.s5code.kotlin.model.EnvironmentKind
 import club.touchtech.s5code.kotlin.model.FileNode
 import club.touchtech.s5code.kotlin.model.GitStatus
 import club.touchtech.s5code.kotlin.model.Project
+import club.touchtech.s5code.kotlin.model.ProjectClone
 import club.touchtech.s5code.kotlin.model.ProjectId
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
 import club.touchtech.s5code.kotlin.model.ProviderInstance
@@ -754,6 +757,8 @@ class LiveWorkspaceGateway(
                             desktopAppUpdate = state?.capabilities?.desktopAppUpdate == true,
                             serverUpdateThreadContinuation =
                                 state?.capabilities?.serverUpdateThreadContinuation == true,
+                            projectCloneTracking =
+                                state?.capabilities?.projectCloneTracking == true,
                         ),
                     continueThreadsAfterServerUpdate =
                         state?.continueThreadsAfterServerUpdate == true,
@@ -1187,6 +1192,105 @@ class LiveWorkspaceGateway(
                 }
             }.awaitAll()
         }
+    }
+
+    /* ── Devices ─────────────────────────────────────────────────────── */
+
+    /**
+     * One lazily-collected stream per environment, like `providerStatuses`:
+     * the flow stays warm briefly after the last collector leaves so the
+     * preview button → preview screen handoff does not reopen the stream.
+     */
+    private val deviceStateFlows = mutableMapOf<String, StateFlow<DeviceServiceSnapshot?>>()
+
+    override fun deviceState(environmentId: EnvironmentId): StateFlow<DeviceServiceSnapshot?> =
+        deviceStateFlows.getOrPut(environmentId.value) {
+            // Unpaired or failed environments read as "no data" rather than
+            // killing the flow; `subscribe` reconnects on its own.
+            flow<DeviceServiceSnapshot?> {
+                    sessionFor(environmentId)
+                        .subscribeDeviceState()
+                        .collect { emit(it.toSnapshot()) }
+                }
+                .catch { emit(null) }
+                .stateIn(scope, SharingStarted.WhileSubscribed(10_000), null)
+        }
+
+    override suspend fun deviceHubAccess(
+        environmentId: EnvironmentId,
+        hostId: String,
+    ): DeviceHubAccess {
+        val session = sessionFor(environmentId)
+        val hubBasePath =
+            deviceState(environmentId).value?.hubBasePath?.takeIf { it.isNotEmpty() }
+                ?: "/api/device-hub"
+        return session.deviceHubAccess(hostId, hubBasePath)
+    }
+
+    override suspend fun refreshDevices(environmentId: EnvironmentId, retryHostId: String?) {
+        sessionFor(environmentId).listDevices(retryHostId)
+    }
+
+    override suspend fun inspectDeviceTools(environmentId: EnvironmentId) {
+        sessionFor(environmentId).listDevices(inspectOnly = true)
+    }
+
+    override suspend fun shutdownDevice(
+        environmentId: EnvironmentId,
+        hostId: String,
+        deviceId: String,
+        platform: String,
+    ) {
+        sessionFor(environmentId).shutdownDevice(hostId, deviceId, platform)
+    }
+
+    /* ── Project clones ──────────────────────────────────────────────── */
+
+    /**
+     * The stream starts null so a draft opened right after a clone starts
+     * cannot mistake "not yet delivered" for "no clone". A failed
+     * subscription resolves to empty rather than holding Start forever —
+     * the server's own dispatch guard still decides.
+     */
+    private val projectClonesFlows = mutableMapOf<String, StateFlow<List<ProjectClone>?>>()
+
+    override fun projectClones(environmentId: EnvironmentId): StateFlow<List<ProjectClone>?> =
+        projectClonesFlows.getOrPut(environmentId.value) {
+            val session =
+                sessions.value[environmentId.value]?.session
+                    ?: return@getOrPut MutableStateFlow(emptyList())
+            // Gate on the live capability rather than a snapshot read: the
+            // draft can open before the config stream delivers, and that gap
+            // is exactly the pending window the null start covers.
+            @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+            session.state
+                .flatMapLatest { state ->
+                    if (!state.capabilities.projectCloneTracking) {
+                        flowOf(emptyList())
+                    } else {
+                        session.subscribeProjectClones()
+                            .map { list -> list.map { it.toModel() } }
+                    }
+                }
+                .catch { emit(emptyList()) }
+                .stateIn(scope, SharingStarted.WhileSubscribed(10_000), null)
+        }
+
+    override suspend fun projectCloneAction(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        retry: Boolean,
+    ): Boolean = sessionFor(environmentId).projectCloneAction(projectId.value, retry)
+
+    override suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId) {
+        dispatch(
+            environmentId,
+            buildJsonObject {
+                put("type", "project.delete")
+                put("commandId", Commands.newCommandId())
+                put("projectId", projectId.value)
+            },
+        )
     }
 
     override suspend fun consumeResetCredit(
@@ -2721,6 +2825,29 @@ class LiveWorkspaceGateway(
         return result.entries.map { it.path }
     }
 
+    override suspend fun searchPathsIn(
+        environmentId: EnvironmentId,
+        cwd: String,
+        query: String,
+        limit: Int,
+    ): List<String> {
+        val result =
+            runCatching {
+                    sessionFor(environmentId)
+                        .request(
+                            WsMethods.ProjectsSearchEntries,
+                            buildJsonObject {
+                                put("cwd", cwd)
+                                put("query", query)
+                                put("limit", limit)
+                            },
+                            ProjectListEntriesResultDto.serializer(),
+                        )
+                }
+                .getOrNull() ?: return emptyList()
+        return result.entries.map { it.path }
+    }
+
     override suspend fun usage(window: UsageWindow): Usage {
         val zone = java.time.ZoneId.systemDefault()
         val now = java.time.Instant.now()
@@ -2889,6 +3016,26 @@ class LiveWorkspaceGateway(
                     SourceControlCloneResultDto.serializer(),
                 )
         return createProject(environmentId = environmentId, workspaceRoot = clone.cwd) to clone.cwd
+    }
+
+    override suspend fun startTrackedProjectClone(
+        environmentId: EnvironmentId,
+        remoteUrl: String,
+        destinationPath: String,
+    ): Pair<ProjectId, String> {
+        // Client-generated id and title like RN's AddProjectScreen: the
+        // command is idempotent on projectId, so a retry after a dropped
+        // socket must not create a second project.
+        val projectId = ProjectId(UUID.randomUUID().toString())
+        val result =
+            sessionFor(environmentId)
+                .startProjectClone(
+                    projectId = projectId.value,
+                    title = inferProjectTitleFromPath(destinationPath),
+                    remoteUrl = remoteUrl,
+                    destinationPath = destinationPath,
+                )
+        return projectId to result.cwd
     }
 
     override suspend fun updateServerSettings(environmentId: EnvironmentId, patch: JsonObject) {

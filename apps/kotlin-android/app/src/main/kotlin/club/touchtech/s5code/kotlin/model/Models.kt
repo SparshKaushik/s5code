@@ -136,6 +136,8 @@ data class EnvironmentCapabilities(
     val desktopAppUpdate: Boolean = false,
     /** `continueRunningThreads` on `server.updateServer` is honored. */
     val serverUpdateThreadContinuation: Boolean = false,
+    /** The environment tracks project clones (`subscribeProjectClones`). */
+    val projectCloneTracking: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -1189,6 +1191,130 @@ data class ConsumeResetCreditResult(
     /** reset | nothingToReset | noCredit | alreadyRedeemed */
     val outcome: String,
     val warning: String?,
+)
+
+/* ── Devices ─────────────────────────────────────────────────────────── */
+
+/**
+ * `DeviceServiceState` distilled for the preview surface: which devices exist
+ * on which hosts and which threads hold one open.
+ */
+data class DeviceServiceSnapshot(
+    val hosts: List<DeviceHost>,
+    val hostStatuses: Map<String, DeviceHostStatus>,
+    val devices: List<DeviceSummary>,
+    val sessions: List<DeviceSession>,
+    val supportsHostRetry: Boolean,
+    val supportsToolInspection: Boolean,
+    /** Origin-relative path the client prefixes to hub routes (`/api/device-hub`). */
+    val hubBasePath: String,
+)
+
+data class DeviceHost(
+    val id: String,
+    val label: String,
+    val tools: DeviceToolVersions?,
+    val toolInspectionError: String?,
+)
+
+data class DeviceToolVersions(val hub: DeviceToolVersion, val agent: DeviceToolVersion)
+
+data class DeviceToolVersion(
+    val requiredVersion: String,
+    val installedVersions: List<String>,
+    val runningVersion: String?,
+)
+
+data class DeviceHostStatus(val status: String, val detail: String?)
+
+data class DeviceSummary(
+    val hostId: String,
+    val id: String,
+    /** ios | android */
+    val platform: String,
+    val name: String,
+    val version: String,
+)
+
+data class DeviceSession(
+    val threadId: String,
+    val hostId: String,
+    val deviceId: String,
+    val platform: String,
+)
+
+/**
+ * `threadDevicePreviews` on the RN client: one open device per matching
+ * session, with the host label folded into the subtitle. Host id is part of
+ * the key because Android serials repeat across hosts.
+ */
+data class ThreadDevicePreview(
+    val key: String,
+    val session: DeviceSession,
+    val name: String,
+    val description: String,
+)
+
+/**
+ * `ProjectCloneSnapshot` — one tracked clone's progress. In-memory on the
+ * server: a finished clone drops after a grace period; a failed one stays
+ * until retried or the project is removed.
+ */
+data class ProjectClone(
+    val projectId: String,
+    val remoteUrl: String,
+    val destinationPath: String,
+    /** The looked-up `owner/repo` when lookup resolved. */
+    val repositoryName: String?,
+    /** running | done | failed | cancelled */
+    val phase: String,
+    /** connecting | counting | receiving | resolving | checkout */
+    val stage: String,
+    /** Percent of the current stage, parsed from git's progress lines. */
+    val percent: Int?,
+    /** Trailing text from the progress line (transfer size and rate). */
+    val detail: String?,
+    /** Human readable reason when phase is failed. */
+    val error: String?,
+)
+
+/** `projectCloneStageLabel`. */
+fun projectCloneStageLabel(stage: String): String =
+    when (stage) {
+        "connecting" -> "Connecting"
+        "counting" -> "Counting objects"
+        "receiving" -> "Receiving objects"
+        "resolving" -> "Resolving deltas"
+        "checkout" -> "Checking out files"
+        else -> "Cloning"
+    }
+
+/** `projectCloneDisplayName`: `owner/repo`, else the folder being cloned into. */
+fun projectCloneDisplayName(clone: ProjectClone): String {
+    clone.repositoryName?.let { return it }
+    val segments = clone.destinationPath.split('/', '\\').filter { it.isNotEmpty() }
+    return segments.lastOrNull() ?: clone.destinationPath
+}
+
+/** `projectCloneProgressSummary`: `Receiving objects · 45% · 12.3 MiB`. */
+fun projectCloneProgressSummary(clone: ProjectClone): String =
+    listOfNotNull(
+        projectCloneStageLabel(clone.stage),
+        clone.percent?.let { "$it%" },
+        clone.detail?.takeIf { it.isNotEmpty() },
+    ).joinToString(" · ")
+
+/**
+ * `DeviceHubAccess` — credentials for the stream's media requests. `img`,
+ * `EventSource`, and `WebSocket` inside the preview cannot send bearer or
+ * DPoP headers, so a short-lived WebSocket ticket travels as `wsTicket`.
+ */
+data class DeviceHubAccess(
+    /** Absolute environment URL ending in the hub base path. */
+    val httpBase: String,
+    /** Same base with the ws(s) scheme. */
+    val wsBase: String,
+    val query: Map<String, String>,
 )
 
 /**

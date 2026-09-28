@@ -16,6 +16,7 @@ import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.feature.archive.ArchiveScreen
 import club.touchtech.s5code.kotlin.feature.connections.ConnectionDetailScreen
 import club.touchtech.s5code.kotlin.feature.connections.ConnectionsScreen
+import club.touchtech.s5code.kotlin.feature.devices.DevicePreviewScreen
 import club.touchtech.s5code.kotlin.feature.files.AttachmentFileScreen
 import club.touchtech.s5code.kotlin.feature.files.FilePreviewScreen
 import club.touchtech.s5code.kotlin.feature.files.FilesTreeScreen
@@ -413,6 +414,15 @@ fun S5NavGraph(
                 },
             )
         }
+        composable(Routes.ThreadDevices, arguments = listOf(environmentArg, threadArg)) { entry ->
+            DevicePreviewScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                threadId = entry.arguments?.getString("threadId").orEmpty(),
+                onBack = navController::popBackStack,
+            )
+        }
+
         composable(Routes.ThreadRewind, arguments = listOf(environmentArg, threadArg)) { entry ->
             ThreadRewindScreen(
                 store = store,

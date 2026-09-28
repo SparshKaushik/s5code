@@ -29,6 +29,9 @@ import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import club.touchtech.s5code.kotlin.model.ConsumeResetCreditResult
+import club.touchtech.s5code.kotlin.model.DeviceHubAccess
+import club.touchtech.s5code.kotlin.model.DeviceServiceSnapshot
+import club.touchtech.s5code.kotlin.model.ProjectClone
 import club.touchtech.s5code.kotlin.model.ResetCreditTarget
 import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageLimitsView
@@ -489,6 +492,17 @@ interface WorkspaceGateway {
     ): List<String>
 
     /**
+     * Same search, addressed by directory instead of thread — the new-task
+     * draft's `@` trigger has no thread yet, only the project's workspace.
+     */
+    suspend fun searchPathsIn(
+        environmentId: EnvironmentId,
+        cwd: String,
+        query: String,
+        limit: Int = 20,
+    ): List<String>
+
+    /**
      * Merged usage over one window. A request rather than a subscription: every
      * environment scans its own provider transcripts, which is slow enough that the
      * screen shows a loading state for it.
@@ -526,6 +540,57 @@ interface WorkspaceGateway {
         environmentId: EnvironmentId,
         target: ResetCreditTarget,
     ): ConsumeResetCreditResult
+
+    /* ── Devices ─────────────────────────────────────────────────────── */
+
+    /**
+     * `deviceEnvironment.state`: the environment's live device inventory —
+     * which threads hold devices open, per-host health. Lazily subscribed;
+     * emits null while the environment is disconnected.
+     */
+    fun deviceState(environmentId: EnvironmentId): StateFlow<DeviceServiceSnapshot?>
+
+    /**
+     * Credentials for the preview's media requests (`DeviceHubAccess` on RN).
+     * Mints a fresh socket ticket each call, so a reconnect or an expired
+     * ticket is answered by calling again, not by retry logic in the UI.
+     */
+    suspend fun deviceHubAccess(environmentId: EnvironmentId, hostId: String): DeviceHubAccess
+
+    /** `device.list` with an optional failed-host retry (`retryHostId`). */
+    suspend fun refreshDevices(environmentId: EnvironmentId, retryHostId: String? = null)
+
+    /** `device.list` `inspectOnly` — rereads tool versions without installing. */
+    suspend fun inspectDeviceTools(environmentId: EnvironmentId)
+
+    /** `device.shutdown` — powers the device off. */
+    suspend fun shutdownDevice(
+        environmentId: EnvironmentId,
+        hostId: String,
+        deviceId: String,
+        platform: String,
+    )
+
+    /* ── Project clones ──────────────────────────────────────────────── */
+
+    /**
+     * `useProjectClone`'s source list: null while the clone stream has not
+     * delivered its first list ("pending" — the draft opens right after a
+     * clone starts, so the gap must not enable Start), then every tracked
+     * clone. On servers without clone tracking this stays an empty list —
+     * Start never waits on a stream the server cannot emit.
+     */
+    fun projectClones(environmentId: EnvironmentId): StateFlow<List<ProjectClone>?>
+
+    /** `projectClone.cancel`/`retry`; `true` when the server applied it. */
+    suspend fun projectCloneAction(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        retry: Boolean,
+    ): Boolean
+
+    /** `project.delete` — removes the project a failed clone was for. */
+    suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId)
 
     /**
      * `sourceControl.lookupRepository` — validates one `owner/name` reference on
@@ -569,6 +634,17 @@ interface WorkspaceGateway {
      * needs that path, since it is not always the requested destination.
      */
     suspend fun cloneProject(
+        environmentId: EnvironmentId,
+        remoteUrl: String,
+        destinationPath: String,
+    ): Pair<ProjectId, String>
+
+    /**
+     * The tracked path for servers with `projectCloneTracking`
+     * (`projectClone.start`): the project exists when this returns and the
+     * clone runs in the background — the draft gates Start on [projectClones].
+     */
+    suspend fun startTrackedProjectClone(
         environmentId: EnvironmentId,
         remoteUrl: String,
         destinationPath: String,
