@@ -79,9 +79,11 @@ interface PendingSend {
 
 interface OpenCodeSessionContext {
   readonly threadId: ThreadId;
-  readonly sessionId: string;
+  /** Mutable: rolling back every recorded turn replaces the session wholesale. */
+  sessionId: string;
   readonly directory: string;
-  readonly createdAt: string;
+  /** Mutable: rolling back every recorded turn replaces the session wholesale. */
+  createdAt: string;
   activeTurnId: TurnId | null;
   /** Most recent turn seen on this session; late events after a turn closes
    * still belong to it and must not spawn a phantom turn. */
@@ -111,6 +113,16 @@ interface OpenCodeSessionContext {
   toolCallByCallId: Map<string, { name: string; input?: unknown }>;
   turnToMessageId: Map<TurnId, string>;
   messageIds: Array<string>;
+  /** Delivered inbox ids that merged into an ongoing turn instead of opening
+   * one (steered input, subagent completion notices). The daemon's message
+   * list marks every delivered input as a user/synthetic row; this set is what
+   * separates real turn boundaries from mid-turn merges during rollback. */
+  nonTurnInputIds: Set<string>;
+  /** Kind of each enqueued inbox item ("user" | "synthetic" | "compaction" |
+   * "move") from `session.inbox.enqueued`. A delivery carries only the id;
+   * the kind decides whether an unmatched delivery opens a turn (provider-
+   * initiated user/synthetic input) or merges invisibly (control items). */
+  inboxItemKindById: Map<string, string>;
 }
 
 export interface OpenCodeAdapterLiveOptions {
@@ -547,10 +559,23 @@ export function makeOpenCodeAdapter(
             // boundary: queued follow-ups deliver only after the previous
             // assistant work ends, so the pending send owning this delivery
             // starts a fresh turn now (superseding whatever is still marked
-            // active). Delivered items nobody sent (compaction, synthetic)
-            // stay on the current turn.
+            // active). Delivered items nobody sent open their own turn when
+            // idle, or merge into the running one.
+            // `session.inbox.delivered` carries only the item id; remember the
+            // enqueued item's kind so the delivery can tell a turn-opening
+            // input from a control item (compaction, move).
+            if (eventType === "session.inbox.enqueued" && !isChildSession) {
+              const inboxId = typeof data.inboxID === "string" ? data.inboxID : undefined;
+              const kind = typeof data.item?.type === "string" ? data.item.type : undefined;
+              if (inboxId && kind) {
+                parentContext.inboxItemKindById.set(inboxId, kind);
+              }
+            }
+
             if (eventType === "session.inbox.delivered" && !isChildSession) {
               const inboxId = typeof data.inboxID === "string" ? data.inboxID : undefined;
+              const itemKind = inboxId ? parentContext.inboxItemKindById.get(inboxId) : undefined;
+              if (inboxId) parentContext.inboxItemKindById.delete(inboxId);
               let sendIndex = inboxId
                 ? parentContext.pendingSends.findIndex((send) => send.inboxId === inboxId)
                 : -1;
@@ -599,6 +624,38 @@ export function makeOpenCodeAdapter(
                   });
                 }
                 turnId = send.turnId;
+              } else if (
+                inboxId &&
+                parentContext.activeTurnId === null &&
+                itemKind !== "compaction" &&
+                itemKind !== "move"
+              ) {
+                // Provider-initiated input delivered while idle (a finished
+                // background job reporting back, another client's prompt)
+                // starts a new busy period; it gets its own turn rather than
+                // appending invisibly into the closed last turn. The daemon
+                // records its input row, so this is also a rollback boundary.
+                const mintedTurnId = TurnId.make(
+                  `turn-${yield* Clock.currentTimeMillis}-${parentContext.nextTurnSeq++}`,
+                );
+                parentContext.activeTurnId = mintedTurnId;
+                parentContext.lastTurnId = mintedTurnId;
+                parentContext.activeTurnStatus = "running";
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId,
+                    turnId: mintedTurnId,
+                    raw: rawEvent,
+                  })),
+                  type: "turn.started",
+                  payload: {},
+                });
+                turnId = mintedTurnId;
+              } else if (inboxId) {
+                // Delivered input nobody sent merges into the running turn
+                // (steered synthetic input, external clients); it must not
+                // count as a turn boundary during rollback.
+                parentContext.nonTurnInputIds.add(inboxId);
               }
             }
 
@@ -903,6 +960,7 @@ export function makeOpenCodeAdapter(
 
               case "session.inbox.cancelled": {
                 if (data.inboxID) {
+                  parentContext.inboxItemKindById.delete(data.inboxID);
                   const sendIndex = parentContext.pendingSends.findIndex(
                     (send) => send.inboxId === data.inboxID,
                   );
@@ -1055,6 +1113,8 @@ export function makeOpenCodeAdapter(
           toolCallByCallId: new Map(),
           turnToMessageId: new Map(),
           messageIds: [],
+          nonTurnInputIds: new Set(),
+          inboxItemKindById: new Map(),
         };
 
         sessionsByThreadId.set(input.threadId, context);
@@ -1460,6 +1520,8 @@ export function makeOpenCodeAdapter(
           toolCallByCallId: new Map(),
           turnToMessageId: forkedTurnToMessageId,
           messageIds: forkedMessageIds,
+          nonTurnInputIds: new Set(),
+          inboxItemKindById: new Map(),
         };
 
         sessionsByThreadId.set(targetThreadId, targetContext);
@@ -1524,6 +1586,109 @@ export function makeOpenCodeAdapter(
         });
       });
 
+    /**
+     * Ordered `{id, type}` rows for one session, oldest first, following the
+     * message cursor. The live event maps alone cannot answer rollback:
+     * resumed sessions have empty maps and per-turn first-message ids are not
+     * tracked, so the daemon's own history is the only complete source.
+     */
+    const listSessionMessages = (
+      sessionId: string,
+    ): Effect.Effect<Array<{ id: string; type: string }>, ProviderAdapterError> =>
+      Effect.tryPromise({
+        try: async () => {
+          const messages: Array<{ id: string; type: string }> = [];
+          let cursor: string | undefined;
+          // A turn boundary needs one user message per turn plus its leading
+          // context, so capped paging is fine; 50 pages covers ~10k messages.
+          for (let page = 0; page < 50; page += 1) {
+            // The cursor already carries ordering/limit; daemons reject a
+            // cursor combined with explicit order/limit params.
+            const pageResult = await hostHandle.client.message.list(
+              cursor !== undefined
+                ? { sessionID: sessionId, cursor }
+                : { sessionID: sessionId, order: "asc", limit: 200 },
+            );
+            for (const message of (pageResult as { data?: Array<unknown> }).data ?? []) {
+              const record = message as { id?: unknown; type?: unknown };
+              if (typeof record.id === "string" && typeof record.type === "string") {
+                messages.push({ id: record.id, type: record.type });
+              }
+            }
+            const next = (pageResult as { cursor?: { next?: string | null } }).cursor?.next;
+            if (typeof next !== "string" || next.length === 0) break;
+            cursor = next;
+          }
+          return messages;
+        },
+        catch: (cause) =>
+          new ProviderAdapterRequestError({
+            provider: PROVIDER,
+            method: "session.message.list",
+            detail: `Failed to read session history: ${openCodeClientErrorMessage(cause)}`,
+            cause,
+          }),
+      });
+
+    /** Whether the session still contains a message with this id. */
+    const sessionMessageExists = (sessionId: string, messageId: string) =>
+      Effect.tryPromise(() =>
+        hostHandle.client.session.message({ sessionID: sessionId, messageID: messageId }),
+      ).pipe(
+        Effect.orElseSucceed(() => undefined),
+        Effect.map((result) => result !== undefined),
+      );
+
+    /** The message id directly preceding `messageId`, or undefined at the start. */
+    const messagePredecessor = (
+      sessionId: string,
+      messageId: string,
+    ): Effect.Effect<string | undefined, ProviderAdapterError> =>
+      listSessionMessages(sessionId).pipe(
+        Effect.map((messages) => {
+          const index = messages.findIndex((message) => message.id === messageId);
+          return index > 0 ? messages[index - 1]?.id : undefined;
+        }),
+      );
+
+    /**
+     * Replace the session with an empty one and drop the old history. Used when
+     * a rollback removes every turn on a daemon where `revert` keeps the
+     * boundary message, leaving no in-place way to reach an empty session.
+     */
+    const recreateEmptySession = (
+      context: OpenCodeSessionContext,
+    ): Effect.Effect<void, ProviderAdapterError> =>
+      Effect.gen(function* () {
+        const created = yield* Effect.tryPromise({
+          try: () =>
+            hostHandle.client.session.create({
+              location: { directory: context.directory },
+              title: `T3 Session: ${context.threadId}`,
+            }),
+          catch: (cause) =>
+            new ProviderAdapterRequestError({
+              provider: PROVIDER,
+              method: "session.create",
+              detail: `Failed to create replacement session: ${openCodeClientErrorMessage(cause)}`,
+              cause,
+            }),
+        });
+        const previousSessionId = context.sessionId;
+        context.sessionId = created.id;
+        threadIdBySessionId.delete(previousSessionId);
+        threadIdBySessionId.set(created.id, context.threadId);
+        context.createdAt = DateTime.formatIso(DateTime.makeUnsafe(created.time.created));
+        context.hasSubagents = false;
+        context.subagents.clear();
+        context.nonTurnInputIds.clear();
+        context.inboxItemKindById.clear();
+        // Removal is best-effort: the old row may already be gone.
+        yield* Effect.tryPromise(() =>
+          hostHandle.client.session.remove({ sessionID: previousSessionId }),
+        ).pipe(Effect.ignore);
+      });
+
     const rollbackThread = (
       threadId: ThreadId,
       numTurns: number,
@@ -1537,38 +1702,110 @@ export function makeOpenCodeAdapter(
           });
         }
 
-        if (numTurns > context.messageIds.length) {
+        if (numTurns <= 0) {
+          return { threadId, turns: [] };
+        }
+
+        // A turn boundary is the input message that opened it — user prompts
+        // and synthetic items both begin one, except input delivered while a
+        // turn was already running, which merges into that turn. Rolling back
+        // N turns reverts at the Nth-to-last input message, deleting it and
+        // everything after.
+        const messages = yield* listSessionMessages(context.sessionId);
+        const turnStartIndexes = messages.flatMap((message, index) =>
+          (message.type === "user" || message.type === "synthetic") &&
+          !context.nonTurnInputIds.has(message.id)
+            ? [index]
+            : [],
+        );
+        const boundaryIndex =
+          numTurns >= turnStartIndexes.length ? 0 : turnStartIndexes.at(-numTurns);
+        const boundary = boundaryIndex === undefined ? undefined : messages[boundaryIndex]?.id;
+        if (boundary === undefined) {
           return yield* new ProviderAdapterRequestError({
             provider: PROVIDER,
             method: "session.revert",
-            detail: `Cannot rollback ${numTurns} turn(s): only ${context.messageIds.length} message(s) are recorded.`,
+            detail: `Cannot rollback ${numTurns} turn(s): no turn boundary message found.`,
           });
         }
 
-        const targetMessageId =
-          context.messageIds.length >= numTurns
-            ? context.messageIds[context.messageIds.length - numTurns]
-            : "latest";
+        // New writes landing mid-rollback would race the boundary the projector
+        // deleted from, so an in-flight turn is interrupted first and reported
+        // as cancelled; queued sends die with the inbox rows the commit drops.
+        if (context.activeTurnId !== null) {
+          const activeTurnId = context.activeTurnId;
+          context.activeTurnId = null;
+          context.activeTurnStatus = "interrupted";
+          yield* emit({
+            ...(yield* buildEventBase({ threadId, turnId: activeTurnId })),
+            type: "turn.completed",
+            payload: { state: "cancelled" },
+          });
+          yield* Effect.tryPromise(async () => {
+            await hostHandle.client.session.interrupt({ sessionID: context.sessionId });
+            await hostHandle.client.session.wait({ sessionID: context.sessionId });
+          }).pipe(Effect.ignore);
+        }
+        context.pendingSends.length = 0;
 
-        yield* Effect.tryPromise({
-          try: async () => {
-            await hostHandle.client.session.revert.stage({
-              sessionID: context.sessionId,
-              messageID: targetMessageId ?? "latest",
-              files: false,
-            });
-            await hostHandle.client.session.revert.commit({
-              sessionID: context.sessionId,
-            });
-          },
-          catch: (cause) =>
-            new ProviderAdapterRequestError({
-              provider: PROVIDER,
-              method: "session.revert",
-              detail: `Failed to rollback session: ${openCodeClientErrorMessage(cause)}`,
-              cause,
-            }),
-        });
+        const stageAndCommit = (messageID: string) =>
+          Effect.tryPromise({
+            try: async () => {
+              await hostHandle.client.session.revert.stage({
+                sessionID: context.sessionId,
+                messageID,
+                files: false,
+              });
+              await hostHandle.client.session.revert.commit({
+                sessionID: context.sessionId,
+              });
+            },
+            catch: (cause) =>
+              new ProviderAdapterRequestError({
+                provider: PROVIDER,
+                method: "session.revert",
+                detail: `Failed to rollback session: ${openCodeClientErrorMessage(cause)}`,
+                cause,
+              }),
+          });
+
+        yield* stageAndCommit(boundary);
+
+        // Released daemons delete the boundary message itself (`>= seq`),
+        // while current dev builds keep it (`> seq`). Re-list and, when the
+        // boundary survived, land a second revert on its predecessor so both
+        // flavors converge on the same post-rollback history.
+        if (yield* sessionMessageExists(context.sessionId, boundary)) {
+          const predecessor = yield* messagePredecessor(context.sessionId, boundary);
+          if (predecessor === undefined) {
+            yield* recreateEmptySession(context);
+          } else {
+            yield* stageAndCommit(predecessor);
+          }
+        }
+
+        const remainingIds = new Set(
+          (yield* listSessionMessages(context.sessionId)).map((message) => message.id),
+        );
+        context.messageIds = context.messageIds.filter((id) => remainingIds.has(id));
+        for (const [messageId, mappedTurnId] of context.messageIdToTurnId) {
+          if (!remainingIds.has(messageId)) {
+            context.messageIdToTurnId.delete(messageId);
+            context.turnToMessageId.delete(mappedTurnId);
+          }
+        }
+        for (const [turnId, messageId] of context.turnToMessageId) {
+          if (!context.messageIdToTurnId.has(messageId)) {
+            context.turnToMessageId.delete(turnId);
+          }
+        }
+        context.lastTurnId =
+          context.messageIds.length > 0
+            ? (context.messageIdToTurnId.get(context.messageIds[context.messageIds.length - 1]!) ??
+              null)
+            : null;
+        context.activeTurnId = null;
+        context.toolCallByCallId.clear();
 
         return {
           threadId,

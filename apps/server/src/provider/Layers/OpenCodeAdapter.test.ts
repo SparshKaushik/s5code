@@ -28,7 +28,64 @@ function createMockHost() {
   const buffer: Array<{ type: string; data?: any }> = [];
   const waiters: Array<() => void> = [];
 
+  // The daemon's durable message rows, keyed by session id. Rollback reads
+  // this history to pick a boundary, so the mock mirrors the rows a real
+  // daemon records: a user/synthetic row per delivered inbox item and an
+  // assistant row per assistant message id.
+  const sessionMessages = new Map<string, Array<{ id: string; type: string }>>();
+  const pendingInputTypes = new Map<string, Map<string, string>>();
+  const stagedReverts = new Map<string, string>();
+  let sessionCount = 0;
+
+  const messagesFor = (sessionId: string) => {
+    let rows = sessionMessages.get(sessionId);
+    if (!rows) {
+      rows = [];
+      sessionMessages.set(sessionId, rows);
+    }
+    return rows;
+  };
+
+  const pushMessage = (sessionId: string, id: string, type: string) => {
+    const rows = messagesFor(sessionId);
+    if (!rows.some((row) => row.id === id)) {
+      rows.push({ id, type });
+    }
+  };
+
   const emit = (event: { type: string; data?: any }) => {
+    const data = event.data ?? {};
+    const sessionId = data.sessionID ?? data.form?.sessionID ?? data.info?.id;
+    if (typeof sessionId === "string") {
+      if (event.type === "session.created") {
+        messagesFor(sessionId);
+      } else if (typeof data.assistantMessageID === "string") {
+        pushMessage(sessionId, data.assistantMessageID, "assistant");
+      } else if (event.type === "session.inbox.enqueued") {
+        const inboxId = typeof data.inboxID === "string" ? data.inboxID : undefined;
+        const kind = typeof data.item?.type === "string" ? data.item.type : undefined;
+        if (inboxId && kind) {
+          let inputs = pendingInputTypes.get(sessionId);
+          if (!inputs) {
+            inputs = new Map();
+            pendingInputTypes.set(sessionId, inputs);
+          }
+          inputs.set(inboxId, kind);
+        }
+      } else if (event.type === "session.inbox.delivered") {
+        const inboxId =
+          typeof data.inboxID === "string"
+            ? data.inboxID
+            : typeof data.messageID === "string"
+              ? data.messageID
+              : undefined;
+        if (inboxId) {
+          const type = pendingInputTypes.get(sessionId)?.get(inboxId) ?? "user";
+          pendingInputTypes.get(sessionId)?.delete(inboxId);
+          pushMessage(sessionId, inboxId, type);
+        }
+      }
+    }
     buffer.push(event);
     const w = waiters.shift();
     if (w) w();
@@ -37,6 +94,7 @@ function createMockHost() {
   const calls: {
     prompts: Array<any>;
     interrupts: Array<any>;
+    waits: Array<any>;
     forks: Array<any>;
     inboxCancels: Array<any>;
     inboxChanges: Array<any>;
@@ -45,9 +103,12 @@ function createMockHost() {
     reverts: Array<any>;
     switchModels: Array<any>;
     switchAgents: Array<any>;
+    creates: Array<any>;
+    removes: Array<any>;
   } = {
     prompts: [],
     interrupts: [],
+    waits: [],
     forks: [],
     inboxCancels: [],
     inboxChanges: [],
@@ -56,6 +117,8 @@ function createMockHost() {
     reverts: [],
     switchModels: [],
     switchAgents: [],
+    creates: [],
+    removes: [],
   };
 
   const client = {
@@ -94,11 +157,46 @@ function createMockHost() {
         ],
       }),
     },
-    session: {
-      create: async (params: any) => ({
-        id: `mock-session-123`,
-        directory: params.location?.directory ?? "/tmp",
+    message: {
+      list: async (params: any) => ({
+        data: [...messagesFor(params.sessionID)],
+        cursor: { next: null },
       }),
+    },
+    session: {
+      create: async (params: any) => {
+        calls.creates.push(params);
+        sessionCount += 1;
+        const id = sessionCount === 1 ? "mock-session-123" : `mock-session-${122 + sessionCount}`;
+        sessionMessages.set(id, []);
+        return {
+          id,
+          directory: params.location?.directory ?? "/tmp",
+          time: { created: 1_700_000_000_000 + sessionCount },
+        };
+      },
+      get: async (params: any) => {
+        if (!sessionMessages.has(params.sessionID)) {
+          throw new Error("Session not found");
+        }
+        return { id: params.sessionID, time: { created: 1_700_000_000_000 } };
+      },
+      remove: async (params: any) => {
+        calls.removes.push(params);
+        sessionMessages.delete(params.sessionID);
+      },
+      message: async (params: any) => {
+        const row = sessionMessages
+          .get(params.sessionID)
+          ?.find((message) => message.id === params.messageID);
+        if (!row) {
+          throw new Error("Message not found");
+        }
+        return row;
+      },
+      wait: async (params: any) => {
+        calls.waits.push(params);
+      },
       switchModel: async (params: any) => {
         calls.switchModels.push(params);
       },
@@ -107,7 +205,14 @@ function createMockHost() {
       },
       prompt: async (params: any) => {
         calls.prompts.push(params);
-        return { id: `prompt-${calls.prompts.length}` };
+        const inboxId = `prompt-${calls.prompts.length}`;
+        let inputs = pendingInputTypes.get(params.sessionID);
+        if (!inputs) {
+          inputs = new Map();
+          pendingInputTypes.set(params.sessionID, inputs);
+        }
+        inputs.set(inboxId, "user");
+        return { id: inboxId };
       },
       interrupt: async (params: any) => {
         calls.interrupts.push(params);
@@ -115,14 +220,25 @@ function createMockHost() {
       compact: async (_params: any) => {},
       fork: async (params: any) => {
         calls.forks.push(params);
-        return { id: `mock-forked-456` };
+        const id = `mock-forked-456`;
+        sessionMessages.set(id, []);
+        return { id, time: { created: 1_800_000_000_000 } };
       },
       revert: {
         stage: async (params: any) => {
           calls.reverts.push({ stage: params });
+          stagedReverts.set(params.sessionID, params.messageID);
         },
         commit: async (params: any) => {
           calls.reverts.push({ commit: params });
+          const boundary = stagedReverts.get(params.sessionID);
+          stagedReverts.delete(params.sessionID);
+          const rows = sessionMessages.get(params.sessionID);
+          if (!rows || boundary === undefined) return;
+          const index = rows.findIndex((row) => row.id === boundary);
+          if (index === -1) return;
+          // Released daemons (v2.0.8) delete the boundary row itself.
+          rows.splice(index);
         },
       },
       inbox: {
@@ -518,6 +634,401 @@ describe("OpenCodeAdapter", () => {
 
       // Verify forked session is registered and usable
       expect(yield* adapter.hasSession(targetThreadId)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("rolls back a turn by reverting at its input message, not an assistant message", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-rollback");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Two full turns, each bounded by its delivered user input.
+      const firstTurn = yield* adapter.sendTurn({ threadId, input: "first" });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "prompt-1" },
+      });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "one" },
+      });
+      emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+      yield* waitForEvent((e) => e.type === "turn.completed");
+
+      const secondTurn = yield* adapter.sendTurn({ threadId, input: "second" });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "prompt-2" },
+      });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, assistantMessageID: "msg-b", delta: "two" },
+      });
+      emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+      yield* waitForEvent((e) => e.type === "turn.completed" && e.turnId === secondTurn.turnId);
+
+      yield* adapter.rollbackThread!(threadId, 1);
+
+      // The revert must stage at the turn's user input row. Staging at the
+      // assistant message (the old behavior) would keep the turn's own input
+      // and silently leave a ghost turn behind.
+      const stages = calls.reverts.filter((call) => call.stage);
+      expect(stages).toHaveLength(1);
+      expect(stages[0].stage).toEqual({
+        sessionID: sessionId,
+        messageID: "prompt-2",
+        files: false,
+      });
+      expect(calls.reverts.filter((call) => call.commit)).toHaveLength(1);
+
+      // The rolled-back turn's message mapping is gone, so forking at it fails.
+      const forkExit = yield* adapter.forkThread!(
+        threadId,
+        ThreadId.make("thread-rollback-fork"),
+        secondTurn.turnId,
+      ).pipe(Effect.exit);
+      expect(Exit.isFailure(forkExit)).toBe(true);
+
+      // The surviving turn still forks cleanly.
+      const forkResult = yield* adapter.forkThread!(
+        threadId,
+        ThreadId.make("thread-rollback-fork"),
+        firstTurn.turnId,
+      );
+      expect((forkResult.resumeCursor as any).sessionID).toContain("mock-forked");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("ignores mid-turn steered input when picking a rollback boundary", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-rollback-steer");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "first" });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "prompt-1" },
+      });
+      // Input delivered mid-execution with no matching send merges into the
+      // running turn; its message row must not count as a turn boundary.
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "ext-1" },
+      });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "one" },
+      });
+      // Wait for the pump to consume the deliveries before rolling back.
+      yield* waitForEvent((e) => e.type === "content.delta");
+
+      // The turn is still running: rollback interrupts it first.
+      yield* adapter.rollbackThread!(threadId, 1);
+      expect(calls.interrupts).toEqual([{ sessionID: sessionId }]);
+      expect(calls.waits).toEqual([{ sessionID: sessionId }]);
+
+      const cancelled = yield* waitForEvent(
+        (e) => e.type === "turn.completed" && (e.payload as any).state === "cancelled",
+      );
+      expect(cancelled).toBeDefined();
+
+      // Boundary is the turn's input, not the steered "ext-1" row that the
+      // daemon also recorded as a user message.
+      const stages = calls.reverts.filter((call) => call.stage);
+      expect(stages).toHaveLength(1);
+      expect(stages[0].stage.messageID).toBe("prompt-1");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("recreates the session when the daemon keeps a first-message boundary", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-rollback-recreate");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      yield* adapter.sendTurn({ threadId, input: "only" });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "prompt-1" },
+      });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "work" },
+      });
+      emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+      yield* waitForEvent((e) => e.type === "turn.completed");
+
+      // Dev-branch daemons keep the boundary row on commit; simulate that.
+      (handle.client.session.revert as any).commit = async (params: any) => {
+        calls.reverts.push({ commit: params });
+      };
+
+      yield* adapter.rollbackThread!(threadId, 1);
+
+      // The boundary row (prompt-1) survived the commit and has no
+      // predecessor, so the session is replaced wholesale.
+      expect(calls.reverts.filter((call) => call.stage)).toHaveLength(1);
+      expect(calls.creates).toHaveLength(2);
+      expect(calls.removes).toEqual([{ sessionID: sessionId }]);
+
+      const sessions = yield* adapter.listSessions();
+      expect(sessions).toHaveLength(1);
+      const newSessionId = (sessions[0]!.resumeCursor as { sessionID: string }).sessionID;
+      expect(newSessionId).not.toBe(sessionId);
+
+      // The replacement session accepts new work under the same thread.
+      yield* adapter.sendTurn({ threadId, input: "again" });
+      expect(calls.prompts.at(-1)?.sessionID).toBe(newSessionId);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("stages a second revert at the predecessor when the boundary survives", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-rollback-gt");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      for (const [turn, assistant] of [
+        ["prompt-1", "msg-a"],
+        ["prompt-2", "msg-b"],
+      ] as const) {
+        yield* adapter.sendTurn({ threadId, input: "turn" });
+        emit({
+          type: "session.inbox.delivered",
+          data: { sessionID: sessionId, inboxID: turn },
+        });
+        emit({
+          type: "session.text.delta",
+          data: { sessionID: sessionId, assistantMessageID: assistant, delta: "x" },
+        });
+        emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+        yield* waitForEvent((e) => e.type === "turn.completed");
+      }
+
+      // Dev-branch daemon: commit deletes rows strictly after the boundary.
+      (handle.client.session.revert as any).commit = async (params: any) => {
+        calls.reverts.push({ commit: params });
+      };
+
+      yield* adapter.rollbackThread!(threadId, 1);
+
+      const stages = calls.reverts.filter((call) => call.stage);
+      // First stage at the turn's input; the boundary survives, so a second
+      // stage lands on its predecessor (the previous turn's assistant row).
+      expect(stages).toHaveLength(2);
+      expect(stages[0].stage.messageID).toBe("prompt-2");
+      expect(stages[1].stage.messageID).toBe("msg-a");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("opens a new turn for provider-initiated input delivered while idle", () =>
+    Effect.gen(function* () {
+      const { handle, emit, calls } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-bg-completion");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+      const waitForEvent = Effect.fn("waitForEvent")(function* (
+        predicate: (event: ProviderRuntimeEvent) => boolean,
+      ) {
+        while (true) {
+          const event = yield* Queue.take(canonicalEvents);
+          if (predicate(event)) return event;
+        }
+      });
+
+      // Turn 1: the agent finishes while a background job still runs.
+      const firstTurn = yield* adapter.sendTurn({ threadId, input: "build in background" });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "prompt-1" },
+      });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, assistantMessageID: "msg-a", delta: "Started." },
+      });
+      emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+      yield* waitForEvent(
+        (e) =>
+          e.type === "turn.completed" &&
+          e.turnId === firstTurn.turnId &&
+          (e.payload as any).state === "completed",
+      );
+
+      // The bg job finishes; the daemon enqueues its completion as a
+      // synthetic item and delivers it into a fresh busy period.
+      emit({
+        type: "session.inbox.enqueued",
+        data: { sessionID: sessionId, inboxID: "bg-1", item: { type: "synthetic" } },
+      });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "bg-1" },
+      });
+      emit({ type: "session.execution.started", data: { sessionID: sessionId } });
+      emit({
+        type: "session.text.delta",
+        data: { sessionID: sessionId, assistantMessageID: "msg-b", delta: "Build finished." },
+      });
+      emit({ type: "session.execution.succeeded", data: { sessionID: sessionId } });
+
+      const secondStarted = yield* waitForEvent(
+        (e) => e.type === "turn.started" && e.turnId !== firstTurn.turnId,
+      );
+      const secondTurnId = secondStarted.turnId!;
+
+      const secondDelta = yield* waitForEvent(
+        (e) => e.type === "content.delta" && (e.payload as any).delta === "Build finished.",
+      );
+      expect(secondDelta.turnId).toBe(secondTurnId);
+
+      const secondCompleted = yield* waitForEvent(
+        (e) => e.type === "turn.completed" && e.turnId === secondTurnId,
+      );
+      expect((secondCompleted.payload as any).state).toBe("completed");
+
+      // The minted turn's input row is a real turn boundary for rollback.
+      yield* adapter.rollbackThread!(threadId, 1);
+      const stages = calls.reverts.filter((call) => call.stage);
+      expect(stages).toHaveLength(1);
+      expect(stages[0].stage.messageID).toBe("bg-1");
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("does not open a turn for a compaction item delivered while idle", () =>
+    Effect.gen(function* () {
+      const { handle, emit } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+
+      const threadId = ThreadId.make("thread-compaction-delivery");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionId = (session.resumeCursor as { sessionID: string }).sessionID;
+
+      const canonicalEvents = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(canonicalEvents, event)),
+      );
+
+      // A daemon-internal control item delivered while idle must not open a
+      // turn; only its own dedicated events should surface.
+      emit({
+        type: "session.inbox.enqueued",
+        data: { sessionID: sessionId, inboxID: "cmp-1", item: { type: "compaction" } },
+      });
+      emit({
+        type: "session.inbox.delivered",
+        data: { sessionID: sessionId, inboxID: "cmp-1" },
+      });
+      emit({
+        type: "session.compaction.ended",
+        data: { sessionID: sessionId, reason: "auto", text: "summary" },
+      });
+
+      // Pump order is FIFO: once the compaction event lands, both inbox
+      // events were already handled.
+      while (true) {
+        const event = yield* Queue.take(canonicalEvents);
+        if (event.type === "turn.started") {
+          throw new Error("compaction delivery minted a turn");
+        }
+        if (event.type === "thread.state.changed") return;
+      }
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
