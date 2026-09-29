@@ -49,6 +49,32 @@ function normalizePem(value: string): string {
   return value.replace(/\\n/gu, "\n").trim();
 }
 
+// PEM parsing plus `subtle.importKey` cost real CPU per call; keys are stable
+// values, so reuse imported keys between JWT operations. Bounded so a caller
+// that hands us many distinct keys cannot grow the map without limit.
+type ImportedRelayKey = Awaited<ReturnType<typeof importSPKI>>;
+const importedKeyCache = new Map<string, Promise<ImportedRelayKey>>();
+const IMPORTED_KEY_CACHE_LIMIT = 256;
+
+function importEdDsaKeyCached(kind: "pkcs8" | "spki", pem: string) {
+  const cacheKey = `${kind}|${pem}`;
+  const cached = importedKeyCache.get(cacheKey);
+  if (cached !== undefined) {
+    return cached;
+  }
+  const imported = (
+    kind === "pkcs8" ? importPKCS8(pem, "EdDSA") : importSPKI(pem, "EdDSA")
+  ) as Promise<ImportedRelayKey>;
+  importedKeyCache.set(cacheKey, imported);
+  if (importedKeyCache.size > IMPORTED_KEY_CACHE_LIMIT) {
+    const oldest = importedKeyCache.keys().next().value;
+    if (oldest !== undefined) {
+      importedKeyCache.delete(oldest);
+    }
+  }
+  return imported;
+}
+
 export function signRelayJwt(input: {
   readonly privateKey: string;
   readonly typ: string;
@@ -56,7 +82,7 @@ export function signRelayJwt(input: {
 }): Effect.Effect<string, RelayJwtError> {
   return Effect.tryPromise({
     try: async () => {
-      const key = await importPKCS8(normalizePem(input.privateKey), "EdDSA");
+      const key = await importEdDsaKeyCached("pkcs8", normalizePem(input.privateKey));
       return new SignJWT(input.payload)
         .setProtectedHeader({ alg: "EdDSA", typ: input.typ })
         .sign(key);
@@ -76,7 +102,7 @@ export function verifyRelayJwt(input: {
 }): Effect.Effect<JWTPayload, RelayJwtError> {
   return Effect.tryPromise({
     try: async () => {
-      const key = await importSPKI(normalizePem(input.publicKey), "EdDSA");
+      const key = await importEdDsaKeyCached("spki", normalizePem(input.publicKey));
       const verified = await jwtVerify(input.token, key, {
         algorithms: ["EdDSA"],
         typ: input.typ,
