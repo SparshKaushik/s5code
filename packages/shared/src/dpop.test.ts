@@ -8,6 +8,7 @@ import {
   normalizeDpopHtu,
   type DpopPublicJwk,
   verifyDpopProof,
+  verifyDpopProofAsync,
 } from "./dpop.ts";
 
 function signDpopProof(input: {
@@ -257,6 +258,67 @@ describe("verifyDpopProof", () => {
       }).ok,
       true,
     );
+  });
+
+  it("verifyDpopProofAsync verifies and rejects proofs via SubtleCrypto", async () => {
+    const subtle = globalThis.crypto.subtle;
+    const thumbprint = computeDpopJwkThumbprint(publicJwk);
+
+    const result = await verifyDpopProofAsync(
+      {
+        proof,
+        method: "POST",
+        url: "https://example.com/oauth/token",
+        nowEpochSeconds: 101,
+        expectedThumbprint: thumbprint,
+      },
+      subtle,
+    );
+    if (!result.ok) {
+      assert.fail(result.reason);
+    }
+    assert.equal(result.thumbprint, thumbprint);
+    assert.equal(result.jti, "proof-1");
+
+    const { privateKey: otherPrivateKey } = NodeCrypto.generateKeyPairSync("ec", {
+      namedCurve: "P-256",
+    });
+    const invalidSignatureProof = signDpopProof({
+      method: "POST",
+      url: "https://example.com/oauth/token",
+      iat: 100,
+      privateKey: otherPrivateKey,
+      publicJwk,
+    });
+    const invalidSignature = await verifyDpopProofAsync(
+      {
+        proof: invalidSignatureProof,
+        method: "POST",
+        url: "https://example.com/oauth/token",
+        nowEpochSeconds: 1_000,
+        expectedThumbprint: thumbprint,
+      },
+      subtle,
+    );
+    if (invalidSignature.ok) {
+      assert.fail("Expected a proof signed by a different key to fail.");
+    }
+    assert.equal(invalidSignature.code, "invalid_signature");
+
+    const outsideWindow = await verifyDpopProofAsync(
+      {
+        proof,
+        method: "POST",
+        url: "https://example.com/oauth/token",
+        nowEpochSeconds: 1_000,
+        expectedThumbprint: thumbprint,
+      },
+      subtle,
+    );
+    if (outsideWindow.ok) {
+      assert.fail("Expected an old DPoP proof to fail.");
+    }
+    assert.equal(outsideWindow.code, "time_window");
   });
 
   it("rejects DPoP public JWK headers that expose private key material", () => {

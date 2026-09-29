@@ -220,6 +220,10 @@ export const ApiLive = Api.make(
       }).pipe(Effect.map(makeRelayTraceLayer)),
     );
 
+    const webCryptoSubtleLayer = Layer.succeed(WebCrypto.WebCrypto, {
+      subtle: globalThis.crypto.subtle,
+    });
+
     const runtimeLayer = Layer.empty.pipe(
       Layer.provideMerge(MobileRegistrations.layer),
       Layer.provideMerge(AgentActivityPublisher.layer),
@@ -247,14 +251,7 @@ export const ApiLive = Api.make(
                   .pipe(Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext)),
             }),
           ),
-          Layer.provideMerge(
-            FcmClient.layer.pipe(
-              Layer.provide(FcmAssertionSigner.layer),
-              Layer.provide(
-                Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle }),
-              ),
-            ),
-          ),
+          Layer.provideMerge(FcmClient.layer.pipe(Layer.provide(FcmAssertionSigner.layer))),
         ),
       ),
       Layer.provideMerge(ApnsClient.layer.pipe(Layer.provideMerge(ApnsProviderTokens.layer))),
@@ -279,7 +276,7 @@ export const ApiLive = Api.make(
         ),
       ),
       Layer.provideMerge(Layer.effect(RelayConfiguration.RelayConfiguration, loadSettings)),
-      Layer.provideMerge(webcryptoLayer),
+      Layer.provideMerge(Layer.merge(webcryptoLayer, webCryptoSubtleLayer)),
     );
 
     const appLayer = relayApiLayer.pipe(
