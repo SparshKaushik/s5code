@@ -2,7 +2,7 @@
 
 Install and authenticate OpenCode on the machine running your environment, then
 enable it in **Settings > Providers**. See [provider setup](./install.md#providers).
-T3 Code requires OpenCode 1.14.19 or newer, including when you connect an existing
+T3 Code requires OpenCode 2.0.0 or newer, including when you connect an existing
 OpenCode server.
 
 ## Local or external server
