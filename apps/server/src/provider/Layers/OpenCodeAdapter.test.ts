@@ -353,6 +353,80 @@ describe("OpenCodeAdapter", () => {
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 
+  it.effect("preserves text block boundaries around tools within one turn", () =>
+    Effect.gen(function* () {
+      const { handle, emit } = createMockHost();
+      const adapter = yield* makeOpenCodeAdapter(handle);
+      const threadId = ThreadId.make("thread-text-blocks");
+      const session = yield* adapter.startSession({
+        threadId,
+        cwd: "/tmp/project",
+        runtimeMode: "full-access",
+      });
+      const sessionID = (session.resumeCursor as { sessionID: string }).sessionID;
+      const events = yield* Queue.unbounded<ProviderRuntimeEvent>();
+      yield* Effect.forkScoped(
+        Stream.runForEach(adapter.streamEvents, (event) => Queue.offer(events, event)),
+      );
+      const turn = yield* adapter.sendTurn({ threadId, input: "check and summarize" });
+
+      const commentary = { sessionID, assistantMessageID: "msg-progress", ordinal: 0 };
+      emit({ type: "session.text.delta", data: { ...commentary, delta: "Checking." } });
+      emit({ type: "session.text.ended", data: { ...commentary, text: "Checking." } });
+      emit({
+        type: "session.tool.called",
+        data: { sessionID, assistantMessageID: "msg-progress", id: "call-check", tool: "shell" },
+      });
+      emit({
+        type: "session.tool.success",
+        data: { sessionID, assistantMessageID: "msg-progress", id: "call-check", content: [] },
+      });
+      // A second block in the same assistant message must have its own id.
+      emit({
+        type: "session.text.ended",
+        data: { ...commentary, ordinal: 1, text: "Checked." },
+      });
+      const final = { sessionID, assistantMessageID: "msg-final", ordinal: 0 };
+      emit({ type: "session.text.delta", data: { ...final, delta: "All done." } });
+      emit({ type: "session.text.ended", data: { ...final, text: "All done." } });
+      emit({ type: "session.execution.succeeded", data: { sessionID } });
+
+      const responseEvents: ProviderRuntimeEvent[] = [];
+      while (true) {
+        const event = yield* Queue.take(events);
+        if (
+          event.type === "content.delta" ||
+          event.type === "item.completed" ||
+          event.type === "item.started" ||
+          event.type === "turn.completed"
+        ) {
+          responseEvents.push(event);
+        }
+        if (event.type === "turn.completed") break;
+      }
+      expect(responseEvents.map((event) => [event.type, event.itemId])).toEqual([
+        ["content.delta", "msg-progress:text:0"],
+        ["item.completed", "msg-progress:text:0"],
+        ["item.started", "call-check"],
+        ["item.completed", "call-check"],
+        ["item.completed", "msg-progress:text:1"],
+        ["content.delta", "msg-final:text:0"],
+        ["item.completed", "msg-final:text:0"],
+        ["turn.completed", undefined],
+      ]);
+      const textCompletions = responseEvents.filter(
+        (event) =>
+          event.type === "item.completed" && event.payload.itemType === "assistant_message",
+      );
+      expect(textCompletions.map((event) => event.payload)).toEqual([
+        { itemType: "assistant_message", status: "completed", detail: "Checking." },
+        { itemType: "assistant_message", status: "completed", detail: "Checked." },
+        { itemType: "assistant_message", status: "completed", detail: "All done." },
+      ]);
+      expect(responseEvents.every((event) => event.turnId === turn.turnId)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
   it.effect("translates child session events into rich subagent tasks and rolls up tokens", () =>
     Effect.gen(function* () {
       const { handle, emit } = createMockHost();

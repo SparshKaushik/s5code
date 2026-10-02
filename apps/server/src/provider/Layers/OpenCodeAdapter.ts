@@ -132,6 +132,15 @@ export interface OpenCodeAdapterLiveOptions {
 const eventCallId = (data: Record<string, unknown>): string | undefined =>
   typeof data.callID === "string" ? data.callID : typeof data.id === "string" ? data.id : undefined;
 
+/** Text ordinals are scoped to an assistant message, not the whole turn. */
+function textItemId(data: Record<string, unknown>): string | undefined {
+  const messageId =
+    typeof data.assistantMessageID === "string" ? data.assistantMessageID : undefined;
+  if (!messageId) return undefined;
+  const ordinal = typeof data.ordinal === "number" ? data.ordinal : 0;
+  return `${messageId}:text:${ordinal}`;
+}
+
 function toToolLifecycleItemType(
   toolName: string,
 ): "command_execution" | "file_change" | "web_search" | "mcp_tool_call" | "dynamic_tool_call" {
@@ -835,7 +844,12 @@ export function makeOpenCodeAdapter(
               case "session.text.delta": {
                 if (typeof data.delta === "string" && data.delta.length > 0) {
                   yield* emit({
-                    ...(yield* buildEventBase({ threadId, turnId, raw: rawEvent })),
+                    ...(yield* buildEventBase({
+                      threadId,
+                      turnId,
+                      itemId: textItemId(data),
+                      raw: rawEvent,
+                    })),
                     type: "content.delta",
                     payload: {
                       streamKind: "assistant_text",
@@ -843,6 +857,27 @@ export function makeOpenCodeAdapter(
                     },
                   });
                 }
+                break;
+              }
+
+              case "session.text.ended": {
+                // A turn can contain several commentary blocks before its final
+                // answer. Close each block where OpenCode closes it, otherwise
+                // ingestion appends the final answer to earlier text above tools.
+                yield* emit({
+                  ...(yield* buildEventBase({
+                    threadId,
+                    turnId,
+                    itemId: textItemId(data),
+                    raw: rawEvent,
+                  })),
+                  type: "item.completed",
+                  payload: {
+                    itemType: "assistant_message",
+                    status: "completed",
+                    ...(typeof data.text === "string" ? { detail: data.text } : {}),
+                  },
+                });
                 break;
               }
 

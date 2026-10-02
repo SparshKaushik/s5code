@@ -535,6 +535,113 @@ describe("ProviderRuntimeIngestion", () => {
     ]);
   });
 
+  it.each(["token", "paragraph", "turn"] as const)(
+    "keeps OpenCode commentary, tools and the final answer in order in %s mode",
+    async (responseStreamingMode) => {
+      const harness = await createHarness({ serverSettings: { responseStreamingMode } });
+      const threadId = asThreadId("thread-1");
+      const turnId = asTurnId("opencode-text-blocks");
+      const base = { provider: ProviderDriverKind.make("opencode"), threadId, turnId };
+      await harness.emitAndDrain([
+        {
+          ...base,
+          type: "turn.started",
+          eventId: asEventId("blocks-started"),
+          createdAt: "2026-01-01T00:00:00.000Z",
+        },
+        {
+          ...base,
+          type: "content.delta",
+          eventId: asEventId("commentary-delta"),
+          itemId: asItemId("msg-progress:text:0"),
+          createdAt: "2026-01-01T00:00:01.000Z",
+          payload: { streamKind: "assistant_text", delta: "Checking." },
+        },
+        {
+          ...base,
+          type: "item.completed",
+          eventId: asEventId("commentary-ended"),
+          itemId: asItemId("msg-progress:text:0"),
+          createdAt: "2026-01-01T00:00:02.000Z",
+          payload: { itemType: "assistant_message", status: "completed", detail: "Checking." },
+        },
+        {
+          ...base,
+          type: "item.started",
+          eventId: asEventId("check-started"),
+          itemId: asItemId("call-check"),
+          createdAt: "2026-01-01T00:00:03.000Z",
+          payload: { itemType: "command_execution", title: "git status" },
+        },
+        {
+          ...base,
+          type: "item.completed",
+          eventId: asEventId("check-ended"),
+          itemId: asItemId("call-check"),
+          createdAt: "2026-01-01T00:00:04.000Z",
+          payload: { itemType: "command_execution", status: "completed", title: "git status" },
+        },
+        // Full-value text boundaries also recover a block whose live deltas were missed.
+        {
+          ...base,
+          type: "item.completed",
+          eventId: asEventId("snapshot-ended"),
+          itemId: asItemId("msg-progress:text:1"),
+          createdAt: "2026-01-01T00:00:05.000Z",
+          payload: { itemType: "assistant_message", status: "completed", detail: "Checked." },
+        },
+        {
+          ...base,
+          type: "content.delta",
+          eventId: asEventId("final-delta"),
+          itemId: asItemId("msg-final:text:0"),
+          createdAt: "2026-01-01T00:00:06.000Z",
+          payload: { streamKind: "assistant_text", delta: "All done." },
+        },
+        {
+          ...base,
+          type: "item.completed",
+          eventId: asEventId("final-ended"),
+          itemId: asItemId("msg-final:text:0"),
+          createdAt: "2026-01-01T00:00:07.000Z",
+          payload: { itemType: "assistant_message", status: "completed", detail: "All done." },
+        },
+        {
+          ...base,
+          type: "turn.completed",
+          eventId: asEventId("blocks-completed"),
+          createdAt: "2026-01-01T00:00:08.000Z",
+          payload: { state: "completed" },
+        },
+      ]);
+
+      const thread = (await harness.readModel()).threads.find((entry) => entry.id === threadId);
+      const messages = thread?.messages.filter((message) => message.role === "assistant");
+      expect(messages).toEqual([
+        expect.objectContaining({
+          id: "assistant:msg-progress:text:0",
+          text: "Checking.",
+          streaming: false,
+        }),
+        expect.objectContaining({
+          id: "assistant:msg-progress:text:1",
+          text: "Checked.",
+          streaming: false,
+        }),
+        expect.objectContaining({
+          id: "assistant:msg-final:text:0",
+          text: "All done.",
+          streaming: false,
+        }),
+      ]);
+      const tools = thread?.activities.filter((activity) => activity.kind.startsWith("tool."));
+      expect(tools).toHaveLength(2);
+      expect(messages![0]!.createdAt < tools![0]!.createdAt).toBe(true);
+      expect(tools![1]!.createdAt < messages![2]!.createdAt).toBe(true);
+      expect(thread?.latestTurn).toMatchObject({ turnId, state: "completed" });
+    },
+  );
+
   it.each(["turn.completed", "turn.aborted"] as const)(
     "finalizes old buffered text on late %s without stopping the newer turn",
     async (terminalType) => {
