@@ -15,11 +15,12 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -30,6 +31,8 @@ import androidx.compose.ui.graphics.drawscope.Fill
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.LifecycleResumeEffect
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Remote
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
@@ -39,6 +42,7 @@ import club.touchtech.s5code.kotlin.design.component.S5ConnectedButtonGroup
 import club.touchtech.s5code.kotlin.design.component.S5ErrorState
 import club.touchtech.s5code.kotlin.design.component.S5LoadingState
 import club.touchtech.s5code.kotlin.design.component.S5ProviderAvatar
+import club.touchtech.s5code.kotlin.design.component.S5PullToRefreshBox
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
@@ -46,7 +50,6 @@ import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Usage
 import club.touchtech.s5code.kotlin.model.UsageWindow
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import kotlinx.coroutines.launch
 
 /** Cost/token mode for the usage view. */
@@ -55,18 +58,18 @@ private enum class UsageMode(val label: String) {
     Tokens("Tokens"),
 }
 
-/** Activity | Limits — the two halves of the Usage screen, matching RN's tabs. */
+/** Transcript usage and live subscription quotas, matching RN's tabs. */
 private enum class UsageTab(val label: String) {
-    Activity("Activity"),
+    Activity("Usage"),
     Limits("Limits"),
 }
 
-/** Usage totals, a daily bar chart, and per-provider/model breakdown. */
+/** Live subscription limits alongside transcript usage and provider/model breakdowns. */
 @Composable
 fun UsageScreen(store: AppStore, onBack: () -> Unit) {
-    var tab by remember { mutableStateOf(UsageTab.Activity) }
-    var window by remember { mutableStateOf(UsageWindow.Month) }
-    var mode by remember { mutableStateOf(UsageMode.Cost) }
+    var tab by rememberSaveable { mutableStateOf(UsageTab.Limits) }
+    var window by rememberSaveable { mutableStateOf(UsageWindow.Month) }
+    var mode by rememberSaveable { mutableStateOf(UsageMode.Cost) }
     // Usage is read per environment and summed, so it is a request rather than a
     // subscription: it has a loading state and it can fail. Changing the window is a
     // new request, which is why it keys the read.
@@ -74,24 +77,47 @@ fun UsageScreen(store: AppStore, onBack: () -> Unit) {
     val remote = state.value
     val limitsView by store.workspace.usageLimits.collectAsStateWithLifecycle()
     val connectedEnvironments by store.workspace.environments.collectAsStateWithLifecycle()
+    val connectedEnvironmentIds =
+        connectedEnvironments
+            .filter { it.state == ConnectionState.Connected }
+            .map { it.id }
+            .sortedBy { it.value }
     val scope = rememberCoroutineScope()
-    // The Limits tab probes each connected environment on entry, the way
-    // `useRefreshLimits` refreshes on focus — a stale bar is better than an
-    // empty one, so this only adds data.
-    LaunchedEffect(tab, connectedEnvironments.size) {
-        if (tab == UsageTab.Limits) {
+    var limitsRefreshCount by remember { mutableIntStateOf(0) }
+    val refreshingLimits = limitsRefreshCount > 0
+    var limitsNow by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    suspend fun refreshLimits(automatic: Boolean) {
+        limitsRefreshCount += 1
+        try {
             store.workspace.refreshUsageLimits(
-                connectedEnvironments
-                    .filter { it.state == ConnectionState.Connected }
-                    .map { it.id },
-                automatic = true,
+                connectedEnvironmentIds,
+                automatic = automatic,
             )
+        } finally {
+            // Quota and reset countdowns re-anchor together, as in RN.
+            limitsNow = System.currentTimeMillis()
+            limitsRefreshCount -= 1
         }
+    }
+
+    // Connection identities matter: an offline environment becoming connected
+    // does not change the catalog's size. Resume also observes the probe cooldown.
+    LifecycleResumeEffect(tab, connectedEnvironmentIds) {
+        val refreshJob =
+            if (tab == UsageTab.Limits) scope.launch { refreshLimits(automatic = true) }
+            else null
+        onPauseOrDispose { refreshJob?.cancel() }
     }
 
     S5Screen(
         title = "Usage",
-        subtitle = remote.valueOrNull?.environments?.joinToString(" · ").orEmpty(),
+        subtitle =
+            if (tab == UsageTab.Limits) {
+                connectedEnvironments
+                    .filter { it.state == ConnectionState.Connected }
+                    .joinToString(" · ") { it.label }
+            } else remote.valueOrNull?.environments?.joinToString(" · ").orEmpty(),
         prominence = S5TopBarProminence.Hero,
         onBack = onBack,
     ) { padding ->
@@ -110,41 +136,60 @@ fun UsageScreen(store: AppStore, onBack: () -> Unit) {
                 )
             }
             if (tab == UsageTab.Limits) {
-                Column(
-                    Modifier.fillMaxSize().verticalScroll(rememberScrollState())
-                        .padding(horizontal = S5Theme.spacing.gutter),
+                S5PullToRefreshBox(
+                    isRefreshing = refreshingLimits,
+                    onRefresh = {
+                        if (!refreshingLimits) scope.launch { refreshLimits(automatic = false) }
+                    },
+                    modifier = Modifier.fillMaxSize(),
                 ) {
-                    UsageLimitsContent(
-                        view = limitsView,
-                        now = System.currentTimeMillis(),
-                        onRedeemCredit = { account ->
-                            val redeem = account.redeem ?: return@UsageLimitsContent
-                            scope.launch {
-                                runCatching {
-                                        store.workspace.consumeResetCredit(
-                                            redeem.environmentId,
-                                            redeem,
-                                        )
-                                    }
-                                    .onSuccess { result ->
-                                        store.showError(
-                                            when (result.outcome) {
-                                                "reset" -> "Usage limits reset."
-                                                "alreadyRedeemed" -> "That credit was already used."
-                                                "noCredit" -> "No reset credit is available."
-                                                "nothingToReset" -> "There is nothing to reset."
-                                                else -> result.warning ?: "Reset credit failed."
+                    Column(
+                        Modifier.fillMaxSize().verticalScroll(rememberScrollState())
+                            .padding(
+                                horizontal = S5Theme.spacing.gutter,
+                                vertical = S5Theme.spacing.small,
+                            ),
+                    ) {
+                        if (refreshingLimits && limitsView.pools.isEmpty() && limitsView.notices.isEmpty()) {
+                            Text(
+                                "Refreshing subscription limits…",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        } else {
+                            UsageLimitsContent(
+                                view = limitsView,
+                                now = limitsNow,
+                                onRedeemCredit = { account ->
+                                    val redeem = account.redeem ?: return@UsageLimitsContent
+                                    scope.launch {
+                                        runCatching {
+                                                store.workspace.consumeResetCredit(
+                                                    redeem.environmentId,
+                                                    redeem,
+                                                )
                                             }
-                                        )
+                                            .onSuccess { result ->
+                                                store.showError(
+                                                    when (result.outcome) {
+                                                        "reset" -> "Usage limits reset."
+                                                        "alreadyRedeemed" -> "That credit was already used."
+                                                        "noCredit" -> "No reset credit is available."
+                                                        "nothingToReset" -> "There is nothing to reset."
+                                                        else -> result.warning ?: "Reset credit failed."
+                                                    }
+                                                )
+                                            }
+                                            .onFailure {
+                                                store.showError(
+                                                    it.message ?: "The reset credit could not be used.",
+                                                )
+                                            }
                                     }
-                                    .onFailure {
-                                        store.showError(
-                                            it.message ?: "The reset credit could not be used.",
-                                        )
-                                    }
-                            }
-                        },
-                    )
+                                },
+                            )
+                        }
+                    }
                 }
                 return@Column
             }
@@ -164,18 +209,24 @@ fun UsageScreen(store: AppStore, onBack: () -> Unit) {
                     label = { it.label },
                 )
             }
-            when (remote) {
-                is Remote.Loading -> S5LoadingState("Adding up usage…")
-                is Remote.Failed ->
-                    Box(Modifier.padding(S5Theme.spacing.gutter)) {
-                        S5ErrorState(
-                            title = "Couldn't read usage",
-                            detail = remote.message,
-                            onRetry = retry,
-                        )
-                    }
-                is Remote.Loaded ->
-                    UsageBody(usage = remote.value, mode = mode, onMode = { mode = it })
+            S5PullToRefreshBox(
+                isRefreshing = remote is Remote.Loading,
+                onRefresh = retry,
+                modifier = Modifier.fillMaxSize(),
+            ) {
+                when (remote) {
+                    is Remote.Loading -> S5LoadingState("Adding up usage…")
+                    is Remote.Failed ->
+                        Box(Modifier.padding(S5Theme.spacing.gutter)) {
+                            S5ErrorState(
+                                title = "Couldn't read usage",
+                                detail = remote.message,
+                                onRetry = retry,
+                            )
+                        }
+                    is Remote.Loaded ->
+                        UsageBody(usage = remote.value, mode = mode, onMode = { mode = it })
+                }
             }
         }
     }

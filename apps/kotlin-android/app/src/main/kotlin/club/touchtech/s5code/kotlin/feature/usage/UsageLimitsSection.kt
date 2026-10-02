@@ -25,6 +25,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.data.displayLimitWindows
 import club.touchtech.s5code.kotlin.data.formatLimitDuration
@@ -73,11 +75,17 @@ private fun PoolBar(window: LimitPoolWindow) {
             .background(MaterialTheme.colorScheme.surfaceContainerHighest),
     ) {
         window.columns.forEachIndexed { index, (account, memberWindow) ->
-            val spent = (memberWindow?.usedPercent?.coerceIn(0.0, 100.0) ?: 0.0) / 100
-            Box(Modifier.weight(1f).fillMaxHeight()) {
+            val remaining = memberWindow?.let { 100.0 - it.usedPercent.coerceIn(0.0, 100.0) }
+            Box(
+                Modifier.weight(1f).fillMaxHeight().semantics {
+                    contentDescription =
+                        if (remaining == null) "${accountName(account)}: no limit reported"
+                        else "${accountName(account)}: ${remaining.toInt()}% left"
+                }
+            ) {
                 Box(
                     Modifier.fillMaxHeight()
-                        .fillMaxWidth(spent.toFloat())
+                        .fillMaxWidth(((remaining ?: 0.0) / 100).toFloat())
                         .background(accountColor(account, index))
                 )
             }
@@ -156,7 +164,7 @@ private fun LimitWindowCard(
             val detail =
                 listOfNotNull(
                     window.pace?.let { PACE_LABELS[it] },
-                    window.resets.firstOrNull()?.let { reset ->
+                    window.resets.firstOrNull { it.restoresPercent > 0 }?.let { reset ->
                         val member = window.members.firstOrNull { it.first.key == reset.accountKey }
                         val when_ =
                             if (reset.atMillis <= now) "resets now"
