@@ -473,21 +473,6 @@ class LiveWorkspaceGateway(
             .toList()
     }
 
-    init {
-        scope.launch {
-            while (true) {
-                kotlinx.coroutines.delay(60_000)
-                clock.value = System.currentTimeMillis()
-                publish()
-            }
-        }
-        // Sessions follow the saved list: pairing starts one, unpairing stops one.
-        store.environments
-            .onEach { reconcile(it) }
-            .launchIn(scope)
-        startUsageLimitsCollection()
-    }
-
     /* ── Session lifecycle ───────────────────────────────────────────── */
 
     private fun reconcile(saved: List<SavedEnvironment>) {
@@ -3272,6 +3257,23 @@ class LiveWorkspaceGateway(
                     put("deleteHistory", deleteHistory)
                 },
             )
+    }
+
+    // Keep startup after every instance property: Main.immediate collectors can
+    // run inline here and must never see a flow or cache before it is initialized.
+    init {
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(60_000)
+                clock.value = System.currentTimeMillis()
+                publish()
+            }
+        }
+        // Sessions follow the saved list: pairing starts one, unpairing stops one.
+        store.environments
+            .onEach { reconcile(it) }
+            .launchIn(scope)
+        startUsageLimitsCollection()
     }
 
     private companion object {

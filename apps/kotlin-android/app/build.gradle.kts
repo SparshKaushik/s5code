@@ -61,8 +61,9 @@ android {
         applicationId = "club.touchtech.s5code.kotlin"
         minSdk = 26
         targetSdk = 37
-        versionCode = 17
-        versionName = "0.1.0-alpha.17"
+        versionCode = 18
+        versionName = "0.1.0-alpha.18"
+        testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Same three values the RN client puts in `extra`: publishable key, the
         // JWT template the relay accepts, and the relay origin. Empty means
@@ -150,6 +151,7 @@ android {
 
     sourceSets {
         named("main") { java.srcDirs("src/main/kotlin") }
+        named("androidTest") { java.srcDirs("src/androidTest/kotlin") }
         named("test") {
             java.srcDirs("src/test/kotlin")
             resources.srcDirs("src/main/assets")
@@ -229,4 +231,7 @@ dependencies {
     testImplementation(libs.junit)
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.okhttp.mockwebserver)
+    androidTestImplementation(libs.androidx.test.core)
+    androidTestImplementation(libs.androidx.test.runner)
+    androidTestImplementation(libs.androidx.test.ext.junit)
 }

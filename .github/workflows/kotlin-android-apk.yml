@@ -60,6 +60,33 @@ jobs:
           CERT_DIGEST=$(keytool -printcert -jarfile apps/kotlin-android/app/build/outputs/apk/debug/app-debug.apk | grep "SHA256:" | head -n 1)
           echo "Debug APK signing certificate: $CERT_DIGEST"
 
+      - name: Enable KVM for startup test
+        run: sudo chmod 666 /dev/kvm
+
+      - name: Verify Android startup
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          arch: x86_64
+          target: google_apis
+          working-directory: apps/kotlin-android
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none -memory 2048
+          script: >-
+            trap 'adb logcat -d > app/build/startup-logcat.txt' EXIT;
+            ./gradlew connectedDebugAndroidTest --stacktrace -Pandroid.testInstrumentationRunnerArguments.class=club.touchtech.s5code.kotlin.StartupTest
+
+      - name: Upload startup test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: kotlin-android-startup-test
+          if-no-files-found: ignore
+          path: |
+            apps/kotlin-android/app/build/reports/androidTests/
+            apps/kotlin-android/app/build/outputs/androidTest-results/
+            apps/kotlin-android/app/build/startup-logcat.txt
+
       - name: Prepare Artifacts
         id: artifacts
         run: |
