@@ -6,6 +6,7 @@ import { defineConfig, mergeConfig } from "vite-plus";
 import baseConfig from "../../vite.config.ts";
 import { loadRepoEnv } from "../../scripts/lib/public-config.ts";
 import packageJson from "./package.json" with { type: "json" };
+import { WeightedShardSequencer } from "./src/testUtils/weightedShardSequencer.ts";
 
 // The bundle used to inline only workspace packages, leaving every third-party
 // runtime dep external. External deps must exist on the real filesystem (the WSL
@@ -85,24 +86,7 @@ export default mergeConfig(
       clean: true,
       shims: true,
       alias: {
-        "jsonc-parser": "jsonc-parser/lib/esm/main.js",
         "node:sqlite": NodePath.resolve(import.meta.dirname ?? "", "src/provider/sqliteCompat.ts"),
-        "#runtime-import": NodePath.resolve(
-          import.meta.dirname ?? "",
-          "src/provider/runtimeImportCompat.ts",
-        ),
-        "#plugin-source": NodePath.resolve(
-          import.meta.dirname ?? "",
-          "src/provider/pluginSourceCompat.ts",
-        ),
-        "@opencode-ai/util/dist/runtime/import.node.js": NodePath.resolve(
-          import.meta.dirname ?? "",
-          "src/provider/runtimeImportCompat.ts",
-        ),
-        "@opencode-ai/plugin/dist/source.node.js": NodePath.resolve(
-          import.meta.dirname ?? "",
-          "src/provider/pluginSourceCompat.ts",
-        ),
       },
       ...(packExecutable
         ? {
@@ -156,6 +140,8 @@ export default mergeConfig(
       // The server suite exercises sqlite, git, temp worktrees, and orchestration
       // runtimes heavily. Running files in parallel introduces load-sensitive flakes.
       fileParallelism: false,
+      // CI runs the suite as `--shard` runs of equal recorded duration.
+      sequence: { sequencer: WeightedShardSequencer },
       // Appended to the root setup, which mergeConfig concatenates.
       setupFiles: ["./src/testUtils/gitConfig.setup.ts"],
       // Server integration tests exercise sqlite, git, and orchestration together.

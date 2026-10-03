@@ -28,7 +28,8 @@ import {
  * client renders partial coverage when an environment reports an older version
  * rather than failing the whole page.
  * Adding providers or other array-element variants is additive: unknown
- * entries are skipped on decode and do not require a version bump.
+ * entries are skipped on decode and do not require a version bump. So are
+ * optional bucket fields, which older clients ignore.
  */
 export const USAGE_CONTRACT_VERSION = 9 as const;
 
@@ -140,6 +141,18 @@ export const UsageTokenTotals = Schema.Struct({
 export type UsageTokenTotals = typeof UsageTokenTotals.Type;
 
 /**
+ * A bucket's cost split by token category, in USD. A provider-reported cost is
+ * split in proportion to the model's list rates.
+ */
+export const UsageCategoryCost = Schema.Struct({
+  input: Schema.Number,
+  cacheRead: Schema.Number,
+  cacheWrite: Schema.Number,
+  output: Schema.Number,
+});
+export type UsageCategoryCost = typeof UsageCategoryCost.Type;
+
+/**
  * One `(day, hourStart?, provider, model)` cell. `hourStart` is the UTC start
  * instant of a rolling bucket and is present only for hourly requests.
  *
@@ -175,7 +188,17 @@ export const UsageBucket = Schema.Struct({
    * True when at least one record's input/cache split was simulated from a
    * rolling context estimate rather than reported as billed tokens.
    */
-  inputTokensEstimated: Schema.Boolean,
+  inputTokensEstimated: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  /**
+   * `costUsd` by token category. Cost with no known rates stays out of it, and
+   * it is absent when nothing could be split or the server predates it.
+   */
+  categoryCostUsd: Schema.optional(UsageCategoryCost),
+  /** Cost of fast and ultrafast requests. Absent when zero; the rest is standard. */
+  fastCostUsd: Schema.optional(Schema.Number),
+  ultrafastCostUsd: Schema.optional(Schema.Number),
+  /** What fast and ultrafast requests cost above the standard rate. Absent when zero. */
+  speedPremiumUsd: Schema.optional(Schema.Number),
   costSource: UsageCostSource,
   /**
    * The catalog entry this cell was priced against, as `<providerId>/<modelKey>`,
@@ -185,7 +208,9 @@ export const UsageBucket = Schema.Struct({
    * Present so the UI can show which model we assumed and let the user correct
    * it, rather than presenting a guess as fact.
    */
-  pricedAs: Schema.NullOr(UsageCatalogModelId),
+  pricedAs: Schema.NullOr(UsageCatalogModelId).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
   /** Distinct assistant responses, after de-duplication. */
   records: NonNegativeInt,
   unpricedRecords: NonNegativeInt,

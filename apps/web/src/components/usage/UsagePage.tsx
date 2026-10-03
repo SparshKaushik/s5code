@@ -1,3 +1,5 @@
+import { ChatGptUsageButton } from "../settings/ChatGptUsageButton";
+import { usesChatGptSharing } from "@t3tools/shared/usageLimits";
 import { RefreshIcon } from "~/components/ui/refresh-icon";
 import { useAtomValue } from "@effect/atom-react";
 import {
@@ -13,6 +15,7 @@ import {
   CircleAlertIcon,
   ChevronDownIcon,
   CircleDashedIcon,
+  InfoIcon,
   SlidersHorizontalIcon,
   TagIcon,
   XIcon,
@@ -71,6 +74,7 @@ import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Toggle, ToggleGroup } from "../ui/toggle-group";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import {
   WorkspaceBreadcrumb,
   WorkspaceBreadcrumbItem,
@@ -82,7 +86,14 @@ import { UsageLimitsSection } from "./UsageLimits";
 import { UsageModelTagDialog } from "./UsageModelTagDialog";
 import { UsagePriceOverrides } from "./UsagePriceOverrides";
 import { UsageProviderChart } from "./UsageProviderChart";
-import { sortModelsByTokens } from "./usageBreakdown";
+import { SpeedPremium, UsageModelDialog } from "./UsageModelDialog";
+import { UsageShareBar } from "./UsageShareBar";
+import {
+  costTypeSegments,
+  sortModelsByTokens,
+  speedCostSegments,
+  tokenTypeSegments,
+} from "./usageBreakdown";
 import {
   METRIC_OPTIONS,
   WINDOW_OPTIONS,
@@ -134,6 +145,8 @@ export function UsagePage() {
   const [tagTarget, setTagTarget] = useState<UsageModelTagTarget | null>(null);
   const modelAliases = useClientSettings((settings) => settings.usageModelAliases);
   const updateClientSettings = useUpdateClientSettings();
+  const [priceDialog, setPriceDialog] = useState<{ readonly model?: string } | null>(null);
+  const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const { days: windowDays, window } = windowSelection;
@@ -216,6 +229,16 @@ export function UsagePage() {
     [breakdown, merged.models, metric],
   );
   const activeProviders = useMemo(() => providersWithUsage(merged.providers), [merged.providers]);
+  const selectedModel =
+    selectedModelKey === null
+      ? undefined
+      : merged.models.find(
+          (model) => `${model.provider}:${model.apiProvider}:${model.model}` === selectedModelKey,
+        );
+  const breakdownPeak = breakdownModels.reduce(
+    (peak, model) => Math.max(peak, metric === "tokens" ? model.totalTokens : model.costUsd),
+    0,
+  );
   const summaryRows: Array<
     | { readonly kind: "usage"; readonly provider: UsageProviderKind }
     | { readonly kind: "enable"; readonly environment: EnvironmentUsageStatus }
@@ -356,6 +379,7 @@ export function UsagePage() {
             isPartial={isPartial}
             duplicateSources={merged.duplicateSources}
             contractMismatches={merged.contractMismatches}
+            onOpenModelPrices={() => setPriceDialog({})}
           />
         </WorkspaceBreadcrumbItem>
       </WorkspaceBreadcrumb>
@@ -524,15 +548,44 @@ export function UsagePage() {
                           : formatTokens(merged.totalTokens)}
                       </span>
                       <span className="text-xs text-muted-foreground">
-                        {metric !== "cost"
-                          ? `${formatCount(merged.sessions)} sessions`
-                          : merged.costQuality.unpricedShare > 0
-                            ? `${formatCount(merged.sessions)} sessions · API estimate excludes ${formatPercent(
-                                merged.costQuality.unpricedShare,
-                              )} unpriced records`
-                            : `${formatCount(merged.sessions)} sessions · API estimate`}
+                        {formatCount(merged.sessions)} sessions
+                        {metric === "cost" && (
+                          <>
+                            {" · API estimate"}
+                            {merged.costQuality.unpricedShare > 0 && (
+                              <>
+                                {" "}
+                                <Popover>
+                                  <PopoverTrigger
+                                    openOnHover
+                                    render={<InlineButton tone="muted" />}
+                                    aria-label="Unpriced usage details"
+                                  >
+                                    <InfoIcon className="size-3" aria-hidden />
+                                  </PopoverTrigger>
+                                  <PopoverPopup side="top" tooltipStyle>
+                                    API estimate excludes{" "}
+                                    {formatPercent(merged.costQuality.unpricedShare)} unpriced
+                                    records.
+                                  </PopoverPopup>
+                                </Popover>
+                              </>
+                            )}
+                          </>
+                        )}
                       </span>
                     </div>
+
+                    {[...presentations].some(
+                      ([id, presentation]) =>
+                        (selectedEnvironmentIds === null || selectedEnvironmentIds.has(id)) &&
+                        presentation.serverConfig?.providers.some(usesChatGptSharing),
+                    ) ? (
+                      <div className="flex items-center justify-between gap-2 text-xs text-muted-foreground">
+                        <span>ChatGPT shared usage</span>
+                        <ChatGptUsageButton size="xs" />
+                      </div>
+                    ) : null}
 
                     {summaryRows.map((row) => {
                       if (row.kind === "enable") {
@@ -630,6 +683,34 @@ export function UsagePage() {
                   </div>
                 </section>
 
+                {merged.totalTokens > 0 ? (
+                  <section className="grid gap-x-12 gap-y-8 lg:grid-cols-2">
+                    {metric === "tokens" ? (
+                      <UsageShareBar
+                        label="Tokens by type"
+                        segments={tokenTypeSegments(merged)}
+                        format={formatTokens}
+                      />
+                    ) : (
+                      <>
+                        <UsageShareBar
+                          label="Cost by type"
+                          segments={costTypeSegments(merged.categoryCost)}
+                          format={formatUsd}
+                        />
+                        {merged.speedCost.fast + merged.speedCost.ultrafast > 0 ? (
+                          <UsageShareBar
+                            label="Cost by speed"
+                            segments={speedCostSegments(merged.speedCost)}
+                            format={formatUsd}
+                            aside={<SpeedPremium premiumUsd={merged.speedCost.premium} />}
+                          />
+                        ) : null}
+                      </>
+                    )}
+                  </section>
+                ) : null}
+
                 <section className="flex flex-col gap-3">
                   <div className="flex items-center justify-between gap-3">
                     <h2 className="text-sm font-medium text-foreground">Breakdown</h2>
@@ -656,82 +737,105 @@ export function UsagePage() {
                   </div>
 
                   {breakdown === "model" ? (
-                    <table className="w-full table-fixed text-sm">
-                      <colgroup>
-                        <col className="w-2/5" />
-                        <col className="w-1/5" />
-                        <col className="w-1/5" />
-                        <col className="w-1/5" />
-                      </colgroup>
+                    <table className="w-full text-sm">
                       <thead>
-                        <tr className="border-b border-border text-left text-xs text-muted-foreground">
-                          <th className="py-2 font-normal">Model</th>
-                          <th className="py-2 text-right font-normal">Cost</th>
-                          <th className="py-2 text-right font-normal">Share</th>
-                          <th className="py-2 text-right font-normal">Tokens</th>
+                        <tr className="border-b border-border text-right text-xs text-muted-foreground">
+                          <th className="py-2 pr-3 text-left font-normal">#</th>
+                          <th className="w-full py-2 text-left font-normal">Model</th>
+                          <th className="py-2 pl-6 font-normal">Cost</th>
+                          <th className="hidden py-2 pl-6 font-normal sm:table-cell">Share</th>
+                          <th className="py-2 pl-6 font-normal">Tokens</th>
                         </tr>
                       </thead>
                       <tbody>
                         {breakdownModels.length === 0 ? (
                           <tr>
-                            <td colSpan={4} className="py-6 text-center text-muted-foreground">
+                            <td colSpan={5} className="py-6 text-center text-muted-foreground">
                               No activity in this window.
                             </td>
                           </tr>
                         ) : (
-                          breakdownModels.map((model) => (
-                            <tr
-                              key={`${model.provider}:${model.model}`}
-                              className="border-b border-border/50 transition-colors hover:bg-muted/50"
-                            >
-                              <td className="py-2 text-foreground">
-                                <span className="flex items-center gap-2">
-                                  <ProviderMark provider={model.provider} className="size-3.5" />
-                                  <span className="truncate">{model.model}</span>
-                                  {model.apiProvider && model.apiProvider.length > 0 ? (
-                                    <span className="shrink-0 text-xs text-muted-foreground">
-                                      via {model.apiProvider}
-                                    </span>
-                                  ) : null}
-                                  {model.unpriced || model.tagged ? (
+                          breakdownModels.map((model, index) => {
+                            const key = `${model.provider}:${model.apiProvider}:${model.model}`;
+                            const value = metric === "tokens" ? model.totalTokens : model.costUsd;
+                            return (
+                              <tr
+                                key={key}
+                                className="relative border-b border-border/50 text-right whitespace-nowrap text-muted-foreground tabular-nums transition-colors hover:bg-muted/50 has-focus-visible:bg-muted/50"
+                              >
+                                <td className="py-2.5 pr-3 text-left text-xs">{index + 1}</td>
+                                <td className="py-2.5 text-left whitespace-normal">
+                                  {/* The button's overlay makes the whole row open the model.
+                                      Focus shows as the row's hover fill, not a ring. */}
+                                  <div className="flex items-center gap-2">
                                     <button
                                       type="button"
-                                      onClick={() =>
-                                        setTagTarget({
-                                          provider: model.provider,
-                                          label: model.model,
-                                          untagged: model.tagged
-                                            ? null
-                                            : {
-                                                apiProvider: model.apiProvider,
-                                                model: model.model,
-                                              },
-                                          taggedAs: model.tagged ? model.pricedAs : null,
-                                        })
-                                      }
-                                      className="flex shrink-0 cursor-pointer items-center gap-1 rounded border border-dashed border-border px-1.5 py-0.5 text-xs text-muted-foreground hover:border-solid hover:text-foreground"
+                                      onClick={() => setSelectedModelKey(key)}
+                                      className="flex items-center gap-2 text-left text-foreground outline-none after:absolute after:inset-0"
                                     >
-                                      <TagIcon className="size-3" />
-                                      {model.tagged ? "Tagged" : "Tag"}
+                                      <ProviderMark
+                                        provider={model.provider}
+                                        className="size-3.5"
+                                      />
+                                      {model.model}
                                     </button>
-                                  ) : null}
-                                </span>
-                              </td>
-                              <td className="py-2 text-right text-foreground tabular-nums">
-                                {isModelCostUnknown(model) ? (
-                                  <span className="text-muted-foreground">Unpriced</span>
-                                ) : (
-                                  formatUsd(model.costUsd)
-                                )}
-                              </td>
-                              <td className="py-2 text-right text-muted-foreground tabular-nums">
-                                {isModelCostUnknown(model) ? "—" : formatPercent(model.costShare)}
-                              </td>
-                              <td className="py-2 text-right text-muted-foreground tabular-nums">
-                                {formatTokens(model.totalTokens)}
-                              </td>
-                            </tr>
-                          ))
+                                    {model.apiProvider ? (
+                                      <span className="shrink-0 text-xs text-muted-foreground">
+                                        via {model.apiProvider}
+                                      </span>
+                                    ) : null}
+                                    {model.unpriced || model.tagged ? (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          setTagTarget({
+                                            provider: model.provider,
+                                            label: model.model,
+                                            untagged: model.tagged
+                                              ? null
+                                              : {
+                                                  apiProvider: model.apiProvider,
+                                                  model: model.model,
+                                                },
+                                            taggedAs: model.tagged ? model.pricedAs : null,
+                                          })
+                                        }
+                                        className="relative z-10 flex shrink-0 cursor-pointer items-center gap-1 rounded border border-dashed border-border px-1.5 py-0.5 text-xs text-muted-foreground hover:border-solid hover:text-foreground"
+                                      >
+                                        <TagIcon className="size-3" />
+                                        {model.tagged ? "Tagged" : "Tag"}
+                                      </button>
+                                    ) : null}
+                                  </div>
+                                  <div aria-hidden className="mt-1.5 h-0.5 max-w-48">
+                                    <div
+                                      className="h-full rounded-full"
+                                      style={{
+                                        // A short minimum keeps tiny shares a dash, not a dot.
+                                        width:
+                                          value > 0 && breakdownPeak > 0
+                                            ? `max(0.5rem, ${(value / breakdownPeak) * 100}%)`
+                                            : 0,
+                                        backgroundColor:
+                                          PROVIDER_PRESENTATION[model.provider].color,
+                                      }}
+                                    />
+                                  </div>
+                                </td>
+                                <td className="py-2.5 pl-6 text-foreground">
+                                  {isModelCostUnknown(model) ? (
+                                    <span className="text-muted-foreground">Unpriced</span>
+                                  ) : (
+                                    formatUsd(model.costUsd)
+                                  )}
+                                </td>
+                                <td className="hidden py-2.5 pl-6 sm:table-cell">
+                                  {isModelCostUnknown(model) ? "" : formatPercent(model.costShare)}
+                                </td>
+                                <td className="py-2.5 pl-6">{formatTokens(model.totalTokens)}</td>
+                              </tr>
+                            );
+                          })
                         )}
                       </tbody>
                     </table>
@@ -810,6 +914,35 @@ export function UsagePage() {
           onClear={handleClearTag}
         />
       </div>
+      {selectedModel !== undefined && !showingLimits ? (
+        <UsageModelDialog
+          model={selectedModel}
+          environments={selectedEnvironments}
+          metric={metric === "tokens" ? "tokens" : "cost"}
+          chartWindow={{
+            days,
+            hours,
+            resolution: isPast24Hours ? "hour" : "day",
+            timeZone: window.timeZone,
+            referenceTime: window.untilTime,
+          }}
+          onSetPrice={() => {
+            setSelectedModelKey(null);
+            setPriceDialog({ model: selectedModel.model });
+          }}
+          onClose={() => setSelectedModelKey(null)}
+        />
+      ) : null}
+      {priceDialog ? (
+        <UsagePriceOverrides
+          usage={environments}
+          initialSelectedEnvironmentIds={selectedEnvironmentIds}
+          initialModel={priceDialog.model}
+          onOpenChange={(open) => {
+            if (!open) setPriceDialog(null);
+          }}
+        />
+      ) : null}
     </SidebarInset>
   );
 }
@@ -953,8 +1086,14 @@ function ProviderMark({
   readonly provider: UsageProviderKind;
   readonly className: string;
 }) {
-  const Mark = PROVIDER_PRESENTATION[provider].mark;
-  return <Mark className={cn("shrink-0", className)} aria-hidden />;
+  const presentation = PROVIDER_PRESENTATION[provider];
+  return (
+    <ProviderInstanceIcon
+      driverKind={presentation.driverKind}
+      displayName={presentation.label}
+      iconClassName={className}
+    />
+  );
 }
 
 function Metric({ label, value }: { readonly label: string; readonly value: string }) {
@@ -1021,6 +1160,7 @@ function UsageEnvironmentFilter({
   isPartial,
   duplicateSources,
   contractMismatches,
+  onOpenModelPrices,
 }: {
   readonly environments: readonly EnvironmentUsageStatus[];
   readonly selectedEnvironments: readonly EnvironmentUsageStatus[];
@@ -1030,8 +1170,8 @@ function UsageEnvironmentFilter({
   readonly isPartial: boolean;
   readonly duplicateSources: readonly string[];
   readonly contractMismatches: MergedUsage["contractMismatches"];
+  readonly onOpenModelPrices: () => void;
 }) {
-  const [modelPricesOpen, setModelPricesOpen] = useState(false);
   const allSelected = selectedEnvironmentIds === null;
   const label = allSelected
     ? "All environments"
@@ -1047,121 +1187,108 @@ function UsageEnvironmentFilter({
     contractMismatches.length > 0;
 
   return (
-    <>
-      <Menu>
-        <MenuTrigger
-          render={<InlineButton />}
-          className="group/usage-environment min-w-0 max-w-full"
-        >
-          <span className="min-w-0 truncate">{label}</span>
-          <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
-            {showUsageStatus && pendingCount > 0 ? (
-              <>
-                <CircleDashedIcon className="size-3.5" aria-hidden />
-                <span className="sr-only">
-                  {pendingCount} {pendingCount === 1 ? "environment" : "environments"} still
-                  scanning
-                  {isPartial ? "; totals are partial" : ""}
-                </span>
-              </>
-            ) : showUsageStatus && hasIssue ? (
-              <CircleAlertIcon
-                className="size-3.5 text-warning-foreground"
-                aria-label="Some environments could not report usage"
-              />
-            ) : (
-              <ChevronDownIcon
-                className="size-3.5 opacity-0 transition-opacity group-hover/usage-environment:opacity-100 group-focus-visible/usage-environment:opacity-100 group-data-popup-open/usage-environment:opacity-100"
-                aria-hidden
-              />
-            )}
-          </span>
-        </MenuTrigger>
-        <MenuPopup align="start">
-          <MenuCheckboxItem
-            checked={allSelected}
-            closeOnClick={false}
-            onCheckedChange={(checked) => onSelectionChange(checked ? null : new Set())}
-          >
-            All environments
-          </MenuCheckboxItem>
-          <MenuSeparator />
-          {environments.map((environment) => {
-            const checked =
-              selectedEnvironmentIds === null ||
-              selectedEnvironmentIds.has(environment.environmentId);
-            const status =
-              environment.error !== null
-                ? "Unavailable"
-                : environment.summary !== null &&
-                    !isCompatibleUsageContractVersion(
-                      environment.summary.contractVersion,
-                      USAGE_CONTRACT_VERSION,
-                    )
-                  ? "Update required"
-                  : environment.summary === null
-                    ? "Scanning…"
-                    : environment.isPending
-                      ? "Refreshing…"
-                      : "Ready";
-            return (
-              <MenuCheckboxItem
-                key={environment.environmentId}
-                checked={checked}
-                closeOnClick={false}
-                onCheckedChange={(nextChecked) => {
-                  const next = new Set(selectedEnvironments.map((entry) => entry.environmentId));
-                  if (nextChecked) next.add(environment.environmentId);
-                  else next.delete(environment.environmentId);
-                  onSelectionChange(next.size === environments.length ? null : next);
-                }}
-              >
-                <span className="flex min-w-0 items-center gap-3">
-                  <span className="min-w-0 flex-1 truncate">{environment.label}</span>
-                  {showUsageStatus ? (
-                    <span
-                      className={cn(
-                        "shrink-0 text-xs text-muted-foreground",
-                        environment.error !== null && "text-destructive",
-                      )}
-                    >
-                      {status}
-                    </span>
-                  ) : null}
-                </span>
-              </MenuCheckboxItem>
-            );
-          })}
-          {environments.length === 0 ? (
-            <p className="px-2 py-2 text-xs text-muted-foreground">No environments connected.</p>
-          ) : null}
-          {showUsageStatus && isPartial ? (
-            <p className="px-2 py-2 text-xs text-muted-foreground">
-              Totals are partial while selected environments scan.
-            </p>
-          ) : null}
-          {showUsageStatus ? (
-            <UsageCoverageNotice
-              environments={selectedEnvironments}
-              duplicateSources={duplicateSources}
-              contractMismatches={contractMismatches}
+    <Menu>
+      <MenuTrigger render={<InlineButton />} className="group/usage-environment min-w-0 max-w-full">
+        <span className="min-w-0 truncate">{label}</span>
+        <span className="flex size-3.5 shrink-0 items-center justify-center text-muted-foreground">
+          {showUsageStatus && pendingCount > 0 ? (
+            <>
+              <CircleDashedIcon className="size-3.5" aria-hidden />
+              <span className="sr-only">
+                {pendingCount} {pendingCount === 1 ? "environment" : "environments"} still scanning
+                {isPartial ? "; totals are partial" : ""}
+              </span>
+            </>
+          ) : showUsageStatus && hasIssue ? (
+            <CircleAlertIcon
+              className="size-3.5 text-warning-foreground"
+              aria-label="Some environments could not report usage"
             />
-          ) : null}
-          <MenuSeparator />
-          <MenuItem onClick={() => setModelPricesOpen(true)}>
-            <SlidersHorizontalIcon aria-hidden />
-            Model prices
-          </MenuItem>
-        </MenuPopup>
-      </Menu>
-      {modelPricesOpen ? (
-        <UsagePriceOverrides
-          usage={environments}
-          initialSelectedEnvironmentIds={selectedEnvironmentIds}
-          onOpenChange={setModelPricesOpen}
-        />
-      ) : null}
-    </>
+          ) : (
+            <ChevronDownIcon
+              className="size-3.5 opacity-0 transition-opacity group-hover/usage-environment:opacity-100 group-focus-visible/usage-environment:opacity-100 group-data-popup-open/usage-environment:opacity-100"
+              aria-hidden
+            />
+          )}
+        </span>
+      </MenuTrigger>
+      <MenuPopup align="start">
+        <MenuCheckboxItem
+          checked={allSelected}
+          closeOnClick={false}
+          onCheckedChange={(checked) => onSelectionChange(checked ? null : new Set())}
+        >
+          All environments
+        </MenuCheckboxItem>
+        <MenuSeparator />
+        {environments.map((environment) => {
+          const checked =
+            selectedEnvironmentIds === null ||
+            selectedEnvironmentIds.has(environment.environmentId);
+          const status =
+            environment.error !== null
+              ? "Unavailable"
+              : environment.summary !== null &&
+                  !isCompatibleUsageContractVersion(
+                    environment.summary.contractVersion,
+                    USAGE_CONTRACT_VERSION,
+                  )
+                ? "Update required"
+                : environment.summary === null
+                  ? "Scanning…"
+                  : environment.isPending
+                    ? "Refreshing…"
+                    : "Ready";
+          return (
+            <MenuCheckboxItem
+              key={environment.environmentId}
+              checked={checked}
+              closeOnClick={false}
+              onCheckedChange={(nextChecked) => {
+                const next = new Set(selectedEnvironments.map((entry) => entry.environmentId));
+                if (nextChecked) next.add(environment.environmentId);
+                else next.delete(environment.environmentId);
+                onSelectionChange(next.size === environments.length ? null : next);
+              }}
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="min-w-0 flex-1 truncate">{environment.label}</span>
+                {showUsageStatus ? (
+                  <span
+                    className={cn(
+                      "shrink-0 text-xs text-muted-foreground",
+                      environment.error !== null && "text-destructive",
+                    )}
+                  >
+                    {status}
+                  </span>
+                ) : null}
+              </span>
+            </MenuCheckboxItem>
+          );
+        })}
+        {environments.length === 0 ? (
+          <p className="px-2 py-2 text-xs text-muted-foreground">No environments connected.</p>
+        ) : null}
+        {showUsageStatus && isPartial ? (
+          <p className="px-2 py-2 text-xs text-muted-foreground">
+            Totals are partial while selected environments scan.
+          </p>
+        ) : null}
+        {showUsageStatus ? (
+          <UsageCoverageNotice
+            environments={selectedEnvironments}
+            duplicateSources={duplicateSources}
+            contractMismatches={contractMismatches}
+          />
+        ) : null}
+        <MenuSeparator />
+        <MenuItem onClick={onOpenModelPrices}>
+          <SlidersHorizontalIcon aria-hidden />
+          Model prices
+        </MenuItem>
+      </MenuPopup>
+    </Menu>
   );
 }
 
@@ -1205,15 +1332,16 @@ function UsageSkeleton() {
 
       <section className="flex flex-col gap-2">
         <h2 className="text-sm font-medium text-foreground">Totals</h2>
-        <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
-          {["Processed tokens", "Cached input", "Uncached input", "Output", "Cache savings"].map(
-            (label) => (
-              <div key={label} className="flex flex-col gap-0.5">
-                <span className="text-xs text-muted-foreground">{label}</span>
-                <Skeleton className="h-6 w-16" />
-              </div>
-            ),
-          )}
+        <MetricSkeletons
+          labels={["Processed tokens", "Cached input", "Uncached input", "Output", "Cache savings"]}
+        />
+      </section>
+
+      <section className="grid gap-x-12 gap-y-8 lg:grid-cols-2">
+        <div className="flex flex-col gap-2.5">
+          <Skeleton className="h-5 w-28" />
+          <Skeleton className="h-2" />
+          <Skeleton className="h-4 w-72" />
         </div>
       </section>
 
@@ -1225,5 +1353,18 @@ function UsageSkeleton() {
         <Skeleton className="h-44" />
       </section>
     </>
+  );
+}
+
+function MetricSkeletons({ labels }: { readonly labels: readonly string[] }) {
+  return (
+    <div className="grid grid-cols-2 gap-x-6 gap-y-4 py-1 md:grid-cols-5">
+      {labels.map((label) => (
+        <div key={label} className="flex flex-col gap-0.5">
+          <span className="text-xs text-muted-foreground">{label}</span>
+          <Skeleton className="h-6 w-16" />
+        </div>
+      ))}
+    </div>
   );
 }

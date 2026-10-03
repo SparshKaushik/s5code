@@ -5,7 +5,6 @@ import { Platform, View } from "react-native";
 import { deriveProjectGroupLabel } from "@t3tools/client-runtime/state/project-grouping";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 
-import { AppText as Text } from "../../components/AppText";
 import { hasCloudPublicConfig } from "../cloud/publicConfig";
 import { useAdaptiveWorkspaceLayout } from "../layout/AdaptiveWorkspaceLayout";
 import { NativeHeaderToolbar } from "../../native/StackHeader";
@@ -89,9 +88,6 @@ function ConfiguredSettingsRouteScreen() {
           />
           <SettingsRow icon="bell.badge" label="Notifications" target="SettingsNotifications" />
         </SettingsSection>
-        <Text className="px-2 text-sm text-foreground-muted">
-          S5 Code works locally without signing in. Cloud features are optional.
-        </Text>
 
         <SettingsIndexSections />
       </ScrollView>
@@ -148,7 +144,6 @@ function SettingsIndexSections() {
           members: scopedProjectMembers,
         })
       : (selectedProject?.label ?? "Unavailable project");
-
   return (
     <>
       <SettingsSection title="Interface">
@@ -156,6 +151,10 @@ function SettingsIndexSections() {
         {Platform.OS === "ios" ? (
           <SettingsRow icon="keyboard" label="Keyboard" target="SettingsKeyboard" />
         ) : null}
+      </SettingsSection>
+
+      <SettingsSection title="Automations">
+        <SettingsRow icon="clock" label="Scheduled tasks" target="SettingsScheduledTasks" />
       </SettingsSection>
 
       <SettingsSection title="Projects & threads">
@@ -169,10 +168,17 @@ function SettingsIndexSections() {
         ) : null}
         <SettingsRow icon="folder" label="Organization" target="SettingsOrganization" />
         <SettingsRow icon="text.bubble" label="Thread behavior" target="SettingsThreads" />
+        <SettingsRow icon="arrow.turn.left.up" label="Follow-ups" target="SettingsFollowUp" />
         <SettingsRow icon="archivebox" label="Archived Threads" target="SettingsArchive" />
       </SettingsSection>
 
       <SettingsSection title="Server settings">
+        <SettingsRow
+          icon="person.crop.circle"
+          label="Provider accounts"
+          target="SettingsProviderAccounts"
+          disabled={noServerTargets}
+        />
         <SettingsRow
           icon="text.bubble"
           label="New threads"

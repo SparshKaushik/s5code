@@ -9,6 +9,12 @@
 import type { UsageProviderKind, UsageTokenTotals } from "@t3tools/contracts";
 
 export type TranscriptUsageProvider = Exclude<UsageProviderKind, "opencode">;
+/**
+ * Billing speed of a request. Faster speeds bill at a model-specific premium.
+ * Claude fast mode and Codex `priority` are `fast`; Codex `ultrafast` is its
+ * own, more expensive tier.
+ */
+export type UsageSpeed = "standard" | "fast" | "ultrafast";
 
 export interface UsageRecord {
   readonly provider: UsageProviderKind;
@@ -36,11 +42,8 @@ export interface UsageRecord {
    */
   readonly inputTokensEstimated: boolean;
   readonly reportedCostUsd: number | null;
-  /**
-   * Whether the request ran in fast mode, which bills at a model-specific
-   * multiple of the standard rate. Only Claude Code records this.
-   */
-  readonly fast: boolean;
+  /** Only Claude Code and Codex record a speed; other providers are `standard`. */
+  readonly speed: UsageSpeed;
   /**
    * Key for cross-file de-duplication, or `null` when the record is inherently
    * unique and needs no dedup.
@@ -134,6 +137,10 @@ export function parseClaudeLine(line: string): UsageRecord | null {
   } catch {
     return null;
   }
+  return parseClaudeRecord(parsed);
+}
+
+export function parseClaudeRecord(parsed: unknown): UsageRecord | null {
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
@@ -178,7 +185,7 @@ export function parseClaudeLine(line: string): UsageRecord | null {
     },
     inputTokensEstimated: false,
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) ? cost : null,
-    fast: usageRecord["speed"] === "fast",
+    speed: usageRecord["speed"] === "fast" ? "fast" : "standard",
     dedupeKey,
   };
 }
@@ -190,12 +197,14 @@ export function parseClaudeLine(line: string): UsageRecord | null {
 /**
  * Rolling state for a single Codex rollout file.
  *
- * Codex `token_count` events carry no model, so the model is carried forward
- * from the most recent `turn_context`. Sessions that switch models mid-run
- * attribute correctly from the switch onward.
+ * Codex `token_count` events carry no model or service tier, so both are
+ * carried forward: the model from the most recent `turn_context`, the tier from
+ * the most recent `thread_settings_applied`. Sessions that switch either
+ * mid-run attribute correctly from the switch onward.
  */
 export interface CodexScanState {
   model: string;
+  speed: UsageSpeed;
   sessionId: string;
   lastUsageSignature: string | null;
   sawSessionMeta: boolean;
@@ -207,6 +216,7 @@ export interface CodexScanState {
 export function initialCodexScanState(): CodexScanState {
   return {
     model: "",
+    speed: "standard",
     sessionId: "",
     lastUsageSignature: null,
     sawSessionMeta: false,
@@ -251,6 +261,10 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
   } catch {
     return null;
   }
+  return parseCodexRecord(parsed, state);
+}
+
+export function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord | null {
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
@@ -277,6 +291,14 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
 
   if (record["type"] === "turn_context") {
     if (typeof payloadRecord["model"] === "string") state.model = payloadRecord["model"];
+    return null;
+  }
+
+  if (payloadType === "thread_settings_applied") {
+    const settings = payloadRecord["thread_settings"];
+    if (typeof settings === "object" && settings !== null) {
+      state.speed = codexSpeed((settings as Record<string, unknown>)["service_tier"]);
+    }
     return null;
   }
 
@@ -340,11 +362,22 @@ export function parseCodexLine(line: string, state: CodexScanState): UsageRecord
     // Codex does not report cost in the rollout.
     inputTokensEstimated: false,
     reportedCostUsd: null,
-    fast: false,
+    speed: state.speed,
     // Events surviving the fork-copy suppression above are unique to this
     // rollout, so they need no global dedup.
     dedupeKey: null,
   };
+}
+
+/**
+ * Maps a Codex `service_tier` to its billing speed. Codex omits the field when
+ * no tier was requested, which bills as standard, as do `default` and
+ * `standard`. `fast` is accepted as an alias of `priority`.
+ */
+function codexSpeed(serviceTier: unknown): UsageSpeed {
+  if (serviceTier === "priority" || serviceTier === "fast") return "fast";
+  if (serviceTier === "ultrafast") return "ultrafast";
+  return "standard";
 }
 
 /* -------------------------------------------------------------------------- */
@@ -388,6 +421,10 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
   } catch {
     return null;
   }
+  return parsePiRecord(parsed, state);
+}
+
+export function parsePiRecord(parsed: unknown, state: PiScanState): UsageRecord | null {
   if (typeof parsed !== "object" || parsed === null) return null;
 
   const record = parsed as Record<string, unknown>;
@@ -468,7 +505,7 @@ export function parsePiLine(line: string, state: PiScanState): UsageRecord | nul
     totals,
     inputTokensEstimated,
     reportedCostUsd,
-    fast: false,
+    speed: "standard",
     // The upstream response id survives a session fork, which copies messages
     // into a new file. pi's own message ids are short and only unique per file.
     dedupeKey: responseId,
@@ -538,6 +575,10 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
   } catch {
     return [];
   }
+  return parseGrokRecord(parsed);
+}
+
+export function parseGrokRecord(parsed: unknown): readonly UsageRecord[] {
   if (typeof parsed !== "object" || parsed === null) return [];
 
   const record = parsed as Record<string, unknown>;
@@ -600,7 +641,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
         totals: grokTotalsToUsage(topLevel),
         inputTokensEstimated: false,
         reportedCostUsd: grokCostTicksToUsd(topLevel.costUsdTicks),
-        fast: false,
+        speed: "standard",
         // No prompt id means we cannot tell two same-second updates apart.
         dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:grok`,
       },
@@ -641,7 +682,7 @@ export function parseGrokLine(line: string): readonly UsageRecord[] {
       totals,
       inputTokensEstimated: false,
       reportedCostUsd,
-      fast: false,
+      speed: "standard",
       dedupeKey: promptId === null ? null : `${sessionId}:${promptId}:${entry.model}`,
     });
   }

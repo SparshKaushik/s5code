@@ -54,6 +54,44 @@ describe("mobile model options", () => {
     ]);
   });
 
+  it("carries configured ACP identity into model and provider catalogs", () => {
+    const iconUrl = "https://cdn.agentclientprotocol.com/registry/v1/latest/antigravity-acp.svg";
+    const config = {
+      providers: [
+        {
+          instanceId: "acpRegistry_antigravity",
+          driver: "acpRegistry",
+          displayName: "Antigravity",
+          iconUrl,
+          enabled: true,
+          installed: true,
+          auth: { status: "authenticated" },
+          models: [
+            {
+              slug: "default",
+              name: "Default",
+              isCustom: false,
+              capabilities: null,
+            },
+          ],
+        },
+      ],
+    } as unknown as ServerConfig;
+
+    const [group] = groupByProvider(buildModelOptions(config, null));
+
+    expect(group).toMatchObject({
+      providerKey: "acpRegistry_antigravity",
+      providerLabel: "Antigravity",
+      models: [
+        {
+          providerDriver: "acpRegistry",
+          providerIconUrl: iconUrl,
+        },
+      ],
+    });
+  });
+
   it("distinguishes same-name OpenCode models without changing their routing", () => {
     const sources = [
       { id: "anthropic", label: "Anthropic" },
@@ -146,6 +184,13 @@ describe("mobile model options", () => {
     expect(option?.capabilities?.optionDescriptors?.[0]?.id).toBe("serviceTier");
     expect(option?.selection.options).toBeUndefined();
 
+    const [emptyOption] = buildModelOptions(config, {
+      instanceId: ProviderInstanceId.make("codex"),
+      model: "gpt-test",
+      options: [],
+    });
+    expect(emptyOption?.selection).toEqual(option?.selection);
+
     const [explicitOption] = buildModelOptions(config, {
       instanceId: ProviderInstanceId.make("codex"),
       model: "gpt-test",
@@ -153,6 +198,56 @@ describe("mobile model options", () => {
     });
     expect(explicitOption?.selection.options).toEqual([{ id: "serviceTier", value: "priority" }]);
   });
+
+  it("limits existing threads to their provider while new tasks keep every provider", () => {
+    const providers = ["codex", "claudeAgent"].map((instanceId) => ({
+      instanceId,
+      driver: instanceId,
+      enabled: true,
+      installed: true,
+      auth: { status: "authenticated" },
+      models: [{ slug: "test", name: instanceId, capabilities: null }],
+    }));
+    const config = { providers } as unknown as ServerConfig;
+    const selection = { instanceId: ProviderInstanceId.make("codex"), model: "test" };
+
+    expect(buildModelOptions(config, selection).map((option) => option.providerKey)).toEqual([
+      "codex",
+      "claudeAgent",
+    ]);
+    expect(buildModelOptions(config, selection, selection.instanceId)).toEqual(
+      buildModelOptions(config, selection).filter((option) => option.providerKey === "codex"),
+    );
+  });
+
+  it.each(["disabled", "unavailable", "missing"] as const)(
+    "retains the selected %s provider's fallback in a filtered catalog",
+    (state) => {
+      const selection = {
+        instanceId: ProviderInstanceId.make("google_work"),
+        model: "saved-model",
+        options: [{ id: "native-option", value: "saved-choice" }],
+      };
+      const provider = {
+        instanceId: selection.instanceId,
+        driver: "antigravity",
+        displayName: "Google Work",
+        enabled: state !== "disabled",
+        installed: true,
+        availability: state === "unavailable" ? "unavailable" : "available",
+        auth: { status: "authenticated" },
+        models: [{ slug: selection.model, name: "Saved model", capabilities: null }],
+      };
+      const config = {
+        providers: state === "missing" ? [] : [provider],
+        settings: { providerInstances: { google_work: { driver: "antigravity" } } },
+      } as unknown as ServerConfig;
+      const options = buildModelOptions(config, selection, selection.instanceId);
+      expect(options).toEqual(buildModelOptions(config, selection));
+      expect(options).toHaveLength(1);
+      expect(options[0]).toMatchObject({ selection, isUnavailable: true });
+    },
+  );
 
   it("rejects stored selections whose provider is not usable", () => {
     const config = {
@@ -407,94 +502,5 @@ describe("mobile model options", () => {
         modelOptions: [unavailable],
       }),
     ).toBeNull();
-  });
-});
-
-describe("provider labels", () => {
-  const providerConfig = (
-    provider: Record<string, unknown>,
-    models: ReadonlyArray<Record<string, unknown>>,
-  ) =>
-    ({
-      providers: [
-        {
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          models,
-          ...provider,
-        },
-      ],
-    }) as unknown as ServerConfig;
-
-  it("names pi in lowercase rather than falling back to the instance id", () => {
-    const options = buildModelOptions(
-      providerConfig({ instanceId: "pi", driver: "pi" }, [
-        { slug: "kiro/claude-sonnet-5", name: "Claude Sonnet 5", subProvider: "kiro" },
-      ]),
-      null,
-    );
-    expect(options[0]?.providerLabel).toBe("pi");
-  });
-
-  it("uses driver names for every shipped driver", () => {
-    const labelFor = (driver: string) =>
-      buildModelOptions(
-        providerConfig({ instanceId: `${driver}-instance`, driver }, [{ slug: "m", name: "M" }]),
-        null,
-      )[0]?.providerLabel;
-
-    expect(labelFor("codex")).toBe("Codex");
-    expect(labelFor("claudeAgent")).toBe("Claude");
-    expect(labelFor("cursor")).toBe("Cursor");
-    expect(labelFor("grok")).toBe("Grok");
-    expect(labelFor("opencode")).toBe("OpenCode");
-  });
-
-  it("prefers a user-set display name over the driver name", () => {
-    const options = buildModelOptions(
-      providerConfig({ instanceId: "pi-work", driver: "pi", displayName: "Work pi" }, [
-        { slug: "m", name: "M" },
-      ]),
-      null,
-    );
-    expect(options[0]?.providerLabel).toBe("Work pi");
-  });
-
-  it("qualifies aggregated models by vendor so duplicate names stay distinct", () => {
-    // pi surfaces the same model through several vendors; unqualified rows
-    // would read identically in the picker.
-    const options = buildModelOptions(
-      providerConfig({ instanceId: "pi", driver: "pi" }, [
-        { slug: "kiro/claude-sonnet-5", name: "Claude Sonnet 5", subProvider: "kiro" },
-        { slug: "anthropic/claude-sonnet-5", name: "Claude Sonnet 5", subProvider: "anthropic" },
-      ]),
-      null,
-    );
-    expect(options.map((option) => option.label)).toEqual([
-      "kiro · Claude Sonnet 5",
-      "anthropic · Claude Sonnet 5",
-    ]);
-  });
-
-  it("leaves a model alone when its name already leads with the vendor", () => {
-    const options = buildModelOptions(
-      providerConfig({ instanceId: "pi", driver: "pi" }, [
-        { slug: "xai/grok-4.5", name: "Grok 4.5", subProvider: "xai" },
-        { slug: "openai/gpt-5", name: "OpenAI GPT-5", subProvider: "openai" },
-      ]),
-      null,
-    );
-    expect(options.map((option) => option.label)).toEqual(["xai · Grok 4.5", "OpenAI GPT-5"]);
-  });
-
-  it("does not qualify single-vendor providers, which have no ambiguity", () => {
-    const options = buildModelOptions(
-      providerConfig({ instanceId: "codex", driver: "codex" }, [
-        { slug: "gpt-5.6", name: "GPT-5.6" },
-      ]),
-      null,
-    );
-    expect(options[0]?.label).toBe("GPT-5.6");
   });
 });

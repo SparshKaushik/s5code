@@ -9,6 +9,8 @@
  * @module provider/sqliteCompat
  */
 
+import * as NodeFSP from "node:fs/promises";
+
 interface DatabaseSyncOptions {
   readonly readOnly?: boolean | undefined;
   readonly timeout?: number | undefined;
@@ -122,10 +124,18 @@ class BunDatabaseSync {
       this.db.loadExtension(path);
     }
   }
+
+  async backup(path: string): Promise<void> {
+    // Bun serializes a consistent SQLite snapshot, including committed WAL
+    // writes. V2's initial copy must not copy only the on-disk database file.
+    await NodeFSP.writeFile(path, this.db.serialize());
+  }
 }
 
 const nodeSqlite = (process as any).getBuiltinModule?.("node:sqlite");
 
 export const DatabaseSync: any = nodeSqlite?.DatabaseSync ?? BunDatabaseSync;
 export const StatementSync: any = nodeSqlite?.StatementSync ?? StatementSyncShim;
-export default { DatabaseSync, StatementSync };
+export const backup =
+  nodeSqlite?.backup ?? ((database: BunDatabaseSync, path: string) => database.backup(path));
+export default { DatabaseSync, StatementSync, backup };

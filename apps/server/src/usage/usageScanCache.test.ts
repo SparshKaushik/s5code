@@ -26,7 +26,7 @@ function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
     },
     inputTokensEstimated: false,
     reportedCostUsd: null,
-    fast: false,
+    speed: "standard",
     dedupeKey: "msg_1:",
     ...overrides,
   };
@@ -65,7 +65,7 @@ describe("scan cache round trip", () => {
         100,
         [
           record({ inputTokensEstimated: true }),
-          record({ dedupeKey: "msg_2:", model: "claude-opus-5-5", fast: true }),
+          record({ dedupeKey: "msg_2:", model: "claude-opus-5-5", speed: "fast" }),
         ],
       ],
       ["/b.jsonl", 200, [record({ sessionId: "session-b", reportedCostUsd: 1.5 })]],
@@ -84,11 +84,14 @@ describe("scan cache round trip", () => {
       size: 80,
       mtimeMs: 400,
       provider: "codex",
-      records: [record({ provider: "codex", model: "gpt-5.2-codex", dedupeKey: null })],
+      records: [
+        record({ provider: "codex", model: "gpt-6-astra", dedupeKey: null, speed: "ultrafast" }),
+      ],
       tailRecords: [],
       position: position({
         codexState: {
-          model: "gpt-5.2-codex",
+          model: "gpt-6-astra",
+          speed: "ultrafast",
           sessionId: "session-c",
           lastUsageSignature: '{"input_tokens":1}',
           sawSessionMeta: true,
@@ -105,6 +108,78 @@ describe("scan cache round trip", () => {
     expect(restored.get("/b.jsonl")).toEqual(original.get("/b.jsonl"));
     expect(restored.get("/grok.jsonl")).toEqual(original.get("/grok.jsonl"));
     expect(restored.get("/codex.jsonl")).toEqual(original.get("/codex.jsonl"));
+  });
+
+  it("keeps upstream v4 Codex history and reparses live rollouts for service tiers", () => {
+    const decoded = decodeScanCache({
+      version: 4,
+      models: ["gpt-6-astra"],
+      sessions: ["session-a"],
+      files: {
+        "/codex.jsonl": {
+          s: 100,
+          m: 100,
+          p: "codex",
+          r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, null, null, 0]],
+          t: [],
+          o: 100,
+          gl: 64,
+          gh: 0xdeadbeef,
+          cs: { model: "gpt-6-astra", sessionId: "session-a" },
+        },
+      },
+    });
+    const entry = decoded.get("/codex.jsonl");
+    expect(entry?.records).toEqual([
+      record({ provider: "codex", model: "gpt-6-astra", dedupeKey: null }),
+    ]);
+    expect(entry?.size).toBe(-1);
+    expect(entry?.position.resumeOffset).toBe(0);
+    expect(entry?.position.codexState).toBeNull();
+  });
+
+  it("preserves S5 v4 gateway pricing, estimated input, and fast-mode history", () => {
+    const decoded = decodeScanCache({
+      version: 4,
+      models: ["claude-opus-5"],
+      sessions: ["session-a"],
+      apiProviders: ["agentrouter"],
+      files: {
+        "/pi.jsonl": {
+          s: 100,
+          m: 100,
+          p: "pi",
+          r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, "msg_1:", null, true, 0, 0]],
+          t: [],
+          o: 100,
+          gl: 64,
+          gh: 0xdeadbeef,
+          cs: null,
+        },
+        "/claude.jsonl": {
+          s: 100,
+          m: 100,
+          p: "claude",
+          r: [[1_786_000_000_000, 0, 0, 2, 1000, 10, 50, 0, "msg_2:", null, false, 0, 1]],
+          t: [],
+          o: 100,
+          gl: 64,
+          gh: 0xdeadbeef,
+          cs: null,
+        },
+      },
+    });
+
+    expect(decoded.get("/pi.jsonl")?.records).toEqual([
+      record({
+        provider: "pi",
+        model: "claude-opus-5",
+        apiProvider: "agentrouter",
+        inputTokensEstimated: true,
+      }),
+    ]);
+    expect(decoded.get("/claude.jsonl")?.records[0]?.speed).toBe("fast");
+    expect(decodeScanCache(encodeScanCache(decoded))).toEqual(decoded);
   });
 
   it("drops an entry whose persisted parse state is corrupt", () => {
@@ -133,8 +208,8 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("drops an entry whose fast flag is not 0 or 1", () => {
-    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record({ fast: true })]]]));
+  it("drops an entry whose speed is not a known index", () => {
+    const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record({ speed: "fast" })]]]));
     const row = encoded.files["/a.jsonl"]!.r[0]!;
     const poisoned = {
       ...encoded,
@@ -144,7 +219,7 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(JSON.parse(JSON.stringify(poisoned))).has("/a.jsonl")).toBe(false);
   });
 
-  it("rejects a document from the previous cache version", () => {
+  it("rejects a document from before records carried a speed", () => {
     const encoded = encodeScanCache(cacheWith([["/a.jsonl", 100, [record()]]]));
     const previous = { ...encoded, version: 3 };
 

@@ -17,14 +17,34 @@
 import type { UsageProviderKind } from "@t3tools/contracts";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord } from "./usageTranscripts.ts";
+import type { CodexScanState, UsageRecord, UsageSpeed } from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
 // v3: entries carry the parse position and reducer state so a grown file
 // re-parses only its appended bytes instead of starting over.
 // v4: records carry Claude fast mode, which v3 rows never captured.
-const USAGE_SCAN_CACHE_VERSION = 4 as const;
+// v5: Codex records carry their service tier. v4 rows store speed the same
+// way, so v4 entries still load; see `decodeScanCache` for v4 Codex entries.
+// v6: retain S5's gateway identity and estimated-token fields alongside speeds.
+const USAGE_SCAN_CACHE_VERSION = 6 as const;
+const SPEED_COMPATIBLE_SINCE_VERSION = 4;
+
+/**
+ * Each cache version writes its own file in the state directory. An older
+ * server sharing that directory cannot read a newer cache and would replace
+ * it, dropping saved usage for deleted transcripts. Separate files keep both.
+ * Legacy upstream and S5 caches are imported when this version's file is missing.
+ */
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v6.json";
+export const LEGACY_SCAN_CACHE_FILE_NAME = "usage-scan-cache.json";
+
+/** Serialised as the index into this list. */
+const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
+
+function isSpeed(value: unknown): value is UsageSpeed {
+  return SPEEDS.some((speed) => speed === value);
+}
 
 export interface CachedFile {
   readonly size: number;
@@ -59,9 +79,9 @@ type SerializedRecord = readonly [
   reasoningTokens: number,
   dedupeKey: string | null,
   reportedCostUsd: number | null,
+  speed: number,
   inputTokensEstimated: boolean,
   apiProviderIndex: number,
-  fast: 0 | 1,
 ];
 
 interface SerializedFile {
@@ -116,9 +136,9 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
     record.totals.reasoningTokens,
     record.dedupeKey,
     record.reportedCostUsd,
+    SPEEDS.indexOf(record.speed),
     record.inputTokensEstimated,
     intern(apiProviders, apiProviderIndex, record.apiProvider),
-    record.fast ? 1 : 0,
   ];
 
   const files: Record<string, SerializedFile> = {};
@@ -154,9 +174,17 @@ export function decodeScanCache(document: unknown): ScanCache {
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
-  if (root.version !== USAGE_SCAN_CACHE_VERSION) return cache;
+  const version = root.version;
+  if (
+    typeof version !== "number" ||
+    version < SPEED_COMPATIBLE_SINCE_VERSION ||
+    version > USAGE_SCAN_CACHE_VERSION
+  ) {
+    return cache;
+  }
   if (!isRecordArray(root.models) || !isRecordArray(root.sessions)) return cache;
-  if (!isRecordArray(root.apiProviders)) return cache;
+  if (version === USAGE_SCAN_CACHE_VERSION && root.apiProviders === undefined) return cache;
+  if (root.apiProviders !== undefined && !isRecordArray(root.apiProviders)) return cache;
   if (typeof root.files !== "object" || root.files === null) return cache;
 
   // The intern tables must be all strings: a numeric entry would pass the
@@ -164,10 +192,17 @@ export function decodeScanCache(document: unknown): ScanCache {
   // at lookupRate. A corrupt table rejects the whole cache.
   if (!root.models.every((value) => typeof value === "string")) return cache;
   if (!root.sessions.every((value) => typeof value === "string")) return cache;
-  if (!root.apiProviders.every((value) => typeof value === "string")) return cache;
+  if (
+    root.apiProviders !== undefined &&
+    !root.apiProviders.every((value) => typeof value === "string")
+  )
+    return cache;
   const models = root.models as readonly string[];
   const sessions = root.sessions as readonly string[];
-  const apiProviders = root.apiProviders as readonly string[];
+  const apiProviders = root.apiProviders ?? [];
+  // S5 v4 used a different row order from upstream v4. Its intern table
+  // distinguishes the layouts, so saved history survives either upgrade path.
+  const legacyFork = version === 4 && root.apiProviders !== undefined;
 
   // Any corrupt row disqualifies the whole entry. Keeping the survivors
   // under the original (size, mtime) would read as a valid warm hit and the
@@ -178,7 +213,8 @@ export function decodeScanCache(document: unknown): ScanCache {
   ): UsageRecord[] | null => {
     const records: UsageRecord[] = [];
     for (const row of rows) {
-      if (!isRecordArray(row) || row.length < 13) return null;
+      if (!isRecordArray(row) || row.length < (root.apiProviders === undefined ? 11 : 13))
+        return null;
       const [
         timestampMs,
         modelIndex,
@@ -190,10 +226,11 @@ export function decodeScanCache(document: unknown): ScanCache {
         reasoning,
         dedupeKey,
         reportedCostUsd,
-        inputTokensEstimated,
-        apiProviderIndex,
-        fast,
       ] = row as SerializedRecord;
+      const speedIndex = legacyFork ? row[12] : row[10];
+      const inputTokensEstimated = legacyFork ? row[10] : row[11];
+      const apiProviderIndex = legacyFork ? row[11] : row[12];
+      const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       if (
@@ -205,7 +242,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         !Number.isFinite(cacheCreation) ||
         !Number.isFinite(output) ||
         !Number.isFinite(reasoning) ||
-        (fast !== 0 && fast !== 1)
+        speed === undefined
       ) {
         return null;
       }
@@ -226,7 +263,7 @@ export function decodeScanCache(document: unknown): ScanCache {
         },
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         inputTokensEstimated: inputTokensEstimated === true,
-        fast: fast === 1,
+        speed,
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
       });
     }
@@ -266,7 +303,11 @@ export function decodeScanCache(document: unknown): ScanCache {
     ) {
       continue;
     }
-    const codexState = decodeCodexState(entry.cs);
+    // v4 Codex records predate service tiers, so they all priced as standard.
+    // Keep them, because the rollout may be gone, but make a live rollout
+    // re-parse whole: no file has size -1, and a zero position cannot resume.
+    const legacyCodex = entry.p === "codex" && version < 5;
+    const codexState = legacyCodex ? null : decodeCodexState(entry.cs);
     if (codexState === undefined) continue;
 
     const provider: UsageProviderKind = entry.p;
@@ -275,17 +316,14 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
-      size: entry.s,
+      size: legacyCodex ? -1 : entry.s,
       mtimeMs: entry.m,
       provider,
       records,
       tailRecords,
-      position: {
-        resumeOffset: entry.o,
-        guardLength: entry.gl,
-        guardHash: entry.gh,
-        codexState,
-      },
+      position: legacyCodex
+        ? { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null }
+        : { resumeOffset: entry.o, guardLength: entry.gl, guardHash: entry.gh, codexState },
     });
   }
 
@@ -303,6 +341,7 @@ function decodeCodexState(value: unknown): CodexScanState | null | undefined {
   const state = value as Partial<CodexScanState>;
   if (
     typeof state.model !== "string" ||
+    !isSpeed(state.speed) ||
     typeof state.sessionId !== "string" ||
     (state.lastUsageSignature !== null && typeof state.lastUsageSignature !== "string") ||
     typeof state.sawSessionMeta !== "boolean" ||
@@ -314,6 +353,7 @@ function decodeCodexState(value: unknown): CodexScanState | null | undefined {
   }
   return {
     model: state.model,
+    speed: state.speed,
     sessionId: state.sessionId,
     lastUsageSignature: state.lastUsageSignature ?? null,
     sawSessionMeta: state.sawSessionMeta,

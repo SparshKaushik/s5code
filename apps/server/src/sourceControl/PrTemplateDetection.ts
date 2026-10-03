@@ -23,8 +23,6 @@ const TEMPLATE_DIRECTORIES = [
   "docs/PULL_REQUEST_TEMPLATE",
 ] as const;
 
-const TREE_PATHS = [...TEMPLATE_PATHS, ...TEMPLATE_DIRECTORIES] as const;
-
 type ExecuteGit = GitVcsDriver.GitVcsDriver["Service"]["execute"];
 
 interface TemplateTreeEntry {

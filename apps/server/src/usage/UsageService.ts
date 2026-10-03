@@ -19,8 +19,8 @@ import {
   CodexSettings,
   OpenCodeSettings,
   type ProviderInstanceConfig,
-  USAGE_CONTRACT_VERSION,
   ProviderInstanceId,
+  USAGE_CONTRACT_VERSION,
   type ServerSettings as ServerSettingsValue,
   type UsageCatalogModel,
   type UsageModelSearchInput,
@@ -48,12 +48,11 @@ import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientResponse } from "effect/unstable/http";
 
-import { ServerConfig } from "../config.ts";
+import * as ServerConfig from "../config.ts";
 import { expandHomePath } from "../pathExpansion.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import { resolveCodexHomeLayout } from "../provider/Drivers/CodexHomeLayout.ts";
 import { resolveAntigravityInstanceDirectories } from "../provider/antigravityAuthSupport.ts";
-import { PI_AGENT_DIR_ENV } from "../provider/pi/PiLaunch.ts";
 import { mergeProviderInstanceEnvironment } from "../provider/ProviderInstanceEnvironment.ts";
 import { readOpenCodeUsage } from "./opencodeUsageReader.ts";
 import { readAntigravityUsage } from "./antigravityUsageReader.ts";
@@ -80,7 +79,9 @@ import {
   decodeScanCache,
   dedupeWithinFile,
   encodeScanCache,
+  LEGACY_SCAN_CACHE_FILE_NAME,
   pruneScanCache,
+  SCAN_CACHE_FILE_NAME,
   type ScanCache,
 } from "./usageScanCache.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
@@ -153,39 +154,11 @@ export class UsageService extends Context.Service<
   }
 >()("t3/usage/UsageService") {}
 
-const EMPTY_PRICING: UsagePricing = {
-  status: "unavailable",
-  source: LITELLM_RATES_URL,
-  fetchedAt: null,
-  knownModels: 0,
-};
-
-/** Empty summary, for suites that only need the RPC surface to resolve. */
-export const layerTest = Layer.succeed(
-  UsageService,
-  UsageService.of({
-    readSummary: (input) =>
-      Effect.succeed({
-        contractVersion: USAGE_CONTRACT_VERSION,
-        readAt: "1970-01-01T00:00:00.000Z",
-        timeZone: input.timeZone,
-        sinceDay: input.sinceDay,
-        untilDay: input.untilDay,
-        buckets: [],
-        sources: [],
-        pricing: EMPTY_PRICING,
-        scanDurationMs: 0,
-      }),
-    searchModels: () => Effect.succeed({ models: [] }),
-    refreshRates: Effect.succeed(EMPTY_PRICING),
-  }),
-);
-
 export const make = Effect.gen(function* () {
   const crypto = yield* Crypto.Crypto;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const config = yield* ServerConfig;
+  const config = yield* ServerConfig.ServerConfig;
   const settingsService = yield* ServerSettings.ServerSettingsService;
   const httpClient = yield* HttpClient.HttpClient;
   const hostEnvironment = yield* HostProcessEnvironment;
@@ -201,7 +174,8 @@ export const make = Effect.gen(function* () {
 
   const ratesCachePath = path.join(config.stateDir, "usage-model-rates.json");
   const catalogCachePath = path.join(config.stateDir, "usage-model-catalog.json");
-  const scanCachePath = path.join(config.stateDir, "usage-scan-cache.json");
+  const scanCachePath = path.join(config.stateDir, SCAN_CACHE_FILE_NAME);
+  const legacyScanCachePath = path.join(config.stateDir, LEGACY_SCAN_CACHE_FILE_NAME);
   let rates: RateTable = new Map();
   let ratesFetchedAtMs: number | null = null;
   let ratesStatus: UsagePricing["status"] = "unavailable";
@@ -345,16 +319,8 @@ export const make = Effect.gen(function* () {
     ),
   );
 
-  const resolvePiAgentDir = (
-    piSettings: { readonly agentDirPath: string },
-    environment: NodeJS.ProcessEnv,
-  ): string => {
-    const agentDirPath = piSettings.agentDirPath.trim();
-    if (agentDirPath.length > 0) return path.resolve(expandHomePath(agentDirPath));
-    // pi isolates per-instance state through PI_CODING_AGENT_DIR (see
-    // provider/pi/PiLaunch.ts); usage must read the same directory it launches
-    // with, or a configured instance reports empty history.
-    const environmentDir = environment[PI_AGENT_DIR_ENV]?.trim();
+  const resolvePiAgentDir = (environment: NodeJS.ProcessEnv): string => {
+    const environmentDir = environment["PI_CODING_AGENT_DIR"]?.trim();
     return environmentDir
       ? path.resolve(expandHomePath(environmentDir))
       : path.join(NodeOS.homedir(), ".pi", "agent");
@@ -380,7 +346,7 @@ export const make = Effect.gen(function* () {
     const home = NodeOS.homedir();
     const instances: Array<Pick<ProviderInstanceConfig, "config" | "environment">> = Object.values(
       settings.providerInstances,
-    ).filter((instance) => instance.driver === "opencode" || instance.driver === "opencode2");
+    ).filter((instance) => instance.driver === "opencode");
     if (!Object.hasOwn(settings.providerInstances, "opencode")) {
       instances.push({ config: settings.providers.opencode });
     }
@@ -430,13 +396,19 @@ export const make = Effect.gen(function* () {
       fileName?: string;
     }> = [];
     const seen = new Set<string>();
-    for (const driver of ["claudeAgent", "codex", "grok"] as const) {
+    for (const driver of ["claudeAgent", "codex", "grok", "pi"] as const) {
       // Disabled accounts still have history. Explicit default slots replace
       // the legacy settings, just as they do in the provider registry.
-      const instances: Array<Pick<ProviderInstanceConfig, "config" | "environment">> =
-        Object.values(settings.providerInstances).filter((instance) => instance.driver === driver);
+      const instances: Array<
+        Pick<ProviderInstanceConfig, "config" | "environment"> & { instanceId: ProviderInstanceId }
+      > = Object.entries(settings.providerInstances)
+        .filter(([, instance]) => instance.driver === driver)
+        .map(([id, instance]) => ({ ...instance, instanceId: ProviderInstanceId.make(id) }));
       if (!Object.hasOwn(settings.providerInstances, driver)) {
-        instances.push({ config: settings.providers[driver] });
+        instances.push({
+          config: settings.providers[driver],
+          instanceId: ProviderInstanceId.make(driver),
+        });
       }
       for (const instance of instances) {
         const environment = mergeProviderInstanceEnvironment(instance.environment, hostEnvironment);
@@ -445,12 +417,15 @@ export const make = Effect.gen(function* () {
         if (driver === "codex") {
           const decoded = decodeCodexSettings(instance.config ?? {});
           if (Option.isNone(decoded)) continue;
-          const config = decoded.value;
+          const codexConfig = decoded.value;
           const environmentHome = environment.CODEX_HOME?.trim();
           const layout = yield* resolveCodexHomeLayout(
-            !config.homePath.trim() && !config.shadowHomePath.trim() && environmentHome
-              ? { ...config, homePath: environmentHome }
-              : config,
+            codexConfig.setupMode !== "managed" &&
+              !codexConfig.homePath.trim() &&
+              !codexConfig.shadowHomePath.trim() &&
+              environmentHome
+              ? { ...codexConfig, homePath: environmentHome }
+              : codexConfig,
           );
           home = layout.sharedHomePath;
         } else if (driver === "claudeAgent") {
@@ -460,6 +435,8 @@ export const make = Effect.gen(function* () {
           home = configured
             ? expandHomePath(configured)
             : environment.CLAUDE_CONFIG_DIR?.trim() || path.join(NodeOS.homedir(), ".claude");
+        } else if (driver === "pi") {
+          home = resolvePiAgentDir(environment);
         } else {
           home = expandHomePath(
             environment.GROK_HOME?.trim() || path.join(NodeOS.homedir(), ".grok"),
@@ -503,41 +480,6 @@ export const make = Effect.gen(function* () {
         });
       }
     }
-    if (settings.providers.pi) {
-      const piDir = path.join(
-        resolvePiAgentDir(settings.providers.pi, hostEnvironment),
-        "sessions",
-      );
-      const sourceKey = `pi\u0000${piDir}`;
-      const previous = sourceCache.get(sourceKey);
-      const dir = yield* fileSystem
-        .realPath(piDir)
-        .pipe(Effect.orElseSucceed(() => previous?.dir ?? piDir));
-      const currentVolumeId = yield* Effect.promise(() => readDirectoryVolumeId(dir));
-      const hasRetainedHistory = fileCache
-        .entries()
-        .some(
-          ([filePath, entry]) =>
-            entry.provider === "pi" &&
-            entry.mtimeMs >= retentionCutoffMs &&
-            entry.records.length + entry.tailRecords.length > 0 &&
-            isWithinDirectory(filePath, dir),
-        );
-      // A recreated directory still reports the retained history under its old identity.
-      const volumeId =
-        previous?.dir === dir && (hasRetainedHistory || !currentVolumeId)
-          ? previous.volumeId || currentVolumeId
-          : currentVolumeId;
-      if (previous?.dir !== dir || previous.volumeId !== volumeId) {
-        sourceCache.set(sourceKey, { dir, volumeId });
-        cacheDirty = true;
-      }
-      const key = `pi\u0000${dir}`;
-      if (!seen.has(key)) {
-        seen.add(key);
-        dirs.push({ provider: "pi", dir, volumeId });
-      }
-    }
     return dirs;
   });
 
@@ -550,10 +492,18 @@ export const make = Effect.gen(function* () {
    */
   const ensureScanCacheLoaded = yield* Effect.cached(
     Effect.gen(function* () {
-      const document = yield* fileSystem.readFileString(scanCachePath).pipe(
-        Effect.flatMap((raw) => decodeScanCacheFile(raw)),
-        Effect.catchCause(() => Effect.succeed(null)),
-      );
+      const readDocument = (filePath: string) =>
+        fileSystem.readFileString(filePath).pipe(
+          Effect.flatMap((raw) => decodeScanCacheFile(raw)),
+          Effect.catchCause(() => Effect.succeed(null)),
+        );
+      let document = yield* readDocument(scanCachePath);
+      if (document === null) {
+        document = yield* readDocument(path.join(config.stateDir, "usage-scan-cache-v5.json"));
+        if (document === null) document = yield* readDocument(legacyScanCachePath);
+        // Write the migrated cache to its own file on the next scan.
+        cacheDirty = document !== null;
+      }
       if (document === null) return;
       for (const [path, entry] of decodeScanCache(document)) fileCache.set(path, entry);
       const sources = decodeCachedSources(document);
@@ -613,7 +563,12 @@ export const make = Effect.gen(function* () {
       // Only a strictly grown file may resume. Same size with a new mtime, or
       // a shrunken file, means rewritten content; re-parse it whole.
       const resumeFrom =
-        cached !== undefined && cached.provider === provider && size > cached.size
+        // Pi's rolling context estimator needs the preceding messages; its
+        // reducer state is not persisted in the shared transcript cache.
+        provider !== "pi" &&
+        cached !== undefined &&
+        cached.provider === provider &&
+        size > cached.size
           ? cached.position
           : undefined;
 

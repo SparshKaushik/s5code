@@ -22,7 +22,7 @@ import { uuidv4 } from "../lib/uuid";
 import { appAtomRegistry } from "./atom-registry";
 import { setPendingConnectionError } from "./use-remote-environment-registry";
 import { useAtomCommand } from "./use-atom-command";
-import { showThreadActionResult } from "./use-vcs-action-state";
+import { showGitActionResult } from "./use-vcs-action-state";
 import { useThreadSelection } from "./use-thread-selection";
 import { useSelectedThreadWorktree } from "./use-selected-thread-worktree";
 
@@ -156,7 +156,7 @@ export function useSelectedThreadGitActions() {
         const error = Cause.squash(result.cause);
         const message = error instanceof Error ? error.message : "Git action failed.";
         setPendingConnectionError(message);
-        showThreadActionResult({ type: "error", title: "Git action failed", description: message });
+        showGitActionResult({ type: "error", title: "Git action failed", description: message });
         return null;
       }
       return result.value;
@@ -305,7 +305,7 @@ export function useSelectedThreadGitActions() {
           return result;
         }
         await refreshSelectedThreadGitStatus({ quiet: true, cwd });
-        showThreadActionResult({
+        showGitActionResult({
           type: "success",
           title:
             result.value.status === "skipped_up_to_date"
@@ -337,7 +337,7 @@ export function useSelectedThreadGitActions() {
             return result;
           }
 
-          showThreadActionResult({
+          showGitActionResult({
             type: "success",
             title: result.value.toast.title,
             description: result.value.toast.description,
