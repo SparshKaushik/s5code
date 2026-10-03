@@ -703,7 +703,7 @@ const makeServerLayer = Layer.unwrap(
     const routesReady = yield* Deferred.make<void>();
     const launcherLayer = ServiceLauncherClient.layer;
 
-    yield* ensureFffNativeLibrary();
+    yield* ensureFffNativeLibrary({ baseDir: config.baseDir });
     yield* fixPath();
 
     const httpListeningLayer = Layer.effectDiscard(

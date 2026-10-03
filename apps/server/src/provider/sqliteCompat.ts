@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- SQLite's native backup API runs outside an Effect environment.
 /**
  * Cross-runtime SQLite compatibility layer for Node.js and Bun.
  *

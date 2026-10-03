@@ -163,6 +163,64 @@ jobs:
           "${binary[0]}" --version
           "${binary[0]}" --help
 
+      - name: Verify standalone server startup and V2 persistence
+        timeout-minutes: 3
+        run: |
+          binary=("$RUNNER_TEMP"/s5code-binary/s5code-server-*-linux-x64)
+          node --input-type=module - "${binary[0]}" <<'NODE'
+          import assert from "node:assert/strict";
+          import { spawn } from "node:child_process";
+          import { mkdtemp, readdir } from "node:fs/promises";
+          import { createServer } from "node:net";
+          import { join } from "node:path";
+          import { DatabaseSync } from "node:sqlite";
+
+          const home = await mkdtemp(join(process.env.RUNNER_TEMP, "s5code-binary-smoke-"));
+          const listener = createServer();
+          await new Promise((resolve) => listener.listen(0, "127.0.0.1", resolve));
+          const { port } = listener.address();
+          await new Promise((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
+          const child = spawn(process.argv[2], ["serve", "--host", "127.0.0.1", "--port", String(port), "--base-dir", home, "--no-browser"], {
+            cwd: home,
+            env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") },
+            stdio: ["ignore", "pipe", "pipe"],
+          });
+          const exited = new Promise((resolve) => child.once("close", resolve));
+          let diagnostics = "";
+          child.stderr.setEncoding("utf8");
+          child.stderr.on("data", (data) => { diagnostics = (diagnostics + data).slice(-10_000); });
+          let deadline;
+          try {
+            await new Promise((resolve, reject) => {
+              let output = "";
+              child.stdout.setEncoding("utf8");
+              child.stdout.on("data", (data) => {
+                output = (output + data).slice(-10_000);
+                if (output.includes("S5 Code server is ready.")) resolve();
+              });
+              child.once("error", reject);
+              child.once("exit", (code, signal) => reject(new Error(`Server exited before readiness (${code ?? signal}): ${diagnostics}`)));
+              deadline = setTimeout(() => reject(new Error(`Server did not become ready: ${diagnostics}`)), 60_000);
+            });
+            clearTimeout(deadline);
+            const descriptor = await fetch(`http://127.0.0.1:${port}/.well-known/t3/environment`, { signal: AbortSignal.timeout(10_000) });
+            assert.equal(descriptor.status, 200);
+            assert.ok(await descriptor.json());
+            const database = new DatabaseSync(join(home, "userdata", "statev2.sqlite"), { readOnly: true });
+            try {
+              assert.equal(database.prepare("SELECT name FROM sqlite_master WHERE name = 'orchestration_v2_events'").get()?.name, "orchestration_v2_events");
+            } finally {
+              database.close();
+            }
+            assert.ok((await readdir(join(home, "caches", "native"))).some((name) => name.startsWith("libfff_c")));
+            console.log("Standalone server reached readiness, served its descriptor, and initialized V2 and native-library state.");
+          } finally {
+            clearTimeout(deadline);
+            if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");
+            await exited;
+          }
+          NODE
+
   # Everything except `t3` (apps/server) and the web app, which has its own job
   # below. `--parallel` drops the package dependency ordering that `vp run`
   # applies by default: these `test` tasks declare no `dependsOn` and resolve
