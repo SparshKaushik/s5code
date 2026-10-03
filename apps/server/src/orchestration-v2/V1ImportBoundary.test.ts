@@ -19,6 +19,9 @@ const legacyReaders = ["orchestration-v2/legacy/", "persistence/Migrations/"] as
 const legacyReaderFiles: Record<string, string> = {
   // Provider history for settings migration reads V1 thread sessions once at load.
   "serverSettings.ts": "one-time provider history for settings migration",
+  "persistence/SchemaEnsure.ts": "repairs released S5 schema collisions before the V2 upgrade",
+  "persistence/LegacyOpenCodeMigration.ts":
+    "normalizes historical S5 provider ids before V2 import",
 };
 const retiredPaths = [
   "orchestration",

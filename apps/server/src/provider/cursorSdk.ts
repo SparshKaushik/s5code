@@ -66,6 +66,8 @@ installCursorShellSpawnGuard();
 
 // Cursor's Webpack chunks and local helpers must stay beside the SDK entry.
 // createRequire also loads that disk-backed package from a Node SEA executable.
+// Bun resolves the SDK's flattened entry, and a literal import lets its
+// compiler include that entry in the standalone server.
 const requireCursorSdk = NodeModule.createRequire(import.meta.url);
 export const {
   Agent,
@@ -74,4 +76,6 @@ export const {
   Cursor,
   CursorSdkError,
   InMemoryCredentialStore,
-} = requireCursorSdk("@cursor/sdk") as typeof import("@cursor/sdk");
+} = (
+  typeof Bun === "undefined" ? requireCursorSdk("@cursor/sdk") : await import("@cursor/sdk")
+) as typeof import("@cursor/sdk");

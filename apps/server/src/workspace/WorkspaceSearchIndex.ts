@@ -34,16 +34,14 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 //
 // The `bun build --compile` server binary is the exception: nothing outside the
 // binary exists there, so `require` cannot see the package at all. The
-// `import()` fallback is what the bun bundler traces to inline fff-node (and
+// runtime-gated `import()` is what the bun bundler traces to inline fff-node (and
 // its ffi-rs binding) into the binary; the native library itself is still
 // extracted to disk by workspace/FffNativeLibrary.ts.
 const requireForFff = NodeModule.createRequire(import.meta.url);
 const loadFffNode = async (): Promise<typeof import("@ff-labs/fff-node")> => {
-  try {
-    return requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
-  } catch {
-    return import("@ff-labs/fff-node");
-  }
+  return typeof Bun === "undefined"
+    ? (requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node"))
+    : import("@ff-labs/fff-node");
 };
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;

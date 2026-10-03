@@ -111,6 +111,8 @@ describe("large usage records", () => {
     expect(result.records).toEqual([
       {
         provider: "claude",
+        apiProvider: "",
+        inputTokensEstimated: false,
         timestampMs: Date.parse(timestamp),
         sessionId: "s1",
         model: "claude-fable-5",

@@ -900,7 +900,7 @@ describe("UsageService", () => {
 
         yield* Effect.gen(function* () {
           const { stateDir } = yield* ServerConfig.ServerConfig;
-          const cachePath = NodePath.join(stateDir, "usage-scan-cache-v5.json");
+          const cachePath = NodePath.join(stateDir, "usage-scan-cache-v6.json");
           const legacyPath = NodePath.join(stateDir, "usage-scan-cache.json");
           yield* (yield* UsageService.make).readSummary(WINDOW);
 
@@ -908,8 +908,10 @@ describe("UsageService", () => {
           // speed 0 (standard), and no tier in the reducer state.
           const legacy = yield* Effect.promise(async () => {
             const document = decodeUnknownJsonString(await NodeFSP.readFile(cachePath, "utf8")) as {
+              apiProviders?: unknown;
               files: Record<string, { r: unknown[][]; cs: { speed?: unknown } }>;
             };
+            delete document.apiProviders;
             for (const file of Object.values(document.files)) {
               file.r = file.r.map((row) => [...row.slice(0, 10), 0]);
               delete file.cs.speed;

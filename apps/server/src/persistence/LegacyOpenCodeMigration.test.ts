@@ -285,6 +285,7 @@ layer("LegacyOpenCodeMigration", (it) => {
       const events = yield* sql<{ readonly event_type: string; readonly payload_json: string }>`
         SELECT event_type, payload_json
         FROM orchestration_events
+        WHERE event_id IN ('ev-1', 'ev-2', 'ev-3')
         ORDER BY sequence
       `;
       assert.equal(events.length, 3);
