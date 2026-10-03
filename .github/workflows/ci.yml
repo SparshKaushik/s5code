@@ -169,7 +169,7 @@ jobs:
           binary=("$RUNNER_TEMP"/s5code-binary/s5code-server-*-linux-x64)
           node --input-type=module - "${binary[0]}" <<'NODE'
           import assert from "node:assert/strict";
-          import { spawn } from "node:child_process";
+          import { execFileSync, spawn } from "node:child_process";
           import { mkdtemp, readdir } from "node:fs/promises";
           import { createServer } from "node:net";
           import { join } from "node:path";
@@ -182,7 +182,7 @@ jobs:
           await new Promise((resolve, reject) => listener.close((error) => error ? reject(error) : resolve()));
           const child = spawn(process.argv[2], ["serve", "--host", "127.0.0.1", "--port", String(port), "--base-dir", home, "--no-browser"], {
             cwd: home,
-            env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config") },
+            env: { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), XDG_CACHE_HOME: join(home, ".cache") },
             stdio: ["ignore", "pipe", "pipe"],
           });
           const exited = new Promise((resolve) => child.once("close", resolve));
@@ -213,7 +213,22 @@ jobs:
               database.close();
             }
             assert.ok((await readdir(join(home, "caches", "native"))).some((name) => name.startsWith("libfff_c")));
-            console.log("Standalone server reached readiness, served its descriptor, and initialized V2 and native-library state.");
+            const cursorCache = join(home, ".cache", "s5code", "native");
+            const cursorArchive = (await readdir(cursorCache)).find((name) => name.startsWith("cursor-sdk-native-linux-x64-"));
+            assert.ok(cursorArchive, "Cursor native helpers were not extracted");
+            const cursorDirectory = join(cursorCache, cursorArchive);
+            assert.match(execFileSync(join(cursorDirectory, "bin", "rg"), ["--version"], { encoding: "utf8" }), /ripgrep/);
+            execFileSync(join(cursorDirectory, "bin", "cursorsandbox"), ["--help"], { stdio: "pipe" });
+            execFileSync("bun", ["--eval", `
+              import { createRequire } from "node:module";
+              const require = createRequire(import.meta.url);
+              const Parser = require(${JSON.stringify(join(cursorDirectory, "vendor", "tree-sitter", "index.js"))});
+              const Bash = require(${JSON.stringify(join(cursorDirectory, "vendor", "tree-sitter-bash", "index.js"))});
+              const parser = new Parser();
+              parser.setLanguage(Bash);
+              if (parser.parse("printf hello").rootNode.hasError) throw new Error("Cursor shell parser failed");
+            `], { cwd: home, stdio: "pipe" });
+            console.log("Standalone server reached readiness, served its descriptor, initialized V2, and loaded runnable native helpers.");
           } finally {
             clearTimeout(deadline);
             if (child.exitCode === null && child.signalCode === null) child.kill("SIGTERM");

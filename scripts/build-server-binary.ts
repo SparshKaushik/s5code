@@ -18,13 +18,14 @@ import * as NodeModule from "node:module";
 import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
 
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
+import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
 
 /**
  * Build a precompiled, standalone server binary for headless deployments.
  *
  * The server is Bun-first (server.ts gates on `typeof Bun` to pick
  * BunHttpServer / BunServices / BunPtyAdapter, and persistence uses bun:sqlite),
- * so `bun build --compile` produces a single self-contained executable with the
+ * so Bun's compile API produces a single self-contained executable with the
  * runtime embedded — no Node, pnpm, `vp`, or `node_modules` needed on the host.
  *
  * We compile the already-bundled `apps/server/dist/bin.mjs` (`vp pack` with
@@ -51,6 +52,11 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
  * boots, serves threads and terminals, and shows an empty file tree on every
  * client, with the reason only in its log. See
  * apps/server/src/workspace/FffNativeLibrary.ts for the extraction at startup.
+ *
+ * Cursor's platform package is embedded as an archive too. Its executables and
+ * tree-sitter bindings must be extracted before importing the SDK; virtual
+ * assets cannot be spawned or dlopened. The standalone-only resolver override
+ * points the SDK at that cache without changing its provider behavior.
  *
  * The web client is NOT embedded. Bun's `--asset` flag (the only way to embed a
  * directory tree at a stable path) ships in Bun 1.4; on 1.3.x it is silently
@@ -240,6 +246,46 @@ const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
   return libraryPath;
 });
 
+const resolveCursorPlatformDirectory = Effect.fn("resolveCursorPlatformDirectory")(function* (
+  repoRoot: string,
+  arch: keyof typeof archToTarget,
+) {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const sdkDirectory = yield* fs.realPath(
+    path.join(repoRoot, "apps/server/node_modules/@cursor/sdk"),
+  );
+  const packageName = `@cursor/sdk-linux-${arch}`;
+  const manifestPath = yield* Effect.try({
+    try: () =>
+      NodeModule.createRequire(path.join(sdkDirectory, "package.json")).resolve(
+        `${packageName}/package.json`,
+      ),
+    catch: (cause) =>
+      new ServerBinaryBuildError({
+        kind: "missing-cursor-native-assets",
+        detail: `Could not resolve ${packageName}; install the target's optional dependencies before building. (${String(cause)})`,
+      }),
+  });
+  const directory = path.dirname(manifestPath);
+  for (const name of [
+    "bin/rg",
+    "bin/cursorsandbox",
+    "vendor/tree-sitter/index.js",
+    "vendor/tree-sitter/binding.node",
+    "vendor/tree-sitter-bash/index.js",
+    "vendor/tree-sitter-bash/binding.node",
+  ]) {
+    if (!(yield* fs.exists(path.join(directory, name)))) {
+      return yield* new ServerBinaryBuildError({
+        kind: "missing-cursor-native-assets",
+        detail: `${packageName} is missing ${name}.`,
+      });
+    }
+  }
+  return directory;
+});
+
 const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (input: {
   readonly arch: Option.Option<string>;
   readonly outputDir: Option.Option<string>;
@@ -315,33 +361,59 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
 
   const fffLibraryPath = yield* resolveFffLibraryPath(repoRoot, options.arch);
 
+  const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "s5code-server-build-" });
+  const cursorDirectory = yield* resolveCursorPlatformDirectory(repoRoot, options.arch);
+  const cursorArchive = path.join(scratch, `cursor-sdk-native-linux-${options.arch}.tgz`);
+  yield* runCommand(
+    "archive Cursor native helpers",
+    "tar",
+    ["-czf", cursorArchive, "-C", cursorDirectory, "bin", "vendor", "package.json"],
+    { verbose: options.verbose },
+  );
+
   // --splitting is required (see the module comment): it keeps the Node SQLite
   // driver in a lazily-loaded chunk so its top-level `node:sqlite` import is
   // never hoisted into the entry, which would kill the binary at startup.
   // --bytecode is intentionally absent: bun cannot generate bytecode with
   // --splitting. The two --define values are what let the running binary
   // recognize itself as a self-updating release artifact.
-  const args = [
-    "build",
-    "--compile",
-    "--splitting",
-    "--target",
-    options.target,
-    "--outfile",
-    outfile,
-    `--define=process.env.T3CODE_SERVER_BINARY_TARGET="linux-${options.arch}"`,
-    `--define=process.env.T3CODE_SERVER_BINARY_REPO="${options.releaseRepo}"`,
-    "--minify",
-    "./bin.mjs",
-    // Extra entry points that are not JS become embedded assets, readable at
-    // runtime through `Bun.embeddedFiles`.
-    fffLibraryPath,
-  ];
+  // The compile API keeps the CLI's splitting behavior and allows a loader
+  // plugin scoped to Cursor's flattened entry. No installed package is edited.
+  const compileScript = `
+    import { dirname } from "node:path";
+    ${patchStandaloneCursorSdk.toString()}
+    let cursorPatched = false;
+    const result = await Bun.build({
+      entrypoints: ${JSON.stringify([entryPath, fffLibraryPath, cursorArchive])},
+      compile: ${JSON.stringify({ target: options.target, outfile })},
+      splitting: true,
+      minify: true,
+      define: ${JSON.stringify({
+        "process.env.T3CODE_SERVER_BINARY_TARGET": JSON.stringify(`linux-${options.arch}`),
+        "process.env.T3CODE_SERVER_BINARY_REPO": JSON.stringify(options.releaseRepo),
+      })},
+      plugins: [{
+        name: "standalone-cursor-native-helpers",
+        setup(build) {
+          build.onLoad({ filter: /[/\\\\]@cursor[/\\\\]sdk[/\\\\]dist[/\\\\]bundled[/\\\\]index\\.js$/ }, async ({ path }) => {
+            cursorPatched = true;
+            return {
+              contents: patchStandaloneCursorSdk(await Bun.file(path).text()),
+              loader: "js",
+              resolveDir: dirname(path),
+            };
+          });
+        },
+      }],
+    });
+    if (!result.success) throw new AggregateError(result.logs, "Standalone compilation failed");
+    if (!cursorPatched) throw new Error("Cursor SDK was not included in the standalone binary");
+  `;
 
   yield* Effect.log(
     `[server-binary] Compiling ${options.target} -> ${outfile} (version ${options.version}, releases from ${options.releaseRepo})...`,
   );
-  yield* runCommand("bun build --compile", "bun", args, {
+  yield* runCommand("Bun standalone compile", "bun", ["--eval", compileScript], {
     verbose: options.verbose,
     cwd: serverDist,
   });
@@ -371,6 +443,12 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     return yield* new ServerBinaryBuildError({
       kind: "fff-library-not-embedded",
       detail: `\`${fffLibraryPath}\` did not end up embedded in ${outfile}, so the server would run with no file tree. Check that this bun version treats non-JS entry points as assets.`,
+    });
+  }
+  if (!containsBytes(compiled, "cursor-sdk-native-")) {
+    return yield* new ServerBinaryBuildError({
+      kind: "cursor-native-assets-not-embedded",
+      detail: `Cursor's native-helper archive did not end up embedded in ${outfile}.`,
     });
   }
   for (const name of ["T3CODE_SERVER_BINARY_TARGET", "T3CODE_SERVER_BINARY_REPO"] as const) {

@@ -1,6 +1,8 @@
 // @effect-diagnostics nodeBuiltinImport:off globalConsole:off -- Installed before the SDK loads, outside an Effect runtime. stderr must match Node's default unhandled-rejection print.
 import * as NodeModule from "node:module";
 
+import { initializeCursorNativeAssets } from "./CursorNativeAssets.ts";
+
 /**
  * The Cursor Agent SDK runs in this process and spawns a shell for tool
  * calls. The command is Cursor's sandbox wrapper (`dump_zsh_state`,
@@ -63,6 +65,8 @@ function installCursorShellSpawnGuard(): void {
 
 // Arm before the SDK loads. Its shell tools spawn from this process.
 installCursorShellSpawnGuard();
+
+await initializeCursorNativeAssets();
 
 // Cursor's Webpack chunks and local helpers must stay beside the SDK entry.
 // createRequire also loads that disk-backed package from a Node SEA executable.
