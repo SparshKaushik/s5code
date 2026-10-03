@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
-import * as NodeFS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -9,13 +9,15 @@ import { expect, it } from "@effect/vitest";
 import { patchStandaloneCursorSdk } from "./standalone-cursor-sdk.ts";
 
 it("resolves the pinned SDK's native helpers from the standalone cache", async () => {
-  const directory = await NodeFS.mkdtemp(NodePath.join(NodeOS.tmpdir(), "s5code-cursor-resolver-"));
+  const directory = await NodeFSP.mkdtemp(
+    NodePath.join(NodeOS.tmpdir(), "s5code-cursor-resolver-"),
+  );
   try {
     const require = NodeModule.createRequire(
       new URL("../../apps/server/package.json", import.meta.url),
     );
     const source = patchStandaloneCursorSdk(
-      await NodeFS.readFile(require.resolve("@cursor/sdk/bundled"), "utf8"),
+      await NodeFSP.readFile(require.resolve("@cursor/sdk/bundled"), "utf8"),
     );
     // Run the actual SDK resolver, with the filesystem primitives it imports.
     const resolverSource = source.slice(
@@ -77,7 +79,7 @@ it("resolves the pinned SDK's native helpers from the standalone cache", async (
       }),
     ).toBe(installed);
   } finally {
-    await NodeFS.rm(directory, { recursive: true, force: true });
+    await NodeFSP.rm(directory, { recursive: true, force: true });
   }
 });
 

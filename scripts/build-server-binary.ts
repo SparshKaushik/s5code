@@ -74,6 +74,8 @@ import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
 
 const ServerBinaryArch = Schema.Literals(["x64", "arm64"]);
 
+const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
+
 const archToTarget = {
   x64: "bun-linux-x64",
   arm64: "bun-linux-arm64",
@@ -384,13 +386,13 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     ${patchStandaloneCursorSdk.toString()}
     let cursorPatched = false;
     const result = await Bun.build({
-      entrypoints: ${JSON.stringify([entryPath, fffLibraryPath, cursorArchive])},
-      compile: ${JSON.stringify({ target: options.target, outfile })},
+      entrypoints: ${yield* encodeJsonString([entryPath, fffLibraryPath, cursorArchive])},
+      compile: ${yield* encodeJsonString({ target: options.target, outfile })},
       splitting: true,
       minify: true,
-      define: ${JSON.stringify({
-        "process.env.T3CODE_SERVER_BINARY_TARGET": JSON.stringify(`linux-${options.arch}`),
-        "process.env.T3CODE_SERVER_BINARY_REPO": JSON.stringify(options.releaseRepo),
+      define: ${yield* encodeJsonString({
+        "process.env.T3CODE_SERVER_BINARY_TARGET": yield* encodeJsonString(`linux-${options.arch}`),
+        "process.env.T3CODE_SERVER_BINARY_REPO": yield* encodeJsonString(options.releaseRepo),
       })},
       plugins: [{
         name: "standalone-cursor-native-helpers",

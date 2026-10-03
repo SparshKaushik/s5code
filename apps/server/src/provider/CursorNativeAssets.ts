@@ -1,5 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- SDK bootstrap runs before the Effect runtime.
-import * as NodeFS from "node:fs/promises";
+import * as NodeFSP from "node:fs/promises";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 
@@ -16,7 +16,7 @@ export async function extractCursorNativeAssets(
   for (const [name, asset] of files) {
     const target = NodePath.join(directory, name);
     const executable = name.startsWith("bin/") || name.endsWith(".node");
-    const existing = await NodeFS.stat(target).catch(() => undefined);
+    const existing = await NodeFSP.stat(target).catch(() => undefined);
     if (
       existing?.isFile() &&
       existing.size === asset.size &&
@@ -24,11 +24,11 @@ export async function extractCursorNativeAssets(
     ) {
       continue;
     }
-    await NodeFS.mkdir(NodePath.dirname(target), { recursive: true });
+    await NodeFSP.mkdir(NodePath.dirname(target), { recursive: true });
     const staging = `${target}.${process.pid}.partial`;
-    await NodeFS.writeFile(staging, new Uint8Array(await asset.arrayBuffer()));
-    await NodeFS.chmod(staging, executable ? 0o755 : 0o644);
-    await NodeFS.rename(staging, target);
+    await NodeFSP.writeFile(staging, new Uint8Array(await asset.arrayBuffer()));
+    await NodeFSP.chmod(staging, executable ? 0o755 : 0o644);
+    await NodeFSP.rename(staging, target);
   }
 }
 
