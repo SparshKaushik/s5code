@@ -587,6 +587,36 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
+  it.effect("includes upstream provider labels in OpenCode 2 model snapshots", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode v2.0.18\n";
+      const snapshot = yield* checkProvider(
+        makeOpenCodeSettings(),
+        process.cwd(),
+        undefined,
+        undefined,
+        Effect.succeed(
+          ["openai", "opencode", "antigravity"].map((providerID) => ({
+            providerID,
+            id: "shared-model",
+            name: "Shared Model",
+            variants: [],
+          })),
+        ),
+      );
+
+      NodeAssert.equal(snapshot.status, "ready");
+      NodeAssert.deepEqual(
+        snapshot.models.map(({ slug, name, subProvider }) => ({ slug, name, subProvider })),
+        [
+          { slug: "openai/shared-model", name: "Shared Model", subProvider: "OpenAI" },
+          { slug: "opencode/shared-model", name: "Shared Model", subProvider: "OpenCode Zen" },
+          { slug: "antigravity/shared-model", name: "Shared Model", subProvider: "Antigravity" },
+        ],
+      );
+    }),
+  );
+
   it.effect("reports a failed OpenCode 2 model list without the server's response", () =>
     Effect.gen(function* () {
       runtimeMock.state.versionStdout = "opencode v2.0.18\n";

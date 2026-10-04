@@ -68,6 +68,37 @@ function settingsWithProviderInstances(): UnifiedSettings {
 }
 
 describe("instance-scoped model selection", () => {
+  it("restores OpenCode provider subtext for cached, custom, and unavailable models", () => {
+    const instanceId = ProviderInstanceId.make("opencode_work");
+    const snapshot = provider({
+      provider: ProviderDriverKind.make("opencode"),
+      instanceId,
+      models: ["openai/gpt-5", "opencode/gpt-5", "antigravity/devin/claude-fable-5"],
+    });
+    const entry = deriveProviderInstanceEntries([snapshot])[0]!;
+    const settings = {
+      ...DEFAULT_UNIFIED_SETTINGS,
+      providerInstances: {
+        [instanceId]: {
+          driver: snapshot.driver,
+          config: { customModels: ["custom-provider/gpt-5"] },
+        },
+      },
+    };
+
+    expect(
+      getAppModelOptionsForInstance(settings, entry, "openai/retired-model").map(
+        ({ slug, subProvider }) => ({ slug, subProvider }),
+      ),
+    ).toEqual([
+      { slug: "openai/gpt-5", subProvider: "OpenAI" },
+      { slug: "opencode/gpt-5", subProvider: "OpenCode Zen" },
+      { slug: "antigravity/devin/claude-fable-5", subProvider: "Antigravity" },
+      { slug: "custom-provider/gpt-5", subProvider: "Custom Provider" },
+      { slug: "openai/retired-model", subProvider: "OpenAI" },
+    ]);
+  });
+
   it("preserves server-provided legacy model metadata", () => {
     const baseProvider = provider({
       instanceId: "claudeAgent",

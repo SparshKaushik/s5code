@@ -12,6 +12,7 @@ import * as Effect from "effect/Effect";
 import * as Schedule from "effect/Schedule";
 
 import { createModelCapabilities } from "@t3tools/shared/model";
+import { resolveModelSubProvider } from "@t3tools/shared/providerLabels";
 import { compareSemverVersions } from "@t3tools/shared/semver";
 import {
   buildServerProvider,
@@ -541,12 +542,17 @@ const checkOpenCode2 = Effect.fn("checkOpenCode2")(function* (
   }
   const models = providerModelsFromSettings(
     result.value
-      .map((model) => ({
-        slug: `${model.providerID}/${model.id}`,
-        name: model.name,
-        isCustom: false,
-        capabilities: openCode2ModelCapabilities(model),
-      }))
+      .map((model) => {
+        const slug = `${model.providerID}/${model.id}`;
+        const subProvider = resolveModelSubProvider("opencode", { slug });
+        return {
+          slug,
+          name: model.name,
+          ...(subProvider ? { subProvider } : {}),
+          isCustom: false,
+          capabilities: openCode2ModelCapabilities(model),
+        };
+      })
       .toSorted((left, right) => left.name.localeCompare(right.name)),
     settings.customModels,
     DEFAULT_OPENCODE_MODEL_CAPABILITIES,

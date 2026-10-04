@@ -92,54 +92,59 @@ describe("mobile model options", () => {
     });
   });
 
-  it("distinguishes same-name OpenCode models without changing their routing", () => {
-    const sources = [
-      { id: "anthropic", label: "Anthropic" },
-      { id: "github-copilot", label: "GitHub Copilot" },
-      { id: "opencode", label: "OpenCode Zen" },
-    ];
-    const config = {
-      providers: [
-        {
-          instanceId: "opencode_work",
-          driver: "opencode",
-          displayName: "OpenCode Work",
-          enabled: true,
-          installed: true,
-          auth: { status: "authenticated" },
-          models: sources.map((source) => ({
-            slug: `${source.id}/claude-fable-5`,
-            name: "Claude Fable 5",
-            subProvider: source.label,
-            isCustom: false,
-            capabilities: null,
-          })),
-        },
-      ],
-    } as unknown as ServerConfig;
-    const selection = {
-      instanceId: ProviderInstanceId.make("opencode_work"),
-      model: "github-copilot/claude-fable-5",
-    };
+  it.each([true, false])(
+    "distinguishes same-name OpenCode models (provider labels: %s)",
+    (withLabels) => {
+      const sources = [
+        { id: "anthropic", label: "Anthropic" },
+        { id: "github-copilot", label: "GitHub Copilot" },
+        { id: "opencode", label: "OpenCode Zen" },
+        { id: "openai", label: "OpenAI" },
+        { id: "antigravity/devin", label: "Antigravity" },
+      ];
+      const config = {
+        providers: [
+          {
+            instanceId: "opencode_work",
+            driver: "opencode",
+            displayName: "OpenCode Work",
+            enabled: true,
+            installed: true,
+            auth: { status: "authenticated" },
+            models: sources.map((source) => ({
+              slug: `${source.id}/claude-fable-5`,
+              name: "Claude Fable 5",
+              ...(withLabels ? { subProvider: source.label } : {}),
+              isCustom: false,
+              capabilities: null,
+            })),
+          },
+        ],
+      } as unknown as ServerConfig;
+      const selection = {
+        instanceId: ProviderInstanceId.make("opencode_work"),
+        model: "github-copilot/claude-fable-5",
+      };
 
-    const options = buildModelOptions(config, selection);
+      const options = buildModelOptions(config, selection);
 
-    expect(options).toMatchObject(
-      sources.map((source) => ({
-        key: `opencode_work:${source.id}/claude-fable-5`,
-        label: "Claude Fable 5",
-        subtitle: source.label,
-        providerLabel: "OpenCode Work",
-        selection: {
-          instanceId: "opencode_work",
-          model: `${source.id}/claude-fable-5`,
-        },
-      })),
-    );
-    expect(groupByProvider(options)).toEqual([
-      { providerKey: "opencode_work", providerLabel: "OpenCode Work", models: options },
-    ]);
-  });
+      expect(options).toMatchObject(
+        sources.map((source) => ({
+          key: `opencode_work:${source.id}/claude-fable-5`,
+          label: "Claude Fable 5",
+          subtitle: source.label,
+          providerLabel: "OpenCode Work",
+          selection: {
+            instanceId: "opencode_work",
+            model: `${source.id}/claude-fable-5`,
+          },
+        })),
+      );
+      expect(groupByProvider(options)).toEqual([
+        { providerKey: "opencode_work", providerLabel: "OpenCode Work", models: options },
+      ]);
+    },
+  );
 
   it("does not materialize catalog defaults for missing stored options", () => {
     const config = {

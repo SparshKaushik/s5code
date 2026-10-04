@@ -15,6 +15,7 @@ import {
   readCustomModelEntries,
   resolveSelectableModel,
 } from "@t3tools/shared/model";
+import { resolveModelSubProvider } from "@t3tools/shared/providerLabels";
 import { getComposerProviderState } from "./components/chat/composerProviderState";
 import { UnifiedSettings } from "@t3tools/contracts/settings";
 import * as Arr from "effect/Array";
@@ -108,7 +109,17 @@ function appendUnavailableDynamicModelSelection(
   if (hiddenModels.includes(slug)) return options;
   if (options.some((option) => option.slug === slug)) return options;
 
-  return [...options, { slug, name: slug, isCustom: false, isUnavailable: true }];
+  const subProvider = resolveModelSubProvider(provider, { slug });
+  return [
+    ...options,
+    {
+      slug,
+      name: slug,
+      isCustom: false,
+      isUnavailable: true,
+      ...(subProvider ? { subProvider } : {}),
+    },
+  ];
 }
 
 function toAppModelOption(model: ServerProvider["models"][number]): AppModelOption {
@@ -140,6 +151,7 @@ function readInstanceModelPreferences(
 
 function applyInstanceModelPreferences(
   options: ReadonlyArray<AppModelOption>,
+  driver: ProviderDriverKind,
   preferences: {
     readonly hiddenModels: ReadonlyArray<string>;
     readonly modelOrder: ReadonlyArray<string>;
@@ -147,7 +159,14 @@ function applyInstanceModelPreferences(
 ): AppModelOption[] {
   const hiddenModels = new Set(preferences.hiddenModels);
   return sortModelsForProviderInstance(
-    options.filter((option) => option.isCustom || !hiddenModels.has(option.slug)),
+    options
+      .filter((option) => option.isCustom || !hiddenModels.has(option.slug))
+      .map((option) => {
+        const subProvider = resolveModelSubProvider(driver, option);
+        return subProvider && subProvider !== option.subProvider
+          ? { ...option, subProvider }
+          : option;
+      }),
     { modelOrder: preferences.modelOrder },
   );
 }
@@ -215,7 +234,7 @@ function getAppModelOptions(
 
   const preferences = readInstanceModelPreferences(settings, defaultInstanceId);
   return appendUnavailableDynamicModelSelection(
-    applyInstanceModelPreferences(options, preferences),
+    applyInstanceModelPreferences(options, provider, preferences),
     rawModels,
     provider,
     selectedModel,
@@ -263,7 +282,7 @@ export function getAppModelOptionsForInstance(
 
   const preferences = readInstanceModelPreferences(settings, entry.instanceId);
   return appendUnavailableDynamicModelSelection(
-    applyInstanceModelPreferences(options, preferences),
+    applyInstanceModelPreferences(options, entry.driverKind, preferences),
     entry.models,
     entry.driverKind,
     selectedModel,
