@@ -37,7 +37,7 @@ class CommandsTest {
     }
 
     @Test
-    fun `turn retry can reuse stable command message and creation ids`() {
+    fun `message retry retains stable command and message ids`() {
         val settings = ThreadSettings()
         val command =
             Commands.startTurn(
@@ -53,13 +53,14 @@ class CommandsTest {
         assertEquals("command-stable", command.getValue("commandId").jsonPrimitive.content)
         assertEquals(
             "message-stable",
-            command.getValue("message").jsonObject.getValue("messageId").jsonPrimitive.content,
+            command.getValue("messageId").jsonPrimitive.content,
         )
-        assertEquals("2026-08-28T00:00:00Z", command.getValue("createdAt").jsonPrimitive.content)
+        assertEquals("message.dispatch", command.getValue("type").jsonPrimitive.content)
+        assertEquals("Retry me", command.getValue("text").jsonPrimitive.content)
     }
 
     @Test
-    fun `existing thread turn carries the staged model and runtime settings`() {
+    fun `message and metadata commands carry the same staged settings`() {
         val settings =
             ThreadSettings(
                 provider = ProviderInstance(instanceId = "codex-work", driver = "codex"),
@@ -87,8 +88,8 @@ class CommandsTest {
         val modelSelection = command.getValue("modelSelection").jsonObject
         assertEquals("codex-work", modelSelection.getValue("instanceId").jsonPrimitive.content)
         assertEquals("gpt-5.4", modelSelection.getValue("model").jsonPrimitive.content)
-        assertEquals("full-access", command.getValue("runtimeMode").jsonPrimitive.content)
-        assertEquals("plan", command.getValue("interactionMode").jsonPrimitive.content)
+        assertEquals("full-access", Commands.setRuntimeMode("thread-1", settings.approvalPolicy.toRuntimeMode()).getValue("runtimeMode").jsonPrimitive.content)
+        assertEquals("plan", Commands.setInteractionMode("thread-1", "plan").getValue("interactionMode").jsonPrimitive.content)
         val options = modelSelection.getValue("options").jsonArray
         assertEquals(2, options.size)
         assertTrue(options.any { it.jsonObject["id"]?.jsonPrimitive?.content == "reasoningEffort" })

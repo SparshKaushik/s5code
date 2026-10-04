@@ -20,20 +20,20 @@ internal fun ThreadShellDto.normalizedV2(): ThreadShellDto {
         },
         session = SessionDto(id, v2LegacySession(live), providerInstanceId = providerInstanceId,
             activeTurnId = activeRunId, lastError = lastError, updatedAt = updatedAt),
-        hasPendingApprovals = pendingRuntimeRequest?.v2String("kind")?.let { it != "user_input" } == true,
+        hasPendingApprovals = pendingRuntimeRequest?.v2String("kind")?.let { it !in setOf("user_input", "auth_refresh", "dynamic_tool_call") } == true,
         hasPendingUserInput = pendingRuntimeRequest?.v2String("kind") == "user_input",
-        backgroundLiveness = if (pendingBackgroundTasks.any { it.v2String("kind") != "command" }) "monitoring" else null,
+        backgroundLiveness = if (pendingBackgroundTasks.isNotEmpty()) "monitoring" else null,
     )
 }
 
 internal fun v2LegacyState(status: String): String = when (status) {
-    "preparing", "starting", "running", "waiting" -> "running"
+    "pending", "preparing", "starting", "running", "waiting" -> "running"
     "failed" -> "error"
     else -> status
 }
 
 internal fun v2LegacySession(status: String): String = when (status) {
-    "preparing", "starting" -> "starting"
+    "pending", "preparing", "starting" -> "starting"
     "running", "waiting" -> "running"
     "failed" -> "error"
     else -> "ready"
@@ -52,16 +52,18 @@ internal fun V2ProjectionDto.asThreadDto(): ThreadDto {
     val native = thread.v2String("creationSource") == "provider" &&
         (thread["lineage"] as? JsonObject)?.v2String("relationshipToParent") == "subagent"
     val status = latest?.v2String("status") ?: if (native) runless?.v2String("status") ?: "idle" else "idle"
+    val rootFailure = turnItems.lastOrNull { it.v2String("type") == "error" && it.v2String("runId") == latest?.v2String("id") }
+        ?.get("failure") as? JsonObject
     return metadata.copy(
         projection = this,
-        latestTurn = latest?.let {
+        latestTurn = (latest ?: if (native) runless else null)?.let {
             LatestTurnDto(it.v2String("id")!!, v2LegacyState(status), it.v2String("requestedAt"),
-                it.v2String("workStartedAt") ?: it.v2String("startedAt"), it.v2String("completedAt"))
+                 it.v2String("workStartedAt") ?: it.v2String("startedAt") ?: it.v2String("requestedAt"), it.v2String("completedAt"))
         },
         session = SessionDto(metadata.id, v2LegacySession(status), session?.v2String("driver"), provider,
-            metadata.runtimeMode, active?.v2String("id"), session?.v2String("lastError"), updatedAt),
+            metadata.runtimeMode, active?.v2String("id"), rootFailure?.v2String("message") ?: session?.v2String("lastError"), updatedAt),
         updatedAt = updatedAt ?: metadata.updatedAt,
-        checkpoints = checkpoints.map { checkpoint ->
+        checkpoints = checkpoints.filter { it.v2Long("appRunOrdinal") != null && it.v2String("status") == "ready" }.map { checkpoint ->
             CheckpointSummaryDto(
                 turnId = checkpoint.v2String("runId").orEmpty(),
                 checkpointTurnCount = checkpoint.v2Long("appRunOrdinal")?.toInt() ?: 0,
@@ -147,7 +149,7 @@ internal fun applyV2Event(
         "provider-thread.updated" -> base.copy(providerThreads = base.providerThreads.v2Upsert(payload))
         "provider-turn.updated" -> {
             val old = base.providerTurns.firstOrNull { it.v2String("id") == payload.v2String("id") }
-            val value = if (payload["tokenUsage"] == null && old?.get("tokenUsage") != null)
+            val value = if ((payload["tokenUsage"] == null || payload["tokenUsage"] == JsonNull) && old?.get("tokenUsage") != null)
                 JsonObject(payload + ("tokenUsage" to old.getValue("tokenUsage"))) else payload
             base.copy(providerTurns = base.providerTurns.v2Upsert(value))
         }
@@ -163,11 +165,12 @@ internal fun applyV2Event(
             val existing = base.visibleTurnItems.firstOrNull { it.sourceItemId == id }
             val ordinal = payload.v2Long("ordinal") ?: 0
             val oldest = base.visibleTurnItems.filter { it.visibility == "local" }.minOfOrNull { it.item.v2Long("ordinal") ?: 0 }
-            if (partialTimeline && base.turnItems.none { it.v2String("id") == id } && existing == null && (ordinal <= (latestLocalTurnOrdinal ?: -1) ||
-                (oldest != null && ordinal < oldest))) return projection
+            val outsideWindow = partialTimeline && existing == null && (ordinal <= (latestLocalTurnOrdinal ?: -1) ||
+                (oldest != null && ordinal < oldest))
+            if (outsideWindow && base.turnItems.none { it.v2String("id") == id }) return projection
             val itemBase = base.copy(turnItems = base.turnItems.v2Upsert(payload))
             val rows = base.visibleTurnItems.filterNot { it.sourceItemId == id }.toMutableList()
-            if (itemBase.isVisible(payload)) {
+            if (!outsideWindow && itemBase.isVisible(payload)) {
                 val index = rows.indexOfFirst { it.visibility == "local" &&
                     ((it.item.v2Long("ordinal") ?: 0) > ordinal ||
                         (it.item.v2Long("ordinal") == ordinal && it.sourceItemId > id)) }

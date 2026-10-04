@@ -134,13 +134,16 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         approvalItem?.let { PendingApproval(it.v2String("requestId")!!, it.v2String("title") ?: "Approval required",
             it.v2String("prompt").orEmpty(), null, approvalKindOf(it), it.v2String("appName"),
             it.v2String("requestKind"), approvalOptionsOf(it)) },
-        questionItem?.let { userInputOf(it)?.copy(id = it.v2String("requestId")!!) },
+        questionItem?.let { item -> userInputOf(item)?.copy(id = item.v2String("requestId")!!,
+            dismissible = (requests[item.v2String("requestId")]?.get("responseCapability") as? JsonObject)?.v2String("type") == "message") },
         projection.runs.filter { it.v2String("status") == "queued" }.sortedBy { it.v2Long("queuePosition") ?: Long.MAX_VALUE }
             .map { run -> QueuedRun(run.v2String("id")!!, run.v2String("userMessageId")!!,
                 projection.messages.firstOrNull { it.v2String("id") == run.v2String("userMessageId") }?.v2String("text").orEmpty(),
                 run.v2Bool("queueHeld")) },
         projection.thread.v2String("creationSource") == "provider" && lineage?.v2String("relationshipToParent") == "subagent",
-        projection.providerSessions.lastOrNull { it.v2String("providerInstanceId") == projection.thread.v2String("providerInstanceId") }
+        projection.runs.lastOrNull { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
+            ?.let { run -> projection.providerThreads.firstOrNull { it.v2String("id") == run.v2String("providerThreadId") } }
+            ?.let { providerThread -> projection.providerSessions.firstOrNull { it.v2String("id") == providerThread.v2String("providerSessionId") } }
             ?.let { ((it["capabilities"] as? JsonObject)?.get("turns") as? JsonObject)?.v2Bool("supportsActiveSteering") } == true,
         buildList {
             lineage?.v2String("parentThreadId")?.let { add(ThreadRelationship(it, "Parent thread")) }

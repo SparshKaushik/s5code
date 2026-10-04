@@ -220,6 +220,11 @@ fun NewTaskProjectScreen(
     val preferences by store.preferences.collectAsStateWithLifecycle()
     val draft by store.draft.collectAsStateWithLifecycle()
 
+    val coroutineScope = rememberCoroutineScope()
+    var startingScratch by remember { mutableStateOf(false) }
+    val scratchTargets = environments.filter { it.state == ConnectionState.Connected && it.scratchWorkspaceRoot != null }
+    val scratchEnvironment = scratchTargets.firstOrNull { it.id == draft.environmentId } ?: scratchTargets.firstOrNull()
+
     // A switched-off environment contributes no projects and no connection to
     // wait on, so only enabled rows drive the state.
     val enabled = remember(environments) { environments.filter { it.isEnabled } }
@@ -231,7 +236,7 @@ fun NewTaskProjectScreen(
     val scopes =
         remember(projects, preferences.projectGrouping, threads) {
             sortProjectScopes(
-                buildProjectScopes(projects, preferences.projectGrouping),
+                buildProjectScopes(projects.filterNot { it.isScratch }, preferences.projectGrouping),
                 threads,
                 ThreadSort.Recent,
             )
@@ -258,9 +263,23 @@ fun NewTaskProjectScreen(
                 environmentId = project.environmentId,
                 projectKey = project.id.value,
                 branch = project.branch,
+                workspaceMode = WorkspaceMode.CurrentCheckout,
+                worktreePath = null,
             )
         }
         onProjectChosen()
+    }
+
+    fun startScratch() {
+        val target = scratchEnvironment ?: return
+        if (startingScratch) return
+        coroutineScope.launch {
+            startingScratch = true
+            try { choose(store.workspace.ensureScratchProject(target.id)) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { store.showError(error.message ?: "Could not start without a project.") }
+            finally { startingScratch = false }
+        }
     }
 
     S5Screen(
@@ -278,7 +297,7 @@ fun NewTaskProjectScreen(
             }
         },
     ) { padding ->
-        if (scopes.isEmpty()) {
+        if (scopes.isEmpty() && scratchEnvironment == null) {
             Column(
                 Modifier.fillMaxSize().padding(padding).padding(S5Theme.spacing.gutter),
                 verticalArrangement = Arrangement.Center,
@@ -326,6 +345,12 @@ fun NewTaskProjectScreen(
                     ),
                 verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
             ) {
+                if (scratchEnvironment != null) item {
+                    S5SelectableRow(label = "No project", supporting = scratchEnvironment.label,
+                        selected = false, onClick = { startScratch() },
+                        trailing = if (startingScratch) ({ S5InlineLoading() }) else null,
+                        position = rowPosition(0, 1))
+                }
                 items(scopes.size) { index ->
                     val scope = scopes[index]
                     val target =
@@ -449,7 +474,10 @@ fun NewTaskDraftScreen(
         )
     }
 
-    val project = remember(projects, draft) { projects.firstOrNull { it.id.value == draft.projectKey } }
+    val project = remember(projects, draft) { projects.firstOrNull { it.environmentId == draft.environmentId && it.id.value == draft.projectKey } }
+    LaunchedEffect(project?.isScratch) {
+        if (project?.isScratch == true) store.updateDraft { it.copy(workspaceMode = WorkspaceMode.CurrentCheckout, branch = "", worktreePath = null) }
+    }
     val environment = remember(environments, draft) { environments.firstOrNull { it.id == draft.environmentId } }
     // RN's composerWorkspaceCwd: the worktree when one is chosen, else the
     // project's root — `@`, `$`, `/`, and `#` all resolve against it.
@@ -581,6 +609,7 @@ fun NewTaskDraftScreen(
                     }
                 },
                 workspaceMode = draft.workspaceMode,
+                allowWorkspaceSelection = project?.isScratch != true,
                 onToggleWorkspaceMode = {
                     store.updateDraft {
                         it.copy(
@@ -922,6 +951,7 @@ private fun NewTaskComposerDock(
     /** Receives clipboard text that was folded out of the field. */
     onPastedText: (String) -> Unit,
     workspaceMode: WorkspaceMode,
+    allowWorkspaceSelection: Boolean,
     onToggleWorkspaceMode: () -> Unit,
     branch: String,
     onBranch: () -> Unit,
@@ -1120,7 +1150,7 @@ private fun NewTaskComposerDock(
 
         belowSuggestions()
 
-        S5ComposerToolbarRow {
+        if (allowWorkspaceSelection) S5ComposerToolbarRow {
             S5ComposerControl(
                 label =
                     when (workspaceMode) {
@@ -1257,6 +1287,9 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
     val environments = remember(allEnvironments) { allEnvironments.filter { it.isEnabled } }
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val draft by store.draft.collectAsStateWithLifecycle()
+    val coroutineScope = rememberCoroutineScope()
+    var switching by remember { mutableStateOf(false) }
+    val selectedProject = projects.firstOrNull { it.environmentId == draft.environmentId && it.id.value == draft.projectKey }
     S5Screen(title = "Environment", subtitle = "Where should this run?", onBack = onBack) { padding ->
         LazyColumn(
             Modifier.fillMaxSize().padding(padding),
@@ -1267,7 +1300,7 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
                 val health = connectionPresentation(environment.state)
                 // A task can only be drafted against a live connection — RN's
                 // canCreateProjectInEnvironment.
-                val creatable =
+                val creatable = !switching && (selectedProject?.isScratch != true || environment.scratchWorkspaceRoot != null) &&
                     environment.state ==
                         club.touchtech.s5code.kotlin.model.ConnectionState.Connected
                 S5SelectableRow(
@@ -1276,24 +1309,39 @@ fun NewTaskEnvironmentScreen(store: AppStore, onBack: () -> Unit) {
                     selected = environment.id == draft.environmentId,
                     onClick = {
                         if (creatable) {
+                            if (selectedProject?.isScratch == true) {
+                                coroutineScope.launch {
+                                    switching = true
+                                    try {
+                                        val match = store.workspace.ensureScratchProject(environment.id)
+                                        store.updateDraft { it.copy(environmentId = environment.id, projectKey = match.id.value,
+                                            branch = "", workspaceMode = WorkspaceMode.CurrentCheckout, worktreePath = null) }
+                                        onBack()
+                                    } catch (cancelled: CancellationException) { throw cancelled }
+                                    catch (error: Exception) { store.showError(error.message ?: "Could not change environment.") }
+                                    finally { switching = false }
+                                }
+                            } else {
                             // RN's selectEnvironment follows the repo to the
                             // target machine rather than leaving the draft
                             // pointing at a project the environment lacks.
                             val current =
-                                projects.firstOrNull { it.id.value == draft.projectKey }
+                                selectedProject
                             val match =
                                 environmentProjectMatch(
-                                    projects.filter { it.environmentId == environment.id },
+                                    projects.filter { it.environmentId == environment.id && !it.isScratch },
                                     current,
                                 )
                             store.updateDraft {
                                 it.copy(
                                     environmentId = environment.id,
-                                    projectKey = match?.id?.value ?: it.projectKey,
-                                    branch = match?.branch ?: it.branch,
+                                    projectKey = match?.id?.value.orEmpty(),
+                                    branch = match?.branch.orEmpty(),
+                                    worktreePath = null,
                                 )
                             }
                             onBack()
+                            }
                         }
                     },
                     leading = { Icon(health.icon, contentDescription = null) },

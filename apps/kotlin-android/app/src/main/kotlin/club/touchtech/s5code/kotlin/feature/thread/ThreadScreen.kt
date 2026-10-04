@@ -208,6 +208,22 @@ fun ThreadScreen(
     }
 
     val summary = current.summary
+    var lastVisitSentAt by remember(env, id) { mutableStateOf(0L) }
+    var lastVisitWatermark by remember(env, id) { mutableStateOf(0L) }
+    LaunchedEffect(env, id, summary.updatedAtMillis, summary.lastVisitedAtMillis,
+        summary.latestCompletedAtMillis, environment?.capabilities?.threadVisitedTracking, syncPhase) {
+        if (environment?.capabilities?.threadVisitedTracking != true || syncPhase != ThreadSyncPhase.Live) return@LaunchedEffect
+        val watermark = summary.updatedAtMillis
+        if (watermark <= 0 || watermark <= (summary.lastVisitedAtMillis ?: 0) || watermark <= lastVisitWatermark) return@LaunchedEffect
+        val unseenCompletion = (summary.latestCompletedAtMillis ?: 0) > (summary.lastVisitedAtMillis ?: 0)
+        if (!unseenCompletion) kotlinx.coroutines.delay((10_000 - (System.currentTimeMillis() - lastVisitSentAt)).coerceAtLeast(0))
+        try {
+            store.workspace.visitThread(env, id, watermark)
+            lastVisitWatermark = watermark
+            lastVisitSentAt = System.currentTimeMillis()
+        } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+        catch (_: Exception) { /* Read tracking is retried with the next live watermark. */ }
+    }
     // The bootstrap worktree card: the live stream wins while it is at least as
     // fresh as the recorded activity, and the whole row hides once a follow-up
     // turn makes the setup history (`resolveVisibleWorktreeSetup` in

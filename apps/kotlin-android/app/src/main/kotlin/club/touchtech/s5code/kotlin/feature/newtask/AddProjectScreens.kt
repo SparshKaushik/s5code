@@ -228,6 +228,7 @@ fun AddProjectSourceScreen(
     onRepository: (environmentId: String, source: String) -> Unit,
     onLocalPath: (environmentId: String) -> Unit,
     onAddEnvironment: () -> Unit,
+    onProjectCreated: () -> Unit,
 ) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val options = remember(environments) { environmentOptions(environments) }
@@ -241,6 +242,11 @@ fun AddProjectSourceScreen(
             runCatching { store.workspace.discoverSourceControl(id) }.getOrNull()
         }
     val readiness = remember(discovery.value) { providerReadiness(discovery.value.valueOrNull) }
+    var newProjectOpen by remember(selected?.environment?.id) { mutableStateOf(false) }
+    var newProjectName by remember(selected?.environment?.id) { mutableStateOf("") }
+    var creatingProject by remember { mutableStateOf(false) }
+    var creationError by remember { mutableStateOf<String?>(null) }
+    val coroutineScope = rememberCoroutineScope()
 
     S5Screen(
         title = "Add project",
@@ -267,6 +273,12 @@ fun AddProjectSourceScreen(
                             )
                         }
                     }
+                }
+                if (selected.environment.scratchWorkspaceRoot != null) S5RowGroup {
+                    S5SelectableRow(label = "New project", supporting = "Create a project from a name",
+                        selected = false, onClick = { newProjectOpen = true },
+                        leading = { Icon(Icons.Rounded.CreateNewFolder, contentDescription = null) },
+                        position = rowPosition(0, 1))
                 }
                 S5RowGroup {
                     val sources = listOf("url") + sortedProviderSources(readiness)
@@ -337,6 +349,29 @@ fun AddProjectSourceScreen(
             Box(Modifier.padding(bottom = S5Theme.spacing.section))
         }
     }
+    if (newProjectOpen) AlertDialog(onDismissRequest = { if (!creatingProject) newProjectOpen = false },
+        title = { Text("New project") }, text = {
+            Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+                S5TextField(value = newProjectName, onValueChange = { newProjectName = it.take(200) }, label = "Project name")
+                creationError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
+            }
+        }, dismissButton = { TextButton(enabled = !creatingProject, onClick = { newProjectOpen = false }) { Text("Cancel") } },
+        confirmButton = { TextButton(enabled = !creatingProject && newProjectName.isNotBlank(), onClick = {
+            val target = selected ?: return@TextButton
+            coroutineScope.launch {
+                creatingProject = true; creationError = null
+                try {
+                    val (project, commitError) = store.workspace.createNamedProject(target.environment.id, newProjectName)
+                    store.updateDraft { it.copy(environmentId = project.environmentId, projectKey = project.id.value,
+                        branch = "", worktreePath = null, workspaceMode = club.touchtech.s5code.kotlin.model.WorkspaceMode.CurrentCheckout) }
+                    commitError?.let { store.showError("Project created; initial commit failed: $it") }
+                    newProjectOpen = false
+                    onProjectCreated()
+                } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+                catch (error: Exception) { creationError = error.message ?: "Could not create project." }
+                finally { creatingProject = false }
+            }
+        }) { Text("Create") } })
 }
 
 /* ── Repository / URL input ──────────────────────────────────────────── */

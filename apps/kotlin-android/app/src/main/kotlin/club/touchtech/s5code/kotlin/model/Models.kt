@@ -88,6 +88,7 @@ data class Environment(
     val autoSettleAfterDays: Int? = 3,
     /** `settings.continueThreadsAfterServerUpdate` — the user's restart-recovery preference. */
     val continueThreadsAfterServerUpdate: Boolean = false,
+    val scratchWorkspaceRoot: String? = null,
 )
 
 /**
@@ -138,6 +139,7 @@ data class EnvironmentCapabilities(
     val serverUpdateThreadContinuation: Boolean = false,
     /** The environment tracks project clones (`subscribeProjectClones`). */
     val projectCloneTracking: Boolean = false,
+    val threadVisitedTracking: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -172,6 +174,7 @@ data class Project(
     /** Snapshot timestamps, for scope sorting — newest first. */
     val createdAtMillis: Long? = null,
     val updatedAtMillis: Long? = null,
+    val isScratch: Boolean = false,
 )
 
 /** `ProjectShell.repositoryIdentity`, kept whole rather than flattened into [Project.repository]. */
@@ -245,6 +248,9 @@ data class ThreadSummary(
     val excerpt: String? = null,
     /** Non-null on the wire while the server is generating a replacement title. */
     val titleRegenerating: Boolean = false,
+    val lastVisitedAtMillis: Long? = null,
+    val latestCompletedAtMillis: Long? = null,
+    val unread: Boolean = false,
 )
 
 /** One entry in the thread transcript. */

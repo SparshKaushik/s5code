@@ -180,7 +180,7 @@ private fun isSnoozed(shell: ThreadShellDto, nowMillis: Long): Boolean {
  * a few days before it would on mobile.
  */
 private fun isSettled(shell: ThreadShellDto, nowMillis: Long): Boolean {
-    if (shell.hasPendingApprovals || shell.hasPendingUserInput) return false
+    if (shell.hasPendingApprovals || shell.hasPendingUserInput || shell.hasActionableProposedPlan || shell.backgroundLiveness != null) return false
     if (shell.session?.status == "starting" || shell.session?.status == "running") return false
     // A pin overrides the lifecycle, as it does in the RN partition: pinned threads
     // render above the inbox and never auto-settle out of sight. Snooze still wins,
@@ -316,8 +316,13 @@ fun threadSummaryFrom(
                 }
                 ?.startedAt
                 ?.let(::parseInstant),
-        excerpt = shell.planProgress?.step,
+        excerpt = shell.planProgress?.step ?: if (shell.backgroundLiveness != null) "Waiting for background work" else null,
         titleRegenerating = shell.titleRegeneration != null,
+        lastVisitedAtMillis = parseInstant(shell.lastVisitedAt),
+        latestCompletedAtMillis = parseInstant(shell.latestTurn?.completedAt),
+        unread = shell.lastVisitedAt != null && parseInstant(shell.latestTurn?.completedAt)?.let {
+            it > (parseInstant(shell.lastVisitedAt) ?: Long.MIN_VALUE)
+        } == true,
     )
 }
 
@@ -1869,6 +1874,7 @@ internal fun ThreadDto.asShell(): ThreadShellDto =
         activeOrderKey = activeOrderKey,
         unsettledAt = unsettledAt,
         linkedPullRequest = linkedPullRequest,
+        lastVisitedAt = projection?.thread?.v2String("lastVisitedAt"),
         titleRegeneration = titleRegeneration,
         session = session,
         autoSettleDisabledAt = autoSettleDisabledAt,
@@ -1881,8 +1887,14 @@ internal fun ThreadDto.asShell(): ThreadShellDto =
         hasPendingUserInput = projection?.runtimeRequests?.any { it.v2String("status") == "pending" &&
             it.v2String("kind") == "user_input" && (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
             ?: (pendingUserInputOf(activities.sortedWith(activityOrder)) != null),
-        hasActionableProposedPlan = projection?.plans?.any { it.v2String("implementedAt") == null }
+        hasActionableProposedPlan = projection?.plans?.any { it.v2String("kind") == "proposed_plan" && it.v2String("status") == "active" }
             ?: proposedPlans.any { it.implementedAt == null },
+        planProgress = projection?.visibleTurnItems?.lastOrNull { it.item.v2String("type") == "todo_list" }?.item?.v2Objects("steps")?.let { steps ->
+            club.touchtech.s5code.kotlin.transport.wire.PlanProgressDto(
+                step = steps.firstOrNull { it.v2String("status") == "running" }?.v2String("text").orEmpty(),
+                completedSteps = steps.count { it.v2String("status") == "completed" }, totalSteps = steps.size,
+            )
+        },
     )
 
 /* ── Provider instances ──────────────────────────────────────────────── */

@@ -928,6 +928,7 @@ fun HomeScreen(
                                                                     ?.threadAutoSettleOptOut == true,
                                                             canMoveUp = canMoveUp,
                                                             canMoveDown = canMoveDown,
+                                                            visitedTrackingSupported = environment?.capabilities?.threadVisitedTracking == true,
                                                         ),
                                                     onSelect = { action ->
                                                         val runAction = {
@@ -1058,8 +1059,10 @@ internal fun threadMenuOptions(
     /** `createThreadMovePlanner` results for this row; null hides the item. */
     canMoveUp: Boolean = false,
     canMoveDown: Boolean = false,
+    visitedTrackingSupported: Boolean = false,
 ): List<S5MenuOption> {
     return buildList {
+        if (visitedTrackingSupported) add(S5MenuOption(id = "mark-unread", label = "Mark unread", icon = Icons.Rounded.EditNote))
         // Prepended like the RN Android menu: the branch the thread already
         // runs on is the fastest way to ask for a second attempt.
         thread.branch?.let { branch ->
@@ -1205,6 +1208,7 @@ private suspend fun performThreadAction(
 ) {
     when {
         action == "pin" -> store.workspace.setPinned(environmentId, id, !pinned)
+        action == "mark-unread" -> store.workspace.markThreadUnread(environmentId, id)
         action == "move-up" ->
             moveUpAssignments?.let { store.workspace.reorderThreads(environmentId, moveSection, it) }
         action == "move-down" ->

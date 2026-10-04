@@ -299,6 +299,7 @@ fun S5NavGraph(
             AddProjectSourceScreen(
                 store = store,
                 onBack = navController::popBackStack,
+                onProjectCreated = { navController.navigate(Routes.NewTaskDraft) { popUpTo(Routes.AddProjectSource) { inclusive = true } } },
                 onRepository = { environmentId, source ->
                     navController.navigate(Routes.addProjectRepository(environmentId, source))
                 },

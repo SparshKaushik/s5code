@@ -57,7 +57,15 @@ jobs:
 
       - name: Verify V2 protocol and projection regressions
         working-directory: apps/kotlin-android
-        run: ./gradlew testDebugUnitTest --tests '*OrchestrationV2Test' --stacktrace
+        run: >-
+          ./gradlew testDebugUnitTest
+          --tests '*OrchestrationV2Test'
+          --tests '*CommandsTest'
+          --tests '*ThreadOutboxTest'
+          --tests '*WorkspaceSnapshotStoreTest'
+          --tests '*ThreadSummaryProjectionTest'
+          --tests '*ThreadStatusTest'
+          --stacktrace
 
       - name: Verify Signing Certificate
         run: |

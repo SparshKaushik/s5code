@@ -758,10 +758,12 @@ class LiveWorkspaceGateway(
                                 state?.capabilities?.serverUpdateThreadContinuation == true,
                             projectCloneTracking =
                                 state?.capabilities?.projectCloneTracking == true,
+                            threadVisitedTracking = state?.capabilities?.threadVisitedTracking == true,
                         ),
                     continueThreadsAfterServerUpdate =
                         state?.continueThreadsAfterServerUpdate == true,
                     addProjectBaseDirectory = state?.addProjectBaseDirectory.orEmpty(),
+                    scratchWorkspaceRoot = state?.scratchWorkspaceRoot,
                     autoSettleOnMerge = state?.autoSettleOnMerge ?: true,
                     autoSettleAfterDays = state?.autoSettleAfterDays,
                 )
@@ -774,7 +776,12 @@ class LiveWorkspaceGateway(
         entries.forEach { (environmentId, connected) ->
             val snapshot = connected.shell.value ?: return@forEach
             val id = EnvironmentId(environmentId)
-            snapshot.projects.forEach { allProjects += projectFrom(id, it) }
+            snapshot.projects.forEach { dto ->
+                val project = projectFrom(id, dto)
+                val scratchRoot = connected.session.state.value.scratchWorkspaceRoot
+                val scratch = scratchRoot != null && normalizeProjectPathForComparison(project.workspaceRoot) == normalizeProjectPathForComparison(scratchRoot)
+                allProjects += if (scratch) project.copy(title = "No project", isScratch = true) else project
+            }
             (snapshot.threads + snapshot.archivedThreads).distinctBy { it.id }.forEach { raw ->
                 val shell = raw.normalizedV2()
                 if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
@@ -1449,7 +1456,7 @@ class LiveWorkspaceGateway(
             for (first in persistence) {
                 // Bound write frequency during streaming without waiting for the
                 // provider to go quiet. The latest immutable snapshot wins.
-                delay(750)
+                kotlinx.coroutines.delay(750)
                 var latest = first
                 while (true) {
                     val pending = persistence.tryReceive()
@@ -2068,6 +2075,35 @@ class LiveWorkspaceGateway(
         val run = projection.runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
             .maxByOrNull { it.v2Long("ordinal") ?: 0 } ?: projection.runs.maxByOrNull { it.v2Long("ordinal") ?: 0 }
         if (run != null) dispatch(environmentId, Commands.interruptTurn(id.value, run.v2String("id")))
+    }
+
+    override suspend fun visitThread(environmentId: EnvironmentId, id: ThreadId, visitedAtMillis: Long) {
+        if (!sessionFor(environmentId).state.value.capabilities.threadVisitedTracking) return
+        dispatch(environmentId, buildJsonObject {
+            put("type", "thread.visit"); put("commandId", Commands.newCommandId()); put("threadId", id.value)
+            put("visitedAt", java.time.Instant.ofEpochMilli(visitedAtMillis).toString())
+        })
+    }
+
+    override suspend fun markThreadUnread(environmentId: EnvironmentId, id: ThreadId) {
+        if (sessionFor(environmentId).state.value.capabilities.threadVisitedTracking)
+            dispatch(environmentId, Commands.lifecycle("thread.mark-unread", id.value))
+    }
+
+    private suspend fun awaitProject(environmentId: EnvironmentId, projectId: String): Project =
+        withTimeoutOrNull(10_000) {
+            projects.map { rows -> rows.firstOrNull { it.environmentId == environmentId && it.id.value == projectId } }
+                .first { it != null }
+        } ?: error("The project was created but has not reached this device yet. Reopen the project picker.")
+
+    override suspend fun ensureScratchProject(environmentId: EnvironmentId): Project {
+        val result = environmentRequest(environmentId, "projects.ensureScratch", JsonObject(emptyMap()))
+        return awaitProject(environmentId, result.v2String("projectId") ?: error("No scratch project was returned."))
+    }
+
+    override suspend fun createNamedProject(environmentId: EnvironmentId, name: String): Pair<Project, String?> {
+        val result = environmentRequest(environmentId, "projects.createNew", buildJsonObject { put("name", name.trim()) })
+        return awaitProject(environmentId, result.v2String("projectId") ?: error("No project was returned.")) to result.v2String("commitError")
     }
 
     override suspend fun environmentRequest(environmentId: EnvironmentId, method: String, payload: JsonObject): JsonObject =

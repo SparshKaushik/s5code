@@ -85,6 +85,7 @@ data class SessionState(
      * auto-settle defaults Settings edits through `server.updateSettings`.
      */
     val addProjectBaseDirectory: String = "",
+    val scratchWorkspaceRoot: String? = null,
     val autoSettleOnMerge: Boolean = true,
     val autoSettleAfterDays: Int? = 3,
     /** The user's `continueThreadsAfterServerUpdate` preference, from server settings. */
@@ -98,6 +99,7 @@ data class SessionState(
  */
 data class ServerCapabilities(
     val serverResolvedCommandContext: Boolean = false,
+    val threadVisitedTracking: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
     val threadPinning: Boolean = false,
@@ -461,6 +463,7 @@ class EnvironmentSession(
                     capabilities =
                         ServerCapabilities(
                             serverResolvedCommandContext = descriptor.capabilities.serverResolvedCommandContext,
+                            threadVisitedTracking = descriptor.capabilities.threadVisitedTracking,
                             threadSettlement = descriptor.capabilities.threadSettlement,
                             threadSnooze = descriptor.capabilities.threadSnooze,
                             threadPinning = descriptor.capabilities.threadPinning,
@@ -488,6 +491,7 @@ class EnvironmentSession(
                                 descriptor.capabilities.projectCloneTracking == true,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
+                    scratchWorkspaceRoot = config.scratchWorkspaceRoot,
                     autoSettleOnMerge = config.settings.sidebarAutoSettleOnMerge,
                     autoSettleAfterDays = config.settings.sidebarAutoSettleAfterDays,
                     continueThreadsAfterServerUpdate =
@@ -610,6 +614,7 @@ class EnvironmentSession(
                                                         ?: snapshot.environment.platform.machine,
                                                 addProjectBaseDirectory =
                                                     snapshot.settings.addProjectBaseDirectory,
+                                                scratchWorkspaceRoot = snapshot.scratchWorkspaceRoot,
                                                 autoSettleOnMerge =
                                                     snapshot.settings.sidebarAutoSettleOnMerge,
                                                 autoSettleAfterDays =

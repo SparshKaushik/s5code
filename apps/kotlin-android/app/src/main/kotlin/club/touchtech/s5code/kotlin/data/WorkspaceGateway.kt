@@ -264,6 +264,13 @@ interface WorkspaceGateway {
 
     suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId)
 
+    suspend fun visitThread(environmentId: EnvironmentId, id: ThreadId, visitedAtMillis: Long) = Unit
+    suspend fun markThreadUnread(environmentId: EnvironmentId, id: ThreadId) = Unit
+
+    suspend fun ensureScratchProject(environmentId: EnvironmentId): Project = error("Scratch projects are unavailable.")
+    suspend fun createNamedProject(environmentId: EnvironmentId, name: String): Pair<Project, String?> =
+        error("Named project creation is unavailable.")
+
     /** V2 settings and queue operations use the environment's authenticated RPC session. */
     suspend fun environmentRequest(environmentId: EnvironmentId, method: String,
         payload: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject =

@@ -1,4 +1,5 @@
 package club.touchtech.s5code.kotlin.transport.wire
+import kotlinx.serialization.json.JsonObject
 
 import club.touchtech.s5code.kotlin.transport.EnvironmentPlatformDto
 import kotlinx.serialization.Serializable
@@ -221,6 +222,7 @@ data class ServerSelfUpdateResultDto(
 
 @Serializable
 data class ServerConfigDto(
+    val scratchWorkspaceRoot: String? = null,
     val environment: ServerEnvironmentDto = ServerEnvironmentDto(),
     val cwd: String = "",
     val providers: List<ServerProviderDto> = emptyList(),

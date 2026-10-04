@@ -154,6 +154,9 @@ fun ThreadRow(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (thread.unread && thread.status in setOf(ThreadStatus.Idle, ThreadStatus.Settled)) {
+                        Text("Done", style = MaterialTheme.typography.labelSmall, color = S5Theme.status.settled)
+                    }
                 }
                 val excerpt = thread.lastError ?: thread.excerpt
                 val subtitleMatch =

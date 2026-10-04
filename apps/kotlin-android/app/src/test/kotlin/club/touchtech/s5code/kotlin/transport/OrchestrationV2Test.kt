@@ -1,6 +1,11 @@
 package club.touchtech.s5code.kotlin.transport
 
 import club.touchtech.s5code.kotlin.data.v2Presentation
+import club.touchtech.s5code.kotlin.data.threadDetailFrom
+import club.touchtech.s5code.kotlin.data.providerInstanceForId
+import club.touchtech.s5code.kotlin.data.parseInstant
+import club.touchtech.s5code.kotlin.model.EnvironmentId
+import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.transport.wire.*
 import kotlinx.serialization.json.*
@@ -86,5 +91,57 @@ class OrchestrationV2Test {
         val resolved = applyV2Event(projection, event("runtime-request.updated", JsonObject(request + ("status" to JsonPrimitive("resolved")))), false, null)
         assertNull(v2Presentation(resolved).approval)
         assertEquals(1, resolved.visibleTurnItems.size)
+    }
+
+    @Test fun `detail status follows resumable requests and native runless work`() {
+        val pending = obj("""{"id":"request","kind":"command","status":"pending","responseCapability":{"type":"live"}}""")
+        val projection = V2ProjectionDto(metadata, runtimeRequests = listOf(pending))
+        fun status(value: V2ProjectionDto) = threadDetailFrom(EnvironmentId("env"), value.asThreadDto(),
+            ::providerInstanceForId, parseInstant("2026-10-01T00:00:00Z")!!).summary.status
+        assertEquals(ThreadStatus.AwaitingApproval, status(projection))
+        assertEquals(ThreadStatus.Idle, status(projection.copy(runtimeRequests = listOf(JsonObject(pending +
+            ("responseCapability" to obj("""{"type":"not_resumable","reason":"expired"}""")))))))
+        val nativeMetadata = JsonObject(metadata + mapOf("creationSource" to JsonPrimitive("provider"),
+            "lineage" to obj("""{"relationshipToParent":"subagent","parentThreadId":"parent"}""")))
+        val native = V2ProjectionDto(nativeMetadata, nodes = listOf(obj("""{"id":"root","kind":"root_turn","runId":null,"status":"running","startedAt":"2026-10-01T00:00:00Z"}""")))
+        assertEquals(ThreadStatus.Working, status(native))
+        assertTrue(v2Presentation(native).providerNativeSubagent)
+    }
+
+    @Test fun `visited events clear unread completion without touching activity`() {
+        val completedAt = "2026-10-01T00:00:00Z"
+        val visitedMetadata = JsonObject(metadata + ("lastVisitedAt" to JsonPrimitive("2026-09-30T00:00:00Z")))
+        val projection = V2ProjectionDto(visitedMetadata, updatedAt = completedAt,
+            runs = listOf(obj("""{"id":"run","ordinal":1,"status":"completed","completedAt":"$completedAt"}""")))
+        fun unread(value: V2ProjectionDto) = threadDetailFrom(EnvironmentId("env"), value.asThreadDto(),
+            ::providerInstanceForId, parseInstant(completedAt)!!).summary.unread
+        assertTrue(unread(projection))
+        val visited = applyV2Event(projection, event("thread.visited", JsonObject(visitedMetadata +
+            ("lastVisitedAt" to JsonPrimitive(completedAt)))), false, null)
+        assertFalse(unread(visited))
+        assertEquals(completedAt, visited.updatedAt)
+        assertFalse(unread(projection.copy(thread = metadata)))
+    }
+
+    @Test fun `retained interrupt requests update outside a bounded window without reviving hidden results`() {
+        val request = item("request", 1, "run_interrupt_request")
+        val result = item("result", 2, "run_interrupt_result")
+        val projection = V2ProjectionDto(metadata, turnItems = listOf(request),
+            attempts = listOf(obj("""{"id":"attempt","runId":"run","rootNodeId":"root","status":"superseded"}""")))
+        val updated = applyV2Event(projection, event("turn-item.updated", JsonObject(request + ("status" to JsonPrimitive("completed")))), true, 10)
+        assertEquals("completed", updated.turnItems.single().v2String("status"))
+        assertTrue(updated.visibleTurnItems.isEmpty())
+        val page = V2HistoryPageDto(items = listOf(row(request), row(request), row(result)))
+        val merged = mergeV2History(updated, page)
+        assertEquals(listOf("request", "result"), merged.visibleTurnItems.map { it.sourceItemId })
+        assertEquals("completed", merged.visibleTurnItems.first().item.v2String("status"))
+    }
+
+    @Test fun `provider replay preserves token usage when a terminal frame omits it`() {
+        val turn = obj("""{"id":"native-turn","status":"running","tokenUsage":{"totalTokens":400}}""")
+        val projection = V2ProjectionDto(metadata, providerTurns = listOf(turn))
+        val updated = applyV2Event(projection, event("provider-turn.updated",
+            obj("""{"id":"native-turn","status":"completed","tokenUsage":null}""")), false, null)
+        assertEquals(turn["tokenUsage"], updated.providerTurns.single()["tokenUsage"])
     }
 }
