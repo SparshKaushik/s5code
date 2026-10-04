@@ -296,6 +296,7 @@ data class ThreadDto(
     val session: SessionDto? = null,
     /** Authoritative V2 control plane and ordered timeline retained in the cache. */
     val projection: V2ProjectionDto? = null,
+    val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
 )
 
 @Serializable

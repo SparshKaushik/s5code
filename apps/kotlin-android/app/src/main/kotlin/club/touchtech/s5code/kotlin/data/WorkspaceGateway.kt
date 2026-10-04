@@ -269,7 +269,8 @@ interface WorkspaceGateway {
         payload: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject =
         error("Environment operations are unavailable.")
 
-    fun environmentStream(environmentId: EnvironmentId, method: String): kotlinx.coroutines.flow.Flow<kotlinx.serialization.json.JsonObject> =
+    fun environmentStream(environmentId: EnvironmentId, method: String,
+        payload: kotlinx.serialization.json.JsonObject = kotlinx.serialization.json.JsonObject(emptyMap())): kotlinx.coroutines.flow.Flow<kotlinx.serialization.json.JsonObject> =
         kotlinx.coroutines.flow.flowOf(kotlinx.serialization.json.JsonObject(emptyMap()))
 
     suspend fun queueAction(environmentId: EnvironmentId, id: ThreadId, type: String,

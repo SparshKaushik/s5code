@@ -38,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
@@ -1084,6 +1085,7 @@ fun ThreadScreen(
                                     },
                                     expandedIds = expandedEntries,
                                     onToggleExpand = { entry -> toggleEntryExpand(entry.id) },
+                                    onOpenThread = { onOpenThread(environmentId, it) },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             is FeedRow.WorkToggle ->

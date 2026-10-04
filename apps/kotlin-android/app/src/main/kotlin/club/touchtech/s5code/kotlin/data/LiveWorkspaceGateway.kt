@@ -777,6 +777,7 @@ class LiveWorkspaceGateway(
             snapshot.projects.forEach { allProjects += projectFrom(id, it) }
             (snapshot.threads + snapshot.archivedThreads).distinctBy { it.id }.forEach { raw ->
                 val shell = raw.normalizedV2()
+                if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
                 val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
                 if (isArchived(shell)) archivedThreads += summary else active += summary
             }
@@ -787,6 +788,7 @@ class LiveWorkspaceGateway(
             val id = EnvironmentId(environmentId)
             snapshot.threads.forEach { raw ->
                 val shell = raw.normalizedV2()
+                if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
                 val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
                 if (archivedThreads.none {
                         it.environmentId == summary.environmentId && it.id == summary.id
@@ -1437,22 +1439,50 @@ class LiveWorkspaceGateway(
         var loadingOlder = false
         var epoch = 0
         var authoritative = false
+        var expandedHistory = false
+        var publishedThread: ThreadDto? = null
         val lock = Mutex()
+        val persistence = kotlinx.coroutines.channels.Channel<Pair<ThreadDto, club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto>?>(
+            kotlinx.coroutines.channels.Channel.CONFLATED,
+        )
+        CoroutineScope(coroutineContext).launch {
+            for (first in persistence) {
+                // Bound write frequency during streaming without waiting for the
+                // provider to go quiet. The latest immutable snapshot wins.
+                delay(750)
+                var latest = first
+                while (true) {
+                    val pending = persistence.tryReceive()
+                    if (pending.isFailure) break
+                    latest = pending.getOrNull()
+                }
+                try {
+                    val snapshot = latest
+                    if (snapshot == null) snapshotStore.removeThread(environmentId, id.value)
+                    else snapshotStore.saveThread(environmentId, snapshot.first, snapshot.second)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Cache failures must not stop live synchronization. */ }
+            }
+        }
         val sync = detailSyncPhases.getOrPut(key) { MutableStateFlow(ThreadSyncPhase.Loading) }
-        fun publishDetail() {
+        fun publishDetail(persist: Boolean = false) {
             projection?.let { current ->
                 if (current.thread.v2String("deletedAt") != null) {
                     target.value = null
-                    snapshotStore.removeThread(environmentId, id.value)
+                    publishedThread = null
+                    persistence.trySend(null)
                     return
                 }
                 val thread = current.asThreadDto()
+                publishedThread = thread
                 val page = club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto(
                     beforeCursor = cursor, hasMore = hasMore, snapshotSequence = sequence,
                 )
                 target.value = threadDetailFrom(environmentId, thread, ::instanceFor, clock.value, page, loadingOlder)
                     .copy(syncPhase = sync.value)
-                snapshotStore.saveThread(environmentId, thread, page)
+                // Expanded history stays in memory, as on RN; repeatedly caching
+                // an entire paged transcript defeats the bounded snapshot path.
+                if (persist && !expandedHistory) persistence.trySend(thread to page)
                 if (key in homePendingDetailKeys) publishPendingRequests()
             }
         }
@@ -1476,16 +1506,22 @@ class LiveWorkspaceGateway(
                     projection = projection?.let { mergeV2History(it, page) }
                     cursor = page.nextCursor
                     hasMore = page.hasMoreHistory
+                    expandedHistory = true
                     publishDetail()
                 }
                 true
             } finally {
-                lock.withLock { loadingOlder = false; publishDetail() }
+                lock.withLock {
+                    if (epoch == readEpoch) { loadingOlder = false; publishDetail() }
+                }
             }
         }
         val setupFlow = worktreeSetups.getOrPut(key) { MutableStateFlow(null) }
         CoroutineScope(coroutineContext).launch {
-            target.map { detail -> detail?.sessionStatus == "starting" || key in pendingCreationKeys.value }
+            combine(target, pendingCreationKeys, setupFlow) { detail, pending, setup ->
+                if (setup != null && !setup.isRunning) retainedCreations.remove(key)
+                detail?.sessionStatus == "starting" || key in pending || setup?.isRunning == true
+            }
                 .distinctUntilChanged().collectLatest { wanted ->
                     if (wanted) session.subscribe(WsMethods.SubscribeWorktreeSetup,
                         buildJsonObject { put("threadId", id.value) }, WorktreeSetupSnapshotDto.serializer().nullable)
@@ -1493,7 +1529,14 @@ class LiveWorkspaceGateway(
                         .collect { setupFlow.value = it?.toModel() }
                 }
         }
-        combine(session.subscribe(
+        CoroutineScope(coroutineContext).launch {
+            clock.collect { now -> lock.withLock {
+                publishedThread?.let { thread -> target.update { detail ->
+                    detail?.copy(summary = threadSummaryFrom(environmentId, thread.asShell(), ::instanceFor, now))
+                } }
+            } }
+        }
+        session.subscribe(
             WsMethods.OrchestrationSubscribeThread,
             payload = { buildJsonObject {
                 put("threadId", id.value)
@@ -1514,19 +1557,28 @@ class LiveWorkspaceGateway(
                         cursor = fresh.historyCursor
                         hasMore = fresh.hasMoreHistory
                         latestOrdinal = fresh.latestLocalTurnOrdinal
-                        epoch += 1
-                        authoritative = true
-                        publishDetail()
+                         epoch += 1
+                         authoritative = true
+                         expandedHistory = false
+                         loadingOlder = false
+                         sync.value = ThreadSyncPhase.Syncing
+                         publishDetail(persist = true)
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { /* Socket fallback carries the same bounded snapshot. */ }
             },
-        ), clock) { item, _ -> item }
+        )
+            .retryWhen { cause, _ ->
+                if (key !in pendingCreationKeys.value || !isPendingCreationMissingThread(cause, id)) false
+                else combine(threads, pendingCreationKeys) { summaries, pending ->
+                    summaries.any { it.environmentId == environmentId && it.id == id } to (key in pending)
+                }.first { (visible, expected) -> visible || !expected }.first
+            }
             .catch { cause ->
                 if (cause is CancellationException) throw cause
-                sync.value = ThreadSyncPhase.Live
             }
             .collect { item -> lock.withLock {
+                var persist = false
                 when (item.kind) {
                     "snapshot" -> {
                         projection = item.projection
@@ -1535,18 +1587,28 @@ class LiveWorkspaceGateway(
                         hasMore = item.hasMoreHistory
                         latestOrdinal = item.latestLocalTurnOrdinal
                         epoch += 1
-                        authoritative = true
-                        sync.value = ThreadSyncPhase.Syncing
+                         authoritative = true
+                         expandedHistory = false
+                         loadingOlder = false
+                         sync.value = ThreadSyncPhase.Syncing
+                         persist = true
                     }
                     "synchronized" -> sync.value = ThreadSyncPhase.Live
                     "event", "unknown-event" -> if (item.sequence > sequence) {
-                        projection = projection?.let { current ->
-                            item.event?.let { applyV2Event(current, it, hasMore, latestOrdinal) } ?: current
-                        }
-                        sequence = item.sequence
+                         val current = projection
+                         val event = item.event
+                         if (current != null && event != null) {
+                             projection = applyV2Event(current, event, hasMore || cursor != null, latestOrdinal)
+                             persist = projection !== current
+                             if (persist && event.v2String("type") == "turn-item.updated") {
+                                 val ordinal = (event["payload"] as? JsonObject)?.v2Long("ordinal")
+                                 if (ordinal != null) latestOrdinal = maxOf(latestOrdinal ?: ordinal, ordinal)
+                             }
+                         }
+                         sequence = item.sequence
                     }
                 }
-                publishDetail()
+                publishDetail(persist)
             } }
     }
 
@@ -1960,21 +2022,20 @@ class LiveWorkspaceGateway(
         val dispatchMode = buildJsonObject {
             val mode = delivery?.dispatchMode ?: "queue"
             when {
-                mode == "queue" -> put("type", "queue_after_active")
+                contextResolved -> put("type", if (mode == "queue") "queue_after_active" else "start_immediately")
                 activeRun != null -> {
                     val native = projection?.providerThreads?.firstOrNull { it.v2String("id") == activeRun.v2String("providerThreadId") }
                     val sessionRow = projection?.providerSessions?.firstOrNull { it.v2String("id") == native?.v2String("providerSessionId") }
                     val capabilities = (sessionRow?.get("capabilities") as? JsonObject)?.get("turns") as? JsonObject
                     val steer = (capabilities?.get("supportsActiveSteering") as? JsonPrimitive)?.booleanOrNull == true
-                    put("type", if (steer) "steer_active" else "queue_after_active")
-                    if (steer) put("targetRunId", activeRun.v2String("id"))
+                    put("type", if (mode != "queue" && steer) "steer_active" else "queue_after_active")
+                    if (mode != "queue" && steer) put("targetRunId", activeRun.v2String("id"))
                 }
                 else -> put("type", "start_immediately")
             }
         }
         val current = detail?.settings
-        // Mirror RN's outbox drain: synchronize metadata first when the staged
-        // composer model differs, then include that same selection on turn.start.
+        // Synchronize metadata before dispatching the same staged selection.
         if (settings != null && current != null && settings != current) {
             updateThreadSettings(
                 environmentId = environmentId,
@@ -1996,7 +2057,7 @@ class LiveWorkspaceGateway(
                 messageId = messageId,
                 createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
                 dispatchMode = dispatchMode,
-                deliveryIntent = if (contextResolved && (delivery?.dispatchMode ?: "queue") != "queue") "auto" else null,
+                deliveryIntent = if (contextResolved && (delivery?.dispatchMode ?: "queue") != "queue") delivery?.dispatchMode ?: "auto" else null,
             ),
         )
     }
@@ -2012,8 +2073,8 @@ class LiveWorkspaceGateway(
     override suspend fun environmentRequest(environmentId: EnvironmentId, method: String, payload: JsonObject): JsonObject =
         sessionFor(environmentId).request(method, payload, JsonObject.serializer())
 
-    override fun environmentStream(environmentId: EnvironmentId, method: String): kotlinx.coroutines.flow.Flow<JsonObject> =
-        sessionFor(environmentId).subscribe(method, JsonObject(emptyMap()), JsonObject.serializer())
+    override fun environmentStream(environmentId: EnvironmentId, method: String, payload: JsonObject): kotlinx.coroutines.flow.Flow<JsonObject> =
+        sessionFor(environmentId).subscribe(method, payload, JsonObject.serializer())
 
     override suspend fun queueAction(environmentId: EnvironmentId, id: ThreadId, type: String,
         runId: String?, text: String?, beforeRunId: String?, targetRunId: String?) {
@@ -2165,18 +2226,21 @@ class LiveWorkspaceGateway(
         commandIdPrefix: String?,
         createdAt: String?,
     ) {
-        // Three separate commands because the server models them separately: the
-        // model lives on thread metadata, the permission level is the runtime mode,
-        // and plan vs default is the interaction mode.
+        val session = sessionFor(environmentId)
+        val currentProvider = if (session.state.value.capabilities.serverResolvedCommandContext) null
+            else session.request("orchestration.getThreadProjection", buildJsonObject { put("threadId", id.value) },
+                V2ProjectionDto.serializer()).thread.v2String("providerInstanceId")
+        val modelCommand = Commands.updateMeta(
+            threadId = id.value,
+            instanceId = settings.provider.instanceId,
+            model = settings.model,
+            options = settings.options,
+            commandId = commandIdPrefix?.let { "$it:model-selection" } ?: Commands.newCommandId(),
+        )
         dispatch(
             environmentId,
-            Commands.updateMeta(
-                threadId = id.value,
-                instanceId = settings.provider.instanceId,
-                model = settings.model,
-                options = settings.options,
-                commandId = commandIdPrefix?.let { "$it:model-selection" } ?: Commands.newCommandId(),
-            ),
+            if (currentProvider != null && currentProvider != settings.provider.instanceId)
+                JsonObject(modelCommand + ("type" to JsonPrimitive("provider.switch"))) else modelCommand,
         )
         dispatch(
             environmentId,

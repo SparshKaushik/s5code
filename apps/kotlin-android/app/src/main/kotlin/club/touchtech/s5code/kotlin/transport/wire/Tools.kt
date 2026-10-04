@@ -108,6 +108,7 @@ data class ServerProviderWorkspaceSnapshotDto(
 
 @Serializable
 data class ServerProviderAuthDto(
+    val canLogout: Boolean? = null,
     /** `authenticated` | `unauthenticated` | `unknown`. Unknown is not a refusal. */
     val status: String = "unknown",
     val type: String? = null,
@@ -122,6 +123,7 @@ data class ServerProviderAuthDto(
  */
 @Serializable
 data class ServerProviderDto(
+    val setup: JsonObject? = null,
     val instanceId: String = "",
     val driver: String = "",
     val displayName: String? = null,

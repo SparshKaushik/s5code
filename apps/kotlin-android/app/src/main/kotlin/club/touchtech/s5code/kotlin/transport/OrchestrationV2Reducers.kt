@@ -96,6 +96,23 @@ internal fun V2ProjectionDto.isVisible(item: JsonObject): Boolean {
     return true
 }
 
+/** Index control-plane state once when reconciling an entire timeline. */
+internal fun V2ProjectionDto.visibilityPredicate(): (JsonObject) -> Boolean {
+    val statuses = runs.associate { it.v2String("id") to it.v2String("status") }
+    val superseded = attempts.filter { it.v2String("status") == "superseded" }
+        .mapTo(hashSetOf()) { it.v2String("runId") to it.v2String("rootNodeId") }
+    val interruptRuns = turnItems.filter { it.v2String("type") == "run_interrupt_request" }
+        .mapTo(hashSetOf()) { it.v2String("runId") }
+    return { item ->
+        val runId = item.v2String("runId")
+        val status = statuses[runId]
+        status != "rolled_back" &&
+            !(status == "cancelled" && item.v2String("type") == "user_message" && item.v2String("inputIntent") == "queued_turn") &&
+            !(item.v2String("type") == "run_interrupt_result" && runId != null && item.v2String("nodeId") != null &&
+                (runId to item.v2String("nodeId")) in superseded && runId !in interruptRuns)
+    }
+}
+
 /** Incremental V2 replay, including rollback visibility and bounded-history watermarks. */
 internal fun applyV2Event(
     projection: V2ProjectionDto,
@@ -116,6 +133,10 @@ internal fun applyV2Event(
         "thread.interaction-mode-updated", "thread.model-selection-updated", "thread.provider-switched",
         "thread.visited", "thread.marked-unread" -> base.copy(thread = payload)
         "run.created", "run.updated" -> base.copy(runs = base.runs.v2Upsert(payload))
+        "run.background-work-cancelled" -> base.copy(runs = base.runs.map { run ->
+            if (run.v2String("id") == payload.v2String("runId")) JsonObject(run +
+                ("restartCancelledBackgroundWork" to payload.getValue("restartCancelledBackgroundWork"))) else run
+        })
         "run-attempt.created", "run-attempt.updated" -> base.copy(attempts = base.attempts.v2Upsert(payload))
         "node.updated" -> base.copy(nodes = base.nodes.v2Upsert(payload))
         "subagent.updated" -> base.copy(subagents = base.subagents.v2Upsert(payload))
@@ -142,7 +163,7 @@ internal fun applyV2Event(
             val existing = base.visibleTurnItems.firstOrNull { it.sourceItemId == id }
             val ordinal = payload.v2Long("ordinal") ?: 0
             val oldest = base.visibleTurnItems.filter { it.visibility == "local" }.minOfOrNull { it.item.v2Long("ordinal") ?: 0 }
-            if (partialTimeline && existing == null && (ordinal <= (latestLocalTurnOrdinal ?: -1) ||
+            if (partialTimeline && base.turnItems.none { it.v2String("id") == id } && existing == null && (ordinal <= (latestLocalTurnOrdinal ?: -1) ||
                 (oldest != null && ordinal < oldest))) return projection
             val itemBase = base.copy(turnItems = base.turnItems.v2Upsert(payload))
             val rows = base.visibleTurnItems.filterNot { it.sourceItemId == id }.toMutableList()
@@ -156,11 +177,18 @@ internal fun applyV2Event(
             }
             itemBase.copy(visibleTurnItems = rows)
         }
+        "checkpoint.rollback-requested" -> base
         else -> return projection
     }
-    return if (type in setOf("run.created", "run.updated", "run-attempt.created", "run-attempt.updated", "turn-item.updated"))
-        next.copy(visibleTurnItems = next.visibleTurnItems.filter { it.visibility != "local" || next.isVisible(it.item) }
-            .mapIndexed { index, row -> row.copy(position = index) }) else next
+    val reconcile = type in setOf("run.created", "run.updated", "run-attempt.created", "run-attempt.updated") ||
+        (type == "turn-item.updated" && (payload.v2String("type") == "run_interrupt_request" ||
+            projection.turnItems.any { it.v2String("id") == payload.v2String("id") && it.v2String("type") == "run_interrupt_request" }))
+    val visible = if (reconcile) next.visibilityPredicate().let { show ->
+        next.visibleTurnItems.filter { it.visibility != "local" || show(it.item) }
+    } else next.visibleTurnItems
+    return if (reconcile || type == "turn-item.updated") next.copy(
+        visibleTurnItems = visible.mapIndexed { index, row -> row.copy(position = index) },
+    ) else next
 }
 
 /** Older history fills missing rows; current streaming values always win. */
@@ -169,10 +197,14 @@ internal fun mergeV2History(projection: V2ProjectionDto, page: V2HistoryPageDto)
     val currentItems = projection.turnItems.associateBy { it.v2String("id") }
     val older = page.items.mapNotNull { row ->
         if ("${row.sourceThreadId}:${row.sourceItemId}" in currentIds) return@mapNotNull null
-        val current = if (row.visibility == "local") currentItems[row.sourceItemId] else null
+        val local = row.visibility == "local" || row.sourceThreadId == projection.thread.v2String("id")
+        val current = if (local) currentItems[row.sourceItemId] else null
         if (current != null && current.v2String("type") != "run_interrupt_request") return@mapNotNull null
         val item = current ?: row.item
-        if (row.visibility == "local" && !projection.isVisible(item)) null else row.copy(item = item)
+        if (local && !projection.isVisible(item)) null else {
+            currentIds.add("${row.sourceThreadId}:${row.sourceItemId}")
+            row.copy(item = item)
+        }
     }
     val rows = (older + projection.visibleTurnItems).mapIndexed { index, row -> row.copy(position = index) }
     val itemIds = projection.turnItems.mapTo(hashSetOf()) { it.v2String("id") }

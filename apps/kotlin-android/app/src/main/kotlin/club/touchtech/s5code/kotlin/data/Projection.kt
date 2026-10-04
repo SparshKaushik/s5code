@@ -39,6 +39,9 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
+import club.touchtech.s5code.kotlin.transport.v2String
+import club.touchtech.s5code.kotlin.transport.v2Objects
+import club.touchtech.s5code.kotlin.transport.v2Long
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -1843,7 +1846,7 @@ fun ApprovalPolicy.toRuntimeMode(): String =
     }
 
 /** A detail snapshot carries every shell field, so the row projection is reused. */
-private fun ThreadDto.asShell(): ThreadShellDto =
+internal fun ThreadDto.asShell(): ThreadShellDto =
     ThreadShellDto(
         id = id,
         projectId = projectId,
@@ -1863,13 +1866,23 @@ private fun ThreadDto.asShell(): ThreadShellDto =
         snoozedAt = snoozedAt,
         pinnedAt = pinnedAt,
         pinOrderKey = pinOrderKey,
+        activeOrderKey = activeOrderKey,
+        unsettledAt = unsettledAt,
+        linkedPullRequest = linkedPullRequest,
         titleRegeneration = titleRegeneration,
         session = session,
         autoSettleDisabledAt = autoSettleDisabledAt,
-        latestUserMessageAt = messages.lastOrNull { it.role == "user" }?.createdAt,
-        hasPendingApprovals = pendingApprovalOf(activities.sortedWith(activityOrder)) != null,
-        hasPendingUserInput = pendingUserInputOf(activities.sortedWith(activityOrder)) != null,
-        hasActionableProposedPlan = proposedPlans.any { it.implementedAt == null },
+        latestUserMessageAt = projection?.messages?.lastOrNull { it.v2String("role") == "user" }?.v2String("createdAt")
+            ?: messages.lastOrNull { it.role == "user" }?.createdAt,
+        hasPendingApprovals = projection?.runtimeRequests?.any { it.v2String("status") == "pending" &&
+            it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") &&
+            (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
+            ?: (pendingApprovalOf(activities.sortedWith(activityOrder)) != null),
+        hasPendingUserInput = projection?.runtimeRequests?.any { it.v2String("status") == "pending" &&
+            it.v2String("kind") == "user_input" && (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
+            ?: (pendingUserInputOf(activities.sortedWith(activityOrder)) != null),
+        hasActionableProposedPlan = projection?.plans?.any { it.v2String("implementedAt") == null }
+            ?: proposedPlans.any { it.implementedAt == null },
     )
 
 /* ── Provider instances ──────────────────────────────────────────────── */

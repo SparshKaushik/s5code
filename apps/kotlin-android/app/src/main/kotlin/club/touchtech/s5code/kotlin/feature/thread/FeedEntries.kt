@@ -36,6 +36,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -92,6 +93,7 @@ fun FeedEntryRow(
      */
     expandedIds: Set<String>? = null,
     onToggleExpand: (FeedEntry) -> Unit = {},
+    onOpenThread: (String) -> Unit = {},
 ) {
     when (entry) {
         is FeedEntry.TurnDivider ->
@@ -129,7 +131,7 @@ fun FeedEntryRow(
 
         is FeedEntry.PlanUpdate -> PlanCard(entry, modifier)
 
-        is FeedEntry.Subagent -> SubagentRow(entry, expandedIds, onToggleExpand, modifier)
+        is FeedEntry.Subagent -> SubagentRow(entry, expandedIds, onToggleExpand, modifier, onOpenThread)
 
         is FeedEntry.QuestionAnswer -> QuestionAnswerRow(entry, onOpenAttachment, expandedIds, onToggleExpand, modifier)
 
@@ -726,9 +728,10 @@ private fun SubagentRow(
     expandedIds: Set<String>?,
     onToggleExpand: (FeedEntry) -> Unit,
     modifier: Modifier,
+    onOpenThread: (String) -> Unit,
 ) {
     // Only worth a disclosure when there is something the one-line form hides.
-    val canExpand = entry.task.isNotBlank()
+    val canExpand = entry.task.isNotBlank() || !entry.result.isNullOrBlank() || entry.childThreadId != null
     var localExpanded by remember(entry.id) { mutableStateOf(false) }
     val expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded
     Column(
@@ -784,13 +787,13 @@ private fun SubagentRow(
             enter = fadeIn() + expandVertically(),
             exit = fadeOut() + shrinkVertically(),
         ) {
-            Text(
-                entry.task,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier =
-                    Modifier.padding(start = 24.dp, top = S5Theme.spacing.tiny),
-            )
+            Column(Modifier.padding(start = 24.dp, top = S5Theme.spacing.tiny)) {
+                entry.status?.let { Text(it.replace('_', ' '), style = MaterialTheme.typography.labelSmall) }
+                if (entry.task.isNotBlank()) Text(entry.task, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant)
+                entry.result?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+                entry.childThreadId?.let { child -> TextButton(onClick = { onOpenThread(child) }) { Text("Open subagent thread") } }
+            }
         }
     }
 }

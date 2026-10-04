@@ -690,6 +690,12 @@ fun S5NavGraph(
         composable(Routes.SettingsAccount) {
             SettingsAccountScreen(store = store, onBack = navController::popBackStack)
         }
+        composable("settings/scheduled-tasks") {
+            club.touchtech.s5code.kotlin.feature.settings.ScheduledTasksScreen(store, navController::popBackStack)
+        }
+        composable("settings/provider-accounts") {
+            club.touchtech.s5code.kotlin.feature.settings.ProviderAccountsScreen(store, navController::popBackStack)
+        }
         composable(Routes.SettingsEnvironments) {
             // Same screen and the same add flow as Routes.Connections. Two routes
             // exist because both deep links are real (Settings pushes one, the home

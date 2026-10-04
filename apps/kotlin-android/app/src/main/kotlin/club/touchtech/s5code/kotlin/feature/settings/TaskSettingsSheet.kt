@@ -82,7 +82,7 @@ fun TaskSettingsSheet(
     onSettingsChange: (ThreadSettings) -> Unit,
     onDismiss: () -> Unit,
     title: String = "Model and settings",
-    searchScope: ModelSearchScope = ModelSearchScope.ActiveProvider,
+    searchScope: ModelSearchScope = ModelSearchScope.AllProviders,
     favorites: List<ModelFavorite> = emptyList(),
     onToggleFavorite: (ModelFavorite) -> Unit = {},
     catalogRefreshing: Boolean = false,

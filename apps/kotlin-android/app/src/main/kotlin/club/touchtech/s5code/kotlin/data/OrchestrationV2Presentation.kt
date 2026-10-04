@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.data
 import club.touchtech.s5code.kotlin.model.*
 import club.touchtech.s5code.kotlin.transport.TransportJson
 import club.touchtech.s5code.kotlin.transport.isVisible
+import club.touchtech.s5code.kotlin.transport.visibilityPredicate
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Long
 import club.touchtech.s5code.kotlin.transport.v2Bool
@@ -29,8 +30,9 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     val pending = projection.runtimeRequests.filter { it.v2String("status") == "pending" &&
         (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
         .sortedBy { it.v2String("createdAt") }
+    val show = projection.visibilityPredicate()
     val items = projection.visibleTurnItems.sortedBy { it.position }.filter {
-        it.visibility != "local" || projection.isVisible(it.item)
+        it.visibility != "local" || show(it.item)
     }
     val approvalItem = pending.asSequence().filter { it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") }
         .mapNotNull { request -> projection.turnItems.firstOrNull {
