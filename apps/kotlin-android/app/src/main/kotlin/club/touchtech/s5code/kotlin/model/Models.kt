@@ -582,6 +582,10 @@ data class ThreadDetail(
     val limitRecoveryAutoResume: Boolean = false,
     val usageLimitReached: Boolean = false,
     val limitRecoverySnoozed: Boolean = false,
+    val canSwitchProvider: Boolean = false,
+    val queueHeld: Boolean = false,
+    val canReorderQueue: Boolean = false,
+    val canPromoteQueued: Boolean = false,
     /** Whether the live detail stream has reached its completion marker. */
     val syncPhase: ThreadSyncPhase = ThreadSyncPhase.Live,
     val checkpoints: List<Checkpoint> = emptyList(),

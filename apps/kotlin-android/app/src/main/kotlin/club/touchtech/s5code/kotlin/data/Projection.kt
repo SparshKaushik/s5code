@@ -514,6 +514,10 @@ fun threadDetailFrom(
         limitRecoveryAutoResume = v2?.limitRecoveryAutoResume == true,
         usageLimitReached = v2?.usageLimitReached == true,
         limitRecoverySnoozed = v2?.limitRecoverySnoozed == true,
+        canSwitchProvider = v2?.canSwitchProvider == true,
+        queueHeld = v2?.queueHeld == true,
+        canReorderQueue = v2?.canReorderQueue == true,
+        canPromoteQueued = v2?.canPromoteQueued == true,
         workspaceRoot = thread.worktreePath,
         page =
             page?.let {

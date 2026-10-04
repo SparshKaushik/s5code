@@ -112,7 +112,8 @@ private fun ScheduledTaskEditor(store: AppStore, env: EnvironmentId, existing: J
     var projectId by remember { mutableStateOf(existing?.v2String("projectId") ?: projects.firstOrNull()?.id?.value.orEmpty()) }
     var projectMenu by remember { mutableStateOf(false) }
     var bound by remember { mutableStateOf(existing?.v2String("threadId").orEmpty()) }
-    var workspace by remember { mutableStateOf((existing?.get("workspaceStrategy") as? JsonObject)?.v2String("type") ?: "root") }
+    val originalWorkspace = existing?.get("workspaceStrategy") as? JsonObject
+    var workspace by remember { mutableStateOf(originalWorkspace?.v2String("type") ?: "root") }
     var ref by remember { mutableStateOf((existing?.get("workspaceStrategy") as? JsonObject)?.v2String("baseRef") ?: "HEAD") }
     var path by remember { mutableStateOf((existing?.get("workspaceStrategy") as? JsonObject)?.v2String("worktreePath").orEmpty()) }
     val selection = existing?.get("modelSelection") as? JsonObject
@@ -129,7 +130,7 @@ private fun ScheduledTaskEditor(store: AppStore, env: EnvironmentId, existing: J
     val scope = rememberCoroutineScope()
     val valid = title.isNotBlank() && prompt.isNotBlank() && projectId.isNotBlank() && settings.model.isNotBlank() &&
         (if (daily) Regex("^([01]?\\d|2[0-3]):[0-5]\\d$").matches(time) && weekdays.isNotEmpty() else (minutes.toLongOrNull() ?: 0) in 1..525600) &&
-        (workspace != "existing_worktree" || path.isNotBlank())
+        (workspace != "existing_worktree" || path.isNotBlank()) && (workspace != "worktree" || ref.isNotBlank())
     AlertDialog(onDismissRequest = onClose, title = { Text(if (existing == null) "New scheduled task" else "Edit scheduled task") },
         text = { LazyColumn(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             item { OutlinedTextField(title, { title = it }, label = { Text("Title") }) }
@@ -173,6 +174,10 @@ private fun ScheduledTaskEditor(store: AppStore, env: EnvironmentId, existing: J
                         put("type", workspace)
                         if (workspace == "worktree") put("baseRef", ref)
                         if (workspace == "existing_worktree") put("worktreePath", path)
+                        if (originalWorkspace?.v2String("type") == workspace) {
+                            originalWorkspace["branch"]?.let { put("branch", it) }
+                            if (workspace == "worktree") originalWorkspace["startFromOrigin"]?.let { put("startFromOrigin", it) }
+                        }
                     }
                     put("modelSelection", Commands.updateMeta("", instanceId = settings.provider.instanceId, model = settings.model, options = settings.options).getValue("modelSelection"))
                     put("runtimeMode", settings.approvalPolicy.toRuntimeMode())
@@ -180,7 +185,8 @@ private fun ScheduledTaskEditor(store: AppStore, env: EnvironmentId, existing: J
                 }
                 store.workspace.environmentRequest(env, "scheduledTasks.upsert", payload)
                 onClose()
-            } catch (error: Exception) { failure = error.message ?: "Could not save scheduled task." }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { failure = error.message ?: "Could not save scheduled task." }
             finally { busy = false }
         } }) { Text("Save") } })
     if (modelOpen) TaskSettingsSheet(settings = settings, onDismiss = { modelOpen = false },

@@ -98,6 +98,8 @@ jobs:
             apps/kotlin-android/app/build/reports/androidTests/
             apps/kotlin-android/app/build/outputs/androidTest-results/
             apps/kotlin-android/app/build/startup-logcat.txt
+            apps/kotlin-android/app/build/reports/tests/testDebugUnitTest/
+            apps/kotlin-android/app/build/test-results/testDebugUnitTest/
 
       - name: Prepare Artifacts
         id: artifacts

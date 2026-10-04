@@ -21,16 +21,18 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
     var editText by remember(id) { mutableStateOf("") }
     var busy by remember(id) { mutableStateOf(false) }
     fun action(block: suspend () -> Unit) {
+        if (busy) return
         scope.launch {
             busy = true
-            try { block() } catch (error: Exception) { store.showError(error.message ?: "Operation failed.") }
+            try { block() } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
+            catch (error: Exception) { store.showError(error.message ?: "Operation failed.") }
             finally { busy = false }
         }
     }
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp)) {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            if (detail.queuedRuns.isNotEmpty()) TextButton(onClick = { queueOpen = true }) {
-                Text("${detail.queuedRuns.size} queued")
+            if (detail.queuedRuns.isNotEmpty() || detail.queueHeld) TextButton(onClick = { queueOpen = true }) {
+                Text(if (detail.queueHeld) "Queue paused · ${detail.queuedRuns.size}" else "${detail.queuedRuns.size} queued")
             }
             if (detail.relationships.isNotEmpty()) TextButton(onClick = { agentsOpen = true }) { Text("Threads & agents") }
             if (working && detail.canSteer && !detail.providerNativeSubagent) {
@@ -74,11 +76,14 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
                     Row {
                         TextButton(enabled = !busy, onClick = { editing = run; editText = run.text }) { Text("Edit") }
                         TextButton(enabled = !busy, onClick = { action { store.workspace.queueAction(env, id, "queued-run.cancel", run.id) } }) { Text("Cancel") }
-                        if (index > 0) TextButton(enabled = !busy, onClick = { action {
+                        if (index > 0 && detail.canReorderQueue) TextButton(enabled = !busy, onClick = { action {
                             store.workspace.queueAction(env, id, "queued-run.reorder", run.id, beforeRunId = detail.queuedRuns[index - 1].id)
                         } }) { Text("Move up") }
+                        if (index < detail.queuedRuns.lastIndex && detail.canReorderQueue) TextButton(enabled = !busy, onClick = { action {
+                            store.workspace.queueAction(env, id, "queued-run.reorder", run.id, beforeRunId = detail.queuedRuns.getOrNull(index + 2)?.id)
+                        } }) { Text("Move down") }
                     }
-                    if (working && detail.canSteer) TextButton(enabled = !busy, onClick = { action {
+                    if (detail.canPromoteQueued) TextButton(enabled = !busy, onClick = { action {
                         store.workspace.queueAction(env, id, "queued-message.promote-to-steer", run.id, targetRunId = detail.latestTurn?.turnId)
                     } }) { Text("Steer now") }
                     HorizontalDivider()
@@ -86,7 +91,7 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
             }
         } }, confirmButton = {
             Row {
-                if (detail.queuedRuns.any { it.held }) TextButton(enabled = !busy, onClick = { action {
+                if (detail.queueHeld) TextButton(enabled = !busy, onClick = { action {
                     store.workspace.queueAction(env, id, "queue.resume")
                 } }) { Text("Resume queue") }
                 TextButton(onClick = { queueOpen = false }) { Text("Close") }

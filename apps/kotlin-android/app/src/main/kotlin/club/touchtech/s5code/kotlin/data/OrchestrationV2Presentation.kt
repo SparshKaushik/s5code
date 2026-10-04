@@ -24,12 +24,30 @@ internal data class V2Presentation(
     val limitRecoveryAutoResume: Boolean,
     val usageLimitReached: Boolean,
     val limitRecoverySnoozed: Boolean,
+    val canSwitchProvider: Boolean,
+    val queueHeld: Boolean,
+    val canReorderQueue: Boolean,
+    val canPromoteQueued: Boolean,
 )
 
 /** V2 ordering comes from visibleTurnItems, including inherited fork history, never timestamps. */
 internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     val requests = projection.runtimeRequests.associateBy { it.v2String("id") }
     val runs = projection.runs.associateBy { it.v2String("id") }
+    val activeRun = projection.runs.lastOrNull { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
+    val native = projection.providerThreads.firstOrNull { it.v2String("id") ==
+        (activeRun?.v2String("providerThreadId") ?: projection.thread.v2String("activeProviderThreadId")) }
+        ?: projection.providerThreads.firstOrNull { it.v2String("appThreadId") == projection.thread.v2String("id") && it.v2String("providerSessionId") != null }
+    val sessionId = native?.v2String("providerSessionId")
+    val session = if (sessionId != null) projection.providerSessions.firstOrNull { it.v2String("id") == sessionId }
+        else projection.providerSessions.lastOrNull { it.v2String("status") !in setOf("stopped", "error") }
+    val capabilities = session?.get("capabilities") as? JsonObject
+    val turns = capabilities?.get("turns") as? JsonObject
+    val canSteer = activeRun?.v2String("status") == "running" && activeRun.v2String("activeAttemptId") != null &&
+        projection.providerTurns.any { it.v2String("runAttemptId") == activeRun.v2String("activeAttemptId") && it.v2String("status") == "running" } &&
+        (turns?.v2Bool("supportsActiveSteering") == true || turns?.v2Bool("supportsSteeringByInterruptRestart") == true)
+    val automaticMessageIds = projection.messages.filter { (it["delegatedCompletion"] != null && it["delegatedCompletion"] != JsonNull) ||
+        (it["notification"] != null && it["notification"] != JsonNull) }.mapTo(hashSetOf()) { it.v2String("id") }
     val pending = projection.runtimeRequests.filter { it.v2String("status") == "pending" &&
         (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
         .sortedBy { it.v2String("createdAt") }
@@ -140,15 +158,13 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             it.v2String("requestKind"), approvalOptionsOf(it)) },
         questionItem?.let { item -> userInputOf(item)?.copy(id = item.v2String("requestId")!!,
             dismissible = (requests[item.v2String("requestId")]?.get("responseCapability") as? JsonObject)?.v2String("type") == "message") },
-        projection.runs.filter { it.v2String("status") == "queued" }.sortedBy { it.v2Long("queuePosition") ?: Long.MAX_VALUE }
+        projection.runs.filter { it.v2String("status") == "queued" && it.v2String("userMessageId") !in automaticMessageIds }
+            .sortedWith(compareBy({ it.v2Long("queuePosition") ?: it.v2Long("ordinal") ?: Long.MAX_VALUE }, { it.v2Long("ordinal") ?: 0 }))
             .map { run -> QueuedRun(run.v2String("id")!!, run.v2String("userMessageId")!!,
                 projection.messages.firstOrNull { it.v2String("id") == run.v2String("userMessageId") }?.v2String("text").orEmpty(),
                 run.v2Bool("queueHeld")) },
         projection.thread.v2String("creationSource") == "provider" && lineage?.v2String("relationshipToParent") == "subagent",
-        projection.runs.lastOrNull { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
-            ?.let { run -> projection.providerThreads.firstOrNull { it.v2String("id") == run.v2String("providerThreadId") } }
-            ?.let { providerThread -> projection.providerSessions.firstOrNull { it.v2String("id") == providerThread.v2String("providerSessionId") } }
-            ?.let { ((it["capabilities"] as? JsonObject)?.get("turns") as? JsonObject)?.v2Bool("supportsActiveSteering") } == true,
+        canSteer,
         buildList {
             lineage?.v2String("parentThreadId")?.let { add(ThreadRelationship(it, "Parent thread")) }
             projection.turnItems.forEach { item ->
@@ -162,5 +178,14 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         failure?.v2String("class") == "usage_limit",
         recovery?.v2Bool("snooze") == true && recovery.v2String("runId") == latestRun?.v2String("id") &&
             parseInstant(projection.thread.v2String("snoozedUntil")) == parseInstant(failure?.v2String("resetAt")),
+        if (session != null) (capabilities?.get("sessions") as? JsonObject)?.v2Bool("supportsProviderSwitchingViaHandoff") == true
+            else activeRun == null && (projection.runs.isEmpty() || projection.thread.v2String("historyOrigin") == "v1_import" ||
+                projection.providerThreads.any { it.v2String("id") == projection.thread.v2String("activeProviderThreadId") &&
+                    it.v2String("appThreadId") == projection.thread.v2String("id") &&
+                    it.v2String("providerInstanceId") == (projection.thread["modelSelection"] as? JsonObject)?.v2String("instanceId") &&
+                    it["nativeThreadRef"] != null && it["nativeThreadRef"] != JsonNull }),
+        projection.runs.any { it.v2String("status") == "queued" && it.v2Bool("queueHeld") },
+        turns?.v2Bool("supportsQueuedMessages") == true,
+        canSteer,
     )
 }

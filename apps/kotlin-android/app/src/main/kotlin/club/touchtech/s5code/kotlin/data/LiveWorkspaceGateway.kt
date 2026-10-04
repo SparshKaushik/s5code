@@ -604,6 +604,22 @@ class LiveWorkspaceGateway(
      */
     private suspend fun subscribeShell(connected: Connected) {
         var prefetchOk = false
+        val persistence = kotlinx.coroutines.channels.Channel<ShellSnapshotDto>(kotlinx.coroutines.channels.Channel.CONFLATED)
+        val cacheJob = CoroutineScope(coroutineContext).launch {
+            for (first in persistence) {
+                kotlinx.coroutines.delay(750)
+                var latest = first
+                while (true) {
+                    val pending = persistence.tryReceive().getOrNull() ?: break
+                    latest = pending
+                }
+                try {
+                    snapshotStore.saveShell(EnvironmentId(connected.session.environmentId), latest)
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Disk cache failures must not interrupt the shell stream. */ }
+            }
+        }
+        try {
         connected.session
             .subscribe(
                 WsMethods.OrchestrationSubscribeShell,
@@ -637,31 +653,28 @@ class LiveWorkspaceGateway(
                                             ShellSnapshotDto.serializer(),
                                         )
                                     connected.shell.value = snapshot.copy(threads = snapshot.threads.map { it.normalizedV2() })
-                                    snapshotStore.saveShell(
-                                        EnvironmentId(session.environmentId),
-                                        snapshot,
-                                    )
+                                    persistence.trySend(connected.shell.value!!)
                                     publish()
                                 } != null
                             }
-                            .getOrDefault(false)
+                            .getOrElse { if (it is CancellationException) throw it; false }
                 },
             )
             .collect { item ->
                 connected.shell.update { current ->
                     applyShellStreamItem(current ?: ShellSnapshotDto(), item)
                 }
-                // Persist the fully reduced snapshot on every shell frame. A
-                // reconnect can fail before "synchronized", and that must not
-                // discard project/thread updates already acknowledged locally.
+                // Streaming updates share a bounded write cadence with thread
+                // caches; disk serialization never holds up the live reducer.
                 connected.shell.value?.takeIf { it.hasCacheableWorkspaceContent() }?.let { snapshot ->
-                    snapshotStore.saveShell(
-                        EnvironmentId(connected.session.environmentId),
-                        snapshot,
-                    )
+                    persistence.trySend(snapshot)
                 }
                 publish()
             }
+        } finally {
+            cacheJob.cancel()
+            persistence.close()
+        }
     }
 
     /**
@@ -1453,7 +1466,7 @@ class LiveWorkspaceGateway(
         val persistence = kotlinx.coroutines.channels.Channel<Pair<ThreadDto, club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto>?>(
             kotlinx.coroutines.channels.Channel.CONFLATED,
         )
-        CoroutineScope(coroutineContext).launch {
+        val cacheJob = CoroutineScope(coroutineContext).launch {
             for (first in persistence) {
                 // Bound write frequency during streaming without waiting for the
                 // provider to go quiet. The latest immutable snapshot wins.
@@ -1525,7 +1538,7 @@ class LiveWorkspaceGateway(
             }
         }
         val setupFlow = worktreeSetups.getOrPut(key) { MutableStateFlow(null) }
-        CoroutineScope(coroutineContext).launch {
+        val setupJob = CoroutineScope(coroutineContext).launch {
             combine(target, pendingCreationKeys, setupFlow) { detail, pending, setup ->
                 if (setup != null && !setup.isRunning) retainedCreations.remove(key)
                 detail?.sessionStatus == "starting" || key in pending || setup?.isRunning == true
@@ -1537,13 +1550,14 @@ class LiveWorkspaceGateway(
                         .collect { setupFlow.value = it?.toModel() }
                 }
         }
-        CoroutineScope(coroutineContext).launch {
+        val clockJob = CoroutineScope(coroutineContext).launch {
             clock.collect { now -> lock.withLock {
                 publishedThread?.let { thread -> target.update { detail ->
                     detail?.copy(summary = threadSummaryFrom(environmentId, thread.asShell(), ::instanceFor, now))
                 } }
             } }
         }
+        try {
         session.subscribe(
             WsMethods.OrchestrationSubscribeThread,
             payload = { buildJsonObject {
@@ -1618,6 +1632,13 @@ class LiveWorkspaceGateway(
                 }
                 publishDetail(persist)
             } }
+        } finally {
+            cacheJob.cancel()
+            setupJob.cancel()
+            clockJob.cancel()
+            persistence.close()
+            detailOlderLoaders.remove(key)
+        }
     }
 
     private suspend fun subscribeLegacyThread(

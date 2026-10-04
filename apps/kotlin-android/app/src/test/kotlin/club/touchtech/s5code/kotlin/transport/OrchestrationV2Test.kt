@@ -49,12 +49,13 @@ class OrchestrationV2Test {
 
     @Test fun `stream updates replace items and rollbacks remove local history only`() {
         val first = item("first", 1)
-        val projection = V2ProjectionDto(metadata, turnItems = listOf(first), visibleTurnItems = listOf(row(first),
-            row(item("inherited", 2), 1).copy(visibility = "inherited", sourceThreadId = "parent")))
+        val projection = V2ProjectionDto(metadata, turnItems = listOf(first), visibleTurnItems = listOf(
+            row(item("inherited", 2)).copy(visibility = "inherited", sourceThreadId = "parent"), row(first, 1)))
         val updatedItem = JsonObject(first + ("text" to JsonPrimitive("streamed")))
         val streamed = applyV2Event(projection, event("turn-item.updated", updatedItem), false, null)
         assertEquals(2, streamed.visibleTurnItems.size)
-        assertEquals("streamed", streamed.visibleTurnItems.first().item.v2String("text"))
+        assertEquals(listOf("inherited", "first"), streamed.visibleTurnItems.map { it.sourceItemId })
+        assertEquals("streamed", streamed.visibleTurnItems.last().item.v2String("text"))
         val reverted = applyV2Event(streamed, event("run.updated", obj("""{"id":"run","status":"rolled_back"}""")), false, null)
         assertEquals(listOf("inherited"), reverted.visibleTurnItems.map { it.sourceItemId })
     }
@@ -167,5 +168,49 @@ class OrchestrationV2Test {
         assertFalse(v2Presentation(projection).usageLimitReached)
         val rootError = JsonObject(childError + ("nodeId" to JsonPrimitive("root")))
         assertTrue(v2Presentation(projection.copy(turnItems = listOf(rootError))).usageLimitReached)
+    }
+
+    @Test fun `automatic completion runs do not enter the editable user queue`() {
+        val projection = V2ProjectionDto(metadata,
+            runs = listOf(obj("""{"id":"automatic","ordinal":1,"status":"queued","userMessageId":"completion","queueHeld":true}"""),
+                obj("""{"id":"user","ordinal":2,"status":"queued","userMessageId":"prompt"}""")),
+            messages = listOf(obj("""{"id":"completion","delegatedCompletion":{"parentRunId":"parent","generation":1,"taskIds":[]}}"""),
+                obj("""{"id":"prompt","text":"My next task"}""")))
+        val state = v2Presentation(projection)
+        assertEquals(listOf("user"), state.queuedRuns.map { it.id })
+        assertTrue(state.queueHeld)
+        assertFalse(state.canPromoteQueued)
+    }
+
+    @Test fun `model picker follows the attached sessions handoff capability`() {
+        val native = obj("""{"id":"native","appThreadId":"thread","providerSessionId":"session"}""")
+        val session = obj("""{"id":"session","status":"running","capabilities":{"sessions":{"supportsProviderSwitchingViaHandoff":false}}}""")
+        val projection = V2ProjectionDto(metadata, providerThreads = listOf(native), providerSessions = listOf(session))
+        assertFalse(v2Presentation(projection).canSwitchProvider)
+        val enabled = JsonObject(session + ("capabilities" to obj("""{"sessions":{"supportsProviderSwitchingViaHandoff":true}}""")))
+        assertTrue(v2Presentation(projection.copy(providerSessions = listOf(enabled))).canSwitchProvider)
+        assertTrue(v2Presentation(V2ProjectionDto(metadata)).canSwitchProvider)
+    }
+
+    @Test fun `steering requires an active attempt and supports interrupt restart providers`() {
+        val run = obj("""{"id":"run","status":"running","activeAttemptId":"attempt","providerThreadId":"native"}""")
+        val projection = V2ProjectionDto(metadata, runs = listOf(run),
+            providerThreads = listOf(obj("""{"id":"native","appThreadId":"thread","providerSessionId":"session"}""")),
+            providerSessions = listOf(obj("""{"id":"session","status":"running","capabilities":{"turns":{"supportsActiveSteering":false,"supportsSteeringByInterruptRestart":true,"supportsQueuedMessages":true}}}""")))
+        assertFalse(v2Presentation(projection).canSteer)
+        val running = projection.copy(providerTurns = listOf(obj("""{"id":"turn","runAttemptId":"attempt","status":"running"}""")))
+        assertTrue(v2Presentation(running).canSteer)
+        assertTrue(v2Presentation(running).canPromoteQueued)
+        assertTrue(v2Presentation(running).canReorderQueue)
+        val waiting = running.copy(runs = listOf(JsonObject(run + ("status" to JsonPrimitive("waiting")))))
+        assertFalse(v2Presentation(waiting).canSteer)
+    }
+
+    @Test fun `stale attached sessions do not use unrelated handoff capabilities`() {
+        val projection = V2ProjectionDto(metadata,
+            runs = listOf(obj("""{"id":"run","status":"running","providerThreadId":"native"}""")),
+            providerThreads = listOf(obj("""{"id":"native","providerSessionId":"missing"}""")),
+            providerSessions = listOf(obj("""{"id":"other","status":"running","capabilities":{"sessions":{"supportsProviderSwitchingViaHandoff":true}}}""")))
+        assertFalse(v2Presentation(projection).canSwitchProvider)
     }
 }

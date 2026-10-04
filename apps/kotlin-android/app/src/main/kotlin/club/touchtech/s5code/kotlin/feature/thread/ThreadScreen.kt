@@ -71,6 +71,7 @@ import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.feature.connections.waitPillLabel
 import club.touchtech.s5code.kotlin.feature.settings.TaskSettingsSheet
+import club.touchtech.s5code.kotlin.feature.settings.ModelSearchScope
 import club.touchtech.s5code.kotlin.feature.usage.ComposerUsageLimitsCard
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import club.touchtech.s5code.kotlin.model.EnvironmentId
@@ -1179,6 +1180,7 @@ fun ThreadScreen(
         TaskSettingsSheet(
             settings = effectiveSettings,
             catalog = machineCatalog,
+            searchScope = if (current.canSwitchProvider) ModelSearchScope.AllProviders else ModelSearchScope.ActiveProvider,
             modelsFor = { provider -> store.modelsFor(provider, env) },
             onSettingsChange = { settings ->
                 // Existing-thread settings are composer state in RN. Staging them
