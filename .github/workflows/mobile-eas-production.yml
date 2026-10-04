@@ -142,13 +142,14 @@ jobs:
       # (EOVERRIDE). Preinstall the plugin outside the project and hand it to
       # eas-cli via EAS_LOCAL_BUILD_PLUGIN_PATH so no npm install ever touches
       # the checkout.
+      # The plugin follows the installed CLI's @expo/eas-build-job version.
       - name: Preinstall eas local build plugin
         id: plugin
         run: |
           set -euo pipefail
-          eas_cli_version="$(npm view eas-cli version)"
+          plugin_version="$(node -p "require('node:module').createRequire(require('node:fs').realpathSync(process.argv[1]))('@expo/eas-build-job/package.json').version" "$(command -v eas)")"
           mkdir -p "$RUNNER_TEMP/eas-plugin"
-          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund "eas-cli-local-build-plugin@$eas_cli_version"
+          npm install --prefix "$RUNNER_TEMP/eas-plugin" --no-audit --no-fund "eas-cli-local-build-plugin@$plugin_version"
           echo "plugin_path=$RUNNER_TEMP/eas-plugin/node_modules/eas-cli-local-build-plugin/bin/run" >> "$GITHUB_OUTPUT"
 
       - name: Pull production environment variables
