@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { deriveToolActivityPresentation } from "./toolActivity.ts";
+import {
+  claudeSkillInvocation,
+  classifyToolActivity,
+  collectToolFilePaths,
+  deriveToolActivityPresentation,
+  dynamicToolTitle,
+  formatReadToolLabel,
+  formatSearchToolLabel,
+  mergeToolActivityData,
+} from "./toolActivity.ts";
 
 describe("toolActivity", () => {
   it("normalizes command tools to a stable ran-command label", () => {
@@ -33,8 +42,7 @@ describe("toolActivity", () => {
         fallbackSummary: "Read File",
       }),
     ).toEqual({
-      summary: "Read file",
-      detail: "/tmp/app.ts",
+      summary: "Read /tmp/app.ts",
     });
   });
 
@@ -55,74 +63,73 @@ describe("toolActivity", () => {
     });
   });
 
-  it("finds the edited file inside an ACP diff content block when locations are sparse", () => {
-    expect(
-      deriveToolActivityPresentation({
-        itemType: "dynamic_tool_call",
-        title: "Edit file",
-        detail: "Edit file",
-        data: {
-          kind: "edit",
-          rawInput: {},
-          content: [{ type: "diff", path: "/tmp/app.ts", oldText: "a", newText: "b" }],
-        },
-        fallbackSummary: "Edit file",
-      }),
-    ).toEqual({
-      summary: "Changed files",
-      detail: "/tmp/app.ts",
-    });
+  it("classifies from kind and toolName without sniffing titles", () => {
+    expect(classifyToolActivity({ data: { kind: "read" } })).toBe("read");
+    expect(classifyToolActivity({ data: { toolName: "Grep" } })).toBe("search");
+    expect(classifyToolActivity({ data: { toolName: "Read" } })).toBe("read");
+    for (const toolName of ["github.read_file", "mongodb.find", "mcp__github__read_file"]) {
+      expect(classifyToolActivity({ data: { toolName } })).toBe("other");
+    }
+    expect(classifyToolActivity({ title: "Find", data: {} })).toBe("other");
   });
 
-  it("finds the read file inside an ACP resource block uri when locations are sparse", () => {
-    expect(
-      deriveToolActivityPresentation({
-        itemType: "dynamic_tool_call",
-        title: "Read",
-        detail: "Read",
-        data: {
-          kind: "read",
-          rawInput: {},
-          content: [
-            {
-              type: "content",
-              content: {
-                type: "resource",
-                resource: {
-                  textResourceContents: {
-                    uri: "file:///tmp/app.ts",
-                    mimeType: "text/plain",
-                    text: "const x = 1;",
-                  },
-                },
-              },
-            },
-          ],
-        },
-        fallbackSummary: "Read",
-      }),
-    ).toEqual({
-      summary: "Read file",
-      detail: "/tmp/app.ts",
-    });
+  it("classifies Claude search tools ahead of their broad file-read request kind", () => {
+    for (const toolName of ["Glob", "Grep", "LS"]) {
+      expect(classifyToolActivity({ requestKind: "file-read", data: { toolName } })).toBe("search");
+    }
+    expect(classifyToolActivity({ requestKind: "file-read", data: { toolName: "Read" } })).toBe(
+      "read",
+    );
   });
 
-  it("reads the command from rawOutput when Cursor omits rawInput", () => {
+  it("formats read and search labels from structured input", () => {
+    expect(formatReadToolLabel("src/env.ts")).toBe("Read src/env.ts");
+    expect(formatReadToolLabel("src/env.ts", 2)).toBe("Read src/env.ts +2 more");
+    expect(formatReadToolLabel("")).toBe("Read file");
     expect(
-      deriveToolActivityPresentation({
-        itemType: "command_execution",
-        title: "Terminal",
-        detail: "Running checks",
-        data: {
-          kind: "execute",
-          rawInput: {},
-          rawOutput: { output: "bun run typecheck", command: "bun run typecheck" },
-        },
-        fallbackSummary: "Terminal",
+      formatSearchToolLabel({
+        input: { pattern: "TODO", path: "apps/web" },
       }),
+    ).toBe("Searched TODO in web");
+    expect(
+      formatSearchToolLabel({
+        input: { glob: "*.ts", path: "/tmp/t3chat-new" },
+      }),
+    ).toBe("Searched files *.ts in t3chat-new");
+    expect(
+      formatSearchToolLabel({ rawInput: {}, input: { pattern: "TODO", path: "apps/web" } }),
+    ).toBe("Searched TODO in web");
+    expect(formatSearchToolLabel({ input: { globPattern: "*.tsx", path: "apps/web" } })).toBe(
+      "Searched files *.tsx in web",
+    );
+    expect(
+      formatSearchToolLabel({ input: { pattern: "TODO", glob: "*.ts", path: "apps/web" } }),
+    ).toBe("Searched TODO in web");
+  });
+
+  it("keeps bare filenames from explicit path fields", () => {
+    expect(collectToolFilePaths({ input: { file_path: "README" } })).toEqual(["README"]);
+  });
+
+  it("keeps the first non-empty rawInput when a later update is empty", () => {
+    expect(
+      mergeToolActivityData({ rawInput: { path: "src/a.ts" } }, { rawInput: {}, kind: "read" }),
     ).toEqual({
-      summary: "Ran command",
-      detail: "bun run typecheck",
+      rawInput: { path: "src/a.ts" },
+      kind: "read",
     });
+    expect(
+      mergeToolActivityData({ rawInput: { path: "src/a.ts" } }, { rawInput: { startLine: 4 } }),
+    ).toEqual({ rawInput: { path: "src/a.ts", startLine: 4 } });
+  });
+
+  it("titles Claude skill calls with the skill they load", () => {
+    expect(dynamicToolTitle("Skill", { skill: "full-send" })).toBe("Skill: full-send");
+    expect(claudeSkillInvocation("Skill", { skill: "claude-api", args: " pricing " })).toEqual({
+      name: "claude-api",
+      args: "pricing",
+    });
+    expect(dynamicToolTitle("Skill", { skill: " " })).toBeUndefined();
+    expect(dynamicToolTitle("Read", { skill: "full-send" })).toBeUndefined();
   });
 });

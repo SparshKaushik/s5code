@@ -2,7 +2,19 @@ import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as NodeDns from "node:dns";
 import * as NodeOS from "node:os";
-import * as NodeSea from "node:sea";
+
+// No static `node:sea` import: Bun does not implement it, and a static import
+// would hoist onto the compiled server binary's startup graph and kill it
+// before any runtime check runs. `getBuiltinModule` probes it lazily; runtimes
+// without the builtin (Bun, bundled Graph) fall through to false.
+const isNodeSea = (): boolean => {
+  try {
+    const sea = process.getBuiltinModule?.("node:sea") as { isSea?: () => boolean } | undefined;
+    return sea?.isSea?.() === true;
+  } catch {
+    return false;
+  }
+};
 
 export const HostProcessPlatform = Context.Reference<NodeJS.Platform>(
   "@t3tools/shared/hostProcess/HostProcessPlatform",
@@ -66,15 +78,18 @@ export const HostProcessInvokedAs = Context.Reference<string>(
 );
 
 /**
- * Whether this process is a Node single-executable rather than a script run
- * by a Node on the machine. Code that needs a sibling file or a Node to run
- * one branches on this: an executable hosts such things as hidden
- * subcommands of itself.
+ * Whether this process is a self-contained executable — a Node SEA or a
+ * bun-compiled binary — rather than a script run by a runtime on the machine.
+ * Code that needs a sibling file or a Node to run one branches on this: an
+ * executable hosts such things as hidden subcommands of itself.
  */
 export const HostProcessIsExecutable = Context.Reference<boolean>(
   "@t3tools/shared/hostProcess/HostProcessIsExecutable",
   {
-    defaultValue: () => NodeSea.isSea(),
+    // Node single-executables answer `node:sea`'s probe; our release binaries
+    // are `bun build --compile` outputs whose entry lives under the virtual
+    // `/$bunfs/` root.
+    defaultValue: () => isNodeSea() || (process.argv[1]?.startsWith("/$bunfs/") ?? false),
   },
 );
 

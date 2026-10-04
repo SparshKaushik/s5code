@@ -5,8 +5,9 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import { lt } from "drizzle-orm";
 
-import { DpopVerificationFailureCode, verifyDpopProof } from "@t3tools/shared/dpop";
+import { DpopVerificationFailureCode, verifyDpopProofAsync } from "@t3tools/shared/dpop";
 import * as RelayDb from "../db.ts";
+import * as WebCrypto from "../WebCrypto.ts";
 import { relayDpopProofs } from "../persistence/schema.ts";
 
 export class DpopProofReplayPersistenceError extends Schema.TaggedError<DpopProofReplayPersistenceError>()(
@@ -65,6 +66,7 @@ export class DpopProofReplay extends Context.Service<
 
 const make = Effect.gen(function* () {
   const db = yield* RelayDb.RelayDb;
+  const { subtle } = yield* WebCrypto.WebCrypto;
 
   const consume: DpopProofReplay["Service"]["consume"] = Effect.fn("relay.dpop_proofs.consume")(
     function* (input) {
@@ -104,14 +106,21 @@ const make = Effect.gen(function* () {
       "relay.dpop.expected_thumbprint_present": input.expectedThumbprint !== undefined,
       "relay.dpop.expected_access_token_present": input.expectedAccessToken !== undefined,
     });
-    const result = verifyDpopProof({
-      proof: input.proof,
-      method: input.method,
-      url: input.url,
-      nowEpochSeconds: Math.floor(input.now.epochMilliseconds / 1_000),
-      ...(input.expectedThumbprint ? { expectedThumbprint: input.expectedThumbprint } : {}),
-      ...(input.expectedAccessToken ? { expectedAccessToken: input.expectedAccessToken } : {}),
-    });
+    // Native ECDSA verification keeps this request under the Workers CPU limit;
+    // the pure-JS fallback costs several milliseconds per proof.
+    const result = yield* Effect.promise(() =>
+      verifyDpopProofAsync(
+        {
+          proof: input.proof,
+          method: input.method,
+          url: input.url,
+          nowEpochSeconds: Math.floor(input.now.epochMilliseconds / 1_000),
+          ...(input.expectedThumbprint ? { expectedThumbprint: input.expectedThumbprint } : {}),
+          ...(input.expectedAccessToken ? { expectedAccessToken: input.expectedAccessToken } : {}),
+        },
+        subtle,
+      ),
+    );
     if (!result.ok) {
       yield* Effect.logWarning("relay dpop proof rejected", {
         code: result.code,

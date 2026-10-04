@@ -112,9 +112,12 @@ describe("highlightNativeReviewDiffVisibleRows", () => {
       exportRow,
     ];
 
-    await highlight(rows);
+    const [highlighted, standalone] = await Promise.all([
+      highlight(rows),
+      highlight([makeHunk("standalone-hunk"), exportRow]),
+    ]);
 
-    expect(tokenization.calls).toEqual(["import {\n  Model,", "export async function run() {}"]);
+    expect(highlighted.tokensByRowId[exportRow.id]).toEqual(standalone.tokensByRowId[exportRow.id]);
   });
 
   it("keeps grammar state across inline comment rows", async () => {
@@ -146,16 +149,12 @@ describe("highlightNativeReviewDiffVisibleRows", () => {
       commentText: "Review note",
     };
 
-    const result = await highlight([openingRow, commentRow, closingRow, trailingRow]);
-
-    expect(tokenization.calls).toEqual([
-      "const message = `open\nclosed`;\nexport const answer = 42;",
+    const [withComment, contiguous] = await Promise.all([
+      highlight([openingRow, commentRow, closingRow, trailingRow]),
+      highlight([openingRow, closingRow, trailingRow]),
     ]);
-    for (const row of [openingRow, closingRow, trailingRow]) {
-      expect(result.tokensByRowId[row.id]?.map((token) => token.content).join("")).toBe(
-        row.content,
-      );
-    }
+
+    expect(withComment.tokensByRowId).toEqual(contiguous.tokensByRowId);
   });
 
   it("does not join unhighlighted rows across cached gaps", async () => {
@@ -184,9 +183,14 @@ describe("highlightNativeReviewDiffVisibleRows", () => {
       trailingRow,
     ];
 
-    await highlight(rows, new Set(["template-close"]));
+    const [highlighted, standalone] = await Promise.all([
+      highlight(rows, new Set(["template-close"])),
+      highlight([trailingRow]),
+    ]);
 
-    expect(tokenization.calls).toEqual(["const message = `open", "export const answer = 42;"]);
+    expect(highlighted.tokensByRowId[trailingRow.id]).toEqual(
+      standalone.tokensByRowId[trailingRow.id],
+    );
   });
 
   it("keeps deletion grammar state out of addition rows", async () => {
@@ -208,9 +212,14 @@ describe("highlightNativeReviewDiffVisibleRows", () => {
       additionRow,
     ];
 
-    await highlight(rows);
+    const [highlighted, standalone] = await Promise.all([
+      highlight(rows),
+      highlight([additionRow]),
+    ]);
 
-    expect(tokenization.calls).toEqual(["const removed = `open", "export const answer = 42;"]);
+    expect(highlighted.tokensByRowId[additionRow.id]).toEqual(
+      standalone.tokensByRowId[additionRow.id],
+    );
   });
 });
 

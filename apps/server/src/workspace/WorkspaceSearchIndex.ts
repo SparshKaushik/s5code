@@ -31,8 +31,18 @@ import { isWorkspaceImagePreviewPath } from "@t3tools/shared/filePreview";
 // library. A static `import` of an external package is a hard error inside a
 // Node single-executable (only built-ins resolve there), so load it through
 // `require`, which reads from the real filesystem in every runtime.
+//
+// The `bun build --compile` server binary is the exception: nothing outside the
+// binary exists there, so `require` cannot see the package at all. The
+// runtime-gated `import()` is what the bun bundler traces to inline fff-node (and
+// its ffi-rs binding) into the binary; the native library itself is still
+// extracted to disk by workspace/FffNativeLibrary.ts.
 const requireForFff = NodeModule.createRequire(import.meta.url);
-const { FileFinder } = requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node");
+const loadFffNode = async (): Promise<typeof import("@ff-labs/fff-node")> => {
+  return typeof Bun === "undefined"
+    ? (requireForFff("@ff-labs/fff-node") as typeof import("@ff-labs/fff-node"))
+    : import("@ff-labs/fff-node");
+};
 
 const WORKSPACE_INDEX_MAX_ENTRIES = 25_000;
 const WORKSPACE_INDEX_PAGE_SIZE = WORKSPACE_INDEX_MAX_ENTRIES + 2;
@@ -304,6 +314,15 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
   cwd: string,
   variant: WorkspaceSearchIndexVariant,
 ) {
+  const { FileFinder } = yield* Effect.tryPromise({
+    try: () => loadFffNode(),
+    catch: (cause) =>
+      new WorkspaceSearchIndexCreateFailed({
+        cwd,
+        reason: "@ff-labs/fff-node failed to load.",
+        cause,
+      }),
+  });
   const result = yield* Effect.try({
     try: () =>
       FileFinder.create({

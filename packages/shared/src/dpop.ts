@@ -110,7 +110,7 @@ function publicKeyBytesFromJwk(jwk: DpopPublicJwkType): Uint8Array {
   return publicKey;
 }
 
-export function verifyDpopProof(input: {
+type DpopProofInput = {
   readonly proof: string | null | undefined;
   readonly method: string;
   readonly url: string;
@@ -118,7 +118,38 @@ export function verifyDpopProof(input: {
   readonly expectedThumbprint?: string;
   readonly expectedAccessToken?: string;
   readonly maxAgeSeconds?: number;
-}): DpopVerificationResult {
+};
+
+type DpopPreparedProof = {
+  readonly thumbprint: string;
+  readonly jti: string;
+  readonly iat: number;
+  readonly jwk: DpopPublicJwkType;
+  // `ArrayBuffer`-backed views so SubtleCrypto accepts them as BufferSource.
+  readonly signature: Uint8Array<ArrayBuffer>;
+  readonly signingInput: Uint8Array<ArrayBuffer>;
+};
+
+type DpopProofPreparation =
+  | { readonly ok: true; readonly proof: DpopPreparedProof }
+  | Extract<DpopVerificationResult, { readonly ok: false }>;
+
+function finishDpopProofVerification(
+  proof: DpopPreparedProof,
+  input: DpopProofInput,
+): DpopVerificationResult {
+  const maxAgeSeconds = input.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
+  if (proof.iat > input.nowEpochSeconds + 5 || input.nowEpochSeconds - proof.iat > maxAgeSeconds) {
+    return {
+      ok: false,
+      code: "time_window",
+      reason: "DPoP proof is outside the allowed time window.",
+    };
+  }
+  return { ok: true, thumbprint: proof.thumbprint, jti: proof.jti, iat: proof.iat };
+}
+
+function prepareDpopProof(input: DpopProofInput): DpopProofPreparation {
   if (!input.proof?.trim()) {
     return { ok: false, code: "missing_proof", reason: "Missing DPoP proof." };
   }
@@ -160,12 +191,38 @@ export function verifyDpopProof(input: {
       }
     }
 
-    const signature = base64UrlToBytes(parts[2]);
-    const signatureInputHash = sha256(new TextEncoder().encode(`${parts[0]}.${parts[1]}`));
+    return {
+      ok: true,
+      proof: {
+        thumbprint,
+        jti: payload.value.jti,
+        iat: payload.value.iat,
+        jwk: header.value.jwk,
+        // Copy so the buffer type stays `Uint8Array<ArrayBuffer>` for SubtleCrypto.
+        signature: new Uint8Array(base64UrlToBytes(parts[2])),
+        signingInput: new Uint8Array(new TextEncoder().encode(`${parts[0]}.${parts[1]}`)),
+      },
+    };
+  } catch {
+    return { ok: false, code: "invalid_proof", reason: "Invalid DPoP proof." };
+  }
+}
+
+/**
+ * Synchronous verification used on Node runtimes. The pure-JS P-256 signature
+ * check costs several milliseconds of CPU; runtimes with a native `SubtleCrypto`
+ * (Cloudflare Workers, browsers) should use `verifyDpopProofAsync` instead.
+ */
+export function verifyDpopProof(input: DpopProofInput): DpopVerificationResult {
+  const prepared = prepareDpopProof(input);
+  if (!prepared.ok) {
+    return prepared;
+  }
+  try {
     const verified = p256.verify(
-      signature,
-      signatureInputHash,
-      publicKeyBytesFromJwk(header.value.jwk),
+      prepared.proof.signature,
+      sha256(prepared.proof.signingInput),
+      publicKeyBytesFromJwk(prepared.proof.jwk),
       {
         prehash: false,
         format: "compact",
@@ -174,26 +231,43 @@ export function verifyDpopProof(input: {
     if (!verified) {
       return { ok: false, code: "invalid_signature", reason: "Invalid DPoP signature." };
     }
-
-    const maxAgeSeconds = input.maxAgeSeconds ?? DEFAULT_MAX_AGE_SECONDS;
-    if (
-      payload.value.iat > input.nowEpochSeconds + 5 ||
-      input.nowEpochSeconds - payload.value.iat > maxAgeSeconds
-    ) {
-      return {
-        ok: false,
-        code: "time_window",
-        reason: "DPoP proof is outside the allowed time window.",
-      };
-    }
-
-    return {
-      ok: true,
-      thumbprint,
-      jti: payload.value.jti,
-      iat: payload.value.iat,
-    };
   } catch {
     return { ok: false, code: "invalid_proof", reason: "Invalid DPoP proof." };
   }
+  return finishDpopProofVerification(prepared.proof, input);
+}
+
+/**
+ * WebCrypto variant of `verifyDpopProof` for CPU-constrained runtimes: the ES256
+ * signature check runs in native `subtle.verify` instead of pure-JS arithmetic.
+ */
+export async function verifyDpopProofAsync(
+  input: DpopProofInput,
+  subtle: SubtleCrypto,
+): Promise<DpopVerificationResult> {
+  const prepared = prepareDpopProof(input);
+  if (!prepared.ok) {
+    return prepared;
+  }
+  try {
+    const key = await subtle.importKey(
+      "jwk",
+      prepared.proof.jwk,
+      { name: "ECDSA", namedCurve: "P-256" },
+      false,
+      ["verify"],
+    );
+    const verified = await subtle.verify(
+      { name: "ECDSA", hash: "SHA-256" },
+      key,
+      prepared.proof.signature,
+      prepared.proof.signingInput,
+    );
+    if (!verified) {
+      return { ok: false, code: "invalid_signature", reason: "Invalid DPoP signature." };
+    }
+  } catch {
+    return { ok: false, code: "invalid_proof", reason: "Invalid DPoP proof." };
+  }
+  return finishDpopProofVerification(prepared.proof, input);
 }

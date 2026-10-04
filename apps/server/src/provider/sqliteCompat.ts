@@ -1,3 +1,4 @@
+// @effect-diagnostics nodeBuiltinImport:off -- SQLite's native backup API runs outside an Effect environment.
 /**
  * Cross-runtime SQLite compatibility layer for Node.js and Bun.
  *
@@ -9,6 +10,8 @@
  * @module provider/sqliteCompat
  */
 
+import * as NodeFSP from "node:fs/promises";
+
 interface DatabaseSyncOptions {
   readonly readOnly?: boolean | undefined;
   readonly timeout?: number | undefined;
@@ -17,7 +20,7 @@ interface DatabaseSyncOptions {
   readonly open?: boolean | undefined;
 }
 
-class StatementSyncShim {
+export class StatementSyncShim {
   private readonly query: any;
   private returnArrays = false;
 
@@ -29,6 +32,30 @@ class StatementSyncShim {
     if (typeof this.query.safeIntegers === "function") {
       this.query.safeIntegers(Boolean(value));
     }
+  }
+
+  /**
+   * Mirrors `node:sqlite`'s `StatementSync.columns()`. The Effect SQL client
+   * uses the length to decide between `.all()` (row-returning) and `.run()`
+   * (writes), so an absent method breaks every statement on Bun. Bun exposes
+   * the result column names as `Query.columnNames`; the richer per-column
+   * metadata Node reports is not available, so those fields are null.
+   */
+  columns(): ReadonlyArray<{
+    column: string;
+    database: string | null;
+    name: string;
+    table: string | null;
+    type: string | null;
+  }> {
+    const names: ReadonlyArray<string> = this.query.columnNames ?? [];
+    return names.map((name) => ({
+      column: name,
+      database: null,
+      name,
+      table: null,
+      type: null,
+    }));
   }
 
   setReturnArrays(value: boolean): void {
@@ -98,10 +125,18 @@ class BunDatabaseSync {
       this.db.loadExtension(path);
     }
   }
+
+  async backup(path: string): Promise<void> {
+    // Bun serializes a consistent SQLite snapshot, including committed WAL
+    // writes. V2's initial copy must not copy only the on-disk database file.
+    await NodeFSP.writeFile(path, this.db.serialize());
+  }
 }
 
 const nodeSqlite = (process as any).getBuiltinModule?.("node:sqlite");
 
 export const DatabaseSync: any = nodeSqlite?.DatabaseSync ?? BunDatabaseSync;
 export const StatementSync: any = nodeSqlite?.StatementSync ?? StatementSyncShim;
-export default { DatabaseSync, StatementSync };
+export const backup =
+  nodeSqlite?.backup ?? ((database: BunDatabaseSync, path: string) => database.backup(path));
+export default { DatabaseSync, StatementSync, backup };

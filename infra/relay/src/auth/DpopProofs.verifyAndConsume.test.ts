@@ -11,6 +11,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 
 import * as RelayDb from "../db.ts";
+import * as WebCrypto from "../WebCrypto.ts";
 import { relayDpopProofs } from "../persistence/schema.ts";
 import * as DpopProofs from "./DpopProofs.ts";
 
@@ -79,7 +80,14 @@ function layer(
       };
     },
   } as unknown as RelayDb.RelayDb["Service"];
-  return DpopProofs.layer.pipe(Layer.provide(Layer.succeed(RelayDb.RelayDb, fakeDb)));
+  return DpopProofs.layer.pipe(
+    Layer.provide(
+      Layer.mergeAll(
+        Layer.succeed(RelayDb.RelayDb, fakeDb),
+        Layer.succeed(WebCrypto.WebCrypto, { subtle: globalThis.crypto.subtle }),
+      ),
+    ),
+  );
 }
 
 function consumeEachProofOnce() {

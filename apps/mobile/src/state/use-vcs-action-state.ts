@@ -10,11 +10,7 @@ export function useVcsActionState(target: VcsActionTarget): VcsActionState {
   return useAtomValue(vcsActionManager.stateAtom(target));
 }
 
-/**
- * Transient banner state for a completed thread-level action (git action).
- * One channel, so two actions can never stack banners.
- */
-export interface ThreadActionResultNotification {
+export interface GitActionResultNotification {
   readonly type: "success" | "error";
   readonly title: string;
   readonly description?: string;
@@ -23,17 +19,17 @@ export interface ThreadActionResultNotification {
 
 const RESULT_DISMISS_MS = 5_000;
 
-const threadActionResultAtom = Atom.make<ThreadActionResultNotification | null>(null).pipe(
+const gitActionResultAtom = Atom.make<GitActionResultNotification | null>(null).pipe(
   Atom.keepAlive,
-  Atom.withLabel("mobile:thread-action-result"),
+  Atom.withLabel("mobile:git-action-result"),
 );
 let dismissTimer: ReturnType<typeof setTimeout> | null = null;
 
-function broadcast(result: ThreadActionResultNotification | null): void {
-  appAtomRegistry.set(threadActionResultAtom, result);
+function broadcast(result: GitActionResultNotification | null): void {
+  appAtomRegistry.set(gitActionResultAtom, result);
 }
 
-export function showThreadActionResult(result: ThreadActionResultNotification): void {
+export function showGitActionResult(result: GitActionResultNotification): void {
   if (dismissTimer) clearTimeout(dismissTimer);
   broadcast(result);
   dismissTimer = setTimeout(() => {
@@ -42,32 +38,30 @@ export function showThreadActionResult(result: ThreadActionResultNotification): 
   }, RESULT_DISMISS_MS);
 }
 
-export function dismissThreadActionResult(): void {
+export function dismissGitActionResult(): void {
   if (dismissTimer) clearTimeout(dismissTimer);
   dismissTimer = null;
   broadcast(null);
 }
 
-export function useThreadActionResultNotification(): {
-  readonly result: ThreadActionResultNotification | null;
+export function useGitActionResultNotification(): {
+  readonly result: GitActionResultNotification | null;
   readonly dismiss: () => void;
 } {
-  const result = useAtomValue(threadActionResultAtom);
-  return { result, dismiss: dismissThreadActionResult };
+  const result = useAtomValue(gitActionResultAtom);
+  return { result, dismiss: dismissGitActionResult };
 }
 
-export type ThreadActionProgressPhase = "idle" | "running" | "success" | "error";
+export type GitActionProgressPhase = "idle" | "running" | "success" | "error";
 
-export interface ThreadActionProgress {
-  readonly phase: ThreadActionProgressPhase;
+export interface GitActionProgress {
+  readonly phase: GitActionProgressPhase;
   readonly label: string | null;
   readonly description: string | null;
   readonly prUrl?: string;
 }
 
-export type GitActionProgress = ThreadActionProgress;
-
-const EMPTY_PROGRESS: ThreadActionProgress = {
+const EMPTY_PROGRESS: GitActionProgress = {
   phase: "idle",
   label: null,
   description: null,
@@ -80,13 +74,9 @@ function formatElapsedSeconds(ms: number | null): string | null {
   return `Running for ${elapsed}s`;
 }
 
-/**
- * Live progress for the selected thread's actions: the git action lane's
- * running phase, then whatever terminal result was last reported.
- */
-export function useThreadActionProgress(target: VcsActionTarget): ThreadActionProgress {
+export function useGitActionProgress(target: VcsActionTarget): GitActionProgress {
   const actionState = useVcsActionState(target);
-  const { result } = useThreadActionResultNotification();
+  const { result } = useGitActionResultNotification();
 
   const [, forceUpdate] = useState(0);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);

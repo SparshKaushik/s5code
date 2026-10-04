@@ -68,10 +68,12 @@ const isFffLibraryAsset = (name: string) =>
  * executable, so the two cases collapse into one check.
  */
 function embeddedFffLibrary(): FffLibraryAsset | undefined {
-  // Read through globalThis so this module typechecks without bun-types, which
-  // the server tsconfig does not include.
-  const files = (globalThis as { Bun?: { embeddedFiles?: ReadonlyArray<FffLibraryAsset> } }).Bun
-    ?.embeddedFiles;
+  // bun-types declares embeddedFiles as Blob[], but the runtime objects carry
+  // the asset name that Blob's type omits.
+  const files =
+    typeof Bun === "undefined"
+      ? undefined
+      : (Bun.embeddedFiles as unknown as ReadonlyArray<FffLibraryAsset>);
   return files?.find((file) => isFffLibraryAsset(file.name));
 }
 

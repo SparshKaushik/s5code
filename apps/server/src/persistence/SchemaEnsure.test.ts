@@ -174,6 +174,48 @@ describe("SchemaEnsure and Migration Recovery", () => {
     ),
   );
 
+  it.effect("reconciles S5 migration ids before creating the V2 schema", () =>
+    provideSqlite(
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        yield* runMigrations({ toMigrationInclusive: 54 });
+        yield* sql`
+          UPDATE effect_sql_migrations SET migration_id = 55
+          WHERE migration_id = 54 AND name = 'ProjectionThreadsAutoSettleDisabledAt'
+        `;
+        yield* sql`
+          UPDATE effect_sql_migrations SET migration_id = 54
+          WHERE migration_id = 53 AND name = 'PullRequestFilesViewed'
+        `;
+        yield* sql`
+          UPDATE effect_sql_migrations SET migration_id = 53
+          WHERE migration_id = 52 AND name = 'ProjectionThreadTitleState'
+        `;
+        yield* sql`
+          INSERT INTO effect_sql_migrations (migration_id, name)
+          VALUES (52, 'MigrateOpenCode2ToOpenCode')
+        `;
+
+        yield* runMigrations();
+        const migrations = yield* sql<{ readonly migration_id: number; readonly name: string }>`
+          SELECT migration_id, name FROM effect_sql_migrations
+          WHERE migration_id BETWEEN 52 AND 56 ORDER BY migration_id
+        `;
+        assert.deepEqual(migrations, [
+          { migration_id: 52, name: "ProjectionThreadTitleState" },
+          { migration_id: 53, name: "PullRequestFilesViewed" },
+          { migration_id: 54, name: "ProjectionThreadsAutoSettleDisabledAt" },
+          { migration_id: 55, name: "OrchestrationV2" },
+          { migration_id: 56, name: "RemoveRedundantProjectionIndexes" },
+        ]);
+        const objects = yield* sqliteObjectNames();
+        assert.isTrue(objects.has("orchestration_v2_events"));
+        // A second boot keeps the same schema and ledger.
+        assert.deepEqual(yield* runMigrations(), []);
+      }),
+    ),
+  );
+
   it.effect("does not heal later schema during a partial migration run", () =>
     provideSqlite(
       Effect.gen(function* () {

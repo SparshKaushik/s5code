@@ -94,7 +94,10 @@ jobs:
           ALCHEMY_STATE_STORE_CREDENTIALS: ${{ secrets.ALCHEMY_STATE_STORE_CREDENTIALS }}
 
       - name: Deploy production relay stage
-        run: vp run --filter t3code-relay deploy --stage prod --yes --no-input ${{ inputs.force && '--force' || '' }}
+        # No --no-input: that flag exists on the upstream Alchemy CLI deploy, not
+        # on this fork's scripts/deploy.ts. --yes plus the script's
+        # layerNonInteractive already run it non-interactively.
+        run: vp run --filter t3code-relay deploy --stage prod --yes ${{ inputs.force && '--force' || '' }}
         env:
           # The PublishClientConfig action writes the client env here instead
           # of the repo-root .env; nothing on the runner reads it.

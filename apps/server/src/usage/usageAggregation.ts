@@ -12,7 +12,13 @@
  *
  * @module usageAggregation
  */
-import type { UsageBucket, UsageDay, UsageResolution, UsageTokenTotals } from "@t3tools/contracts";
+import type {
+  UsageBucket,
+  UsageCategoryCost,
+  UsageDay,
+  UsageResolution,
+  UsageTokenTotals,
+} from "@t3tools/contracts";
 
 import { addTotals, EMPTY_TOTALS, type UsageRecord } from "./usageTranscripts.ts";
 import type { UsagePricer } from "./usagePricing.ts";
@@ -51,6 +57,10 @@ interface MutableBucket {
   totals: UsageTokenTotals;
   costUsd: number;
   cacheSavingsUsd: number;
+  categoryCostUsd: UsageCategoryCost | null;
+  fastCostUsd: number;
+  ultrafastCostUsd: number;
+  speedPremiumUsd: number;
   records: number;
   unpricedRecords: number;
   inputTokensEstimated: boolean;
@@ -167,6 +177,10 @@ export class UsageAggregator {
         totals: EMPTY_TOTALS,
         costUsd: 0,
         cacheSavingsUsd: 0,
+        categoryCostUsd: null,
+        fastCostUsd: 0,
+        ultrafastCostUsd: 0,
+        speedPremiumUsd: 0,
         records: 0,
         unpricedRecords: 0,
         inputTokensEstimated: false,
@@ -184,6 +198,22 @@ export class UsageAggregator {
     bucket.totals = addTotals(bucket.totals, record.totals);
     bucket.costUsd += priced.costUsd;
     bucket.cacheSavingsUsd += this.#options.pricer.cacheSavingsUsd(record);
+    if (priced.categoryCostUsd !== null) {
+      const sum = bucket.categoryCostUsd;
+      const add = priced.categoryCostUsd;
+      bucket.categoryCostUsd =
+        sum === null
+          ? add
+          : {
+              input: sum.input + add.input,
+              cacheRead: sum.cacheRead + add.cacheRead,
+              cacheWrite: sum.cacheWrite + add.cacheWrite,
+              output: sum.output + add.output,
+            };
+    }
+    if (record.speed === "fast") bucket.fastCostUsd += priced.costUsd;
+    if (record.speed === "ultrafast") bucket.ultrafastCostUsd += priced.costUsd;
+    bucket.speedPremiumUsd += priced.speedPremiumUsd;
     bucket.records += 1;
     if (priced.costSource === "unpriced") bucket.unpricedRecords += 1;
     if (priced.costSource === "providerReported") bucket.providerReportedRecords += 1;
@@ -205,6 +235,10 @@ export class UsageAggregator {
         apiProvider = "",
         sourcePath = "",
       ] = key.split("\u0000");
+      const category = bucket.categoryCostUsd;
+      const fastCostUsd = roundUsd(bucket.fastCostUsd);
+      const ultrafastCostUsd = roundUsd(bucket.ultrafastCostUsd);
+      const speedPremiumUsd = roundUsd(bucket.speedPremiumUsd);
       buckets.push({
         day: day as UsageDay,
         ...(hourStart === "" ? {} : { hourStart }),
@@ -216,6 +250,20 @@ export class UsageAggregator {
         costUsd: bucket.costUsd,
         cacheSavingsUsd: bucket.cacheSavingsUsd,
         inputTokensEstimated: bucket.inputTokensEstimated,
+        // Zero and unknown figures are omitted to keep payloads small.
+        ...(category === null
+          ? {}
+          : {
+              categoryCostUsd: {
+                input: roundUsd(category.input),
+                cacheRead: roundUsd(category.cacheRead),
+                cacheWrite: roundUsd(category.cacheWrite),
+                output: roundUsd(category.output),
+              },
+            }),
+        ...(fastCostUsd === 0 ? {} : { fastCostUsd }),
+        ...(ultrafastCostUsd === 0 ? {} : { ultrafastCostUsd }),
+        ...(speedPremiumUsd === 0 ? {} : { speedPremiumUsd }),
         costSource: resolveCostSource(bucket),
         pricedAs: bucket.pricedAs as UsageBucket["pricedAs"],
         records: bucket.records,
@@ -239,6 +287,14 @@ export class UsageAggregator {
       outOfWindow: this.#outOfWindow,
     };
   }
+}
+
+/**
+ * Rounds to micro-dollars. The split and speed figures need no more precision,
+ * and shorter numbers keep them cheap on the wire.
+ */
+function roundUsd(value: number): number {
+  return Math.round(value * 1e6) / 1e6;
 }
 
 /**

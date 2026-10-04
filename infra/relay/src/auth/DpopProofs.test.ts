@@ -5,8 +5,13 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 
 import * as RelayDb from "../db.ts";
+import * as WebCrypto from "../WebCrypto.ts";
 import { relayDpopProofs } from "../persistence/schema.ts";
 import * as DpopProofs from "./DpopProofs.ts";
+
+const webCryptoLayer = Layer.succeed(WebCrypto.WebCrypto, {
+  subtle: globalThis.crypto.subtle,
+});
 
 describe("DpopProofReplay", () => {
   it.effect("consumes proof ids without pruning expired rows on the request path", () => {
@@ -68,7 +73,11 @@ describe("DpopProofReplay", () => {
         },
       ]);
     }).pipe(
-      Effect.provide(DpopProofs.layer.pipe(Layer.provide(Layer.succeed(RelayDb.RelayDb, fakeDb)))),
+      Effect.provide(
+        DpopProofs.layer.pipe(
+          Layer.provide(Layer.merge(Layer.succeed(RelayDb.RelayDb, fakeDb), webCryptoLayer)),
+        ),
+      ),
     );
   });
 
@@ -93,7 +102,11 @@ describe("DpopProofReplay", () => {
       yield* replay.pruneExpired;
       expect(calls).toEqual(["delete", "delete.where"]);
     }).pipe(
-      Effect.provide(DpopProofs.layer.pipe(Layer.provide(Layer.succeed(RelayDb.RelayDb, fakeDb)))),
+      Effect.provide(
+        DpopProofs.layer.pipe(
+          Layer.provide(Layer.merge(Layer.succeed(RelayDb.RelayDb, fakeDb), webCryptoLayer)),
+        ),
+      ),
     );
   });
 
@@ -119,7 +132,11 @@ describe("DpopProofReplay", () => {
       expect(Date.parse(error.expiresBefore ?? "")).not.toBeNaN();
       expect(error.cause).toBe(cause);
     }).pipe(
-      Effect.provide(DpopProofs.layer.pipe(Layer.provide(Layer.succeed(RelayDb.RelayDb, fakeDb)))),
+      Effect.provide(
+        DpopProofs.layer.pipe(
+          Layer.provide(Layer.merge(Layer.succeed(RelayDb.RelayDb, fakeDb), webCryptoLayer)),
+        ),
+      ),
     );
   });
 });
