@@ -80,12 +80,13 @@ private fun ProviderAccountCard(store: AppStore, env: EnvironmentId, provider: J
     }
     fun action(method: String, extra: JsonObject = JsonObject(emptyMap()), after: () -> Unit = {}) {
         if (busy) return
+        busy = true; failure = null
         scope.launch {
-            busy = true; failure = null
             try {
                 store.workspace.environmentRequest(env, method, JsonObject(extra + ("instanceId" to JsonPrimitive(instanceId))))
                 after()
-            } catch (error: Exception) { failure = error.message ?: "Could not update sign-in." }
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { failure = error.message ?: "Could not update sign-in." }
             finally { busy = false }
         }
     }

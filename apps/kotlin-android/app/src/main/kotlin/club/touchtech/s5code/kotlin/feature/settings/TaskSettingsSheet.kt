@@ -71,7 +71,7 @@ import kotlinx.coroutines.launch
  * descriptors, so the sheet renders what this model has rather than a fixed
  * effort row.
  *
- * [searchScope] widens or narrows the *search*, never the agent list. See
+ * [searchScope] widens or narrows both search and the agent list. See
  * [ModelSearchScope].
  */
 @Composable
@@ -103,8 +103,7 @@ fun TaskSettingsSheet(
             val visible =
                 when (searchScope) {
                     ModelSearchScope.AllProviders -> listed
-                    // RN binds an existing thread to its current provider
-                    // instance; sessions cannot move between harnesses.
+                    // A session without portable handoff stays on its instance.
                     ModelSearchScope.ActiveProvider ->
                         listed.filter { it.instanceId == settings.provider.instanceId }
                 }
@@ -156,8 +155,8 @@ fun TaskSettingsSheet(
 
     // Starred rows resolve against the catalog so a favorite on an instance this
     // environment no longer offers does not render a dead row. Under
-    // ActiveProvider only the bound instance's favorites show — picking another
-    // agent mid-thread is not a move the turn start would accept anyway.
+    // ActiveProvider only the bound instance's favorites show, because this
+    // session cannot hand its history to another agent.
     val favoriteRows =
         remember(favorites, catalog, searchScope, settings.provider, query) {
             favorites

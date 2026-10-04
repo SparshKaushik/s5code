@@ -7,10 +7,9 @@ import club.touchtech.s5code.kotlin.model.ProviderInstance
  * How wide a model search reaches.
  *
  * A new task has no history to lose, so searching every configured agent is the
- * fast path to "whatever can do this". An existing thread is bound to its current
- * provider instance: sessions cannot move between harnesses, matching RN's
- * `threadProviderGroups` filtering. The scope therefore limits both model search
- * and the provider rows rendered by the settings sheet.
+ * fast path to "whatever can do this". Existing threads can search across agents
+ * only when their V2 session supports provider handoff. The scope limits both
+ * model search and the provider rows rendered by the settings sheet.
  */
 enum class ModelSearchScope {
     AllProviders,

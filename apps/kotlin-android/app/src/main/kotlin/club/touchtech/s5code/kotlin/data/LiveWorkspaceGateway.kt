@@ -56,11 +56,9 @@ import club.touchtech.s5code.kotlin.transport.EnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.DirectEnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.EnvironmentSession
 import club.touchtech.s5code.kotlin.transport.SessionPhase
-import club.touchtech.s5code.kotlin.transport.ThreadReduction
 import club.touchtech.s5code.kotlin.transport.WsMethods
 import club.touchtech.s5code.kotlin.transport.applyShellStreamItem
 import club.touchtech.s5code.kotlin.transport.hasCacheableWorkspaceContent
-import club.touchtech.s5code.kotlin.transport.applyThreadEvent
 import club.touchtech.s5code.kotlin.transport.applyV2Event
 import club.touchtech.s5code.kotlin.transport.asThreadDto
 import club.touchtech.s5code.kotlin.transport.mergeV2History
@@ -97,7 +95,6 @@ import club.touchtech.s5code.kotlin.transport.wire.TerminalSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalStreamEventDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
-import club.touchtech.s5code.kotlin.transport.wire.ThreadStreamItemDto
 import club.touchtech.s5code.kotlin.transport.wire.UsageSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.WorktreeSetupSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsListRefsResultDto
@@ -619,8 +616,7 @@ class LiveWorkspaceGateway(
                 catch (_: Exception) { /* Disk cache failures must not interrupt the shell stream. */ }
             }
         }
-        try {
-        connected.session
+        val stream = connected.session
             .subscribe(
                 WsMethods.OrchestrationSubscribeShell,
                 payload = {
@@ -660,7 +656,8 @@ class LiveWorkspaceGateway(
                             .getOrElse { if (it is CancellationException) throw it; false }
                 },
             )
-            .collect { item ->
+        try {
+            stream.collect { item ->
                 connected.shell.update { current ->
                     applyShellStreamItem(current ?: ShellSnapshotDto(), item)
                 }
@@ -1557,8 +1554,7 @@ class LiveWorkspaceGateway(
                 } }
             } }
         }
-        try {
-        session.subscribe(
+        val stream = session.subscribe(
             WsMethods.OrchestrationSubscribeThread,
             payload = { buildJsonObject {
                 put("threadId", id.value)
@@ -1579,12 +1575,12 @@ class LiveWorkspaceGateway(
                         cursor = fresh.historyCursor
                         hasMore = fresh.hasMoreHistory
                         latestOrdinal = fresh.latestLocalTurnOrdinal
-                         epoch += 1
-                         authoritative = true
-                         expandedHistory = false
-                         loadingOlder = false
-                         sync.value = ThreadSyncPhase.Syncing
-                         publishDetail(persist = true)
+                        epoch += 1
+                        authoritative = true
+                        expandedHistory = false
+                        loadingOlder = false
+                        sync.value = ThreadSyncPhase.Syncing
+                        publishDetail(persist = true)
                     }
                 } catch (cancelled: CancellationException) { throw cancelled }
                 catch (_: Exception) { /* Socket fallback carries the same bounded snapshot. */ }
@@ -1599,7 +1595,8 @@ class LiveWorkspaceGateway(
             .catch { cause ->
                 if (cause is CancellationException) throw cause
             }
-            .collect { item -> lock.withLock {
+        try {
+            stream.collect { item -> lock.withLock {
                 var persist = false
                 when (item.kind) {
                     "snapshot" -> {
@@ -1609,25 +1606,25 @@ class LiveWorkspaceGateway(
                         hasMore = item.hasMoreHistory
                         latestOrdinal = item.latestLocalTurnOrdinal
                         epoch += 1
-                         authoritative = true
-                         expandedHistory = false
-                         loadingOlder = false
-                         sync.value = ThreadSyncPhase.Syncing
-                         persist = true
+                        authoritative = true
+                        expandedHistory = false
+                        loadingOlder = false
+                        sync.value = ThreadSyncPhase.Syncing
+                        persist = true
                     }
                     "synchronized" -> sync.value = ThreadSyncPhase.Live
                     "event", "unknown-event" -> if (item.sequence > sequence) {
-                         val current = projection
-                         val event = item.event
-                         if (current != null && event != null) {
-                             projection = applyV2Event(current, event, hasMore || cursor != null, latestOrdinal)
-                             persist = projection !== current
-                             if (persist && event.v2String("type") == "turn-item.updated") {
-                                 val ordinal = (event["payload"] as? JsonObject)?.v2Long("ordinal")
-                                 if (ordinal != null) latestOrdinal = maxOf(latestOrdinal ?: ordinal, ordinal)
-                             }
-                         }
-                         sequence = item.sequence
+                        val current = projection
+                        val event = item.event
+                        if (current != null && event != null) {
+                            projection = applyV2Event(current, event, hasMore || cursor != null, latestOrdinal)
+                            persist = projection !== current
+                            if (persist && event.v2String("type") == "turn-item.updated") {
+                                val ordinal = (event["payload"] as? JsonObject)?.v2Long("ordinal")
+                                if (ordinal != null) latestOrdinal = maxOf(latestOrdinal ?: ordinal, ordinal)
+                            }
+                        }
+                        sequence = item.sequence
                     }
                 }
                 publishDetail(persist)
@@ -1641,360 +1638,6 @@ class LiveWorkspaceGateway(
         }
     }
 
-    private suspend fun subscribeLegacyThread(
-        environmentId: EnvironmentId,
-        id: ThreadId,
-        key: String,
-        target: MutableStateFlow<ThreadDetail?>,
-    ) {
-        var snapshot: ThreadDto? = null
-        var page: club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto? = null
-        // The orchestration-log sequence of the newest applied frame. Resuming
-        // subscriptions pass it as `afterSequence`; replayed events at or below
-        // it are dropped, matching the shell reducer's dedup semantics.
-        var lastSequence = 0L
-        var prefetchOk = false
-        // Serializes stream application against `loadOlderTurns` merges — the
-        // UI's load-earlier tap runs on another coroutine, and a page merge
-        // interleaved with an event application is how transcripts duplicate.
-        val applyLock = Mutex()
-        // Anything that rewrites history (a snapshot frame, a revert) bumps the
-        // epoch so an in-flight older-page fetch cannot merge into a state it
-        // was not read against.
-        var historyEpoch = 0
-        var loadingOlder = false
-        // A page read ahead of the live watermark parks here until the stream
-        // catches up; merging early would duplicate deltas still in flight.
-        var pendingOlderPage:
-            club.touchtech.s5code.kotlin.transport.wire.ThreadDetailSnapshotDto? = null
-        val sync = detailSyncPhases.getOrPut(key) { MutableStateFlow(ThreadSyncPhase.Loading) }
-        fun reproject(now: Long) {
-            snapshot?.let { thread ->
-                val projected =
-                    threadDetailFrom(
-                        environmentId,
-                        thread,
-                        ::instanceFor,
-                        now,
-                        page,
-                        loadingOlder,
-                    )
-                target.value = projected.copy(syncPhase = sync.value)
-            }
-        }
-        // The load-earlier path lives here rather than on the public method so
-        // it shares the subscription's snapshot state and apply lock — the
-        // merged page has to compose with whatever the stream has already
-        // applied, not a second copy.
-        suspend fun loadOlder(): Boolean {
-            val session = sessionFor(environmentId)
-            if (!session.state.value.capabilities.threadSnapshotPagination) return false
-            val epochAtStart = historyEpoch
-            var cursor: String? = null
-            applyLock.withLock {
-                cursor = page?.beforeCursor
-                if (loadingOlder || page?.hasMore != true || cursor == null) return false
-                loadingOlder = true
-                reproject(clock.value)
-            }
-            val fresh =
-                runCatching {
-                        session.getJson(
-                            "/api/orchestration/threads/${id.value}" +
-                                "?turnLimit=$OLDER_THREAD_PAGE_USER_TURN_LIMIT" +
-                                "&beforeCursor=${android.net.Uri.encode(cursor)}" +
-                                if (session.state.value.capabilities.reasoningMessages) {
-                                    "&reasoningMessages=true"
-                                } else {
-                                    ""
-                                },
-                            club.touchtech.s5code.kotlin.transport.wire
-                                .ThreadDetailSnapshotDto.serializer(),
-                        )
-                    }
-                    .getOrNull()
-            var merged = false
-            applyLock.withLock {
-                if (fresh != null && epochAtStart == historyEpoch &&
-                    fresh.snapshotSequence >= lastSequence
-                ) {
-                    val current = snapshot
-                    if (current != null) {
-                        val watermark = fresh.page?.threadSequence
-                        if (watermark != null && watermark > lastSequence) {
-                            // Parked: merge once live events reach the page's
-                            // thread-scoped watermark (`pendingOlderPage` in
-                            // client-runtime's thread state).
-                            pendingOlderPage = fresh
-                        } else {
-                            snapshot = mergeOlderThreadPage(current, fresh.thread)
-                            // The merged page persists under the loaded
-                            // watermark, not the page's own sequence: it is
-                            // only known consistent with what it merged into.
-                            page = fresh.page?.copy(snapshotSequence = lastSequence)
-                            snapshotStore.saveThread(environmentId, snapshot!!, page)
-                            merged = true
-                        }
-                    }
-                }
-                if (pendingOlderPage == null) loadingOlder = false
-                reproject(clock.value)
-            }
-            return merged
-        }
-        detailOlderLoaders[key] = ::loadOlder
-        // A fresh subscription is either loading from scratch or reconciling the
-        // cached/live detail already visible from the prior connection.
-        sync.value = if (target.value == null) ThreadSyncPhase.Loading else ThreadSyncPhase.Syncing
-        val session = sessionFor(environmentId)
-        // The worktree setup stream (`vcsEnvironment.worktreeSetup` in RN) is a
-        // child of this subscription: it is wanted only while a setup could
-        // plausibly exist — a queued creation heading toward the server, the
-        // recorded activity still saying running, or the live stream reporting
-        // running. Without the gate every open thread would hold a dead RPC
-        // stream on servers that predate it.
-        val setupFlow = worktreeSetups.getOrPut(key) { MutableStateFlow(null) }
-        val wire = MutableStateFlow<ThreadDto?>(null)
-        // A sibling coroutine on this subscription's job, so it is cancelled
-        // with it and keeps running while the stream collect blocks below.
-        CoroutineScope(coroutineContext).launch {
-            combine(
-                    wire,
-                    pendingCreationKeys,
-                    setupFlow,
-                ) { current, pending, live ->
-                    val recordedRunning =
-                        current
-                            ?.let { thread ->
-                                findRecordedWorktreeSetup(thread.activities, thread.id)
-                            }
-                            ?.isRunning == true
-                    // A terminal setup means the retained creation can no longer
-                    // be resent — the bootstrap already settled one way or the
-                    // other.
-                    if (live != null && !live.isRunning) retainedCreations.remove(key)
-                    key in pending || recordedRunning || live?.isRunning == true
-                }
-                .distinctUntilChanged()
-                .collectLatest { wanted ->
-                    if (!wanted) return@collectLatest
-                    try {
-                        session
-                            .subscribe(
-                                WsMethods.SubscribeWorktreeSetup,
-                                payload = buildJsonObject { put("threadId", id.value) },
-                                WorktreeSetupSnapshotDto.serializer().nullable,
-                            )
-                            .collect { snapshotDto -> setupFlow.value = snapshotDto?.toModel() }
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (expected: Exception) {
-                        // A dead setup stream is cosmetic, not fatal: the recorded
-                        // activity still renders, and the thread subscription
-                        // this coroutine shadows must not die with it.
-                    }
-                }
-        }
-        val paginationSupported = session.state.value.capabilities.threadSnapshotPagination
-        val completionMarkerSupported =
-            session.state.value.capabilities.threadResumeCompletionMarker
-        val reasoningSupported = session.state.value.capabilities.reasoningMessages
-        combine(
-                session.subscribe(
-                    WsMethods.OrchestrationSubscribeThread,
-                    payload = {
-                        buildJsonObject {
-                            put("threadId", id.value)
-                            // Only resume when this connection fetched an
-                            // authoritative baseline (HTTP prefetch). A stale
-                            // cursor would skip events the local copy never saw.
-                            if (prefetchOk && lastSequence > 0) {
-                                put("afterSequence", lastSequence)
-                            }
-                            // Gated like RN's state/threads.ts: an older server
-                            // never sends "synchronized", and asking anyway
-                            // would park the thread in Syncing forever.
-                            if (completionMarkerSupported) {
-                                put("requestCompletionMarker", true)
-                            }
-                            // Without the opt-in the server folds thinking
-                            // traces into system messages; asking turns them
-                            // into the feed's "Thought" rows.
-                            if (reasoningSupported) {
-                                put("reasoningMessages", true)
-                            }
-                            // The fallback snapshot (no `afterSequence`, or a
-                            // gap too large to replay) is windowed to the last
-                            // ten user turns on capable servers — absent, the
-                            // server sends the full thread, which preserves
-                            // pre-pagination behavior.
-                            if (paginationSupported) {
-                                put("turnLimit", INITIAL_THREAD_USER_TURN_LIMIT)
-                            }
-                        }
-                    },
-                    ThreadStreamItemDto.serializer(),
-                    prefetch = { connected ->
-                        prefetchOk =
-                            runCatching {
-                                    withTimeoutOrNull(SNAPSHOT_PREFETCH_MS) {
-                                        val fresh =
-                                            connected.getJson(
-                                                "/api/orchestration/threads/${id.value}" +
-                                                    buildString {
-                                                        if (paginationSupported) {
-                                                            append("?turnLimit=$INITIAL_THREAD_USER_TURN_LIMIT")
-                                                        }
-                                                        if (reasoningSupported) {
-                                                            append(
-                                                                if (paginationSupported) "&" else "?"
-                                                            )
-                                                            append("reasoningMessages=true")
-                                                        }
-                                                    },
-                                                club.touchtech.s5code.kotlin.transport.wire
-                                                    .ThreadDetailSnapshotDto.serializer(),
-                                            )
-                                        snapshot = fresh.thread
-                                        page = fresh.page
-                                        lastSequence = fresh.snapshotSequence
-                                        snapshotStore.saveThread(environmentId, fresh.thread, page)
-                                    } != null
-                                }
-                                .getOrDefault(false)
-                    },
-                ),
-                clock,
-            ) { item, now ->
-                item to now
-            }
-            .retryWhen { cause, _ ->
-                // Navigation intentionally races the durable outbox drain. Until
-                // bootstrap creates this generated id, subscribeThread answers
-                // "not found"; that is expected queue latency, not a fatal
-                // coroutine failure. Retry on shell projection, or finish quietly
-                // if dispatch rejects the creation and the outbox drops ownership.
-                if (key !in pendingCreationKeys.value || !isPendingCreationMissingThread(cause, id)) {
-                    false
-                } else {
-                    combine(threads, pendingCreationKeys) { summaries, pending ->
-                            summaries.any {
-                                it.environmentId == environmentId && it.id == id
-                            } to (key in pending)
-                        }
-                        .first { (visible, expected) -> visible || !expected }
-                        .first
-                }
-            }
-            .catch { cause ->
-                // A malformed/stale deep link can also address a missing thread.
-                // The screen's empty/loading state owns that outcome; never let a
-                // read-only subscription failure cancel the app ViewModel scope.
-                if (cause is CancellationException) throw cause
-                if (!isPendingCreationMissingThread(cause, id)) return@catch
-            }
-            .collect { (item, now) ->
-                applyLock.withLock {
-                    when (item.kind) {
-                        "snapshot" -> {
-                            sync.value =
-                                if (!completionMarkerSupported &&
-                                    item.snapshot?.thread != null
-                                ) {
-                                    // No "synchronized" frame is coming on a
-                                    // server without the marker capability;
-                                    // the snapshot alone is the settled state.
-                                    ThreadSyncPhase.Live
-                                } else if (target.value == null) {
-                                    ThreadSyncPhase.Loading
-                                } else {
-                                    ThreadSyncPhase.Syncing
-                                }
-                            snapshot = item.snapshot?.thread
-                            page = item.snapshot?.page
-                            item.snapshot?.snapshotSequence?.let { lastSequence = it }
-                            // A fresh window rewrites history: an older-page
-                            // fetch in flight merges against nothing valid.
-                            historyEpoch += 1
-                            pendingOlderPage = null
-                            loadingOlder = false
-                            snapshot?.let { snapshotStore.saveThread(environmentId, it, page) }
-                        }
-                        "synchronized" -> sync.value = ThreadSyncPhase.Live
-                        "event" -> {
-                            val current = snapshot
-                            val event = item.event
-                            // Replay overlap: `afterSequence` resumes can re-deliver
-                            // events the HTTP snapshot already covered.
-                            val eventSequence =
-                                (event as? JsonObject)?.get("sequence")
-                                    ?.jsonPrimitive?.longOrNull
-                            if (eventSequence != null && eventSequence <= lastSequence) {
-                                return@collect
-                            }
-                            val eventType =
-                                (event as? JsonObject)?.get("type")
-                                    ?.jsonPrimitive?.contentOrNull
-                            if (eventType == "thread.reverted") {
-                                historyEpoch += 1
-                                pendingOlderPage = null
-                            }
-                            if (current != null && event != null) {
-                                when (val result = applyThreadEvent(current, event)) {
-                                    is ThreadReduction.Updated -> snapshot = result.thread
-                                    ThreadReduction.Deleted -> {
-                                        snapshot = null
-                                        target.value = null
-                                        snapshotStore.removeThread(environmentId, id.value)
-                                    }
-                                    ThreadReduction.Unchanged -> Unit
-                                }
-                                if (eventSequence != null) lastSequence = eventSequence
-                            }
-                            // A parked older page merges once the live stream
-                            // has reached its thread-scoped watermark.
-                            val parked = pendingOlderPage
-                            val parkedWatermark = parked?.page?.threadSequence
-                            if (parked != null && parkedWatermark != null &&
-                                parkedWatermark <= lastSequence
-                            ) {
-                                val current = snapshot
-                                if (current != null &&
-                                    parked.snapshotSequence >= lastSequence
-                                ) {
-                                    snapshot = mergeOlderThreadPage(current, parked.thread)
-                                    page = parked.page?.copy(snapshotSequence = lastSequence)
-                                    snapshotStore.saveThread(environmentId, snapshot!!, page)
-                                }
-                                pendingOlderPage = null
-                                loadingOlder = false
-                            }
-                        }
-                    }
-                    // The setup watcher's gate reads the wire thread, not the
-                    // projection: the `worktree-setup` activity does not reach
-                    // the feed.
-                    wire.value = snapshot
-                    snapshot?.let { thread ->
-                        if (item.kind == "event") {
-                            snapshotStore.saveThread(environmentId, thread, page)
-                        }
-                        val projected =
-                            threadDetailFrom(
-                                environmentId,
-                                thread,
-                                ::instanceFor,
-                                now,
-                                page,
-                                loadingOlder,
-                            )
-                        target.value = projected.copy(syncPhase = sync.value)
-                        if (key in homePendingDetailKeys) publishPendingRequests()
-                    }
-                }
-            }
-    }
-
     /**
      * Fetches and merges the next page of older turns — `loadOlderTurns` in
      * client-runtime. The actual work is the subscription's own closure so it
@@ -2003,20 +1646,6 @@ class LiveWorkspaceGateway(
      */
     override suspend fun loadOlderTurns(environmentId: EnvironmentId, id: ThreadId): Boolean =
         detailOlderLoaders["${environmentId.value}/${id.value}"]?.invoke() ?: false
-
-    /** The wire thread behind an open detail, for commands that need turn ids. */
-    private fun latestTurnId(environmentId: EnvironmentId, id: ThreadId): String? =
-        threads.value
-            .firstOrNull { it.environmentId == environmentId && it.id == id }
-            ?.let { summary ->
-                sessions.value[environmentId.value]
-                    ?.shell
-                    ?.value
-                    ?.threads
-                    ?.firstOrNull { it.id == id.value }
-                    ?.latestTurn
-                    ?.turnId
-            }
 
     /* ── Writes ──────────────────────────────────────────────────────── */
 
@@ -3637,13 +3266,6 @@ class LiveWorkspaceGateway(
          * stream can provide itself.
          */
         const val SNAPSHOT_PREFETCH_MS = 6_000L
-
-        /**
-         * Turn-window sizes from `packages/client-runtime/src/state/threads.ts`:
-         * ten user-anchored turns on open, twenty per load-earlier tap.
-         */
-        const val INITIAL_THREAD_USER_TURN_LIMIT = 10
-        const val OLDER_THREAD_PAGE_USER_TURN_LIMIT = 20
 
         fun gitActionLabel(action: String): String =
             when (action) {

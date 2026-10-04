@@ -47,11 +47,13 @@ fun ScheduledTasksScreen(store: AppStore, onBack: () -> Unit) {
     }
     fun action(method: String, task: JsonObject, enabled: Boolean? = null) {
         val target = env ?: return
+        if (busy) return
+        busy = true
         scope.launch {
-            busy = true
             try { store.workspace.environmentRequest(target.id, method, buildJsonObject {
                 put("id", task.v2String("id")); enabled?.let { put("enabled", it) }
-            }) } catch (error: Exception) { store.showError(error.message ?: "Could not update scheduled task.") }
+            }) } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { store.showError(error.message ?: "Could not update scheduled task.") }
             finally { busy = false }
         }
     }

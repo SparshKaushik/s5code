@@ -22,8 +22,8 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
     var busy by remember(id) { mutableStateOf(false) }
     fun action(block: suspend () -> Unit) {
         if (busy) return
+        busy = true
         scope.launch {
-            busy = true
             try { block() } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
             catch (error: Exception) { store.showError(error.message ?: "Operation failed.") }
             finally { busy = false }
