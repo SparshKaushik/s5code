@@ -488,12 +488,20 @@ fun threadDetailFrom(
             // bracketing a thought would otherwise strand two cards where RN
             // shows one.
             .let(::groupConsecutiveThoughts)
+    val v2 = thread.projection?.let(::v2Presentation)
 
     return ThreadDetail(
         summary = summary,
-        feed = feed,
-        approval = pendingApprovalOf(sortedActivities),
-        userInput = pendingUserInputOf(sortedActivities),
+        feed = v2?.feed ?: feed,
+        approval = if (v2 != null) v2.approval else pendingApprovalOf(sortedActivities),
+        userInput = if (v2 != null) v2.userInput else pendingUserInputOf(sortedActivities),
+        queuedRuns = v2?.queuedRuns.orEmpty(),
+        queuedMessages = v2?.queuedRuns?.size ?: 0,
+        providerNativeSubagent = v2?.providerNativeSubagent == true,
+        canSteer = v2?.canSteer == true,
+        relationships = v2?.relationships.orEmpty(),
+        usageLimitResetAt = v2?.usageLimitResetAt,
+        limitRecoveryAutoResume = v2?.limitRecoveryAutoResume == true,
         workspaceRoot = thread.worktreePath,
         page =
             page?.let {
@@ -620,7 +628,7 @@ private data class Sortable(val createdAt: String?, val entry: FeedEntry)
  * kind and label of each record a `t3-context://` reference can point at.
  * Unknown record kinds are kept — the reference still labels itself.
  */
-private fun contextRecordLabels(context: JsonElement?): Map<String, FeedEntry.ContextRecordLabel> {
+internal fun contextRecordLabels(context: JsonElement?): Map<String, FeedEntry.ContextRecordLabel> {
     val records = (context as? JsonObject)?.get("records") as? JsonArray ?: return emptyMap()
     return records.mapNotNull { element ->
         val record = element as? JsonObject ?: return@mapNotNull null
@@ -717,7 +725,7 @@ private fun collapseToolLifecycle(sortedActivities: List<ThreadActivityDto>): Li
  * and reads "Thought (×N)". Progress ticks (`thought == false`) never merge —
  * they fold beside tools, not into a thought card.
  */
-private fun groupConsecutiveThoughts(feed: List<FeedEntry>): List<FeedEntry> {
+internal fun groupConsecutiveThoughts(feed: List<FeedEntry>): List<FeedEntry> {
     val result = mutableListOf<FeedEntry>()
     var index = 0
     while (index < feed.size) {
@@ -1156,7 +1164,7 @@ private fun toolCollapseKey(activity: ThreadActivityDto, payload: JsonObject?): 
  * "started" rows whose completion will arrive anyway, progress heartbeats, and
  * context-window bookkeeping. Showing them turns the transcript into a log.
  */
-private fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
+internal fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
     val payload = activity.payload as? JsonObject
     val turnId = activity.turnId
     val at = parseInstant(activity.createdAt) ?: 0L
@@ -1672,7 +1680,7 @@ fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApprova
  * `requestType` vocabulary — `requestKindFromRequestType` in
  * `packages/client-runtime/src/pendingRequests.ts`.
  */
-private fun approvalKindOf(payload: JsonObject): ApprovalKind =
+internal fun approvalKindOf(payload: JsonObject): ApprovalKind =
     when (payload.string("requestKind")) {
         "file-read" -> ApprovalKind.FileRead
         "file-change" -> ApprovalKind.FileWrite
@@ -1693,7 +1701,7 @@ private fun approvalKindOf(payload: JsonObject): ApprovalKind =
  * The strings pass through untouched: the reply echoes [ApprovalOption.decision]
  * and translating it here is how "always" used to reach OpenCode as a reject.
  */
-private fun approvalOptionsOf(payload: JsonObject): List<ApprovalOption> =
+internal fun approvalOptionsOf(payload: JsonObject): List<ApprovalOption> =
     (payload["options"] as? JsonArray)
         ?.mapNotNull { raw ->
             val option = raw as? JsonObject ?: return@mapNotNull null
@@ -1739,7 +1747,7 @@ fun pendingUserInputOf(sortedActivities: List<ThreadActivityDto>): PendingUserIn
  * unanswerable (no options and custom answers disallowed) is dropped rather than
  * rendered as a card the user cannot satisfy.
  */
-private fun userInputOf(payload: JsonObject): PendingUserInput? {
+internal fun userInputOf(payload: JsonObject): PendingUserInput? {
     val rawQuestions = payload["questions"] as? JsonArray ?: return null
     val questions =
         rawQuestions.mapNotNull { raw ->

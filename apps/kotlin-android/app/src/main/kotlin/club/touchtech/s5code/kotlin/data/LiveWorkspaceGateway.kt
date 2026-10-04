@@ -61,6 +61,16 @@ import club.touchtech.s5code.kotlin.transport.WsMethods
 import club.touchtech.s5code.kotlin.transport.applyShellStreamItem
 import club.touchtech.s5code.kotlin.transport.hasCacheableWorkspaceContent
 import club.touchtech.s5code.kotlin.transport.applyThreadEvent
+import club.touchtech.s5code.kotlin.transport.applyV2Event
+import club.touchtech.s5code.kotlin.transport.asThreadDto
+import club.touchtech.s5code.kotlin.transport.mergeV2History
+import club.touchtech.s5code.kotlin.transport.normalizedV2
+import club.touchtech.s5code.kotlin.transport.v2String
+import club.touchtech.s5code.kotlin.transport.v2Long
+import club.touchtech.s5code.kotlin.transport.wire.V2ProjectionDto
+import club.touchtech.s5code.kotlin.transport.wire.V2ThreadSnapshotDto
+import club.touchtech.s5code.kotlin.transport.wire.V2ThreadStreamDto
+import club.touchtech.s5code.kotlin.transport.wire.V2HistoryPageDto
 import club.touchtech.s5code.kotlin.transport.wire.AssetUrlResultDto
 import club.touchtech.s5code.kotlin.transport.wire.AttachmentUploadUrlResultDto
 import club.touchtech.s5code.kotlin.transport.wire.DispatchResultDto
@@ -625,7 +635,7 @@ class LiveWorkspaceGateway(
                                             "/api/orchestration/shell",
                                             ShellSnapshotDto.serializer(),
                                         )
-                                    connected.shell.value = snapshot
+                                    connected.shell.value = snapshot.copy(threads = snapshot.threads.map { it.normalizedV2() })
                                     snapshotStore.saveShell(
                                         EnvironmentId(session.environmentId),
                                         snapshot,
@@ -765,7 +775,8 @@ class LiveWorkspaceGateway(
             val snapshot = connected.shell.value ?: return@forEach
             val id = EnvironmentId(environmentId)
             snapshot.projects.forEach { allProjects += projectFrom(id, it) }
-            snapshot.threads.forEach { shell ->
+            (snapshot.threads + snapshot.archivedThreads).distinctBy { it.id }.forEach { raw ->
+                val shell = raw.normalizedV2()
                 val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
                 if (isArchived(shell)) archivedThreads += summary else active += summary
             }
@@ -774,7 +785,8 @@ class LiveWorkspaceGateway(
         // contributes rows archived mid-session before a refetch lands.
         archivedShells.value.forEach { (environmentId, snapshot) ->
             val id = EnvironmentId(environmentId)
-            snapshot.threads.forEach { shell ->
+            snapshot.threads.forEach { raw ->
+                val shell = raw.normalizedV2()
                 val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
                 if (archivedThreads.none {
                         it.environmentId == summary.environmentId && it.id == summary.id
@@ -1416,6 +1428,134 @@ class LiveWorkspaceGateway(
         key: String,
         target: MutableStateFlow<ThreadDetail?>,
     ) {
+        val session = sessionFor(environmentId)
+        var projection: V2ProjectionDto? = null
+        var sequence = 0L
+        var cursor: String? = null
+        var hasMore = false
+        var latestOrdinal: Long? = null
+        var loadingOlder = false
+        var epoch = 0
+        var authoritative = false
+        val lock = Mutex()
+        val sync = detailSyncPhases.getOrPut(key) { MutableStateFlow(ThreadSyncPhase.Loading) }
+        fun publishDetail() {
+            projection?.let { current ->
+                if (current.thread.v2String("deletedAt") != null) {
+                    target.value = null
+                    snapshotStore.removeThread(environmentId, id.value)
+                    return
+                }
+                val thread = current.asThreadDto()
+                val page = club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto(
+                    beforeCursor = cursor, hasMore = hasMore, snapshotSequence = sequence,
+                )
+                target.value = threadDetailFrom(environmentId, thread, ::instanceFor, clock.value, page, loadingOlder)
+                    .copy(syncPhase = sync.value)
+                snapshotStore.saveThread(environmentId, thread, page)
+                if (key in homePendingDetailKeys) publishPendingRequests()
+            }
+        }
+        detailOlderLoaders[key] = loader@{
+            val readCursor: String
+            val readEpoch: Int
+            lock.withLock {
+                if (loadingOlder || !hasMore || cursor == null) return@loader false
+                readCursor = cursor!!
+                readEpoch = epoch
+                loadingOlder = true
+                publishDetail()
+            }
+            try {
+                val page = session.getJson(
+                    "/api/orchestration/threads/${id.value}/history?cursor=${android.net.Uri.encode(readCursor)}",
+                    V2HistoryPageDto.serializer(),
+                )
+                lock.withLock {
+                    if (epoch != readEpoch) return@loader false
+                    projection = projection?.let { mergeV2History(it, page) }
+                    cursor = page.nextCursor
+                    hasMore = page.hasMoreHistory
+                    publishDetail()
+                }
+                true
+            } finally {
+                lock.withLock { loadingOlder = false; publishDetail() }
+            }
+        }
+        val setupFlow = worktreeSetups.getOrPut(key) { MutableStateFlow(null) }
+        CoroutineScope(coroutineContext).launch {
+            target.map { detail -> detail?.sessionStatus == "starting" || key in pendingCreationKeys.value }
+                .distinctUntilChanged().collectLatest { wanted ->
+                    if (wanted) session.subscribe(WsMethods.SubscribeWorktreeSetup,
+                        buildJsonObject { put("threadId", id.value) }, WorktreeSetupSnapshotDto.serializer().nullable)
+                        .catch { if (it is CancellationException) throw it }
+                        .collect { setupFlow.value = it?.toModel() }
+                }
+        }
+        combine(session.subscribe(
+            WsMethods.OrchestrationSubscribeThread,
+            payload = { buildJsonObject {
+                put("threadId", id.value)
+                put("requestCompletionMarker", true)
+                put("acceptBoundedSnapshot", true)
+                if (authoritative) put("afterSequence", sequence)
+            } },
+            serializer = V2ThreadStreamDto.serializer(),
+            prefetch = { connected ->
+                authoritative = false
+                try {
+                    val fresh = withTimeoutOrNull(SNAPSHOT_PREFETCH_MS) {
+                        connected.getJson("/api/orchestration/threads/${id.value}/bounded", V2ThreadSnapshotDto.serializer())
+                    }
+                    if (fresh != null) lock.withLock {
+                        projection = fresh.projection
+                        sequence = fresh.snapshotSequence
+                        cursor = fresh.historyCursor
+                        hasMore = fresh.hasMoreHistory
+                        latestOrdinal = fresh.latestLocalTurnOrdinal
+                        epoch += 1
+                        authoritative = true
+                        publishDetail()
+                    }
+                } catch (cancelled: CancellationException) { throw cancelled }
+                catch (_: Exception) { /* Socket fallback carries the same bounded snapshot. */ }
+            },
+        ), clock) { item, _ -> item }
+            .catch { cause ->
+                if (cause is CancellationException) throw cause
+                sync.value = ThreadSyncPhase.Live
+            }
+            .collect { item -> lock.withLock {
+                when (item.kind) {
+                    "snapshot" -> {
+                        projection = item.projection
+                        sequence = item.snapshotSequence
+                        cursor = item.historyCursor
+                        hasMore = item.hasMoreHistory
+                        latestOrdinal = item.latestLocalTurnOrdinal
+                        epoch += 1
+                        authoritative = true
+                        sync.value = ThreadSyncPhase.Syncing
+                    }
+                    "synchronized" -> sync.value = ThreadSyncPhase.Live
+                    "event", "unknown-event" -> if (item.sequence > sequence) {
+                        projection = projection?.let { current ->
+                            item.event?.let { applyV2Event(current, it, hasMore, latestOrdinal) } ?: current
+                        }
+                        sequence = item.sequence
+                    }
+                }
+                publishDetail()
+            } }
+    }
+
+    private suspend fun subscribeLegacyThread(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        key: String,
+        target: MutableStateFlow<ThreadDetail?>,
+    ) {
         var snapshot: ThreadDto? = null
         var page: club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto? = null
         // The orchestration-log sequence of the newest applied frame. Resuming
@@ -1792,7 +1932,7 @@ class LiveWorkspaceGateway(
     private suspend fun dispatch(environmentId: EnvironmentId, command: JsonObject) {
         sessionFor(environmentId)
             .request(
-                WsMethods.OrchestrationDispatchCommand,
+                if (command.v2String("type")?.startsWith("project.") == true) "projects.mutate" else WsMethods.OrchestrationDispatchCommand,
                 command,
                 DispatchResultDto.serializer(),
             )
@@ -1809,6 +1949,29 @@ class LiveWorkspaceGateway(
     ) {
         val detail = details["${environmentId.value}/${id.value}"]?.value
         val effective = settings ?: detail?.settings ?: ThreadSettings()
+        val messageId = delivery?.messageId ?: UUID.randomUUID().toString()
+        val storedAttachments = persistV2Attachments(environmentId, id.value, messageId, attachments)
+        val session = sessionFor(environmentId)
+        val contextResolved = session.state.value.capabilities.serverResolvedCommandContext
+        val projection = if (contextResolved) null else session.request("orchestration.getThreadProjection",
+            buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
+        val activeRun = projection?.runs?.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
+            ?.maxByOrNull { it.v2Long("ordinal") ?: 0 }
+        val dispatchMode = buildJsonObject {
+            val mode = delivery?.dispatchMode ?: "queue"
+            when {
+                mode == "queue" -> put("type", "queue_after_active")
+                activeRun != null -> {
+                    val native = projection?.providerThreads?.firstOrNull { it.v2String("id") == activeRun.v2String("providerThreadId") }
+                    val sessionRow = projection?.providerSessions?.firstOrNull { it.v2String("id") == native?.v2String("providerSessionId") }
+                    val capabilities = (sessionRow?.get("capabilities") as? JsonObject)?.get("turns") as? JsonObject
+                    val steer = (capabilities?.get("supportsActiveSteering") as? JsonPrimitive)?.booleanOrNull == true
+                    put("type", if (steer) "steer_active" else "queue_after_active")
+                    if (steer) put("targetRunId", activeRun.v2String("id"))
+                }
+                else -> put("type", "start_immediately")
+            }
+        }
         val current = detail?.settings
         // Mirror RN's outbox drain: synchronize metadata first when the staged
         // composer model differs, then include that same selection on turn.start.
@@ -1826,18 +1989,35 @@ class LiveWorkspaceGateway(
             Commands.startTurn(
                 threadId = id.value,
                 text = text,
-                attachments = wireAttachments(environmentId, attachments),
+                attachments = storedAttachments,
                 settings = effective,
                 contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
-                messageId = delivery?.messageId ?: UUID.randomUUID().toString(),
+                messageId = messageId,
                 createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
+                dispatchMode = dispatchMode,
+                deliveryIntent = if (contextResolved && (delivery?.dispatchMode ?: "queue") != "queue") "auto" else null,
             ),
         )
     }
 
     override suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId) {
-        dispatch(environmentId, Commands.interruptTurn(id.value, latestTurnId(environmentId, id)))
+        val projection = sessionFor(environmentId).request("orchestration.getThreadProjection",
+            buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
+        val run = projection.runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
+            .maxByOrNull { it.v2Long("ordinal") ?: 0 } ?: projection.runs.maxByOrNull { it.v2Long("ordinal") ?: 0 }
+        if (run != null) dispatch(environmentId, Commands.interruptTurn(id.value, run.v2String("id")))
+    }
+
+    override suspend fun environmentRequest(environmentId: EnvironmentId, method: String, payload: JsonObject): JsonObject =
+        sessionFor(environmentId).request(method, payload, JsonObject.serializer())
+
+    override fun environmentStream(environmentId: EnvironmentId, method: String): kotlinx.coroutines.flow.Flow<JsonObject> =
+        sessionFor(environmentId).subscribe(method, JsonObject(emptyMap()), JsonObject.serializer())
+
+    override suspend fun queueAction(environmentId: EnvironmentId, id: ThreadId, type: String,
+        runId: String?, text: String?, beforeRunId: String?, targetRunId: String?) {
+        dispatch(environmentId, Commands.queueAction(type, id.value, runId, text, beforeRunId, targetRunId))
     }
 
     override suspend fun respondToApproval(
@@ -1945,15 +2125,16 @@ class LiveWorkspaceGateway(
                 it.environmentId == environmentId && it.id.value == projectKey
             } ?: error("That project is no longer available.")
         val resolvedThreadId = threadId?.value ?: UUID.randomUUID().toString()
-        dispatch(
-            environmentId,
+        val messageId = delivery?.messageId ?: UUID.randomUUID().toString()
+        sessionFor(environmentId).execute(
+            "orchestration.launchThread",
             Commands.startTurnBootstrapping(
                 threadId = resolvedThreadId,
                 projectId = projectKey,
                 projectCwd = project.workspaceRoot,
                 title = titleFromPrompt(prompt),
                 text = prompt,
-                attachments = wireAttachments(environmentId, attachments),
+                attachments = persistV2Attachments(environmentId, resolvedThreadId, messageId, attachments),
                 instanceId = settings.provider.instanceId,
                 model = settings.model,
                 options = settings.options,
@@ -1964,7 +2145,7 @@ class LiveWorkspaceGateway(
                 worktreePath = worktreePath,
                 contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
-                messageId = delivery?.messageId ?: UUID.randomUUID().toString(),
+                messageId = messageId,
                 createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
             ),
         )
@@ -2096,7 +2277,11 @@ class LiveWorkspaceGateway(
         id: ThreadId,
         turnCount: Int,
     ) {
-        dispatch(environmentId, Commands.revertCheckpoint(id.value, turnCount))
+        val projection = sessionFor(environmentId).request("orchestration.getThreadProjection",
+            buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
+        val checkpoint = projection.checkpoints.firstOrNull { it.v2Long("appRunOrdinal") == turnCount.toLong() && it.v2String("status") == "ready" }
+            ?: error("That checkpoint is no longer available.")
+        dispatch(environmentId, Commands.rollback(id.value, checkpoint.v2String("id")!!, checkpoint.v2String("scopeId")!!))
     }
 
     /* ── Tool reads ──────────────────────────────────────────────────── */
@@ -2310,6 +2495,21 @@ class LiveWorkspaceGateway(
                 }
             }
         }
+
+    private suspend fun persistV2Attachments(environmentId: EnvironmentId, threadId: String,
+        messageId: String, attachments: List<ComposerAttachment>): List<JsonObject> {
+        val shaped = wireAttachments(environmentId, attachments)
+        val uploads = shaped.filter { it["dataUrl"] != null }
+        if (uploads.isEmpty()) return shaped
+        val result = sessionFor(environmentId).request("assets.persistChatAttachments", buildJsonObject {
+            put("threadId", threadId)
+            put("messageId", messageId)
+            put("attachments", kotlinx.serialization.json.JsonArray(uploads))
+        }, JsonObject.serializer())
+        val stored = (result["attachments"] as? kotlinx.serialization.json.JsonArray).orEmpty()
+        var index = 0
+        return shaped.map { if (it["dataUrl"] != null) stored[index++] as JsonObject else it }
+    }
 
     /** Reads an attachment's bytes into a temp file for the upload POST. */
     private suspend fun readAttachmentFile(attachment: ComposerAttachment): java.io.File? =

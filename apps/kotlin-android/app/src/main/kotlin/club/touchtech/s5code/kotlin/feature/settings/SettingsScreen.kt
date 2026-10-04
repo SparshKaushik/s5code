@@ -191,6 +191,13 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
             }
 
             S5RowGroup(title = "Configuration") {
+                S5SettingsRow(icon = Icons.Rounded.Schedule, label = "Scheduled tasks",
+                    onClick = { onOpen("settings/scheduled-tasks") })
+                S5SettingsRow(icon = Icons.Rounded.Person, label = "Provider accounts",
+                    onClick = { onOpen("settings/provider-accounts") })
+                S5SwitchRow(icon = Icons.Rounded.Bolt, label = "Steer running turns",
+                    checked = preferences.followUpBehavior == "steer",
+                    onCheckedChange = { enabled -> store.updatePreferences { it.copy(followUpBehavior = if (enabled) "steer" else "queue") } })
                 val configRowCount = if (account == CloudAccountState.Unconfigured) 1 else 3
                 S5SettingsRow(
                     icon = Icons.Rounded.Hub,

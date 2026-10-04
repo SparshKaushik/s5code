@@ -264,6 +264,18 @@ interface WorkspaceGateway {
 
     suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId)
 
+    /** V2 settings and queue operations use the environment's authenticated RPC session. */
+    suspend fun environmentRequest(environmentId: EnvironmentId, method: String,
+        payload: kotlinx.serialization.json.JsonObject): kotlinx.serialization.json.JsonObject =
+        error("Environment operations are unavailable.")
+
+    fun environmentStream(environmentId: EnvironmentId, method: String): kotlinx.coroutines.flow.Flow<kotlinx.serialization.json.JsonObject> =
+        kotlinx.coroutines.flow.flowOf(kotlinx.serialization.json.JsonObject(emptyMap()))
+
+    suspend fun queueAction(environmentId: EnvironmentId, id: ThreadId, type: String,
+        runId: String? = null, text: String? = null, beforeRunId: String? = null,
+        targetRunId: String? = null) = Unit
+
     /**
      * Answers an open approval request. [decision] is one of the strings the
      * provider advertised on the request (see `PendingApproval.options`),

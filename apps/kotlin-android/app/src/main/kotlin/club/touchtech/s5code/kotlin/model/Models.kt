@@ -370,6 +370,9 @@ sealed interface FeedEntry {
         val active: Boolean,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
+        val childThreadId: String? = null,
+        val result: String? = null,
+        val status: String? = null,
     ) : FeedEntry
 
     /**
@@ -564,6 +567,12 @@ data class ThreadDetail(
     /** Active worktree root when present; project root is supplied by the screen otherwise. */
     val workspaceRoot: String? = null,
     val queuedMessages: Int = 0,
+    val queuedRuns: List<QueuedRun> = emptyList(),
+    val providerNativeSubagent: Boolean = false,
+    val canSteer: Boolean = false,
+    val relationships: List<ThreadRelationship> = emptyList(),
+    val usageLimitResetAt: String? = null,
+    val limitRecoveryAutoResume: Boolean = false,
     /** Whether the live detail stream has reached its completion marker. */
     val syncPhase: ThreadSyncPhase = ThreadSyncPhase.Live,
     val checkpoints: List<Checkpoint> = emptyList(),
@@ -605,6 +614,9 @@ data class ThreadDetail(
      */
     val settings: ThreadSettings = ThreadSettings(),
 )
+
+data class QueuedRun(val id: String, val messageId: String, val text: String, val held: Boolean)
+data class ThreadRelationship(val threadId: String, val label: String)
 
 /**
  * The loaded window's upper edge, from `OrchestrationThreadDetailPage` in

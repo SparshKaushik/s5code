@@ -72,6 +72,7 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         notifyFailures = notifyFailures,
         liveUpdatesEnabled = liveUpdatesEnabled,
         planModeEnabled = planModeEnabled,
+        followUpBehavior = if (followUpBehavior == "steer") "steer" else "queue",
         legacyThreadListEnabled = legacyThreadListEnabled,
     )
 
@@ -80,6 +81,7 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
  * and its tests do not need a `ViewModel`.
  */
 data class RuntimePreferences(
+    val followUpBehavior: String = "queue",
     val themeMode: S5ThemeMode = S5ThemeMode.System,
     val colorTheme: S5ColorTheme = S5ColorTheme.Default,
     /** Starred models in picker order. Client-local, same as the other clients. */
@@ -116,6 +118,7 @@ data class RuntimePreferences(
 
 fun RuntimePreferences.toStored(): StoredPreferences =
     StoredPreferences(
+        followUpBehavior = followUpBehavior,
         themeMode = themeMode.name,
         // Downgrade story: an older build keeps reading the switch and sees the
         // same answer as the named choice.

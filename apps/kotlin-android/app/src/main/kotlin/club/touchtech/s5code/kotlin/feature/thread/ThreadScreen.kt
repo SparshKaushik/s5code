@@ -299,6 +299,7 @@ fun ThreadScreen(
         project?.repositoryIdentity?.displayName
             ?.takeIf { environment?.capabilities?.pullRequests == true }
     val working = summary.status == ThreadStatus.Working
+    var followUp by remember(threadId, preferences.followUpBehavior) { mutableStateOf(preferences.followUpBehavior) }
     val plan = remember(current.feed) { activePlan(current.feed) }
     // Long runs of tool calls fold behind a disclosure row, as they do in the RN
     // and desktop feeds. The expansion set is per-thread view state, so leaving and
@@ -762,7 +763,13 @@ fun ThreadScreen(
                             ),
                 )
             }
-            ThreadComposer(
+            V2ThreadControls(store, env, id, current, working, followUp,
+                onFollowUp = { followUp = it }, onOpenThread = { onOpenThread(environmentId, it) })
+            if (current.providerNativeSubagent) {
+                Text("Provider-managed subagent · ${summary.status}", modifier = Modifier.padding(16.dp),
+                    style = MaterialTheme.typography.bodySmall)
+            } else ThreadComposer(
+                sendLabel = if (working) { if (current.canSteer && followUp == "steer") "Steer" else "Queue" } else "Send",
                 value = draft.text,
                 commands =
                     remember(effectiveSettings.provider, workspaceRoot) {
@@ -867,6 +874,7 @@ fun ThreadScreen(
                                 attachments = images,
                                 settings = effectiveSettings,
                                 contextRecords = contextRecords,
+                                dispatchMode = if (working && current.canSteer && followUp == "steer") "steer" else "queue",
                             )
                             following = true
                         } catch (error: Exception) {
@@ -887,8 +895,7 @@ fun ThreadScreen(
                 onRemoveAttachment = { attachment ->
                     store.removeThreadDraftImage(environmentId, threadId, attachment.id)
                 },
-                queuedMessages =
-                    queuedMessages.count {
+                queuedMessages = current.queuedMessages + queuedMessages.count {
                         it.environmentId == env && it.threadId == id
                     },
                 connectionState = environment?.state ?: club.touchtech.s5code.kotlin.model.ConnectionState.Offline,

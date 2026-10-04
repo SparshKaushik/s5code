@@ -10,6 +10,7 @@ import kotlinx.serialization.json.Json
 /** Persisted preferences. Non-secret, so plain storage rather than the Keystore. */
 @Serializable
 data class StoredPreferences(
+    val followUpBehavior: String = "queue",
     val themeMode: String = "System",
     /**
      * The old dynamic-color switch. Only read to seed [colorTheme] for files

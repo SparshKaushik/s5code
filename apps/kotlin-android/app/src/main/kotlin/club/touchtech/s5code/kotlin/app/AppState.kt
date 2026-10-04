@@ -797,6 +797,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         attachments: List<ComposerAttachment>,
         settings: ThreadSettings,
         contextRecords: List<ComposerContextRecord> = emptyList(),
+        dispatchMode: String = preferences.value.followUpBehavior,
     ) {
         val trimmed = text.trim()
         val message =
@@ -807,6 +808,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 settings = settings,
                 threadId = ThreadId(threadId),
                 contextRecords = referencedComposerContextRecords(trimmed, contextRecords),
+                dispatchMode = dispatchMode,
             )
         val durable = outboxStore.enqueue(message)
         outboxMutation.withLock {

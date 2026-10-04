@@ -24,6 +24,7 @@ data class TurnDeliveryMetadata(
     val commandId: String,
     val messageId: String,
     val createdAt: String,
+    val dispatchMode: String = "queue",
 )
 
 /** One existing-thread message durably parked until it can be dispatched. */
@@ -181,6 +182,7 @@ fun newQueuedThreadMessage(
     creation: StoredQueuedThreadCreation? = null,
     contextRecords: List<ComposerContextRecord> = emptyList(),
     threadId: ThreadId = ThreadId(UUID.randomUUID().toString()),
+    dispatchMode: String = "queue",
 ): QueuedThreadMessage =
     QueuedThreadMessage(
         environmentId = environmentId,
@@ -195,6 +197,7 @@ fun newQueuedThreadMessage(
                 commandId = UUID.randomUUID().toString(),
                 messageId = UUID.randomUUID().toString(),
                 createdAt = Instant.now().toString(),
+                dispatchMode = dispatchMode,
             ),
     )
 
@@ -212,6 +215,7 @@ data class StoredQueuedThreadCreation(
 
 @Serializable
 private data class StoredQueuedThreadMessage(
+    val dispatchMode: String = "queue",
     val schemaVersion: Int = 1,
     val environmentId: String,
     val threadId: String,
@@ -236,6 +240,7 @@ internal fun encodeQueuedThreadMessage(message: QueuedThreadMessage): String =
             commandId = message.delivery.commandId,
             messageId = message.delivery.messageId,
             createdAt = message.delivery.createdAt,
+            dispatchMode = message.delivery.dispatchMode,
             text = message.text,
             attachments = message.attachments.map { it.toStored() },
             settings = message.settings.toStoredThreadSettings(),
@@ -258,6 +263,6 @@ internal fun decodeQueuedThreadMessage(raw: String): QueuedThreadMessage {
         settings = stored.settings.toRuntimeThreadSettings(),
         creation = stored.creation,
         contextRecords = stored.contextRecords,
-        delivery = TurnDeliveryMetadata(stored.commandId, stored.messageId, stored.createdAt),
+        delivery = TurnDeliveryMetadata(stored.commandId, stored.messageId, stored.createdAt, stored.dispatchMode),
     )
 }

@@ -97,6 +97,7 @@ data class SessionState(
  * gate the write paths rather than merely hiding buttons.
  */
 data class ServerCapabilities(
+    val serverResolvedCommandContext: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
     val threadPinning: Boolean = false,
@@ -459,6 +460,7 @@ class EnvironmentSession(
                         config.settings.environmentIcon ?: descriptor.platform.machine,
                     capabilities =
                         ServerCapabilities(
+                            serverResolvedCommandContext = descriptor.capabilities.serverResolvedCommandContext,
                             threadSettlement = descriptor.capabilities.threadSettlement,
                             threadSnooze = descriptor.capabilities.threadSnooze,
                             threadPinning = descriptor.capabilities.threadPinning,

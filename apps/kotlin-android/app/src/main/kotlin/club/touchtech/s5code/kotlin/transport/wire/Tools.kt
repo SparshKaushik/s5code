@@ -280,6 +280,8 @@ data class ServerConfigStreamPayloadDto(
 
 @Serializable
 data class ServerCapabilitiesDto(
+    val serverResolvedCommandContext: Boolean = false,
+    val threadVisitedTracking: Boolean = false,
     val connectionProbe: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,

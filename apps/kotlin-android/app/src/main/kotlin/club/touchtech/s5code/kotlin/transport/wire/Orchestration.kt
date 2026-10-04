@@ -2,6 +2,7 @@ package club.touchtech.s5code.kotlin.transport.wire
 
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 
 /**
  * Wire DTOs for the orchestration contracts in
@@ -127,6 +128,24 @@ data class ThreadShellDto(
     /** Set when `thread.auto-settle.set` turned the idle sweep off for this thread. */
     val autoSettleDisabledAt: String? = null,
     val unsettledAt: String? = null,
+    val status: String? = null,
+    val providerInstanceId: String? = null,
+    val latestRunId: String? = null,
+    val activeRunId: String? = null,
+    val latestRunRequestedAt: String? = null,
+    val latestRunStartedAt: String? = null,
+    val latestRunCompletedAt: String? = null,
+    val activityRunStartedAt: String? = null,
+    val activityRunStatus: String? = null,
+    val pendingRuntimeRequest: JsonObject? = null,
+    val pendingBackgroundTasks: List<JsonObject> = emptyList(),
+    val lastError: String? = null,
+    val lastVisitedAt: String? = null,
+    val lineage: JsonObject? = null,
+    val creationSource: String? = null,
+    val historyOrigin: String? = null,
+    val usageLimitResetAt: String? = null,
+    val limitRecovery: JsonObject? = null,
 )
 
 @Serializable
@@ -143,6 +162,8 @@ data class ShellSnapshotDto(
     val projects: List<ProjectShellDto> = emptyList(),
     val threads: List<ThreadShellDto> = emptyList(),
     val updatedAt: String? = null,
+    val schemaVersion: Int = 2,
+    val archivedThreads: List<ThreadShellDto> = emptyList(),
 )
 
 /**
@@ -273,6 +294,8 @@ data class ThreadDto(
     val activities: List<ThreadActivityDto> = emptyList(),
     val checkpoints: List<CheckpointSummaryDto> = emptyList(),
     val session: SessionDto? = null,
+    /** Authoritative V2 control plane and ordered timeline retained in the cache. */
+    val projection: V2ProjectionDto? = null,
 )
 
 @Serializable

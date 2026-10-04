@@ -172,6 +172,7 @@ fun ThreadComposer(
     onOpenDevicePreview: () -> Unit = {},
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
+    sendLabel: String = "Send",
     onCancel: () -> Unit,
     working: Boolean,
     attachments: List<ComposerAttachment>,
@@ -592,7 +593,7 @@ fun ThreadComposer(
                             }
                             S5ComposerAction(
                                 icon = Icons.AutoMirrored.Rounded.Send,
-                                label = if (queuedMessages > 0 || connectionState != ConnectionState.Connected) "Queue" else "Send",
+                                label = if (connectionState != ConnectionState.Connected) "Queue" else sendLabel,
                                 onClick = onSend,
                                 enabled = canSend,
                             )

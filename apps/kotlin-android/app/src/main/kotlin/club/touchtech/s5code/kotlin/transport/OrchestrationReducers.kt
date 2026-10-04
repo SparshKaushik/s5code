@@ -51,33 +51,36 @@ fun applyShellStreamItem(
     item: ShellStreamItemDto,
 ): ShellSnapshotDto =
     when (item.kind) {
-        "snapshot" -> item.snapshot ?: snapshot
+        "snapshot" -> item.snapshot?.let { fresh -> fresh.copy(
+            threads = fresh.threads.map { it.normalizedV2() },
+            archivedThreads = fresh.archivedThreads.map { it.normalizedV2() },
+        ) } ?: snapshot
         "synchronized" -> snapshot
         else -> {
             val sequence = item.sequence
             if (sequence == null || sequence <= snapshot.snapshotSequence) snapshot
             else
                 when (item.kind) {
-                    "project-upserted" ->
+                    "project-upserted", "project.updated" ->
                         item.project?.let { project ->
                             snapshot.copy(
                                 projects = snapshot.projects.upsertBy(project) { it.id == project.id },
                                 snapshotSequence = sequence,
                             )
                         } ?: snapshot
-                    "project-removed" ->
+                    "project-removed", "project.removed" ->
                         snapshot.copy(
                             projects = snapshot.projects.filterNot { it.id == item.projectId },
                             snapshotSequence = sequence,
                         )
-                    "thread-upserted" ->
+                    "thread-upserted", "thread.updated" ->
                         item.thread?.let { thread ->
                             snapshot.copy(
-                                threads = snapshot.threads.upsertBy(thread) { it.id == thread.id },
+                                threads = snapshot.threads.upsertBy(thread.normalizedV2()) { it.id == thread.id },
                                 snapshotSequence = sequence,
                             )
                         } ?: snapshot
-                    "thread-removed" ->
+                    "thread-removed", "thread.removed" ->
                         snapshot.copy(
                             threads = snapshot.threads.filterNot { it.id == item.threadId },
                             snapshotSequence = sequence,

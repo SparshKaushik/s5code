@@ -19,7 +19,7 @@ import kotlinx.serialization.json.putJsonObject
 
 /**
  * Builders for `orchestration.dispatchCommand` payloads, matching
- * `ClientOrchestrationCommand` in `packages/contracts/src/orchestration.ts`.
+ * `OrchestrationV2Command` in `packages/contracts/src/orchestrationV2.ts`.
  *
  * Commands are built as JSON rather than typed classes because the union has 23
  * members with almost no shared fields, and each one is written in exactly one
@@ -78,13 +78,15 @@ object Commands {
         commandId: String = newCommandId(),
         messageId: String = UUID.randomUUID().toString(),
         createdAt: String = now(),
+        dispatchMode: JsonObject = buildJsonObject { put("type", "start_immediately") },
+        deliveryIntent: String? = "auto",
     ): JsonObject = buildJsonObject {
-        put("type", "thread.turn.start")
+        put("type", "message.dispatch")
         put("commandId", commandId)
         put("threadId", threadId)
-        putJsonObject("message") {
-            put("messageId", messageId)
-            put("role", "user")
+        put("createdBy", "user")
+        put("creationSource", "mobile")
+        put("messageId", messageId)
             put("text", text)
             if (contextRecords.isNotEmpty()) {
                 putJsonObject("context") {
@@ -97,11 +99,9 @@ object Commands {
             putJsonArray("attachments") {
                 attachments.forEach { add(it) }
             }
-        }
         putModelSelection(settings.provider.instanceId, settings.model, settings.options)
-        put("runtimeMode", settings.approvalPolicy.toRuntimeMode())
-        put("interactionMode", if (settings.runtimeMode == RuntimeMode.Plan) "plan" else "default")
-        put("createdAt", createdAt)
+        put("dispatchMode", dispatchMode)
+        deliveryIntent?.let { put("deliveryIntent", it) }
     }
 
     /**
@@ -130,12 +130,11 @@ object Commands {
         messageId: String = UUID.randomUUID().toString(),
         createdAt: String = now(),
     ): JsonObject = buildJsonObject {
-        put("type", "thread.turn.start")
         put("commandId", commandId)
         put("threadId", threadId)
-        putJsonObject("message") {
+        put("creationSource", "mobile")
+        putJsonObject("initialMessage") {
             put("messageId", messageId)
-            put("role", "user")
             put("text", text)
             if (contextRecords.isNotEmpty()) {
                 putJsonObject("context") {
@@ -150,48 +149,42 @@ object Commands {
             }
         }
         putModelSelection(instanceId, model, options)
-        put("titleSeed", title)
+        put("projectId", projectId)
+        put("title", title)
+        put("generateTitle", true)
         put("runtimeMode", runtimeMode)
         put("interactionMode", interactionMode)
-        putJsonObject("bootstrap") {
-            putJsonObject("createThread") {
-                put("projectId", projectId)
-                put("title", title)
-                putModelSelection(instanceId, model, options)
-                put("runtimeMode", runtimeMode)
-                put("interactionMode", interactionMode)
-                if (branch != null) put("branch", branch) else put("branch", null as String?)
-                // In worktree mode the path is decided by prepareWorktree, so
-                // sending one here would fight it. An explicit path is the
-                // "New thread on branch" prefill: open the existing worktree.
-                put("worktreePath", if (newWorktree) null else worktreePath)
-                put("createdAt", createdAt)
-            }
-            if (newWorktree && branch != null) {
-                putJsonObject("prepareWorktree") {
-                    put("projectCwd", projectCwd)
-                    put("baseBranch", branch)
-                    put("branch", worktreeBranchName(title))
+        putJsonObject("workspaceStrategy") {
+            when {
+                newWorktree -> {
+                    put("type", "worktree")
+                    put("baseRef", branch ?: "HEAD")
                 }
-                // A fresh worktree has no node_modules; skipping setup would give
-                // the agent a workspace where nothing builds.
-                put("runSetupScript", true)
+                worktreePath != null -> {
+                    put("type", "existing_worktree")
+                    put("worktreePath", worktreePath)
+                    branch?.let { put("branch", it) }
+                }
+                else -> {
+                    put("type", "root")
+                    branch?.let { put("branch", it) }
+                }
             }
         }
-        put("createdAt", createdAt)
     }
 
     fun interruptTurn(threadId: String, turnId: String?): JsonObject = buildJsonObject {
-        put("type", "thread.turn.interrupt")
+        put("type", "run.interrupt")
         put("commandId", newCommandId())
         put("threadId", threadId)
-        if (turnId != null) put("turnId", turnId)
-        put("createdAt", now())
+        requireNotNull(turnId) { "This thread has no interruptible run." }
+        put("runId", turnId)
+        put("holdQueue", true)
     }
 
     fun respondToApproval(threadId: String, requestId: String, decision: String): JsonObject =
         buildJsonObject {
-            put("type", "thread.approval.respond")
+            put("type", "runtime-request.respond")
             put("commandId", newCommandId())
             put("threadId", threadId)
             put("requestId", requestId)
@@ -215,7 +208,7 @@ object Commands {
         answers: Map<String, UserInputAnswer>,
         attachmentsByQuestionId: Map<String, List<SentAttachment>> = emptyMap(),
     ): JsonObject = buildJsonObject {
-        put("type", "thread.user-input.respond")
+        put("type", "runtime-request.respond")
         put("commandId", newCommandId())
         put("threadId", threadId)
         put("requestId", requestId)
@@ -272,7 +265,7 @@ object Commands {
         options: List<ProviderOptionSelection> = emptyList(),
         commandId: String = newCommandId(),
     ): JsonObject = buildJsonObject {
-        put("type", "thread.meta.update")
+        put("type", if (instanceId != null && model != null) "thread.model-selection.set" else "thread.metadata.update")
         put("commandId", commandId)
         put("threadId", threadId)
         // The contract rejects both together, so the caller picks one.
@@ -358,6 +351,25 @@ object Commands {
         put("threadId", threadId)
         put("turnCount", turnCount)
         put("createdAt", now())
+    }
+
+    fun rollback(threadId: String, checkpointId: String, scopeId: String): JsonObject = buildJsonObject {
+        put("type", "checkpoint.rollback")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("checkpointId", checkpointId)
+        put("scopeId", scopeId)
+    }
+
+    fun queueAction(type: String, threadId: String, runId: String? = null,
+        text: String? = null, beforeRunId: String? = null, targetRunId: String? = null): JsonObject = buildJsonObject {
+        put("type", type)
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        runId?.let { put(if (type == "queued-message.promote-to-steer") "queuedRunId" else "runId", it) }
+        text?.let { put("text", it) }
+        if (type == "queued-run.reorder") put("beforeRunId", beforeRunId)
+        targetRunId?.let { put("targetRunId", it) }
     }
 
     /**

@@ -143,7 +143,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         serializer: kotlinx.serialization.KSerializer<T>,
     ): T {
         val url = endpoint(httpBaseUrl, path)
-        val builder = Request.Builder().url(url).get()
+        val builder = Request.Builder().url(url).header("x-t3-orchestration-protocol", "2").get()
         when (credential) {
             is EnvironmentCredential.Bearer ->
                 builder.header("authorization", "Bearer ${credential.token}")
@@ -248,6 +248,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
                 buildString {
                     append("wsTicket=").append(java.net.URLEncoder.encode(ticket, "UTF-8"))
                     append("&clientSurface=mobile")
+                    append("&orchestrationProtocol=2")
                     append("&clientAppVersion=")
                         .append(java.net.URLEncoder.encode(BuildConfig.VERSION_NAME, "UTF-8"))
                     append("&clientDeviceType=phone")
