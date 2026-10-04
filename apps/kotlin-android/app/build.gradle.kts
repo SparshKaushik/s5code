@@ -61,8 +61,8 @@ android {
         applicationId = "club.touchtech.s5code.kotlin"
         minSdk = 26
         targetSdk = 37
-        versionCode = 18
-        versionName = "0.1.0-alpha.18"
+        versionCode = 19
+        versionName = "0.1.0-alpha.19"
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
 
         // Same three values the RN client puts in `extra`: publishable key, the
