@@ -4,6 +4,7 @@ import club.touchtech.s5code.kotlin.model.*
 import club.touchtech.s5code.kotlin.transport.TransportJson
 import club.touchtech.s5code.kotlin.transport.isVisible
 import club.touchtech.s5code.kotlin.transport.visibilityPredicate
+import club.touchtech.s5code.kotlin.transport.latestRootFailure
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Long
 import club.touchtech.s5code.kotlin.transport.v2Bool
@@ -21,6 +22,8 @@ internal data class V2Presentation(
     val relationships: List<ThreadRelationship>,
     val usageLimitResetAt: String?,
     val limitRecoveryAutoResume: Boolean,
+    val usageLimitReached: Boolean,
+    val limitRecoverySnoozed: Boolean,
 )
 
 /** V2 ordering comes from visibleTurnItems, including inherited fork history, never timestamps. */
@@ -126,9 +129,10 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     val lineage = projection.thread["lineage"] as? JsonObject
     val recovery = projection.thread["limitRecovery"] as? JsonObject
     val latestRun = projection.runs.filter { it.v2String("status") !in setOf("queued", "cancelled", "rolled_back") }
-        .maxByOrNull { it.v2Long("ordinal") ?: 0 }?.v2String("id")
-    val failure = projection.turnItems.lastOrNull { it.v2String("type") == "error" && it.v2String("runId") == latestRun }
-        ?.get("failure") as? JsonObject
+        .maxByOrNull { it.v2Long("ordinal") ?: 0 }
+    val rootFailure = projection.latestRootFailure(latestRun)
+    val sessionError = projection.providerSessions.lastOrNull { it.v2String("providerInstanceId") == projection.thread.v2String("providerInstanceId") }?.v2String("lastError")
+    val failure = rootFailure?.takeIf { sessionError == null || sessionError == it.v2String("message") }
     return V2Presentation(
         groupConsecutiveThoughts(feed),
         approvalItem?.let { PendingApproval(it.v2String("requestId")!!, it.v2String("title") ?: "Approval required",
@@ -154,6 +158,9 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             }
         }.distinctBy { it.threadId },
         if (failure?.v2String("class") == "usage_limit") failure.v2String("resetAt") else null,
-        recovery?.v2Bool("autoResume") == true,
+        recovery?.v2Bool("autoResume") == true && recovery.v2String("runId") == latestRun?.v2String("id") && recovery.v2String("resetAt") == failure?.v2String("resetAt"),
+        failure?.v2String("class") == "usage_limit",
+        recovery?.v2Bool("snooze") == true && recovery.v2String("runId") == latestRun?.v2String("id") &&
+            parseInstant(projection.thread.v2String("snoozedUntil")) == parseInstant(failure?.v2String("resetAt")),
     )
 }

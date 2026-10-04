@@ -114,6 +114,9 @@ fun statusPresentation(status: ThreadStatus): S5StatusPresentation {
                 Icons.Rounded.Schedule,
                 S5PillShape,
             )
+        ThreadStatus.Waiting ->
+            S5StatusPresentation("Waiting", colors.inputContainer, colors.onInputContainer, colors.input,
+                colors.onInput, Icons.Rounded.HourglassEmpty, S5PillShape)
         ThreadStatus.Idle ->
             S5StatusPresentation(
                 "Idle",

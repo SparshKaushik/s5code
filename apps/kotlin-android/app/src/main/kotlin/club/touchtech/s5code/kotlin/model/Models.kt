@@ -187,6 +187,7 @@ data class RepositoryIdentity(
 )
 
 enum class ThreadStatus {
+    Waiting,
     Working,
     AwaitingApproval,
     AwaitingInput,
@@ -579,6 +580,8 @@ data class ThreadDetail(
     val relationships: List<ThreadRelationship> = emptyList(),
     val usageLimitResetAt: String? = null,
     val limitRecoveryAutoResume: Boolean = false,
+    val usageLimitReached: Boolean = false,
+    val limitRecoverySnoozed: Boolean = false,
     /** Whether the live detail stream has reached its completion marker. */
     val syncPhase: ThreadSyncPhase = ThreadSyncPhase.Live,
     val checkpoints: List<Checkpoint> = emptyList(),

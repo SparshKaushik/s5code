@@ -65,6 +65,7 @@ import club.touchtech.s5code.kotlin.transport.applyV2Event
 import club.touchtech.s5code.kotlin.transport.asThreadDto
 import club.touchtech.s5code.kotlin.transport.mergeV2History
 import club.touchtech.s5code.kotlin.transport.normalizedV2
+import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Long
 import club.touchtech.s5code.kotlin.transport.wire.V2ProjectionDto
@@ -2062,7 +2063,6 @@ class LiveWorkspaceGateway(
                 contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
                 messageId = messageId,
-                createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
                 dispatchMode = dispatchMode,
                 deliveryIntent = if (contextResolved && (delivery?.dispatchMode ?: "queue") != "queue") delivery?.dispatchMode ?: "auto" else null,
             ),
@@ -2073,7 +2073,9 @@ class LiveWorkspaceGateway(
         val projection = sessionFor(environmentId).request("orchestration.getThreadProjection",
             buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
         val run = projection.runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
-            .maxByOrNull { it.v2Long("ordinal") ?: 0 } ?: projection.runs.maxByOrNull { it.v2Long("ordinal") ?: 0 }
+            .maxByOrNull { it.v2Long("ordinal") ?: 0 }
+            ?: if (projection.pendingBackgroundWork().isNotEmpty()) projection.runs.filterNot { it.v2String("status") == "queued" }
+                .maxByOrNull { it.v2Long("ordinal") ?: 0 } else null
         if (run != null) dispatch(environmentId, Commands.interruptTurn(id.value, run.v2String("id")))
     }
 
@@ -2088,6 +2090,17 @@ class LiveWorkspaceGateway(
     override suspend fun markThreadUnread(environmentId: EnvironmentId, id: ThreadId) {
         if (sessionFor(environmentId).state.value.capabilities.threadVisitedTracking)
             dispatch(environmentId, Commands.lifecycle("thread.mark-unread", id.value))
+    }
+
+    override suspend fun updateLimitRecovery(environmentId: EnvironmentId, id: ThreadId, runId: String,
+        resetAt: String, autoResume: Boolean?, snooze: Boolean?) {
+        dispatch(environmentId, buildJsonObject {
+            put("type", "thread.metadata.update"); put("commandId", Commands.newCommandId()); put("threadId", id.value)
+            putJsonObject("limitRecovery") {
+                put("runId", runId); put("resetAt", resetAt)
+                autoResume?.let { put("autoResume", it) }; snooze?.let { put("snooze", it) }
+            }
+        })
     }
 
     private suspend fun awaitProject(environmentId: EnvironmentId, projectId: String): Project =
@@ -2228,7 +2241,6 @@ class LiveWorkspaceGateway(
             Commands.startTurnBootstrapping(
                 threadId = resolvedThreadId,
                 projectId = projectKey,
-                projectCwd = project.workspaceRoot,
                 title = titleFromPrompt(prompt),
                 text = prompt,
                 attachments = persistV2Attachments(environmentId, resolvedThreadId, messageId, attachments),
@@ -2243,7 +2255,6 @@ class LiveWorkspaceGateway(
                 contextRecords = contextRecords.map { it.toWireJson() },
                 commandId = delivery?.commandId ?: Commands.newCommandId(),
                 messageId = messageId,
-                createdAt = delivery?.createdAt ?: java.time.Instant.now().toString(),
             ),
         )
         return ThreadId(resolvedThreadId)

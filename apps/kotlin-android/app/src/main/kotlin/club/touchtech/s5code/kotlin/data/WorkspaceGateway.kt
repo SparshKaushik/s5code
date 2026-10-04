@@ -266,6 +266,8 @@ interface WorkspaceGateway {
 
     suspend fun visitThread(environmentId: EnvironmentId, id: ThreadId, visitedAtMillis: Long) = Unit
     suspend fun markThreadUnread(environmentId: EnvironmentId, id: ThreadId) = Unit
+    suspend fun updateLimitRecovery(environmentId: EnvironmentId, id: ThreadId, runId: String,
+        resetAt: String, autoResume: Boolean? = null, snooze: Boolean? = null) = Unit
 
     suspend fun ensureScratchProject(environmentId: EnvironmentId): Project = error("Scratch projects are unavailable.")
     suspend fun createNamedProject(environmentId: EnvironmentId, name: String): Pair<Project, String?> =

@@ -47,7 +47,6 @@ class CommandsTest {
                 settings = settings,
                 commandId = "command-stable",
                 messageId = "message-stable",
-                createdAt = "2026-08-28T00:00:00Z",
             )
 
         assertEquals("command-stable", command.getValue("commandId").jsonPrimitive.content)

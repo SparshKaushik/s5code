@@ -12,17 +12,18 @@ internal fun JsonObject.v2Objects(key: String): List<JsonObject> =
 internal fun ThreadShellDto.normalizedV2(): ThreadShellDto {
     if (status == null) return this
     val live = activityRunStatus ?: status
+    val backgroundHolds = pendingBackgroundTasks.any { it.v2String("kind") != "command" }
     val turnId = activeRunId ?: latestRunId
     return copy(
         latestTurn = turnId?.let {
             LatestTurnDto(it, v2LegacyState(live), latestRunRequestedAt,
                 activityRunStartedAt ?: latestRunStartedAt, latestRunCompletedAt)
         },
-        session = SessionDto(id, v2LegacySession(live), providerInstanceId = providerInstanceId,
+        session = SessionDto(id, if (backgroundHolds && live == "waiting") "ready" else v2LegacySession(live), providerInstanceId = providerInstanceId,
             activeTurnId = activeRunId, lastError = lastError, updatedAt = updatedAt),
         hasPendingApprovals = pendingRuntimeRequest?.v2String("kind")?.let { it !in setOf("user_input", "auth_refresh", "dynamic_tool_call") } == true,
         hasPendingUserInput = pendingRuntimeRequest?.v2String("kind") == "user_input",
-        backgroundLiveness = if (pendingBackgroundTasks.isNotEmpty()) "monitoring" else null,
+        backgroundLiveness = if (pendingBackgroundTasks.any { it.v2String("kind") != "command" }) "monitoring" else null,
     )
 }
 
@@ -39,6 +40,42 @@ internal fun v2LegacySession(status: String): String = when (status) {
     else -> "ready"
 }
 
+internal fun V2ProjectionDto.latestRootFailure(run: JsonObject?): JsonObject? {
+    if (run?.v2String("status") != "failed") return null
+    return turnItems.filter { it.v2String("type") == "error" && it.v2String("status") == "failed" &&
+        it.v2String("runId") == run.v2String("id") && it.v2String("nodeId") == run.v2String("rootNodeId") }
+        .maxWithOrNull(compareBy<JsonObject>({ it.v2String("updatedAt").orEmpty() }, { it.v2Long("ordinal") ?: 0 }, { it.v2String("id").orEmpty() }))
+        ?.get("failure") as? JsonObject
+}
+
+/** Commands left running do not hold completion; subagents and monitors do. */
+internal fun V2ProjectionDto.pendingBackgroundWork(): List<JsonObject> {
+    if (runs.any { it.v2String("status") in setOf("preparing", "starting", "running") }) return emptyList()
+    val latest = runs.filterNot { it.v2String("status") == "queued" && it.v2Bool("queueHeld") }.maxByOrNull { it.v2Long("ordinal") ?: 0 }
+    if (latest?.v2String("status") !in setOf("completed", "cancelled", "failed", "interrupted", "waiting")) return emptyList()
+    val tasks = linkedMapOf<String, JsonObject>()
+    val providerId = thread.v2String("activeProviderThreadId")
+    providerThreads.filter { providerId == null || it.v2String("id") == providerId }.forEach { native ->
+        native.v2Objects("pendingBackgroundTasks").forEach { task ->
+            task.v2String("taskId")?.let { tasks.putIfAbsent(it, task) }
+        }
+    }
+    val rolledBack = runs.filter { it.v2String("status") == "rolled_back" }.mapTo(hashSetOf()) { it.v2String("id") }
+    turnItems.filter { it.v2String("type") in setOf("command_execution", "dynamic_tool", "subagent") &&
+        it.v2String("status") in setOf("pending", "running", "waiting") && it.v2String("runId") !in rolledBack &&
+        !(it.v2String("type") == "dynamic_tool" && (it["input"] as? JsonObject)?.v2Bool("persistent") == true) }
+        .forEach { item ->
+            val id = (item["nativeItemRef"] as? JsonObject)?.v2String("nativeId") ?: item.v2String("id") ?: return@forEach
+            tasks.putIfAbsent(id, buildJsonObject {
+                put("taskId", id)
+                put("kind", when (item.v2String("type")) { "command_execution" -> "command"; "subagent" -> "subagent"; else -> "background_task" })
+                put("description", item.v2String("title") ?: item.v2String("prompt") ?: item.v2String("toolName"))
+                item.v2String("childThreadId")?.let { put("childThreadId", it) }
+            })
+        }
+    return tasks.values.toList()
+}
+
 /** Adapt the control plane for existing Kotlin screens; the V2 projection remains authoritative. */
 internal fun V2ProjectionDto.asThreadDto(): ThreadDto {
     val metadata = TransportJson.decodeFromJsonElement(ThreadDto.serializer(), thread)
@@ -52,16 +89,16 @@ internal fun V2ProjectionDto.asThreadDto(): ThreadDto {
     val native = thread.v2String("creationSource") == "provider" &&
         (thread["lineage"] as? JsonObject)?.v2String("relationshipToParent") == "subagent"
     val status = latest?.v2String("status") ?: if (native) runless?.v2String("status") ?: "idle" else "idle"
-    val rootFailure = turnItems.lastOrNull { it.v2String("type") == "error" && it.v2String("runId") == latest?.v2String("id") }
-        ?.get("failure") as? JsonObject
+    val rootFailure = latestRootFailure(latest)
+    val backgroundHolds = pendingBackgroundWork().any { it.v2String("kind") != "command" }
     return metadata.copy(
         projection = this,
         latestTurn = (latest ?: if (native) runless else null)?.let {
             LatestTurnDto(it.v2String("id")!!, v2LegacyState(status), it.v2String("requestedAt"),
                  it.v2String("workStartedAt") ?: it.v2String("startedAt") ?: it.v2String("requestedAt"), it.v2String("completedAt"))
         },
-        session = SessionDto(metadata.id, v2LegacySession(status), session?.v2String("driver"), provider,
-            metadata.runtimeMode, active?.v2String("id"), rootFailure?.v2String("message") ?: session?.v2String("lastError"), updatedAt),
+        session = SessionDto(metadata.id, if (backgroundHolds && status == "waiting") "ready" else v2LegacySession(status), session?.v2String("driver"), provider,
+            metadata.runtimeMode, active?.v2String("id"), session?.v2String("lastError") ?: rootFailure?.v2String("message"), updatedAt),
         updatedAt = updatedAt ?: metadata.updatedAt,
         checkpoints = checkpoints.filter { it.v2Long("appRunOrdinal") != null && it.v2String("status") == "ready" }.map { checkpoint ->
             CheckpointSummaryDto(

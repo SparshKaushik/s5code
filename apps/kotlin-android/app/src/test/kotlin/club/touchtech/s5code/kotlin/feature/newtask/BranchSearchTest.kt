@@ -6,7 +6,7 @@ import org.junit.Test
 
 /**
  * `filterNewTaskBranches`: the typed query is a would-be ref name, so spaces
- * sanitize to dashes before matching — and remote `origin/*` refs are in the
+ * sanitize to dashes before matching — and remote refs under `origin/` are in the
  * list, so "release" finds `origin/release-2` as well as the local branch.
  */
 class BranchSearchTest {

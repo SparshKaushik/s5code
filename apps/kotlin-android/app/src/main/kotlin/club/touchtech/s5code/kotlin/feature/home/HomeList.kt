@@ -407,6 +407,7 @@ private fun statusRank(status: ThreadStatus): Int =
         ThreadStatus.Failed -> 2
         ThreadStatus.Working -> 3
         ThreadStatus.Queued -> 4
+        ThreadStatus.Waiting -> 4
         ThreadStatus.Idle -> 5
         ThreadStatus.Snoozed -> 6
         ThreadStatus.Settled -> 7

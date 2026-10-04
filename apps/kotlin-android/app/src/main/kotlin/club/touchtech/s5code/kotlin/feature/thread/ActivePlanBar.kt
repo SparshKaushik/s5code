@@ -88,6 +88,7 @@ fun atHistoryTop(lastVisibleIndex: Int, lastIndex: Int, wasAtTop: Boolean): Bool
 fun planBarApplies(status: ThreadStatus): Boolean =
     when (status) {
         ThreadStatus.Working,
+        ThreadStatus.Waiting,
         ThreadStatus.Queued,
         ThreadStatus.AwaitingApproval,
         ThreadStatus.AwaitingInput -> true

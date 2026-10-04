@@ -42,6 +42,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Objects
 import club.touchtech.s5code.kotlin.transport.v2Long
+import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -90,6 +91,7 @@ fun threadStatusOf(shell: ThreadShellDto, nowMillis: Long): ThreadStatus =
         shell.hasPendingUserInput -> ThreadStatus.AwaitingInput
         shell.session?.status == "running" -> ThreadStatus.Working
         shell.session?.status == "starting" -> ThreadStatus.Working
+        shell.backgroundLiveness != null && shell.session?.status != "error" -> ThreadStatus.Waiting
         // A queued turn start is work the user just asked for that no session has
         // adopted yet. Without this the row looks idle for the seconds a provider
         // takes to come up, which reads as "my message was lost".
@@ -510,6 +512,8 @@ fun threadDetailFrom(
         relationships = v2?.relationships.orEmpty(),
         usageLimitResetAt = v2?.usageLimitResetAt,
         limitRecoveryAutoResume = v2?.limitRecoveryAutoResume == true,
+        usageLimitReached = v2?.usageLimitReached == true,
+        limitRecoverySnoozed = v2?.limitRecoverySnoozed == true,
         workspaceRoot = thread.worktreePath,
         page =
             page?.let {
@@ -1895,6 +1899,7 @@ internal fun ThreadDto.asShell(): ThreadShellDto =
                 completedSteps = steps.count { it.v2String("status") == "completed" }, totalSteps = steps.size,
             )
         },
+        backgroundLiveness = if (projection?.pendingBackgroundWork()?.any { it.v2String("kind") != "command" } == true) "monitoring" else null,
     )
 
 /* ── Provider instances ──────────────────────────────────────────────── */

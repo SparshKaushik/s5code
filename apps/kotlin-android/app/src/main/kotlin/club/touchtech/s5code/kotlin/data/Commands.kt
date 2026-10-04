@@ -21,11 +21,6 @@ import kotlinx.serialization.json.putJsonObject
  * Builders for `orchestration.dispatchCommand` payloads, matching
  * `OrchestrationV2Command` in `packages/contracts/src/orchestrationV2.ts`.
  *
- * Commands are built as JSON rather than typed classes because the union has 23
- * members with almost no shared fields, and each one is written in exactly one
- * place. A serializable class per command would be 23 classes to express what is
- * already a one-line literal.
- *
  * Every command carries a client-generated `commandId`. The server uses it for
  * idempotency, so a retry after a dropped socket must reuse the same id or the
  * turn starts twice.
@@ -71,13 +66,12 @@ object Commands {
     fun startTurn(
         threadId: String,
         text: String,
-        /** Already-shaped wire attachments: upload images carry `dataUrl`, files a server id. */
+        /** Persisted ChatAttachment records, including server ids for images. */
         attachments: List<JsonObject>,
         settings: ThreadSettings,
         contextRecords: List<JsonObject> = emptyList(),
         commandId: String = newCommandId(),
         messageId: String = UUID.randomUUID().toString(),
-        createdAt: String = now(),
         dispatchMode: JsonObject = buildJsonObject { put("type", "start_immediately") },
         deliveryIntent: String? = "auto",
     ): JsonObject = buildJsonObject {
@@ -87,33 +81,30 @@ object Commands {
         put("createdBy", "user")
         put("creationSource", "mobile")
         put("messageId", messageId)
-            put("text", text)
-            if (contextRecords.isNotEmpty()) {
-                putJsonObject("context") {
-                    put("version", 1)
-                    putJsonArray("records") {
-                        contextRecords.forEach { add(it) }
-                    }
+        put("text", text)
+        if (contextRecords.isNotEmpty()) {
+            putJsonObject("context") {
+                put("version", 1)
+                putJsonArray("records") {
+                    contextRecords.forEach { add(it) }
                 }
             }
-            putJsonArray("attachments") {
-                attachments.forEach { add(it) }
-            }
+        }
+        putJsonArray("attachments") {
+            attachments.forEach { add(it) }
+        }
         putModelSelection(settings.provider.instanceId, settings.model, settings.options)
         put("dispatchMode", dispatchMode)
         deliveryIntent?.let { put("deliveryIntent", it) }
     }
 
     /**
-     * Creates a thread and starts its first turn in one command, mirroring
-     * `buildProjectThreadStartTurnInput` in the RN client. The bootstrap block is
-     * what makes this atomic: a failure to prepare the worktree fails the whole
-     * command instead of leaving an empty thread in the list.
+     * Input to orchestration.launchThread: the server prepares the workspace,
+     * creates the thread, and dispatches its first message through one service.
      */
     fun startTurnBootstrapping(
         threadId: String,
         projectId: String,
-        projectCwd: String,
         title: String,
         text: String,
         attachments: List<JsonObject>,
@@ -128,7 +119,6 @@ object Commands {
         contextRecords: List<JsonObject> = emptyList(),
         commandId: String = newCommandId(),
         messageId: String = UUID.randomUUID().toString(),
-        createdAt: String = now(),
     ): JsonObject = buildJsonObject {
         put("commandId", commandId)
         put("threadId", threadId)
@@ -345,14 +335,6 @@ object Commands {
         put("snoozedUntil", untilIso)
     }
 
-    fun revertCheckpoint(threadId: String, turnCount: Int): JsonObject = buildJsonObject {
-        put("type", "thread.checkpoint.revert")
-        put("commandId", newCommandId())
-        put("threadId", threadId)
-        put("turnCount", turnCount)
-        put("createdAt", now())
-    }
-
     fun rollback(threadId: String, checkpointId: String, scopeId: String): JsonObject = buildJsonObject {
         put("type", "checkpoint.rollback")
         put("commandId", newCommandId())
@@ -392,20 +374,6 @@ object Commands {
         put("createdAt", now())
     }
 
-    /**
-     * Worktree branch name for a new task. Prefixed and slugified so a branch
-     * created from a phone is recognisable in a terminal later.
-     */
-    private fun worktreeBranchName(title: String): String {
-        val slug =
-            title
-                .lowercase()
-                .replace(Regex("[^a-z0-9]+"), "-")
-                .trim('-')
-                .take(32)
-                .ifBlank { "task" }
-        return "s5/$slug-${UUID.randomUUID().toString().take(6)}"
-    }
 }
 
 /** Default snooze: tomorrow morning, matching the RN preset the row menu uses. */

@@ -39,22 +39,25 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
                 }
             }
         }
-        detail.usageLimitResetAt?.let { resetAt ->
-            Text("Usage limit reached · resets $resetAt", style = MaterialTheme.typography.bodySmall)
+        if (detail.summary.status == ThreadStatus.Waiting && !detail.providerNativeSubagent) {
+            TextButton(enabled = !busy, onClick = { action { store.workspace.cancelTurn(env, id) } }) { Text("Stop background work") }
+        }
+        if (detail.usageLimitReached) {
+            val resetAt = detail.usageLimitResetAt
+            val runId = detail.latestTurn?.turnId
+            Text(if (resetAt != null) "Usage limit reached · resets ${club.touchtech.s5code.kotlin.data.absoluteLabel(resetAt)}"
+                else "Usage limit reached. The provider did not report a reset time; retry when the limit is available.", style = MaterialTheme.typography.bodySmall)
+            if (resetAt != null && runId != null) {
             Row {
                 TextButton(enabled = !busy, onClick = { action {
-                    store.workspace.environmentRequest(env, "orchestration.dispatchCommand", buildJsonObject {
-                        put("type", "thread.metadata.update")
-                        put("commandId", java.util.UUID.randomUUID().toString())
-                        put("threadId", id.value)
-                        putJsonObject("limitRecovery") {
-                            put("runId", detail.latestTurn?.turnId)
-                            put("resetAt", resetAt)
-                            put("autoResume", !detail.limitRecoveryAutoResume)
-                        }
-                    })
+                    store.workspace.updateLimitRecovery(env, id, runId, resetAt, autoResume = !detail.limitRecoveryAutoResume)
                 } }) { Text(if (detail.limitRecoveryAutoResume) "Disable auto-resume" else "Resume after reset") }
-                TextButton(enabled = !busy, onClick = { action { store.workspace.setSnoozed(env, id, true, resetAt) } }) { Text("Snooze until reset") }
+                TextButton(enabled = !busy && (detail.limitRecoverySnoozed ||
+                    (club.touchtech.s5code.kotlin.data.parseInstant(resetAt) ?: 0) > System.currentTimeMillis()),
+                    onClick = { action { store.workspace.updateLimitRecovery(env, id, runId, resetAt, snooze = !detail.limitRecoverySnoozed) } }) {
+                    Text(if (detail.limitRecoverySnoozed) "Wake now" else "Snooze until reset")
+                }
+            }
             }
         }
     }

@@ -758,10 +758,10 @@ private fun SubagentRow(
                 S5InlineLoading(Modifier.size(16.dp))
             } else {
                 Icon(
-                    Icons.Rounded.CheckCircle,
+                    if (entry.status == "failed") Icons.Rounded.ErrorOutline else if (entry.status in setOf("interrupted", "cancelled")) Icons.Rounded.WarningAmber else Icons.Rounded.CheckCircle,
                     contentDescription = null,
                     modifier = Modifier.size(16.dp),
-                    tint = S5Theme.status.settled,
+                    tint = if (entry.status == "failed") MaterialTheme.colorScheme.error else S5Theme.status.settled,
                 )
             }
             Text(entry.name, style = MaterialTheme.typography.labelLargeEmphasized)

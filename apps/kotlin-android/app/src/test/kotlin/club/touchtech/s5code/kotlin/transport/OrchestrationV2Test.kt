@@ -144,4 +144,28 @@ class OrchestrationV2Test {
             obj("""{"id":"native-turn","status":"completed","tokenUsage":null}""")), false, null)
         assertEquals(turn["tokenUsage"], updated.providerTurns.single()["tokenUsage"])
     }
+
+    @Test fun `background subagents hold completion while long lived commands do not`() {
+        val run = obj("""{"id":"run","ordinal":1,"status":"completed","startedAt":"2026-10-01T00:00:00Z","completedAt":"2026-10-01T00:01:00Z"}""")
+        val agent = JsonObject(item("agent", 2, "subagent") + ("status" to JsonPrimitive("running")))
+        val command = JsonObject(item("server", 3, "command_execution") + ("status" to JsonPrimitive("running")))
+        val projection = V2ProjectionDto(metadata, runs = listOf(run), turnItems = listOf(agent, command))
+        fun status(value: V2ProjectionDto) = threadDetailFrom(EnvironmentId("env"), value.asThreadDto(),
+            ::providerInstanceForId, parseInstant("2026-10-01T00:02:00Z")!!).summary.status
+        assertEquals(ThreadStatus.Waiting, status(projection))
+        assertEquals(ThreadStatus.Idle, status(projection.copy(turnItems = listOf(command))))
+        val abandoned = projection.copy(runs = listOf(JsonObject(run + ("status" to JsonPrimitive("rolled_back")))))
+        assertTrue(abandoned.pendingBackgroundWork().isEmpty())
+    }
+
+    @Test fun `subagent failures do not offer root run usage limit recovery`() {
+        val run = obj("""{"id":"run","ordinal":1,"status":"failed","rootNodeId":"root"}""")
+        val failure = obj("""{"class":"usage_limit","message":"Limit reached","resetAt":"2026-10-01T01:00:00Z"}""")
+        val childError = JsonObject(item("child-error", 2, "error") + mapOf("nodeId" to JsonPrimitive("child"),
+            "status" to JsonPrimitive("failed"), "failure" to failure))
+        val projection = V2ProjectionDto(metadata, runs = listOf(run), turnItems = listOf(childError))
+        assertFalse(v2Presentation(projection).usageLimitReached)
+        val rootError = JsonObject(childError + ("nodeId" to JsonPrimitive("root")))
+        assertTrue(v2Presentation(projection.copy(turnItems = listOf(rootError))).usageLimitReached)
+    }
 }
