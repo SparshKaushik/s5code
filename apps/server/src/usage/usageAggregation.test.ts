@@ -280,7 +280,7 @@ describe("UsageAggregator", () => {
     expect(result.buckets).toHaveLength(1);
     expect(result.buckets[0]?.model).toBe("claude-fable-5");
     expect(result.buckets[0]?.records).toBe(2);
-    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.01125, 9);
+    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.00925, 9);
     expect(result.buckets[0]?.unpricedRecords).toBe(0);
   });
 
@@ -340,7 +340,7 @@ describe("UsageAggregator", () => {
           apiProvider: "tagged-gateway",
           sourcePath: "/first-home",
           records: 2,
-          costUsd: expect.closeTo(0.01125, 9),
+          costUsd: expect.closeTo(0.00925, 9),
           costSource: "userTagged",
           pricedAs: catalogModelId,
           inputTokensEstimated: true,

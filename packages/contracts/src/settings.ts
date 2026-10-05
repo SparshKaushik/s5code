@@ -1430,7 +1430,7 @@ export const ServerSettings = Schema.Struct({
    * Exact model ID to the model its usage counts as, such as a preview slug to
    * its released name. The mapped model is priced and reported as its target.
    */
-  usageModelAliases: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
+  usageModelMappings: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
 });
@@ -1730,7 +1730,7 @@ export const ServerSettingsPatch = Schema.Struct({
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),
   ),
   /** Each entry replaces one model's mapping; `null` removes it. */
-  usageModelAliases: Schema.optionalKey(
+  usageModelMappings: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
   ),
 });

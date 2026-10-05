@@ -764,6 +764,43 @@ describe("UsageService", () => {
     }).pipe(Effect.scoped),
   );
 
+  it.live(
+    "remaps unchanged transcripts and restores their original model when the mapping is removed",
+    () =>
+      Effect.gen(function* () {
+        const { transcript, settings, home } = yield* setup;
+        yield* Effect.promise(() => NodeFSP.writeFile(transcript, claudeLine(1, 5, "preview")));
+
+        yield* Effect.gen(function* () {
+          const settingsService = yield* ServerSettings.ServerSettingsService;
+          const service = yield* UsageService.make;
+          const original = yield* service.readSummary(WINDOW);
+          assert.strictEqual(original.buckets[0]?.model, "preview");
+          assert.strictEqual(original.buckets[0]?.unpricedRecords, 1);
+
+          yield* settingsService.updateSettings({
+            usageModelMappings: { preview: "released" },
+            usagePriceOverrides: {
+              released: { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 },
+            },
+          });
+          const mapped = yield* service.readSummary(WINDOW);
+          assert.strictEqual(mapped.buckets[0]?.model, "released");
+          assert.closeTo(mapped.buckets[0]?.costUsd ?? -1, 0.00006, 1e-12);
+          assert.strictEqual(mapped.buckets[0]?.unpricedRecords, 0);
+          assert.deepStrictEqual(mapped.buckets[0]?.totals, original.buckets[0]?.totals);
+
+          yield* settingsService.updateSettings({ usageModelMappings: { preview: null } });
+          const restored = yield* service.readSummary(WINDOW);
+          assert.deepStrictEqual(restored.buckets, original.buckets);
+        }).pipe(
+          Effect.provide(
+            serviceLayers({ prefix: "usage-service-model-mappings-test", home, settings }),
+          ),
+        );
+      }).pipe(Effect.scoped),
+  );
+
   it.live("reads assistant usage out of the OpenCode database", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;

@@ -938,7 +938,7 @@ export function createServerEnvironmentAtoms<R, E>(
   const usageScanSettingsAtom = Atom.family((environmentId: EnvironmentId) =>
     Atom.make((get) => {
       const settings = get(settingsValueAtom(environmentId));
-      const aliases = settings?.usageModelAliases ?? {};
+      const aliases = settings?.usageModelMappings ?? {};
       return JSON.stringify([
         get(usagePricesAtom(environmentId)),
         Object.keys(aliases)

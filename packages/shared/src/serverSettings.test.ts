@@ -580,6 +580,27 @@ describe("serverSettings helpers", () => {
     expect(current.usagePriceOverrides["example-model"]?.cacheReadCostPerMillionTokens).toBe(0.5);
   });
 
+  it("replaces and removes individual usage mappings without clobbering other models", () => {
+    const current = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usageModelMappings: { preview: "released" },
+    });
+    const added = applyServerSettingsPatch(current, {
+      usageModelMappings: { other: "other-released" },
+    });
+    const replaced = applyServerSettingsPatch(added, {
+      usageModelMappings: { preview: "new-released" },
+    });
+    expect(replaced.usageModelMappings).toEqual({
+      preview: "new-released",
+      other: "other-released",
+    });
+    const removed = applyServerSettingsPatch(replaced, {
+      usageModelMappings: { preview: null },
+    });
+    expect(removed.usageModelMappings).toEqual({ other: "other-released" });
+    expect(current.usageModelMappings).toEqual({ preview: "released" });
+  });
+
   it("stores background activity profiles as a versioned object and syncs legacy aliases", () => {
     const next = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       backgroundActivity: {

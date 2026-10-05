@@ -999,7 +999,7 @@ export const make = Effect.gen(function* () {
         aliases: input.modelAliases,
         priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       }),
-      modelAliases: resolveModelAliases(settings.usageModelAliases),
+      modelAliases: resolveModelAliases(settings.usageModelMappings),
     });
 
     const sources: UsageSource[] = [];
@@ -1128,7 +1128,7 @@ export const make = Effect.gen(function* () {
       input.untilTime ?? null,
       input.modelAliases,
       settings.usagePriceOverrides,
-      settings.usageModelAliases,
+      settings.usageModelMappings,
       settings.cursorKeychainUsageEnabled,
     ]);
 

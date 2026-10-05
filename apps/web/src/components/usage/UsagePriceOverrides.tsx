@@ -65,8 +65,8 @@ const priceTargetsAtom = Atom.make((get): readonly UsagePriceTarget[] =>
       label: environment.entry.target.label,
       prices: settings?.usagePriceOverrides ?? null,
       aliases:
-        environment.serverConfig?.environment.capabilities.usageModelAliases === true
-          ? (settings?.usageModelAliases ?? null)
+        environment.serverConfig?.environment.capabilities.usageModelMappings === true
+          ? (settings?.usageModelMappings ?? null)
           : null,
       unavailable:
         environment.connection.phase !== "connected"
