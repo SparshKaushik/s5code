@@ -633,6 +633,9 @@ class EnvironmentSession(
                                                     snapshot.settings.sidebarAutoSettleOnMerge,
                                                 autoSettleAfterDays =
                                                     snapshot.settings.sidebarAutoSettleAfterDays,
+                                                continueThreadsAfterServerUpdate =
+                                                    snapshot.settings
+                                                        .continueThreadsAfterServerUpdate == true,
                                                 serverSettings = snapshot.settings,
                                             )
                                     }
