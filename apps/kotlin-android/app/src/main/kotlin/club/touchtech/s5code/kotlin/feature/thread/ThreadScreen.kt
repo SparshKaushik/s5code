@@ -570,6 +570,8 @@ fun ThreadScreen(
             )
         },
         bottomBar = {
+            // Scaffold overlays direct slot children; controls must sit above the composer.
+            Column(Modifier.fillMaxWidth()) {
             val pendingInput = current.userInput
             if (pendingInput != null) {
                 val capabilities = environment?.capabilities
@@ -948,6 +950,7 @@ fun ThreadScreen(
                 },
                 draftKey = threadId,
             )
+            }
             }
         },
         floatingActionButton = {
