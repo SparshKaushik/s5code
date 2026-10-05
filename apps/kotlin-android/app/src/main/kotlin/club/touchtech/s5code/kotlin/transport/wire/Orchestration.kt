@@ -182,6 +182,19 @@ data class ShellStreamItemDto(
     val projectId: String? = null,
     val thread: ThreadShellDto? = null,
     val threadId: String? = null,
+    /**
+     * "active" | "archived" on thread deltas, telling the client which half of
+     * the shell the row belongs to.
+     */
+    val location: String? = null,
+    /**
+     * Present on metadata-only enrichment snapshots: the server resolved
+     * repository identity for these workspace roots and is patching `projects`
+     * in place. Absent marks the frame as an authoritative snapshot that
+     * replaces the whole shell. See `shellStreamItemFromEnrichmentRefresh` and
+     * `mergeShellSnapshotProjects` in the RN client.
+     */
+    val resolvedRepositoryIdentityRoots: List<String>? = null,
 )
 
 @Serializable

@@ -5,6 +5,7 @@ import club.touchtech.s5code.kotlin.transport.wire.CheckpointSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.LatestTurnDto
 import club.touchtech.s5code.kotlin.transport.wire.MessageDto
 import club.touchtech.s5code.kotlin.transport.wire.ModelSelectionDto
+import club.touchtech.s5code.kotlin.transport.wire.ProjectShellDto
 import club.touchtech.s5code.kotlin.transport.wire.ProposedPlanDto
 import club.touchtech.s5code.kotlin.transport.wire.SessionDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellSnapshotDto
@@ -51,10 +52,18 @@ fun applyShellStreamItem(
     item: ShellStreamItemDto,
 ): ShellSnapshotDto =
     when (item.kind) {
-        "snapshot" -> item.snapshot?.let { fresh -> fresh.copy(
-            threads = fresh.threads.map { it.normalizedV2() },
-            archivedThreads = fresh.archivedThreads.map { it.normalizedV2() },
-        ) } ?: snapshot
+        "snapshot" ->
+            item.snapshot
+                ?.let { fresh ->
+                    mergeShellSnapshotProjects(
+                        snapshot,
+                        fresh.copy(
+                            threads = fresh.threads.map { it.normalizedV2() },
+                            archivedThreads = fresh.archivedThreads.map { it.normalizedV2() },
+                        ),
+                        item.resolvedRepositoryIdentityRoots,
+                    )
+                } ?: snapshot
         "synchronized" -> snapshot
         else -> {
             val sequence = item.sequence
@@ -64,7 +73,12 @@ fun applyShellStreamItem(
                     "project-upserted", "project.updated" ->
                         item.project?.let { project ->
                             snapshot.copy(
-                                projects = snapshot.projects.upsertBy(project) { it.id == project.id },
+                                projects =
+                                    snapshot.projects.upsertBy(
+                                        snapshot.projects
+                                            .firstOrNull { it.id == project.id }
+                                            .let { retainRepositoryIdentity(it, project) },
+                                    ) { it.id == project.id },
                                 snapshotSequence = sequence,
                             )
                         } ?: snapshot
@@ -75,14 +89,27 @@ fun applyShellStreamItem(
                         )
                     "thread-upserted", "thread.updated" ->
                         item.thread?.let { thread ->
+                            val normalized = thread.normalizedV2()
                             snapshot.copy(
-                                threads = snapshot.threads.upsertBy(thread.normalizedV2()) { it.id == thread.id },
+                                threads =
+                                    if (item.location == "active") {
+                                        snapshot.threads.upsertBy(normalized) { it.id == thread.id }
+                                    } else {
+                                        snapshot.threads.filterNot { it.id == thread.id }
+                                    },
+                                // The archive has its own bounded subscription; a
+                                // delta for a thread must never leave it in both
+                                // halves of the shell.
+                                archivedThreads =
+                                    snapshot.archivedThreads.filterNot { it.id == thread.id },
                                 snapshotSequence = sequence,
                             )
                         } ?: snapshot
                     "thread-removed", "thread.removed" ->
                         snapshot.copy(
                             threads = snapshot.threads.filterNot { it.id == item.threadId },
+                            archivedThreads =
+                                snapshot.archivedThreads.filterNot { it.id == item.threadId },
                             snapshotSequence = sequence,
                         )
                     // Forward compatible: a newer server's event kind leaves the
@@ -94,6 +121,84 @@ fun applyShellStreamItem(
 
 private inline fun <T> List<T>.upsertBy(value: T, predicate: (T) -> Boolean): List<T> =
     if (any(predicate)) map { if (predicate(it)) value else it } else this + value
+
+/**
+ * Merges an incoming shell snapshot into the current one, mirroring
+ * `mergeShellSnapshotProjects` in `packages/client-runtime/src/state/
+ * shellReducer.ts`.
+ *
+ * Two snapshot flavors share `kind: "snapshot"` on the wire:
+ *
+ * - **Authoritative** (`resolvedRepositoryIdentityRoots` absent): replaces
+ *   threads, archives, and sequence outright, but keeps a prior non-null
+ *   repository identity when the same-root candidate arrives unresolved — the
+ *   async enrichment pass has not necessarily finished when the snapshot lands.
+ * - **Enrichment refresh** (`resolvedRepositoryIdentityRoots` present): a
+ *   metadata-only patch whose `threads`/`archivedThreads` are empty by
+ *   contract. Only repository identity updates for matching projects apply;
+ *   structure and sequence are untouched, because the refresh carries no
+ *   sequence of its own.
+ *
+ * Collapsing both into a whole-shell replace is what made the home list
+ * empty: the first enrichment refresh after a reconnect arrives with zero
+ * threads and wiped the live shell (and the disk cache it seeded).
+ */
+fun mergeShellSnapshotProjects(
+    previous: ShellSnapshotDto,
+    next: ShellSnapshotDto,
+    resolvedRepositoryIdentityRoots: List<String>?,
+): ShellSnapshotDto {
+    if (resolvedRepositoryIdentityRoots != null) {
+        val resolved = resolvedRepositoryIdentityRoots.toSet()
+        val nextById = next.projects.associateBy { it.id }
+        return previous.copy(
+            projects =
+                previous.projects.map { project ->
+                    val candidate = nextById[project.id] ?: return@map project
+                    if (candidate.workspaceRoot != project.workspaceRoot) {
+                        return@map project
+                    }
+                    if (project.workspaceRoot in resolved) {
+                        project.copy(repositoryIdentity = candidate.repositoryIdentity)
+                    } else if (
+                        project.repositoryIdentity == null &&
+                        candidate.repositoryIdentity != null
+                    ) {
+                        project.copy(repositoryIdentity = candidate.repositoryIdentity)
+                    } else {
+                        project
+                    }
+                },
+        )
+    }
+    val previousById = previous.projects.associateBy { it.id }
+    return next.copy(
+        projects =
+            next.projects.map { project ->
+                retainRepositoryIdentity(previousById[project.id], project)
+            },
+    )
+}
+
+/**
+ * Enrichment is async: a project mutation can land with a null identity while
+ * an earlier snapshot already resolved it. Keep the prior identity for the
+ * same workspace root until an authoritative snapshot or marked refresh
+ * replaces it.
+ */
+private fun retainRepositoryIdentity(
+    previous: ProjectShellDto?,
+    next: ProjectShellDto,
+): ProjectShellDto =
+    if (
+        next.repositoryIdentity == null &&
+        previous?.repositoryIdentity != null &&
+        previous.workspaceRoot == next.workspaceRoot
+    ) {
+        next.copy(repositoryIdentity = previous.repositoryIdentity)
+    } else {
+        next
+    }
 
 /* ── Thread detail ───────────────────────────────────────────────────── */
 

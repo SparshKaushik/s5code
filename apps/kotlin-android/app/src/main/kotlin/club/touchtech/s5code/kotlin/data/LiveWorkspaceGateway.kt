@@ -58,6 +58,7 @@ import club.touchtech.s5code.kotlin.transport.EnvironmentSession
 import club.touchtech.s5code.kotlin.transport.SessionPhase
 import club.touchtech.s5code.kotlin.transport.WsMethods
 import club.touchtech.s5code.kotlin.transport.applyShellStreamItem
+import club.touchtech.s5code.kotlin.transport.mergeShellSnapshotProjects
 import club.touchtech.s5code.kotlin.transport.hasCacheableWorkspaceContent
 import club.touchtech.s5code.kotlin.transport.applyV2Event
 import club.touchtech.s5code.kotlin.transport.asThreadDto
@@ -648,7 +649,21 @@ class LiveWorkspaceGateway(
                                             "/api/orchestration/shell",
                                             ShellSnapshotDto.serializer(),
                                         )
-                                    connected.shell.value = snapshot.copy(threads = snapshot.threads.map { it.normalizedV2() })
+                                    // Authoritative snapshot merge, same as RN's
+                                    // applyItems: retains a resolved repository
+                                    // identity the fresh snapshot has not yet
+                                    // recomputed.
+                                    connected.shell.update { current ->
+                                        mergeShellSnapshotProjects(
+                                            current ?: ShellSnapshotDto(),
+                                            snapshot.copy(
+                                                threads = snapshot.threads.map { it.normalizedV2() },
+                                                archivedThreads =
+                                                    snapshot.archivedThreads.map { it.normalizedV2() },
+                                            ),
+                                            resolvedRepositoryIdentityRoots = null,
+                                        )
+                                    }
                                     persistence.trySend(connected.shell.value!!)
                                     publish()
                                 } != null
