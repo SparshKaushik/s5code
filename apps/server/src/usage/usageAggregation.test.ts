@@ -1,7 +1,8 @@
 import { describe, expect, it } from "@effect/vitest";
+import { UsageCatalogModelId } from "@t3tools/contracts";
 
-import { UsageAggregator } from "./usageAggregation.ts";
-import { EMPTY_CATALOG } from "./usageModelCatalog.ts";
+import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
+import { EMPTY_CATALOG, parseModelCatalog } from "./usageModelCatalog.ts";
 import { UsagePricer, type RateTable } from "./usagePricing.ts";
 import type { UsageRecord } from "./usageTranscripts.ts";
 
@@ -133,6 +134,41 @@ describe("UsageAggregator", () => {
     expect(losAngeles.buckets[0]?.day).toBe("2026-08-06");
   });
 
+  it("finds the day at a quarter-hour zone's midnight across interleaved buckets", () => {
+    // Kathmandu is UTC+5:45, so its midnight falls at 18:15 UTC.
+    const result = aggregate(
+      [
+        record({ timestampMs: Date.parse("2026-08-01T18:14:59.999Z") }),
+        record({ timestampMs: Date.parse("2026-08-01T18:15:00.000Z") }),
+        record({ timestampMs: Date.parse("2026-08-01T18:15:00.000Z"), model: "claude-opus-5" }),
+        record({ timestampMs: Date.parse("2026-08-01T18:16:00.000Z") }),
+      ],
+      "Asia/Kathmandu",
+    );
+
+    expect(result.buckets.map((bucket) => [bucket.day, bucket.model, bucket.records])).toEqual([
+      ["2026-08-01", "claude-fable-5", 1],
+      ["2026-08-02", "claude-fable-5", 2],
+      ["2026-08-02", "claude-opus-5", 1],
+    ]);
+  });
+
+  it("finds the day at a fixed offset's midnight between quarter hours", () => {
+    // At +00:01, midnight falls at 23:59 UTC.
+    const result = aggregate(
+      [
+        record({ timestampMs: Date.parse("2026-08-01T23:58:59.999Z") }),
+        record({ timestampMs: Date.parse("2026-08-01T23:59:00.000Z") }),
+      ],
+      "+00:01",
+    );
+
+    expect(result.buckets.map((bucket) => [bucket.day, bucket.records])).toEqual([
+      ["2026-08-01", 1],
+      ["2026-08-02", 1],
+    ]);
+  });
+
   it("splits an hourly request into fixed buckets anchored to its exact start", () => {
     const result = aggregate(
       [
@@ -229,6 +265,25 @@ describe("UsageAggregator", () => {
     expect(aggregator.add(record({ timestampMs: Date.parse("2026-07-01T12:00:00Z") }))).toBe(false);
   });
 
+  it("folds a mapped model into its target and prices it there", () => {
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      pricer,
+      modelAliases: resolveModelAliases({ "example-preview": "claude-fable-5" }),
+    });
+    aggregator.add(record());
+    aggregator.add(record({ model: "example-preview", rateModel: "example-preview-high" }));
+    const result = aggregator.finish();
+
+    expect(result.buckets).toHaveLength(1);
+    expect(result.buckets[0]?.model).toBe("claude-fable-5");
+    expect(result.buckets[0]?.records).toBe(2);
+    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.01125, 9);
+    expect(result.buckets[0]?.unpricedRecords).toBe(0);
+  });
+
   it("separates providers and models into their own buckets", () => {
     const result = aggregate([
       record(),
@@ -237,5 +292,98 @@ describe("UsageAggregator", () => {
     ]);
 
     expect(result.buckets).toHaveLength(3);
+  });
+
+  it("keeps gateway tags and estimated tokens separate when mapped models share a bucket", () => {
+    const catalogModelId = UsageCatalogModelId.make("anthropic/claude-fable-5");
+    const aggregator = new UsageAggregator({
+      timeZone: "UTC",
+      sinceDay: "2026-08-01",
+      untilDay: "2026-08-31",
+      modelAliases: resolveModelAliases({ preview: "claude-fable-5" }),
+      pricer: new UsagePricer({
+        rates,
+        catalog: parseModelCatalog({
+          anthropic: {
+            id: "anthropic",
+            name: "Anthropic",
+            models: {
+              "claude-fable-5": {
+                name: "Claude Fable 5",
+                cost: { input: 10, output: 50, cache_read: 1, cache_write: 12.5 },
+              },
+            },
+          },
+        }),
+        aliases: [
+          {
+            provider: "pi",
+            apiProvider: "tagged-gateway",
+            model: "claude-fable-5",
+            catalogModelId,
+          },
+        ],
+      }),
+    });
+    const tagged = record({ provider: "pi", apiProvider: "tagged-gateway" });
+    aggregator.add(tagged, "/first-home");
+    aggregator.add(
+      record({ ...tagged, model: "preview", inputTokensEstimated: true }),
+      "/first-home",
+    );
+    aggregator.add(record({ ...tagged, apiProvider: "other-gateway" }), "/first-home");
+    aggregator.add(tagged, "/second-home");
+
+    expect(aggregator.finish().buckets).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          apiProvider: "tagged-gateway",
+          sourcePath: "/first-home",
+          records: 2,
+          costUsd: expect.closeTo(0.01125, 9),
+          costSource: "userTagged",
+          pricedAs: catalogModelId,
+          inputTokensEstimated: true,
+          totals: {
+            ...tagged.totals,
+            uncachedInputTokens: 200,
+            cachedInputTokens: 2000,
+            cacheCreationTokens: 20,
+            outputTokens: 100,
+          },
+        }),
+        expect.objectContaining({
+          apiProvider: "other-gateway",
+          sourcePath: "/first-home",
+          records: 1,
+        }),
+        expect.objectContaining({
+          apiProvider: "tagged-gateway",
+          sourcePath: "/second-home",
+          records: 1,
+        }),
+      ]),
+    );
+    expect(aggregator.finish().buckets).toHaveLength(3);
+  });
+});
+
+describe("resolveModelAliases", () => {
+  it("follows chains to the final model and drops chains that enter a loop", () => {
+    expect(
+      resolveModelAliases({
+        "preview[1m]": "preview",
+        preview: "example-model",
+        loop: "back",
+        back: "loop",
+        intoLoop: "loop",
+        self: "self",
+      }),
+    ).toEqual(
+      new Map([
+        ["preview[1m]", "example-model"],
+        ["preview", "example-model"],
+      ]),
+    );
   });
 });
