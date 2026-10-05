@@ -336,11 +336,11 @@ private fun ScaleSlider(
     }
 }
 
-/** Default project grouping for the home list. */
+/** Default project grouping for the home list — RN's Organization screen. */
 @Composable
 fun SettingsProjectGroupingScreen(store: AppStore, onBack: () -> Unit) {
     val preferences by store.preferences.collectAsStateWithLifecycle()
-    S5Screen(title = "Project grouping", subtitle = preferences.projectGrouping.label, onBack = onBack) {
+    S5Screen(title = "Organization", subtitle = preferences.projectGrouping.label, onBack = onBack) {
         padding ->
         Column(
             Modifier.fillMaxSize().padding(padding),

@@ -67,7 +67,22 @@ object Routes {
     const val SettingsEnvironments = "settings/environments"
     const val SettingsAppearance = "settings/appearance"
     const val SettingsProjectGrouping = "settings/project-grouping"
+    // RN links the same screen from settings/organization; both resolve here.
+    const val SettingsOrganization = "settings/organization"
     const val SettingsClientStorage = "settings/client-storage"
+    const val SettingsFollowUps = "settings/follow-ups"
+    const val SettingsThreads = "settings/threads"
+    const val SettingsNotifications = "settings/notifications"
+    const val SettingsOverview = "settings/overview"
+    const val SettingsNewThreads = "settings/new-threads"
+    const val SettingsSourceControl = "settings/source-control"
+    const val SettingsAgentBehavior = "settings/agent-behavior"
+    const val SettingsMaintenance = "settings/maintenance"
+    const val SettingsDiagnostics = "settings/diagnostics"
+    // RN's settings/usage and settings/archive point at the same screens the
+    // top-level routes do; the nested forms exist for deep links.
+    const val SettingsUsage = "settings/usage"
+    const val SettingsArchive = "settings/archive"
     const val Usage = "usage"
     const val Archive = "archive"
     const val NotFound = "not-found"

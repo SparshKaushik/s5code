@@ -614,6 +614,9 @@ interface WorkspaceGateway {
     /** `project.delete` — removes the project a failed clone was for. */
     suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId)
 
+    /** `project.update` — the Settings → Overview rename writes only `title`. */
+    suspend fun renameProject(environmentId: EnvironmentId, projectId: ProjectId, title: String)
+
     /**
      * `sourceControl.lookupRepository` — validates one `owner/name` reference on
      * one provider. The server has no repository search; this throws on failure

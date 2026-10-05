@@ -1,5 +1,7 @@
 package club.touchtech.s5code.kotlin.model
 
+import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
+
 /**
  * Presentation models the screens render.
  *
@@ -88,6 +90,13 @@ data class Environment(
     val autoSettleAfterDays: Int? = 3,
     /** `settings.continueThreadsAfterServerUpdate` — the user's restart-recovery preference. */
     val continueThreadsAfterServerUpdate: Boolean = false,
+    /**
+     * The environment's server-settings snapshot (`config.settings`). The
+     * Settings → Server settings pages read the first connected environment's
+     * copy and write patches to every connected one; the wire DTO doubles as
+     * the read model here rather than restating forty fields twice.
+     */
+    val serverSettings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
     val scratchWorkspaceRoot: String? = null,
 )
 
@@ -140,6 +149,10 @@ data class EnvironmentCapabilities(
     /** The environment tracks project clones (`subscribeProjectClones`). */
     val projectCloneTracking: Boolean = false,
     val threadVisitedTracking: Boolean = false,
+    /** `storageCleanup`/`worktreeCleanup` maintenance settings are honored. */
+    val storageCleanup: Boolean = false,
+    /** `continueThreadsAfterServerUpdate` persists on this server. */
+    val threadRestartContinuation: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -584,6 +597,8 @@ data class ThreadDetail(
     val limitRecoverySnoozed: Boolean = false,
     val canSwitchProvider: Boolean = false,
     val queueHeld: Boolean = false,
+    /** Work the last turn left running in the background, for the "Waiting on" pill. */
+    val pendingBackgroundTasks: List<PendingBackgroundTask> = emptyList(),
     val canReorderQueue: Boolean = false,
     val canPromoteQueued: Boolean = false,
     /** Whether the live detail stream has reached its completion marker. */
@@ -630,6 +645,13 @@ data class ThreadDetail(
 
 data class QueuedRun(val id: String, val messageId: String, val text: String, val held: Boolean)
 data class ThreadRelationship(val threadId: String, val label: String)
+
+/**
+ * Display slice of `OrchestrationV2PendingBackgroundTask`: work the settled turn
+ * left running (`kind` is `command` | `subagent` | `monitor` | `background_task`,
+ * [description] optional). Drives the floating "Waiting on …" pill.
+ */
+data class PendingBackgroundTask(val kind: String, val description: String? = null)
 
 /**
  * The loaded window's upper edge, from `OrchestrationThreadDetailPage` in

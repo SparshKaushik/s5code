@@ -314,6 +314,115 @@ private val IRIS_DARK =
         codeForeground = 0xFFFFFAFF,
     )
 
+private val OSCURA_DUSK_DARK =
+    S5ThemePalette(
+        canvas = 0xFF131419,
+        surface = 0xFF0F1015,
+        surfaceRaised = 0xFF1B1D24,
+        surfaceOverlay = 0xFF0A0B0E,
+        text = 0xFFE6E6E6,
+        textMuted = 0xFF9592A4,
+        border = 0xFF32333B,
+        accent = 0xFFE6E7A3,
+        accentForeground = 0xFF131419,
+        secondary = 0xFF23242B,
+        secondaryForeground = 0xFFE6E6E6,
+        muted = 0xFF2C2C31,
+        mutedForeground = 0xFF9592A4,
+        error = 0xFFFB414A,
+        errorForeground = 0xFFFF7B86,
+        errorSurface = 0xFF371A20,
+        accentSurface = 0xFF36372E,
+        accentSurfaceForeground = 0xFFE6E7A3,
+        messageSurface = 0xFF26271F,
+        messageForeground = 0xFFE6E6E6,
+        messageAction = 0xFFE6E7A3,
+        codeBackground = 0xFF0B0B0F,
+        codeForeground = 0xFFE6E6E6,
+    )
+
+private val OSCURA_DUSK_LIGHT =
+    S5ThemePalette(
+        canvas = 0xFFF8F9FA,
+        surface = 0xFFFFFFFF,
+        surfaceRaised = 0xFFF0F2F4,
+        surfaceOverlay = 0xFFE9ECEF,
+        text = 0xFF2D3748,
+        textMuted = 0xFF718096,
+        border = 0xFFE2E8F0,
+        // The warm Oscura accent darkened until it reads on white.
+        accent = 0xFF8A7D1E,
+        accentForeground = 0xFFFFFDEB,
+        secondary = 0xFFEDF2F5,
+        secondaryForeground = 0xFF2D3748,
+        muted = 0xFFF2F4F7,
+        mutedForeground = 0xFF667085,
+        error = 0xFFE53E3E,
+        errorForeground = 0xFFC53030,
+        errorSurface = 0xFFFED7D7,
+        accentSurface = 0xFFF6F0CF,
+        accentSurfaceForeground = 0xFF5F550F,
+        messageSurface = 0xFFFAF5DE,
+        messageForeground = 0xFF2D3748,
+        messageAction = 0xFF8A7D1E,
+        codeBackground = 0xFFF0F1F4,
+        codeForeground = 0xFF2D3748,
+    )
+
+private val OSCURA_DAWN_DARK =
+    S5ThemePalette(
+        canvas = 0xFF202127,
+        surface = 0xFF1B1C22,
+        surfaceRaised = 0xFF2A2B33,
+        surfaceOverlay = 0xFF14151A,
+        text = 0xFFE6E6E6,
+        textMuted = 0xFF9592A4,
+        border = 0xFF32333B,
+        accent = 0xFF54C0A3,
+        accentForeground = 0xFF131419,
+        secondary = 0xFF2B2C34,
+        secondaryForeground = 0xFFE6E6E6,
+        muted = 0xFF33343C,
+        mutedForeground = 0xFF9592A4,
+        error = 0xFFFB414A,
+        errorForeground = 0xFFFF7B86,
+        errorSurface = 0xFF40222A,
+        accentSurface = 0xFF2B4A42,
+        accentSurfaceForeground = 0xFF9FE3D1,
+        messageSurface = 0xFF2E2A22,
+        messageForeground = 0xFFE6E6E6,
+        messageAction = 0xFFE6E7A3,
+        codeBackground = 0xFF17181D,
+        codeForeground = 0xFFE6E6E6,
+    )
+
+private val OSCURA_DAWN_LIGHT =
+    S5ThemePalette(
+        canvas = 0xFFFBFCFD,
+        surface = 0xFFF3F5F7,
+        surfaceRaised = 0xFFFFFFFF,
+        surfaceOverlay = 0xFFE9ECEF,
+        text = 0xFF2D3748,
+        textMuted = 0xFF718096,
+        border = 0xFFE2E8F0,
+        accent = 0xFF2F8C74,
+        accentForeground = 0xFFFFFFFF,
+        secondary = 0xFFEDF2F5,
+        secondaryForeground = 0xFF2D3748,
+        muted = 0xFFF0F2F5,
+        mutedForeground = 0xFF667085,
+        error = 0xFFE53E3E,
+        errorForeground = 0xFFC53030,
+        errorSurface = 0xFFFED7D7,
+        accentSurface = 0xFFD8EFE7,
+        accentSurfaceForeground = 0xFF1D5C4B,
+        messageSurface = 0xFFFDF6E3,
+        messageForeground = 0xFF2D3748,
+        messageAction = 0xFF8A7D1E,
+        codeBackground = 0xFFF0F1F4,
+        codeForeground = 0xFF2D3748,
+    )
+
 /** Named themes in picker order, matching `BUILT_IN_THEMES`. */
 internal val S5_NAMED_THEMES =
     listOf(
@@ -322,6 +431,8 @@ internal val S5_NAMED_THEMES =
         S5NamedTheme("ocean", "Ocean", OCEAN_LIGHT, OCEAN_DARK),
         S5NamedTheme("ember", "Ember", EMBER_LIGHT, EMBER_DARK),
         S5NamedTheme("iris", "Iris", IRIS_LIGHT, IRIS_DARK),
+        S5NamedTheme("oscura-dusk", "Oscura Dusk", OSCURA_DUSK_LIGHT, OSCURA_DUSK_DARK),
+        S5NamedTheme("oscura-dawn", "Oscura Dawn", OSCURA_DAWN_LIGHT, OSCURA_DAWN_DARK),
     )
 
 /**

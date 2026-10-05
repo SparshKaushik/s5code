@@ -8,6 +8,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneActionResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneStartResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigStreamEventDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProvidersUpdatedDto
 import kotlin.random.Random
@@ -90,6 +91,11 @@ data class SessionState(
     val autoSettleAfterDays: Int? = 3,
     /** The user's `continueThreadsAfterServerUpdate` preference, from server settings. */
     val continueThreadsAfterServerUpdate: Boolean = false,
+    /**
+     * The full server-settings snapshot the Settings → Server settings pages
+     * read and `server.updateSettings` writes back.
+     */
+    val serverSettings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
 )
 
 /**
@@ -139,6 +145,10 @@ data class ServerCapabilities(
     val serverUpdateThreadContinuation: Boolean = false,
     /** The supervising desktop app accepts `server.updateServer`. */
     val desktopAppUpdate: Boolean = false,
+    /** `storageCleanup`/`worktreeCleanup` settings are honored. */
+    val storageCleanup: Boolean = false,
+    /** The server persists `continueThreadsAfterServerUpdate`. */
+    val threadRestartContinuation: Boolean = false,
 )
 
 /**
@@ -489,6 +499,9 @@ class EnvironmentSession(
                             desktopAppUpdate = descriptor.capabilities.desktopAppUpdate == true,
                             projectCloneTracking =
                                 descriptor.capabilities.projectCloneTracking == true,
+                            storageCleanup = descriptor.capabilities.storageCleanup,
+                            threadRestartContinuation =
+                                descriptor.capabilities.threadRestartContinuation,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     scratchWorkspaceRoot = config.scratchWorkspaceRoot,
@@ -496,6 +509,7 @@ class EnvironmentSession(
                     autoSettleAfterDays = config.settings.sidebarAutoSettleAfterDays,
                     continueThreadsAfterServerUpdate =
                         config.settings.continueThreadsAfterServerUpdate == true,
+                    serverSettings = config.settings,
                 )
             // `canMaintainEnvironment` asks the session record, not the
             // credential store: a token minted before scopes existed would fail
@@ -619,6 +633,7 @@ class EnvironmentSession(
                                                     snapshot.settings.sidebarAutoSettleOnMerge,
                                                 autoSettleAfterDays =
                                                     snapshot.settings.sidebarAutoSettleAfterDays,
+                                                serverSettings = snapshot.settings,
                                             )
                                     }
                                 }
@@ -942,6 +957,13 @@ class EnvironmentSession(
                         return@transformLatest
                     } catch (expected: RpcFailure) {
                         delay(RESUBSCRIBE_DELAY_MS)
+                    } catch (_: RpcTransportClosed) {
+                        // The socket tore down mid-stream (manual retry,
+                        // reconnect, close). `RpcTransportClosed` is not an
+                        // `RpcFailure`, so without this it propagates out of
+                        // `transformLatest` and kills the collector. Wait for
+                        // the next connection instead.
+                        return@transformLatest
                     }
                 }
             }

@@ -8,6 +8,7 @@ import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.PendingApproval
+import club.touchtech.s5code.kotlin.model.PendingBackgroundTask
 import club.touchtech.s5code.kotlin.model.PendingUserInput
 import club.touchtech.s5code.kotlin.model.UserInputQuestion
 import club.touchtech.s5code.kotlin.model.PlanStep
@@ -39,6 +40,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
+import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Objects
 import club.touchtech.s5code.kotlin.transport.v2Long
@@ -518,6 +520,13 @@ fun threadDetailFrom(
         queueHeld = v2?.queueHeld == true,
         canReorderQueue = v2?.canReorderQueue == true,
         canPromoteQueued = v2?.canPromoteQueued == true,
+        pendingBackgroundTasks =
+            thread.projection?.pendingBackgroundWork().orEmpty().map { task ->
+                PendingBackgroundTask(
+                    kind = task.v2String("kind") ?: "background_task",
+                    description = task.v2String("description"),
+                )
+            },
         workspaceRoot = thread.worktreePath,
         page =
             page?.let {

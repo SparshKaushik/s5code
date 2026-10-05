@@ -235,7 +235,12 @@ data class ServerConfigDto(
     val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
 )
 
-/** The `settings` slice this client reads — `environmentIcon` overrides `platform.machine`. */
+/**
+ * The `settings` slice this client reads — `environmentIcon` overrides
+ * `platform.machine`, the rest feeds Settings → Server settings. Mirrors
+ * `ServerSettings` in `packages/contracts/src/settings.ts`, with the same
+ * decoding defaults so a server that predates a key still reads sanely.
+ */
 @Serializable
 data class ServerConfigSettingsDto(
     val environmentIcon: String? = null,
@@ -249,6 +254,48 @@ data class ServerConfigSettingsDto(
      * sent as `continueRunningThreads` when the server supports it.
      */
     val continueThreadsAfterServerUpdate: Boolean? = null,
+    /** `null` inherits: the repository's t3.json, then "local". */
+    val defaultThreadEnvMode: String? = null,
+    /** Base new worktrees on the remote branch. */
+    val newWorktreesStartFromOrigin: Boolean = true,
+    /** `null` defers to the repository's t3.json, then to recursive. */
+    val worktreeSubmodules: String? = null,
+    /** Keep the default branch current when there are no local changes. */
+    val defaultAutoPull: Boolean = false,
+    /** approval-required | auto-accept-edits | auto | full-access */
+    val defaultRuntimeMode: String = "full-access",
+    /** static | semantic | custom */
+    val branchNamingMode: String = "static",
+    val branchNamePrefix: String = "t3code",
+    val branchNameInstructions: String = "",
+    /** turn | paragraph */
+    val responseStreamingMode: String = "paragraph",
+    /** Whether agents may drive the in-app preview browser. */
+    val enableAgentBrowserAccess: Boolean = true,
+    /** Whether agents may drive simulators and emulators. */
+    val enableAgentDeviceAccess: Boolean = false,
+    /** Check installed provider CLIs for newer versions. */
+    val enableProviderUpdateChecks: Boolean = true,
+    val autoResumeLimitedThreads: Boolean = false,
+    val snoozeLimitedThreads: Boolean = false,
+    /**
+     * `WorktreeCleanup`: `{"mode":"off"}`, `{"mode":"custom","rules":{…}}`, or
+     * null (inherit — the `storageCleanup` worktree rules apply). Kept as raw
+     * JSON so the settings page can round-trip rules it does not read.
+     */
+    val worktreeCleanup: kotlinx.serialization.json.JsonObject? = null,
+    val storageCleanup: ServerStorageCleanupDto = ServerStorageCleanupDto(),
+)
+
+/** `StorageCleanupSettings`: retention rules in days; null clears the rule. */
+@Serializable
+data class ServerStorageCleanupDto(
+    val worktreeAfterDays: Int? = null,
+    val worktreeOnMerge: Boolean = false,
+    val worktreeOnDelete: Boolean = false,
+    val worktreeUnchanged: Boolean = false,
+    val browserArtifactsAfterDays: Int? = null,
+    val logsAfterDays: Int? = null,
 )
 
 @Serializable
@@ -325,6 +372,10 @@ data class ServerCapabilitiesDto(
      * Start does not wait on a stream this server never emits.
      */
     val projectCloneTracking: Boolean? = null,
+    /** `storageCleanup`/`worktreeCleanup` settings are honored. */
+    val storageCleanup: Boolean = false,
+    /** The server persists `continueThreadsAfterServerUpdate`. */
+    val threadRestartContinuation: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */

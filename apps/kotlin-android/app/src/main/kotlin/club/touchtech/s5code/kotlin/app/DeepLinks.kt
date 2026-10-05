@@ -105,9 +105,13 @@ private val THREAD_CHILDREN =
 
 /**
  * Settings sub-routes an external link may open, matching the linking table in
- * `apps/mobile/src/Stack.tsx`. RN's `settings/legal` and
- * `settings/open-source-licenses` have no screen here yet, so they are not in
- * the allowlist.
+ * `apps/mobile/src/Stack.tsx`. Keys are RN's linking paths; values are this
+ * client's route suffixes, which differ where the Kotlin route names its own
+ * page (RN's `settings/project` is `settings/overview` here, its
+ * `settings/thread-preferences` is `settings/threads`, and `settings/about`'s
+ * version content lives on the Diagnostics screen). RN's `settings/legal`,
+ * `settings/open-source-licenses`, `settings/keyboard`, and the parameterized
+ * `environments/:id` have no screen here, so they are not in the allowlist.
  */
 private val SETTINGS_CHILDREN =
     mapOf(
@@ -116,7 +120,22 @@ private val SETTINGS_CHILDREN =
         "environments" to "environments",
         "appearance" to "appearance",
         "project-grouping" to "project-grouping",
+        "organization" to "project-grouping",
         "client-storage" to "client-storage",
+        "follow-ups" to "follow-ups",
+        "thread-preferences" to "threads",
+        "notifications" to "notifications",
+        "project" to "overview",
+        "new-threads" to "new-threads",
+        "source-control" to "source-control",
+        "agent-behavior" to "agent-behavior",
+        "maintenance" to "maintenance",
+        "diagnostics" to "diagnostics",
+        "about" to "diagnostics",
+        "provider-accounts" to "provider-accounts",
+        "scheduled-tasks" to "scheduled-tasks",
+        "usage" to "usage",
+        "archive" to "archive",
     )
 
 private const val MAX_SEGMENT_LENGTH = 256

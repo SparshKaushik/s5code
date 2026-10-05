@@ -27,10 +27,8 @@ import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.CloudOff
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Smartphone
-import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.Badge
@@ -72,7 +70,6 @@ import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.ProviderSkill
 import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SlashCommand
-import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import kotlinx.coroutines.delay
 import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
 import club.touchtech.s5code.kotlin.platform.active
@@ -182,10 +179,6 @@ fun ThreadComposer(
     queuedMessages: Int,
     connectionState: ConnectionState,
     modifier: Modifier = Modifier,
-    connectionError: String? = null,
-    environmentLabel: String,
-    syncPhase: ThreadSyncPhase,
-    onReconnect: () -> Unit,
     provider: ProviderInstance,
     /** Display name for the chip, resolved from the catalog — never the slug. */
     modelLabel: String,
@@ -396,14 +389,6 @@ fun ThreadComposer(
             .padding(horizontal = S5Theme.spacing.medium, vertical = S5Theme.spacing.small),
         verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
     ) {
-        ComposerStatusPill(
-            connectionState = connectionState,
-            connectionError = connectionError,
-            environmentLabel = environmentLabel,
-            syncPhase = syncPhase,
-            onClick = onReconnect,
-        )
-
         SuggestionPopover(
             commands = commandSuggestions + skillSuggestions,
             paths = pathSuggestions,
@@ -617,80 +602,6 @@ fun ThreadComposer(
         attachment = previewAttachment,
         onDismiss = { previewAttachment = null },
     )
-}
-
-private data class ComposerStatus(val label: String, val unavailable: Boolean)
-
-@Composable
-private fun ComposerStatusPill(
-    connectionState: ConnectionState,
-    connectionError: String?,
-    environmentLabel: String,
-    syncPhase: ThreadSyncPhase,
-    onClick: () -> Unit,
-) {
-    val status =
-        remember(connectionState, connectionError, environmentLabel, syncPhase) {
-            when (connectionState) {
-                ConnectionState.Connecting,
-                ConnectionState.Recovering ->
-                    ComposerStatus(
-                        if (connectionError.isNullOrBlank()) {
-                            "Reconnecting to $environmentLabel…"
-                        } else {
-                            "Failed to connect. Retrying $environmentLabel…"
-                        },
-                        unavailable = false,
-                    )
-                ConnectionState.Offline -> ComposerStatus("You are offline", unavailable = true)
-                ConnectionState.Disabled ->
-                    ComposerStatus("$environmentLabel is switched off", unavailable = true)
-                ConnectionState.AuthRequired ->
-                    ComposerStatus(
-                        connectionError?.takeIf { it.isNotBlank() }
-                            ?.let { "Failed to connect to $environmentLabel: $it" }
-                            ?: "Failed to connect to $environmentLabel",
-                        unavailable = true,
-                    )
-                ConnectionState.Connected ->
-                    when (syncPhase) {
-                        ThreadSyncPhase.Loading -> ComposerStatus("Loading messages…", false)
-                        ThreadSyncPhase.Syncing -> ComposerStatus("Syncing messages…", false)
-                        ThreadSyncPhase.Live -> null
-                    }
-            }
-        }
-    AnimatedVisibility(status != null, enter = fadeIn(), exit = fadeOut()) {
-        status?.let { presentation ->
-            Surface(
-                onClick = onClick,
-                shape = MaterialTheme.shapes.extraLarge,
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                tonalElevation = 2.dp,
-            ) {
-                Row(
-                    Modifier.padding(horizontal = S5Theme.spacing.medium, vertical = S5Theme.spacing.small),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-                ) {
-                    Icon(
-                        if (presentation.unavailable) Icons.Rounded.CloudOff else Icons.Rounded.Sync,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint =
-                            if (presentation.unavailable) MaterialTheme.colorScheme.error
-                            else MaterialTheme.colorScheme.primary,
-                    )
-                    Text(
-                        presentation.label,
-                        style = MaterialTheme.typography.labelMedium,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-    }
 }
 
 @Composable

@@ -374,6 +374,17 @@ object Commands {
         put("createdAt", now())
     }
 
+    /**
+     * `project.update` (`ProjectMutation` in `contracts/project.ts`). Only the
+     * title travels: the Overview rename is the one mutation this client makes.
+     */
+    fun projectUpdate(projectId: String, title: String): JsonObject = buildJsonObject {
+        put("type", "project.update")
+        put("commandId", newCommandId())
+        put("projectId", projectId)
+        put("title", title.trim())
+    }
+
 }
 
 /** Default snooze: tomorrow morning, matching the RN preset the row menu uses. */

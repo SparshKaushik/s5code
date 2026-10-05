@@ -45,10 +45,19 @@ import club.touchtech.s5code.kotlin.feature.onboarding.PairUrlScreen
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentScreen
 import club.touchtech.s5code.kotlin.feature.review.ReviewScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsAccountScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsAgentBehaviorScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsAppearanceScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsClientStorageScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsDiagnosticsScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsFollowUpsScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsMaintenanceScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsNewThreadsScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsNotificationsScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsOverviewScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsProjectGroupingScreen
 import club.touchtech.s5code.kotlin.feature.settings.SettingsScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsSourceControlScreen
+import club.touchtech.s5code.kotlin.feature.settings.SettingsThreadsScreen
 import club.touchtech.s5code.kotlin.feature.terminal.TerminalScreen
 import club.touchtech.s5code.kotlin.feature.thread.ThreadRewindScreen
 import club.touchtech.s5code.kotlin.feature.thread.ThreadScreen
@@ -715,6 +724,56 @@ fun S5NavGraph(
         }
         composable(Routes.SettingsProjectGrouping) {
             SettingsProjectGroupingScreen(store = store, onBack = navController::popBackStack)
+        }
+        // RN links both project-grouping and organization at the same screen.
+        composable(Routes.SettingsOrganization) {
+            SettingsProjectGroupingScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsFollowUps) {
+            SettingsFollowUpsScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsThreads) {
+            SettingsThreadsScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsNotifications) {
+            SettingsNotificationsScreen(
+                store = store,
+                onBack = navController::popBackStack,
+                onOpen = { route -> navController.navigate(route) },
+            )
+        }
+        composable(Routes.SettingsOverview) {
+            SettingsOverviewScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsNewThreads) {
+            SettingsNewThreadsScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsSourceControl) {
+            SettingsSourceControlScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsAgentBehavior) {
+            SettingsAgentBehaviorScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsMaintenance) {
+            SettingsMaintenanceScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsDiagnostics) {
+            SettingsDiagnosticsScreen(store = store, onBack = navController::popBackStack)
+        }
+        // RN's settings/usage and settings/archive deep links resolve to the
+        // same screens the top-level routes do.
+        composable(Routes.SettingsUsage) {
+            UsageScreen(store = store, onBack = navController::popBackStack)
+        }
+        composable(Routes.SettingsArchive) {
+            ArchiveScreen(
+                store = store,
+                onBack = navController::popBackStack,
+                onOpenThread = { environmentId, threadId ->
+                    navController.navigate(Routes.thread(environmentId, threadId))
+                },
+                confirmController = confirmController,
+            )
         }
         composable(Routes.SettingsClientStorage) {
             SettingsClientStorageScreen(

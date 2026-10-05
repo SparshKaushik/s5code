@@ -84,6 +84,7 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ReviewDiffPreviewResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SearchThreadsResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerSelfUpdateResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ShellSnapshotDto
@@ -785,6 +786,9 @@ class LiveWorkspaceGateway(
                             projectCloneTracking =
                                 state?.capabilities?.projectCloneTracking == true,
                             threadVisitedTracking = state?.capabilities?.threadVisitedTracking == true,
+                            storageCleanup = state?.capabilities?.storageCleanup == true,
+                            threadRestartContinuation =
+                                state?.capabilities?.threadRestartContinuation == true,
                         ),
                     continueThreadsAfterServerUpdate =
                         state?.continueThreadsAfterServerUpdate == true,
@@ -792,6 +796,7 @@ class LiveWorkspaceGateway(
                     scratchWorkspaceRoot = state?.scratchWorkspaceRoot,
                     autoSettleOnMerge = state?.autoSettleOnMerge ?: true,
                     autoSettleAfterDays = state?.autoSettleAfterDays,
+                    serverSettings = state?.serverSettings ?: ServerConfigSettingsDto(),
                 )
             }
 
@@ -1327,6 +1332,14 @@ class LiveWorkspaceGateway(
                 put("projectId", projectId.value)
             },
         )
+    }
+
+    override suspend fun renameProject(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        title: String,
+    ) {
+        dispatch(environmentId, Commands.projectUpdate(projectId.value, title))
     }
 
     override suspend fun consumeResetCredit(

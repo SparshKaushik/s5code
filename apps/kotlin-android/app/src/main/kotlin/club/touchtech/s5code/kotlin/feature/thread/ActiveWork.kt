@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
+import club.touchtech.s5code.kotlin.model.PendingBackgroundTask
 import club.touchtech.s5code.kotlin.model.TurnInfo
 
 /**
@@ -60,4 +61,77 @@ private val ACTIVE_SESSION_STATUSES = setOf("starting", "running")
 internal fun workingLabel(startedAtMillis: Long, nowMillis: Long): String {
     val elapsed = (nowMillis - startedAtMillis).coerceAtLeast(0L)
     return "Working for ${formatDuration(elapsed)}"
+}
+
+/**
+ * The floating pill's own duration: "Working 1m 04s" like the RN
+ * `WorkingTimer`, rather than the feed row's "Working for 1m 04s".
+ */
+internal fun floatingWorkingLabel(startedAtMillis: Long, nowMillis: Long): String {
+    val totalSeconds = ((nowMillis - startedAtMillis).coerceAtLeast(0L) / 1_000L)
+    val duration =
+        when {
+            totalSeconds < 60 -> "${totalSeconds}s"
+            totalSeconds >= 3_600 -> formatDuration(totalSeconds * 1_000L)
+            else -> {
+                val minutes = totalSeconds / 60
+                val seconds = (totalSeconds % 60).toString().padStart(2, '0')
+                "${minutes}m ${seconds}s"
+            }
+        }
+    return "Working $duration"
+}
+
+/* ── Background work left running after the turn settled ─────────────── */
+
+private data class BackgroundKind(val order: Int, val singular: String, val plural: String)
+
+// `order` groups work the way a reader thinks about it: agents first, loose
+// tasks last — `BACKGROUND_WORK_KINDS` in `state/threadExecution.ts`.
+private fun backgroundKind(kind: String): BackgroundKind =
+    when (kind) {
+        "subagent" -> BackgroundKind(0, "subagent", "subagents")
+        "command" -> BackgroundKind(1, "command", "commands")
+        "monitor" -> BackgroundKind(2, "monitor", "monitors")
+        else -> BackgroundKind(3, "background task", "background tasks")
+    }
+
+/**
+ * The floating "Waiting on …" pill label, ported from
+ * `presentPendingBackgroundWork` in `packages/client-runtime/src/state/
+ * threadExecution.ts`. A command does not hold completion, so "Running" is for
+ * loose work and "Waiting on" for work the turn is blocked behind.
+ */
+internal fun pendingBackgroundWorkLabel(tasks: List<PendingBackgroundTask>): String? {
+    if (tasks.isEmpty()) return null
+    val waiting = tasks.any { it.kind != "command" }
+    val items =
+        tasks
+            .map { task ->
+                val kind = backgroundKind(task.kind)
+                val label = task.description?.trim().orEmpty()
+                kind to label.ifEmpty { kind.singular }
+            }
+            .sortedBy { it.first.order }
+    if (items.size == 1) {
+        val (kind, label) = items.single()
+        val named = label != kind.singular
+        return if (waiting) {
+            if (named) "Waiting on ${kind.singular} $label" else "Waiting on a ${kind.singular}"
+        } else {
+            if (named) "Running: $label" else "Running a ${kind.singular}"
+        }
+    }
+    val counts = items.groupingBy { it.first }.eachCount()
+    val groups =
+        counts.entries.sortedBy { it.key.order }.map { (kind, count) ->
+            "$count ${if (count == 1) kind.singular else kind.plural}"
+        }
+    val joined =
+        when (groups.size) {
+            1 -> groups.first()
+            2 -> "${groups[0]} and ${groups[1]}"
+            else -> groups.dropLast(1).joinToString(", ") + ", and ${groups.last()}"
+        }
+    return "${if (waiting) "Waiting on" else "Running"} $joined"
 }

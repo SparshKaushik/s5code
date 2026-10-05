@@ -41,6 +41,8 @@ enum class S5ColorTheme(val id: String, val label: String) {
     Ocean("ocean", "Ocean"),
     Ember("ember", "Ember"),
     Iris("iris", "Iris"),
+    OscuraDusk("oscura-dusk", "Oscura Dusk"),
+    OscuraDawn("oscura-dawn", "Oscura Dawn"),
     ;
 
     /** The shared palette this id resolves to, for named themes only. */

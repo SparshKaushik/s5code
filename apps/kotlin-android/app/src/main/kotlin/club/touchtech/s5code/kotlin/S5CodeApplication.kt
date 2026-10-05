@@ -31,6 +31,7 @@ class S5CodeApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
+        installCrashLogger()
         TextMateHighlighter.install { path ->
             try {
                 assets.open(path)
@@ -69,7 +70,41 @@ class S5CodeApplication : Application(), SingletonImageLoader.Factory {
             .crossfade(true)
             .build()
 
+    /**
+     * Appends the uncaught stack trace to `crash_log.txt` in filesDir before the
+     * previous handler runs, so Settings → Diagnostics can show the last crash
+     * the way RN's startup-crash section does. Kept bounded: a runaway crash
+     * loop must not grow the file without limit, and the most recent entries
+     * are the ones worth keeping.
+     */
+    private fun installCrashLogger() {
+        val previous = Thread.getDefaultUncaughtExceptionHandler()
+        Thread.setDefaultUncaughtExceptionHandler { thread, throwable ->
+            runCatching {
+                val file = java.io.File(filesDir, CRASH_LOG_FILE)
+                if (file.length() > CRASH_LOG_MAX_BYTES) {
+                    // Keep the tail: the newest entries survive the trim.
+                    file.writeText(file.readText().takeLast(CRASH_LOG_KEEP_BYTES.toInt()))
+                }
+                file.appendText(
+                    "\n=== ${java.time.Instant.now()} on ${thread.name} ===\n" +
+                        throwable.stackTraceToString() +
+                        "\n",
+                )
+            }
+            previous?.uncaughtException(thread, throwable)
+        }
+    }
+
     private companion object {
+        const val CRASH_LOG_FILE = "crash_log.txt"
+
+        /** Trim once the log passes 256 KB. */
+        const val CRASH_LOG_MAX_BYTES = 256L * 1024
+
+        /** …down to the newest 64 KB. */
+        const val CRASH_LOG_KEEP_BYTES = 64L * 1024
+
         /** 24 MB of decoded previews, enough for a small nearby working set. */
         const val IMAGE_MEMORY_CACHE_MAX_BYTES = 24L * 1024 * 1024
 

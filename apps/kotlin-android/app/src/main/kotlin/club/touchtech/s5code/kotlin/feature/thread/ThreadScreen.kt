@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -11,10 +12,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.Bolt
 import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material.icons.rounded.Folder
@@ -23,13 +27,16 @@ import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Source
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
@@ -38,6 +45,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
@@ -59,13 +67,13 @@ import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
 import club.touchtech.s5code.kotlin.design.component.S5Notice
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
-import club.touchtech.s5code.kotlin.design.component.S5WaitPill
 import club.touchtech.s5code.kotlin.design.component.S5WaitState
 import club.touchtech.s5code.kotlin.design.component.ScrollAnchor
 import club.touchtech.s5code.kotlin.design.component.scrollAnchor
 import club.touchtech.s5code.kotlin.design.component.scrollToAnchor
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.feature.connections.WaitNotice
 import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
 import club.touchtech.s5code.kotlin.feature.connections.showRetry
 import club.touchtech.s5code.kotlin.feature.connections.waitNotice
@@ -84,6 +92,7 @@ import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
 import club.touchtech.s5code.kotlin.platform.rememberQuestionFileIntake
 import club.touchtech.s5code.kotlin.platform.rememberQuestionFilePicker
 import club.touchtech.s5code.kotlin.platform.rememberQuestionMediaPicker
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 
@@ -367,6 +376,26 @@ fun ThreadScreen(
                 sessionStatus = current.sessionStatus,
                 sessionStartedAtMillis = current.sessionUpdatedAtMillis,
             )
+        }
+    // A running turn whose newest user message is `/compact` is compacting until
+    // the transcript records the completed compaction — `isCompacting` in
+    // `use-thread-composer-state.ts`. Kotlin feed rows do not carry the run id on
+    // user messages, so the last message stands in for "the active run asked to
+    // compact": anything older belongs to a turn that already finished.
+    val isCompacting =
+        remember(current.feed, activeWorkStartedAt) {
+            if (activeWorkStartedAt == null) {
+                false
+            } else {
+                val lastUserIndex =
+                    current.feed.indexOfLast { it is FeedEntry.UserMessage }
+                lastUserIndex >= 0 &&
+                    (current.feed[lastUserIndex] as FeedEntry.UserMessage)
+                        .text.trim().equals("/compact", ignoreCase = true) &&
+                    current.feed.drop(lastUserIndex + 1).none {
+                        it is FeedEntry.Note && it.compaction
+                    }
+            }
         }
     val rows =
         remember(
@@ -919,10 +948,6 @@ fun ThreadScreen(
                         it.environmentId == env && it.threadId == id
                     },
                 connectionState = environment?.state ?: club.touchtech.s5code.kotlin.model.ConnectionState.Offline,
-                connectionError = environment?.lastError?.takeIf { it.isNotBlank() },
-                environmentLabel = environment?.label ?: "Environment",
-                syncPhase = syncPhase,
-                onReconnect = { store.retryEnvironment(env) },
                 provider = effectiveSettings.provider,
                 modelLabel =
                     machineCatalog
@@ -954,29 +979,53 @@ fun ThreadScreen(
             }
         },
         floatingActionButton = {
-            // The pill and the jump button share this slot: both belong just above the
-            // composer, and only one of them is ever worth showing at a time. The pill
-            // wins, since a connection that is not live makes "jump to latest"
-            // meaningless.
-            Column(
-                horizontalAlignment = Alignment.End,
-                verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-            ) {
-                AnimatedVisibility(wait != null && rows.isNotEmpty()) {
-                    wait?.let { notice ->
-                        S5WaitPill(
-                            label = waitPillLabel(notice),
-                            spinning = notice.spinning,
-                            onClick = { store.retryEnvironment(env) },
+            // One floating control above the composer, matching the RN client's
+            // FloatingWorkingControl: a centered pill that reports connection,
+            // syncing, compaction, the working timer, or background work — in
+            // that precedence — with a separate scroll-to-end circle alongside.
+            // A pending approval or user input hides the status pill so it does
+            // not compete with the gate, exactly as RN does.
+            val floatingStatus =
+                when {
+                    wait != null ->
+                        FloatingStatus.Connection(wait!!)
+                    current.approval != null || current.userInput != null -> null
+                    syncPhase != ThreadSyncPhase.Live ->
+                        FloatingStatus.Syncing(
+                            if (syncPhase == ThreadSyncPhase.Loading) {
+                                "Loading messages…"
+                            } else {
+                                "Syncing messages…"
+                            }
+                        )
+                    isCompacting -> FloatingStatus.Compacting
+                    activeWorkStartedAt != null ->
+                        FloatingStatus.Working(activeWorkStartedAt)
+                    else ->
+                        pendingBackgroundWorkLabel(current.pendingBackgroundTasks)
+                            ?.let(FloatingStatus::Waiting)
+                }
+            val showJump = !following && rows.isNotEmpty()
+            Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.large),
+                ) {
+                    AnimatedVisibility(floatingStatus != null && rows.isNotEmpty()) {
+                        floatingStatus?.let { status ->
+                            FloatingStatusPill(
+                                status = status,
+                                onReconnect = { store.retryEnvironment(env) },
+                            )
+                        }
+                    }
+                    AnimatedVisibility(showJump) {
+                        S5FloatingAction(
+                            icon = Icons.Rounded.ArrowDownward,
+                            label = "Jump to latest",
+                            onClick = { scope.launch { listState.animateScrollToItem(0) } },
                         )
                     }
-                }
-                AnimatedVisibility(!following && rows.isNotEmpty()) {
-                    S5FloatingAction(
-                        icon = Icons.Rounded.ArrowDownward,
-                        label = "Jump to latest",
-                        onClick = { scope.launch { listState.animateScrollToItem(0) } },
-                    )
                 }
             }
         },
@@ -1265,3 +1314,114 @@ private fun UserInputCollapsedBar(
  * delay the strip past the moment the title has already gone.
  */
 private const val PLAN_BAR_COLLAPSE_THRESHOLD = 0.6f
+
+/**
+ * What the floating pill above the composer says — the Kotlin port of
+ * `FloatingWorkingStatus` in `apps/mobile/src/features/threads/
+ * floating-working-status.ts`. Connection, syncing, compacting, working, and
+ * waiting share one element so the label swaps in place; only the connection
+ * variant is tappable and triggers a reconnect.
+ */
+private sealed interface FloatingStatus {
+    val label: String
+
+    data class Connection(val notice: WaitNotice) : FloatingStatus {
+        override val label get() = waitPillLabel(notice)
+    }
+
+    data class Syncing(override val label: String) : FloatingStatus
+    data object Compacting : FloatingStatus {
+        override val label get() = "Compacting…"
+    }
+    data class Working(val startedAtMillis: Long) : FloatingStatus {
+        // The pill renders `floatingWorkingLabel` instead — it needs the tick.
+        override val label get() = "Working"
+    }
+    data class Waiting(override val label: String) : FloatingStatus
+}
+
+/**
+ * The centered pill from the RN `FloatingWorkingControl`. Syncing and
+ * compacting spin; a dead connection shows the red dot instead of a spinner,
+ * since it is not making progress; the working kind ticks its own duration.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun FloatingStatusPill(
+    status: FloatingStatus,
+    onReconnect: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        onClick = onReconnect,
+        enabled = status is FloatingStatus.Connection,
+        shape = androidx.compose.foundation.shape.CircleShape,
+        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        contentColor = MaterialTheme.colorScheme.onSurface,
+        tonalElevation = 3.dp,
+        shadowElevation = 2.dp,
+        modifier = modifier,
+    ) {
+        Row(
+            Modifier.padding(horizontal = S5Theme.spacing.medium, vertical = S5Theme.spacing.small),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            val spinning =
+                when (status) {
+                    is FloatingStatus.Connection -> status.notice.spinning
+                    is FloatingStatus.Syncing,
+                    FloatingStatus.Compacting -> true
+                    else -> false
+                }
+            when {
+                spinning ->
+                    LoadingIndicator(Modifier.size(16.dp))
+                status is FloatingStatus.Connection ->
+                    // The dead-connection dot, same as S5WaitPill's static
+                    // affordance: no spinner where nothing is retrying.
+                    Box(
+                        Modifier.size(8.dp)
+                            .background(
+                                MaterialTheme.colorScheme.error,
+                                androidx.compose.foundation.shape.CircleShape,
+                            ),
+                    )
+                status is FloatingStatus.Waiting ->
+                    Icon(
+                        Icons.Rounded.Bolt,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+            }
+            if (status is FloatingStatus.Working) {
+                var nowMillis by
+                    remember(status.startedAtMillis) {
+                        mutableLongStateOf(System.currentTimeMillis())
+                    }
+                LaunchedEffect(status.startedAtMillis) {
+                    while (true) {
+                        delay(1_000)
+                        nowMillis = System.currentTimeMillis()
+                    }
+                }
+                Text(
+                    floatingWorkingLabel(status.startedAtMillis, nowMillis),
+                    style = MaterialTheme.typography.labelLargeEmphasized,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 260.dp),
+                )
+            } else {
+                Text(
+                    status.label,
+                    style = MaterialTheme.typography.labelLargeEmphasized,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.widthIn(max = 260.dp),
+                )
+            }
+        }
+    }
+}
