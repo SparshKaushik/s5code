@@ -327,6 +327,8 @@ data class ServerConfigStreamPayloadDto(
     val providers: List<ServerProviderDto>? = null,
     /** `usageLimitSourcesUpdated` payload — the full configured source set. */
     val sources: List<UsageLimitSourceDto>? = null,
+    /** `settingsUpdated` payload — the whole settings record, like the snapshot's. */
+    val settings: ServerConfigSettingsDto? = null,
 )
 
 @Serializable

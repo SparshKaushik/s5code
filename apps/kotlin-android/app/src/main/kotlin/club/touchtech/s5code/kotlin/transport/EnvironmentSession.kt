@@ -637,6 +637,25 @@ class EnvironmentSession(
                                             )
                                     }
                                 }
+                                event.type == "settingsUpdated" -> {
+                                    // The server pushes this after an
+                                    // updateSettings write instead of a fresh
+                                    // snapshot; without it the session's read
+                                    // of the settings goes stale until the
+                                    // next reconnect.
+                                    event.payload?.settings?.let { settings ->
+                                        _state.value =
+                                            _state.value.copy(
+                                                autoSettleOnMerge =
+                                                    settings.sidebarAutoSettleOnMerge,
+                                                autoSettleAfterDays =
+                                                    settings.sidebarAutoSettleAfterDays,
+                                                continueThreadsAfterServerUpdate =
+                                                    settings.continueThreadsAfterServerUpdate == true,
+                                                serverSettings = settings,
+                                            )
+                                    }
+                                }
                                 event.type == "providerStatuses" -> {
                                     event.payload?.providers?.let { _providers.value = it }
                                 }
