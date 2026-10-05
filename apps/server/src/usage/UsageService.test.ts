@@ -133,6 +133,7 @@ const NARROW_WINDOW: UsageSummaryInput = {
   timeZone: "UTC",
   sinceDay: UsageDay.make("2026-09-01"),
   untilDay: UsageDay.make("2026-09-02"),
+  modelAliases: [],
 };
 
 /**
@@ -1239,6 +1240,7 @@ describe("UsageService", () => {
         timeZone: "UTC",
         sinceDay: UsageDay.make("2026-08-10"),
         untilDay: UsageDay.make("2026-08-12"),
+        modelAliases: [],
       });
       assert.deepStrictEqual(later.buckets, []);
       assert.strictEqual(later.sources[0]?.status, "missing");
