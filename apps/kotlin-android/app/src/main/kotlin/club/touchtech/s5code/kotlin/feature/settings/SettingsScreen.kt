@@ -8,10 +8,10 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.AddComment
 import androidx.compose.material.icons.automirrored.rounded.ReplyAll
 import androidx.compose.material.icons.rounded.AccountTree
 import androidx.compose.material.icons.rounded.Analytics
+import androidx.compose.material.icons.rounded.AddComment
 import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.BugReport
 import androidx.compose.material.icons.rounded.Build
@@ -173,7 +173,7 @@ fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit
                     val rows = 4
                     var position = 0
                     S5SettingsRow(
-                        icon = Icons.AutoMirrored.Rounded.AddComment,
+                        icon = Icons.Rounded.AddComment,
                         label = "New threads",
                         onClick = { onOpen(Routes.SettingsNewThreads) },
                         position = rowPosition(position++, rows),
