@@ -7,6 +7,23 @@ import {
   highlightSourceFile,
 } from "./shikiReviewHighlighter";
 
+// Cold regex compilation on a busy runner can exhaust Shiki's per-line budget.
+// Compare complete tokens here without changing the app's bounded tokenization.
+vi.mock("@shikijs/core", async (importOriginal) => {
+  const original = await importOriginal<typeof import("@shikijs/core")>();
+  return {
+    ...original,
+    createHighlighterCore: async (...args: Parameters<typeof original.createHighlighterCore>) => {
+      const highlighter = await original.createHighlighterCore(...args);
+      return {
+        ...highlighter,
+        codeToTokensBase: (...input: Parameters<typeof highlighter.codeToTokensBase>) =>
+          highlighter.codeToTokensBase(input[0], { ...input[1], tokenizeTimeLimit: 0 }),
+      };
+    },
+  };
+});
+
 describe("highlightSourceFile", () => {
   it("preserves one highlighted token row per source line without trailing newlines", async () => {
     const lines = [
