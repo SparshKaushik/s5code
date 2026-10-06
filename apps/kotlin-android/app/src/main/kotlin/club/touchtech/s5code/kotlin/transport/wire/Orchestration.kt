@@ -1,0 +1,500 @@
+package club.touchtech.s5code.kotlin.transport.wire
+
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
+
+/**
+ * Wire DTOs for the orchestration contracts in
+ * `packages/contracts/src/orchestration.ts`.
+ *
+ * Two rules keep these decodable against a moving server:
+ *
+ * - Every field the server marked optional is optional here with a default, and
+ *   every union the contract calls forward-compatible is decoded as a string
+ *   rather than an enum. A client that fails a whole snapshot over one unknown
+ *   literal takes its own connection down over data it did not need.
+ * - Activity payloads stay [JsonElement]. Their shape is provider-defined and
+ *   grows per adapter; the presentation layer reads the handful of keys it knows
+ *   and ignores the rest, which is what the RN client does too.
+ */
+
+@Serializable
+data class ModelSelectionDto(
+    val instanceId: String = "",
+    val model: String = "",
+    val options: JsonElement? = null,
+)
+
+@Serializable
+data class LatestTurnDto(
+    val turnId: String,
+    /** running | interrupted | completed | error */
+    val state: String,
+    val requestedAt: String? = null,
+    val startedAt: String? = null,
+    val completedAt: String? = null,
+    val assistantMessageId: String? = null,
+)
+
+@Serializable
+data class SessionDto(
+    val threadId: String = "",
+    /** idle | starting | running | ready | interrupted | stopped | error */
+    val status: String = "idle",
+    val providerName: String? = null,
+    val providerInstanceId: String? = null,
+    val runtimeMode: String = "full-access",
+    val activeTurnId: String? = null,
+    val lastError: String? = null,
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class PlanProgressDto(
+    val step: String = "",
+    val completedSteps: Int = 0,
+    val totalSteps: Int = 0,
+)
+
+@Serializable
+data class TitleRegenerationDto(val requestId: String = "", val startedAt: String? = null)
+
+/**
+ * The checkout's own remote when it names a different repository than the
+ * canonical one — a fork tracking its upstream. Clients group by
+ * `origin.canonicalKey` when present so a fork stays its own scope while pull
+ * request features keep the canonical identity; mirrors `RepositoryOrigin` and
+ * `repositoryGroupingKeyOf` in `packages/contracts/src/environment.ts`.
+ */
+@Serializable
+data class RepositoryOriginDto(
+    val canonicalKey: String,
+    val displayName: String? = null,
+)
+
+@Serializable
+data class RepositoryIdentityDto(
+    val canonicalKey: String = "",
+    val displayName: String? = null,
+    val owner: String? = null,
+    val name: String? = null,
+    val rootPath: String? = null,
+    val origin: RepositoryOriginDto? = null,
+) {
+    /** What clients group checkouts by: the fork's own remote, else the canonical repo. */
+    val groupingKey: String get() = origin?.canonicalKey ?: canonicalKey
+
+    /** The label matching [groupingKey], from `repositoryGroupingDisplayNameOf`. */
+    val groupingDisplayName: String?
+        get() = origin?.let { it.displayName ?: it.canonicalKey } ?: displayName
+}
+
+@Serializable
+data class ProjectShellDto(
+    val id: String,
+    val title: String = "",
+    val workspaceRoot: String = "",
+    val repositoryIdentity: RepositoryIdentityDto? = null,
+    val defaultModelSelection: ModelSelectionDto? = null,
+    /**
+     * The project's own icon, relative to its workspace root, when the server
+     * found one. A cache-key hint only: `assets.createUrl` re-reads the
+     * authoritative path before signing, so a stale value costs a URL, not
+     * correctness.
+     */
+    val faviconPath: String? = null,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+)
+
+/**
+ * The home list's row model. Note the derived flags (`hasPendingApprovals`,
+ * `hasPendingUserInput`, `planProgress`, `backgroundLiveness`): the server
+ * computes them so a client can render an accurate row without subscribing to
+ * every thread's full activity history.
+ */
+@Serializable
+data class ThreadShellDto(
+    val id: String,
+    val projectId: String = "",
+    val title: String = "",
+    val modelSelection: ModelSelectionDto = ModelSelectionDto(),
+    val runtimeMode: String = "full-access",
+    val interactionMode: String = "default",
+    val branch: String? = null,
+    val worktreePath: String? = null,
+    val latestTurn: LatestTurnDto? = null,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+    val archivedAt: String? = null,
+    val settledOverride: String? = null,
+    val settledAt: String? = null,
+    val snoozedUntil: String? = null,
+    val snoozedAt: String? = null,
+    val pinnedAt: String? = null,
+    val pinOrderKey: String? = null,
+    /** Manual Active placement; keyless threads keep creation/re-entry order. */
+    val activeOrderKey: String? = null,
+    val titleRegeneration: TitleRegenerationDto? = null,
+    val session: SessionDto? = null,
+    val latestUserMessageAt: String? = null,
+    val hasPendingApprovals: Boolean = false,
+    val hasPendingUserInput: Boolean = false,
+    val hasActionableProposedPlan: Boolean = false,
+    /** working | monitoring, or absent for none. */
+    val backgroundLiveness: String? = null,
+    val planProgress: PlanProgressDto? = null,
+    val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
+    /**
+     * The link array that replaced `linkedPullRequest` on watch-capable servers:
+     * multiple PRs, host snapshots, stack membership, and `watch` state. Rows
+     * written before linking decode to an empty list. Servers that send neither
+     * `pullRequests` nor a `branchPullRequest` predate discovery, so null must
+     * mean "unsupported" rather than "none": `resolveThreadPrSource` decides
+     * whether to trust the legacy single link off that distinction.
+     */
+    val pullRequests: List<ThreadPullRequestLinkDto>? = null,
+    /** Pull request the server discovered from the thread's current branch. */
+    val branchPullRequest: ThreadLinkedPullRequestDto? = null,
+    /** Native `/goal` on the active provider thread; absent on goal-less servers. */
+    val goal: ProviderGoalDto? = null,
+    /**
+     * The last message the user wrote. Wakes and agent-authored messages share
+     * the `user` role, so they move `latestUserMessageAt` but not this; the
+     * Working section orders on it.
+     *
+     * Three states ride on one field: `null` is a real answer (the user has
+     * authored nothing), while [AUTHORED_AT_UNKNOWN] marks a server that
+     * predates the field — only the unknown case falls back to the latest
+     * run's request time, matching `sortWorkingThreadsBySend`. A sentinel
+     * default is what keeps "absent" distinct from JSON `null` on decode.
+     */
+    val latestUserAuthoredMessageAt: String? = FIELD_ABSENT,
+    /** Set when `thread.auto-settle.set` turned the idle sweep off for this thread. */
+    val autoSettleDisabledAt: String? = null,
+    val unsettledAt: String? = null,
+    val status: String? = null,
+    val providerInstanceId: String? = null,
+    val latestRunId: String? = null,
+    val activeRunId: String? = null,
+    val latestRunRequestedAt: String? = null,
+    val latestRunStartedAt: String? = null,
+    val latestRunCompletedAt: String? = null,
+    val activityRunStartedAt: String? = null,
+    val activityRunStatus: String? = null,
+    val pendingRuntimeRequest: JsonObject? = null,
+    val pendingBackgroundTasks: List<JsonObject> = emptyList(),
+    val lastError: String? = null,
+    val lastVisitedAt: String? = null,
+    val lineage: JsonObject? = null,
+    val creationSource: String? = null,
+    val historyOrigin: String? = null,
+    val usageLimitResetAt: String? = null,
+    val limitRecovery: JsonObject? = null,
+)
+
+/**
+ * `OrchestrationV2ProviderGoal` on the shell: the native `/goal` a provider set
+ * on the conversation. `status` stays a string — the literal set is the
+ * contract's, but a newer server value must not sink a shell decode. Usage
+ * fields are provider-specific: Codex reports tokens, Claude reports checks.
+ */
+@Serializable
+data class ProviderGoalDto(
+    val objective: String = "",
+    /** active | paused | blocked | usage_limited | budget_limited | complete */
+    val status: String = "",
+    val tokensUsed: Long? = null,
+    val tokenBudget: Long? = null,
+    val timeUsedSeconds: Long? = null,
+    val checks: Long? = null,
+    val lastCheck: String? = null,
+)
+
+@Serializable
+data class ThreadLinkedPullRequestDto(
+    val projectId: String = "",
+    val repository: String = "",
+    val number: Int = 0,
+    val url: String = "",
+)
+
+/**
+ * One link in `ThreadPullRequestLink[]` on the V2 shell/detail — a host-level
+ * identity (`host`/`repository`/`number`, no `projectId`) plus the last host
+ * snapshot the sync reactor wrote. `watch` stays an opaque object: the client
+ * only ever needs to know a watch exists (`thread.pull-request.watch` carries
+ * the key to stop it), not the wake bookkeeping inside it.
+ */
+@Serializable
+data class ThreadPullRequestLinkDto(
+    val host: String = "",
+    val repository: String = "",
+    val number: Int = 0,
+    val url: String = "",
+    /** manual | created | agent | stack | stack-dismissed (a tombstone; hide it). */
+    val source: String = "",
+    val linkedAt: String = "",
+    val snapshot: ThreadPullRequestSnapshotDto? = null,
+    val stack: ThreadPullRequestStackDto? = null,
+    val watch: JsonObject? = null,
+)
+
+@Serializable
+data class ThreadPullRequestSnapshotDto(
+    /** open | closed | merged */
+    val state: String = "open",
+    val title: String = "",
+    val headBranch: String = "",
+    val baseBranch: String = "",
+    val isDraft: Boolean = false,
+    val updatedAt: String? = null,
+    val syncedAt: String = "",
+    val closedAt: String? = null,
+    val mergedAt: String? = null,
+    val author: JsonObject? = null,
+    val additions: Int? = null,
+    val deletions: Int? = null,
+    val changedFiles: Int? = null,
+    /** approved | changes-requested | review-required | none */
+    val reviewDecision: String? = null,
+    /** passing | failing | pending | unknown */
+    val checksState: String? = null,
+    val mergeability: String? = null,
+)
+
+@Serializable
+data class ThreadPullRequestStackLayerDto(
+    val number: Int = 0,
+    val headBranch: String = "",
+    val state: String = "open",
+)
+
+/** A host-native stack a linked pull request belongs to; layers run bottom to top. */
+@Serializable
+data class ThreadPullRequestStackDto(
+    val kind: String = "native",
+    val id: String = "",
+    val number: Int = 0,
+    val url: String = "",
+    val base: String = "",
+    val layers: List<ThreadPullRequestStackLayerDto> = emptyList(),
+)
+
+/**
+ * Sentinel for a wire field the server never sent, on fields where `null` is
+ * a real answer and "absent" means an older server. Decode reads the default
+ * for a missing key and `null` for an explicit one, so the two stay distinct.
+ * Never a real value: it cannot parse as an instant and renders as nothing.
+ *
+ * One caveat: `explicitNulls = false` writes a `null` field the same as an
+ * absent one, so a value persisted to the snapshot cache reads back as
+ * [FIELD_ABSENT] — the cold-start list briefly sorts with the older-server
+ * fallback until the live snapshot arrives. Accepted: distinguishing them on
+ * disk would need a custom serializer for one ordering hint.
+ */
+const val FIELD_ABSENT: String = "__field_absent__"
+
+@Serializable
+data class ShellSnapshotDto(
+    val snapshotSequence: Long = 0,
+    val projects: List<ProjectShellDto> = emptyList(),
+    val threads: List<ThreadShellDto> = emptyList(),
+    val updatedAt: String? = null,
+    val schemaVersion: Int = 2,
+    val archivedThreads: List<ThreadShellDto> = emptyList(),
+)
+
+/**
+ * One frame of `orchestration.subscribeShell`. The union is flattened into one
+ * nullable-field class rather than a sealed hierarchy: kotlinx polymorphism
+ * needs a discriminator it can register, and this union keys on `kind` with
+ * per-variant field names, which a custom serializer would have to reimplement
+ * for no gain over reading `kind` directly.
+ */
+@Serializable
+data class ShellStreamItemDto(
+    val kind: String,
+    val snapshot: ShellSnapshotDto? = null,
+    val sequence: Long? = null,
+    val project: ProjectShellDto? = null,
+    val projectId: String? = null,
+    val thread: ThreadShellDto? = null,
+    val threadId: String? = null,
+    /**
+     * "active" | "archived" on thread deltas, telling the client which half of
+     * the shell the row belongs to.
+     */
+    val location: String? = null,
+    /**
+     * Present on metadata-only enrichment snapshots: the server resolved
+     * repository identity for these workspace roots and is patching `projects`
+     * in place. Absent marks the frame as an authoritative snapshot that
+     * replaces the whole shell. See `shellStreamItemFromEnrichmentRefresh` and
+     * `mergeShellSnapshotProjects` in the RN client.
+     */
+    val resolvedRepositoryIdentityRoots: List<String>? = null,
+)
+
+@Serializable
+data class ChatAttachmentDto(
+    val type: String = "image",
+    val id: String = "",
+    val name: String = "",
+    val mimeType: String = "",
+    val sizeBytes: Long = 0,
+)
+
+@Serializable
+data class MessageDto(
+    val id: String,
+    /** user | assistant | system | reasoning (the last behind `reasoningMessages` opt-in) */
+    val role: String = "assistant",
+    val text: String = "",
+    val attachments: List<ChatAttachmentDto>? = null,
+    /**
+     * `OrchestrationMessageContext`, kept opaque: records are a forward-
+     * compatible union (`UnknownContextRecord` is the contract's own fallback),
+     * so the wire type stays `JsonElement` and the renderer picks what it knows.
+     */
+    val context: JsonElement? = null,
+    val turnId: String? = null,
+    val streaming: Boolean = false,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+)
+
+@Serializable
+data class ProposedPlanDto(
+    val id: String,
+    val turnId: String? = null,
+    val planMarkdown: String = "",
+    val implementedAt: String? = null,
+    val implementationThreadId: String? = null,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+)
+
+/**
+ * A single provider-shaped event in the thread's history: tool calls, subagent
+ * tasks, approvals, user-input requests, reasoning, plan updates. `kind` is an
+ * open string and `payload` is opaque, exactly as the contract has it.
+ */
+@Serializable
+data class ThreadActivityDto(
+    val id: String,
+    /** info | tool | approval | error */
+    val tone: String = "info",
+    val kind: String = "",
+    val summary: String = "",
+    val payload: JsonElement? = null,
+    val turnId: String? = null,
+    val sequence: Long? = null,
+    val createdAt: String? = null,
+)
+
+@Serializable
+data class CheckpointFileDto(
+    val path: String = "",
+    val kind: String = "",
+    val additions: Int = 0,
+    val deletions: Int = 0,
+)
+
+@Serializable
+data class CheckpointSummaryDto(
+    val turnId: String = "",
+    val checkpointTurnCount: Int = 0,
+    val checkpointRef: String = "",
+    /** ready | missing | error */
+    val status: String = "ready",
+    val files: List<CheckpointFileDto> = emptyList(),
+    val assistantMessageId: String? = null,
+    val completedAt: String? = null,
+)
+
+@Serializable
+data class ThreadDto(
+    val id: String,
+    val projectId: String = "",
+    val title: String = "",
+    val modelSelection: ModelSelectionDto = ModelSelectionDto(),
+    val runtimeMode: String = "full-access",
+    val interactionMode: String = "default",
+    val branch: String? = null,
+    val worktreePath: String? = null,
+    val latestTurn: LatestTurnDto? = null,
+    val createdAt: String? = null,
+    val updatedAt: String? = null,
+    val archivedAt: String? = null,
+    val settledOverride: String? = null,
+    val settledAt: String? = null,
+    /** Last re-entry into the active list; anchors keyless active ordering. */
+    val unsettledAt: String? = null,
+    val snoozedUntil: String? = null,
+    val snoozedAt: String? = null,
+    val pinnedAt: String? = null,
+    val pinOrderKey: String? = null,
+    /** Manual Active placement; keyless threads keep creation/re-entry order. */
+    val activeOrderKey: String? = null,
+    val titleRegeneration: TitleRegenerationDto? = null,
+    val deletedAt: String? = null,
+    /** Set when `thread.auto-settle.set` turned the idle sweep off for this thread. */
+    val autoSettleDisabledAt: String? = null,
+    val messages: List<MessageDto> = emptyList(),
+    val proposedPlans: List<ProposedPlanDto> = emptyList(),
+    val activities: List<ThreadActivityDto> = emptyList(),
+    val checkpoints: List<CheckpointSummaryDto> = emptyList(),
+    val session: SessionDto? = null,
+    /** Authoritative V2 control plane and ordered timeline retained in the cache. */
+    val projection: V2ProjectionDto? = null,
+    val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
+    /** See [ThreadShellDto.pullRequests]. On `ThreadDto` this decodes the app thread record. */
+    val pullRequests: List<ThreadPullRequestLinkDto>? = null,
+    val branchPullRequest: ThreadLinkedPullRequestDto? = null,
+)
+
+@Serializable
+data class ThreadDetailPageDto(
+    val beforeCursor: String? = null,
+    val hasMore: Boolean = false,
+    val snapshotSequence: Long = 0,
+    val threadSequence: Long? = null,
+)
+
+@Serializable
+data class ThreadDetailSnapshotDto(
+    val snapshotSequence: Long = 0,
+    val thread: ThreadDto,
+    val page: ThreadDetailPageDto? = null,
+)
+
+/**
+ * One frame of `orchestration.subscribeThread`. Events arrive as raw JSON and are
+ * applied by [club.touchtech.s5code.kotlin.transport.applyThreadEvent], which
+ * only understands the event types that change what a screen renders.
+ */
+@Serializable
+data class ThreadStreamItemDto(
+    val kind: String,
+    val snapshot: ThreadDetailSnapshotDto? = null,
+    val event: JsonElement? = null,
+)
+
+/** One message-body hit from `orchestration.searchThreads`. */
+@Serializable
+data class ThreadSearchMatchDto(
+    val threadId: String,
+    val projectId: String,
+    /** user | assistant */
+    val source: String,
+    val snippet: String = "",
+    val messageCreatedAt: String? = null,
+)
+
+@Serializable
+data class SearchThreadsResultDto(val matches: List<ThreadSearchMatchDto> = emptyList())
+
+/** `dispatchCommand`'s ack: the event-log sequence the command produced. */
+@Serializable data class DispatchResultDto(val sequence: Long = 0)

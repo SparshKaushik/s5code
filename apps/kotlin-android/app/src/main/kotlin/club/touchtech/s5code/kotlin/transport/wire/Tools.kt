@@ -1,0 +1,816 @@
+package club.touchtech.s5code.kotlin.transport.wire
+import kotlinx.serialization.json.JsonObject
+
+import club.touchtech.s5code.kotlin.transport.EnvironmentPlatformDto
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonPrimitive
+
+/**
+ * Wire DTOs for the non-orchestration RPCs the mobile client uses: git status
+ * and refs, the project file index, review diffs, terminals, usage, and rewind.
+ *
+ * All of these are addressed by `cwd`, not by thread id. The thread's
+ * `worktreePath` (or its project's `workspaceRoot` when it has no worktree) is
+ * the directory a tool call operates in, which is why the projection keeps both
+ * on every thread row.
+ */
+
+/* ── Server config ───────────────────────────────────────────────────── */
+
+@Serializable
+data class ProviderOptionChoiceDto(
+    val id: String = "",
+    val label: String = "",
+    val description: String? = null,
+    val isDefault: Boolean = false,
+)
+
+/**
+ * One knob a model advertises, from `ProviderOptionDescriptor` in
+ * `packages/contracts/src/model.ts`.
+ *
+ * Flattened across the select/boolean union for the same reason the stream items
+ * are: the two variants differ only in `options` and the type of `currentValue`,
+ * and `currentValue` is the one field that cannot share a slot, so it arrives as
+ * a [JsonPrimitive] and is read per type.
+ */
+@Serializable
+data class ProviderOptionDescriptorDto(
+    val id: String = "",
+    val label: String = "",
+    val description: String? = null,
+    /** select | boolean */
+    val type: String = "select",
+    val options: List<ProviderOptionChoiceDto> = emptyList(),
+    val currentValue: JsonPrimitive? = null,
+    val promptInjectedValues: List<String> = emptyList(),
+)
+
+@Serializable
+data class ModelCapabilitiesDto(
+    val optionDescriptors: List<ProviderOptionDescriptorDto> = emptyList(),
+)
+
+@Serializable
+data class ServerProviderModelDto(
+    val slug: String = "",
+    val name: String = "",
+    val shortName: String? = null,
+    /**
+     * Upstream vendor for aggregating providers (Pi, OpenCode), from
+     * `subProvider` in the contract. Pickers qualify the display name with it
+     * because several vendors ship identically-named models.
+     */
+    val subProvider: String? = null,
+    val isDefault: Boolean = false,
+    val isLegacy: Boolean = false,
+    /**
+     * Null when the provider advertises no knobs for this model, which is a real
+     * answer and not a missing field: OpenCode and Pi ship empty capabilities.
+     */
+    val capabilities: ModelCapabilitiesDto? = null,
+)
+
+@Serializable
+data class ServerProviderSlashCommandDto(
+    val name: String = "",
+    val description: String? = null,
+)
+
+/** `ServerProviderSkill`: a composer's slash/skill-menu candidate. */
+@Serializable
+data class ServerProviderSkillDto(
+    val name: String = "",
+    val description: String? = null,
+    val path: String = "",
+    val scope: String? = null,
+    val enabled: Boolean = false,
+    val displayName: String? = null,
+    val shortDescription: String? = null,
+    /** Hidden from the agent's own tool, so only the user can start it. */
+    val userInvocationOnly: Boolean? = null,
+    /** `false` reserves the skill for the agent; composers must not offer it. */
+    val userInvocable: Boolean? = null,
+)
+
+/**
+ * `ServerProviderWorkspaceSnapshot`: the commands and skills live in one
+ * workspace directory. A provider picks them up per project root, so the
+ * composer resolves against the thread's cwd before falling back to the
+ * provider-level lists.
+ */
+@Serializable
+data class ServerProviderWorkspaceSnapshotDto(
+    val cwd: String = "",
+    val checkedAt: String = "",
+    val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
+    val skills: List<ServerProviderSkillDto> = emptyList(),
+)
+
+@Serializable
+data class ServerProviderAuthDto(
+    val canLogout: Boolean? = null,
+    /** `authenticated` | `unauthenticated` | `unknown`. Unknown is not a refusal. */
+    val status: String = "unknown",
+    val type: String? = null,
+    val label: String? = null,
+    val email: String? = null,
+)
+
+/**
+ * One configured provider instance. `instanceId` is the routing key the server
+ * insists on; `driver` is only metadata. A client that routes on driver breaks
+ * as soon as a user configures two instances of the same CLI.
+ */
+@Serializable
+data class ServerProviderDto(
+    val setup: JsonObject? = null,
+    val instanceId: String = "",
+    val driver: String = "",
+    val displayName: String? = null,
+    /** The instance's brand tint, for usage/limit bar colors. */
+    val accentColor: String? = null,
+    val badgeLabel: String? = null,
+    val enabled: Boolean = false,
+    val installed: Boolean = false,
+    val version: String? = null,
+    val status: String = "unknown",
+    val auth: ServerProviderAuthDto = ServerProviderAuthDto(),
+    val availability: String? = null,
+    val unavailableReason: String? = null,
+    /**
+     * `false` means the provider owns mode switching (a client must not offer
+     * plan/default). Absent is not false — legacy snapshots omit the field and
+     * the toggle stays available, matching `showInteractionModeToggle !== false`
+     * in the other clients.
+     */
+    val showInteractionModeToggle: Boolean? = null,
+    val requiresNewThreadForModelChange: Boolean = false,
+    val models: List<ServerProviderModelDto> = emptyList(),
+    val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
+    val skills: List<ServerProviderSkillDto> = emptyList(),
+    /** Per-directory snapshots; a cwd match replaces the provider-level lists. */
+    val workspaceSnapshots: List<ServerProviderWorkspaceSnapshotDto> = emptyList(),
+    /** Present when this provider reports subscription usage to the limits view. */
+    val usageLimits: UsageLimitsDto? = null,
+    /** Human-readable provider problem, when the server has one to report. */
+    val message: String? = null,
+    val versionAdvisory: ProviderVersionAdvisoryDto? = null,
+    val compatibilityAdvisory: ProviderCompatibilityAdvisoryDto? = null,
+    /** Live result of `server.updateProvider` while the environment runs it. */
+    val updateState: ProviderUpdateStateDto? = null,
+)
+
+/**
+ * `ServerProviderVersionAdvisory`: the server's own "is this provider stale"
+ * verdict. `canUpdate` means `server.updateProvider` will be honored; behind
+ * without it is a manual-update hint.
+ */
+@Serializable
+data class ProviderVersionAdvisoryDto(
+    /** unknown | current | behind_latest */
+    val status: String = "unknown",
+    val currentVersion: String? = null,
+    val latestVersion: String? = null,
+    val updateCommand: String? = null,
+    val canUpdate: Boolean = false,
+    val checkedAt: String? = null,
+    val message: String? = null,
+)
+
+/** `ServerProviderCompatibilityAdvisory`: whether this server still trusts the provider. */
+@Serializable
+data class ProviderCompatibilityAdvisoryDto(
+    /** unknown | supported | graceful | unsupported | broken */
+    val status: String = "unknown",
+    val latestVersionStatus: String? = null,
+    val message: String? = null,
+    val recommendedVersion: String? = null,
+    val recommendedRange: String? = null,
+)
+
+/** `ServerProviderUpdateState`: queued/running/succeeded/failed bookkeeping. */
+@Serializable
+data class ProviderUpdateStateDto(
+    /** idle | queued | running | succeeded | failed | unchanged */
+    val status: String = "idle",
+    val startedAt: String? = null,
+    val finishedAt: String? = null,
+    val message: String? = null,
+    val output: String? = null,
+)
+
+/** `server.refreshProviders` answer: the full list, not a delta. */
+@Serializable
+data class ServerProvidersUpdatedDto(
+    val providers: List<ServerProviderDto> = emptyList(),
+)
+
+/**
+ * `server.updateServer` acknowledgement: the artifact is installed and the
+ * server restarts into it moments later — the connection drops and the
+ * supervisor reconnects on its own.
+ */
+@Serializable
+data class ServerSelfUpdateResultDto(
+    val targetVersion: String = "",
+    /** boot-service | binary | respawn | desktop-managed */
+    val method: String = "",
+    val updateId: String? = null,
+    val desktopUpdateToken: String? = null,
+)
+
+@Serializable
+data class ServerConfigDto(
+    val scratchWorkspaceRoot: String? = null,
+    val environment: ServerEnvironmentDto = ServerEnvironmentDto(),
+    val cwd: String = "",
+    val providers: List<ServerProviderDto> = emptyList(),
+    /**
+     * `directEndpoints`: the LAN and tailnet addresses this server listens on
+     * right now, so a client connected one way can learn the others. Hints
+     * only — an address is trusted after it answers as this environment.
+     * Absent on servers that predate the feature; empty on loopback-only binds.
+     */
+    val directEndpoints: List<ServerDirectEndpointDto> = emptyList(),
+    /** Top-level capability flags from `ServerConfig` in `contracts/server.ts`. */
+    val shellResumeCompletionMarker: Boolean = false,
+    val threadResumeCompletionMarker: Boolean = false,
+    val threadSnapshotPagination: Boolean = false,
+    /** Whether thread reads accept the `reasoningMessages` opt-in. */
+    val reasoningMessages: Boolean = false,
+    val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
+)
+
+/**
+ * `ServerDirectEndpoint`: one advertised address the same server also answers.
+ * `kind` is `lan` | `tailnet` on today's servers but stays a string — a new
+ * kind is a route this client does not know, not a decode failure.
+ */
+@Serializable
+data class ServerDirectEndpointDto(
+    val kind: String = "",
+    val httpBaseUrl: String = "",
+)
+
+/**
+ * The `settings` slice this client reads — `environmentIcon` overrides
+ * `platform.machine`, the rest feeds Settings → Server settings. Mirrors
+ * `ServerSettings` in `packages/contracts/src/settings.ts`, with the same
+ * decoding defaults so a server that predates a key still reads sanely.
+ */
+@Serializable
+data class ServerConfigSettingsDto(
+    val environmentIcon: String? = null,
+    /** Base directory the add-project flow opens its folder browser on. */
+    val addProjectBaseDirectory: String = "",
+    /** Server-side auto-settle defaults; `null` days means the idle sweep is off. */
+    val sidebarAutoSettleOnMerge: Boolean = true,
+    val sidebarAutoSettleAfterDays: Int? = 3,
+    /**
+     * The user's "keep running turns across a server update" preference —
+     * sent as `continueRunningThreads` when the server supports it.
+     */
+    val continueThreadsAfterServerUpdate: Boolean? = null,
+    /** `null` inherits: the repository's t3.json, then "local". */
+    val defaultThreadEnvMode: String? = null,
+    /** Base new worktrees on the remote branch. */
+    val newWorktreesStartFromOrigin: Boolean = true,
+    /**
+     * `removeAgentCreditsOnMerge`: strip recognized agent credits from GitHub
+     * merge and squash messages. Project-scope overrides exist upstream
+     * (`ProjectScopedServerSettingKey`); this client reads the server value.
+     */
+    val removeAgentCreditsOnMerge: Boolean = false,
+    /** `null` defers to the repository's t3.json, then to recursive. */
+    val worktreeSubmodules: String? = null,
+    /** Keep the default branch current when there are no local changes. */
+    val defaultAutoPull: Boolean = false,
+    /** approval-required | auto-accept-edits | auto | full-access */
+    val defaultRuntimeMode: String = "full-access",
+    /** static | semantic | custom */
+    val branchNamingMode: String = "static",
+    /** The prefix new branches start with; "t3" is the server default. */
+    val branchNamePrefix: String = "t3",
+    val branchNameInstructions: String = "",
+    /**
+     * `worktreesDirectory`: the absolute directory new worktrees are created
+     * under, empty for `<T3 home>/worktrees`. Editable only where the server
+     * advertises `capabilities.worktreesDirectory`.
+     */
+    val worktreesDirectory: String = "",
+    /**
+     * `previousWorktreesDirectories`: earlier locations, server-maintained so
+     * worktrees left there stay eligible for cleanup and review diffs.
+     */
+    val previousWorktreesDirectories: List<String> = emptyList(),
+    /** turn | paragraph */
+    val responseStreamingMode: String = "paragraph",
+    /** Whether agents may drive the in-app preview browser. */
+    val enableAgentBrowserAccess: Boolean = true,
+    /** Whether agents may drive simulators and emulators. */
+    val enableAgentDeviceAccess: Boolean = false,
+    /** Check installed provider CLIs for newer versions. */
+    val enableProviderUpdateChecks: Boolean = true,
+    val autoResumeLimitedThreads: Boolean = false,
+    val snoozeLimitedThreads: Boolean = false,
+    /**
+     * `WorktreeCleanup`: `{"mode":"off"}`, `{"mode":"custom","rules":{…}}`, or
+     * null (inherit — the `storageCleanup` worktree rules apply). Kept as raw
+     * JSON so the settings page can round-trip rules it does not read.
+     */
+    val worktreeCleanup: kotlinx.serialization.json.JsonObject? = null,
+    val storageCleanup: ServerStorageCleanupDto = ServerStorageCleanupDto(),
+    /**
+     * `usageModelMappings`: exact model id → the model its usage counts as
+     * (e.g. a preview slug folded into its released name). Keys and values are
+     * opaque to this client; the usage scan just needs the map.
+     */
+    val usageModelMappings: Map<String, String> = emptyMap(),
+    /**
+     * `projectSettingsOverrides`: per-project setting replacements, kept as raw
+     * JSON like [worktreeCleanup] so a settings UI can round-trip keys it does
+     * not read.
+     */
+    val projectSettingsOverrides: JsonObject? = null,
+)
+
+/** `StorageCleanupSettings`: retention rules in days; null clears the rule. */
+@Serializable
+data class ServerStorageCleanupDto(
+    val worktreeAfterDays: Int? = null,
+    val worktreeOnMerge: Boolean = false,
+    val worktreeOnDelete: Boolean = false,
+    val worktreeUnchanged: Boolean = false,
+    val browserArtifactsAfterDays: Int? = null,
+    val logsAfterDays: Int? = null,
+)
+
+@Serializable
+data class ServerEnvironmentDto(
+    val environmentId: String = "",
+    val label: String = "",
+    val platform: EnvironmentPlatformDto = EnvironmentPlatformDto(),
+    val serverVersion: String = "",
+    val capabilities: ServerCapabilitiesDto = ServerCapabilitiesDto(),
+)
+
+/**
+ * One frame of `subscribeServerConfig` (`ServerConfigStreamEvent` in
+ * `contracts/server.ts`). The union is flattened: this client reads the
+ * snapshot wholesale, applies `providerStatuses` for live provider health, and
+ * ignores the settings/keybindings/theme variants it does not consume.
+ */
+@Serializable
+data class ServerConfigStreamEventDto(
+    val version: Int = 0,
+    val type: String = "",
+    val config: ServerConfigDto? = null,
+    val payload: ServerConfigStreamPayloadDto? = null,
+)
+
+@Serializable
+data class ServerConfigStreamPayloadDto(
+    /** `providerStatuses` payload — the full provider list, not a delta. */
+    val providers: List<ServerProviderDto>? = null,
+    /** `usageLimitSourcesUpdated` payload — the full configured source set. */
+    val sources: List<UsageLimitSourceDto>? = null,
+    /** `settingsUpdated` payload — the whole settings record, like the snapshot's. */
+    val settings: ServerConfigSettingsDto? = null,
+)
+
+@Serializable
+data class ServerCapabilitiesDto(
+    val serverResolvedCommandContext: Boolean = false,
+    val threadVisitedTracking: Boolean = false,
+    val connectionProbe: Boolean = false,
+    val threadSettlement: Boolean = false,
+    val threadSnooze: Boolean = false,
+    val threadPinning: Boolean = false,
+    val threadPinReorder: Boolean = false,
+    val threadActiveReorder: Boolean = false,
+    val threadTitleRegeneration: Boolean = false,
+    val pullRequests: Boolean = false,
+    /** Absent on servers older than pending attachment uploads. */
+    val attachmentUploads: Boolean = false,
+    /** Question answers may carry uploaded attachments. */
+    val questionAttachments: Boolean = false,
+    /** Absent on servers that only accept image uploads. */
+    val fileAttachments: FileAttachmentsCapabilityDto? = null,
+    /**
+     * `server.updateSettings` accepts sidebar auto-settle writes. Absent on
+     * servers older than shared settings sync.
+     */
+    val threadAutoSettlement: Boolean = false,
+    /** `thread.auto-settle.set` is accepted (per-thread auto-settle opt-out). */
+    val threadAutoSettleOptOut: Boolean = false,
+    /**
+     * `serverSelfUpdate`: the update path to offer — boot-service, binary,
+     * respawn, or desktop-managed. Absent means the server cannot self-update
+     * (dev checkouts, Windows foreground runs, old servers).
+     */
+    val serverSelfUpdate: String? = null,
+    /** `server.updateServer` exists with streaming progress; unused by this client. */
+    val serverSelfUpdateProgress: Boolean? = null,
+    /** `continueRunningThreads` on `server.updateServer` is honored. */
+    val serverUpdateThreadContinuation: Boolean? = null,
+    /** The supervising desktop app accepts `server.updateServer`. */
+    val desktopAppUpdate: Boolean? = null,
+    /**
+     * The environment tracks project clones and streams their progress
+     * (`subscribeProjectClones`). Absent means `projects.remove` alone decides;
+     * Start does not wait on a stream this server never emits.
+     */
+    val projectCloneTracking: Boolean? = null,
+    /** `storageCleanup`/`worktreeCleanup` settings are honored. */
+    val storageCleanup: Boolean = false,
+    /** The server persists `continueThreadsAfterServerUpdate`. */
+    val threadRestartContinuation: Boolean = false,
+    /** The server honors the `worktreesDirectory` setting. */
+    val worktreesDirectory: Boolean = false,
+    /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
+    val projectSettingsOverrides: Boolean = false,
+    /** `server.updateSettings` persists `usageModelMappings` and applies them to usage. */
+    val usageModelMappings: Boolean = false,
+    /**
+     * The thread link array (`pullRequests`) and host snapshots exist. Absent
+     * means `linkedPullRequest` is the whole story: no stacks, no watches.
+     */
+    val threadPullRequests: Boolean = false,
+    /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
+    val threadPullRequestWatch: Boolean = false,
+    /**
+     * `serverInstallation`: how this server was installed (npx-style runner vs.
+     * `npm-global` with a prefix), flattening the contract's small union the
+     * way stream items flatten — `prefix` exists only on `npm-global`. It tells
+     * a manual update hint where the new binary must land. Absent means the
+     * server predates the field; decode stays permissive so an unknown `kind`
+     * reads as itself instead of nothing.
+     */
+    val serverInstallation: ServerInstallationDto? = null,
+)
+
+/** `ServerInstallation`: one of `npx`/`pnpm-dlx`/`bunx`, or `npm-global` + `prefix`. */
+@Serializable
+data class ServerInstallationDto(
+    val kind: String = "",
+    val prefix: String? = null,
+)
+
+/** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */
+@Serializable
+data class FileAttachmentsCapabilityDto(val maxUploadBytes: Long = 0)
+
+/* ── Git / VCS ───────────────────────────────────────────────────────── */
+
+@Serializable
+data class VcsWorkingTreeFileDto(
+    val path: String = "",
+    val insertions: Int = 0,
+    val deletions: Int = 0,
+)
+
+@Serializable
+data class VcsWorkingTreeDto(
+    val files: List<VcsWorkingTreeFileDto> = emptyList(),
+    val insertions: Int = 0,
+    val deletions: Int = 0,
+)
+
+@Serializable
+data class VcsChangeRequestDto(
+    val number: Int = 0,
+    val title: String = "",
+    val url: String = "",
+    val baseRef: String = "",
+    val headRef: String = "",
+    /** open | draft | merged | closed */
+    val state: String = "open",
+)
+
+/**
+ * `vcs.refreshStatus` merges the local and remote halves the subscription sends
+ * separately. Remote fields default rather than being nullable as a group,
+ * because a repo with no upstream is normal, not an error.
+ */
+@Serializable
+data class VcsStatusDto(
+    val isRepo: Boolean = false,
+    val hasPrimaryRemote: Boolean = false,
+    val isDefaultRef: Boolean = false,
+    val refName: String? = null,
+    val hasWorkingTreeChanges: Boolean = false,
+    val workingTree: VcsWorkingTreeDto = VcsWorkingTreeDto(),
+    val hasUpstream: Boolean = false,
+    val aheadCount: Int = 0,
+    val behindCount: Int = 0,
+    val aheadOfDefaultCount: Int = 0,
+    val pr: VcsChangeRequestDto? = null,
+)
+
+@Serializable
+data class VcsRefDto(
+    val name: String = "",
+    val isRemote: Boolean = false,
+    val remoteName: String? = null,
+    val current: Boolean = false,
+    val isDefault: Boolean = false,
+    val worktreePath: String? = null,
+)
+
+@Serializable
+data class VcsListRefsResultDto(
+    val refs: List<VcsRefDto> = emptyList(),
+    val isRepo: Boolean = false,
+    val hasPrimaryRemote: Boolean = false,
+    val nextCursor: Int? = null,
+    val totalCount: Int = 0,
+)
+
+/* ── Project file index ──────────────────────────────────────────────── */
+
+@Serializable
+data class ProjectEntryDto(
+    val path: String = "",
+    /** file | directory */
+    val kind: String = "file",
+)
+
+@Serializable
+data class ProjectListEntriesResultDto(
+    val entries: List<ProjectEntryDto> = emptyList(),
+    val truncated: Boolean = false,
+)
+
+@Serializable
+data class ProjectReadFileResultDto(
+    val relativePath: String = "",
+    val contents: String = "",
+    val byteLength: Long = 0,
+    val truncated: Boolean = false,
+)
+
+/* ── Review ──────────────────────────────────────────────────────────── */
+
+/**
+ * A unified diff as text plus its provenance. The server deliberately does not
+ * pre-parse it; the client parses once and caches by `diffHash`.
+ */
+@Serializable
+data class ReviewDiffSourceDto(
+    val id: String = "",
+    /** working-tree | branch-range */
+    val kind: String = "working-tree",
+    val title: String = "",
+    val baseRef: String? = null,
+    val headRef: String? = null,
+    val diff: String = "",
+    val diffHash: String = "",
+    val truncated: Boolean = false,
+)
+
+@Serializable
+data class ReviewDiffPreviewResultDto(
+    val cwd: String = "",
+    val sources: List<ReviewDiffSourceDto> = emptyList(),
+)
+
+/* ── Terminal ────────────────────────────────────────────────────────── */
+
+@Serializable
+data class TerminalSnapshotDto(
+    val threadId: String = "",
+    val terminalId: String = "",
+    val cwd: String = "",
+    val worktreePath: String? = null,
+    /** starting | running | exited | error */
+    val status: String = "starting",
+    val pid: Int? = null,
+    val history: String = "",
+    val exitCode: Int? = null,
+    val exitSignal: Int? = null,
+    val label: String = "",
+    val updatedAt: String? = null,
+    val sequence: Long? = null,
+    val hasRunningSubprocess: Boolean = false,
+)
+
+/**
+ * `TerminalSummary` in `packages/contracts/src/terminal.ts` — one row of the
+ * session list the terminal switcher renders. Same fields as
+ * [TerminalSnapshotDto] minus the scrollback.
+ */
+@Serializable
+data class TerminalSummaryDto(
+    val threadId: String = "",
+    val terminalId: String = "",
+    val cwd: String = "",
+    val worktreePath: String? = null,
+    val status: String = "starting",
+    val pid: Int? = null,
+    val exitCode: Int? = null,
+    val exitSignal: Int? = null,
+    val hasRunningSubprocess: Boolean = false,
+    val label: String = "",
+    val updatedAt: String? = null,
+)
+
+/**
+ * One frame of `subscribeTerminalMetadata`, flattened like
+ * [TerminalStreamEventDto]: `snapshot` carries the whole list, `upsert` one row,
+ * `remove` just the ids.
+ */
+@Serializable
+data class TerminalMetadataStreamEventDto(
+    val type: String,
+    val terminals: List<TerminalSummaryDto>? = null,
+    val terminal: TerminalSummaryDto? = null,
+    val threadId: String = "",
+    val terminalId: String = "",
+)
+
+/**
+ * One frame of `terminal.attach`. Flattened for the same reason as the shell
+ * stream item: the union keys on `type` with per-variant fields.
+ */
+@Serializable
+data class TerminalStreamEventDto(
+    val type: String,
+    val threadId: String = "",
+    val terminalId: String = "",
+    val sequence: Long? = null,
+    val snapshot: TerminalSnapshotDto? = null,
+    val data: String? = null,
+    val exitCode: Int? = null,
+    val exitSignal: Int? = null,
+    val message: String? = null,
+    val hasRunningSubprocess: Boolean = false,
+    val label: String? = null,
+)
+
+/* ── Usage ───────────────────────────────────────────────────────────── */
+
+@Serializable
+data class UsageTokenTotalsDto(
+    val uncachedInputTokens: Long = 0,
+    val cachedInputTokens: Long = 0,
+    val cacheCreationTokens: Long = 0,
+    val outputTokens: Long = 0,
+    val reasoningTokens: Long = 0,
+)
+
+@Serializable
+data class UsageBucketDto(
+    val day: String = "",
+    /**
+     * UTC start of a rolling hourly bucket, present only when the request asked
+     * for hourly resolution.
+     */
+    val hourStart: String? = null,
+    /** claude | codex | cursor | pi */
+    val provider: String = "",
+    val model: String = "",
+    val apiProvider: String = "",
+    val totals: UsageTokenTotalsDto = UsageTokenTotalsDto(),
+    val costUsd: Double = 0.0,
+    val records: Long = 0,
+    val unpricedRecords: Long = 0,
+    val sessions: Long = 0,
+)
+
+@Serializable
+data class UsagePricingDto(
+    /** fresh | cached | unavailable */
+    val status: String = "unavailable",
+    val source: String = "",
+    val knownModels: Int = 0,
+)
+
+@Serializable
+data class UsageSummaryDto(
+    val contractVersion: Int = 0,
+    val timeZone: String = "UTC",
+    val sinceDay: String = "",
+    val untilDay: String = "",
+    val buckets: List<UsageBucketDto> = emptyList(),
+    val pricing: UsagePricingDto = UsagePricingDto(),
+)
+
+/* ── Rewind ──────────────────────────────────────────────────────────── */
+
+/** One captured turn in a thread's rewind history. */
+@Serializable
+data class RewindEntryDto(
+    val turnId: String = "",
+    val sequence: Int = 0,
+    val userMessageId: String? = null,
+    val assistantMessageId: String? = null,
+    val prompt: String = "",
+    val files: List<String> = emptyList(),
+    /** applied | undone */
+    val state: String = "applied",
+    val createdAt: String? = null,
+)
+
+/**
+ * `available` false means the controls are hidden entirely, not disabled: the
+ * thread has no workspace or the snapshot store could not be created, so there
+ * is nothing to offer.
+ */
+@Serializable
+data class RewindStatusDto(
+    val threadId: String = "",
+    val available: Boolean = false,
+    val undo: RewindEntryDto? = null,
+    val redo: RewindEntryDto? = null,
+    val appliedCount: Int = 0,
+    val undoneCount: Int = 0,
+)
+
+/* ── Source control ──────────────────────────────────────────────────── */
+
+/**
+ * `sourceControl.lookupRepository` resolves one repository reference. The server
+ * has no repository *search* RPC, so the add-project flow validates a typed
+ * reference rather than offering a browsable list.
+ */
+@Serializable
+data class SourceControlRepositoryDto(
+    val provider: String = "",
+    val nameWithOwner: String = "",
+    val url: String = "",
+    val sshUrl: String = "",
+)
+
+/**
+ * `server.discoverSourceControl` (`SourceControlDiscoveryResult`). The
+ * add-project source list reads which providers are installed and signed in.
+ */
+@Serializable
+data class SourceControlDiscoveryResultDto(
+    val versionControlSystems: List<VcsDiscoveryItemDto> = emptyList(),
+    val sourceControlProviders: List<SourceControlProviderDiscoveryItemDto> = emptyList(),
+)
+
+@Serializable
+data class VcsDiscoveryItemDto(
+    val kind: String = "",
+    val implemented: Boolean = false,
+    val label: String = "",
+    val status: String = "",
+)
+
+@Serializable
+data class SourceControlProviderDiscoveryItemDto(
+    val kind: String = "",
+    val label: String = "",
+    val status: String = "",
+    val installHint: String = "",
+    val auth: SourceControlProviderAuthDto = SourceControlProviderAuthDto(),
+)
+
+@Serializable
+data class SourceControlProviderAuthDto(
+    val status: String = "unknown",
+    val detail: String? = null,
+)
+
+/** `sourceControl.cloneRepository` result. */
+@Serializable
+data class SourceControlCloneResultDto(val cwd: String = "", val remoteUrl: String = "")
+
+/* ── Filesystem browse ───────────────────────────────────────────────── */
+
+@Serializable
+data class FilesystemBrowseEntryDto(val name: String = "", val fullPath: String = "")
+
+@Serializable
+data class FilesystemBrowseResultDto(
+    val parentPath: String = "",
+    val entries: List<FilesystemBrowseEntryDto> = emptyList(),
+)
+
+/* ── Assets ──────────────────────────────────────────────────────────── */
+
+/**
+ * `assets.createUrl` result. The URL is relative to the environment's HTTP origin
+ * and carries a signed, expiring token in its path, which is what lets an image
+ * be fetched with a plain GET instead of an authenticated RPC.
+ */
+@Serializable
+data class AssetUrlResultDto(
+    val relativeUrl: String = "",
+    val expiresAt: Long = 0,
+    val sourcePath: String? = null,
+)
+
+/**
+ * `attachments.createUploadUrl` result. The relative URL is a self-signed
+ * upload endpoint: bytes go to it with a plain POST, no session credential.
+ */
+@Serializable
+data class AttachmentUploadUrlResultDto(
+    val attachmentId: String = "",
+    val relativeUrl: String = "",
+    val expiresAt: Long = 0,
+)

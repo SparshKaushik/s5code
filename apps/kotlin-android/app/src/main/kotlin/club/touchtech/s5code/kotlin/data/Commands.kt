@@ -1,0 +1,437 @@
+package club.touchtech.s5code.kotlin.data
+
+import club.touchtech.s5code.kotlin.model.ProviderOptionSelection
+import club.touchtech.s5code.kotlin.model.ProviderOptionValue
+import club.touchtech.s5code.kotlin.model.RuntimeMode
+import club.touchtech.s5code.kotlin.model.SentAttachment
+import club.touchtech.s5code.kotlin.model.ThreadSettings
+import club.touchtech.s5code.kotlin.model.UserInputAnswer
+import java.util.UUID
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonObjectBuilder
+import kotlinx.serialization.json.add
+import kotlinx.serialization.json.addJsonObject
+import kotlinx.serialization.json.buildJsonArray
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonArray
+import kotlinx.serialization.json.putJsonObject
+
+/**
+ * Builders for `orchestration.dispatchCommand` payloads, matching
+ * `OrchestrationV2Command` in `packages/contracts/src/orchestrationV2.ts`.
+ *
+ * Every command carries a client-generated `commandId`. The server uses it for
+ * idempotency, so a retry after a dropped socket must reuse the same id or the
+ * turn starts twice.
+ */
+object Commands {
+
+    fun newCommandId(): String = UUID.randomUUID().toString()
+
+    private fun now(): String = java.time.Instant.now().toString()
+
+    /**
+     * A `modelSelection` block. Options ride along in the contract's canonical
+     * array shape and are omitted when empty rather than sent as `[]`, which the
+     * server would read as "clear every option" instead of "nothing to say".
+     */
+    private fun JsonObjectBuilder.putModelSelection(
+        instanceId: String,
+        model: String,
+        options: List<ProviderOptionSelection>,
+    ) = putJsonObject("modelSelection") {
+        put("instanceId", instanceId)
+        put("model", model)
+        if (options.isNotEmpty()) {
+            putJsonArray("options") {
+                options.forEach { selection ->
+                    addJsonObject {
+                        put("id", selection.id)
+                        when (val value = selection.value) {
+                            is ProviderOptionValue.Text -> put("value", value.value)
+                            is ProviderOptionValue.Flag -> put("value", value.value)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * Starts a turn on an existing thread. Settings are explicit because RN stages
+     * model/runtime changes in the composer and applies the same snapshot to both
+     * thread metadata and the turn command when Send is tapped.
+     */
+    fun startTurn(
+        threadId: String,
+        text: String,
+        /** Persisted ChatAttachment records, including server ids for images. */
+        attachments: List<JsonObject>,
+        settings: ThreadSettings,
+        contextRecords: List<JsonObject> = emptyList(),
+        commandId: String = newCommandId(),
+        messageId: String = UUID.randomUUID().toString(),
+        dispatchMode: JsonObject = buildJsonObject { put("type", "start_immediately") },
+        deliveryIntent: String? = "auto",
+    ): JsonObject = buildJsonObject {
+        put("type", "message.dispatch")
+        put("commandId", commandId)
+        put("threadId", threadId)
+        put("createdBy", "user")
+        put("creationSource", "mobile")
+        put("messageId", messageId)
+        put("text", text)
+        if (contextRecords.isNotEmpty()) {
+            putJsonObject("context") {
+                put("version", 1)
+                putJsonArray("records") {
+                    contextRecords.forEach { add(it) }
+                }
+            }
+        }
+        putJsonArray("attachments") {
+            attachments.forEach { add(it) }
+        }
+        putModelSelection(settings.provider.instanceId, settings.model, settings.options)
+        put("dispatchMode", dispatchMode)
+        deliveryIntent?.let { put("deliveryIntent", it) }
+    }
+
+    /**
+     * Input to orchestration.launchThread: the server prepares the workspace,
+     * creates the thread, and dispatches its first message through one service.
+     */
+    fun startTurnBootstrapping(
+        threadId: String,
+        projectId: String,
+        title: String,
+        text: String,
+        attachments: List<JsonObject>,
+        instanceId: String,
+        model: String,
+        options: List<ProviderOptionSelection>,
+        runtimeMode: String,
+        interactionMode: String,
+        branch: String?,
+        newWorktree: Boolean,
+        worktreePath: String? = null,
+        contextRecords: List<JsonObject> = emptyList(),
+        commandId: String = newCommandId(),
+        messageId: String = UUID.randomUUID().toString(),
+    ): JsonObject = buildJsonObject {
+        put("commandId", commandId)
+        put("threadId", threadId)
+        put("creationSource", "mobile")
+        putJsonObject("initialMessage") {
+            put("messageId", messageId)
+            put("text", text)
+            if (contextRecords.isNotEmpty()) {
+                putJsonObject("context") {
+                    put("version", 1)
+                    putJsonArray("records") {
+                        contextRecords.forEach { add(it) }
+                    }
+                }
+            }
+            putJsonArray("attachments") {
+                attachments.forEach { add(it) }
+            }
+        }
+        putModelSelection(instanceId, model, options)
+        put("projectId", projectId)
+        put("title", title)
+        put("generateTitle", true)
+        put("runtimeMode", runtimeMode)
+        put("interactionMode", interactionMode)
+        putJsonObject("workspaceStrategy") {
+            when {
+                newWorktree -> {
+                    put("type", "worktree")
+                    put("baseRef", branch ?: "HEAD")
+                }
+                worktreePath != null -> {
+                    put("type", "existing_worktree")
+                    put("worktreePath", worktreePath)
+                    branch?.let { put("branch", it) }
+                }
+                else -> {
+                    put("type", "root")
+                    branch?.let { put("branch", it) }
+                }
+            }
+        }
+    }
+
+    fun interruptTurn(threadId: String, turnId: String?): JsonObject = buildJsonObject {
+        put("type", "run.interrupt")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        requireNotNull(turnId) { "This thread has no interruptible run." }
+        put("runId", turnId)
+        put("holdQueue", true)
+    }
+
+    /**
+     * `prepared-run.retry` — replays a failed prepared run after a workspace
+     * preparation failure. Only valid when the run's `workspacePreparation`
+     * projection is present; the server rejects anything else.
+     */
+    fun preparedRunRetry(threadId: String, runId: String): JsonObject = buildJsonObject {
+        put("type", "prepared-run.retry")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("runId", runId)
+    }
+
+    /**
+     * `thread.pull-request.watch` — toggles the server-side watch that keeps a
+     * linked pull request polling so its state stays fresh. [link] carries the
+     * `url`/`source` pair the link was created with and is only sent when
+     * turning the watch on.
+     */
+    fun pullRequestWatch(
+        threadId: String,
+        host: String,
+        repository: String,
+        number: Int,
+        watching: Boolean,
+        linkUrl: String? = null,
+        linkSource: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("type", "thread.pull-request.watch")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("host", host)
+        put("repository", repository)
+        put("number", number)
+        put("watching", watching)
+        if (linkUrl != null && linkSource != null) {
+            putJsonObject("link") {
+                put("url", linkUrl)
+                put("source", linkSource)
+            }
+        }
+    }
+
+    fun respondToApproval(threadId: String, requestId: String, decision: String): JsonObject =
+        buildJsonObject {
+            put("type", "runtime-request.respond")
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("requestId", requestId)
+            put("decision", decision)
+            put("createdAt", now())
+        }
+
+    /**
+     * Answers a structured input request. Answers are keyed by question id, and
+     * the value is a string for single answers or an array for multi-select —
+     * `ProviderUserInputAnswers` is an open record, so the shape has to match what
+     * the provider asked for.
+     *
+     * [attachmentsByQuestionId] carries `ChatAttachment` records for files the
+     * user staged on a question: the id is the pending upload's server id, minted
+     * by `attachments.createUploadUrl` before submit.
+     */
+    fun respondToUserInput(
+        threadId: String,
+        requestId: String,
+        answers: Map<String, UserInputAnswer>,
+        attachmentsByQuestionId: Map<String, List<SentAttachment>> = emptyMap(),
+    ): JsonObject = buildJsonObject {
+        put("type", "runtime-request.respond")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("requestId", requestId)
+        putJsonObject("answers") {
+            answers.forEach { (questionId, answer) ->
+                when (answer) {
+                    is UserInputAnswer.Text -> put(questionId, answer.value)
+                    is UserInputAnswer.Choices ->
+                        putJsonArray(questionId) { answer.values.forEach { add(it) } }
+                }
+            }
+        }
+        if (attachmentsByQuestionId.isNotEmpty()) {
+            putJsonObject("attachmentsByQuestionId") {
+                attachmentsByQuestionId.forEach { (questionId, attachments) ->
+                    putJsonArray(questionId) {
+                        attachments.forEach { attachment ->
+                            addJsonObject {
+                                put("type", attachment.type)
+                                put("id", attachment.id)
+                                put("name", attachment.name)
+                                put("mimeType", attachment.mimeType)
+                                put("sizeBytes", attachment.sizeBytes)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        put("createdAt", now())
+    }
+
+    /**
+     * Closes an async question without answering it (`thread.user-input.dismiss`).
+     * The agent is not messaged; the composer is simply released. Only
+     * `responseMode: "message"` requests may be dismissed — a native callback
+     * question has the provider blocked on the reply.
+     */
+    fun dismissUserInput(threadId: String, requestId: String): JsonObject =
+        buildJsonObject {
+            put("type", "thread.user-input.dismiss")
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("requestId", requestId)
+            put("createdAt", now())
+        }
+
+    fun updateMeta(
+        threadId: String,
+        title: String? = null,
+        regenerateTitle: Boolean = false,
+        instanceId: String? = null,
+        model: String? = null,
+        options: List<ProviderOptionSelection> = emptyList(),
+        commandId: String = newCommandId(),
+    ): JsonObject = buildJsonObject {
+        put("type", if (instanceId != null && model != null) "thread.model-selection.set" else "thread.metadata.update")
+        put("commandId", commandId)
+        put("threadId", threadId)
+        // The contract rejects both together, so the caller picks one.
+        if (regenerateTitle) put("regenerateTitle", true) else if (title != null) put("title", title)
+        if (instanceId != null && model != null) {
+            putModelSelection(instanceId, model, options)
+        }
+    }
+
+    fun setRuntimeMode(
+        threadId: String,
+        runtimeMode: String,
+        commandId: String = newCommandId(),
+        createdAt: String = now(),
+    ): JsonObject = buildJsonObject {
+        put("type", "thread.runtime-mode.set")
+        put("commandId", commandId)
+        put("threadId", threadId)
+        put("runtimeMode", runtimeMode)
+        put("createdAt", createdAt)
+    }
+
+    fun setInteractionMode(
+        threadId: String,
+        interactionMode: String,
+        commandId: String = newCommandId(),
+        createdAt: String = now(),
+    ): JsonObject = buildJsonObject {
+        put("type", "thread.interaction-mode.set")
+        put("commandId", commandId)
+        put("threadId", threadId)
+        put("interactionMode", interactionMode)
+        put("createdAt", createdAt)
+    }
+
+    /**
+     * `thread.pin.reorder` / `thread.active.reorder` — a move writes one
+     * fractional order key to the moved thread; neighbors are never touched.
+     */
+    fun reorderOrderKey(type: String, threadId: String, orderKey: String): JsonObject =
+        buildJsonObject {
+            put("type", type)
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("orderKey", orderKey)
+        }
+
+    fun lifecycle(type: String, threadId: String): JsonObject = buildJsonObject {
+        put("type", type)
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+    }
+
+    /** Unsettle and unsnooze only accept "user": activity resets are server-side. */
+    fun lifecycleByUser(type: String, threadId: String): JsonObject = buildJsonObject {
+        put("type", type)
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("reason", "user")
+    }
+
+    /**
+     * `thread.auto-settle.set` — the per-thread opt-out from the idle sweep.
+     * `enabled` false stamps `autoSettleDisabledAt`; true clears it.
+     */
+    fun setAutoSettle(threadId: String, enabled: Boolean): JsonObject = buildJsonObject {
+        put("type", "thread.auto-settle.set")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("enabled", enabled)
+    }
+
+    fun snooze(threadId: String, untilIso: String): JsonObject = buildJsonObject {
+        put("type", "thread.snooze")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("snoozedUntil", untilIso)
+    }
+
+    fun rollback(threadId: String, checkpointId: String, scopeId: String): JsonObject = buildJsonObject {
+        put("type", "checkpoint.rollback")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("checkpointId", checkpointId)
+        put("scopeId", scopeId)
+    }
+
+    fun queueAction(type: String, threadId: String, runId: String? = null,
+        text: String? = null, beforeRunId: String? = null, targetRunId: String? = null): JsonObject = buildJsonObject {
+        put("type", type)
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        runId?.let { put(if (type == "queued-message.promote-to-steer") "queuedRunId" else "runId", it) }
+        text?.let { put("text", it) }
+        if (type == "queued-run.reorder") put("beforeRunId", beforeRunId)
+        targetRunId?.let { put("targetRunId", it) }
+    }
+
+    /**
+     * Registers a project. `projectId` is client-generated because the command is
+     * idempotent on it: a retry after a dropped socket must not create a second
+     * project for the same directory.
+     */
+    fun createProject(
+        projectId: String,
+        title: String,
+        workspaceRoot: String,
+        createWorkspaceRootIfMissing: Boolean,
+    ): JsonObject = buildJsonObject {
+        put("type", "project.create")
+        put("commandId", newCommandId())
+        put("projectId", projectId)
+        put("title", title)
+        put("workspaceRoot", workspaceRoot)
+        put("createWorkspaceRootIfMissing", createWorkspaceRootIfMissing)
+        put("createdAt", now())
+    }
+
+    /**
+     * `project.update` (`ProjectMutation` in `contracts/project.ts`). Only the
+     * title travels: the Overview rename is the one mutation this client makes.
+     */
+    fun projectUpdate(projectId: String, title: String): JsonObject = buildJsonObject {
+        put("type", "project.update")
+        put("commandId", newCommandId())
+        put("projectId", projectId)
+        put("title", title.trim())
+    }
+
+}
+
+/** Default snooze: tomorrow morning, matching the RN preset the row menu uses. */
+fun tomorrowMorningIso(): String {
+    val zone = java.time.ZoneId.systemDefault()
+    val tomorrow = java.time.LocalDate.now(zone).plusDays(1).atTime(9, 0)
+    return tomorrow.atZone(zone).toInstant().toString()
+}
