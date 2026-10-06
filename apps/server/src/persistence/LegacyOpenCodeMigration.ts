@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 // Normalize historical S5 provider ids before upstream's V2 data import.
 export default Effect.gen(function* () {

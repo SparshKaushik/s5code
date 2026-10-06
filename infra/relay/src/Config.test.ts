@@ -2,6 +2,7 @@ import { assert, expect, it } from "@effect/vitest";
 import * as ConfigProvider from "effect/ConfigProvider";
 import * as Effect from "effect/Effect";
 import * as Redacted from "effect/Redacted";
+import * as Option from "effect/Option";
 
 import * as RelayConfiguration from "./Config.ts";
 
@@ -126,5 +127,51 @@ it.effect("rejects an invalid cleanup mode", () =>
 
     expect(error._tag).toBe("ConfigError");
     expect(error.message).toContain('Expected "off" | "dry-run" | "enabled"');
+  }),
+);
+
+it.effect("reads the legacy cleanup mode independently of the main one", () =>
+  Effect.gen(function* () {
+    const provider = ConfigProvider.fromEnv({
+      env: { RELAY_TUNNEL_CLEANUP_MODE: "enabled", RELAY_LEGACY_TUNNEL_CLEANUP_MODE: "dry-run" },
+    });
+    expect(yield* RelayConfiguration.managedEndpointCleanupModeConfig.parse(provider)).toBe(
+      "enabled",
+    );
+    expect(yield* RelayConfiguration.legacyManagedEndpointCleanupModeConfig.parse(provider)).toBe(
+      "dry-run",
+    );
+    expect(
+      yield* RelayConfiguration.legacyManagedEndpointCleanupModeConfig.parse(
+        ConfigProvider.fromEnv({ env: {} }),
+      ),
+    ).toBe("off");
+  }),
+);
+
+it.effect.each([
+  { name: "missing", env: {}, expected: Option.none() },
+  {
+    name: "positive",
+    env: { RELAY_LEGACY_TUNNEL_GRACE_MINUTES: "10" },
+    expected: Option.some(10),
+  },
+] as const)("loads a $name legacy grace override", ({ env, expected }) =>
+  Effect.gen(function* () {
+    const minutes = yield* RelayConfiguration.legacyTunnelGraceMinutesConfig.parse(
+      ConfigProvider.fromEnv({ env }),
+    );
+    expect(minutes).toEqual(expected);
+  }),
+);
+
+it.effect.each(["0", "-10"])("rejects a grace override of %s minutes", (value) =>
+  Effect.gen(function* () {
+    const error = yield* Effect.flip(
+      RelayConfiguration.legacyTunnelGraceMinutesConfig.parse(
+        ConfigProvider.fromEnv({ env: { RELAY_LEGACY_TUNNEL_GRACE_MINUTES: value } }),
+      ),
+    );
+    expect(error._tag).toBe("ConfigError");
   }),
 );

@@ -84,7 +84,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     }
   };
 
-  const updaterLayer = Layer.succeed(ElectronUpdater.ElectronUpdater, {
+  const layerUpdater = Layer.succeed(ElectronUpdater.ElectronUpdater, {
     setFeedURL: (options) =>
       Effect.sync(() => {
         feedUrls.push(options);
@@ -129,7 +129,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       ).pipe(Effect.asVoid),
   } satisfies ElectronUpdater.ElectronUpdater["Service"]);
 
-  const windowLayer = Layer.succeed(ElectronWindow.ElectronWindow, {
+  const layerWindow = Layer.succeed(ElectronWindow.ElectronWindow, {
     create: () => Effect.die("unexpected BrowserWindow creation"),
     main: Effect.succeedNone,
     currentMainOrFirst: Effect.succeedNone,
@@ -167,9 +167,9 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     }),
     waitForReady: () => Effect.succeed(true),
   };
-  const backendLayer = DesktopBackendPool.layerTest([stubBackendInstance]);
+  const layerBackend = DesktopBackendPool.layerTest([stubBackendInstance]);
 
-  const desktopWindowLayer = Layer.succeed(DesktopWindow.DesktopWindow, {
+  const layerDesktopWindow = Layer.succeed(DesktopWindow.DesktopWindow, {
     createMain: Effect.die("unexpected createMain"),
     ensureMain: Effect.die("unexpected ensureMain"),
     revealOrCreateMain: Effect.sync(() => {
@@ -189,7 +189,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     dispatchSnapShotEvent: () => Effect.void,
   } satisfies DesktopWindow.DesktopWindow["Service"]);
 
-  const electronAppLayer = Layer.succeed(ElectronApp.ElectronApp, {
+  const layerElectronApp = Layer.succeed(ElectronApp.ElectronApp, {
     metadata: Effect.die("unexpected metadata read"),
     name: Effect.succeed("S5 Code"),
     systemLocale: Effect.succeed("en-US"),
@@ -213,7 +213,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     on: () => Effect.void,
   } satisfies ElectronApp.ElectronApp["Service"]);
 
-  const macUnsignedUpdateInstallLayer = Layer.succeed(
+  const layerMacUnsignedUpdateInstall = Layer.succeed(
     MacUnsignedUpdateInstall.MacUnsignedUpdateInstall,
     {
       usesSquirrelCompatibleSignature: () =>
@@ -225,7 +225,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     } satisfies MacUnsignedUpdateInstall.MacUnsignedUpdateInstall["Service"],
   );
 
-  const environmentLayer = DesktopEnvironment.layer({
+  const layerEnvironment = DesktopEnvironment.layer({
     dirname: "/repo/apps/desktop/src",
     homeDirectory: `/tmp/t3-desktop-updates-home-${process.pid}`,
     platform: options.platform ?? "darwin",
@@ -253,7 +253,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     ...DesktopAppSettings.DEFAULT_DESKTOP_SETTINGS,
   };
   const setUpdateChannelError = options.setUpdateChannelError;
-  const settingsLayer =
+  const layerSettings =
     setUpdateChannelError || options.beforeSetUpdateChannel
       ? Layer.succeed(DesktopAppSettings.DesktopAppSettings, {
           get: Effect.sync(() => testSettings),
@@ -289,7 +289,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   // Tracks the restart markers installs leave, so installs stay free of real
   // disk I/O that would outrun the tests' settle loops.
   const updateRestartMarkers = new Set<string>();
-  const fileSystemLayer = FileSystem.layerNoop({
+  const layerFileSystem = FileSystem.layerNoop({
     readFileString: (path) =>
       path === "/missing/resources/package-type" && options.packageType !== undefined
         ? Effect.succeed(options.packageType)
@@ -313,15 +313,15 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
   });
 
   const layer = DesktopUpdates.layer.pipe(
-    Layer.provide(fileSystemLayer),
-    Layer.provideMerge(updaterLayer),
-    Layer.provideMerge(windowLayer),
-    Layer.provideMerge(desktopWindowLayer),
-    Layer.provideMerge(backendLayer),
+    Layer.provide(layerFileSystem),
+    Layer.provideMerge(layerUpdater),
+    Layer.provideMerge(layerWindow),
+    Layer.provideMerge(layerDesktopWindow),
+    Layer.provideMerge(layerBackend),
     Layer.provideMerge(DesktopState.layer),
-    Layer.provideMerge(settingsLayer),
-    Layer.provideMerge(electronAppLayer),
-    Layer.provideMerge(macUnsignedUpdateInstallLayer),
+    Layer.provideMerge(layerSettings),
+    Layer.provideMerge(layerElectronApp),
+    Layer.provideMerge(layerMacUnsignedUpdateInstall),
     Layer.provideMerge(
       DesktopConfig.layerTest({
         T3CODE_HOME: `/tmp/t3-desktop-updates-test-${process.pid}`,
@@ -330,7 +330,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
         ...options.env,
       }),
     ),
-    Layer.provideMerge(environmentLayer),
+    Layer.provideMerge(layerEnvironment),
     Layer.provideMerge(NodeServices.layer),
   );
 
