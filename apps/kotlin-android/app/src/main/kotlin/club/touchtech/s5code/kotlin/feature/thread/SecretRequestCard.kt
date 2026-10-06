@@ -95,7 +95,8 @@ private fun SecretRequestLine(
         when (display) {
             SecretRequestDisplay.Pending ->
                 "${entry.label} · Waiting for your answer"
-            is SecretRequestDisplay.PendingElsewhere,
+            is SecretRequestDisplay.PendingElsewhere ->
+                "${entry.label} · ${display.label}"
             is SecretRequestDisplay.Answered ->
                 "${entry.label} · ${display.label}"
         }
