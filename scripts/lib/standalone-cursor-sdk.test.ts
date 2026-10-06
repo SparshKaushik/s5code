@@ -21,8 +21,8 @@ it("resolves the pinned SDK's native helpers from the standalone cache", async (
     );
     // Run the actual SDK resolver, with the filesystem primitives it imports.
     const resolverSource = source.slice(
-      source.indexOf("function RZ1($){"),
-      source.indexOf("function CZ1($){"),
+      source.indexOf("function pd0($){"),
+      source.indexOf("function ld0($){"),
     );
     const env: NodeJS.ProcessEnv = {
       T3CODE_CURSOR_SDK_PLATFORM_DIR: NodePath.join(directory, "cache"),
@@ -35,12 +35,12 @@ it("resolves the pinned SDK's native helpers from the standalone cache", async (
         execPath: NodePath.join(directory, "bin/server"),
         env,
       },
-      TZ1: NodePath.join,
-      V_0: NodePath.resolve,
-      Pi0: NodePath.dirname,
-      vf1: NodePath.parse,
-      LS8: () => undefined,
-      BS8: () => false,
+      dd0: NodePath.join,
+      Mz0: NodePath.resolve,
+      wP0: NodePath.dirname,
+      EA1: NodePath.parse,
+      kP8: () => undefined,
+      PP8: () => false,
     }) as (input: {
       relativePath: string;
       excludedWorkspaceDirs: string[];

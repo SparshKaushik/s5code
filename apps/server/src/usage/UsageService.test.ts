@@ -795,7 +795,7 @@ describe("UsageService", () => {
           assert.deepStrictEqual(restored.buckets, original.buckets);
         }).pipe(
           Effect.provide(
-            serviceLayers({ prefix: "usage-service-model-mappings-test", home, settings }),
+            layerService({ prefix: "usage-service-model-mappings-test", home, settings }),
           ),
         );
       }).pipe(Effect.scoped),
@@ -804,7 +804,7 @@ describe("UsageService", () => {
   it.live("reads assistant usage out of the OpenCode database", () =>
     Effect.gen(function* () {
       const { settings, home } = yield* setup;
-      // OPENCODE_DATA_DIR (set by serviceLayers) shadows XDG_DATA_HOME when a
+      // OPENCODE_DATA_DIR (set by layerService) shadows XDG_DATA_HOME when a
       // data dir is named, matching how envRoots resolves roots.
       const dbDir = NodePath.join(home, "opencode");
       yield* Effect.promise(() => NodeFSP.mkdir(dbDir, { recursive: true }));
@@ -846,7 +846,7 @@ describe("UsageService", () => {
       });
 
       const service = yield* UsageService.make.pipe(
-        Effect.provide(serviceLayers({ prefix: "usage-service-opencode-test", home, settings })),
+        Effect.provide(layerService({ prefix: "usage-service-opencode-test", home, settings })),
       );
       const summary = yield* service.readSummary(WINDOW);
       // The environment also scans OPENCODE_DATA_DIR, which stays missing in
