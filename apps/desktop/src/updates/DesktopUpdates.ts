@@ -614,12 +614,13 @@ export const make = Effect.gen(function* () {
           ),
         ),
     ).pipe(
-      Effect.catchTag("DesktopUpdateQuarantineClearError", (error) =>
-        logUpdaterWarning("failed to clear macOS quarantine attributes before update install", {
-          appPath: error.appPath,
-          cause: formatUpdaterErrorCause(error.cause),
-        }),
-      ),
+      Effect.catchTags({
+        DesktopUpdateQuarantineClearError: (error) =>
+          logUpdaterWarning("failed to clear macOS quarantine attributes before update install", {
+            appPath: error.appPath,
+            cause: formatUpdaterErrorCause(error.cause),
+          }),
+      }),
     );
   });
 
