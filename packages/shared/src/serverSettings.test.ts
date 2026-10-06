@@ -580,6 +580,27 @@ describe("serverSettings helpers", () => {
     expect(current.usagePriceOverrides["example-model"]?.cacheReadCostPerMillionTokens).toBe(0.5);
   });
 
+  it("replaces and removes individual usage mappings without clobbering other models", () => {
+    const current = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usageModelMappings: { preview: "released" },
+    });
+    const added = applyServerSettingsPatch(current, {
+      usageModelMappings: { other: "other-released" },
+    });
+    const replaced = applyServerSettingsPatch(added, {
+      usageModelMappings: { preview: "new-released" },
+    });
+    expect(replaced.usageModelMappings).toEqual({
+      preview: "new-released",
+      other: "other-released",
+    });
+    const removed = applyServerSettingsPatch(replaced, {
+      usageModelMappings: { preview: null },
+    });
+    expect(removed.usageModelMappings).toEqual({ other: "other-released" });
+    expect(current.usageModelMappings).toEqual({ preview: "released" });
+  });
+
   it("stores background activity profiles as a versioned object and syncs legacy aliases", () => {
     const next = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
       backgroundActivity: {
@@ -793,5 +814,18 @@ describe("serverSettings helpers", () => {
     });
 
     expect(resolved.pauseWhenOnBattery).toBe(false);
+  });
+});
+
+describe("worktreesDirectory", () => {
+  it("remembers previous custom locations so their worktrees stay managed", () => {
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { worktreesDirectory: "/a" });
+    expect(first.previousWorktreesDirectories).toEqual([]);
+    const second = applyServerSettingsPatch(first, { worktreesDirectory: "/b" });
+    expect(second.previousWorktreesDirectories).toEqual(["/a"]);
+    const reset = applyServerSettingsPatch(second, { worktreesDirectory: "" });
+    expect(reset.previousWorktreesDirectories).toEqual(["/a", "/b"]);
+    const back = applyServerSettingsPatch(reset, { worktreesDirectory: "/a" });
+    expect(back.previousWorktreesDirectories).toEqual(["/b"]);
   });
 });

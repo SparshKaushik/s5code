@@ -1,5 +1,5 @@
 import * as Effect from "effect/Effect";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as SqlClient from "effect/sql/SqlClient";
 
 const threadColumnNames = Effect.fn("schemaEnsure.threadColumnNames")(function* () {
   const sql = yield* SqlClient.SqlClient;

@@ -22,8 +22,8 @@ import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
 import * as Semaphore from "effect/Semaphore";
 import * as Stream from "effect/Stream";
-import { ChildProcess } from "effect/unstable/process";
-import * as ChildProcessSpawner from "effect/unstable/process/ChildProcessSpawner";
+import { ChildProcess } from "effect/process";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
 import * as DesktopBackendPool from "../backend/DesktopBackendPool.ts";
 import * as DesktopConfig from "../app/DesktopConfig.ts";
@@ -614,12 +614,13 @@ export const make = Effect.gen(function* () {
           ),
         ),
     ).pipe(
-      Effect.catchTag("DesktopUpdateQuarantineClearError", (error) =>
-        logUpdaterWarning("failed to clear macOS quarantine attributes before update install", {
-          appPath: error.appPath,
-          cause: formatUpdaterErrorCause(error.cause),
-        }),
-      ),
+      Effect.catchTags({
+        DesktopUpdateQuarantineClearError: (error) =>
+          logUpdaterWarning("failed to clear macOS quarantine attributes before update install", {
+            appPath: error.appPath,
+            cause: formatUpdaterErrorCause(error.cause),
+          }),
+      }),
     );
   });
 

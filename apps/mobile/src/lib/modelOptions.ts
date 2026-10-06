@@ -9,6 +9,7 @@ import {
   buildExplicitProviderOptionSelectionsFromDescriptors,
   getProviderOptionDescriptors,
 } from "@t3tools/shared/model";
+import { resolveModelSubProvider } from "@t3tools/shared/providerLabels";
 
 export type ModelOption = {
   readonly key: string;
@@ -179,7 +180,7 @@ export function buildModelOptions(
       options.set(key, {
         key,
         label: model.name,
-        subtitle: model.subProvider ?? "",
+        subtitle: resolveModelSubProvider(provider.driver, model) ?? "",
         providerKey: provider.instanceId,
         providerLabel,
         providerDriver: provider.driver,
@@ -233,7 +234,11 @@ export function buildModelOptions(
       options.set(key, {
         key,
         label: model?.name ?? fallbackModelSelection.model,
-        subtitle: model?.subProvider ?? "",
+        subtitle:
+          resolveModelSubProvider(providerDriver, {
+            slug: fallbackModelSelection.model,
+            subProvider: model?.subProvider,
+          }) ?? "",
         providerKey: fallbackModelSelection.instanceId,
         providerLabel,
         providerDriver,

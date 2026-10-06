@@ -1,6 +1,6 @@
 import * as Effect from "effect/Effect";
-import * as Migrator from "effect/unstable/sql/Migrator";
-import * as SqlClient from "effect/unstable/sql/SqlClient";
+import * as Migrator from "effect/sql/Migrator";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /** Align released S5 migration ids with upstream before its V2 upgrade runs. */
 export const reconcileForkMigrationHistory = Effect.fn("reconcileForkMigrationHistory")(
