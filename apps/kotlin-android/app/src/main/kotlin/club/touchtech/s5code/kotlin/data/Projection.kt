@@ -248,7 +248,7 @@ fun projectFrom(environmentId: EnvironmentId, dto: ProjectShellDto): Project =
         environmentId = environmentId,
         title = dto.title,
         workspaceRoot = dto.workspaceRoot,
-        repository = dto.repositoryIdentity?.let { it.displayName ?: it.canonicalKey },
+        repository = dto.repositoryIdentity?.let { it.groupingDisplayName ?: it.groupingKey },
         // The project has no branch of its own; a thread's branch is the thread's.
         // Showing the default here would be a guess that goes stale.
         branch = "",
@@ -261,6 +261,8 @@ fun projectFrom(environmentId: EnvironmentId, dto: ProjectShellDto): Project =
                     owner = identity.owner,
                     name = identity.name,
                     rootPath = identity.rootPath,
+                    originCanonicalKey = identity.origin?.canonicalKey,
+                    originDisplayName = identity.origin?.displayName,
                 )
             },
         createdAtMillis = parseInstant(dto.createdAt),

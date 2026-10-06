@@ -1002,7 +1002,18 @@ class EnvironmentSession(
                 while (true) {
                     try {
                         live.stream(method, payload(live)).collect { element ->
-                            emit(TransportJson.decodeFromJsonElement(serializer, element))
+                            val decoded = try {
+                                TransportJson.decodeFromJsonElement(serializer, element)
+                            } catch (_: kotlinx.serialization.SerializationException) {
+                                // An incompatible snapshot must fail this connection,
+                                // not crash the application from a background collector.
+                                // Do not include the frame or decoder message: either
+                                // may contain private transcript data.
+                                val reason = RpcTransportClosed("The server sent an incompatible $method response. Update the app or server.")
+                                live.close(reason)
+                                throw reason
+                            }
+                            emit(decoded)
                         }
                         return@transformLatest
                     } catch (expected: RpcFailure) {

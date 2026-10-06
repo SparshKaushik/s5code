@@ -1118,9 +1118,9 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     environmentId = message.environmentId,
                     projectKey = message.creation.projectKey,
                     branch = message.creation.branch,
-                    prompt = message.text,
-                    attachments = draft.attachments + message.attachments,
-                    contextRecords = draft.contextRecords + message.contextRecords,
+                    prompt = club.touchtech.s5code.kotlin.data.recoveredMessageText(draft.prompt, message.text),
+                    attachments = (draft.attachments + message.attachments).distinctBy { it.id },
+                    contextRecords = (draft.contextRecords + message.contextRecords).distinctBy { it.kind to it.contextId },
                     settings = message.settings,
                     workspaceMode =
                         if (message.creation.newWorktree) WorkspaceMode.NewWorktree
@@ -1134,9 +1134,9 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 message.threadId.value,
             ) { draft ->
                 draft.copy(
-                    text = message.text,
-                    attachments = draft.attachments + message.attachments,
-                    contextRecords = draft.contextRecords + message.contextRecords,
+                    text = club.touchtech.s5code.kotlin.data.recoveredMessageText(draft.text, message.text),
+                    attachments = (draft.attachments + message.attachments).distinctBy { it.id },
+                    contextRecords = (draft.contextRecords + message.contextRecords).distinctBy { it.kind to it.contextId },
                     settings = message.settings,
                 )
             }

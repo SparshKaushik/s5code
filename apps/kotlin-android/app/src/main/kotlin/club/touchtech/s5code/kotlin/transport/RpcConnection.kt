@@ -6,6 +6,10 @@ import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.CancellableContinuation
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.ensureActive
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.delay
@@ -33,6 +37,19 @@ class RpcFailure(
 
 /** The socket went away. Callers treat this as transient and reconnect. */
 class RpcTransportClosed(override val message: String) : Exception(message)
+
+/** A chunk queued before teardown can outlive its stream's channel. */
+@OptIn(ExperimentalCoroutinesApi::class)
+internal suspend fun deliverRpcChunk(channel: Channel<JsonElement>, values: List<JsonElement>) {
+    try {
+        values.forEach { channel.send(it) }
+    } catch (error: Exception) {
+        currentCoroutineContext().ensureActive()
+        // Channel.send throws the channel's close cause, including RpcFailure
+        // or RpcTransportClosed, not just ClosedSendChannelException.
+        if (!channel.isClosedForSend) throw error
+    }
+}
 
 /**
  * One live RPC session over one WebSocket.
@@ -76,12 +93,13 @@ private constructor(
         val id = requestIds.getAndIncrement()
         return suspendCancellableCoroutine { continuation ->
             scope.launch {
-                val closedNow = failure
+                val closedNow = lock.withLock {
+                    failure.also { if (it == null) pendingRequests[id] = continuation }
+                }
                 if (closedNow != null) {
                     continuation.resumeWithException(closedNow)
                     return@launch
                 }
-                lock.withLock { pendingRequests[id] = continuation }
                 continuation.invokeOnCancellation {
                     scope.launch {
                         lock.withLock { pendingRequests.remove(id) }
@@ -104,27 +122,38 @@ private constructor(
         // chunk, so buffering here would let the client fall behind the server
         // silently and grow unboundedly on a slow consumer.
         val chunks = Channel<JsonElement>(capacity = Channel.RENDEZVOUS)
-        val closedNow = failure
+        val closedNow = lock.withLock {
+            failure.also { if (it == null) pendingStreams[id] = chunks }
+        }
         if (closedNow != null) {
             close(closedNow)
             return@callbackFlow
         }
-        lock.withLock { pendingStreams[id] = chunks }
         send(RpcFromClient.Request(id, tag, payload))
 
         val pump = launch {
-            for (chunk in chunks) {
-                send(chunk)
-                // Acked after the collector took the value, which is what makes
-                // backpressure reach the server rather than stopping at us.
-                this@RpcConnection.send(RpcFromClient.Ack(id))
+            try {
+                for (chunk in chunks) {
+                    send(chunk)
+                    // Acked after the collector took the value, which is what makes
+                    // backpressure reach the server rather than stopping at us.
+                    this@RpcConnection.send(RpcFromClient.Ack(id))
+                }
+                close()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                close(error)
             }
         }
 
         awaitClose {
             pump.cancel()
+            // close() retains suspended rendezvous sends. Once the collector
+            // is gone, cancel them too so old socket dispatchers cannot leak.
+            chunks.cancel()
             scope.launch {
-                lock.withLock { pendingStreams.remove(id) }?.close()
+                lock.withLock { pendingStreams.remove(id) }
                 this@RpcConnection.send(RpcFromClient.Interrupt(id))
             }
         }
@@ -149,7 +178,7 @@ private constructor(
             is RpcFromServer.Chunk ->
                 scope.launch {
                     val channel = lock.withLock { pendingStreams[envelope.requestId] } ?: return@launch
-                    envelope.values.forEach { channel.send(it) }
+                    deliverRpcChunk(channel, envelope.values)
                 }
             is RpcFromServer.Exit ->
                 scope.launch {
@@ -202,8 +231,8 @@ private constructor(
         runCatching { socket.close(NORMAL_CLOSE, null) }
     }
 
-    fun close() {
-        fail(RpcTransportClosed("The client closed the session."))
+    fun close(reason: RpcTransportClosed = RpcTransportClosed("The client closed the session.")) {
+        fail(reason)
     }
 
     private fun startKeepalive() {

@@ -261,7 +261,7 @@ data class ThreadPullRequestSnapshotDto(
     val reviewDecision: String? = null,
     /** passing | failing | pending | unknown */
     val checksState: String? = null,
-    val mergeability: JsonObject? = null,
+    val mergeability: String? = null,
 )
 
 @Serializable

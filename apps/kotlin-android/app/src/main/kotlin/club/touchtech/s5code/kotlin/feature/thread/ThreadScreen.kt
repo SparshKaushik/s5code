@@ -1208,13 +1208,13 @@ fun ThreadScreen(
                                     fetchToolDetail = { call ->
                                         store.workspace.turnItemDetail(
                                             env,
-                                            id,
+                                            call.sourceThreadId?.let(::ThreadId) ?: id,
                                             call.id,
                                             call.detailRevision,
                                         )
                                     },
                                     resolveToolOutputImage = { call, index ->
-                                        store.workspace.toolOutputImageUrl(env, id, call.id, index)
+                                        store.workspace.toolOutputImageUrl(env, call.sourceThreadId?.let(::ThreadId) ?: id, call.id, index)
                                     },
                                     onRetryPreparation = { runId ->
                                         runCatching {

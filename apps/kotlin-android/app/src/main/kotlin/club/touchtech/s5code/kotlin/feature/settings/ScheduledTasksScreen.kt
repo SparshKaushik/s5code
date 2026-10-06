@@ -52,7 +52,7 @@ fun ScheduledTasksScreen(store: AppStore, onBack: () -> Unit) {
     LaunchedEffect(env?.id) {
         val target = env ?: return@LaunchedEffect
         try { store.workspace.environmentStream(target.id, "scheduledTasks.subscribe").collect {
-            tasks = it.v2Objects("tasks"); loading = false
+            tasks = club.touchtech.s5code.kotlin.data.scheduledTaskRows(it); loading = false
         } } catch (cancelled: CancellationException) { throw cancelled }
         catch (error: Exception) { failure = error.message; loading = false }
     }

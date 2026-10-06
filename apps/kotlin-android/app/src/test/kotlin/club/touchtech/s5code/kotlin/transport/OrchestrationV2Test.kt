@@ -47,6 +47,20 @@ class OrchestrationV2Test {
         assertEquals(listOf("first", "second"), v2Presentation(decoded.projection!!).feed.map { it.id })
     }
 
+    @Test fun `inherited tool output retains its source thread for detail and assets`() {
+        val tool = JsonObject(item("screenshot", 1, "dynamic_tool") + mapOf(
+            "outputOmitted" to JsonPrimitive(true),
+            "toolName" to JsonPrimitive("screenshot"),
+        ))
+        val projection = V2ProjectionDto(metadata, visibleTurnItems = listOf(
+            row(tool).copy(visibility = "inherited", sourceThreadId = "parent"),
+        ))
+        val entry = v2Presentation(projection).feed.single() as FeedEntry.ToolCall
+        assertEquals("parent", entry.sourceThreadId)
+        assertEquals("screenshot", entry.id)
+        assertTrue(entry.fetchesDetail)
+    }
+
     @Test fun `stream updates replace items and rollbacks remove local history only`() {
         val first = item("first", 1)
         val projection = V2ProjectionDto(metadata, turnItems = listOf(first), visibleTurnItems = listOf(

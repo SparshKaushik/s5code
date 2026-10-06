@@ -65,6 +65,11 @@ jobs:
           --tests '*WorkspaceSnapshotStoreTest'
           --tests '*ThreadSummaryProjectionTest'
           --tests '*ThreadStatusTest'
+          --tests '*RpcChunkDeliveryTest'
+          --tests '*PullRequestSnapshotWireTest'
+          --tests '*RecoveredMessageTextTest'
+          --tests '*RepositoryOriginProjectionTest'
+          --tests '*ScheduledTaskRowsTest'
           --stacktrace
 
       - name: Verify Signing Certificate

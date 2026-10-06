@@ -719,7 +719,7 @@ private fun ToolRow(
                 // The output the timeline withheld: a fetched block under the
                 // call, and the fetch's own status while it is in flight or
                 // failed — RN's "Loading output…" / error line.
-                if (entry.fetchesDetail && fetchedText == null) {
+                if (entry.fetchesDetail && (detailError != null || !fetched || fetchedItem == null)) {
                     Row(
                         Modifier.padding(top = S5Theme.spacing.small),
                         verticalAlignment = Alignment.CenterVertically,

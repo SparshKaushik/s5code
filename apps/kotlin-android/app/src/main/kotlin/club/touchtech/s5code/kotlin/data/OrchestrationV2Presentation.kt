@@ -159,7 +159,8 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                     fetchesDetail = turnItemNeedsDetailFetch(item),
                     detailRevision = turnItemDetailRevision(item),
                     outputImageCount = if (type == "dynamic_tool" && !item.v2Bool("outputOmitted"))
-                        toolOutputImageCount(item["output"]) else 0)
+                         toolOutputImageCount(item["output"]) else 0,
+                     sourceThreadId = row.sourceThreadId)
             }
         }
     }

@@ -558,6 +558,8 @@ sealed interface FeedEntry {
          * each loads over HTTP as a `tool-output-image` asset by index.
          */
         val outputImageCount: Int = 0,
+        /** Inherited tool rows load detail and image assets from their original thread. */
+        val sourceThreadId: String? = null,
     ) : FeedEntry
 
     data class Reasoning(
