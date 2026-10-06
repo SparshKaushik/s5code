@@ -6,6 +6,7 @@ import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentId
+import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.FileNode
 import club.touchtech.s5code.kotlin.model.GitStatus
 import club.touchtech.s5code.kotlin.model.PendingApproval
@@ -24,6 +25,7 @@ import club.touchtech.s5code.kotlin.model.TerminalSession
 import club.touchtech.s5code.kotlin.model.TerminalSummary
 import club.touchtech.s5code.kotlin.model.ThreadDetail
 import club.touchtech.s5code.kotlin.model.ThreadId
+import club.touchtech.s5code.kotlin.model.ThreadPullRequestLink
 import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.ThreadSummary
@@ -40,6 +42,8 @@ import club.touchtech.s5code.kotlin.model.WorkspaceAsset
 import club.touchtech.s5code.kotlin.model.WorktreeSetupSnapshot
 import club.touchtech.s5code.kotlin.model.UserInputAnswer
 import club.touchtech.s5code.kotlin.transport.wire.FilesystemBrowseEntryDto
+import club.touchtech.s5code.kotlin.transport.wire.ScheduledTaskWebhookDeliveryDto
+import club.touchtech.s5code.kotlin.transport.wire.ScheduledTaskWebhookDeliverySummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlRepositoryDto
 import kotlinx.coroutines.flow.Flow
@@ -313,6 +317,120 @@ interface WorkspaceGateway {
 
     /** Closes a dismissible user-input request without answering it. */
     suspend fun dismissInput(environmentId: EnvironmentId, id: ThreadId, inputId: String) = Unit
+
+    /**
+     * `secrets.answerRequest`: delivers the user's reply to a `secret_request`
+     * turn item — a saved value the server stores under a one-use SecretRef, or
+     * a decline. The item's own [FeedEntry.SecretRequest.threadId] is the
+     * address because the request may have been inherited into a fork.
+     *
+     * Callers build [answer] with [secretRequestAnswerPayload] semantics: a
+     * save on blank text must never reach this method (the server rejects it).
+     */
+    suspend fun answerSecretRequest(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        turnItemId: String,
+        answer: SecretRequestAnswer,
+    ) = Unit
+
+    /* ── Pull request links and watches ──────────────────────────────── */
+
+    /**
+     * `thread.pull-request.watch`: turns the server-side watch for a linked
+     * pull request on or off. [link]'s url and source travel with the command
+     * when [watching] is on, matching `watchThreadPullRequest` in the
+     * client-runtime commands. Only call when the server advertises
+     * `threadPullRequestWatch`.
+     */
+    suspend fun setPullRequestWatch(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        link: ThreadPullRequestLink,
+        watching: Boolean,
+    ) = Unit
+
+    /**
+     * `prepared-run.retry`: replays a failed prepared run after a workspace
+     * preparation failure. [runId] comes from the error row's
+     * `retryablePreparationRunId`, which is only set where a retry applies.
+     */
+    suspend fun retryPreparedRun(environmentId: EnvironmentId, id: ThreadId, runId: String) = Unit
+
+    /* ── Turn-item detail reads ──────────────────────────────────────── */
+
+    /**
+     * `orchestration.getTurnItem`: the full input/output of one turn item that
+     * withheld it (`FeedEntry.ToolCall.fetchesDetail`). [revision] is the row's
+     * `detailRevision`; a still-current answer may come back as null when the
+     * server reports the item unchanged for that revision.
+     *
+     * The item stays a [JsonObject]: turn items are a forward-compatible union
+     * the V2 projection reads positionally, and this payload feeds the same
+     * readers.
+     */
+    suspend fun turnItemDetail(
+        environmentId: EnvironmentId,
+        threadId: ThreadId,
+        itemId: String,
+        revision: String?,
+    ): JsonObject? = null
+
+    /**
+     * A signed URL for one inline image in a tool item's output — the
+     * `tool-output-image` `assets.createUrl` resource, addressed by the image's
+     * order in the output (the same index `toolOutputImages` yields).
+     */
+    suspend fun toolOutputImageUrl(
+        environmentId: EnvironmentId,
+        threadId: ThreadId,
+        itemId: String,
+        index: Int,
+    ): String = ""
+
+    /* ── Composer errors ─────────────────────────────────────────────── */
+
+    /**
+     * Why a thread's queued send last failed, keyed `"<environmentId>:<threadId>"`
+     * — RN's `threadComposerErrorsAtom`. The drain can reject a message after
+     * the user has left the thread, so the reason outlives the attempt.
+     */
+    val threadComposerErrors: StateFlow<Map<String, ThreadComposerError>>
+
+    /** Records a terminal send failure for a thread's composer. */
+    fun setThreadComposerError(threadKey: String, message: String, messageId: String? = null) = Unit
+
+    /** Clears one thread's send failure — a resend or a manual dismiss. */
+    fun clearThreadComposerError(threadKey: String, messageId: String? = null) = Unit
+
+    /* ── Scheduled-task webhooks ─────────────────────────────────────── */
+
+    /**
+     * `scheduledTasks.rotateWebhookToken`: mints a new URL token for a webhook
+     * task, invalidating the old path. Returns the updated task record as raw
+     * JSON — the settings screen's tasks stay decoded the way it already reads
+     * them.
+     */
+    suspend fun rotateScheduledTaskWebhookToken(
+        environmentId: EnvironmentId,
+        taskId: String,
+    ): JsonObject = JsonObject(emptyMap())
+
+    /**
+     * `scheduledTasks.listWebhookDeliveries`: the recent webhook deliveries a
+     * task received, newest first per the server.
+     */
+    suspend fun listScheduledTaskWebhookDeliveries(
+        environmentId: EnvironmentId,
+        taskId: String,
+    ): List<ScheduledTaskWebhookDeliverySummaryDto> = emptyList()
+
+    /** `scheduledTasks.getWebhookDelivery`: one delivery with request detail. */
+    suspend fun scheduledTaskWebhookDelivery(
+        environmentId: EnvironmentId,
+        taskId: String,
+        deliveryId: String,
+    ): ScheduledTaskWebhookDeliveryDto? = null
 
     /**
      * Searches persisted user and assistant messages on every selected environment.

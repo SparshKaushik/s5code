@@ -416,12 +416,26 @@ fun SettingsSourceControlScreen(store: AppStore, onBack: () -> Unit) {
                         sync.write(buildJsonObject { put("branchNamingMode", mode) })
                     },
                 )
+                S5RowGroup(title = "Pull requests") {
+                    S5SwitchRow(
+                        icon = Icons.AutoMirrored.Rounded.CallMerge,
+                        label = "Remove agent credits when merging",
+                        supporting =
+                            "Remove recognized agent credits from GitHub merge and squash messages, keeping human co-authors. Includes auto-merge. Excludes merge queues, stack merges, and existing commits.",
+                        checked = settings.removeAgentCreditsOnMerge,
+                        onCheckedChange = { enabled ->
+                            sync.write(
+                                buildJsonObject { put("removeAgentCreditsOnMerge", enabled) }
+                            )
+                        },
+                    )
+                }
                 if (settings.branchNamingMode == "static") {
                     ServerTextSetting(
                         label = "Branch prefix",
                         placeholder = "No prefix",
                         supporting =
-                            "Use t3code or t3code/ for t3code/add-search. Leave empty for no prefix.",
+                            "Use t3 or t3/ for t3/add-search. Leave empty for no prefix.",
                         value = settings.branchNamePrefix,
                         onCommit = { text ->
                             sync.write(buildJsonObject { put("branchNamePrefix", text) })

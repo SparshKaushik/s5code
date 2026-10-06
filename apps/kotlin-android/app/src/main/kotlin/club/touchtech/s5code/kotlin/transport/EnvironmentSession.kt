@@ -10,6 +10,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneStartResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigStreamEventDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerInstallationDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProvidersUpdatedDto
 import kotlin.random.Random
 import kotlinx.coroutines.CancellationException
@@ -149,6 +150,25 @@ data class ServerCapabilities(
     val storageCleanup: Boolean = false,
     /** The server persists `continueThreadsAfterServerUpdate`. */
     val threadRestartContinuation: Boolean = false,
+    /**
+     * The thread link array (`pullRequests`) and host snapshots exist. Absent
+     * means `linkedPullRequest` is the whole story: no stacks, no watches.
+     */
+    val threadPullRequests: Boolean = false,
+    /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
+    val threadPullRequestWatch: Boolean = false,
+    /** The server honors the `worktreesDirectory` setting. */
+    val worktreesDirectory: Boolean = false,
+    /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
+    val projectSettingsOverrides: Boolean = false,
+    /** `server.updateSettings` persists `usageModelMappings` and applies them to usage. */
+    val usageModelMappings: Boolean = false,
+    /**
+     * `capabilities.serverInstallation`: how this server was installed (npx-style
+     * runner vs. `npm-global` with a prefix), or null when it predates the field.
+     * A manual update hint needs it to say where the new binary must land.
+     */
+    val serverInstallation: ServerInstallationDto? = null,
 )
 
 /**
@@ -502,6 +522,14 @@ class EnvironmentSession(
                             storageCleanup = descriptor.capabilities.storageCleanup,
                             threadRestartContinuation =
                                 descriptor.capabilities.threadRestartContinuation,
+                            threadPullRequests = descriptor.capabilities.threadPullRequests,
+                            threadPullRequestWatch =
+                                descriptor.capabilities.threadPullRequestWatch,
+                            worktreesDirectory = descriptor.capabilities.worktreesDirectory,
+                            projectSettingsOverrides =
+                                descriptor.capabilities.projectSettingsOverrides,
+                            usageModelMappings = descriptor.capabilities.usageModelMappings,
+                            serverInstallation = descriptor.capabilities.serverInstallation,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     scratchWorkspaceRoot = config.scratchWorkspaceRoot,

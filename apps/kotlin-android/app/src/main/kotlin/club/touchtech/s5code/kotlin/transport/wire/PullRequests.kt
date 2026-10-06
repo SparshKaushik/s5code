@@ -30,7 +30,8 @@ data class PullRequestListResultDto(
 /**
  * `PullRequestDetail`, decoded to the same composer fields as the list entry.
  * Numeric `#` queries resolve through this when the listing page does not hold
- * the exact number.
+ * the exact number. `headSha` joins them for detail reads: hosts report it with
+ * the detail, and watch UIs compare it against a watch's recorded head.
  */
 @Serializable
 data class PullRequestDetailDto(
@@ -44,4 +45,6 @@ data class PullRequestDetailDto(
     val state: String = "open",
     val isDraft: Boolean = false,
     val updatedAt: String = "",
+    /** The head commit, where the host reports it with the detail. */
+    val headSha: String? = null,
 )

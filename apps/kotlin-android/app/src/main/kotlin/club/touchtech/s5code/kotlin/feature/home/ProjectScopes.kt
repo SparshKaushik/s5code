@@ -53,7 +53,10 @@ private fun physicalProjectKey(project: Project): String =
     "${project.environmentId.value}:${normalizeProjectPathForComparison(project.workspaceRoot)}"
 
 private fun repositoryScopedKey(project: Project, mode: ProjectGrouping): String? {
-    val canonicalKey = project.repositoryIdentity?.canonicalKey ?: return null
+    // The grouping key, not the canonical one: a checkout whose remote names a
+    // fork stays in its own scope (`repositoryGroupingKeyOf` in the contracts,
+    // upstream fix 017c9a0eb5 — forks must not merge into upstream's group).
+    val canonicalKey = project.repositoryIdentity?.groupingCanonicalKey ?: return null
     if (mode == ProjectGrouping.Repository) return canonicalKey
     val relativePath = repositoryRelativePath(project) ?: return canonicalKey
     return if (relativePath.isEmpty()) canonicalKey else "$canonicalKey::$relativePath"
@@ -68,7 +71,9 @@ private fun logicalProjectKey(project: Project, mode: ProjectGrouping): String {
 
 /** `deriveProjectGroupLabel`: a shared repo name beats the representative's title. */
 private fun projectGroupLabel(representative: Project, members: List<Project>): String {
-    val displayNames = uniqueNonEmptyValues(members.map { it.repositoryIdentity?.displayName })
+    // `repositoryGroupingDisplayNameOf`: the label of the key the group formed
+    // under, so a fork's own remote names its group rather than its upstream's.
+    val displayNames = uniqueNonEmptyValues(members.map { it.repositoryIdentity?.groupingDisplayName })
     if (displayNames.size == 1) return displayNames[0]
     val repoNames = uniqueNonEmptyValues(members.map { it.repositoryIdentity?.name })
     if (repoNames.size == 1) return repoNames[0]

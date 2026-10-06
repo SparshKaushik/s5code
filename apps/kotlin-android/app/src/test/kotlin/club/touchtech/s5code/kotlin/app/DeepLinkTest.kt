@@ -80,6 +80,14 @@ class DeepLinkTest {
         assertNull(parseDeepLinkPath("/unknown"))
         assertNull(parseDeepLinkPath("/threads/%zz/thread"))
         assertNull(parseDeepLinkPath("/threads/${"a".repeat(300)}/thread"))
+        // Branded ids reject whitespace-only values upstream; padding trims but
+        // a link that is only spaces must not route to a thread.
+        assertEquals(
+            DeepLink.Thread("env-1", "thread-2"),
+            parseDeepLinkPath("/threads/%20env-1%20/thread-2"),
+        )
+        assertNull(parseDeepLinkPath("/threads/%20/thread"))
+        assertNull(parseDeepLinkPath("/threads/env/%20"))
     }
 
     @Test

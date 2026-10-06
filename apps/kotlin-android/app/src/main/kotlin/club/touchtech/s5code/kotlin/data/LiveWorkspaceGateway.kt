@@ -36,6 +36,7 @@ import club.touchtech.s5code.kotlin.model.TerminalStatus
 import club.touchtech.s5code.kotlin.model.TerminalSummary
 import club.touchtech.s5code.kotlin.model.ThreadDetail
 import club.touchtech.s5code.kotlin.model.ThreadId
+import club.touchtech.s5code.kotlin.model.ThreadPullRequestLink
 import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.model.ThreadSummary
@@ -65,6 +66,8 @@ import club.touchtech.s5code.kotlin.transport.asThreadDto
 import club.touchtech.s5code.kotlin.transport.mergeV2History
 import club.touchtech.s5code.kotlin.transport.normalizedV2
 import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
+import club.touchtech.s5code.kotlin.transport.pullRequestLinks
+import club.touchtech.s5code.kotlin.transport.visibleThreadPullRequests
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Long
 import club.touchtech.s5code.kotlin.transport.wire.V2ProjectionDto
@@ -83,6 +86,10 @@ import club.touchtech.s5code.kotlin.transport.wire.ConsumeResetCreditResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ReviewDiffPreviewResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ScheduledTaskGetWebhookDeliveryResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ScheduledTaskListWebhookDeliveriesResultDto
+import club.touchtech.s5code.kotlin.transport.wire.ScheduledTaskWebhookDeliveryDto
+import club.touchtech.s5code.kotlin.transport.wire.ScheduledTaskWebhookDeliverySummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.SearchThreadsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto
@@ -238,6 +245,23 @@ class LiveWorkspaceGateway(
     override val providerCatalogs: StateFlow<Map<EnvironmentId, List<ProviderCatalogEntry>>> =
         _providerCatalogs.asStateFlow()
 
+    /**
+     * Terminal send failures by `"<environmentId>:<threadId>"` — the outbox
+     * drain rejects a queued message after the user may have left the thread,
+     * so the reason lives here until a resend or dismiss clears it.
+     */
+    private val composerErrors = ThreadComposerErrorStore()
+    override val threadComposerErrors: StateFlow<Map<String, ThreadComposerError>> =
+        composerErrors.errors
+
+    override fun setThreadComposerError(threadKey: String, message: String, messageId: String?) {
+        composerErrors.set(threadKey, message, messageId)
+    }
+
+    override fun clearThreadComposerError(threadKey: String, messageId: String?) {
+        composerErrors.clear(threadKey, messageId)
+    }
+
     /** Live thread details, keyed by environment and thread. */
     private val details = mutableMapOf<String, MutableStateFlow<ThreadDetail?>>()
     private val detailSyncPhases = mutableMapOf<String, MutableStateFlow<ThreadSyncPhase>>()
@@ -288,6 +312,16 @@ class LiveWorkspaceGateway(
 
     /** Signed project-icon URLs, keyed by environment and workspace root. */
     private val projectIconUrls = java.util.concurrent.ConcurrentHashMap<String, CachedIconUrl>()
+
+    /**
+     * Fetched turn-item detail, keyed `<env>/<thread>/<item>/<revision>`. A
+     * settled item's content never changes, so the row's `updatedAt` revision
+     * pins it permanently within the subscription — the RN query family does
+     * the same per-revision keying with a TTL. "live" revisions are never
+     * stored: they expire the moment the item's status settles.
+     */
+    private val turnItemDetailCache =
+        java.util.concurrent.ConcurrentHashMap<String, JsonObject>()
 
     /**
      * Slash commands for a provider instance, merged across environments and
@@ -499,6 +533,7 @@ class LiveWorkspaceGateway(
             connected.providersJob?.cancel()
             connected.session.stop()
             archivedShells.update { it - id }
+            composerErrors.clearForEnvironment(id)
             val prefix = "$id/"
             detailJobs.keys.filter { it.startsWith(prefix) }.forEach(::dropDetailSubscription)
             pendingCreationKeys.update { keys -> keys.filterNotTo(mutableSetOf()) { it.startsWith(prefix) } }
@@ -789,6 +824,17 @@ class LiveWorkspaceGateway(
                             storageCleanup = state?.capabilities?.storageCleanup == true,
                             threadRestartContinuation =
                                 state?.capabilities?.threadRestartContinuation == true,
+                            threadPullRequests =
+                                state?.capabilities?.threadPullRequests == true,
+                            threadPullRequestWatch =
+                                state?.capabilities?.threadPullRequestWatch == true,
+                            worktreesDirectory =
+                                state?.capabilities?.worktreesDirectory == true,
+                            projectSettingsOverrides =
+                                state?.capabilities?.projectSettingsOverrides == true,
+                            usageModelMappings =
+                                state?.capabilities?.usageModelMappings == true,
+                            serverInstallation = state?.capabilities?.serverInstallation,
                         ),
                     continueThreadsAfterServerUpdate =
                         state?.continueThreadsAfterServerUpdate == true,
@@ -1459,6 +1505,7 @@ class LiveWorkspaceGateway(
         details.remove(key)
         detailSyncPhases.remove(key)
         worktreeSetups.remove(key)
+        turnItemDetailCache.keys.removeIf { it.startsWith("$key/") }
         // A thread nobody is watching cannot act on "Work locally"; the
         // retained payload would only leak.
         retainedCreations.remove(key)
@@ -1747,14 +1794,40 @@ class LiveWorkspaceGateway(
         )
     }
 
+    /**
+     * Stop for the thread's latest work — `interruptThreadTurn` in the RN
+     * commands. A run interruption ends the watches it owns server-side;
+     * watches stay out of the run pick because counting them would interrupt a
+     * settled run that owns nothing. With no run to stop at all, Stop still
+     * ends the thread's pull request watches — the one background work that
+     * has no run.
+     */
     override suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId) {
         val projection = sessionFor(environmentId).request("orchestration.getThreadProjection",
             buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
         val run = projection.runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
             .maxByOrNull { it.v2Long("ordinal") ?: 0 }
-            ?: if (projection.pendingBackgroundWork().isNotEmpty()) projection.runs.filterNot { it.v2String("status") == "queued" }
-                .maxByOrNull { it.v2Long("ordinal") ?: 0 } else null
-        if (run != null) dispatch(environmentId, Commands.interruptTurn(id.value, run.v2String("id")))
+            ?: if (projection.pendingBackgroundWork(includePullRequestWatches = false).isNotEmpty())
+                projection.runs.filterNot { it.v2String("status") == "queued" }
+                    .maxByOrNull { it.v2Long("ordinal") ?: 0 } else null
+        if (run != null) {
+            dispatch(environmentId, Commands.interruptTurn(id.value, run.v2String("id")))
+            return
+        }
+        visibleThreadPullRequests(projection.pullRequestLinks()).forEach { link ->
+            if (link.watch != null) {
+                dispatch(
+                    environmentId,
+                    Commands.pullRequestWatch(
+                        threadId = id.value,
+                        host = link.host,
+                        repository = link.repository,
+                        number = link.number,
+                        watching = false,
+                    ),
+                )
+            }
+        }
     }
 
     override suspend fun visitThread(environmentId: EnvironmentId, id: ThreadId, visitedAtMillis: Long) {
@@ -1848,6 +1921,134 @@ class LiveWorkspaceGateway(
             Commands.dismissUserInput(threadId = id.value, requestId = inputId),
         )
     }
+
+    /**
+     * `secrets.answerRequest` carries a Void success — [EnvironmentSession.execute]
+     * rather than `request`, which would fail decoding a response that has no
+     * value. [id] is the thread the request was raised on (`entry.threadId`),
+     * which can differ from the viewing thread on an inherited row.
+     */
+    override suspend fun answerSecretRequest(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        turnItemId: String,
+        answer: SecretRequestAnswer,
+    ) {
+        val payload = secretRequestAnswerPayload(id.value, turnItemId, answer)
+            ?: return
+        sessionFor(environmentId).execute(WsMethods.SecretsAnswerRequest, payload)
+    }
+
+    /**
+     * `thread.pull-request.watch` on an unaware server is an unknown-command
+     * defect that kills the socket, so the advertised capability gates the
+     * dispatch rather than just hiding the affordance.
+     */
+    override suspend fun setPullRequestWatch(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        link: ThreadPullRequestLink,
+        watching: Boolean,
+    ) {
+        if (!sessionFor(environmentId).state.value.capabilities.threadPullRequestWatch) return
+        dispatch(
+            environmentId,
+            Commands.pullRequestWatch(
+                threadId = id.value,
+                host = link.host,
+                repository = link.repository,
+                number = link.number,
+                watching = watching,
+                linkUrl = link.url.takeIf { watching },
+                linkSource = link.source.takeIf { watching },
+            ),
+        )
+    }
+
+    override suspend fun retryPreparedRun(environmentId: EnvironmentId, id: ThreadId, runId: String) {
+        dispatch(environmentId, Commands.preparedRunRetry(id.value, runId))
+    }
+
+    /**
+     * `orchestration.getTurnItem` — the full input/output of a row that
+     * withheld it. Settled revisions are immutable, so they cache for the
+     * subscription's life; "live" always refetches because the item is still
+     * streaming. A null answer means the item was unchanged for [revision] or
+     * gone entirely.
+     */
+    override suspend fun turnItemDetail(
+        environmentId: EnvironmentId,
+        threadId: ThreadId,
+        itemId: String,
+        revision: String?,
+    ): JsonObject? {
+        val cacheKey = "${environmentId.value}/${threadId.value}/$itemId/${revision ?: ""}"
+        turnItemDetailCache[cacheKey]?.let { return it }
+        val result =
+            sessionFor(environmentId)
+                .request(
+                    WsMethods.OrchestrationGetTurnItem,
+                    buildJsonObject {
+                        put("threadId", threadId.value)
+                        put("itemId", itemId)
+                        revision?.let { put("revision", it) }
+                    },
+                    JsonObject.serializer(),
+                )
+        val item = result["item"] as? JsonObject
+        if (item != null && revision != "live") turnItemDetailCache[cacheKey] = item
+        return item
+    }
+
+    /* ── Scheduled-task webhooks ─────────────────────────────────────── */
+
+    /**
+     * `scheduledTasks.rotateWebhookToken` returns `ScheduledTaskMutationResult`
+     * — `{ task }` — and the screen's tasks stay raw JSON, so the task itself
+     * is what comes back rather than the wrapper.
+     */
+    override suspend fun rotateScheduledTaskWebhookToken(
+        environmentId: EnvironmentId,
+        taskId: String,
+    ): JsonObject {
+        val result =
+            sessionFor(environmentId)
+                .request(
+                    WsMethods.ScheduledTasksRotateWebhookToken,
+                    buildJsonObject { put("id", taskId) },
+                    JsonObject.serializer(),
+                )
+        return result["task"] as? JsonObject
+            ?: error("The server did not return the updated task.")
+    }
+
+    override suspend fun listScheduledTaskWebhookDeliveries(
+        environmentId: EnvironmentId,
+        taskId: String,
+    ): List<ScheduledTaskWebhookDeliverySummaryDto> =
+        sessionFor(environmentId)
+            .request(
+                WsMethods.ScheduledTasksListWebhookDeliveries,
+                buildJsonObject { put("id", taskId) },
+                ScheduledTaskListWebhookDeliveriesResultDto.serializer(),
+            )
+            .deliveries
+
+    override suspend fun scheduledTaskWebhookDelivery(
+        environmentId: EnvironmentId,
+        taskId: String,
+        deliveryId: String,
+    ): ScheduledTaskWebhookDeliveryDto? =
+        sessionFor(environmentId)
+            .request(
+                WsMethods.ScheduledTasksGetWebhookDelivery,
+                buildJsonObject {
+                    put("id", taskId)
+                    put("deliveryId", deliveryId)
+                },
+                ScheduledTaskGetWebhookDeliveryResultDto.serializer(),
+            )
+            .delivery
 
     override suspend fun searchThreads(
         environmentIds: Set<EnvironmentId>,
@@ -2227,6 +2428,39 @@ class LiveWorkspaceGateway(
                                 if (fileName != null) put("fileName", fileName)
                                 if (mimeType != null) put("mimeType", mimeType)
                                 if (disposition != null) put("disposition", disposition)
+                            },
+                        )
+                    },
+                    AssetUrlResultDto.serializer(),
+                )
+        return assetOrigin(environmentId).trimEnd('/') +
+            "/" + result.relativeUrl.trimStart('/')
+    }
+
+    /**
+     * Signs a `tool-output-image` resource: one image a tool returned inline,
+     * addressed by its order in the stored output (`turnItemOutputImages` in
+     * the RN work log). The timeline never carries the bytes, so each image
+     * loads over HTTP through this URL.
+     */
+    override suspend fun toolOutputImageUrl(
+        environmentId: EnvironmentId,
+        threadId: ThreadId,
+        itemId: String,
+        index: Int,
+    ): String {
+        val result =
+            sessionFor(environmentId)
+                .request(
+                    WsMethods.AssetsCreateUrl,
+                    buildJsonObject {
+                        put(
+                            "resource",
+                            buildJsonObject {
+                                put("_tag", "tool-output-image")
+                                put("threadId", threadId.value)
+                                put("itemId", itemId)
+                                put("index", index)
                             },
                         )
                     },

@@ -174,8 +174,11 @@ fun parseDeepLinkPath(raw: String): DeepLink? {
             segments.size <= 2 ->
             DeepLink.AddProject(segments.getOrElse(1) { "" })
         segments.size >= 3 && segments[0] == "threads" -> {
-            val environmentId = segments[1]
-            val threadId = segments[2]
+            // Branded ids reject whitespace-only values upstream (contracts
+            // TrimmedNonEmptyString), so a hand-typed `%20` segment is treated
+            // as missing rather than routing to a thread that cannot exist.
+            val environmentId = segments[1].trim()
+            val threadId = segments[2].trim()
             if (environmentId.isBlank() || threadId.isBlank()) return null
             val rest = segments.drop(3)
             // A file deep link (`files/<path>`) carries the path as the route's

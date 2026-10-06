@@ -380,6 +380,68 @@ class HomeListTest {
     }
 
     @Test
+    fun `working threads keep send order regardless of arrangement keys`() {
+        // `sortWorkingThreadsBySend`: a row that woke to work again stays put
+        // instead of jumping on its unsettled anchor or a stored move, so the
+        // user's last send decides the order.
+        val base = threads.first { it.status == ThreadStatus.Working }
+        // Sent first but just woke again — the anchor would put it on top.
+        val sentEarlier =
+            base.copy(
+                id = ThreadId("thr-work-earlier"),
+                createdAtMillis = 1_000L,
+                unsettledAtMillis = 9_000L,
+                latestUserAuthoredMessageAtKnown = true,
+                latestUserAuthoredMessageAtMillis = 2_000L,
+            )
+        val sentLater =
+            base.copy(
+                id = ThreadId("thr-work-later"),
+                createdAtMillis = 1_000L,
+                activeOrderKey = "a",
+                latestUserAuthoredMessageAtKnown = true,
+                latestUserAuthoredMessageAtMillis = 3_000L,
+            )
+        val result =
+            homeListItems(
+                    threads = listOf(sentEarlier, sentLater),
+                    projects = projects,
+                    environments = environments,
+                    state = HomeUiState(),
+                    grouping = ProjectGrouping.Flat,
+                    sort = ThreadSort.Recent,
+                )
+                .filterIsInstance<HomeListItem.Thread>()
+                .map { it.thread.id.value }
+        assertEquals(listOf("thr-work-later", "thr-work-earlier"), result)
+    }
+
+    @Test
+    fun `working threads fall back to the run request on old servers`() {
+        // Without `latestUserAuthoredMessageAt` the shell predates the field;
+        // `sortWorkingThreadsBySend` orders on the latest run's request time.
+        val base = threads.first { it.status == ThreadStatus.Working }
+        val requestedEarlier =
+            base.copy(id = ThreadId("thr-run-earlier"), createdAtMillis = 1_000L,
+                latestRunRequestedAtMillis = 2_000L)
+        val requestedLater =
+            base.copy(id = ThreadId("thr-run-later"), createdAtMillis = 1_000L,
+                latestRunRequestedAtMillis = 3_000L)
+        val result =
+            homeListItems(
+                    threads = listOf(requestedEarlier, requestedLater),
+                    projects = projects,
+                    environments = environments,
+                    state = HomeUiState(),
+                    grouping = ProjectGrouping.Flat,
+                    sort = ThreadSort.Recent,
+                )
+                .filterIsInstance<HomeListItem.Thread>()
+                .map { it.thread.id.value }
+        assertEquals(listOf("thr-run-later", "thr-run-earlier"), result)
+    }
+
+    @Test
     fun `recent sort orders newest first within a status rank`() {
         val settled =
             items(HomeUiState(settledExpanded = true), ProjectGrouping.Flat)

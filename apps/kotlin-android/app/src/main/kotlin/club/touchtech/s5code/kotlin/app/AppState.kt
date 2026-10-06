@@ -789,7 +789,15 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     fun clearThreadDraft(environmentId: String, threadId: String) =
         _threadDrafts.update { it - threadDraftKey(environmentId, threadId) - threadId }
 
-    /** Queues first, then clears the draft only after the durable record exists. */
+    /**
+     * Queues first, then clears the draft only after the durable record exists.
+     *
+     * Composer errors follow `threadComposerErrorsAtom`: a new send supersedes
+     * the reason the previous one bounced, so the key is cleared on entry; if
+     * the durable write itself fails the reason lands there instead of a toast,
+     * because the outbox can deliver minutes later and the user may have left
+     * the thread by then.
+     */
     suspend fun enqueueThreadMessage(
         environmentId: String,
         threadId: String,
@@ -799,23 +807,29 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         contextRecords: List<ComposerContextRecord> = emptyList(),
         dispatchMode: String = preferences.value.followUpBehavior,
     ) {
+        val composerErrorKey = "$environmentId:$threadId"
+        workspace.clearThreadComposerError(composerErrorKey)
         val trimmed = text.trim()
-        val message =
-            newQueuedThreadMessage(
-                environmentId = EnvironmentId(environmentId),
-                text = trimmed,
-                attachments = attachments,
-                settings = settings,
-                threadId = ThreadId(threadId),
-                contextRecords = referencedComposerContextRecords(trimmed, contextRecords),
-                dispatchMode = dispatchMode,
+        val message = try {
+            buildQueuedMessage(
+                environmentId, threadId, trimmed, attachments, settings,
+                contextRecords, dispatchMode,
             )
-        val durable = outboxStore.enqueue(message)
-        outboxMutation.withLock {
-            _outbox.update { current ->
-                (current.filterNot { it.delivery.messageId == durable.delivery.messageId } + durable)
-                    .sortedBy { it.delivery.createdAt }
-            }
+        } catch (error: Exception) {
+            workspace.setThreadComposerError(
+                composerErrorKey,
+                error.message ?: "The queued message could not be saved.",
+            )
+            throw error
+        }
+        try {
+            persistQueuedMessage(message)
+        } catch (error: Exception) {
+            workspace.setThreadComposerError(
+                composerErrorKey,
+                error.message ?: "The queued message could not be saved.",
+            )
+            throw error
         }
         clearThreadDraftContent(environmentId, threadId)
         val thread = workspace.threads.value.firstOrNull {
@@ -823,6 +837,35 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         }
         val project = thread?.let { summary -> workspace.projects.value.firstOrNull { it.id == summary.projectId } }
         armLiveUpdate(thread?.title.orEmpty(), project?.title.orEmpty())
+    }
+
+    private fun buildQueuedMessage(
+        environmentId: String,
+        threadId: String,
+        trimmed: String,
+        attachments: List<ComposerAttachment>,
+        settings: ThreadSettings,
+        contextRecords: List<ComposerContextRecord>,
+        dispatchMode: String,
+    ): QueuedThreadMessage =
+        newQueuedThreadMessage(
+            environmentId = EnvironmentId(environmentId),
+            text = trimmed,
+            attachments = attachments,
+            settings = settings,
+            threadId = ThreadId(threadId),
+            contextRecords = referencedComposerContextRecords(trimmed, contextRecords),
+            dispatchMode = dispatchMode,
+        )
+
+    private suspend fun persistQueuedMessage(message: QueuedThreadMessage) {
+        val durable = outboxStore.enqueue(message)
+        outboxMutation.withLock {
+            _outbox.update { current ->
+                (current.filterNot { it.delivery.messageId == durable.delivery.messageId } + durable)
+                    .sortedBy { it.delivery.createdAt }
+            }
+        }
     }
 
     /** Creates a durable pending task and lets the same drain create its thread. */
@@ -1000,7 +1043,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         if (reason != null) {
                             restoreQueuedMessageToDraft(message)
                             completeQueuedMessage(message, creationAccepted = false)
-                            showError(reason)
+                            reportQueuedMessageFailure(message, reason)
                             return
                         }
                     }
@@ -1044,8 +1087,14 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         return
                     }
                     if (!isTransientOutboxFailure(error)) {
+                        // RN's `restoreRejectedQueuedMessage`: the reason lives on
+                        // the thread's composer (the new-task path keeps the toast,
+                        // which a screen that may not exist yet can still show) and
+                        // the payload goes back to a draft rather than vanishing.
+                        val reason = error.message ?: "A queued message could not be sent."
+                        restoreQueuedMessageToDraft(message)
                         completeQueuedMessage(message, creationAccepted = false)
-                        showError(error.message ?: "A queued message could not be sent.")
+                        reportQueuedMessageFailure(message, reason)
                         return
                     }
                     attempt += 1
@@ -1113,6 +1162,32 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             _outbox.update { queued ->
                 queued.filterNot { it.delivery.messageId == message.delivery.messageId }
             }
+        }
+        // A delivered message settles any send failure recorded for it — the
+        // notice describing a bounce must not survive the bounce's undo.
+        if (creationAccepted) {
+            workspace.clearThreadComposerError(
+                "${message.environmentId.value}:${message.threadId.value}",
+                message.delivery.messageId,
+            )
+        }
+    }
+
+    /**
+     * A terminal delivery failure lands on the thread's composer (RN's
+     * `threadComposerErrorsAtom`), where it sits next to the restored draft.
+     * Rejected creations have no thread to pin the notice to, so they keep the
+     * global toast.
+     */
+    private fun reportQueuedMessageFailure(message: QueuedThreadMessage, reason: String) {
+        if (message.creation != null) {
+            showError(reason)
+        } else {
+            workspace.setThreadComposerError(
+                "${message.environmentId.value}:${message.threadId.value}",
+                reason,
+                message.delivery.messageId,
+            )
         }
     }
 

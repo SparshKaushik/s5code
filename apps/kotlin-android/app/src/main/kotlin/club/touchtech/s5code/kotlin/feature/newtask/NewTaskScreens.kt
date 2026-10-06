@@ -1260,14 +1260,14 @@ private fun environmentProjectMatch(
     projectsOnTarget: List<club.touchtech.s5code.kotlin.model.Project>,
     selected: club.touchtech.s5code.kotlin.model.Project?,
 ): club.touchtech.s5code.kotlin.model.Project? {
-    val repositoryKey = selected?.repositoryIdentity?.canonicalKey
+    val repositoryKey = selected?.repositoryIdentity?.groupingCanonicalKey
     val workspaceBasename = selected?.workspaceRoot?.split('/')?.lastOrNull()?.takeIf { it.isNotEmpty() }
     fun knownMismatch(project: club.touchtech.s5code.kotlin.model.Project): Boolean {
-        val key = project.repositoryIdentity?.canonicalKey ?: return false
+        val key = project.repositoryIdentity?.groupingCanonicalKey ?: return false
         return repositoryKey != null && key != repositoryKey
     }
     return (repositoryKey?.let { key ->
-            projectsOnTarget.firstOrNull { it.repositoryIdentity?.canonicalKey == key }
+            projectsOnTarget.firstOrNull { it.repositoryIdentity?.groupingCanonicalKey == key }
         })
         ?: (workspaceBasename?.let { base ->
             projectsOnTarget.firstOrNull {

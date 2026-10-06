@@ -7,9 +7,14 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import okhttp3.FormBody
+import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
+import okhttp3.RequestBody.Companion.toRequestBody
 
 /**
  * The HTTP half of the environment protocol. Only four endpoints matter to a
@@ -24,6 +29,9 @@ import okhttp3.Request
  * - `POST /api/auth/websocket-ticket` — short-lived ticket appended to the
  *   WebSocket URL, because a browser cannot set headers on a WebSocket upgrade
  *   and the server therefore authenticates the socket by query parameter.
+ * - `GET /api/connect/link-state` and `POST /api/connect/preferences` — the
+ *   T3 Connect link record a connected client may read and tune
+ *   (`EnvironmentCloudLinkState` in `packages/contracts/src/environmentHttp.ts`).
  */
 /**
  * How an authenticated request proves who it is.
@@ -116,6 +124,39 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         authenticated(httpBaseUrl, "/api/auth/websocket-ticket", credential, method = "POST")
 
     /**
+     * `GET /api/connect/link-state` (`EnvironmentCloudLinkStateResult`): whether
+     * this environment is linked to T3 Connect, whether a managed tunnel and
+     * activity publishing are active, and whether it holds webhook requests
+     * while offline. Read-only and cheap; screens poll it rather than stream.
+     */
+    suspend fun cloudLinkState(
+        httpBaseUrl: String,
+        credential: EnvironmentCredential,
+    ): EnvironmentCloudLinkStateDto =
+        authenticated(httpBaseUrl, "/api/connect/link-state", credential, method = "GET")
+
+    /**
+     * `POST /api/connect/preferences` (`EnvironmentCloudPreferencesRequest`):
+     * partial write — omitted keys are left unchanged server-side, which is why
+     * null fields are dropped rather than encoded.
+     */
+    suspend fun updateCloudPreferences(
+        httpBaseUrl: String,
+        credential: EnvironmentCredential,
+        publishAgentActivity: Boolean,
+        holdWebhooksWhileOffline: Boolean? = null,
+    ): EnvironmentCloudLinkStateDto =
+        authenticatedJson(
+            httpBaseUrl,
+            "/api/connect/preferences",
+            credential,
+            buildJsonObject {
+                put("publishAgentActivity", publishAgentActivity)
+                holdWebhooksWhileOffline?.let { put("holdWebhooksWhileOffline", it) }
+            },
+        )
+
+    /**
      * Resolves the socket URL for a connection attempt. The ticket is minted per
      * attempt on purpose: it is short-lived, so caching it across reconnects
      * trades a fast path for an authentication failure after a long sleep.
@@ -173,6 +214,32 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
                 // checks; a proof without it is refused even when the signature is
                 // good.
                 builder.header("dpop", credential.proof(method, url, credential.token))
+            }
+        }
+        return execute(builder.build())
+    }
+
+    /** POST with a JSON body under the same credential rules as [authenticated]. */
+    private suspend inline fun <reified T> authenticatedJson(
+        httpBaseUrl: String,
+        path: String,
+        credential: EnvironmentCredential,
+        payload: kotlinx.serialization.json.JsonObject,
+    ): T {
+        val url = endpoint(httpBaseUrl, path)
+        val builder =
+            Request.Builder()
+                .url(url)
+                .post(
+                    payload.toString()
+                        .toRequestBody("application/json".toMediaType())
+                )
+        when (credential) {
+            is EnvironmentCredential.Bearer ->
+                builder.header("authorization", "Bearer ${credential.token}")
+            is EnvironmentCredential.Dpop -> {
+                builder.header("authorization", "DPoP ${credential.token}")
+                builder.header("dpop", credential.proof("POST", url, credential.token))
             }
         }
         return execute(builder.build())
@@ -418,6 +485,19 @@ data class EnvironmentCapabilitiesDto(
     val threadPinning: Boolean = false,
     val threadTitleRegeneration: Boolean = false,
     val pullRequests: Boolean = false,
+    /** Thread link arrays plus host snapshots (`thread.pullRequests` on shells). */
+    val threadPullRequests: Boolean = false,
+    /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
+    val threadPullRequestWatch: Boolean = false,
+    /** The server honors the `worktreesDirectory` setting. */
+    val worktreesDirectory: Boolean = false,
+    /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
+    val projectSettingsOverrides: Boolean = false,
+    /** `server.updateSettings` persists `usageModelMappings` and applies them to usage. */
+    val usageModelMappings: Boolean = false,
+    /** How this server was installed (`ServerInstallation`); drives manual-update wording. */
+    val serverInstallation: club.touchtech.s5code.kotlin.transport.wire.ServerInstallationDto? =
+        null,
 )
 
 @Serializable
@@ -433,6 +513,25 @@ data class AuthSessionDto(
     val authenticated: Boolean = false,
     /** `AuthSessionState.scopes`; absent on servers older than scoped tokens. */
     val scopes: List<String>? = null,
+)
+
+/**
+ * `EnvironmentCloudLinkStateResult`: this environment's T3 Connect link as the
+ * host reports it. A publish-only link has `managedTunnelActive` false — the
+ * relay publishes notifications for it without holding a tunnel. Optional
+ * fields exist because older environment servers omit them; null means "not
+ * reported", not "off".
+ */
+@Serializable
+data class EnvironmentCloudLinkStateDto(
+    val linked: Boolean = false,
+    val cloudUserId: String? = null,
+    val relayUrl: String? = null,
+    val relayIssuer: String? = null,
+    val managedTunnelActive: Boolean? = null,
+    val publishAgentActivity: Boolean = false,
+    /** Opt-in: T3 Connect holds webhook requests while this environment is offline. */
+    val holdWebhooksWhileOffline: Boolean? = null,
 )
 
 @Serializable data class WebSocketTicketDto(val ticket: String)

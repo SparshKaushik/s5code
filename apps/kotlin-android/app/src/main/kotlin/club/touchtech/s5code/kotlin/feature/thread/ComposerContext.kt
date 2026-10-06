@@ -155,3 +155,16 @@ internal fun replaceComposerTextRange(
     val safeEnd = rangeEnd.coerceIn(safeStart, text.length)
     return text.substring(0, safeStart) + replacement + text.substring(safeEnd)
 }
+
+/* ── Commands that own their turn ─────────────────────────────────────── */
+
+private val GOAL_COMMAND = Regex("^/goal(?:\\s|$)")
+
+/**
+ * The server's `isGoalCommand`: a native `/goal` changes the provider's goal,
+ * so it is never a steer of the running turn and never a message carrying
+ * files — the orchestrator rejects `steer_active` for it outright. Callers
+ * force a queued (separate-turn) dispatch instead of failing the send.
+ */
+internal fun isGoalCommand(text: String, hasAttachments: Boolean): Boolean =
+    !hasAttachments && GOAL_COMMAND.containsMatchIn(text.trim())

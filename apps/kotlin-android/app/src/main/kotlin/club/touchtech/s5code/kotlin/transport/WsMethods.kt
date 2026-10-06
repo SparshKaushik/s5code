@@ -19,6 +19,19 @@ internal object WsMethods {
     const val OrchestrationDispatchCommand = "orchestration.dispatchCommand"
     const val OrchestrationSearchThreads = "orchestration.searchThreads"
     const val OrchestrationGetArchivedShellSnapshot = "orchestration.getArchivedShellSnapshot"
+    const val OrchestrationGetThreadProjection = "orchestration.getThreadProjection"
+    /** Full input/output for one withheld or summarized turn item. */
+    const val OrchestrationGetTurnItem = "orchestration.getTurnItem"
+
+    /**
+     * `secrets.answerRequest` — the agent's private-secret card. Declared with
+     * no success value, so callers use `execute`, not `request`.
+     */
+    const val SecretsAnswerRequest = "secrets.answerRequest"
+
+    const val ScheduledTasksRotateWebhookToken = "scheduledTasks.rotateWebhookToken"
+    const val ScheduledTasksListWebhookDeliveries = "scheduledTasks.listWebhookDeliveries"
+    const val ScheduledTasksGetWebhookDelivery = "scheduledTasks.getWebhookDelivery"
 
     const val SubscribeWorktreeSetup = "subscribeWorktreeSetup"
     const val WorktreeSetupCancel = "worktreeSetup.cancel"

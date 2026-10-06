@@ -376,11 +376,19 @@ private fun pinnedOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
 /**
  * `sortActiveThreadsByOrderKey` applied inside one status rank: attention rows
  * keep their lead, then unarranged threads by re-entry anchor, then arranged
- * threads by key.
+ * threads by key. Two working threads are the exception: like
+ * `sortWorkingThreadsBySend` they stay newest-send-first on
+ * [ThreadSummary.workingSortAtMillis], so a run ending or waking does not move
+ * a row and a stored arrangement cannot reorder them while they work.
  */
 private fun activeOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
     val rank = statusRank(left.status).compareTo(statusRank(right.status))
     if (rank != 0) return rank
+    if (left.status == ThreadStatus.Working && right.status == ThreadStatus.Working) {
+        return right.workingSortAtMillis.compareTo(left.workingSortAtMillis).takeIf { it != 0 }
+            ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+            ?: left.environmentId.value.compareTo(right.environmentId.value)
+    }
     val leftKey = left.activeOrderKey
     val rightKey = right.activeOrderKey
     if (leftKey == null && rightKey != null) return -1

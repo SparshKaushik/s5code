@@ -121,6 +121,17 @@ data class RelayStatusDto(
     val status: String,
     val checkedAt: String = "",
     val error: String? = null,
+    /**
+     * `RelayEnvironmentStatusResponse.offlineReason` — why the relay thinks the
+     * host is offline. `tunnel_released` means the idle tunnel was deleted and
+     * the host needs a current build to get a new one; present screens with
+     * [relayOfflineReasonMessage].
+     */
+    val offlineReason: String? = null,
+    /** Correlates a failed status probe with a relay-side log line. */
+    val traceId: String? = null,
+    /** The environment's own descriptor, echoed back while it is reachable. */
+    val descriptor: club.touchtech.s5code.kotlin.transport.EnvironmentDescriptorDto? = null,
 )
 
 @Serializable

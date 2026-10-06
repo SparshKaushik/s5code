@@ -60,6 +60,19 @@ data class PlanProgressDto(
 @Serializable
 data class TitleRegenerationDto(val requestId: String = "", val startedAt: String? = null)
 
+/**
+ * The checkout's own remote when it names a different repository than the
+ * canonical one — a fork tracking its upstream. Clients group by
+ * `origin.canonicalKey` when present so a fork stays its own scope while pull
+ * request features keep the canonical identity; mirrors `RepositoryOrigin` and
+ * `repositoryGroupingKeyOf` in `packages/contracts/src/environment.ts`.
+ */
+@Serializable
+data class RepositoryOriginDto(
+    val canonicalKey: String,
+    val displayName: String? = null,
+)
+
 @Serializable
 data class RepositoryIdentityDto(
     val canonicalKey: String = "",
@@ -67,7 +80,15 @@ data class RepositoryIdentityDto(
     val owner: String? = null,
     val name: String? = null,
     val rootPath: String? = null,
-)
+    val origin: RepositoryOriginDto? = null,
+) {
+    /** What clients group checkouts by: the fork's own remote, else the canonical repo. */
+    val groupingKey: String get() = origin?.canonicalKey ?: canonicalKey
+
+    /** The label matching [groupingKey], from `repositoryGroupingDisplayNameOf`. */
+    val groupingDisplayName: String?
+        get() = origin?.let { it.displayName ?: it.canonicalKey } ?: displayName
+}
 
 @Serializable
 data class ProjectShellDto(
@@ -125,6 +146,31 @@ data class ThreadShellDto(
     val backgroundLiveness: String? = null,
     val planProgress: PlanProgressDto? = null,
     val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
+    /**
+     * The link array that replaced `linkedPullRequest` on watch-capable servers:
+     * multiple PRs, host snapshots, stack membership, and `watch` state. Rows
+     * written before linking decode to an empty list. Servers that send neither
+     * `pullRequests` nor a `branchPullRequest` predate discovery, so null must
+     * mean "unsupported" rather than "none": `resolveThreadPrSource` decides
+     * whether to trust the legacy single link off that distinction.
+     */
+    val pullRequests: List<ThreadPullRequestLinkDto>? = null,
+    /** Pull request the server discovered from the thread's current branch. */
+    val branchPullRequest: ThreadLinkedPullRequestDto? = null,
+    /** Native `/goal` on the active provider thread; absent on goal-less servers. */
+    val goal: ProviderGoalDto? = null,
+    /**
+     * The last message the user wrote. Wakes and agent-authored messages share
+     * the `user` role, so they move `latestUserMessageAt` but not this; the
+     * Working section orders on it.
+     *
+     * Three states ride on one field: `null` is a real answer (the user has
+     * authored nothing), while [AUTHORED_AT_UNKNOWN] marks a server that
+     * predates the field — only the unknown case falls back to the latest
+     * run's request time, matching `sortWorkingThreadsBySend`. A sentinel
+     * default is what keeps "absent" distinct from JSON `null` on decode.
+     */
+    val latestUserAuthoredMessageAt: String? = FIELD_ABSENT,
     /** Set when `thread.auto-settle.set` turned the idle sweep off for this thread. */
     val autoSettleDisabledAt: String? = null,
     val unsettledAt: String? = null,
@@ -148,6 +194,24 @@ data class ThreadShellDto(
     val limitRecovery: JsonObject? = null,
 )
 
+/**
+ * `OrchestrationV2ProviderGoal` on the shell: the native `/goal` a provider set
+ * on the conversation. `status` stays a string — the literal set is the
+ * contract's, but a newer server value must not sink a shell decode. Usage
+ * fields are provider-specific: Codex reports tokens, Claude reports checks.
+ */
+@Serializable
+data class ProviderGoalDto(
+    val objective: String = "",
+    /** active | paused | blocked | usage_limited | budget_limited | complete */
+    val status: String = "",
+    val tokensUsed: Long? = null,
+    val tokenBudget: Long? = null,
+    val timeUsedSeconds: Long? = null,
+    val checks: Long? = null,
+    val lastCheck: String? = null,
+)
+
 @Serializable
 data class ThreadLinkedPullRequestDto(
     val projectId: String = "",
@@ -155,6 +219,82 @@ data class ThreadLinkedPullRequestDto(
     val number: Int = 0,
     val url: String = "",
 )
+
+/**
+ * One link in `ThreadPullRequestLink[]` on the V2 shell/detail — a host-level
+ * identity (`host`/`repository`/`number`, no `projectId`) plus the last host
+ * snapshot the sync reactor wrote. `watch` stays an opaque object: the client
+ * only ever needs to know a watch exists (`thread.pull-request.watch` carries
+ * the key to stop it), not the wake bookkeeping inside it.
+ */
+@Serializable
+data class ThreadPullRequestLinkDto(
+    val host: String = "",
+    val repository: String = "",
+    val number: Int = 0,
+    val url: String = "",
+    /** manual | created | agent | stack | stack-dismissed (a tombstone; hide it). */
+    val source: String = "",
+    val linkedAt: String = "",
+    val snapshot: ThreadPullRequestSnapshotDto? = null,
+    val stack: ThreadPullRequestStackDto? = null,
+    val watch: JsonObject? = null,
+)
+
+@Serializable
+data class ThreadPullRequestSnapshotDto(
+    /** open | closed | merged */
+    val state: String = "open",
+    val title: String = "",
+    val headBranch: String = "",
+    val baseBranch: String = "",
+    val isDraft: Boolean = false,
+    val updatedAt: String? = null,
+    val syncedAt: String = "",
+    val closedAt: String? = null,
+    val mergedAt: String? = null,
+    val author: JsonObject? = null,
+    val additions: Int? = null,
+    val deletions: Int? = null,
+    val changedFiles: Int? = null,
+    /** approved | changes-requested | review-required | none */
+    val reviewDecision: String? = null,
+    /** passing | failing | pending | unknown */
+    val checksState: String? = null,
+    val mergeability: JsonObject? = null,
+)
+
+@Serializable
+data class ThreadPullRequestStackLayerDto(
+    val number: Int = 0,
+    val headBranch: String = "",
+    val state: String = "open",
+)
+
+/** A host-native stack a linked pull request belongs to; layers run bottom to top. */
+@Serializable
+data class ThreadPullRequestStackDto(
+    val kind: String = "native",
+    val id: String = "",
+    val number: Int = 0,
+    val url: String = "",
+    val base: String = "",
+    val layers: List<ThreadPullRequestStackLayerDto> = emptyList(),
+)
+
+/**
+ * Sentinel for a wire field the server never sent, on fields where `null` is
+ * a real answer and "absent" means an older server. Decode reads the default
+ * for a missing key and `null` for an explicit one, so the two stay distinct.
+ * Never a real value: it cannot parse as an instant and renders as nothing.
+ *
+ * One caveat: `explicitNulls = false` writes a `null` field the same as an
+ * absent one, so a value persisted to the snapshot cache reads back as
+ * [FIELD_ABSENT] — the cold-start list briefly sorts with the older-server
+ * fallback until the live snapshot arrives. Accepted: distinguishing them on
+ * disk would need a custom serializer for one ordering hint.
+ */
+const val FIELD_ABSENT: String = "__field_absent__"
 
 @Serializable
 data class ShellSnapshotDto(
@@ -310,6 +450,9 @@ data class ThreadDto(
     /** Authoritative V2 control plane and ordered timeline retained in the cache. */
     val projection: V2ProjectionDto? = null,
     val linkedPullRequest: ThreadLinkedPullRequestDto? = null,
+    /** See [ThreadShellDto.pullRequests]. On `ThreadDto` this decodes the app thread record. */
+    val pullRequests: List<ThreadPullRequestLinkDto>? = null,
+    val branchPullRequest: ThreadLinkedPullRequestDto? = null,
 )
 
 @Serializable

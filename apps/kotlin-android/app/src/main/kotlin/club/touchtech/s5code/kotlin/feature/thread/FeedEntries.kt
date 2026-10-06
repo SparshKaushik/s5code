@@ -29,6 +29,7 @@ import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.rounded.Psychology
 import androidx.compose.material.icons.rounded.RadioButtonUnchecked
+import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.Build
 import androidx.compose.material3.HorizontalDivider
@@ -41,7 +42,9 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -60,6 +63,10 @@ import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5Markdown
 import coil3.compose.AsyncImage
+import club.touchtech.s5code.kotlin.data.SecretRequestAnswer
+import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
+import club.touchtech.s5code.kotlin.design.component.S5Button
+import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentInlineCard
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentMessageSegment
@@ -69,7 +76,10 @@ import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.PlanStepState
 import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.ToolState
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+import kotlinx.serialization.json.JsonObject
 
 /**
  * One transcript entry. Every branch is a separate composable so a streaming
@@ -94,6 +104,27 @@ fun FeedEntryRow(
     expandedIds: Set<String>? = null,
     onToggleExpand: (FeedEntry) -> Unit = {},
     onOpenThread: (String) -> Unit = {},
+    /**
+     * Sends `secrets.answerRequest` for a pending [FeedEntry.SecretRequest];
+     * throws on failure so the card can map it with `secretRequestFailureMessage`.
+     */
+    onAnswerSecretRequest: suspend (FeedEntry.SecretRequest, SecretRequestAnswer) -> Unit = { _, _ -> },
+    /**
+     * `orchestration.getTurnItem` for a row whose wire payload withheld its
+     * output ([FeedEntry.ToolCall.fetchesDetail]); runs only while expanded.
+     */
+    fetchToolDetail: suspend (FeedEntry.ToolCall) -> JsonObject? = { null },
+    /**
+     * Mints the signed `tool-output-image` URL for one index of a tool call's
+     * output ([FeedEntry.ToolCall.outputImageCount]); null when unsupported.
+     */
+    resolveToolOutputImage: suspend (FeedEntry.ToolCall, Int) -> String? = { _, _ -> null },
+    /**
+     * `prepared-run.retry` for an error row carrying
+     * [FeedEntry.ErrorEntry.retryablePreparationRunId]; the caller surfaces
+     * failures, so implementations catch their own.
+     */
+    onRetryPreparation: suspend (runId: String) -> Unit = {},
 ) {
     when (entry) {
         is FeedEntry.TurnDivider ->
@@ -127,7 +158,16 @@ fun FeedEntryRow(
 
         is FeedEntry.Reasoning -> ReasoningRow(entry, expandedIds, onToggleExpand, modifier)
 
-        is FeedEntry.ToolCall -> ToolRow(entry, onCopy, expandedIds, onToggleExpand, modifier)
+        is FeedEntry.ToolCall ->
+            ToolRow(
+                entry,
+                onCopy,
+                expandedIds,
+                onToggleExpand,
+                modifier,
+                fetchToolDetail,
+                resolveToolOutputImage,
+            )
 
         is FeedEntry.PlanUpdate -> PlanCard(entry, modifier)
 
@@ -137,9 +177,12 @@ fun FeedEntryRow(
 
         is FeedEntry.Warning -> WarningRow(entry, modifier)
 
+        is FeedEntry.SecretRequest ->
+            SecretRequestRow(entry, modifier, onAnswer = { onAnswerSecretRequest(entry, it) })
+
         is FeedEntry.Note -> NoteRow(entry, modifier)
 
-        is FeedEntry.ErrorEntry -> ErrorRow(entry, modifier)
+        is FeedEntry.ErrorEntry -> ErrorRow(entry, modifier, onRetryPreparation)
     }
 }
 
@@ -581,6 +624,8 @@ private fun ToolRow(
     expandedIds: Set<String>?,
     onToggleExpand: (FeedEntry) -> Unit,
     modifier: Modifier,
+    fetchToolDetail: suspend (FeedEntry.ToolCall) -> JsonObject?,
+    resolveToolOutputImage: suspend (FeedEntry.ToolCall, Int) -> String?,
 ) {
     // A chevron on a row with nothing behind it is a promise the row cannot keep.
     val canExpand = toolCallCanExpand(entry)
@@ -592,6 +637,25 @@ private fun ToolRow(
             ToolState.Succeeded -> S5Theme.status.settled
             ToolState.Failed -> S5Theme.status.failed
         }
+    // A withheld payload arrives on expand (`useTurnItemDetail`): the row's
+    // `detailRevision` keys the read, so a still-running item refetches only
+    // when the row reopens rather than on every stream tick. Null means the
+    // item was unchanged for that revision or gone entirely.
+    var fetched by remember(entry.id, entry.detailRevision) { mutableStateOf(false) }
+    var fetchedItem by remember(entry.id, entry.detailRevision) { mutableStateOf<JsonObject?>(null) }
+    var detailError by remember(entry.id, entry.detailRevision) { mutableStateOf<String?>(null) }
+    LaunchedEffect(expanded, entry.id, entry.detailRevision) {
+        if (!expanded || !entry.fetchesDetail || fetched || detailError != null) return@LaunchedEffect
+        try {
+            fetchedItem = fetchToolDetail(entry)
+            fetched = true
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            detailError = error.message ?: "unknown error"
+        }
+    }
+    var previewImage by remember(entry.id) { mutableStateOf<String?>(null) }
     S5Card(
         tone = S5CardTone.Standard,
         onClick =
@@ -641,7 +705,9 @@ private fun ToolRow(
                 )
             }
             if (expanded) {
-                val body = remember(entry.id, entry) { toolCallExpandedBody(entry) }
+                val fetchedText = fetchedItem?.let(::fetchedTurnItemText)
+                val body =
+                    remember(entry.id, entry, fetchedText) { toolCallExpandedBody(entry, fetchedText) }
                 if (body != null) {
                     Box(Modifier.padding(top = S5Theme.spacing.small)) {
                         S5CodeBlock(
@@ -650,6 +716,106 @@ private fun ToolRow(
                         )
                     }
                 }
+                // The output the timeline withheld: a fetched block under the
+                // call, and the fetch's own status while it is in flight or
+                // failed — RN's "Loading output…" / error line.
+                if (entry.fetchesDetail && fetchedText == null) {
+                    Row(
+                        Modifier.padding(top = S5Theme.spacing.small),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                    ) {
+                        if (detailError == null && !fetched) {
+                            S5InlineLoading(Modifier.size(16.dp))
+                        }
+                        Text(
+                            when {
+                                detailError != null -> "Couldn't load output: $detailError"
+                                fetched -> "Output is no longer available."
+                                else -> "Loading output…"
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color =
+                                if (detailError != null) MaterialTheme.colorScheme.error
+                                else MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                // Inline images never ride the timeline; each is a signed
+                // `tool-output-image` asset by index, rendered below the text.
+                val imageCount =
+                    fetchedItem?.let(::turnItemDetailImageCount) ?: entry.outputImageCount
+                if (imageCount > 0) {
+                    Row(
+                        Modifier.padding(top = S5Theme.spacing.small),
+                        horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                    ) {
+                        for (index in 0 until imageCount) {
+                            ToolOutputImageThumbnail(
+                                index = index,
+                                resolveUrl = { resolveToolOutputImage(entry, index) },
+                                onPreview = { previewImage = it },
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+    S5ImageLightbox(
+        model = previewImage,
+        contentDescription = "Tool output image",
+        imageKey = previewImage,
+        onDismiss = { previewImage = null },
+    )
+}
+
+/**
+ * One inline image a tool returned, rendered at the same 44dp as a sent
+ * attachment thumbnail. Signing happens once per index; a failed sign keeps the
+ * quiet placeholder rather than a broken image.
+ */
+@Composable
+private fun ToolOutputImageThumbnail(
+    index: Int,
+    resolveUrl: suspend () -> String?,
+    onPreview: (String) -> Unit,
+) {
+    val url by
+        produceState<String?>(initialValue = null, index) {
+            value =
+                try {
+                    resolveUrl()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    null
+                }
+        }
+    if (url != null) {
+        Surface(
+            onClick = { url?.let(onPreview) },
+            shape = MaterialTheme.shapes.small,
+        ) {
+            AsyncImage(
+                model = url,
+                contentDescription = "Tool output image",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier.size(44.dp),
+            )
+        }
+    } else {
+        Surface(
+            shape = MaterialTheme.shapes.small,
+            color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        ) {
+            Box(Modifier.size(44.dp), contentAlignment = Alignment.Center) {
+                Icon(
+                    Icons.Rounded.Image,
+                    contentDescription = null,
+                    modifier = Modifier.size(16.dp),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }
@@ -963,20 +1129,52 @@ private fun NoteRow(entry: FeedEntry.Note, modifier: Modifier) {
 }
 
 @Composable
-private fun ErrorRow(entry: FeedEntry.ErrorEntry, modifier: Modifier) {
+private fun ErrorRow(
+    entry: FeedEntry.ErrorEntry,
+    modifier: Modifier,
+    onRetryPreparation: suspend (String) -> Unit,
+) {
+    val scope = rememberCoroutineScope()
+    var retrying by remember(entry.id) { mutableStateOf(false) }
     Surface(
         modifier.fillMaxWidth(),
         shape = MaterialTheme.shapes.medium,
         color = MaterialTheme.colorScheme.errorContainer,
         contentColor = MaterialTheme.colorScheme.onErrorContainer,
     ) {
-        Row(
-            Modifier.padding(S5Theme.spacing.medium),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-        ) {
-            Icon(Icons.Rounded.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
-            Text(entry.message, style = MaterialTheme.typography.bodySmall)
+        Column(Modifier.padding(S5Theme.spacing.medium)) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+            ) {
+                Icon(Icons.Rounded.ErrorOutline, contentDescription = null, modifier = Modifier.size(18.dp))
+                Text(entry.message, style = MaterialTheme.typography.bodySmall)
+            }
+            // RN's WorkspacePreparationRetryButton: the run only appears retryable
+            // while its workspacePreparation still ends in this failure.
+            val runId = entry.retryablePreparationRunId
+            if (runId != null) {
+                S5Button(
+                    text = "Retry",
+                    onClick = {
+                        if (!retrying) {
+                            retrying = true
+                            scope.launch {
+                                try {
+                                    onRetryPreparation(runId)
+                                } finally {
+                                    retrying = false
+                                }
+                            }
+                        }
+                    },
+                    icon = Icons.Rounded.Refresh,
+                    emphasis = S5ActionEmphasis.Secondary,
+                    style = S5ButtonStyle.Outlined,
+                    enabled = !retrying,
+                    modifier = Modifier.padding(top = S5Theme.spacing.small),
+                )
+            }
         }
     }
 }

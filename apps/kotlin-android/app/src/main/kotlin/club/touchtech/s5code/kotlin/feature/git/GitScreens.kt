@@ -26,6 +26,8 @@ import androidx.compose.material.icons.automirrored.rounded.MergeType
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Source
 import androidx.compose.material.icons.rounded.Sync
+import androidx.compose.material.icons.rounded.Visibility
+import androidx.compose.material.icons.rounded.VisibilityOff
 import androidx.compose.material.icons.rounded.Warning
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -81,9 +83,48 @@ fun GitOverviewScreen(
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
 ) {
+    val env = remember(environmentId) { EnvironmentId(environmentId) }
+    val id = remember(threadId) { ThreadId(threadId) }
+    val scope = rememberCoroutineScope()
+    val context = androidx.compose.ui.platform.LocalContext.current
     val (state, retry) = rememberGitStatus(store, environmentId, threadId)
     val remote = state.value
     val status = remote.valueOrNull
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val environment = remember(environments, environmentId) {
+        environments.firstOrNull { it.id.value == environmentId }
+    }
+    // The link array lives on the thread detail; servers without the capability
+    // get no detail subscription at all, since there is nothing it would carry.
+    val linkCapable = environment?.capabilities?.threadPullRequests == true
+    val watchCapable = environment?.capabilities?.threadPullRequestWatch == true
+    val detailFlow =
+        remember(linkCapable, env, id) {
+            if (linkCapable) {
+                store.workspace.thread(env, id)
+            } else {
+                kotlinx.coroutines.flow.flowOf<club.touchtech.s5code.kotlin.model.ThreadDetail?>(null)
+            }
+        }
+    val detail by detailFlow.collectAsStateWithLifecycle(initialValue = null)
+    val linkedPullRequests =
+        detail?.pullRequests?.filter { it.source != "stack-dismissed" }.orEmpty()
+    fun openLink(url: String) {
+        runCatching {
+            context.startActivity(
+                android.content.Intent(
+                    android.content.Intent.ACTION_VIEW,
+                    android.net.Uri.parse(url),
+                )
+            )
+        }.onFailure { store.showError("The pull request could not be opened.") }
+    }
+    fun setWatching(link: club.touchtech.s5code.kotlin.model.ThreadPullRequestLink, watching: Boolean) {
+        scope.launch {
+            runCatching { store.workspace.setPullRequestWatch(env, id, link, watching) }
+                .onFailure { store.showError(it.message ?: "Could not update the watch.") }
+        }
+    }
     LaunchedEffect(environmentId, threadId, status?.unstaged, status?.staged, status?.untracked) {
         if (status != null && (status.unstaged.isNotEmpty() || status.staged.isNotEmpty() || status.untracked.isNotEmpty())) {
             runCatching {
@@ -202,6 +243,56 @@ fun GitOverviewScreen(
                                 onClick = { onOpen(route) },
                                 position = rowPosition(index, actions.size),
                             )
+                        }
+                    }
+
+                    // RN's GitOverviewSheet linked-PR block: one row per link,
+                    // opening on the host, with the watch state on the subtitle
+                    // and — where the server understands it — a watch toggle.
+                    if (linkedPullRequests.isNotEmpty()) {
+                        S5RowGroup(title = "Linked pull requests") {
+                            linkedPullRequests.forEachIndexed { index, link ->
+                                val snapshot = link.snapshot
+                                val linkOpen = snapshot == null || snapshot.state == "open"
+                                S5SelectableRow(
+                                    label = "#${link.number} ${snapshot?.title ?: "Pull request"}",
+                                    supporting =
+                                        "${link.repository} · " +
+                                            (snapshot?.let {
+                                                if (it.isDraft && it.state == "open") "Draft"
+                                                else it.state
+                                            } ?: "Status pending") +
+                                            (if (link.watched) " · Watching" else ""),
+                                    selected = false,
+                                    onClick = { openLink(link.url) },
+                                    leading = {
+                                        Icon(
+                                            Icons.AutoMirrored.Rounded.CallMerge,
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    trailing =
+                                        if (watchCapable && linkOpen) {
+                                            {
+                                                S5Button(
+                                                    text =
+                                                        if (link.watched) "Watching" else "Watch",
+                                                    onClick = {
+                                                        setWatching(link, !link.watched)
+                                                    },
+                                                    emphasis = S5ActionEmphasis.Primary,
+                                                    style = S5ButtonStyle.Text,
+                                                    icon =
+                                                        if (link.watched) Icons.Rounded.VisibilityOff
+                                                        else Icons.Rounded.Visibility,
+                                                )
+                                            }
+                                        } else {
+                                            null
+                                        },
+                                    position = rowPosition(index, linkedPullRequests.size),
+                                )
+                            }
                         }
                     }
                     Box(Modifier.padding(bottom = 96.dp))
@@ -726,6 +817,7 @@ fun PullRequestsScreen(store: AppStore, environmentId: String, onBack: () -> Uni
     val threads by store.workspace.threads.collectAsStateWithLifecycle()
     // Scoped to one environment: a PR list that merged two machines would show
     // the same repository twice with different local branches.
+    val context = androidx.compose.ui.platform.LocalContext.current
     val pullRequests =
         remember(threads, environmentId) {
             threads
@@ -793,8 +885,19 @@ fun PullRequestsScreen(store: AppStore, environmentId: String, onBack: () -> Uni
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                             )
                             S5Button(
-                                text = "Open on GitHub",
-                                onClick = {},
+                                text = "Open pull request",
+                                onClick = {
+                                    val url = pr.url ?: return@S5Button
+                                    runCatching {
+                                        context.startActivity(
+                                            android.content.Intent(
+                                                android.content.Intent.ACTION_VIEW,
+                                                android.net.Uri.parse(url),
+                                            )
+                                        )
+                                    }
+                                },
+                                enabled = pr.url != null,
                                 emphasis = S5ActionEmphasis.Prominent,
                                 style = S5ButtonStyle.Tonal,
                                 icon = Icons.AutoMirrored.Rounded.OpenInNew,

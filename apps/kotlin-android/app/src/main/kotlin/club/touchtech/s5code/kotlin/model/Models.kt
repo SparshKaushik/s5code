@@ -153,6 +153,25 @@ data class EnvironmentCapabilities(
     val storageCleanup: Boolean = false,
     /** `continueThreadsAfterServerUpdate` persists on this server. */
     val threadRestartContinuation: Boolean = false,
+    /**
+     * The thread link array (`pullRequests`) and host snapshots exist. Absent
+     * means `linkedPullRequest` is the whole story: no stacks, no watches.
+     */
+    val threadPullRequests: Boolean = false,
+    /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
+    val threadPullRequestWatch: Boolean = false,
+    /** The server honors the `worktreesDirectory` setting. */
+    val worktreesDirectory: Boolean = false,
+    /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
+    val projectSettingsOverrides: Boolean = false,
+    /** `server.updateSettings` persists `usageModelMappings`. */
+    val usageModelMappings: Boolean = false,
+    /**
+     * `capabilities.serverInstallation` — how this server was installed, when
+     * reported. The wire DTO doubles as the model here, the way
+     * [Environment.serverSettings] does.
+     */
+    val serverInstallation: club.touchtech.s5code.kotlin.transport.wire.ServerInstallationDto? = null,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -197,7 +216,24 @@ data class RepositoryIdentity(
     val owner: String? = null,
     val name: String? = null,
     val rootPath: String? = null,
-)
+    /**
+     * The checkout's own remote when it names a different repository than the
+     * canonical one — a fork that tracks its upstream. Group by
+     * [groupingCanonicalKey] so a fork stays distinct from the repository it
+     * forked, while pull request features keep the canonical identity.
+     * `RepositoryOrigin` in `packages/contracts/src/environment.ts`.
+     */
+    val originCanonicalKey: String? = null,
+    val originDisplayName: String? = null,
+) {
+    /** `repositoryGroupingKeyOf`: a fork's own remote, otherwise the canonical key. */
+    val groupingCanonicalKey: String get() = originCanonicalKey ?: canonicalKey
+
+    /** `repositoryGroupingDisplayNameOf`: the label matching [groupingCanonicalKey]. */
+    val groupingDisplayName: String?
+        get() = if (originCanonicalKey != null) originDisplayName ?: originCanonicalKey
+            else displayName
+}
 
 enum class ThreadStatus {
     Waiting,
@@ -211,14 +247,135 @@ enum class ThreadStatus {
     Queued,
 }
 
-data class PullRequestRef(val number: Int, val state: PullRequestState, val title: String)
+/**
+ * The single-slot pull request a thread row or git status shows. [kind],
+ * [others], and [layers] carry the aggregate badge (`presentThreadLinkedPullRequests`
+ * in `apps/mobile/src/state/thread-pr-presentation.ts`): a native or derived
+ * stack shows its height, several unrelated links show "+N", and [state] is the
+ * aggregate's. [Unknown] state means the linked request has not synced once —
+ * it is "status pending", not open.
+ */
+data class PullRequestRef(
+    val number: Int,
+    val state: PullRequestState,
+    val title: String,
+    val url: String? = null,
+    /** pull-request | stack — whether [number] is one request or a chain's top. */
+    val kind: PullRequestRefKind = PullRequestRefKind.PullRequest,
+    /** Linked requests beyond the shown one (`+N`); zero when alone or stacked. */
+    val others: Int = 0,
+    /** Stack height when [kind] is `Stack`; zero otherwise. */
+    val layers: Int = 0,
+    /** The link has never synced, so [state] is a placeholder, not a host report. */
+    val pendingSync: Boolean = false,
+) {
+    /** The compact label the badge draws: the number, "+N", or the stack height. */
+    val badgeLabel: String
+        get() = when {
+            kind == PullRequestRefKind.Stack -> "$layers"
+            others > 0 -> "+${others + 1}"
+            else -> "#$number"
+        }
+}
+
+enum class PullRequestRefKind {
+    PullRequest,
+    Stack,
+}
 
 enum class PullRequestState {
+    /** The link was never synced; no host state is known. */
+    Unknown,
     Open,
     Merged,
     Closed,
     Draft,
 }
+
+/**
+ * One entry of the `pullRequests` link array on V2 threads — a host-level
+ * identity plus the snapshot the server's sync reactor last wrote
+ * (`ThreadPullRequestLink` in `packages/contracts/src/threadPullRequest.ts`).
+ * [watched] records only that a server-side watch exists; the wake bookkeeping
+ * inside `watch` stays on the wire DTO because this client never reads it.
+ */
+data class ThreadPullRequestLink(
+    val host: String,
+    val repository: String,
+    val number: Int,
+    val url: String,
+    /** manual | created | agent | stack | stack-dismissed (a tombstone; hide it). */
+    val source: String,
+    val linkedAt: String,
+    val snapshot: ThreadPullRequestSnapshot? = null,
+    val stack: ThreadPullRequestStack? = null,
+    val watched: Boolean = false,
+)
+
+/** Host state the sync reactor persisted on a link; null until first sync. */
+data class ThreadPullRequestSnapshot(
+    /** open | closed | merged */
+    val state: String,
+    val title: String,
+    val headBranch: String,
+    val baseBranch: String,
+    val isDraft: Boolean,
+    val updatedAt: String? = null,
+    val syncedAt: String = "",
+    val closedAt: String? = null,
+    val mergedAt: String? = null,
+    val additions: Int? = null,
+    val deletions: Int? = null,
+    val changedFiles: Int? = null,
+    /** approved | changes-requested | review-required | none */
+    val reviewDecision: String? = null,
+    /** passing | failing | pending | unknown */
+    val checksState: String? = null,
+)
+
+/** A host-native stack a linked pull request belongs to; layers run bottom to top. */
+data class ThreadPullRequestStack(
+    val id: String,
+    val number: Int,
+    val url: String,
+    val base: String,
+    val layers: List<ThreadPullRequestStackLayer> = emptyList(),
+)
+
+data class ThreadPullRequestStackLayer(
+    val number: Int,
+    val headBranch: String,
+    /** open | closed | merged */
+    val state: String,
+)
+
+/**
+ * The legacy single-link shape (`ThreadLinkedPullRequest` in the contract):
+ * `branchPullRequest`, and the field older servers still project.
+ */
+data class ThreadLinkedPullRequest(
+    val projectId: String,
+    val repository: String,
+    val number: Int,
+    val url: String,
+)
+
+/**
+ * `OrchestrationV2ProviderGoal` on the shell: the native `/goal` a provider set
+ * on the conversation. `status` stays a string — the literal set is the
+ * contract's, but a newer server value must not sink a decode. Usage fields are
+ * provider-specific: Codex reports tokens, Claude reports checks.
+ */
+data class ProviderGoal(
+    val objective: String,
+    /** active | paused | blocked | usage_limited | budget_limited | complete */
+    val status: String,
+    val tokensUsed: Long? = null,
+    val tokenBudget: Long? = null,
+    val timeUsedSeconds: Long? = null,
+    val checks: Long? = null,
+    val lastCheck: String? = null,
+)
 
 data class ThreadSummary(
     val id: ThreadId,
@@ -251,7 +408,26 @@ data class ThreadSummary(
     val activeOrderKey: String? = null,
     val snoozedUntilLabel: String? = null,
     val lastError: String? = null,
+    /**
+     * The PR presentation for the row: a resolved link badge when the server
+     * sends the `pullRequests` array, else the legacy single link or the
+     * branch-discovered request.
+     */
     val pullRequest: PullRequestRef? = null,
+    /** Native `/goal` on the active provider thread, when the server reports one. */
+    val goal: ProviderGoal? = null,
+    /**
+     * Epoch millis of the last message the *user* wrote — wakes and
+     * agent-authored messages share the `user` role but do not count. The
+     * Working section sorts on this; when [latestUserAuthoredMessageAtKnown] is
+     * false the server predates the field and [workingSortAtMillis] falls back
+     * to the latest run's request time, matching `sortWorkingThreadsBySend`.
+     */
+    val latestUserAuthoredMessageAtMillis: Long? = null,
+    /** False when the server never sent `latestUserAuthoredMessageAt` (older build). */
+    val latestUserAuthoredMessageAtKnown: Boolean = false,
+    /** Epoch millis of `latestRunRequestedAt`, the fallback send-order anchor. */
+    val latestRunRequestedAtMillis: Long? = null,
     val changedFiles: Int = 0,
     val additions: Int = 0,
     val deletions: Int = 0,
@@ -265,7 +441,19 @@ data class ThreadSummary(
     val lastVisitedAtMillis: Long? = null,
     val latestCompletedAtMillis: Long? = null,
     val unread: Boolean = false,
-)
+) {
+    /**
+     * The Working section's ordering key, following `sortWorkingThreadsBySend`:
+     * the later of thread creation and the user's last authored send, falling
+     * back to the latest run's request time when the server predates the field.
+     */
+    val workingSortAtMillis: Long
+        get() = maxOf(
+            createdAtMillis,
+            if (latestUserAuthoredMessageAtKnown) latestUserAuthoredMessageAtMillis ?: 0
+            else latestRunRequestedAtMillis ?: 0,
+        )
+}
 
 /** One entry in the thread transcript. */
 sealed interface FeedEntry {
@@ -351,6 +539,25 @@ sealed interface FeedEntry {
         /** `payload.toolSource`: the integration/browser surface the call ran on. */
         val toolSourceName: String? = null,
         val toolSourceKind: String? = null,
+        /**
+         * The wire item withheld or summarized its input/output; expanding the
+         * row must call `orchestration.getTurnItem` for the full payload
+         * (`turnItemNeedsDetailFetch` in the RN work log). Only set on V2 rows.
+         */
+        val fetchesDetail: Boolean = false,
+        /**
+         * The `revision` `getTurnItem` takes: "live" while the item is still
+         * active, else its `updatedAt`. A running row shares one revision so an
+         * open detail does not refetch on every stream tick
+         * (`turnItemDetailRevision`).
+         */
+        val detailRevision: String? = null,
+        /**
+         * Inline images the tool output carries (`toolOutputImages`, capped at
+         * `MAX_TOOL_OUTPUT_IMAGES`). Their bytes never travel on the timeline;
+         * each loads over HTTP as a `tool-output-image` asset by index.
+         */
+        val outputImageCount: Int = 0,
     ) : FeedEntry
 
     data class Reasoning(
@@ -450,11 +657,42 @@ sealed interface FeedEntry {
 
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
 
+    /**
+     * A `secret_request` turn item: the agent asked the user for a credential
+     * that never passes through the transcript. The row carries only what was
+     * asked and how it resolved; the value goes straight to the server via
+     * `secrets.answerRequest`.
+     */
+    data class SecretRequest(
+        override val id: String,
+        /** The thread the request belongs to — answers address it, not the viewing thread. */
+        val threadId: String,
+        val label: String,
+        val reason: String,
+        val placeholder: String? = null,
+        /** pending | saved | declined | cancelled */
+        val secretStatus: String,
+        /**
+         * True only while the request is pending *and* was raised on this
+         * thread's own items (`visibility == "local"`): an inherited request is
+         * answered in the thread that asked.
+         */
+        val answerable: Boolean,
+        override val turnId: String? = null,
+        override val atMillis: Long = 0,
+    ) : FeedEntry
+
     data class ErrorEntry(
         override val id: String,
         val message: String,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
+        /**
+         * The run whose `prepared-run.retry` command retries a workspace
+         * preparation failure (`workspacePreparationRetryRunIds` in the RN
+         * client); null on every other error row.
+         */
+        val retryablePreparationRunId: String? = null,
     ) : FeedEntry
 }
 
@@ -599,6 +837,14 @@ data class ThreadDetail(
     val queueHeld: Boolean = false,
     /** Work the last turn left running in the background, for the "Waiting on" pill. */
     val pendingBackgroundTasks: List<PendingBackgroundTask> = emptyList(),
+    /**
+     * The thread's pull-request link array (`thread.pullRequests` on watch-
+     * capable servers), already mapped to models. Stacks and watch state ride
+     * here; [ThreadSummary.pullRequest] stays the one-slot badge.
+     */
+    val pullRequests: List<ThreadPullRequestLink> = emptyList(),
+    /** The pull request the server discovered from the thread's current branch. */
+    val branchPullRequest: ThreadLinkedPullRequest? = null,
     val canReorderQueue: Boolean = false,
     val canPromoteQueued: Boolean = false,
     /** Whether the live detail stream has reached its completion marker. */
@@ -649,9 +895,15 @@ data class ThreadRelationship(val threadId: String, val label: String)
 /**
  * Display slice of `OrchestrationV2PendingBackgroundTask`: work the settled turn
  * left running (`kind` is `command` | `subagent` | `monitor` | `background_task`,
- * [description] optional). Drives the floating "Waiting on …" pill.
+ * [description] optional). Drives the floating "Waiting on …" pill. [taskId] is
+ * the server's stable identity (`pull-request-watch:<host>/<repo>#<n>` for a
+ * watch), kept for callers that key off it.
  */
-data class PendingBackgroundTask(val kind: String, val description: String? = null)
+data class PendingBackgroundTask(
+    val kind: String,
+    val description: String? = null,
+    val taskId: String? = null,
+)
 
 /**
  * The loaded window's upper edge, from `OrchestrationThreadDetailPage` in

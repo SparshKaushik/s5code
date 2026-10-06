@@ -823,10 +823,13 @@ private fun singleToolCallLabel(entry: FeedEntry.ToolCall): String =
 
 /**
  * `workEntryCanExpand`: something must be behind the chevron — MCP payload,
- * files, a command, or detail text.
+ * files, a command, detail text, or a withheld payload the expansion fetches
+ * (`turnItemNeedsDetailFetch` arriving as [FeedEntry.ToolCall.fetchesDetail]).
  */
 fun toolCallCanExpand(entry: FeedEntry.ToolCall): Boolean =
     (entry.itemType == "mcp_tool_call" && entry.toolDataJson != null) ||
+        entry.fetchesDetail ||
+        entry.outputImageCount > 0 ||
         entry.changedFiles.any { it.isNotBlank() } ||
         !entry.command.isNullOrBlank() ||
         entry.detail.isNotBlank()
@@ -834,9 +837,10 @@ fun toolCallCanExpand(entry: FeedEntry.ToolCall): Boolean =
 /**
  * `buildWorkEntryExpandedBody`: MCP payload, then the command, then detail,
  * then the file list — each block deduped against the row's visible label the
- * way RN's `appendBlock` does.
+ * way RN's `appendBlock` does. [fetchedDetail] is the full item text from a
+ * `getTurnItem` read, appended last so withheld output lands after the call.
  */
-fun toolCallExpandedBody(entry: FeedEntry.ToolCall): String? {
+fun toolCallExpandedBody(entry: FeedEntry.ToolCall, fetchedDetail: String? = null): String? {
     val blocks = mutableListOf<String>()
     val visibleLabel = toolCallRowLabel(entry, expanded = true).trim()
     fun appendBlock(value: String?) {
@@ -850,6 +854,7 @@ fun toolCallExpandedBody(entry: FeedEntry.ToolCall): String? {
     }
     appendBlock(entry.command)
     appendBlock(entry.detail)
+    appendBlock(fetchedDetail)
     if (entry.changedFiles.isNotEmpty()) appendBlock(entry.changedFiles.joinToString("\n"))
     return blocks.takeIf { it.isNotEmpty() }?.joinToString("\n\n")
 }

@@ -226,6 +226,13 @@ data class ServerConfigDto(
     val environment: ServerEnvironmentDto = ServerEnvironmentDto(),
     val cwd: String = "",
     val providers: List<ServerProviderDto> = emptyList(),
+    /**
+     * `directEndpoints`: the LAN and tailnet addresses this server listens on
+     * right now, so a client connected one way can learn the others. Hints
+     * only — an address is trusted after it answers as this environment.
+     * Absent on servers that predate the feature; empty on loopback-only binds.
+     */
+    val directEndpoints: List<ServerDirectEndpointDto> = emptyList(),
     /** Top-level capability flags from `ServerConfig` in `contracts/server.ts`. */
     val shellResumeCompletionMarker: Boolean = false,
     val threadResumeCompletionMarker: Boolean = false,
@@ -233,6 +240,17 @@ data class ServerConfigDto(
     /** Whether thread reads accept the `reasoningMessages` opt-in. */
     val reasoningMessages: Boolean = false,
     val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
+)
+
+/**
+ * `ServerDirectEndpoint`: one advertised address the same server also answers.
+ * `kind` is `lan` | `tailnet` on today's servers but stays a string — a new
+ * kind is a route this client does not know, not a decode failure.
+ */
+@Serializable
+data class ServerDirectEndpointDto(
+    val kind: String = "",
+    val httpBaseUrl: String = "",
 )
 
 /**
@@ -258,6 +276,12 @@ data class ServerConfigSettingsDto(
     val defaultThreadEnvMode: String? = null,
     /** Base new worktrees on the remote branch. */
     val newWorktreesStartFromOrigin: Boolean = true,
+    /**
+     * `removeAgentCreditsOnMerge`: strip recognized agent credits from GitHub
+     * merge and squash messages. Project-scope overrides exist upstream
+     * (`ProjectScopedServerSettingKey`); this client reads the server value.
+     */
+    val removeAgentCreditsOnMerge: Boolean = false,
     /** `null` defers to the repository's t3.json, then to recursive. */
     val worktreeSubmodules: String? = null,
     /** Keep the default branch current when there are no local changes. */
@@ -266,8 +290,20 @@ data class ServerConfigSettingsDto(
     val defaultRuntimeMode: String = "full-access",
     /** static | semantic | custom */
     val branchNamingMode: String = "static",
-    val branchNamePrefix: String = "t3code",
+    /** The prefix new branches start with; "t3" is the server default. */
+    val branchNamePrefix: String = "t3",
     val branchNameInstructions: String = "",
+    /**
+     * `worktreesDirectory`: the absolute directory new worktrees are created
+     * under, empty for `<T3 home>/worktrees`. Editable only where the server
+     * advertises `capabilities.worktreesDirectory`.
+     */
+    val worktreesDirectory: String = "",
+    /**
+     * `previousWorktreesDirectories`: earlier locations, server-maintained so
+     * worktrees left there stay eligible for cleanup and review diffs.
+     */
+    val previousWorktreesDirectories: List<String> = emptyList(),
     /** turn | paragraph */
     val responseStreamingMode: String = "paragraph",
     /** Whether agents may drive the in-app preview browser. */
@@ -285,6 +321,18 @@ data class ServerConfigSettingsDto(
      */
     val worktreeCleanup: kotlinx.serialization.json.JsonObject? = null,
     val storageCleanup: ServerStorageCleanupDto = ServerStorageCleanupDto(),
+    /**
+     * `usageModelMappings`: exact model id → the model its usage counts as
+     * (e.g. a preview slug folded into its released name). Keys and values are
+     * opaque to this client; the usage scan just needs the map.
+     */
+    val usageModelMappings: Map<String, String> = emptyMap(),
+    /**
+     * `projectSettingsOverrides`: per-project setting replacements, kept as raw
+     * JSON like [worktreeCleanup] so a settings UI can round-trip keys it does
+     * not read.
+     */
+    val projectSettingsOverrides: JsonObject? = null,
 )
 
 /** `StorageCleanupSettings`: retention rules in days; null clears the rule. */
@@ -378,6 +426,35 @@ data class ServerCapabilitiesDto(
     val storageCleanup: Boolean = false,
     /** The server persists `continueThreadsAfterServerUpdate`. */
     val threadRestartContinuation: Boolean = false,
+    /** The server honors the `worktreesDirectory` setting. */
+    val worktreesDirectory: Boolean = false,
+    /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
+    val projectSettingsOverrides: Boolean = false,
+    /** `server.updateSettings` persists `usageModelMappings` and applies them to usage. */
+    val usageModelMappings: Boolean = false,
+    /**
+     * The thread link array (`pullRequests`) and host snapshots exist. Absent
+     * means `linkedPullRequest` is the whole story: no stacks, no watches.
+     */
+    val threadPullRequests: Boolean = false,
+    /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
+    val threadPullRequestWatch: Boolean = false,
+    /**
+     * `serverInstallation`: how this server was installed (npx-style runner vs.
+     * `npm-global` with a prefix), flattening the contract's small union the
+     * way stream items flatten — `prefix` exists only on `npm-global`. It tells
+     * a manual update hint where the new binary must land. Absent means the
+     * server predates the field; decode stays permissive so an unknown `kind`
+     * reads as itself instead of nothing.
+     */
+    val serverInstallation: ServerInstallationDto? = null,
+)
+
+/** `ServerInstallation`: one of `npx`/`pnpm-dlx`/`bunx`, or `npm-global` + `prefix`. */
+@Serializable
+data class ServerInstallationDto(
+    val kind: String = "",
+    val prefix: String? = null,
 )
 
 /** `capabilities.fileAttachments` from `ExecutionEnvironmentCapabilities`. */

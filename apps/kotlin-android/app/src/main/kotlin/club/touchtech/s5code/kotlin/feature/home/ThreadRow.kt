@@ -76,6 +76,14 @@ fun ThreadRow(
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val status = statusPresentation(thread.status)
+    // A live provider `/goal` relabels Working the way
+    // `thread-list-v2-items.tsx` does — the same presentation otherwise.
+    val statusLabel =
+        if (thread.status == ThreadStatus.Working && thread.goal?.status == "active") {
+            "Goal"
+        } else {
+            status.label
+        }
     val elapsedLabel = rememberLiveElapsedLabel(thread)
     val needsAttention =
         thread.status == ThreadStatus.AwaitingApproval || thread.status == ThreadStatus.AwaitingInput
@@ -144,7 +152,7 @@ fun ThreadRow(
                                 // Kotlin's Queued covers RN's "connecting"
                                 // window between message send and session start.
                                 if (thread.status == ThreadStatus.Queued) "Connecting"
-                                else elapsedLabel?.let { "${status.label} · $it" } ?: status.label,
+                                else elapsedLabel?.let { "$statusLabel · $it" } ?: statusLabel,
                             containerColor = status.container,
                             contentColor = status.content,
                         )

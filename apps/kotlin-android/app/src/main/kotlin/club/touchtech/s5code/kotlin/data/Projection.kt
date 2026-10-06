@@ -15,6 +15,7 @@ import club.touchtech.s5code.kotlin.model.PlanStep
 import club.touchtech.s5code.kotlin.model.PlanStepState
 import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.model.ProjectId
+import club.touchtech.s5code.kotlin.model.ProviderGoal
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.PullRequestRef
 import club.touchtech.s5code.kotlin.model.PullRequestState
@@ -34,17 +35,21 @@ import club.touchtech.s5code.kotlin.model.ToolState
 import club.touchtech.s5code.kotlin.model.TurnInfo
 import club.touchtech.s5code.kotlin.model.UserInputKind
 import club.touchtech.s5code.kotlin.model.UserInputOption
+import club.touchtech.s5code.kotlin.transport.TransportJson
+import club.touchtech.s5code.kotlin.transport.wire.FIELD_ABSENT
 import club.touchtech.s5code.kotlin.transport.wire.ModelCapabilitiesDto
 import club.touchtech.s5code.kotlin.transport.wire.ProjectShellDto
+import club.touchtech.s5code.kotlin.transport.wire.ProviderGoalDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
+import club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
 import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
+import club.touchtech.s5code.kotlin.transport.threadPullRequestsOf
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Objects
 import club.touchtech.s5code.kotlin.transport.v2Long
-import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonArray
 import kotlinx.serialization.json.JsonElement
@@ -296,14 +301,27 @@ fun threadSummaryFrom(
         // excerpt on a working thread is the "stale label" the repo's guidance
         // calls out.
         lastError = shell.session?.lastError?.takeIf { status == ThreadStatus.Failed },
-        pullRequest =
-            shell.linkedPullRequest?.let { pr ->
-                PullRequestRef(
-                    number = pr.number,
-                    state = PullRequestState.Open,
-                    title = "#${pr.number}",
-                )
-            },
+        // `resolveThreadPrSource`: the link array replaces legacy references only
+        // on servers that project it (null = unsupported). The badge resolver owns
+        // stacks and linked counts; the single link falls back to the legacy or
+        // branch-discovered reference.
+        pullRequest = resolveThreadPullRequestRef(shell),
+        goal = shell.goal?.let {
+            ProviderGoal(
+                objective = it.objective,
+                status = it.status,
+                tokensUsed = it.tokensUsed,
+                tokenBudget = it.tokenBudget,
+                timeUsedSeconds = it.timeUsedSeconds,
+                checks = it.checks,
+                lastCheck = it.lastCheck,
+            )
+        },
+        latestUserAuthoredMessageAtMillis =
+            if (shell.latestUserAuthoredMessageAt == FIELD_ABSENT) null
+            else parseInstant(shell.latestUserAuthoredMessageAt),
+        latestUserAuthoredMessageAtKnown = shell.latestUserAuthoredMessageAt != FIELD_ABSENT,
+        latestRunRequestedAtMillis = parseInstant(shell.latestRunRequestedAt ?: shell.latestTurn?.requestedAt),
         archived = isArchived(shell),
         // Only a running turn gets an elapsed label. A finished turn's duration is
         // history, and a row that keeps counting is the "lying spinner" the repo's
@@ -329,6 +347,30 @@ fun threadSummaryFrom(
         } == true,
     )
 }
+
+/**
+ * `resolveThreadPrSource` in `apps/mobile/src/state/thread-pr-presentation.ts`:
+ * the persisted link array drives the badge only on servers that project it —
+ * `pullRequests` null means the field was absent, which the RN client reads as
+ * the `threadPullRequests` capability being off. Those servers fall back to
+ * `branchPullRequest` alone; older ones prefer `linkedPullRequest`, which on
+ * pre-watch servers *is* the link.
+ */
+private fun resolveThreadPullRequestRef(shell: ThreadShellDto): PullRequestRef? =
+    if (shell.pullRequests != null) {
+        presentThreadLinkedPullRequests(shell.pullRequests)
+            ?: shell.branchPullRequest?.let(::legacyPullRequestRef)
+    } else {
+        (shell.linkedPullRequest ?: shell.branchPullRequest)?.let(::legacyPullRequestRef)
+    }
+
+private fun legacyPullRequestRef(link: ThreadLinkedPullRequestDto): PullRequestRef =
+    PullRequestRef(
+        number = link.number,
+        state = PullRequestState.Open,
+        title = "#${link.number}",
+        url = link.url,
+    )
 
 /* ── Thread detail ───────────────────────────────────────────────────── */
 
@@ -525,8 +567,13 @@ fun threadDetailFrom(
                 PendingBackgroundTask(
                     kind = task.v2String("kind") ?: "background_task",
                     description = task.v2String("description"),
+                    taskId = task.v2String("taskId"),
                 )
             },
+        pullRequests =
+            threadPullRequestsOf(thread.pullRequests, thread.linkedPullRequest)
+                .map { it.toModel() },
+        branchPullRequest = thread.branchPullRequest?.toModel(),
         workspaceRoot = thread.worktreePath,
         page =
             page?.let {
@@ -1868,8 +1915,23 @@ fun ApprovalPolicy.toRuntimeMode(): String =
     }
 
 /** A detail snapshot carries every shell field, so the row projection is reused. */
-internal fun ThreadDto.asShell(): ThreadShellDto =
-    ThreadShellDto(
+internal fun ThreadDto.asShell(): ThreadShellDto {
+    // The pending-request rule is the server's (`threadShellFromProjection`):
+    // a secret an agent waits on is user input too, so a waiting
+    // `secret_request` item synthesizes one when no real request is open.
+    val realPending = projection?.runtimeRequests?.filter {
+        it.v2String("status") == "pending" &&
+            (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable"
+    }.orEmpty()
+    val liveRunIds = projection?.runs
+        ?.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
+        ?.mapNotNull { it.v2String("id") }?.toSet().orEmpty()
+    val waitingSecret = projection?.turnItems?.any {
+        it.v2String("type") == "secret_request" && it.v2String("status") == "waiting" &&
+            it.v2String("nodeId") != null && it.v2String("runId") in liveRunIds
+    } == true
+    val pendingSecretInput = realPending.isEmpty() && waitingSecret
+    return ThreadShellDto(
         id = id,
         projectId = projectId,
         title = title,
@@ -1891,19 +1953,39 @@ internal fun ThreadDto.asShell(): ThreadShellDto =
         activeOrderKey = activeOrderKey,
         unsettledAt = unsettledAt,
         linkedPullRequest = linkedPullRequest,
+        // The app thread's own link array is what the V2 shell projects; absent
+        // means the server predates it, not that the list is empty.
+        pullRequests = pullRequests,
+        branchPullRequest = branchPullRequest,
+        goal = projection?.providerThreads
+            ?.firstOrNull { it.v2String("id") == projection?.thread?.v2String("activeProviderThreadId") }
+            ?.let { (it["goal"] as? JsonObject) }
+            ?.let {
+                runCatching {
+                    TransportJson.decodeFromJsonElement(ProviderGoalDto.serializer(), it)
+                }.getOrNull()
+            },
         lastVisitedAt = projection?.thread?.v2String("lastVisitedAt"),
         titleRegeneration = titleRegeneration,
         session = session,
         autoSettleDisabledAt = autoSettleDisabledAt,
         latestUserMessageAt = projection?.messages?.lastOrNull { it.v2String("role") == "user" }?.v2String("createdAt")
             ?: messages.lastOrNull { it.role == "user" }?.createdAt,
-        hasPendingApprovals = projection?.runtimeRequests?.any { it.v2String("status") == "pending" &&
-            it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") &&
-            (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
-            ?: (pendingApprovalOf(activities.sortedWith(activityOrder)) != null),
-        hasPendingUserInput = projection?.runtimeRequests?.any { it.v2String("status") == "pending" &&
-            it.v2String("kind") == "user_input" && (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable" }
-            ?: (pendingUserInputOf(activities.sortedWith(activityOrder)) != null),
+        // Only V2 conversations carry `createdBy`; a V1 thread leaves the
+        // FIELD_ABSENT sentinel so the Working sort falls back to the run's
+        // request time, matching `sortWorkingThreadsBySend`.
+        latestUserAuthoredMessageAt = projection?.let { current ->
+            current.messages
+                .filter { it.v2String("role") == "user" && it.v2String("createdBy") == "user" }
+                .mapNotNull { it.v2String("updatedAt") }
+                .maxOrNull()
+        } ?: FIELD_ABSENT,
+        hasPendingApprovals = projection?.let {
+            realPending.any { it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") }
+        } ?: (pendingApprovalOf(activities.sortedWith(activityOrder)) != null),
+        hasPendingUserInput = projection?.let {
+            pendingSecretInput || realPending.any { it.v2String("kind") == "user_input" }
+        } ?: (pendingUserInputOf(activities.sortedWith(activityOrder)) != null),
         hasActionableProposedPlan = projection?.plans?.any { it.v2String("kind") == "proposed_plan" && it.v2String("status") == "active" }
             ?: proposedPlans.any { it.implementedAt == null },
         planProgress = projection?.visibleTurnItems?.lastOrNull { it.item.v2String("type") == "todo_list" }?.item?.v2Objects("steps")?.let { steps ->
@@ -1912,8 +1994,10 @@ internal fun ThreadDto.asShell(): ThreadShellDto =
                 completedSteps = steps.count { it.v2String("status") == "completed" }, totalSteps = steps.size,
             )
         },
+        latestRunRequestedAt = latestTurn?.requestedAt,
         backgroundLiveness = if (projection?.pendingBackgroundWork()?.any { it.v2String("kind") != "command" } == true) "monitoring" else null,
     )
+}
 
 /* ── Provider instances ──────────────────────────────────────────────── */
 

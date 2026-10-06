@@ -17,7 +17,32 @@ data class CloudEnvironmentRow(
     val online: Boolean?,
     val statusError: String?,
     val linked: Boolean,
+    /**
+     * `RelayStatusDto.traceId`, when the relay's answer carried one — support
+     * correlates a user's report with a relay log line.
+     */
+    val statusTraceId: String? = null,
 )
+
+/**
+ * A host with a current build re-provisions a tunnel within minutes of coming
+ * back, which clears `tunnel_released`. While the reason is still reported, the
+ * host is either still off or running a build too old to do that — matching
+ * `RELAY_TUNNEL_RELEASED_MESSAGE` in `client-runtime/relay`.
+ */
+const val RELAY_TUNNEL_RELEASED_MESSAGE =
+    "Offline for a while, so its T3 Connect tunnel was removed. " +
+        "Start T3 Code on that computer and update it to the latest version to reconnect."
+
+/**
+ * User-facing text for an offline status's `offlineReason`, or null when the
+ * relay gave no reason this build knows — the caller falls back to `error`.
+ */
+fun relayOfflineReasonMessage(status: RelayStatusDto): String? =
+    when (status.offlineReason) {
+        "tunnel_released" -> RELAY_TUNNEL_RELEASED_MESSAGE
+        else -> null
+    }
 
 /** What the managed-environment list is doing. */
 sealed interface CloudEnvironmentsState {
@@ -127,7 +152,20 @@ class CloudEnvironments(
                     updateRow(environment.environmentId) { row ->
                         result.fold(
                             onSuccess = { status ->
-                                row.copy(online = status.status == "online", statusError = status.error)
+                                val online = status.status == "online"
+                                row.copy(
+                                    online = online,
+                                    // The offline reason only qualifies an
+                                    // offline answer; an online row keeps the
+                                    // relay's own error string (usually none).
+                                    statusError =
+                                        if (online) {
+                                            status.error
+                                        } else {
+                                            relayOfflineReasonMessage(status) ?: status.error
+                                        },
+                                    statusTraceId = status.traceId,
+                                )
                             },
                             onFailure = { cause ->
                                 row.copy(

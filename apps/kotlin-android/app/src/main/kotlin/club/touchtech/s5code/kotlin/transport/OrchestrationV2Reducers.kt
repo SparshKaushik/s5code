@@ -48,11 +48,54 @@ internal fun V2ProjectionDto.latestRootFailure(run: JsonObject?): JsonObject? {
         ?.get("failure") as? JsonObject
 }
 
-/** Commands left running do not hold completion; subagents and monitors do. */
-internal fun V2ProjectionDto.pendingBackgroundWork(): List<JsonObject> {
+/**
+ * The thread's decoded `pullRequests` link array, or empty when the field is
+ * absent (a server that predates linking) or fails to decode — an unreadable
+ * link set behaves like none rather than taking the projection down.
+ */
+internal fun V2ProjectionDto.pullRequestLinks(): List<ThreadPullRequestLinkDto> {
+    val raw = thread["pullRequests"] ?: return emptyList()
+    return runCatching {
+        TransportJson.decodeFromJsonElement(
+            kotlinx.serialization.builtins.ListSerializer(ThreadPullRequestLinkDto.serializer()),
+            raw,
+        )
+    }.getOrNull().orEmpty()
+}
+
+/**
+ * `pull-request-watch:<host>/<repo>#<n>` monitor rows for links the server is
+ * watching: a watch wakes the agent, so the thread stays working between
+ * wakes instead of returning to the inbox. Tombstoned stack members are
+ * excluded, matching `pullRequestWatchTasks` in
+ * `packages/shared/src/orchestrationV2PendingBackgroundWork.ts`.
+ */
+private fun V2ProjectionDto.pullRequestWatchTasks(): List<JsonObject> {
+    return pullRequestLinks().filter { it.source != "stack-dismissed" && it.watch != null }.map { link ->
+        buildJsonObject {
+            put("taskId", "pull-request-watch:${threadPullRequestKeyOf(link)}")
+            put("kind", "monitor")
+            put("description", "Watching pull request #${link.number}")
+        }
+    }
+}
+
+/**
+ * Commands left running do not hold completion; subagents and monitors do.
+ *
+ * [includePullRequestWatches] adds the thread's server-side PR watches as
+ * monitor tasks — the "Waiting on" pill wants them. Callers that pick a run to
+ * interrupt pass false: Stop ends watches on its own, and counting them as
+ * run-bound work would interrupt a settled run that owns nothing.
+ */
+internal fun V2ProjectionDto.pendingBackgroundWork(
+    includePullRequestWatches: Boolean = true,
+): List<JsonObject> {
     if (runs.any { it.v2String("status") in setOf("preparing", "starting", "running") }) return emptyList()
     val latest = runs.filterNot { it.v2String("status") == "queued" && it.v2Bool("queueHeld") }.maxByOrNull { it.v2Long("ordinal") ?: 0 }
-    if (latest?.v2String("status") !in setOf("completed", "cancelled", "failed", "interrupted", "waiting")) return emptyList()
+    // A thread that never ran waits on nothing else, but a watch started on it still wakes it.
+    if (latest == null) return if (includePullRequestWatches) pullRequestWatchTasks() else emptyList()
+    if (latest.v2String("status") !in setOf("completed", "cancelled", "failed", "interrupted", "waiting")) return emptyList()
     val tasks = linkedMapOf<String, JsonObject>()
     val providerId = thread.v2String("activeProviderThreadId")
     providerThreads.filter { providerId == null || it.v2String("id") == providerId }.forEach { native ->
@@ -73,6 +116,9 @@ internal fun V2ProjectionDto.pendingBackgroundWork(): List<JsonObject> {
                 item.v2String("childThreadId")?.let { put("childThreadId", it) }
             })
         }
+    if (includePullRequestWatches) pullRequestWatchTasks().forEach { task ->
+        task.v2String("taskId")?.let { tasks.putIfAbsent(it, task) }
+    }
     return tasks.values.toList()
 }
 

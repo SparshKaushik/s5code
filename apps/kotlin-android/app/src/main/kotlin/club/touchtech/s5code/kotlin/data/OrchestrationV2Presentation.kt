@@ -63,8 +63,14 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         .mapNotNull { request -> projection.turnItems.firstOrNull {
             it.v2String("requestId") == request.v2String("id") && it.v2String("type") == "user_input_request"
         } }.firstOrNull()
+    val retryablePreparationRuns = workspacePreparationRetryRunIds(projection)
     val feed = items.mapNotNull { row ->
         val item = row.item
+        // Workspace setup is client bookkeeping; preparation failures have
+        // their own error item, and a retry cancels that item — so neither the
+        // "Preparing workspace" command nor a cancelled preparation error is a
+        // row (`turnItemIsWorkspacePreparation` in the RN work log).
+        if (turnItemIsWorkspacePreparation(item)) return@mapNotNull null
         val id = row.sourceItemId
         val type = item.v2String("type")
         val runId = item.v2String("runId")
@@ -102,7 +108,16 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                 state in setOf("pending", "running", "waiting"), runId, at,
                 childThreadId = item.v2String("childThreadId"), result = item.v2String("result"), status = state)
             "error" -> FeedEntry.ErrorEntry(id,
-                (item["failure"] as? JsonObject)?.v2String("message") ?: title ?: "Provider error", runId, at)
+                (item["failure"] as? JsonObject)?.v2String("message") ?: title ?: "Provider error", runId, at,
+                retryablePreparationRunId = runId?.takeIf { it in retryablePreparationRuns })
+            "secret_request" -> FeedEntry.SecretRequest(id,
+                threadId = item.v2String("threadId") ?: row.sourceThreadId,
+                label = item.v2String("label") ?: title ?: "Secret request",
+                reason = item.v2String("reason").orEmpty(),
+                placeholder = item.v2String("placeholder"),
+                secretStatus = item.v2String("secretStatus") ?: "pending",
+                answerable = item.v2String("secretStatus") == "pending" && row.visibility == "local",
+                turnId = runId, atMillis = at)
             "compaction" -> FeedEntry.Note(id, item.v2String("summary") ?: "Context compacted", runId, at, compaction = true)
             "handoff" -> FeedEntry.Note(id, "Provider handoff → ${item.v2String("toModel") ?: item.v2String("toProviderInstanceId")}\n" +
                 item.v2String("summary").orEmpty(), runId, at)
@@ -140,7 +155,11 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                         else -> ToolState.Succeeded }, runId, at, itemType = type.orEmpty(), toolTitle = title,
                     toolName = item.v2String("toolName"), changedFiles = listOfNotNull(item.v2String("fileName")),
                     command = if (type == "command_execution") item.v2String("input") else null,
-                    lifecycleStatus = state)
+                    lifecycleStatus = state,
+                    fetchesDetail = turnItemNeedsDetailFetch(item),
+                    detailRevision = turnItemDetailRevision(item),
+                    outputImageCount = if (type == "dynamic_tool" && !item.v2Bool("outputOmitted"))
+                        toolOutputImageCount(item["output"]) else 0)
             }
         }
     }
@@ -188,4 +207,103 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         turns?.v2Bool("supportsQueuedMessages") == true,
         canSteer,
     )
+}
+
+/* ── Turn-item detail and workspace preparation ──────────────────────── */
+
+/**
+ * `ORCHESTRATION_V2_WORKSPACE_PREPARATION_FAILURE_CODE`: the error code a
+ * failed workspace preparation leaves on its cancelled/failed error item.
+ */
+internal const val WORKSPACE_PREPARATION_FAILURE_CODE = "workspace_preparation_failed"
+
+/** The literal input a workspace-preparation command item carries. */
+private const val WORKSPACE_PREPARATION_INPUT = "Preparing workspace"
+
+/**
+ * `turnItemIsWorkspacePreparation`: workspace setup is client bookkeeping and
+ * preparation failures have their own error item, so the "Preparing workspace"
+ * command row and a cancelled preparation error never render — a retry cancels
+ * that item, leaving nothing to say.
+ */
+internal fun turnItemIsWorkspacePreparation(item: JsonObject): Boolean =
+    (item.v2String("type") == "command_execution" && item.v2String("input") == WORKSPACE_PREPARATION_INPUT) ||
+        (item.v2String("type") == "error" && item.v2String("status") == "cancelled" &&
+            (item["failure"] as? JsonObject)?.v2String("code") == WORKSPACE_PREPARATION_FAILURE_CODE)
+
+/**
+ * `workspacePreparationRetryRunIds`: the runs a Retry can prepare again —
+ * failed runs with a recorded `workspacePreparation` whose preparation error
+ * item is the failure kind, so Retry only appears where `prepared-run.retry`
+ * applies. Older servers record no preparation and never offer it.
+ */
+internal fun workspacePreparationRetryRunIds(projection: V2ProjectionDto): Set<String> {
+    val failed = projection.runs
+        .filter { it.v2String("status") == "failed" && it["workspacePreparation"] != null }
+        .mapNotNull { it.v2String("id") }
+        .toSet()
+    if (failed.isEmpty()) return emptySet()
+    return projection.turnItems.mapNotNull { item ->
+        val runId = item.v2String("runId")
+        if (item.v2String("type") == "error" && item.v2String("status") == "failed" &&
+            (item["failure"] as? JsonObject)?.v2String("code") == WORKSPACE_PREPARATION_FAILURE_CODE &&
+            runId != null && runId in failed
+        ) runId else null
+    }.toSet()
+}
+
+/** Live statuses share one cache revision; a settled item keys on `updatedAt`. */
+private val LIVE_TURN_ITEM_STATUSES = setOf("idle", "pending", "running", "waiting")
+
+/**
+ * `turnItemDetailRevision`: the cache key `getTurnItem` takes. A running item
+ * keeps "live", so an open row fetches once while it streams and again when it
+ * finishes rather than on every update.
+ */
+internal fun turnItemDetailRevision(item: JsonObject): String =
+    if (item.v2String("status") in LIVE_TURN_ITEM_STATUSES) "live" else item.v2String("updatedAt").orEmpty()
+
+/** Wire projection replaces a large dynamic input with `{ summary, truncated: true }`. */
+internal fun JsonObject.isSummarizedValue(): Boolean =
+    (this["truncated"] as? JsonPrimitive)?.booleanOrNull == true && v2String("summary") != null
+
+/** `turnItemNeedsDetailFetch`: the timeline item withholds content `getTurnItem` returns. */
+internal fun turnItemNeedsDetailFetch(item: JsonObject): Boolean =
+    when (item.v2String("type")) {
+        "command_execution" -> item.v2Bool("outputOmitted")
+        "dynamic_tool" ->
+            item.v2Bool("outputOmitted") ||
+                (item["input"] as? JsonObject)?.isSummarizedValue() == true
+        else -> false
+    }
+
+/** `MAX_TOOL_OUTPUT_IMAGES` — a tool returns one screenshot or a few frames. */
+internal const val MAX_TOOL_OUTPUT_IMAGES = 8
+
+/**
+ * `toolOutputImages`, counted rather than listed: the bytes never ride the
+ * timeline, so the row only needs how many `tool-output-image` asset indices to
+ * request. Accepts both the MCP `{ data, mimeType }` shape and the Anthropic
+ * `{ source: { media_type } }` shape Claude stores.
+ */
+internal fun toolOutputImageCount(output: JsonElement?): Int {
+    val blocks = when (output) {
+        is JsonArray -> output
+        is JsonObject -> output["content"] as? JsonArray ?: listOf(output)
+        else -> return 0
+    }
+    var count = 0
+    for (block in blocks) {
+        val record = block as? JsonObject ?: continue
+        if (record.v2String("type") != "image") continue
+        val source = record["source"] as? JsonObject
+        if (source != null && source.v2String("type") != "base64") continue
+        val mimeType = (source?.v2String("media_type") ?: record.v2String("mimeType"))
+            ?.lowercase() ?: continue
+        if (mimeType in ComposerAttachmentLimits.SUPPORTED_IMAGE_MIME_TYPES) {
+            count += 1
+            if (count >= MAX_TOOL_OUTPUT_IMAGES) break
+        }
+    }
+    return count
 }

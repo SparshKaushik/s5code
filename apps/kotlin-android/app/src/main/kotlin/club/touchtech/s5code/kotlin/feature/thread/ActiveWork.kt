@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
 import club.touchtech.s5code.kotlin.model.PendingBackgroundTask
+import club.touchtech.s5code.kotlin.model.ProviderGoal
 import club.touchtech.s5code.kotlin.model.TurnInfo
 
 /**
@@ -97,12 +98,21 @@ private fun backgroundKind(kind: String): BackgroundKind =
     }
 
 /**
- * The floating "Waiting on …" pill label, ported from
+ * The floating "Waiting on …" presentation, ported from
  * `presentPendingBackgroundWork` in `packages/client-runtime/src/state/
  * threadExecution.ts`. A command does not hold completion, so "Running" is for
- * loose work and "Waiting on" for work the turn is blocked behind.
+ * loose work and "Waiting on" for work the turn is blocked behind — and
+ * [waiting] is what picks the pill's icon: the bolt only while the work can
+ * still wake the agent, a terminal glyph for commands it left running.
  */
-internal fun pendingBackgroundWorkLabel(tasks: List<PendingBackgroundTask>): String? {
+internal data class PendingBackgroundWork(
+    /** "Waiting on subagent Review src/math.ts", or "Running: dev server". */
+    val title: String,
+    /** True when the work will wake the agent; false when only commands remain. */
+    val waiting: Boolean,
+)
+
+internal fun pendingBackgroundWork(tasks: List<PendingBackgroundTask>): PendingBackgroundWork? {
     if (tasks.isEmpty()) return null
     val waiting = tasks.any { it.kind != "command" }
     val items =
@@ -116,11 +126,14 @@ internal fun pendingBackgroundWorkLabel(tasks: List<PendingBackgroundTask>): Str
     if (items.size == 1) {
         val (kind, label) = items.single()
         val named = label != kind.singular
-        return if (waiting) {
-            if (named) "Waiting on ${kind.singular} $label" else "Waiting on a ${kind.singular}"
-        } else {
-            if (named) "Running: $label" else "Running a ${kind.singular}"
-        }
+        return PendingBackgroundWork(
+            if (waiting) {
+                if (named) "Waiting on ${kind.singular} $label" else "Waiting on a ${kind.singular}"
+            } else {
+                if (named) "Running: $label" else "Running a ${kind.singular}"
+            },
+            waiting,
+        )
     }
     val counts = items.groupingBy { it.first }.eachCount()
     val groups =
@@ -133,5 +146,80 @@ internal fun pendingBackgroundWorkLabel(tasks: List<PendingBackgroundTask>): Str
             2 -> "${groups[0]} and ${groups[1]}"
             else -> groups.dropLast(1).joinToString(", ") + ", and ${groups.last()}"
         }
-    return "${if (waiting) "Waiting on" else "Running"} $joined"
+    return PendingBackgroundWork(
+        "${if (waiting) "Waiting on" else "Running"} $joined",
+        waiting,
+    )
+}
+
+/* ── Native provider goals ───────────────────────────────────────────── */
+
+private val PROVIDER_GOAL_TITLES: Map<String, String> =
+    mapOf(
+        "active" to "Pursuing goal",
+        "paused" to "Goal paused",
+        "blocked" to "Goal blocked",
+        "usage_limited" to "Goal hit a usage limit",
+        "budget_limited" to "Goal reached its token budget",
+        "complete" to "Goal complete",
+    )
+
+private fun formatGoalTokens(tokens: Long): String =
+    when {
+        tokens < 1_000 -> "$tokens"
+        tokens < 1_000_000 -> "${Math.round(tokens / 1_000.0)}k"
+        else ->
+            (tokens / 1_000_000.0).let { value ->
+                if (value == value.toLong().toDouble()) "${value.toLong()}m"
+                else String.format(java.util.Locale.US, "%.1fm", value)
+            }
+    }
+
+/**
+ * `presentProviderGoal` in `state/threadExecution.ts`: the status line a
+ * native `/goal` renders. An active goal on an idle thread is set, not
+ * pursued — the caller passes whether a turn is still in flight so "Pursuing"
+ * only reads as live while work actually runs. Usage is provider-specific:
+ * Codex reports tokens, Claude reports checks.
+ */
+internal data class ProviderGoalPresentation(
+    /** "Pursuing goal", "Goal paused", "Goal complete"… */
+    val title: String,
+    val objective: String,
+    /** "12k / 50k tokens · 4m" for Codex, "2 checks" for Claude; null when unreported. */
+    val usage: String?,
+    /** Only a stopped goal can resume. */
+    val canResume: Boolean,
+)
+
+internal fun presentProviderGoal(goal: ProviderGoal, working: Boolean): ProviderGoalPresentation {
+    val usage = mutableListOf<String>()
+    goal.tokensUsed?.takeIf { it > 0 }?.let { used ->
+        val budget = goal.tokenBudget
+        usage += if (budget == null) {
+            "${formatGoalTokens(used)} tokens"
+        } else {
+            "${formatGoalTokens(used)} / ${formatGoalTokens(budget)} tokens"
+        }
+    }
+    goal.timeUsedSeconds?.takeIf { it >= 60 }?.let { usage += formatDuration(it * 1_000) }
+    goal.checks?.takeIf { it > 0 }?.let { usage += "$it ${if (it == 1L) "check" else "checks"}" }
+    return ProviderGoalPresentation(
+        title =
+            if (goal.status == "active" && !working) "Goal set"
+            else PROVIDER_GOAL_TITLES[goal.status] ?: "Pursuing goal",
+        objective = goal.objective,
+        usage = usage.takeIf { it.isNotEmpty() }?.joinToString(" · "),
+        canResume = goal.status != "active" && goal.status != "complete",
+    )
+}
+
+/**
+ * The floating pill's goal label: the title plus the usage report the way the
+ * web banner joins them, so "12k / 50k tokens" stays visible next to "Goal
+ * paused" rather than living only in the card the Kotlin client does not have.
+ */
+internal fun providerGoalPillLabel(goal: ProviderGoal, working: Boolean): String {
+    val presentation = presentProviderGoal(goal, working)
+    return presentation.usage?.let { "${presentation.title} · $it" } ?: presentation.title
 }

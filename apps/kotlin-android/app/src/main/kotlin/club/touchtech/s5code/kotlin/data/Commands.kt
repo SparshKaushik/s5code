@@ -172,6 +172,48 @@ object Commands {
         put("holdQueue", true)
     }
 
+    /**
+     * `prepared-run.retry` — replays a failed prepared run after a workspace
+     * preparation failure. Only valid when the run's `workspacePreparation`
+     * projection is present; the server rejects anything else.
+     */
+    fun preparedRunRetry(threadId: String, runId: String): JsonObject = buildJsonObject {
+        put("type", "prepared-run.retry")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("runId", runId)
+    }
+
+    /**
+     * `thread.pull-request.watch` — toggles the server-side watch that keeps a
+     * linked pull request polling so its state stays fresh. [link] carries the
+     * `url`/`source` pair the link was created with and is only sent when
+     * turning the watch on.
+     */
+    fun pullRequestWatch(
+        threadId: String,
+        host: String,
+        repository: String,
+        number: Int,
+        watching: Boolean,
+        linkUrl: String? = null,
+        linkSource: String? = null,
+    ): JsonObject = buildJsonObject {
+        put("type", "thread.pull-request.watch")
+        put("commandId", newCommandId())
+        put("threadId", threadId)
+        put("host", host)
+        put("repository", repository)
+        put("number", number)
+        put("watching", watching)
+        if (linkUrl != null && linkSource != null) {
+            putJsonObject("link") {
+                put("url", linkUrl)
+                put("source", linkSource)
+            }
+        }
+    }
+
     fun respondToApproval(threadId: String, requestId: String, decision: String): JsonObject =
         buildJsonObject {
             put("type", "runtime-request.respond")

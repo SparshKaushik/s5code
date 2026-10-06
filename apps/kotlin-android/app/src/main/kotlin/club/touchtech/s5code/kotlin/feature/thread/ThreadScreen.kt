@@ -27,6 +27,7 @@ import androidx.compose.material.icons.rounded.KeyboardArrowUp
 import androidx.compose.material.icons.rounded.Source
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
+import androidx.compose.material.icons.rounded.TrackChanges
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LoadingIndicator
@@ -140,6 +141,10 @@ fun ThreadScreen(
             providerCatalogs[env]?.takeIf { it.isNotEmpty() } ?: providerCatalog
         }
     val attachmentError by store.attachmentError.collectAsStateWithLifecycle()
+    val composerError =
+        store.workspace.threadComposerErrors
+            .collectAsStateWithLifecycle()
+            .value["$environmentId:$threadId"]
     val stagedQuestionAttachments by store.questionAttachments.collectAsStateWithLifecycle()
     val preferences by store.preferences.collectAsStateWithLifecycle()
     val catalogRefreshing by store.catalogRefreshing.collectAsStateWithLifecycle()
@@ -601,6 +606,21 @@ fun ThreadScreen(
         bottomBar = {
             // Scaffold overlays direct slot children; controls must sit above the composer.
             Column(Modifier.fillMaxWidth()) {
+            // Why the last send never left the queue, dismissable above the
+            // composer — RN's ComposerErrorNotice in the same slot.
+            composerError?.let { error ->
+                ComposerErrorNotice(
+                    message = error.message,
+                    onDismiss = {
+                        store.workspace.clearThreadComposerError("$environmentId:$threadId")
+                    },
+                    modifier =
+                        Modifier.padding(
+                            horizontal = S5Theme.spacing.gutter,
+                            vertical = S5Theme.spacing.tiny,
+                        ),
+                )
+            }
             val pendingInput = current.userInput
             if (pendingInput != null) {
                 val capabilities = environment?.capabilities
@@ -923,11 +943,24 @@ fun ThreadScreen(
                                 attachments = images,
                                 settings = effectiveSettings,
                                 contextRecords = contextRecords,
-                                dispatchMode = if (working && current.canSteer && followUp == "steer") "steer" else "queue",
+                                // A /goal command changes the provider's goal;
+                                // the server rejects it as a steer, so it always
+                                // queues as its own turn rather than riding the
+                                // user's steer preference.
+                                dispatchMode =
+                                    when {
+                                        isGoalCommand(text, images.isNotEmpty()) -> "queue"
+                                        working && current.canSteer && followUp == "steer" -> "steer"
+                                        else -> "queue"
+                                    },
                             )
                             following = true
                         } catch (error: Exception) {
-                            store.showError(error.message ?: "The message could not be saved to the outbox.")
+                            store.workspace.setThreadComposerError(
+                                "$environmentId:$threadId",
+                                error.message
+                                    ?: "The message could not be saved to the outbox.",
+                            )
                         }
                     }
                 },
@@ -1001,9 +1034,15 @@ fun ThreadScreen(
                     isCompacting -> FloatingStatus.Compacting
                     activeWorkStartedAt != null ->
                         FloatingStatus.Working(activeWorkStartedAt)
-                    else ->
-                        pendingBackgroundWorkLabel(current.pendingBackgroundTasks)
-                            ?.let(FloatingStatus::Waiting)
+                    else -> {
+                        // RN's order: leftover background work first, then a
+                        // native /goal as the idle-thread status.
+                        pendingBackgroundWork(current.pendingBackgroundTasks)
+                            ?.let { FloatingStatus.Waiting(it.title, it.waiting) }
+                            ?: current.summary.goal?.let {
+                                FloatingStatus.Goal(providerGoalPillLabel(it, working = false))
+                            }
+                    }
                 }
             val showJump = !following && rows.isNotEmpty()
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -1155,6 +1194,39 @@ fun ThreadScreen(
                                     expandedIds = expandedEntries,
                                     onToggleExpand = { entry -> toggleEntryExpand(entry.id) },
                                     onOpenThread = { onOpenThread(environmentId, it) },
+                                    onAnswerSecretRequest = { request, answer ->
+                                        // The item's own threadId is the
+                                        // address: an inherited request is
+                                        // answered on the thread that raised it.
+                                        store.workspace.answerSecretRequest(
+                                            env,
+                                            ThreadId(request.threadId),
+                                            request.id,
+                                            answer,
+                                        )
+                                    },
+                                    fetchToolDetail = { call ->
+                                        store.workspace.turnItemDetail(
+                                            env,
+                                            id,
+                                            call.id,
+                                            call.detailRevision,
+                                        )
+                                    },
+                                    resolveToolOutputImage = { call, index ->
+                                        store.workspace.toolOutputImageUrl(env, id, call.id, index)
+                                    },
+                                    onRetryPreparation = { runId ->
+                                        runCatching {
+                                                store.workspace.retryPreparedRun(env, id, runId)
+                                            }
+                                            .onFailure {
+                                                store.showError(
+                                                    it.message
+                                                        ?: "The setup could not be retried."
+                                                )
+                                            }
+                                    },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
                             is FeedRow.WorkToggle ->
@@ -1337,7 +1409,14 @@ private sealed interface FloatingStatus {
         // The pill renders `floatingWorkingLabel` instead — it needs the tick.
         override val label get() = "Working"
     }
-    data class Waiting(override val label: String) : FloatingStatus
+    /**
+     * The turn settled while work it started still runs. [waiting] is false
+     * when only commands remain, such as a dev server: the agent is done, so
+     * the pill drops the bolt for the terminal glyph.
+     */
+    data class Waiting(override val label: String, val waiting: Boolean) : FloatingStatus
+    /** A native /goal on an idle thread: paused, blocked, complete, or set. */
+    data class Goal(override val label: String) : FloatingStatus
 }
 
 /**
@@ -1387,9 +1466,19 @@ private fun FloatingStatusPill(
                                 androidx.compose.foundation.shape.CircleShape,
                             ),
                     )
+                // A dev server can run for hours after the agent is done, so
+                // only work that will wake the agent gets the bolt (RN's same
+                // split between `bolt` and `terminal` glyphs).
                 status is FloatingStatus.Waiting ->
                     Icon(
-                        Icons.Rounded.Bolt,
+                        if (status.waiting) Icons.Rounded.Bolt else Icons.Rounded.Terminal,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                status is FloatingStatus.Goal ->
+                    Icon(
+                        Icons.Rounded.TrackChanges,
                         contentDescription = null,
                         modifier = Modifier.size(13.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
