@@ -42,6 +42,8 @@ export class DeviceHostTimeoutError extends Schema.TaggedError<DeviceHostTimeout
 export interface DeviceHubEndpoint {
   /** Loopback origin of expo-device-hub, e.g. `http://127.0.0.1:3400`. */
   readonly origin: string;
+  /** Only the server sees remote credentials; they never reach the client. */
+  readonly headers?: Readonly<Record<string, string>>;
 }
 
 export interface AgentDeviceEndpoint {
@@ -52,6 +54,7 @@ export interface AgentDeviceEndpoint {
 }
 
 export interface DeviceHostReady {
+  readonly supportsActions?: boolean;
   readonly nodePath: string;
   readonly hub: DeviceHubEndpoint;
   /**

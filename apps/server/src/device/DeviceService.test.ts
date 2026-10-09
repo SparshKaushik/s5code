@@ -16,11 +16,13 @@ import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { TestClock } from "effect/testing";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceHost from "./DeviceHost.ts";
 import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
 
 import * as DeviceService from "./DeviceService.ts";
+import * as SimboxHost from "./SimboxDeviceHost.ts";
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -68,6 +70,8 @@ const fixture = Effect.fn("fixture")(function* (
   runtimeFailure?: NodeRuntimeUnavailableError | DeviceHost.DeviceHostError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  respond?: (request: Parameters<Parameters<typeof HttpClient.make>[0]>[0]) => Response | undefined,
+  configureAgent?: Parameters<typeof DeviceService.makeWithHosts>[2],
 ) {
   const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
   const starts: string[] = [];
@@ -132,7 +136,7 @@ const fixture = Effect.fn("fixture")(function* (
   const service = yield* DeviceService.makeWithHosts(
     new Map([[host.id, host]]),
     undefined,
-    undefined,
+    configureAgent,
     installTool,
   ).pipe(
     Effect.provideService(DeviceHost.DeviceHost, host),
@@ -162,6 +166,8 @@ const fixture = Effect.fn("fixture")(function* (
       HttpClient.make((request) =>
         Effect.gen(function* () {
           requests.push(request.url);
+          const custom = respond?.(request);
+          if (custom) return HttpClientResponse.fromWeb(request, custom);
           if (request.url.includes("/api/screenshot")) {
             return HttpClientResponse.fromWeb(
               request,
@@ -734,4 +740,222 @@ it.effect("failed manual installation leaves lifecycle state unchanged and can b
     expect(starts).toEqual([]);
     expect(agentStarts).toEqual([]);
   }).pipe(Effect.scoped),
+);
+
+describe("automatic Simbox device attachment", () => {
+  const registration = (): SimboxHost.Registration => ({
+    version: 1,
+    createdAt: Date.now(),
+    runId: "039dd761-9144-4a9c-a03b-e44c893d73ad",
+    tunnelUrl: "https://fixture.trycloudflare.com",
+    daemonToken: "private-runner-token",
+    expiresAt: null,
+    platform: "ios",
+    stop: false,
+    autoBoot: true,
+    apiUrl: "https://api.simbox.touchtech.club",
+    userToken: null,
+  });
+  it.effect(
+    "boots once, attaches to each originating thread, and removes every session on stop",
+    () =>
+      Effect.gen(function* () {
+        let booted = false;
+        let boots = 0;
+        const input = registration();
+        const f = yield* fixture(
+          Effect.void,
+          undefined,
+          false,
+          undefined,
+          false,
+          undefined,
+          (request) => {
+            if (!request.url.includes("/simbox-device-hub")) return;
+            expect(request.headers.authorization).toBe("Bearer private-runner-token");
+            if (request.url.endsWith("/boot")) {
+              booted = true;
+              boots++;
+              return Response.json({ ok: true });
+            }
+            if (request.url.endsWith("/start")) return Response.json({ ok: true });
+            return Response.json({
+              simulators: [
+                {
+                  id: "SIM-1234",
+                  name: "iPhone 17 Pro",
+                  platform: "ios",
+                  booted,
+                  physical: false,
+                  version: "iOS 26.4",
+                },
+              ],
+              emulators: [],
+            });
+          },
+        );
+        yield* f.service.configure({ enabled: true, agentAccessEnabled: true });
+        const threadA = ThreadId.make("simbox-thread-a");
+        const threadB = ThreadId.make("simbox-thread-b");
+        const first = yield* f.service.registerSimbox(threadA, input);
+        expect(first).toHaveLength(1);
+        expect(first[0]?.threadId).toBe(threadA);
+        expect(first[0]?.hostId).toBe(SimboxHost.hostId(input.runId));
+        expect(yield* f.service.registerSimbox(threadA, input)).toEqual(first);
+        const second = yield* f.service.registerSimbox(threadB, input);
+        expect(second[0]?.threadId).toBe(threadB);
+        expect(boots).toBe(1);
+        const state = yield* f.service.state;
+        expect(state.sessions).toHaveLength(2);
+        expect(
+          state.devices.find((d) => d.hostId === SimboxHost.hostId(input.runId))?.supportsActions,
+        ).toBe(false);
+        yield* f.service.registerSimbox(threadA, { ...input, stop: true });
+        expect((yield* f.service.state).sessions).toHaveLength(0);
+        expect((yield* f.service.state).hosts.some((h) => h.kind === "simbox")).toBe(false);
+      }),
+  );
+  it.effect("requires consent and does not boot an unselected device after an ordinary exec", () =>
+    Effect.gen(function* () {
+      const input = registration();
+      const f = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        (request) => {
+          if (!request.url.includes("/simbox-device-hub")) return;
+          return Response.json({
+            simulators: [
+              {
+                id: "SIM-1234",
+                name: "iPhone 17 Pro",
+                platform: "ios",
+                booted: false,
+                physical: false,
+                version: "iOS 26.4",
+              },
+            ],
+            emulators: [],
+          });
+        },
+      );
+      const rejected = yield* f.service
+        .registerSimbox(ThreadId.make("simbox-thread"), input)
+        .pipe(Effect.result);
+      expect(rejected._tag).toBe("Failure");
+      expect(f.requests).toHaveLength(0);
+      yield* f.service.configure({ enabled: true, agentAccessEnabled: true });
+      expect(
+        yield* f.service.registerSimbox(ThreadId.make("simbox-thread"), {
+          ...input,
+          autoBoot: false,
+        }),
+      ).toEqual([]);
+      expect(f.requests.some((url) => url.endsWith("/boot"))).toBe(false);
+    }),
+  );
+});
+
+it.effect(
+  "Simbox monitoring refreshes saved agent credentials and removes sessions when the API ends a run",
+  () =>
+    Effect.gen(function* () {
+      const input: SimboxHost.Registration = {
+        version: 1,
+        createdAt: 0,
+        runId: "039dd761-9144-4a9c-a03b-e44c893d73ad",
+        tunnelUrl: "https://initial.trycloudflare.com",
+        daemonToken: "initial-token",
+        expiresAt: null,
+        platform: "ios",
+        stop: false,
+        autoBoot: true,
+        apiUrl: "https://api.simbox.touchtech.club",
+        userToken: "app-token",
+        agentSession: "custom-simbox-session",
+      };
+      let run = {
+        id: input.runId,
+        state: "live",
+        tunnelUrl: input.tunnelUrl,
+        daemonToken: input.daemonToken,
+        expiresAt: null,
+      };
+      const renewed = yield* Deferred.make<void>();
+      const configurations: Array<{ token: string; url: string }> = [];
+      const f = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        (request) => {
+          if (request.url.endsWith("/v1/runs/current")) return Response.json({ run });
+          if (!request.url.includes("/simbox-device-hub")) return;
+          if (request.url.endsWith("/start")) return Response.json({ ok: true });
+          return Response.json({
+            simulators: [
+              {
+                id: "SIM-1234",
+                name: "iPhone 17 Pro",
+                platform: "ios",
+                booted: true,
+                physical: false,
+                version: "iOS 26.4",
+              },
+            ],
+            emulators: [],
+          });
+        },
+        (_id, ready) =>
+          Effect.gen(function* () {
+            configurations.push({ token: ready.agentDevice.token, url: ready.agentDevice.baseUrl });
+            if (ready.agentDevice.token === "renewed-token")
+              yield* Deferred.succeed(renewed, undefined);
+            return "/private/agent-config.json";
+          }),
+      );
+      yield* f.service.configure({ enabled: true, agentAccessEnabled: true });
+      const threadId = ThreadId.make("simbox-monitor-thread");
+      const sessions = yield* f.service.registerSimbox(threadId, input);
+      const hostId = SimboxHost.hostId(input.runId);
+      const target = yield* f.service.agentTarget({
+        hostId,
+        threadId,
+        deviceId: sessions[0]!.deviceId,
+      });
+      expect(target).toEqual([
+        "--config",
+        "/private/agent-config.json",
+        "--session",
+        "custom-simbox-session",
+      ]);
+      run = {
+        ...run,
+        tunnelUrl: "https://recovered.trycloudflare.com",
+        daemonToken: "renewed-token",
+      };
+      yield* TestClock.adjust("15 seconds");
+      yield* Deferred.await(renewed);
+      expect(configurations).toEqual([
+        { token: "initial-token", url: "https://initial.trycloudflare.com/agent-device" },
+        { token: "renewed-token", url: "https://recovered.trycloudflare.com/agent-device" },
+      ]);
+      const removed = yield* Deferred.make<void>();
+      yield* DeviceService.stateStream(f.service).pipe(
+        Stream.runForEach((state) =>
+          !state.hosts.some((host) => host.id === hostId) && state.sessions.length === 0
+            ? Deferred.succeed(removed, undefined)
+            : Effect.void,
+        ),
+        Effect.forkChild,
+      );
+      run = { ...run, state: "ended" };
+      yield* TestClock.adjust("15 seconds");
+      yield* Deferred.await(removed);
+    }),
 );

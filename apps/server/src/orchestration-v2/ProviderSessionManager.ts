@@ -42,6 +42,7 @@ import * as ProjectService from "../project/ProjectService.ts";
 import * as McpProviderSession from "../mcp/McpProviderSession.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
+import * as SimboxDeviceRegistration from "../device/SimboxDeviceRegistration.ts";
 import * as EventSink from "./EventSink.ts";
 import * as IdAllocator from "./IdAllocator.ts";
 import * as ProviderEventIngestor from "./ProviderEventIngestor.ts";
@@ -326,6 +327,9 @@ export const layerWithOptions = (
        */
       const serverSettings = yield* Effect.serviceOption(ServerSettings.ServerSettingsService);
       const projectService = yield* Effect.serviceOption(ProjectService.ProjectService);
+      const simboxDevices = yield* Effect.serviceOption(
+        SimboxDeviceRegistration.SimboxDeviceRegistration,
+      );
       const eventSink = yield* EventSink.EventSinkV2;
       const idAllocator = yield* IdAllocator.IdAllocatorV2;
       const providerEventIngestor = yield* ProviderEventIngestor.ProviderEventIngestorV2;
@@ -1608,6 +1612,34 @@ export const layerWithOptions = (
                 ? markIdle(entry.runtime.providerSessionId)
                 : touchActivity(entry.runtime.providerSessionId),
             ).pipe(
+              Effect.andThen(
+                Effect.gen(function* () {
+                  if (
+                    Option.isNone(simboxDevices) ||
+                    event.type !== "turn_item.updated" ||
+                    SimboxDeviceRegistration.receiptsForItem(event.turnItem).length === 0
+                  )
+                    return;
+                  const item = event.turnItem;
+                  const current = (yield* Ref.get(sessions)).get(
+                    sessionKey(entry.runtime.providerSessionId),
+                  );
+                  if (
+                    current?.runtime !== entry.runtime ||
+                    !current.attachedThreadIds.has(item.threadId)
+                  )
+                    return;
+                  const access = yield* agentAccessSettings(item.threadId);
+                  if (!access.device) return;
+                  // Attachment may warm the remote hub; keep provider event delivery moving.
+                  yield* simboxDevices.value.observe(item).pipe(
+                    Effect.catch((error) =>
+                      Effect.logWarning(error.message, { threadId: item.threadId }),
+                    ),
+                    Effect.forkIn(layerScope),
+                  );
+                }),
+              ),
               Effect.andThen(
                 event.type === "provider_session.updated"
                   ? persistProviderSessionUpdate(entry, event)

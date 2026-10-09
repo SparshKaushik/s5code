@@ -127,11 +127,17 @@ const forwardHeaders = (request: HttpServerRequest.HttpServerRequest, origin: st
 const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstreamUrl: string,
+  headers: Readonly<Record<string, string>> = {},
 ) {
   const client = yield* request.upgrade;
   const upstream = yield* Socket.makeWebSocket(upstreamUrl, {
     openTimeout: "10 seconds",
-  }).pipe(Effect.provide(NodeSocket.layerWebSocketConstructor));
+  }).pipe(
+    Effect.provideService(
+      Socket.WebSocketConstructor,
+      (url) => new NodeSocket.NodeWS.WebSocket(url, { headers }),
+    ),
+  );
   yield* Effect.scoped(
     Effect.gen(function* () {
       const writeToClient = yield* client.writer;
@@ -159,11 +165,12 @@ const proxyHttp = Effect.fn("DeviceHubProxy.proxyHttp")(function* (
   request: HttpServerRequest.HttpServerRequest,
   upstreamUrl: string,
   hubOrigin: string,
+  upstreamHeaders: Readonly<Record<string, string>> = {},
 ) {
   const httpClient = HttpClient.withScope(yield* HttpClient.HttpClient);
   const method = request.method;
   const upstreamRequest = HttpClientRequest.make(method)(upstreamUrl).pipe(
-    HttpClientRequest.setHeaders(forwardHeaders(request, hubOrigin)),
+    HttpClientRequest.setHeaders({ ...forwardHeaders(request, hubOrigin), ...upstreamHeaders }),
     method === "GET" || method === "HEAD"
       ? (self) => self
       : HttpClientRequest.bodyStream(request.stream),
@@ -225,9 +232,15 @@ const handler = Effect.gen(function* () {
     return yield* proxyWebSocket(
       request,
       `${ready.hub.origin.replace(/^http/, "ws")}${upstreamPath}`,
+      ready.hub.headers,
     );
   }
-  return yield* proxyHttp(request, `${ready.hub.origin}${upstreamPath}`, ready.hub.origin);
+  return yield* proxyHttp(
+    request,
+    `${ready.hub.origin}${upstreamPath}`,
+    ready.hub.origin,
+    ready.hub.headers,
+  );
 });
 
 export const layer = HttpRouter.add("*", `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`, handler);

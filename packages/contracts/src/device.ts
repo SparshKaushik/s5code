@@ -59,6 +59,8 @@ export const DeviceSummary = Schema.Struct({
   version: Schema.String,
   booted: Schema.Boolean,
   physical: Schema.Boolean,
+  /** Cloud hosts can stream and automate without exposing host shell settings. */
+  supportsActions: Schema.optional(Schema.Boolean),
 });
 export type DeviceSummary = typeof DeviceSummary.Type;
 
@@ -89,7 +91,7 @@ export type DeviceToolVersions = typeof DeviceToolVersions.Type;
 
 export const DeviceHostSummary = Schema.Struct({
   id: DeviceHostId,
-  kind: Schema.Literals(["local", "ssh"]),
+  kind: Schema.Literals(["local", "ssh", "simbox"]),
   label: TrimmedNonEmptyString,
   platforms: Schema.Array(DevicePlatformAvailability),
   tools: Schema.optional(DeviceToolVersions),

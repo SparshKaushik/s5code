@@ -20,6 +20,7 @@ import {
   type DeviceHostId,
   type DeviceId,
   DeviceBootError,
+  DeviceActionUnavailableError,
   DeviceHostUnavailableError,
   DeviceNotFoundError,
   DeviceOperationError,
@@ -67,6 +68,7 @@ import * as DeviceHost from "./DeviceHost.ts";
 import * as SshDeviceHost from "./SshDeviceHost.ts";
 import * as Exit from "effect/Exit";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
+import * as SimboxDeviceHost from "./SimboxDeviceHost.ts";
 
 /** Origin-relative prefix the hub is proxied under. See DeviceHubProxy. */
 export const DEVICE_HUB_ROUTE_PREFIX = "/api/device-hub";
@@ -110,6 +112,10 @@ export interface DeviceAgentReadiness extends DeviceReadiness {
 export class DeviceService extends Context.Service<
   DeviceService,
   {
+    readonly registerSimbox: (
+      threadId: ThreadId,
+      input: SimboxDeviceHost.Registration,
+    ) => Effect.Effect<ReadonlyArray<DeviceSession>, DeviceError>;
     readonly agentCli: Effect.Effect<string, DeviceError>;
     readonly testHost: (
       config: SshDeviceHostConfig,
@@ -165,7 +171,7 @@ const vendorPrefix = (platform: DevicePlatform) =>
   platform === "ios" ? "/vendor/serve-sim" : "/vendor/serve-emu";
 
 export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* (
-  hosts: ReadonlyMap<DeviceHostId, DeviceHost.DeviceHost["Service"]>,
+  hosts: Map<DeviceHostId, DeviceHost.DeviceHost["Service"]>,
   testHost: DeviceService["Service"]["testHost"] = (host) =>
     Effect.fail(
       new DeviceHostUnavailableError({
@@ -186,6 +192,11 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   installTool?: (tool: "hub" | "agent") => Effect.Effect<unknown, DeviceError>,
 ) {
   const settings = yield* ServerSettings.ServerSettingsService;
+  const scope = yield* Scope.Scope;
+  const simboxContext =
+    yield* Effect.context<Effect.Services<ReturnType<typeof SimboxDeviceHost.make>>>();
+  const simboxHosts = new Map<string, Effect.Success<ReturnType<typeof SimboxDeviceHost.make>>>();
+  const configuredSimboxHosts = new Set<DeviceHostId>();
   const lifecycleLock = yield* Semaphore.make(1);
   const readDeviceSettings = settings.getSettings.pipe(
     Effect.map((value) => ({
@@ -357,12 +368,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     );
 
   const hubJson = <A, I>(
+    ready: DeviceReadiness,
     request: HttpClientRequest.HttpClientRequest,
     schema: Schema.Codec<A, I>,
     operation: string,
     timeout: Duration.Input = Duration.seconds(15),
   ) =>
-    httpClient.execute(request).pipe(
+    httpClient.execute(HttpClientRequest.setHeaders(request, ready.hub.headers ?? {})).pipe(
       Effect.flatMap(HttpClientResponse.filterStatusOk),
       Effect.flatMap(HttpClientResponse.schemaBodyJson(schema)),
       Effect.scoped,
@@ -379,6 +391,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
 
   const fetchDevices = Effect.fn("DeviceService.fetchDevices")(function* (ready: DeviceReadiness) {
     const list = yield* hubJson(
+      ready,
       HttpClientRequest.get(`${ready.hub.origin}/api/devices`),
       HubDeviceList,
       "list",
@@ -391,6 +404,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       version: device.version,
       booted: device.booted,
       physical: device.physical,
+      ...(ready.supportsActions === false ? { supportsActions: false } : {}),
     });
     const devices = [...list.simulators, ...list.emulators].map(toSummary);
     const host = yield* resolveHost(ready.hostId);
@@ -610,7 +624,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         (cause) =>
           new DeviceOperationError({ operation: "boot", reason: "invalid_payload", cause }),
       ),
-      Effect.flatMap((request) => hubJson(request, HubActionResult, "boot", BOOT_TIMEOUT)),
+      Effect.flatMap((request) => hubJson(ready, request, HubActionResult, "boot", BOOT_TIMEOUT)),
     );
     if (!result.ok) {
       return yield* new DeviceBootError({
@@ -638,7 +652,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             new DeviceOperationError({ operation: "boot", reason: "invalid_payload", cause }),
         ),
         Effect.flatMap((request) =>
-          hubJson(request, HubActionResult, "attach stream", BOOT_TIMEOUT),
+          hubJson(ready, request, HubActionResult, "attach stream", BOOT_TIMEOUT),
         ),
       );
     }
@@ -691,7 +705,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
             new DeviceOperationError({ operation: "open", reason: "invalid_payload", cause }),
         ),
         Effect.flatMap((request) =>
-          hubJson(request, HubActionResult, "attach stream", BOOT_TIMEOUT),
+          hubJson(ready, request, HubActionResult, "attach stream", BOOT_TIMEOUT),
         ),
       );
     }
@@ -747,7 +761,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
           (cause) =>
             new DeviceOperationError({ operation: "shutdown", reason: "invalid_payload", cause }),
         ),
-        Effect.flatMap((request) => hubJson(request, HubActionResult, "shutdown")),
+        Effect.flatMap((request) => hubJson(ready, request, HubActionResult, "shutdown")),
         Effect.flatMap((result) =>
           result.ok
             ? Effect.void
@@ -840,21 +854,25 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     function* (input) {
       const { ready, device } = yield* resolveDevice(input.hostId, input.deviceId);
       const url = `${ready.hub.origin}${vendorPrefix(device.platform)}/api/screenshot?device=${encodeURIComponent(device.id)}`;
-      const png = yield* httpClient.execute(HttpClientRequest.post(url)).pipe(
-        Effect.flatMap(HttpClientResponse.filterStatusOk),
-        Effect.flatMap((response) => response.arrayBuffer),
-        Effect.map((buffer) => new Uint8Array(buffer)),
-        Effect.scoped,
-        Effect.timeout(SCREENSHOT_TIMEOUT),
-        Effect.mapError(
-          (cause) =>
-            new DeviceOperationError({
-              operation: "screenshot",
-              reason: "request_failed",
-              cause,
-            }),
-        ),
-      );
+      const png = yield* httpClient
+        .execute(
+          HttpClientRequest.post(url).pipe(HttpClientRequest.setHeaders(ready.hub.headers ?? {})),
+        )
+        .pipe(
+          Effect.flatMap(HttpClientResponse.filterStatusOk),
+          Effect.flatMap((response) => response.arrayBuffer),
+          Effect.map((buffer) => new Uint8Array(buffer)),
+          Effect.scoped,
+          Effect.timeout(SCREENSHOT_TIMEOUT),
+          Effect.mapError(
+            (cause) =>
+              new DeviceOperationError({
+                operation: "screenshot",
+                reason: "request_failed",
+                cause,
+              }),
+          ),
+        );
       return { device, png };
     },
   );
@@ -875,7 +893,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const detail: DeviceService["Service"]["detail"] = Effect.fn("DeviceService.detail")(
     function* (input) {
       const { ready, device } = yield* resolveDevice(input.hostId, input.deviceId);
-      const read = yield* readDeviceDetail(ready, device.platform, device.id);
+      const read =
+        ready.supportsActions === false
+          ? { settings: {}, foregroundApp: null }
+          : yield* readDeviceDetail(ready, device.platform, device.id);
       return {
         hostId: ready.hostId,
         deviceId: device.id,
@@ -889,6 +910,12 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
   const action: DeviceService["Service"]["action"] = Effect.fn("DeviceService.action")(
     function* (input) {
       const { ready, device } = yield* resolveDevice(input.hostId, input.deviceId);
+      if (ready.supportsActions === false)
+        return yield* new DeviceActionUnavailableError({
+          operation: input.type,
+          platform: device.platform,
+          reason: "unsupported",
+        });
       yield* runDeviceAction(ready, device.platform, input);
       return yield* detail({ hostId: ready.hostId, deviceId: device.id });
     },
@@ -899,8 +926,123 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       Effect.map(({ state }) => state.sessions.filter((session) => session.threadId === threadId)),
     );
 
+  const removeSimbox = (runId: string) =>
+    lifecycleLock.withPermit(
+      Effect.gen(function* () {
+        const registered = simboxHosts.get(runId);
+        if (!registered) return;
+        simboxHosts.delete(runId);
+        configuredSimboxHosts.delete(registered.host.id);
+        hosts.delete(registered.host.id);
+        publishedHosts.delete(registered.host.id);
+        yield* registered.host.stop;
+        const summaries = yield* Effect.forEach(hosts.values(), (host) => host.summary);
+        yield* publish((state) => ({
+          ...state,
+          hosts: summaries,
+          devices: state.devices.filter((device) => device.hostId !== registered.host.id),
+          sessions: state.sessions.filter((session) => session.hostId !== registered.host.id),
+          hostStatuses: Object.fromEntries(
+            Object.entries(state.hostStatuses).filter(([id]) => id !== registered.host.id),
+          ),
+        }));
+      }),
+    );
+  const registerSimbox: DeviceService["Service"]["registerSimbox"] = (threadId, input) =>
+    Effect.gen(function* () {
+      const consent = yield* readDeviceSettings;
+      if (!consent.enabled || !consent.agentAccessEnabled)
+        return yield* new DeviceHostUnavailableError({
+          hostId: SimboxDeviceHost.hostId(input.runId),
+          reason: "Enable device support and agent device access to attach a Simbox runner.",
+        });
+      if (input.stop) {
+        yield* removeSimbox(input.runId);
+        return [];
+      }
+      let registered = simboxHosts.get(input.runId);
+      if (!registered) {
+        registered = yield* SimboxDeviceHost.make(input).pipe(Effect.provide(simboxContext));
+        const next = registered;
+        yield* lifecycleLock.withPermit(
+          Effect.gen(function* () {
+            // Registration receipts may arrive concurrently from two threads.
+            if (simboxHosts.has(input.runId)) return;
+            simboxHosts.set(input.runId, next);
+            hosts.set(next.host.id, next.host);
+            publishedHosts.set(next.host.id, next.host);
+            const summary = yield* next.host.summary;
+            yield* publish((state) => ({ ...state, hosts: [...state.hosts, summary] }));
+            yield* Effect.gen(function* () {
+              while (simboxHosts.get(input.runId) === next) {
+                yield* Effect.sleep("15 seconds");
+                const alive = yield* next.refresh.pipe(Effect.orElseSucceed(() => true));
+                if (!alive) {
+                  yield* removeSimbox(input.runId);
+                  return;
+                }
+                if (configuredSimboxHosts.has(next.host.id)) {
+                  yield* lifecycleLock
+                    .withPermit(
+                      Effect.gen(function* () {
+                        const consent = yield* readDeviceSettings;
+                        if (
+                          consent.enabled &&
+                          consent.agentAccessEnabled &&
+                          simboxHosts.get(input.runId) === next
+                        )
+                          yield* configureAgent(next.host.id, next.ready);
+                      }),
+                    )
+                    .pipe(Effect.ignore);
+                }
+              }
+            }).pipe(Effect.forkIn(scope));
+          }),
+        );
+        registered = simboxHosts.get(input.runId);
+      }
+      if (!registered) return [];
+      const hostId = registered.host.id;
+      yield* registered.update(input);
+      const ready = yield* readiness(registered.host.id);
+      const state = yield* refresh(ready);
+      const candidates = state.devices.filter(
+        (device) =>
+          device.hostId === hostId && (!input.platform || device.platform === input.platform),
+      );
+      const selected = input.deviceId
+        ? candidates.find((device) => device.id === input.deviceId)
+        : input.deviceName
+          ? candidates.find(
+              (device) => device.name === input.deviceName || device.id === input.deviceName,
+            )
+          : (candidates.find((device) => device.booted) ??
+            (input.autoBoot
+              ? (candidates.find((device) => device.name.startsWith("iPhone")) ?? candidates[0])
+              : undefined));
+      if (!selected) return [];
+      const existing = state.sessions.find(
+        (session) =>
+          session.threadId === threadId &&
+          session.hostId === hostId &&
+          session.deviceId === selected.id,
+      );
+      if (existing && selected.booted) return [existing];
+      return [
+        yield* open({
+          threadId,
+          hostId: registered.host.id,
+          deviceId: selected.id,
+          platform: selected.platform,
+          boot: input.autoBoot || !!input.deviceId || !!input.deviceName,
+        }),
+      ];
+    });
+
   return {
     ...DeviceService.of({
+      registerSimbox,
       testHost,
       updateTool: (tool) =>
         lifecycleLock.withPermit(
@@ -940,14 +1082,18 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                   hostId: host.id,
                   reason: "Host configuration changed. Retry the operation.",
                 });
-              return yield* configureAgent(input.hostId, ready);
+              const configPath = yield* configureAgent(input.hostId, ready);
+              if (simboxHosts.has(input.hostId.slice("simbox-".length)))
+                configuredSimboxHosts.add(input.hostId);
+              return configPath;
             }),
           );
           return [
             "--config",
             configPath,
             "--session",
-            agentDeviceSession(input.threadId, input.hostId, input.deviceId),
+            simboxHosts.get(input.hostId.slice("simbox-".length))?.agentSession ??
+              agentDeviceSession(input.threadId, input.hostId, input.deviceId),
           ];
         }),
       state: SynchronizedRef.get(stateRef).pipe(Effect.map(({ state }) => state)),
