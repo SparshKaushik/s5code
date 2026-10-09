@@ -105,7 +105,11 @@ export function DeviceWorkspace(props: {
                 screenshotPending={screenshotPending}
                 onScreenshot={() => void saveScreenshot()}
                 toolsOpen={toolsOpen}
-                onTools={() => setToolsOpen(!toolsOpen)}
+                onTools={
+                  props.device.supportsActions === false
+                    ? undefined
+                    : () => setToolsOpen(!toolsOpen)
+                }
                 onFloat={props.onFloat}
                 onClose={props.onClose}
                 onPowerOff={props.onPowerOff}

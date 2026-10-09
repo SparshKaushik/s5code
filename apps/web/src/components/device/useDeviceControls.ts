@@ -78,7 +78,7 @@ export function useDeviceControls(options: {
     };
   }, [access, device.id, device.platform, visible]);
 
-  const available = detail !== null && visible;
+  const available = detail !== null && visible && device.supportsActions !== false;
   const act = async (body: ActionBody) => {
     if (busy.current || !available) return;
     busy.current = true;
@@ -122,7 +122,7 @@ export function useDeviceControls(options: {
     pending,
     error,
     act,
-    disabled: pending || !detail || !visible,
+    disabled: pending || !detail || !visible || device.supportsActions === false,
     foregroundApp: foreground === undefined ? (detail?.foregroundApp ?? null) : foreground,
   };
 }

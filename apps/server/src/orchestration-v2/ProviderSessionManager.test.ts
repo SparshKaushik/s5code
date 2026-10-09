@@ -41,6 +41,7 @@ import * as McpProviderSessions from "@t3tools/provider-core/server/McpProviderS
 import * as McpSessionRegistry from "../mcp/McpSessionRegistry.ts";
 import * as SqlitePersistence from "../persistence/Sqlite.ts";
 import * as ServerSettings from "../serverSettings.ts";
+import * as SimboxDeviceRegistration from "../device/SimboxDeviceRegistration.ts";
 import { CodexProviderCapabilitiesV2 } from "./Adapters/CodexAdapterV2.ts";
 import * as EventSink from "./EventSink.ts";
 import * as EventStore from "./EventStore.ts";
@@ -472,6 +473,7 @@ function layerTest(input: {
   readonly scopeCloseReached?: Deferred.Deferred<void>;
   readonly serverSettingsLayer?: ReturnType<typeof ServerSettings.layerTest>;
   readonly projectServiceLayer?: Layer.Layer<ProjectService.ProjectService>;
+  readonly simboxLayer?: Layer.Layer<SimboxDeviceRegistration.SimboxDeviceRegistration>;
 }) {
   const layerConfiguredEventSink =
     input.flakyReleaseWrites !== undefined
@@ -538,6 +540,7 @@ function layerTest(input: {
           layerTestStores,
           ...(input.serverSettingsLayer === undefined ? [] : [input.serverSettingsLayer]),
           ...(input.projectServiceLayer === undefined ? [] : [input.projectServiceLayer]),
+          ...(input.simboxLayer === undefined ? [] : [input.simboxLayer]),
         ),
       ),
     ),
@@ -4721,5 +4724,115 @@ it.effect(
         projectExists: false,
       });
       assert.isFalse(denied?.capabilities?.has("device"));
+    }),
+);
+
+it.effect(
+  "ProviderSessionManagerV2 attaches Simbox receipts only from an attached thread with device access",
+  () =>
+    Effect.gen(function* () {
+      for (const enabled of [true, false]) {
+        const state = yield* Ref.make(emptyState);
+        const attached = yield* Deferred.make<void>();
+        const calls: ThreadId[] = [];
+        const simboxLayer = Layer.succeed(
+          SimboxDeviceRegistration.SimboxDeviceRegistration,
+          SimboxDeviceRegistration.SimboxDeviceRegistration.of({
+            observe: (item) =>
+              Effect.sync(() => {
+                calls.push(item.threadId);
+              }).pipe(Effect.andThen(Deferred.succeed(attached, undefined))),
+          }),
+        );
+        yield* Effect.gen(function* () {
+          const sink = yield* EventSink.EventSinkV2;
+          const ids = yield* IdAllocator.IdAllocatorV2;
+          const manager = yield* ProviderSessionManager.ProviderSessionManagerV2;
+          const threadId = ThreadId.make(`simbox-hook-${enabled}`);
+          const now = yield* DateTime.now;
+          yield* sink.write({
+            events: [yield* makeThreadCreatedEvent({ idAllocator: ids, threadId, now })],
+          });
+          const providerSessionId = yield* ids.allocate.providerSession({
+            providerInstanceId: modelSelection.instanceId,
+            threadId,
+          });
+          const runtime = yield* manager.open({
+            threadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          });
+          const laterThreadId = ThreadId.make(`simbox-later-thread-${enabled}`);
+          yield* sink.write({
+            events: [
+              yield* makeThreadCreatedEvent({ idAllocator: ids, threadId: laterThreadId, now }),
+            ],
+          });
+          const laterRuntime = yield* manager.open({
+            threadId: laterThreadId,
+            providerSessionId,
+            modelSelection,
+            runtimePolicy,
+          });
+          assert.equal(laterRuntime.providerSessionId, runtime.providerSessionId);
+          assert.equal((yield* Ref.get(state)).openCount, 1);
+          const delivered = yield* Deferred.make<void>();
+          const subscription = yield* runtime.subscribeEvents!;
+          yield* subscription.events.pipe(
+            Stream.runForEach((event) =>
+              event.type === "turn_item.updated" && event.turnItem.threadId === laterThreadId
+                ? Deferred.succeed(delivered, undefined)
+                : Effect.void,
+            ),
+            Effect.forkScoped,
+          );
+          const queue = (yield* Ref.get(state)).eventQueues.get(String(providerSessionId))!;
+          const receipt = {
+            id: "simbox-tool-output" as import("@t3tools/contracts").OrchestrationV2TurnItem["id"],
+            threadId: laterThreadId,
+            runId: null,
+            nodeId: null,
+            providerThreadId: null,
+            providerTurnId: null,
+            nativeItemRef: null,
+            parentItemId: null,
+            ordinal: 0,
+            status: "completed" as const,
+            title: null,
+            startedAt: null,
+            completedAt: null,
+            updatedAt: now,
+            type: "command_execution" as const,
+            input: "simbox sim",
+            output: "[simbox-device:f1234567-1234-1234-1234-123456789abc]",
+          };
+          yield* Queue.offer(queue, {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: { ...receipt, threadId: ThreadId.make("unattached-thread") },
+          });
+          yield* Queue.offer(queue, {
+            type: "turn_item.updated",
+            driver: CODEX_DRIVER,
+            turnItem: receipt,
+          });
+          yield* Deferred.await(delivered);
+          if (enabled) yield* Deferred.await(attached);
+          assert.deepEqual(calls, enabled ? [laterThreadId] : []);
+        }).pipe(
+          Effect.provide(
+            layerTest({
+              state,
+              idleTimeoutMs: 60_000,
+              simboxLayer,
+              serverSettingsLayer: ServerSettings.layerTest({
+                enableDeviceSupport: true,
+                enableAgentDeviceAccess: enabled,
+              }),
+            }),
+          ),
+        );
+      }
     }),
 );
