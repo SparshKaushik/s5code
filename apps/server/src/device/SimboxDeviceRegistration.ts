@@ -49,7 +49,7 @@ export class SimboxDeviceRegistration extends Context.Service<
       item: OrchestrationV2TurnItem,
     ) => Effect.Effect<void, SimboxDeviceRegistrationError>;
   }
->()("s5/device/SimboxDeviceRegistration") {}
+>()("t3/device/SimboxDeviceRegistration") {}
 
 const make = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;

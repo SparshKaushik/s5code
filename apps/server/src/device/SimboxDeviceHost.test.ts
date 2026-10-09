@@ -1,12 +1,15 @@
 import { describe, expect, it } from "@effect/vitest";
 import * as Effect from "effect/Effect";
+import * as Deferred from "effect/Deferred";
+import * as Fiber from "effect/Fiber";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { TestClock } from "effect/testing";
 import * as SimboxHost from "./SimboxDeviceHost.ts";
 
 const registration = (): SimboxHost.Registration => ({
   version: 1,
-  createdAt: Date.now(),
+  createdAt: 0,
   runId: "039dd761-9144-4a9c-a03b-e44c893d73ad",
   tunnelUrl: "https://initial.trycloudflare.com",
   daemonToken: "initial-private-token",
@@ -19,6 +22,32 @@ const registration = (): SimboxHost.Registration => ({
 });
 
 describe("Simbox device host", () => {
+  it.effect("retries a warming hub and returns ready once discovery becomes available", () =>
+    Effect.gen(function* () {
+      const firstAttempt = yield* Deferred.make<void>();
+      let attempts = 0;
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          attempts++;
+          if (attempts === 1) yield* Deferred.succeed(firstAttempt, undefined);
+          return HttpClientResponse.fromWeb(
+            request,
+            new Response("", { status: attempts === 1 ? 503 : 200 }),
+          );
+        }),
+      );
+      const remote = yield* SimboxHost.make({ ...registration(), userToken: null }).pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+      const connecting = yield* remote.host.ensureReady(() => Effect.void).pipe(Effect.forkChild);
+      yield* Deferred.await(firstAttempt);
+      yield* TestClock.adjust("2 seconds");
+      expect((yield* Fiber.join(connecting)).hub.origin).toBe(
+        "https://initial.trycloudflare.com/simbox-device-hub",
+      );
+      expect(attempts).toBe(2);
+    }),
+  );
   it.effect(
     "authenticates the runner, refreshes all connection targets, and detects ended/replaced runs",
     () =>

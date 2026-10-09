@@ -745,7 +745,7 @@ it.effect("failed manual installation leaves lifecycle state unchanged and can b
 describe("automatic Simbox device attachment", () => {
   const registration = (): SimboxHost.Registration => ({
     version: 1,
-    createdAt: Date.now(),
+    createdAt: 0,
     runId: "039dd761-9144-4a9c-a03b-e44c893d73ad",
     tunnelUrl: "https://fixture.trycloudflare.com",
     daemonToken: "private-runner-token",
