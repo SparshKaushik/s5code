@@ -154,15 +154,15 @@ export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registr
       )
       .pipe(
         Effect.flatMap((response) =>
-          response.status === 503
-            ? Effect.fail(
-                new DeviceHost.DeviceHostError({
-                  hostId: id,
-                  step: "starting Simbox device hub",
-                  cause: new Error("Hub starting"),
-                }),
-              )
-            : HttpClientResponse.filterStatusOk(response).pipe(Effect.asVoid),
+          Effect.gen(function* () {
+            if (response.status === 503)
+              return yield* new DeviceHost.DeviceHostError({
+                hostId: id,
+                step: "starting Simbox device hub",
+                cause: new Error("Hub starting"),
+              });
+            yield* HttpClientResponse.filterStatusOk(response);
+          }),
         ),
         Effect.scoped,
         Effect.timeout("15 seconds"),

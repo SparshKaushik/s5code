@@ -1090,7 +1090,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
               return configPath;
             }),
           );
-          const session = simboxHosts.get(input.hostId.slice("simbox-".length))?.agentSession ??
+          const session =
+            simboxHosts.get(input.hostId.slice("simbox-".length))?.agentSession ??
             (yield* agentDeviceSession(input.threadId, input.hostId, input.deviceId).pipe(
               Effect.provideService(Crypto.Crypto, crypto),
             ));
