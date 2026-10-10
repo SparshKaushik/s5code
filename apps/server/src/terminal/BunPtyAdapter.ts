@@ -5,7 +5,7 @@ import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
-import * as PtyAdapter from "./PtyAdapter.ts";
+import * as PtyAdapter from "@t3tools/shared/PtyAdapter";
 
 export class BunPtyUnsupportedPlatformError extends Schema.TaggedError<BunPtyUnsupportedPlatformError>()(
   "BunPtyUnsupportedPlatformError",
