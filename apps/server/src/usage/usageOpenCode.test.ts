@@ -88,18 +88,21 @@ const readAll = (root: string, sinceMs: number) =>
 
 describe("resolveOpenCodeDatabasePath", () => {
   it("honours OPENCODE_DB, then XDG_DATA_HOME, then ~/.local/share", () => {
-    expect(resolveOpenCodeDatabasePath("/home/u", { OPENCODE_DB: "/custom/opencode.db" })).toBe(
-      "/custom/opencode.db",
-    );
-    expect(resolveOpenCodeDatabasePath("/home/u", { XDG_DATA_HOME: "/data" })).toBe(
+    expect(
+      resolveOpenCodeDatabasePath("/home/u", { OPENCODE_DB: "/custom/opencode.db" }, NodePath),
+    ).toBe("/custom/opencode.db");
+    expect(resolveOpenCodeDatabasePath("/home/u", { XDG_DATA_HOME: "/data" }, NodePath)).toBe(
       NodePath.join("/data", "opencode", "opencode.db"),
     );
-    expect(resolveOpenCodeDatabasePath("/home/u", {})).toBe(
+    expect(resolveOpenCodeDatabasePath("/home/u", {}, NodePath)).toBe(
       NodePath.join("/home/u", ".local", "share", "opencode", "opencode.db"),
     );
     // A relative XDG_DATA_HOME is ignored, matching the XDG spec.
-    expect(resolveOpenCodeDatabasePath("/home/u", { XDG_DATA_HOME: "data" })).toBe(
+    expect(resolveOpenCodeDatabasePath("/home/u", { XDG_DATA_HOME: "data" }, NodePath)).toBe(
       NodePath.join("/home/u", ".local", "share", "opencode", "opencode.db"),
+    );
+    expect(resolveOpenCodeDatabasePath("/home/u", { OPENCODE_DB: "~/history.db" }, NodePath)).toBe(
+      NodePath.join("/home/u", "history.db"),
     );
   });
 });

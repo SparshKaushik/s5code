@@ -20,8 +20,6 @@ import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as SqlClient from "effect/sql/SqlClient";
 
-import * as NodePath from "node:path";
-
 import type { OpenCodeSettings } from "../settings.ts";
 
 function object(value: unknown): Record<string, unknown> {
@@ -142,13 +140,14 @@ export interface OpenCodeUsageReadResult {
 export function resolveOpenCodeDatabasePath(
   home: string,
   environment: Readonly<Record<string, string | undefined>>,
+  path: Pick<Path.Path, "join" | "isAbsolute">,
 ): string {
   const override = environment["OPENCODE_DB"]?.trim();
-  if (override) return expandHomePath(override);
+  if (override) return expandHomePath(override, home);
   const dataHome = environment["XDG_DATA_HOME"]?.trim();
   const base =
-    dataHome && NodePath.isAbsolute(dataHome) ? dataHome : NodePath.join(home, ".local", "share");
-  return NodePath.join(base, "opencode", "opencode.db");
+    dataHome && path.isAbsolute(dataHome) ? dataHome : path.join(home, ".local", "share");
+  return path.join(base, "opencode", "opencode.db");
 }
 
 const isNotFound = (cause: PlatformError.PlatformError) => cause.reason._tag === "NotFound";
@@ -342,15 +341,7 @@ const resolveOpenCodeDataDirs = Effect.fn("resolveOpenCodeDataDirs")(function* (
         ?.split(",")
         .map((value) => value.trim())
         .filter(Boolean);
-  const dataHome = environment["XDG_DATA_HOME"]?.trim();
-  const defaults = [
-    path.join(
-      dataHome && path.isAbsolute(dataHome)
-        ? dataHome
-        : path.join(homeDirectory, ".local", "share"),
-      "opencode",
-    ),
-  ];
+  const defaults = [path.dirname(resolveOpenCodeDatabasePath(homeDirectory, environment, path))];
   const canonical = new Set<string>();
   for (const root of roots?.length ? roots : defaults) {
     const resolved = path.resolve(expandHomePath(root, homeDirectory));
