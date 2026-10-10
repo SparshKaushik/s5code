@@ -15,9 +15,14 @@
  * @module usageScanCache
  */
 import type { UsageProviderKind } from "@t3tools/contracts";
+import type {
+  TranscriptUsageFormat,
+  UsageRecord,
+  UsageSpeed,
+} from "@t3tools/provider-core/server/usage";
+import * as Schema from "effect/Schema";
 
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
-import type { CodexScanState, UsageRecord, UsageSpeed } from "./usageTranscripts.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
 // entries would keep serving double-counted records forever.
@@ -41,10 +46,6 @@ export const LEGACY_SCAN_CACHE_FILE_NAME = "usage-scan-cache.json";
 
 /** Serialised as the index into this list. */
 const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
-
-function isSpeed(value: unknown): value is UsageSpeed {
-  return SPEEDS.some((speed) => speed === value);
-}
 
 export interface CachedFile {
   readonly size: number;
@@ -95,8 +96,8 @@ interface SerializedFile {
   readonly o: number;
   readonly gl: number;
   readonly gh: number;
-  /** Codex reducer state at `o`; `null` for stateless providers. */
-  readonly cs: CodexScanState | null;
+  /** The format's encoded reducer state at `o`; `null` for stateless formats. */
+  readonly cs: unknown;
 }
 
 interface SerializedCache {
@@ -162,7 +163,7 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     o: entry.position.resumeOffset,
     gl: entry.position.guardLength,
     gh: entry.position.guardHash,
-    cs: entry.position.codexState,
+    cs: entry.position.state,
   };
 }
 
@@ -227,10 +228,15 @@ function isRecordArray(value: unknown): value is readonly unknown[] {
  * Rebuilds the cache from a parsed document.
  *
  * Anything malformed yields an empty cache rather than an error: a corrupt
- * cache should cost one cold scan, never a broken page.
+ * cache should cost one cold scan, never a broken page. Entries of a provider
+ * without a transcript format in `formats` are dropped.
  */
-export function decodeScanCache(document: unknown): ScanCache {
+export function decodeScanCache(
+  document: unknown,
+  formats: ReadonlyMap<UsageProviderKind, TranscriptUsageFormat<unknown>>,
+): ScanCache {
   const cache: ScanCache = new Map();
+  const isValidState = makeStateValidators(formats);
   if (typeof document !== "object" || document === null) return cache;
 
   const root = document as Partial<SerializedCache>;
@@ -334,16 +340,9 @@ export function decodeScanCache(document: unknown): ScanCache {
     if (typeof raw !== "object" || raw === null) continue;
     const entry = raw as Partial<SerializedFile>;
     if (typeof entry.s !== "number" || typeof entry.m !== "number") continue;
-    if (
-      entry.p !== "claude" &&
-      entry.p !== "codex" &&
-      entry.p !== "grok" &&
-      entry.p !== "cursor" &&
-      entry.p !== "opencode" &&
-      entry.p !== "antigravity" &&
-      entry.p !== "pi"
-    )
-      continue;
+    if (entry.p === undefined) continue;
+    const format = formats.get(entry.p);
+    if (format === undefined) continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
     // Position fields feed byte offsets and a Buffer allocation in the reader,
     // so anything outside their real ranges must reject the entry: a bogus
@@ -363,27 +362,34 @@ export function decodeScanCache(document: unknown): ScanCache {
     ) {
       continue;
     }
-    // v4 Codex records predate service tiers, so they all priced as standard.
-    // Keep them, because the rollout may be gone, but make a live rollout
-    // re-parse whole: no file has size -1, and a zero position cannot resume.
-    const legacyCodex = entry.p === "codex" && version < 5;
-    const codexState = legacyCodex ? null : decodeCodexState(entry.cs);
-    if (codexState === undefined) continue;
+    // v4 records of stateful formats (Codex) predate service tiers, so they
+    // all priced as standard. Keep them, because the rollout may be gone, but
+    // make a live rollout re-parse whole: no file has size -1, and a zero
+    // position cannot resume.
+    const legacy = format.state !== undefined && version < 5;
+    // A corrupt state disqualifies the entry: resuming with it would attach
+    // appended usage to the wrong model or replay fork-copied history.
+    if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
 
-    const provider: UsageProviderKind = entry.p;
+    const provider = entry.p;
     const records = decodeRecords(entry.r, provider);
     const tailRecords = decodeRecords(entry.t, provider);
     if (records === null || tailRecords === null) continue;
 
     cache.set(path, {
-      size: legacyCodex ? -1 : entry.s,
+      size: legacy ? -1 : entry.s,
       mtimeMs: entry.m,
       provider,
       records,
       tailRecords,
-      position: legacyCodex
-        ? { resumeOffset: 0, guardLength: 0, guardHash: 0, codexState: null }
-        : { resumeOffset: entry.o, guardLength: entry.gl, guardHash: entry.gh, codexState },
+      position: legacy
+        ? { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null }
+        : {
+            resumeOffset: entry.o,
+            guardLength: entry.gl,
+            guardHash: entry.gh,
+            state: entry.cs,
+          },
     });
   }
 
@@ -391,35 +397,21 @@ export function decodeScanCache(document: unknown): ScanCache {
 }
 
 /**
- * Validates a persisted Codex reducer state. Returns `undefined` for a corrupt
- * value, which disqualifies the entry: resuming with a bad state would attach
- * appended usage to the wrong model or replay fork-copied history.
+ * Per provider, whether a persisted state is valid: `null`, or one the
+ * format's schema accepts.
  */
-function decodeCodexState(value: unknown): CodexScanState | null | undefined {
-  if (value === null) return null;
-  if (typeof value !== "object") return undefined;
-  const state = value as Partial<CodexScanState>;
-  if (
-    typeof state.model !== "string" ||
-    !isSpeed(state.speed) ||
-    typeof state.sessionId !== "string" ||
-    (state.lastUsageSignature !== null && typeof state.lastUsageSignature !== "string") ||
-    typeof state.sawSessionMeta !== "boolean" ||
-    typeof state.suppressingForkCopies !== "boolean" ||
-    typeof state.forkCopyAnchorMs !== "number" ||
-    !Number.isFinite(state.forkCopyAnchorMs)
-  ) {
-    return undefined;
-  }
-  return {
-    model: state.model,
-    speed: state.speed,
-    sessionId: state.sessionId,
-    lastUsageSignature: state.lastUsageSignature ?? null,
-    sawSessionMeta: state.sawSessionMeta,
-    suppressingForkCopies: state.suppressingForkCopies,
-    forkCopyAnchorMs: state.forkCopyAnchorMs,
-  };
+function makeStateValidators(
+  formats: ReadonlyMap<UsageProviderKind, TranscriptUsageFormat<unknown>>,
+): ReadonlyMap<UsageProviderKind, (value: unknown) => boolean> {
+  return new Map(
+    [...formats].map(([provider, format]) => {
+      const isState = format.state === undefined ? undefined : Schema.is(format.state.schema);
+      return [
+        provider,
+        (value: unknown) => value === null || (isState !== undefined && isState(value)),
+      ] as const;
+    }),
+  );
 }
 
 /** Keeps saved usage after transcript cleanup, until the reporting retention expires. */

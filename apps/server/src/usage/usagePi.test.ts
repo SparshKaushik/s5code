@@ -1,6 +1,7 @@
 import { describe, expect, it } from "@effect/vitest";
 
-import { initialPiScanState, parsePiLine, totalTokens } from "./usageTranscripts.ts";
+import { initialPiScanState, parsePiLine } from "@t3tools/provider-pi/server/usage";
+import { totalTokens } from "@t3tools/provider-core/server/usage";
 
 describe("parsePiLine", () => {
   /** Shaped after a real pi session record. */

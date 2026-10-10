@@ -36,15 +36,10 @@
         "src/provider/*Compat.ts",
       ],
       // Keep the transitive Effect runtime pinned for standalone npm installs.
-      // Native msgpack acceleration and the Vite+ web build prerequisite.
-      // sdk-v2 remains packaged for backwards-compatible installations, but OpenCode 2
-      // now communicates exclusively through the out-of-process client service.
-      "ignoreDependencies": [
-        "@effect/platform-node-shared",
-        "msgpackr-extract",
-        "@opencode-ai/sdk-v2",
-        "@t3tools/web",
-      ],
+      // The Vite+ web build prerequisite.
+      // Native and disk-loaded provider packages stay external to the bundle; the
+      // CLI archive and desktop sidecar stage them from this manifest.
+      "ignoreDependencies": ["@effect/platform-node-shared", "@t3tools/web", "@napi-rs/keyring"],
     },
     "apps/desktop": {
       // Electron loads these bundles by filename rather than importing them.
@@ -85,6 +80,7 @@
         "plugins/*.cjs",
         "scripts/generate-device-stream.mts",
         "src/features/devices/device-stream.browser.ts!",
+        "src/features/browser/preview-stream.browser.ts!",
       ],
       // Fonts are configured as asset paths; Expo autolinks the native packages.
       "ignoreDependencies": [

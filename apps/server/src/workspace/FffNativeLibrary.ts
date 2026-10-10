@@ -32,7 +32,7 @@ import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 /**
  * The env var `fff-node` reads first. Also honoured when set from outside, which
@@ -127,7 +127,7 @@ export const ensureFffNativeLibrary = Effect.fn("ensureFffNativeLibrary")(functi
   /** Overridable so the swallow can be tested off bun, where nothing is embedded. */
   readonly asset?: FffLibraryAsset | undefined;
 }): Effect.fn.Return<void, never, FileSystem.FileSystem | Path.Path> {
-  const env = yield* HostProcessEnvironment;
+  const env = yield* HostProcess.Environment;
   const fileSystem = yield* FileSystem.FileSystem;
 
   // An operator's explicit path wins, and is left exactly as given.

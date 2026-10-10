@@ -24,7 +24,6 @@
         "allowedDuplicatedPackages": ["effect"],
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
         "diagnosticSeverity": {
-          "importFromBarrel": "error",
           "anyUnknownInErrorContext": "error",
           "unsafeEffectTypeAssertion": "error",
           "instanceOfSchema": "error",
@@ -53,7 +52,13 @@
           "globalFetch": "error",
           "globalFetchInEffect": "error",
           "schemaNumber": "off"
-        }
+        },
+        "overrides": [
+          {
+            "include": ["**/*.test.ts", "**/*.test.tsx"],
+            "options": { "diagnosticSeverity": { "preferSchemaOverJson": "off" } }
+          }
+        ]
       }
     ]
   }

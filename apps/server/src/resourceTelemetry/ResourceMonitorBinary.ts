@@ -1,8 +1,4 @@
-import {
-  HostProcessArchitecture,
-  HostProcessEnvironment,
-  HostProcessPlatform,
-} from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Context from "effect/Context";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -106,7 +102,7 @@ function resourceMonitorPlatformKey(
 function resourceMonitorRustTarget(
   platform: NodeJS.Platform,
   architecture: NodeJS.Architecture,
-  linuxLibc: ResourceMonitorLinuxLibc,
+  linuxLibc?: ResourceMonitorLinuxLibc,
 ): string | undefined {
   if (platform === "darwin") {
     return architecture === "arm64"
@@ -139,10 +135,10 @@ export const make = Effect.fn("resourceTelemetry.resourceMonitorBinary.make")(fu
   const config = yield* ServerConfig.ServerConfig;
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const platform = yield* HostProcessPlatform;
-  const architecture = yield* HostProcessArchitecture;
-  const environment = yield* HostProcessEnvironment;
-  const linuxLibc = platform === "linux" ? yield* ResourceMonitorHostLinuxLibc : "gnu";
+  const platform = yield* HostProcess.Platform;
+  const architecture = yield* HostProcess.Architecture;
+  const environment = yield* HostProcess.Environment;
+  const linuxLibc = platform === "linux" ? yield* ResourceMonitorHostLinuxLibc : undefined;
   const executableName = binaryName(platform);
   const platformKey = resourceMonitorPlatformKey(platform, architecture);
   const rustTarget = resourceMonitorRustTarget(platform, architecture, linuxLibc);

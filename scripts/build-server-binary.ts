@@ -15,7 +15,7 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as NodeModule from "node:module";
 
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
@@ -468,8 +468,8 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
   // builds each Linux arch on a matching runner: a cross-compiled arm64 binary
   // can omit @yuuang/ffi-rs-linux-arm64-gnu (pulled in by @ff-labs/fff-node) and
   // still look like a successful compile until --version dies at process start.
-  const hostPlatform = yield* HostProcessPlatform;
-  const hostArch = yield* HostProcessArchitecture;
+  const hostPlatform = yield* HostProcess.Platform;
+  const hostArch = yield* HostProcess.Architecture;
   if (hostPlatform === "linux" && hostArch === options.arch) {
     yield* Effect.log(`[server-binary] Smoke-testing ${outfile} --version...`);
     yield* runCommand("server binary --version", outfile, ["--version"], {

@@ -3,7 +3,7 @@
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Schema from "effect/Schema";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as PtyAdapter from "./PtyAdapter.ts";
 
@@ -118,7 +118,7 @@ class BunPtyProcess implements PtyAdapter.PtyProcess {
 }
 
 export const make = Effect.fn("BunPtyAdapter.make")(function* () {
-  const platform = yield* HostProcessPlatform;
+  const platform = yield* HostProcess.Platform;
   if (platform === "win32") {
     return yield* Effect.die(new BunPtyUnsupportedPlatformError({ platform }));
   }

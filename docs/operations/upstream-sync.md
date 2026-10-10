@@ -72,7 +72,9 @@ These are the things a sync must never regress. Grep for them after a merge:
   self-hosted Clerk/relay URLs, "S5 Code" copy. Files: `apps/desktop`,
   `apps/mobile/app.config.ts`, `apps/web/index.html`, `packages/shared/src/devHome.ts`.
 - **Usage tags** — `UsageModelAlias`, `UsageCatalogModelId`, `userTagged` cost
-  source, `pi`/`opencode` provider kinds, `UsagePricer`. Files:
+  source, `pi`/`opencode` provider kinds, `UsagePricer`. Usage readers now live with their
+  drivers in `packages/provider-pi` and `packages/provider-opencode`; preserve
+  their per-instance roots and gateway metadata when moving them. Files:
   `packages/contracts/src/usage.ts`, `apps/server/src/usage/usagePricing.ts`,
   `apps/web/src/components/usage/`. Preserve gateway-specific models.dev prices,
   aliases, historical Pi usage, and estimated input/cache tokens alongside
