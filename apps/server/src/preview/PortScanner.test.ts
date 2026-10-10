@@ -715,10 +715,10 @@ effectIt.effect(
         return target === undefined ? missing.readLink(path) : Effect.succeed(target);
       },
     });
-    const fetchFn = (() =>
-      Promise.resolve(
-        new Response("hello", { headers: { "content-type": "text/html" } }),
-      )) as typeof globalThis.fetch;
+    const fetchFn = Object.assign(
+      () => Promise.resolve(new Response("hello", { headers: { "content-type": "text/html" } })),
+      { preconnect: () => {} },
+    );
     const layer = layerProbeFailure(
       (input) => {
         lsofSpawns += 1;
