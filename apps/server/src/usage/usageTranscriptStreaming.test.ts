@@ -135,8 +135,9 @@ describe("large usage records", () => {
     expect(result.records).toEqual([
       {
         provider: "pi",
-        model: "anthropic/actual",
-        rateModel: "actual",
+        model: "actual",
+        apiProvider: "anthropic",
+        inputTokensEstimated: false,
         sessionId: "pi-session",
         timestampMs: Date.parse(timestamp),
         totals: {
@@ -148,7 +149,7 @@ describe("large usage records", () => {
         },
         reportedCostUsd: 0.25,
         speed: "standard",
-        dedupeKey: JSON.stringify(["pi", entry.id, timestamp, "anthropic/actual"]),
+        dedupeKey: JSON.stringify(["pi", entry.id, timestamp, "anthropic", "actual"]),
       },
     ]);
   });
