@@ -163,6 +163,12 @@ jobs:
           "${binary[0]}" --version
           "${binary[0]}" --help
 
+      - name: Install Chromium for standalone browser smoke test
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+
+      - name: Verify standalone browser runtime
+        run: node scripts/smoke-standalone-browser.mjs
+
       - name: Verify standalone server startup and V2 persistence
         timeout-minutes: 3
         run: |
