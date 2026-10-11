@@ -14,8 +14,8 @@ import {
 import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NodeSqliteClient from "@t3tools/shared/nodeSqliteClient";
 import * as Effect from "effect/Effect";
-import * as Exit from "effect/Exit";
 import * as FileSystem from "effect/FileSystem";
+import * as Option from "effect/Option";
 import * as Path from "effect/Path";
 import type * as PlatformError from "effect/PlatformError";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -151,14 +151,30 @@ export function resolveOpenCodeDatabasePath(
 }
 
 const isNotFound = (cause: PlatformError.PlatformError) => cause.reason._tag === "NotFound";
+const MESSAGE_PAGE_SIZE = 64;
 
-/** A regular file or directory, never a symlink to one. */
-const entryType = Effect.fn("entryType")(function* (path: string) {
+/** Whether the path is itself a symlink, without following it. */
+const isSymbolicLink = Effect.fnUntraced(function* (path: string) {
   const fileSystem = yield* FileSystem.FileSystem;
-  const link = yield* Effect.exit(fileSystem.readLink(path));
-  if (Exit.isSuccess(link)) return "SymbolicLink" as const;
-  return (yield* fileSystem.stat(path)).type;
+  return yield* Effect.isSuccess(fileSystem.readLink(path));
 });
+
+/** Stat of a regular file or directory; a symlink reports as itself and is never followed. */
+const entryInfo = Effect.fn("entryInfo")(function* (path: string) {
+  const fileSystem = yield* FileSystem.FileSystem;
+  if (yield* isSymbolicLink(path))
+    return { type: "SymbolicLink" as const, mtime: Option.none<Date>() };
+  return yield* fileSystem.stat(path);
+});
+
+/**
+ * Stats run in the libuv thread pool, so a few at a time cut the walk's wall
+ * time without lengthening any event-loop turn.
+ */
+const LEGACY_STAT_CONCURRENCY = 4;
+
+/** Entries stat'd before any is processed, so one huge directory is not held in memory at once. */
+const LEGACY_STAT_BATCH = 256;
 
 /** Reads current SQLite and pre-migration JSON stores without modifying either. */
 export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
@@ -181,8 +197,8 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
     records.push(record);
   };
 
-  const rootIsFile = yield* entryType(root).pipe(
-    Effect.map((type) => type === "File"),
+  const rootIsFile = yield* entryInfo(root).pipe(
+    Effect.map((info) => info.type === "File"),
     Effect.orElseSucceed(() => false),
   );
   const rootDir = rootIsFile ? path.dirname(root) : root;
@@ -194,8 +210,8 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
             names.filter((name) => /^opencode(?:-[a-zA-Z0-9_-]+)?\.db$/.test(name)),
             // One database removed between listing and stat must not hide the rest.
             (name) =>
-              entryType(path.join(rootDir, name)).pipe(
-                Effect.map((type) => type === "File"),
+              entryInfo(path.join(rootDir, name)).pipe(
+                Effect.map((info) => info.type === "File"),
                 Effect.catchTags({
                   PlatformError: (cause) =>
                     isNotFound(cause) ? Effect.succeed(false) : Effect.fail(cause),
@@ -241,30 +257,73 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
         const predicates = table === "session_message" ? ["type = 'assistant'"] : [];
 
         if (timestamp !== "NULL") predicates.push("time_created >= ?");
-        const orderBy = columns.has("seq")
-          ? " ORDER BY session_id, seq"
-          : ` ORDER BY session_id, ${timestamp === "NULL" ? "id" : "time_created"}, id`;
-        const where = predicates.length > 0 ? ` WHERE ${predicates.join(" AND ")}` : "";
-        const rows = yield* sql.unsafe<{
-          readonly id: unknown;
-          readonly session_id: unknown;
-          readonly data: unknown;
-          readonly created: unknown;
-        }>(
-          `SELECT id, session_id, data, ${timestamp} AS created FROM ${table}${where}${orderBy}`,
-          timestamp === "NULL" ? [] : [sinceMs],
-        );
-        for (const [index, row] of rows.entries()) {
-          append(
-            file.records,
-            parseOpenCodeMessage(text(row.data), {
-              kiroContext,
-              id: text(row.id),
-              sessionId: text(row.session_id),
-              ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
-            }),
+        const lastRowId = (yield* sql.unsafe<{ readonly last_row_id: number | null }>(
+          `SELECT MAX(rowid) AS last_row_id FROM ${table}`,
+        ))[0]?.last_row_id;
+        if (lastRowId === null || lastRowId === undefined) continue;
+        // Kiro cache estimates depend on native session order, which can differ
+        // from insertion order after a session import. Page that order too.
+        const orderedBySequence = columns.has("seq");
+        const orderSession = "COALESCE(session_id, '')";
+        const orderSequence = "COALESCE(seq, 0)";
+        let after: { rowId: number; session: string; sequence: number } | undefined;
+        // SqlClient materializes each result with StatementSync.all(). Keep
+        // message bodies in small pages, and exclude rows appended mid-scan.
+        while (true) {
+          const pagePredicates = [
+            ...predicates,
+            "rowid <= ?",
+            ...(after === undefined
+              ? []
+              : [
+                  orderedBySequence
+                    ? `(${orderSession}, ${orderSequence}, rowid) > (?, ?, ?)`
+                    : "rowid > ?",
+                ]),
+          ];
+          const rows = yield* sql.unsafe<{
+            readonly row_id: number;
+            readonly order_session: string;
+            readonly order_sequence: number;
+            readonly id: unknown;
+            readonly session_id: unknown;
+            readonly data: unknown;
+            readonly created: unknown;
+          }>(
+            `SELECT rowid AS row_id, id, session_id, data, ${timestamp} AS created,
+                    ${orderedBySequence ? orderSession : "''"} AS order_session,
+                    ${orderedBySequence ? orderSequence : "0"} AS order_sequence
+             FROM ${table} WHERE ${pagePredicates.join(" AND ")}
+             ORDER BY ${orderedBySequence ? `${orderSession}, ${orderSequence}, ` : ""}rowid LIMIT ${MESSAGE_PAGE_SIZE}`,
+            [
+              ...(timestamp === "NULL" ? [] : [sinceMs]),
+              lastRowId,
+              ...(after === undefined
+                ? []
+                : orderedBySequence
+                  ? [after.session, after.sequence, after.rowId]
+                  : [after.rowId]),
+            ],
           );
-          if (index % 256 === 255) yield* Effect.yieldNow;
+          for (const row of rows) {
+            append(
+              file.records,
+              parseOpenCodeMessage(text(row.data), {
+                kiroContext,
+                id: text(row.id),
+                sessionId: text(row.session_id),
+                ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
+              }),
+            );
+          }
+          if (rows.length < MESSAGE_PAGE_SIZE) break;
+          const last = rows[rows.length - 1]!;
+          after = {
+            rowId: last.row_id,
+            session: last.order_session,
+            sequence: last.order_sequence,
+          };
+          yield* Effect.yieldNow;
         }
       }
     }).pipe(
@@ -284,33 +343,63 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
   while (directories.length > 0) {
     const directory = directories.pop()!;
     yield* Effect.gen(function* () {
-      for (const name of yield* fileSystem.readDirectory(directory)) {
-        const entry = path.join(directory, name);
-        const type = yield* entryType(entry).pipe(
-          Effect.catchTags({
-            PlatformError: (cause) =>
-              isNotFound(cause) ? Effect.succeed(null) : Effect.fail(cause),
-          }),
-        );
-        if (type === "Directory") {
-          directories.push(entry);
-        } else if (type === "File" && name.endsWith(".json")) {
-          found = true;
-          const id = name.slice(0, -5);
-          if (seen.has(`opencode:${id}`)) continue;
-          const file = { path: entry, records: [] as UsageRecord[] };
-          files.push(file);
-          yield* fileSystem.readFileString(entry).pipe(
-            Effect.map((source) =>
-              append(file.records, parseOpenCodeMessage(source, { id, kiroContext })),
+      const names = yield* fileSystem.readDirectory(directory);
+      for (let start = 0; start < names.length; start += LEGACY_STAT_BATCH) {
+        const batch = names.slice(start, start + LEGACY_STAT_BATCH);
+        const entries = batch.map((name) => path.join(directory, name));
+        // `stat` follows symlinks and `readLink` fails, expensively, for
+        // everything else. Stat a batch, then ask whether an entry is a symlink
+        // only where the answer changes the result.
+        const infos = yield* Effect.forEach(
+          entries,
+          (entry) =>
+            fileSystem.stat(entry).pipe(
+              Effect.catchTags({
+                // A symlink whose target cannot be stat'd is skipped, not an error.
+                PlatformError: (cause) =>
+                  isNotFound(cause)
+                    ? Effect.succeed(null)
+                    : isSymbolicLink(entry).pipe(
+                        Effect.flatMap((link) =>
+                          link ? Effect.succeed(null) : Effect.fail(cause),
+                        ),
+                      ),
+              }),
+              Effect.exit,
             ),
-            Effect.catchTags({
-              PlatformError: (cause) => {
-                if (!isNotFound(cause)) error = true;
-                return Effect.void;
-              },
-            }),
-          );
+          { concurrency: LEGACY_STAT_CONCURRENCY },
+        );
+        for (const [index, name] of batch.entries()) {
+          const entry = entries[index]!;
+          const info = yield* infos[index]!;
+          if (info?.type === "Directory") {
+            if (!(yield* isSymbolicLink(entry))) directories.push(entry);
+          } else if (info?.type === "File" && name.endsWith(".json")) {
+            const id = name.slice(0, -5);
+            // A message cannot be created after its file was last written, so a
+            // file untouched since the window opened holds nothing in range.
+            const skip =
+              seen.has(`opencode:${id}`) ||
+              Option.exists(info.mtime, (mtime) => mtime.getTime() < sinceMs);
+            // A skipped file only matters as proof that the store exists.
+            if (found && skip) continue;
+            if (yield* isSymbolicLink(entry)) continue;
+            found = true;
+            if (skip) continue;
+            const file = { path: entry, records: [] as UsageRecord[] };
+            files.push(file);
+            yield* fileSystem.readFileString(entry).pipe(
+              Effect.map((source) =>
+                append(file.records, parseOpenCodeMessage(source, { id, kiroContext })),
+              ),
+              Effect.catchTags({
+                PlatformError: (cause) => {
+                  if (!isNotFound(cause)) error = true;
+                  return Effect.void;
+                },
+              }),
+            );
+          }
         }
       }
     }).pipe(

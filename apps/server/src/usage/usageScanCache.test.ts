@@ -67,7 +67,7 @@ describe("scan cache round trip", () => {
         "/a.jsonl",
         100,
         [
-          record({ inputTokensEstimated: true }),
+          record({ inputTokensEstimated: true, rateModel: "priced-model" }),
           record({ dedupeKey: "msg_2:", model: "claude-opus-5-5", speed: "fast" }),
         ],
       ],
@@ -192,6 +192,28 @@ describe("scan cache round trip", () => {
     ]);
     expect(decoded.get("/claude.jsonl")?.records[0]?.speed).toBe("fast");
     expect(decodeScanCache(encodeScanCache(decoded), TEST_FORMAT_MAP)).toEqual(decoded);
+  });
+
+  it("keeps saved Pi usage while forcing live transcripts to include newly supported auxiliary costs", () => {
+    const original = cacheWith([
+      ["/pi.jsonl", 100, [record({ provider: "pi", apiProvider: "kiro" })]],
+    ]);
+    const entry = original.get("/pi.jsonl")!;
+    original.set("/pi.jsonl", {
+      ...entry,
+      provider: "pi",
+      position: position({ state: { sessionId: "session-a", kiroContextTokensByModel: {} } }),
+    });
+    const encoded = encodeScanCache(original);
+    const { pf: _piFormat, ...oldFile } = encoded.files["/pi.jsonl"]!;
+    const decoded = decodeScanCache(
+      { ...encoded, files: { "/pi.jsonl": oldFile } },
+      TEST_FORMAT_MAP,
+    ).get("/pi.jsonl");
+    expect(decoded?.records).toEqual(original.get("/pi.jsonl")?.records);
+    expect(decoded?.size).toBe(-1);
+    expect(decoded?.position.resumeOffset).toBe(0);
+    expect(decodeScanCache(encoded, TEST_FORMAT_MAP)).toEqual(original);
   });
 
   it("drops an entry whose persisted parse state is corrupt", () => {

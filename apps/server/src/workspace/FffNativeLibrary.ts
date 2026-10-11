@@ -17,7 +17,7 @@
  * virtual filesystem is not a real filesystem, and `dlopen("/$bunfs/root/...")`
  * fails with ENOENT because the dynamic loader is the kernel's, not bun's. So the
  * library has to be materialised on disk once, and `fff-node` has to be told
- * where. The patch in `patches/@ff-labs__fff-node@0.9.4.patch` gives
+ * where. The patch in `patches/@ff-labs__fff-node@0.11.0.patch` gives
  * `findBinary()` an explicit `T3CODE_FFF_NATIVE_LIB_PATH` override for exactly
  * this, checked before every other heuristic.
  *

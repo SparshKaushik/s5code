@@ -1,4 +1,4 @@
-/** Pi transcript usage, including gateway pricing and estimated Kiro context. */
+/** Native Pi usage, including auxiliary costs, gateway pricing and estimated Kiro context. */
 import type { PiSettings } from "../settings.ts";
 import {
   parseTimestampMs,
@@ -61,12 +61,21 @@ function parsePiRecord(parsed: unknown, state: PiScanState): UsageRecord | null 
     if (typeof record["id"] === "string") state.sessionId = record["id"];
     return null;
   }
-  if (record["type"] !== "message") return null;
+  const type = record["type"];
+  if (type !== "message" && type !== "usage" && type !== "compaction" && type !== "branch_summary")
+    return null;
 
-  const message = record["message"];
+  const message = type === "message" ? record["message"] : record;
   if (typeof message !== "object" || message === null) return null;
   const messageRecord = message as Record<string, unknown>;
-  if (messageRecord["role"] !== "assistant") return null;
+  if (
+    type === "message" &&
+    messageRecord["role"] !== "assistant" &&
+    messageRecord["role"] !== "toolResult"
+  )
+    return null;
+  const auxiliary =
+    type === "compaction" || type === "branch_summary" || messageRecord["role"] === "toolResult";
 
   const usage = messageRecord["usage"];
   if (typeof usage !== "object" || usage === null) return null;
@@ -75,7 +84,14 @@ function parsePiRecord(parsed: unknown, state: PiScanState): UsageRecord | null 
   const timestampMs = parseTimestampMs(record["timestamp"]);
   if (timestampMs === null) return null;
 
-  const model = typeof messageRecord["model"] === "string" ? messageRecord["model"] : "";
+  const model = auxiliary
+    ? "Tools/summaries"
+    : typeof messageRecord["responseModel"] === "string" &&
+        messageRecord["responseModel"].length > 0
+      ? messageRecord["responseModel"]
+      : typeof messageRecord["model"] === "string"
+        ? messageRecord["model"]
+        : "";
   if (model.length === 0) return null;
 
   const outputTokens = tokenCount(usageRecord["output"]);
@@ -113,13 +129,13 @@ function parsePiRecord(parsed: unknown, state: PiScanState): UsageRecord | null 
     reasoningTokens: Math.min(outputTokens, tokenCount(usageRecord["reasoning"])),
   };
 
-  if (totalTokens(totals) === 0) return null;
-
   const cost = usageRecord["cost"];
   const reportedCostUsd =
     typeof cost === "object" && cost !== null
       ? finitePositive((cost as Record<string, unknown>)["total"])
       : null;
+
+  if (totalTokens(totals) === 0 && reportedCostUsd === null) return null;
 
   const responseId =
     typeof messageRecord["responseId"] === "string" ? messageRecord["responseId"] : null;
@@ -136,7 +152,11 @@ function parsePiRecord(parsed: unknown, state: PiScanState): UsageRecord | null 
     speed: "standard",
     // The upstream response id survives a session fork, which copies messages
     // into a new file. pi's own message ids are short and only unique per file.
-    dedupeKey: responseId,
+    dedupeKey:
+      responseId ??
+      (typeof record["id"] === "string"
+        ? JSON.stringify(["pi", record["id"], record["timestamp"], apiProvider, model])
+        : null),
   };
 }
 
@@ -147,7 +167,17 @@ export const piUsageFormat: TranscriptUsageFormat<PiScanState> = {
     type: true,
     id: true,
     timestamp: true,
-    message: { role: true, model: true, provider: true, usage: true, responseId: true },
+    provider: true,
+    model: true,
+    usage: true,
+    message: {
+      role: true,
+      model: true,
+      responseModel: true,
+      provider: true,
+      usage: true,
+      responseId: true,
+    },
   },
   mightCarryUsage: (line) => line.includes('"usage"') || line.includes('"session"'),
   parseLine: (line, state) => orEmpty(parsePiLine(line, state)),
@@ -167,6 +197,8 @@ export const piUsageReader: ProviderUsageReader<PiSettings, Path.Path> = {
   directories: Effect.fn("piUsageReader.directories")(function* ({ environment }) {
     const path = yield* Path.Path;
     const home = yield* HostProcess.HomeDirectory;
+    const sessionDir = environment.PI_CODING_AGENT_SESSION_DIR?.trim();
+    if (sessionDir) return [{ dir: path.resolve(expandHomePath(sessionDir, home)) }];
     const agentDir = environment.PI_CODING_AGENT_DIR?.trim() || path.join(home, ".pi", "agent");
     return [{ dir: path.resolve(expandHomePath(agentDir, home), "sessions") }];
   }),

@@ -1,0 +1,63 @@
+diff --git a/package.json b/package.json
+--- a/package.json
++++ b/package.json
+@@ -11,7 +11,7 @@
+     ".": {
+       "types": "./dist/index.d.ts",
+       "import": "./dist/index.js",
+-      "require": "./dist/index.cjs",
++      "require": "./dist/index.js",
+       "default": "./dist/index.js"
+     },
+     "./package.json": "./package.json"
+diff --git a/dist/index.js b/dist/index.js
+--- a/dist/index.js
++++ b/dist/index.js
+@@ -1,7 +1,7 @@
+ // src/binary.ts
+ import { existsSync, readFileSync } from "fs";
+ import { createRequire } from "module";
+-import { dirname, join } from "path";
++import { dirname, join, sep } from "path";
+ import { fileURLToPath } from "url";
+ 
+ // src/platform.ts
+@@ -120,6 +120,16 @@
+ function binaryExists() {
+   return findBinary() !== null;
+ }
++function resolveUnpackedAsarPath(binaryPath) {
++  const pathSegments = binaryPath.split(sep);
++  const asarIndex = pathSegments.findLastIndex((segment) => segment.endsWith(".asar"));
++  if (asarIndex === -1) {
++    return binaryPath;
++  }
++  pathSegments[asarIndex] = `${pathSegments[asarIndex]}.unpacked`;
++  const unpackedPath = pathSegments.join(sep);
++  return existsSync(unpackedPath) ? unpackedPath : binaryPath;
++}
+ function resolveFromNpmPackage() {
+   const packageName = getNpmPackageName();
+   try {
+@@ -128,7 +138,7 @@
+     const packageDir = dirname(packageJsonPath);
+     const binaryPath = join(packageDir, getLibFilename());
+     if (existsSync(binaryPath)) {
+-      return binaryPath;
++      return resolveUnpackedAsarPath(binaryPath);
+     }
+   } catch {
+   }
+@@ -154,6 +164,12 @@
+   return existsSync(join(workspaceRoot, "Cargo.toml"));
+ }
+ function findBinary() {
++  // Compiled S5 servers extract this library to a real filesystem path.
++  const overridePath = process.env.T3CODE_FFF_NATIVE_LIB_PATH;
++  if (overridePath && existsSync(overridePath)) {
++    return overridePath;
++  }
++
+   if (isDevWorkspace()) {
+     const binPath = join(getPackageDir(), "bin", getLibFilename());
+     if (existsSync(binPath)) return binPath;

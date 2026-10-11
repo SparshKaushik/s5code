@@ -83,6 +83,8 @@ type SerializedRecord = readonly [
   speed: number,
   inputTokensEstimated: boolean,
   apiProviderIndex: number,
+  /** Optional trailing field keeps existing cache rows readable. */
+  rateModelIndex?: number | null,
 ];
 
 interface SerializedFile {
@@ -98,6 +100,8 @@ interface SerializedFile {
   readonly gh: number;
   /** The format's encoded reducer state at `o`; `null` for stateless formats. */
   readonly cs: unknown;
+  /** Pi v1 includes native auxiliary usage and entry-ID deduplication. */
+  readonly pf?: 1;
 }
 
 interface SerializedCache {
@@ -153,6 +157,9 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     SPEEDS.indexOf(record.speed),
     record.inputTokensEstimated,
     intern(tables.apiProviders, tables.apiProviderIndex, record.apiProvider),
+    record.rateModel === undefined
+      ? null
+      : intern(tables.models, tables.modelIndex, record.rateModel),
   ];
   return {
     s: entry.size,
@@ -164,6 +171,7 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     gl: entry.position.guardLength,
     gh: entry.position.guardHash,
     cs: entry.position.state,
+    ...(entry.provider === "pi" ? { pf: 1 as const } : {}),
   };
 }
 
@@ -296,10 +304,13 @@ export function decodeScanCache(
       const speedIndex = legacyFork ? row[12] : row[10];
       const inputTokensEstimated = legacyFork ? row[10] : row[11];
       const apiProviderIndex = legacyFork ? row[11] : row[12];
+      const rateModelIndex = root.apiProviders === undefined ? row[11] : row[13];
       const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
+      const rateModel = typeof rateModelIndex === "number" ? models[rateModelIndex] : undefined;
       if (
+        (rateModelIndex != null && rateModel === undefined) ||
         typeof timestampMs !== "number" ||
         !Number.isFinite(timestampMs) ||
         model === undefined ||
@@ -317,6 +328,7 @@ export function decodeScanCache(
         provider,
         timestampMs,
         model,
+        ...(rateModel === undefined ? {} : { rateModel }),
         apiProvider:
           (typeof apiProviderIndex === "number" ? apiProviders[apiProviderIndex] : undefined) ?? "",
         sessionId: (typeof sessionIndex === "number" ? sessions[sessionIndex] : undefined) ?? "",
@@ -365,8 +377,10 @@ export function decodeScanCache(
     // v4 records of stateful formats (Codex) predate service tiers, so they
     // all priced as standard. Keep them, because the rollout may be gone, but
     // make a live rollout re-parse whole: no file has size -1, and a zero
-    // position cannot resume.
-    const legacy = format.state !== undefined && version < 5;
+    // position cannot resume. Pi entries from before auxiliary usage support
+    // likewise keep saved totals, but live transcripts must be read again.
+    const legacy =
+      (format.state !== undefined && version < 5) || (entry.p === "pi" && entry.pf !== 1);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;

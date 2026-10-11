@@ -597,6 +597,12 @@ it.layer(layerTest)("checkOpenCodeProviderStatus", (it) => {
         Effect.succeed(
           ["openai", "opencode", "antigravity"].map((providerID) => ({
             providerID,
+            providerName:
+              providerID === "openai"
+                ? "OpenAI"
+                : providerID === "opencode"
+                  ? "OpenCode Zen"
+                  : "Antigravity",
             id: "shared-model",
             name: "Shared Model",
             variants: [],
@@ -727,6 +733,47 @@ it.layer(layerTest)("checkOpenCodeProviderStatus with configured server URL", (i
         "full-access",
       ]);
       NodeAssert.equal(runtimeMock.state.sdkClientInputs.length, 0);
+    }),
+  );
+
+  it.effect("labels each model with the sub-provider that listed it", () =>
+    Effect.gen(function* () {
+      // Names come from the server's provider list; see openCode2Catalog.test.ts
+      // for reading that list itself.
+      const snapshot = yield* checkProvider(
+        makeOpenCodeSettings({
+          serverUrl: "http://127.0.0.1:9999",
+          serverPassword: "secret-password",
+        }),
+        process.cwd(),
+        undefined,
+        replayOpenCodeServer(OPENCODE_2_RESPONSES, "secret-password"),
+        Effect.succeed([
+          {
+            providerID: "openai",
+            id: "gpt-5.4",
+            name: "GPT-5.4",
+            providerName: "OpenAI",
+            variants: [],
+          },
+          {
+            providerID: "custom",
+            id: "m1",
+            name: "Custom 1",
+            providerName: "OpenCode",
+            variants: [],
+          },
+          { providerID: "anthropic", id: "claude", name: "Claude", variants: [] },
+        ]),
+      );
+
+      const subProviderFor = (slug: string) =>
+        snapshot.models.find((model) => model.slug === slug)?.subProvider;
+      NodeAssert.equal(subProviderFor("openai/gpt-5.4"), "OpenAI");
+      // A provider called plain "OpenCode" would repeat the instance name.
+      NodeAssert.equal(subProviderFor("custom/m1"), undefined);
+      // The id stands in until the server names its providers.
+      NodeAssert.equal(subProviderFor("anthropic/claude"), "anthropic");
     }),
   );
 

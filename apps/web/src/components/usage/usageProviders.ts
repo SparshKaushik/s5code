@@ -36,8 +36,8 @@ export const PROVIDER_PRESENTATION = {
     driverKind: ProviderDriverKind.make("antigravity"),
   },
   pi: {
-    label: "pi",
-    color: "#8b7cf6",
+    label: "Pi",
+    color: "#4d9f8a",
     driverKind: ProviderDriverKind.make("pi"),
   },
 } satisfies Record<UsageProviderKind, UsageProviderPresentation>;

@@ -216,6 +216,36 @@ describe("readOpenCodeUsage", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.live(
+    "keeps Kiro session order across bounded pages even when rows were imported backwards",
+    () =>
+      Effect.gen(function* () {
+        seedDatabase(
+          NodePath.join(dir, "opencode.db"),
+          Array.from({ length: 130 }, (_, index) => {
+            const seq = 130 - index;
+            return {
+              id: `msg_${seq}`,
+              sessionId: "ses_k",
+              seq,
+              data: assistantData({
+                model: { id: "claude-sonnet-5", providerID: "kiro" },
+                tokens: { input: seq * 1_000, output: 10, cache: { read: 0, write: 0 } },
+              }),
+            };
+          }),
+        );
+        const records = yield* readAll(dir, SINCE);
+        expect(records).toHaveLength(130);
+        expect(
+          records.every(
+            (record) => record.inputTokensEstimated && record.totals.uncachedInputTokens === 1_000,
+          ),
+        ).toBe(true);
+        expect(records[129]?.totals.cachedInputTokens).toBe(129_000);
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.live("only reads messages inside the window", () =>
     Effect.gen(function* () {
       seedDatabase(NodePath.join(dir, "opencode.db"), [
