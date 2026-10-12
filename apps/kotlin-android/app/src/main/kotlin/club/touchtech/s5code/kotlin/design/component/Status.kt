@@ -84,6 +84,11 @@ fun statusPresentation(status: ThreadStatus): S5StatusPresentation {
                 Icons.Rounded.ErrorOutline,
                 S5MaterialShapes.failed(),
             )
+        ThreadStatus.Limited ->
+            S5StatusPresentation(
+                "Limited", colors.failedContainer, colors.onFailedContainer,
+                colors.failed, colors.onFailed, Icons.Rounded.HourglassEmpty, S5MaterialShapes.failed(),
+            )
         ThreadStatus.Settled ->
             S5StatusPresentation(
                 "Settled",

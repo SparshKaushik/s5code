@@ -32,6 +32,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
@@ -212,9 +213,18 @@ fun UserInputCard(
     onRemoveAttachment: (String, QuestionAttachment) -> Unit = { _, _ -> },
     onRetryAttachment: (String, QuestionAttachment) -> Unit = { _, _ -> },
 ) {
-    var textAnswers by remember(request.id) { mutableStateOf(emptyMap<String, String>()) }
+    var textAnswers by remember(request.id) {
+        mutableStateOf(request.questions.filter { it.allowCustomAnswer && it.initialAnswer != null }
+            .associate { it.id to it.initialAnswer!! })
+    }
     var selectedAnswers by
         remember(request.id) { mutableStateOf(emptyMap<String, Set<String>>()) }
+    var seededQuestions by remember(request.id) { mutableStateOf(request.questions.map { it.id }.toSet()) }
+    LaunchedEffect(request.questions) {
+        request.questions.filter { it.id !in seededQuestions && it.allowCustomAnswer && it.initialAnswer != null }
+            .forEach { question -> textAnswers = textAnswers + (question.id to question.initialAnswer!!) }
+        seededQuestions = seededQuestions + request.questions.map { it.id }
+    }
     val submission =
         remember(request, textAnswers, selectedAnswers, attachments, preparingQuestions) {
             buildUserInputSubmission(request, textAnswers, selectedAnswers, attachments, preparingQuestions)
@@ -461,8 +471,10 @@ private fun resolveUserInputAnswer(
     selectedAnswers: Map<String, Set<String>>,
     attachmentCount: Int,
 ): UserInputAnswer? {
-    val custom = textAnswers[question.id]?.trim().orEmpty()
-    if (question.allowCustomAnswer && custom.isNotEmpty()) {
+    val raw = textAnswers[question.id]
+    val custom = if (question.initialAnswer != null) raw else raw?.trim()
+    if (question.allowCustomAnswer && custom != null &&
+        (custom.isNotEmpty() || question.initialAnswer != null)) {
         return UserInputAnswer.Text(custom)
     }
     val selected =

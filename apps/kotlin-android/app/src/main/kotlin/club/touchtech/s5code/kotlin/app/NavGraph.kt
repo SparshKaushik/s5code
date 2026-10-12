@@ -444,6 +444,14 @@ fun S5NavGraph(
                 confirmController = confirmController,
             )
         }
+        composable(Routes.ThreadBrowser, arguments = listOf(environmentArg, threadArg)) { entry ->
+            club.touchtech.s5code.kotlin.feature.browser.BrowserScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                threadId = entry.arguments?.getString("threadId").orEmpty(),
+                onBack = navController::popBackStack,
+            )
+        }
         composable(Routes.ThreadFiles, arguments = listOf(environmentArg, threadArg)) { entry ->
             val environmentId = entry.arguments?.getString("environmentId").orEmpty()
             val threadId = entry.arguments?.getString("threadId").orEmpty()

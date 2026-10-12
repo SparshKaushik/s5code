@@ -108,6 +108,7 @@ data class Environment(
  * whether it can offer settle or snooze at all.
  */
 data class EnvironmentCapabilities(
+    val serverBrowser: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
     val threadPinning: Boolean = false,
@@ -136,6 +137,11 @@ data class EnvironmentCapabilities(
     val sessionAuthenticated: Boolean = false,
     /** The session token carries `orchestration:operate`. */
     val sessionCanOperate: Boolean = false,
+    val sessionCanMaintain: Boolean = false,
+    val sessionCanWriteSettings: Boolean = false,
+    val sessionCanManageProviders: Boolean = false,
+    val sessionPermissions: List<String>? = null,
+    val sessionExpiresAt: String? = null,
     /**
      * `serverSelfUpdate`: the update path this server can take
      * ("boot-service" | "binary" | "respawn" | "desktop-managed"), or null when
@@ -241,6 +247,7 @@ enum class ThreadStatus {
     AwaitingApproval,
     AwaitingInput,
     Failed,
+    Limited,
     Idle,
     Settled,
     Snoozed,
@@ -491,6 +498,8 @@ sealed interface FeedEntry {
          */
         val contextRecords: Map<String, ContextRecordLabel> = emptyMap(),
         override val atMillis: Long = 0,
+        /** Automation, Agent, or S5 Code for a user-role message sent on the user's behalf. */
+        val attribution: String? = null,
     ) : FeedEntry
 
     /** Display slice of one `ComposerContextRecord`. */
@@ -659,6 +668,16 @@ sealed interface FeedEntry {
 
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
 
+    data class McpApp(
+        override val id: String,
+        val itemId: String,
+        val sourceThreadId: String,
+        val app: kotlinx.serialization.json.JsonObject,
+        val revision: String,
+        override val turnId: String? = null,
+        override val atMillis: Long = 0,
+    ) : FeedEntry
+
     /**
      * A `secret_request` turn item: the agent asked the user for a credential
      * that never passes through the transcript. The row carries only what was
@@ -780,6 +799,8 @@ data class UserInputQuestion(
      * custom-answer field. True or absent both allow it.
      */
     val allowCustomAnswer: Boolean = true,
+    /** Provider editor contents; an explicitly empty answer is valid. */
+    val initialAnswer: String? = null,
 )
 
 /**
@@ -906,6 +927,8 @@ data class PendingBackgroundTask(
     val description: String? = null,
     val taskId: String? = null,
 )
+
+data class PendingChildInput(val threadId: String, val title: String, val approval: Boolean)
 
 /**
  * The loaded window's upper edge, from `OrchestrationThreadDetailPage` in
@@ -1320,6 +1343,8 @@ data class ProviderStatus(
 data class ProviderCatalogEntry(
     val instance: ProviderInstance,
     val models: List<String>,
+    val hiddenModels: Set<String> = emptySet(),
+    val updateRequiredModels: List<String> = emptyList(),
     /**
      * Option descriptors per model slug, as the server advertises them. Kept
      * beside the slugs rather than replacing them because every caller but the
@@ -1357,9 +1382,7 @@ data class ProviderCatalogEntry(
 /**
  * A model the user starred in the picker.
  *
- * Client-local by design: the other clients keep `favorites` in their own
- * settings too, so nothing crosses the server and a favorite can point at an
- * instance only this machine knows about. [instanceId] is the routing key, same
+ * Shared through the connected environment's settings. [instanceId] is the routing key, same
  * as [ProviderInstance.instanceId] — a favorite for an instance the catalog no
  * longer lists simply does not render.
  */
@@ -1406,6 +1429,7 @@ data class UsageLimitSourceAccount(
     val email: String?,
     val plan: String?,
     val limits: ProviderUsageLimits,
+    val workspaceId: String? = null,
 )
 
 /** `UsageLimitSourceSnapshot`: one configured source's published read. */

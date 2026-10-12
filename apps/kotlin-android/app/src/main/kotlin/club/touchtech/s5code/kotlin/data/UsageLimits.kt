@@ -75,6 +75,7 @@ private fun UsageLimitSourceDto.toModel(): UsageLimitSource =
                     email = account.email,
                     plan = account.plan,
                     limits = account.usageLimits.toModel(),
+                    workspaceId = account.workspaceId,
                 )
             },
     )
@@ -110,8 +111,10 @@ fun isUsageLimitsCommand(prompt: String): Boolean =
 
 /* ── accounts ─────────────────────────────────────────────────────────── */
 
-private fun accountKey(driver: String, email: String?): String? =
-    email?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }?.let { "$driver:$it" }
+internal fun accountKey(driver: String, email: String?, workspaceId: String? = null): String? =
+    email?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }?.let {
+        "$driver:$it" + workspaceId?.takeIf(String::isNotBlank)?.let { workspace -> ":workspace:$workspace" }.orEmpty()
+    }
 
 /** `limitsNotice`: the one-line status under a provider heading. */
 internal fun limitsNotice(limits: ProviderUsageLimits): String? =
@@ -196,7 +199,7 @@ fun collectLimitAccounts(presentations: List<LimitEnvironmentPresentation>): Lis
             val model = limits.toModel()
             if (limitsNotice(model) != null) continue
             merge(
-                accountKey(provider.driver, provider.auth.email)
+                accountKey(provider.driver, provider.auth.email, provider.auth.workspaceId)
                     ?: "${presentation.environmentId.value}:${provider.instanceId}",
                 Pending(
                     presentation.environmentId,
@@ -231,7 +234,7 @@ fun collectLimitAccounts(presentations: List<LimitEnvironmentPresentation>): Lis
             for (account in source.accounts) {
                 if (limitsNotice(account.limits) != null) continue
                 merge(
-                    accountKey(account.driver, account.email) ?: "${source.id}:${account.id}",
+                    accountKey(account.driver, account.email, account.workspaceId) ?: "${source.id}:${account.id}",
                     Pending(
                         presentation.environmentId,
                         LimitAccount(

@@ -55,6 +55,7 @@ data class UsageLimitSourceAccountDto(
     val email: String? = null,
     val plan: String? = null,
     val usageLimits: UsageLimitsDto = UsageLimitsDto(),
+    val workspaceId: String? = null,
 )
 
 /**

@@ -81,7 +81,7 @@ object Commands {
         put("createdBy", "user")
         put("creationSource", "mobile")
         put("messageId", messageId)
-        put("text", text)
+        put("text", club.touchtech.s5code.kotlin.feature.thread.composerMessageText(text, attachments.isNotEmpty()))
         if (contextRecords.isNotEmpty()) {
             putJsonObject("context") {
                 put("version", 1)
@@ -125,7 +125,7 @@ object Commands {
         put("creationSource", "mobile")
         putJsonObject("initialMessage") {
             put("messageId", messageId)
-            put("text", text)
+            put("text", club.touchtech.s5code.kotlin.feature.thread.composerMessageText(text, attachments.isNotEmpty()))
             if (contextRecords.isNotEmpty()) {
                 putJsonObject("context") {
                     put("version", 1)

@@ -591,6 +591,7 @@ private fun resolvedWorktreeRules(
 ): ServerStorageCleanupDto {
     val rules = (cleanup?.get("rules") as? JsonObject) ?: return storage
     return ServerStorageCleanupDto(
+        worktreeKeepWhen = rules.v2String("worktreeKeepWhen") ?: storage.worktreeKeepWhen,
         worktreeAfterDays = (rules["worktreeAfterDays"] as? JsonPrimitive)?.intOrNull,
         worktreeOnMerge =
             (rules["worktreeOnMerge"] as? JsonPrimitive)?.booleanOrNull
@@ -674,6 +675,7 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
                                             putJsonObject("worktreeCleanup") {
                                                 put("mode", "custom")
                                                 putJsonObject("rules") {
+                                                    put("worktreeKeepWhen", rules.worktreeKeepWhen)
                                                     put("worktreeOnMerge", rules.worktreeOnMerge)
                                                     put("worktreeOnDelete", rules.worktreeOnDelete)
                                                     put("worktreeUnchanged", rules.worktreeUnchanged)
@@ -690,6 +692,16 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
                         },
                     )
                     if (mode != "off") {
+                        ServerSettingChoices(
+                            title = "Keep worktrees with",
+                            choices = listOf(
+                                ServerChoice("uncommitted-changes", "Uncommitted changes", "Keep tracked edits and non-ignored new files."),
+                                ServerChoice("tracked-changes", "Tracked changes", "Keep edits to files already tracked by Git."),
+                                ServerChoice("any-local-files", "Any local files", "Also keep ignored files such as build output."),
+                            ),
+                            current = rules.worktreeKeepWhen,
+                            onSelect = { value -> value?.let { writeWorktreePatch("worktreeKeepWhen", JsonPrimitive(it)) } },
+                        )
                         S5RowGroup(title = "Worktree rules") {
                             val rows = 3
                             var position = 0

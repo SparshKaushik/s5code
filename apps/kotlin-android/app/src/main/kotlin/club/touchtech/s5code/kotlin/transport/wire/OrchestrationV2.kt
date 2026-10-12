@@ -42,6 +42,7 @@ data class V2ThreadSnapshotDto(
     val historyCursor: String? = null,
     val hasMoreHistory: Boolean = false,
     val latestLocalTurnOrdinal: Long? = null,
+    val turnItemsOmitLocalVisible: Boolean = false,
 )
 
 @Serializable
@@ -54,6 +55,7 @@ data class V2ThreadStreamDto(
     val historyCursor: String? = null,
     val hasMoreHistory: Boolean = false,
     val latestLocalTurnOrdinal: Long? = null,
+    val turnItemsOmitLocalVisible: Boolean = false,
 )
 
 @Serializable

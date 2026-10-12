@@ -84,7 +84,7 @@ data class RuntimePreferences(
     val followUpBehavior: String = "queue",
     val themeMode: S5ThemeMode = S5ThemeMode.System,
     val colorTheme: S5ColorTheme = S5ColorTheme.Default,
-    /** Starred models in picker order. Client-local, same as the other clients. */
+    /** Legacy favorites, retained locally until the connected environment migrates them. */
     val modelFavorites: List<ModelFavorite> = emptyList(),
     val projectGrouping: ProjectGrouping = ProjectGrouping.Repository,
     val threadSort: ThreadSort = ThreadSort.Recent,

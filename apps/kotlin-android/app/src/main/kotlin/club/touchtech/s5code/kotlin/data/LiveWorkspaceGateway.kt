@@ -57,6 +57,8 @@ import club.touchtech.s5code.kotlin.transport.EnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.DirectEnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.EnvironmentSession
 import club.touchtech.s5code.kotlin.transport.SessionPhase
+import club.touchtech.s5code.kotlin.transport.grants
+import club.touchtech.s5code.kotlin.transport.restoreCompactTurnItems
 import club.touchtech.s5code.kotlin.transport.WsMethods
 import club.touchtech.s5code.kotlin.transport.applyShellStreamItem
 import club.touchtech.s5code.kotlin.transport.mergeShellSnapshotProjects
@@ -70,7 +72,10 @@ import club.touchtech.s5code.kotlin.transport.pullRequestLinks
 import club.touchtech.s5code.kotlin.transport.visibleThreadPullRequests
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Long
+import club.touchtech.s5code.kotlin.transport.v2Objects
+import kotlinx.coroutines.flow.channelFlow
 import club.touchtech.s5code.kotlin.transport.wire.V2ProjectionDto
+import club.touchtech.s5code.kotlin.transport.wire.ProviderModelPreferencesDto
 import club.touchtech.s5code.kotlin.transport.wire.V2ThreadSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.V2ThreadStreamDto
 import club.touchtech.s5code.kotlin.transport.wire.V2HistoryPageDto
@@ -793,6 +798,7 @@ class LiveWorkspaceGateway(
                     capabilities =
                         EnvironmentCapabilities(
                             threadSettlement = state?.capabilities?.threadSettlement == true,
+                            serverBrowser = state?.capabilities?.serverBrowser == true,
                             threadSnooze = state?.capabilities?.threadSnooze == true,
                             threadPinning = state?.capabilities?.threadPinning == true,
                             threadPinReorder = state?.capabilities?.threadPinReorder == true,
@@ -813,7 +819,12 @@ class LiveWorkspaceGateway(
                                 state?.capabilities?.threadAutoSettleOptOut == true,
                             sessionAuthenticated = state?.authenticated == true,
                             sessionCanOperate =
-                                state?.scopes?.contains("orchestration:operate") == true,
+                                state?.grants("orchestration:operate") == true,
+                            sessionCanMaintain = state?.grants("environment:maintain") == true,
+                            sessionCanWriteSettings = state?.grants("settings:write") == true,
+                            sessionCanManageProviders = state?.grants("providers:manage") == true,
+                            sessionPermissions = state?.permissions ?: state?.scopes,
+                            sessionExpiresAt = state?.sessionExpiresAt,
                             serverSelfUpdate = state?.capabilities?.serverSelfUpdate,
                             desktopAppUpdate = state?.capabilities?.desktopAppUpdate == true,
                             serverUpdateThreadContinuation =
@@ -902,7 +913,7 @@ class LiveWorkspaceGateway(
         val perEnvironment = mutableMapOf<EnvironmentId, List<ProviderCatalogEntry>>()
         entries.forEach { (environmentId, connected) ->
             perEnvironment[EnvironmentId(environmentId)] =
-                buildCatalogEntries(connected.session.providers.value)
+                buildCatalogEntries(connected.session.providers.value, connected.session.state.value.serverSettings.providerModelPreferences.orEmpty())
         }
         _providerCatalogs.value = perEnvironment
         _providerCatalog.value =
@@ -910,7 +921,8 @@ class LiveWorkspaceGateway(
     }
 
     private fun buildCatalogEntries(
-        providers: List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>
+        providers: List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>,
+        preferences: Map<String, ProviderModelPreferencesDto> = emptyMap(),
     ): List<ProviderCatalogEntry> =
         providers
             .filter { provider ->
@@ -934,7 +946,9 @@ class LiveWorkspaceGateway(
                             driver = first.driver,
                             displayName = first.displayName,
                         ),
-                    models = models.map { it.slug }.distinct(),
+                    models = orderedProviderModels(models.map { it.slug }.distinct(), preferences[instanceId]),
+                    hiddenModels = preferences[instanceId]?.hiddenModels.orEmpty().toSet(),
+                    updateRequiredModels = first.updateRequiredModels.map { "${it.name} (v${it.minVersion}+)" },
                     modelLabels =
                         models.associate { model ->
                             model.slug to
@@ -1314,6 +1328,57 @@ class LiveWorkspaceGateway(
         return session.deviceHubAccess(hostId, hubBasePath)
     }
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    override fun pendingChildInputs(environmentId: EnvironmentId, threadId: ThreadId): Flow<List<club.touchtech.s5code.kotlin.model.PendingChildInput>> =
+        sessions.flatMapLatest { entries ->
+            entries[environmentId.value]?.shell?.map { snapshot ->
+                childInputs(snapshot?.threads.orEmpty(), threadId.value)
+            } ?: flowOf(emptyList())
+        }.distinctUntilChanged()
+
+    override fun browserTabs(environmentId: EnvironmentId, threadId: ThreadId): Flow<List<JsonObject>> = channelFlow {
+        val session = sessionFor(environmentId)
+        var tabs = emptyList<JsonObject>()
+        var revision = -1L
+        var epoch: String? = null
+        suspend fun reload() {
+            val result = session.request("preview.list", buildJsonObject { put("threadId", threadId.value) }, JsonObject.serializer())
+            tabs = result.v2Objects("sessions")
+            revision = result.v2Long("revision") ?: -1
+            epoch = result.v2String("serverEpoch")
+            send(tabs.filter { it.v2String("runtime") == "server" })
+        }
+        session.subscribe("subscribePreviewEvents", payload = { JsonObject(emptyMap()) },
+            serializer = JsonObject.serializer(), prefetch = { reload() }).collect { event ->
+            if (event.v2String("serverEpoch") != epoch || (event.v2Long("revision") ?: 0) > revision + 1) reload()
+            if ((event.v2Long("revision") ?: 0) <= revision) return@collect
+            revision = event.v2Long("revision") ?: revision
+            if (event.v2String("threadId") != threadId.value) return@collect
+            tabs = reduceBrowserTabs(tabs, event)
+            send(tabs.filter { it.v2String("runtime") == "server" })
+        }
+    }
+
+    override suspend fun browserAccess(environmentId: EnvironmentId): DeviceHubAccess = sessionFor(environmentId).browserAccess()
+
+    override suspend fun browserCommand(environmentId: EnvironmentId, method: String, input: JsonObject): JsonObject {
+        require(method in setOf("preview.open", "preview.navigate", "preview.adjust", "preview.refresh", "preview.close"))
+        val session = sessionFor(environmentId)
+        return if (method in setOf("preview.refresh", "preview.close")) {
+            session.execute(method, input)
+            JsonObject(emptyMap())
+        } else session.request(method, input, JsonObject.serializer())
+    }
+
+    override suspend fun mcpAppRequest(environmentId: EnvironmentId, method: String, input: JsonObject): JsonObject {
+        require(method in setOf("mcpApps.callTool", "mcpApps.toolInfo", "mcpApps.readResource", "mcpApps.updateModelContext"))
+        val session = sessionFor(environmentId)
+        return if (method == "mcpApps.updateModelContext") {
+            session.execute(method, input)
+            JsonObject(emptyMap())
+        } else session.request(method, input, JsonObject.serializer())
+    }
+
     override suspend fun refreshDevices(environmentId: EnvironmentId, retryHostId: String?) {
         sessionFor(environmentId).listDevices(retryHostId)
     }
@@ -1635,6 +1700,7 @@ class LiveWorkspaceGateway(
                 put("threadId", id.value)
                 put("requestCompletionMarker", true)
                 put("acceptBoundedSnapshot", true)
+                put("acceptCompactTurnItems", true)
                 if (authoritative) put("afterSequence", sequence)
             } },
             serializer = V2ThreadStreamDto.serializer(),
@@ -1642,10 +1708,10 @@ class LiveWorkspaceGateway(
                 authoritative = false
                 try {
                     val fresh = withTimeoutOrNull(SNAPSHOT_PREFETCH_MS) {
-                        connected.getJson("/api/orchestration/threads/${id.value}/bounded", V2ThreadSnapshotDto.serializer())
+                        connected.getJson("/api/orchestration/threads/${id.value}/bounded?compactTurnItems=1", V2ThreadSnapshotDto.serializer())
                     }
                     if (fresh != null) lock.withLock {
-                        projection = fresh.projection
+                        projection = fresh.projection.restoreCompactTurnItems(fresh.turnItemsOmitLocalVisible)
                         sequence = fresh.snapshotSequence
                         cursor = fresh.historyCursor
                         hasMore = fresh.hasMoreHistory
@@ -1675,7 +1741,7 @@ class LiveWorkspaceGateway(
                 var persist = false
                 when (item.kind) {
                     "snapshot" -> {
-                        projection = item.projection
+                        projection = item.projection?.restoreCompactTurnItems(item.turnItemsOmitLocalVisible)
                         sequence = item.snapshotSequence
                         cursor = item.historyCursor
                         hasMore = item.hasMoreHistory
@@ -3251,12 +3317,7 @@ class LiveWorkspaceGateway(
     }
 
     override suspend fun updateServerSettings(environmentId: EnvironmentId, patch: JsonObject) {
-        sessionFor(environmentId)
-            .request(
-                WsMethods.ServerUpdateSettings,
-                buildJsonObject { put("patch", patch) },
-                kotlinx.serialization.json.JsonObject.serializer(),
-            )
+        sessionFor(environmentId).updateSettings(patch)
     }
 
     /* ── Git writes ──────────────────────────────────────────────────── */

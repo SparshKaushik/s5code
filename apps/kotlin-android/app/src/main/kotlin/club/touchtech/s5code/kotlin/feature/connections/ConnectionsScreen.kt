@@ -516,6 +516,15 @@ fun ConnectionDetailScreen(
                 )
             }
 
+            environment.capabilities.sessionPermissions?.let { permissions ->
+                Text(if (permissions.isEmpty()) "This connection has no permissions."
+                    else "This connection can: " + permissions.map(::permissionLabel).joinToString(", "),
+                    style = MaterialTheme.typography.bodySmall)
+            }
+            environment.capabilities.sessionExpiresAt?.let { expires ->
+                Text("Connection expires ${club.touchtech.s5code.kotlin.data.absoluteLabel(expires)}",
+                    style = MaterialTheme.typography.bodySmall)
+            }
             EnvironmentMaintenance(
                 store = store,
                 environment = environment,
@@ -593,7 +602,7 @@ private fun EnvironmentMaintenance(
         remember(environment.id) { store.workspace.providerStatuses(environment.id) }
             .collectAsStateWithLifecycle()
     val caps = environment.capabilities
-    val allowed = connected && caps.sessionAuthenticated && caps.sessionCanOperate
+    val allowed = connected && caps.sessionAuthenticated && caps.sessionCanMaintain
     var pending by remember(environment.id) { mutableStateOf<String?>(null) }
     var checkedRelease by remember(environment.id) { mutableStateOf<String?>(null) }
     var upToDate by remember(environment.id) { mutableStateOf(false) }

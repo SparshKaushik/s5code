@@ -82,6 +82,9 @@ data class SessionState(
      */
     val authenticated: Boolean = false,
     val scopes: List<String>? = null,
+    val permissions: List<String>? = null,
+    val serverUpdateScope: String? = null,
+    val sessionExpiresAt: String? = null,
     /**
      * Server settings the screens read: the add-project base directory and the
      * auto-settle defaults Settings edits through `server.updateSettings`.
@@ -105,6 +108,7 @@ data class SessionState(
  * gate the write paths rather than merely hiding buttons.
  */
 data class ServerCapabilities(
+    val serverBrowser: Boolean = false,
     val serverResolvedCommandContext: Boolean = false,
     val threadVisitedTracking: Boolean = false,
     val threadSettlement: Boolean = false,
@@ -492,6 +496,7 @@ class EnvironmentSession(
                         config.settings.environmentIcon ?: descriptor.platform.machine,
                     capabilities =
                         ServerCapabilities(
+                            serverBrowser = descriptor.capabilities.serverBrowser,
                             serverResolvedCommandContext = descriptor.capabilities.serverResolvedCommandContext,
                             threadVisitedTracking = descriptor.capabilities.threadVisitedTracking,
                             threadSettlement = descriptor.capabilities.threadSettlement,
@@ -545,7 +550,8 @@ class EnvironmentSession(
             // best-effort — a failed lookup leaves authenticated false, which
             // merely hides the maintenance rows rather than blocking the
             // connection.
-            _state.value = _state.value.copy(authenticated = false, scopes = null)
+            _state.value = _state.value.copy(authenticated = false, scopes = null, permissions = null,
+                sessionExpiresAt = null, serverUpdateScope = config.auth?.serverUpdateScope)
             val sessionAuth =
                 authorized?.let { auth ->
                     try {
@@ -561,6 +567,9 @@ class EnvironmentSession(
                     _state.value.copy(
                         authenticated = sessionAuth.authenticated,
                         scopes = sessionAuth.scopes,
+                        permissions = sessionAuth.permissions,
+                        sessionExpiresAt = sessionAuth.expiresAt,
+                        serverUpdateScope = sessionAuth.auth?.serverUpdateScope ?: config.auth?.serverUpdateScope,
                     )
             }
             probeSupported = descriptor.capabilities.connectionProbe
@@ -858,6 +867,14 @@ class EnvironmentSession(
         )
     }
 
+    /** The browser stream uses the same short-lived ticket mechanism as device media. */
+    suspend fun browserAccess(): DeviceHubAccess {
+        val auth = authorized ?: error("Environment is not connected.")
+        val base = auth.httpBaseUrl.trimEnd('/') + "/api/preview-stream"
+        return DeviceHubAccess(base, base.replaceFirst(Regex("^http"), "ws"),
+            mapOf("wsTicket" to http.webSocketTicket(auth.httpBaseUrl, auth.credential).ticket))
+    }
+
     /** `device.list` — [retryHostId] retries a failed host like the RN menu does. */
     suspend fun listDevices(
         retryHostId: String? = null,
@@ -937,6 +954,7 @@ class EnvironmentSession(
         serializer: KSerializer<T>,
     ): T {
         val live = awaitConnection()
+        state.value.requireRpcPermissions(method, payload)
         return live.call(method, payload, serializer)
     }
 
@@ -948,7 +966,19 @@ class EnvironmentSession(
      * succeeded. `terminal.write` and `terminal.resize` are both shaped this way.
      */
     suspend fun execute(method: String, payload: JsonElement) {
-        awaitConnection().request(method, payload)
+        val live = awaitConnection()
+        state.value.requireRpcPermissions(method, payload)
+        live.request(method, payload)
+    }
+
+    /** Apply the authoritative acknowledgement before another settings action can read stale state. */
+    suspend fun updateSettings(patch: JsonObject) {
+        val settings = request(WsMethods.ServerUpdateSettings, buildJsonObject { put("patch", patch) }, ServerConfigSettingsDto.serializer())
+        _state.value = _state.value.copy(serverSettings = settings,
+            addProjectBaseDirectory = settings.addProjectBaseDirectory,
+            autoSettleOnMerge = settings.sidebarAutoSettleOnMerge,
+            autoSettleAfterDays = settings.sidebarAutoSettleAfterDays,
+            continueThreadsAfterServerUpdate = settings.continueThreadsAfterServerUpdate == true)
     }
 
     /**
@@ -1001,7 +1031,9 @@ class EnvironmentSession(
                 // transformLatest delivers for free.
                 while (true) {
                     try {
-                        live.stream(method, payload(live)).collect { element ->
+                        val input = payload(live)
+                        state.value.requireRpcPermissions(method, input)
+                        live.stream(method, input).collect { element ->
                             val decoded = try {
                                 TransportJson.decodeFromJsonElement(serializer, element)
                             } catch (_: kotlinx.serialization.SerializationException) {

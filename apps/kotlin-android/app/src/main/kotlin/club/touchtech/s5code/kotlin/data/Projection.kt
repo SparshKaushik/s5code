@@ -98,7 +98,7 @@ fun threadStatusOf(shell: ThreadShellDto, nowMillis: Long): ThreadStatus =
         shell.hasPendingUserInput -> ThreadStatus.AwaitingInput
         shell.session?.status == "running" -> ThreadStatus.Working
         shell.session?.status == "starting" -> ThreadStatus.Working
-        shell.backgroundLiveness != null && shell.session?.status != "error" -> ThreadStatus.Waiting
+        shell.backgroundLiveness != null && shell.session?.status !in setOf("error", "limited") -> ThreadStatus.Waiting
         // A queued turn start is work the user just asked for that no session has
         // adopted yet. Without this the row looks idle for the seconds a provider
         // takes to come up, which reads as "my message was lost".
@@ -110,6 +110,7 @@ fun threadStatusOf(shell: ThreadShellDto, nowMillis: Long): ThreadStatus =
         // over, the thread is idle, and badging it failed forever is the "lying
         // label" the repo's guidance calls out.
         shell.session?.status == "error" -> ThreadStatus.Failed
+        shell.session?.status == "limited" -> ThreadStatus.Limited
         else -> ThreadStatus.Idle
     }
 
@@ -122,7 +123,7 @@ fun threadStatusOf(shell: ThreadShellDto, nowMillis: Long): ThreadStatus =
  */
 fun hasQueuedTurnStart(shell: ThreadShellDto, nowMillis: Long): Boolean {
     val messageAt = shell.latestUserMessageAt?.let(::parseInstant) ?: return false
-    if (shell.session?.status == "error") return false
+    if (shell.session?.status in setOf("error", "limited")) return false
     if (kotlin.math.abs(nowMillis - messageAt) > QUEUED_TURN_START_GRACE_MS) return false
     val turn = shell.latestTurn ?: return true
     return listOf(turn.requestedAt, turn.startedAt, turn.completedAt).all { candidate ->
@@ -161,8 +162,8 @@ private fun isSnoozed(shell: ThreadShellDto, nowMillis: Long): Boolean {
     if (until <= nowMillis) return false
     val snoozedAt = shell.snoozedAt?.let(::parseInstant)
     val session = shell.session
-    if (session?.status == "error") {
-        val erroredAt = session.updatedAt?.let(::parseInstant)
+    if (session?.status in setOf("error", "limited")) {
+        val erroredAt = session?.updatedAt?.let(::parseInstant)
         if (snoozedAt == null || erroredAt == null || erroredAt > snoozedAt) return false
     }
     val turn = shell.latestTurn
@@ -1856,6 +1857,7 @@ internal fun userInputOf(payload: JsonObject): PendingUserInput? {
                     },
                 options = options,
                 allowCustomAnswer = allowCustomAnswer,
+                initialAnswer = question.string("initialAnswer"),
             )
         }
     return questions.takeIf { it.isNotEmpty() }?.let {

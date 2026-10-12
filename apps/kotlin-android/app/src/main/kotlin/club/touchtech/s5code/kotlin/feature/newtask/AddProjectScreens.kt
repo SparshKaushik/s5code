@@ -78,9 +78,6 @@ import kotlinx.coroutines.withTimeoutOrNull
 
 /* ── Shared flow pieces ──────────────────────────────────────────────── */
 
-/** `AddProjectRemoteSource`: the clone sources the RN source screen lists. */
-private val PROVIDER_SOURCES = listOf("github", "gitlab", "forgejo", "bitbucket", "azure-devops")
-
 private fun sourceLabel(source: String): String =
     when (source) {
         "github" -> "GitHub"
@@ -88,12 +85,14 @@ private fun sourceLabel(source: String): String =
         "forgejo" -> "Forgejo / Gitea"
         "bitbucket" -> "Bitbucket"
         "azure-devops" -> "Azure DevOps"
-        else -> "Git URL"
+        "gitcafe" -> "GitCafe"
+        "url" -> "Git URL"
+        else -> source.replaceFirstChar(Char::uppercaseChar)
     }
 
 private fun sourcePathHint(source: String): String =
     when (source) {
-        "github", "forgejo" -> "owner/repo"
+        "github", "forgejo", "gitcafe" -> "owner/repo"
         "gitlab" -> "group/project"
         "bitbucket" -> "workspace/repository"
         "azure-devops" -> "project/repository"
@@ -107,7 +106,7 @@ private fun providerReadiness(
     val unavailable =
         "Provider status unavailable. Open Source Control settings and rescan."
     val readiness = mutableMapOf<String, Pair<Boolean, String?>>()
-    for (source in PROVIDER_SOURCES) {
+    for (source in discovery?.sourceControlProviders.orEmpty().map { it.kind }) {
         val provider = discovery?.sourceControlProviders?.firstOrNull { it.kind == source }
         readiness[source] =
             when {
@@ -125,7 +124,7 @@ private fun providerReadiness(
 
 /** `sortAddProjectProviderSources`: ready providers first, then label order. */
 private fun sortedProviderSources(readiness: Map<String, Pair<Boolean, String?>>): List<String> =
-    PROVIDER_SOURCES.sortedWith(
+    readiness.keys.sortedWith(
         compareByDescending<String> { readiness[it]?.first == true }.thenBy { sourceLabel(it) }
     )
 

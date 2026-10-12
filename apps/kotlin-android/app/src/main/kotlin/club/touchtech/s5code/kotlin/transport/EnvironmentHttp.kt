@@ -101,7 +101,8 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
             .add("subject_token", credential)
             .add("subject_token_type", BOOTSTRAP_TOKEN_TYPE)
             .add("requested_token_type", ACCESS_TOKEN_TYPE)
-            .add("scope", CLIENT_SCOPES.joinToString(" "))
+            // The credential already carries the pairing grant. Inherit it, as
+            // RN does, so granular permissions survive the exchange on new servers.
             .add("client_label", deviceLabel)
             .add("client_device_type", "mobile")
             .add("client_os", "Android")
@@ -343,21 +344,6 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         const val ACCESS_TOKEN_TYPE = "urn:ietf:params:oauth:token-type:access_token"
         const val BOOTSTRAP_TOKEN_TYPE = "urn:t3:params:oauth:token-type:environment-bootstrap"
 
-        /**
-         * `AuthStandardClientScopes` from `packages/contracts/src/auth.ts`. The
-         * administrative scopes are deliberately not requested: this client has
-         * no UI that manages other clients' access, and asking for authority it
-         * cannot exercise makes every paired phone a bigger loss if stolen.
-         */
-        val CLIENT_SCOPES =
-            listOf(
-                "orchestration:read",
-                "orchestration:operate",
-                "terminal:operate",
-                "review:write",
-                "relay:read",
-            )
-
         private val EMPTY_BODY = FormBody.Builder().build()
 
         val LenientJson = Json {
@@ -479,6 +465,7 @@ data class EnvironmentPlatformDto(
  */
 @Serializable
 data class EnvironmentCapabilitiesDto(
+    val serverBrowser: Boolean = false,
     val connectionProbe: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
@@ -511,8 +498,12 @@ data class AccessTokenDto(
 @Serializable
 data class AuthSessionDto(
     val authenticated: Boolean = false,
+    val auth: club.touchtech.s5code.kotlin.transport.wire.ServerAuthDescriptorDto? = null,
     /** `AuthSessionState.scopes`; absent on servers older than scoped tokens. */
     val scopes: List<String>? = null,
+    /** An explicit empty array grants nothing; null selects legacy scope fallback. */
+    val permissions: List<String>? = null,
+    val expiresAt: String? = null,
 )
 
 /**

@@ -94,6 +94,7 @@ fun planBarApplies(status: ThreadStatus): Boolean =
         ThreadStatus.AwaitingInput -> true
         ThreadStatus.Idle,
         ThreadStatus.Failed,
+        ThreadStatus.Limited,
         ThreadStatus.Settled,
         ThreadStatus.Snoozed -> false
     }

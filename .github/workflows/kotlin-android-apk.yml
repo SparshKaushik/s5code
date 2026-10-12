@@ -70,7 +70,20 @@ jobs:
           --tests '*RecoveredMessageTextTest'
           --tests '*RepositoryOriginProjectionTest'
           --tests '*ScheduledTaskRowsTest'
+          --tests '*SessionPermissionsTest'
+          --tests '*ClientSyncTest'
+          --tests '*ClientSyncPresentationTest'
+          --tests '*EnvironmentHttpTest'
+          --tests '*PendingUserInputAnswersTest'
+          --tests '*WorkGroupsTest'
+          --tests '*ActiveWorkTest'
+          --tests '*ActivePlanTest'
+          --tests '*ModelCatalogTest'
           --stacktrace
+
+      - name: Lint Kotlin Android client
+        working-directory: apps/kotlin-android
+        run: ./gradlew lintDebug --stacktrace
 
       - name: Verify Signing Certificate
         run: |
@@ -104,6 +117,7 @@ jobs:
             apps/kotlin-android/app/build/outputs/androidTest-results/
             apps/kotlin-android/app/build/startup-logcat.txt
             apps/kotlin-android/app/build/reports/tests/testDebugUnitTest/
+            apps/kotlin-android/app/build/reports/lint-results-debug.*
             apps/kotlin-android/app/build/test-results/testDebugUnitTest/
 
       - name: Prepare Artifacts

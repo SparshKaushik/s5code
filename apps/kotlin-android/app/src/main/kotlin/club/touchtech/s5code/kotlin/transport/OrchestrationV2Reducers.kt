@@ -9,17 +9,22 @@ internal fun JsonObject.v2Bool(key: String): Boolean = (get(key) as? JsonPrimiti
 internal fun JsonObject.v2Objects(key: String): List<JsonObject> =
     (get(key) as? JsonArray).orEmpty().mapNotNull { it as? JsonObject }
 
+/** Restore the repeated local rows omitted by compact bounded snapshots before replay or caching. */
+internal fun V2ProjectionDto.restoreCompactTurnItems(omitted: Boolean): V2ProjectionDto =
+    if (!omitted) this else copy(turnItems = visibleTurnItems.filter {
+        it.visibility == "local" || it.sourceThreadId == thread.v2String("id")
+    }.map { it.item } + turnItems)
+
 internal fun ThreadShellDto.normalizedV2(): ThreadShellDto {
     if (status == null) return this
     val live = activityRunStatus ?: status
-    val backgroundHolds = pendingBackgroundTasks.any { it.v2String("kind") != "command" }
     val turnId = activeRunId ?: latestRunId
     return copy(
         latestTurn = turnId?.let {
             LatestTurnDto(it, v2LegacyState(live), latestRunRequestedAt,
                 activityRunStartedAt ?: latestRunStartedAt, latestRunCompletedAt)
         },
-        session = SessionDto(id, if (backgroundHolds && live == "waiting") "ready" else v2LegacySession(live), providerInstanceId = providerInstanceId,
+        session = SessionDto(id, if (live == "failed" && lastErrorClass == "usage_limit") "limited" else v2LegacySession(live), providerInstanceId = providerInstanceId,
             activeTurnId = activeRunId, lastError = lastError, updatedAt = updatedAt),
         hasPendingApprovals = pendingRuntimeRequest?.v2String("kind")?.let { it !in setOf("user_input", "auth_refresh", "dynamic_tool_call") } == true,
         hasPendingUserInput = pendingRuntimeRequest?.v2String("kind") == "user_input",
@@ -136,14 +141,13 @@ internal fun V2ProjectionDto.asThreadDto(): ThreadDto {
         (thread["lineage"] as? JsonObject)?.v2String("relationshipToParent") == "subagent"
     val status = latest?.v2String("status") ?: if (native) runless?.v2String("status") ?: "idle" else "idle"
     val rootFailure = latestRootFailure(latest)
-    val backgroundHolds = pendingBackgroundWork().any { it.v2String("kind") != "command" }
     return metadata.copy(
         projection = this,
         latestTurn = (latest ?: if (native) runless else null)?.let {
             LatestTurnDto(it.v2String("id")!!, v2LegacyState(status), it.v2String("requestedAt"),
                  it.v2String("workStartedAt") ?: it.v2String("startedAt") ?: it.v2String("requestedAt"), it.v2String("completedAt"))
         },
-        session = SessionDto(metadata.id, if (backgroundHolds && status == "waiting") "ready" else v2LegacySession(status), session?.v2String("driver"), provider,
+        session = SessionDto(metadata.id, if (status == "failed" && rootFailure?.v2String("class") == "usage_limit") "limited" else v2LegacySession(status), session?.v2String("driver"), provider,
             metadata.runtimeMode, active?.v2String("id"), session?.v2String("lastError") ?: rootFailure?.v2String("message"), updatedAt),
         updatedAt = updatedAt ?: metadata.updatedAt,
         checkpoints = checkpoints.filter { it.v2Long("appRunOrdinal") != null && it.v2String("status") == "ready" }.map { checkpoint ->
@@ -248,7 +252,13 @@ internal fun applyV2Event(
             val existing = base.visibleTurnItems.firstOrNull { it.sourceItemId == id }
             val ordinal = payload.v2Long("ordinal") ?: 0
             val oldest = base.visibleTurnItems.filter { it.visibility == "local" }.minOfOrNull { it.item.v2Long("ordinal") ?: 0 }
-            val outsideWindow = partialTimeline && existing == null && (ordinal <= (latestLocalTurnOrdinal ?: -1) ||
+            val runId = payload.v2String("runId")
+            // Queued runs keep their original ordinal when a later steer overtakes them.
+            val liveRun = runId != null && base.runs.any { it.v2String("id") == runId &&
+                it.v2String("status") in setOf("preparing", "queued", "starting", "running", "waiting") }
+            val visibleRun = runId != null && base.visibleTurnItems.any { it.visibility == "local" &&
+                it.item.v2String("runId") == runId && (it.item.v2Long("ordinal") ?: 0) <= ordinal }
+            val outsideWindow = partialTimeline && existing == null && !liveRun && !visibleRun && (ordinal <= (latestLocalTurnOrdinal ?: -1) ||
                 (oldest != null && ordinal < oldest))
             if (outsideWindow && base.turnItems.none { it.v2String("id") == id }) return projection
             val itemBase = base.copy(turnItems = base.turnItems.v2Upsert(payload))

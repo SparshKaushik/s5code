@@ -1,5 +1,8 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
+import club.touchtech.s5code.kotlin.model.ModelFavorite
+import androidx.compose.material.icons.rounded.Public
+
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -126,6 +129,8 @@ fun ThreadScreen(
         remember(environmentId, threadId) { store.workspace.thread(env, id) }
             .collectAsStateWithLifecycle()
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val childInputs by remember(env, id) { store.workspace.pendingChildInputs(env, id) }
+        .collectAsStateWithLifecycle(emptyList())
     val syncPhase by
         remember(environmentId, threadId) { store.workspace.threadSyncPhase(env, id) }
             .collectAsStateWithLifecycle()
@@ -602,10 +607,19 @@ fun ThreadScreen(
                 label = "Session rewind",
                 onClick = { onOpen("rewind") },
             )
+            if (environment?.capabilities?.serverBrowser == true) {
+                S5IconButton(icon = Icons.Rounded.Public,
+                    label = "Browser", onClick = { onOpen("browser") })
+            }
         },
         bottomBar = {
             // Scaffold overlays direct slot children; controls must sit above the composer.
             Column(Modifier.fillMaxWidth()) {
+            childInputs.forEach { child ->
+                androidx.compose.material3.TextButton(onClick = { onOpenThread(environmentId, child.threadId) }) {
+                    Text("${child.title} ${if (child.approval) "needs approval" else "has a question"}")
+                }
+            }
             // Why the last send never left the queue, dismissable above the
             // composer — RN's ComposerErrorNotice in the same slot.
             composerError?.let { error ->
@@ -1171,6 +1185,8 @@ fun ThreadScreen(
                             is FeedRow.Entry ->
                                 FeedEntryRow(
                                     entry = row.entry,
+                                    mcpAppContent = { app -> McpAppView(store, env, ThreadId(threadId), app,
+                                        awaitingUser = current.approval != null || current.userInput != null) },
                                     onCopy = copy,
                                     workspaceRoot = workspaceRoot,
                                     onOpenFile = { path ->
@@ -1314,8 +1330,12 @@ fun ThreadScreen(
             },
             onDismiss = { settingsOpen = false },
             title = "Model and settings",
-            favorites = preferences.modelFavorites,
-            onToggleFavorite = { store.toggleModelFavorite(it.instanceId, it.model) },
+            favorites = environment?.serverSettings?.favorites?.map { ModelFavorite(it.provider, it.model) }
+                ?: preferences.modelFavorites,
+            onToggleFavorite = { store.toggleModelFavorite(env, it.instanceId, it.model) },
+            onToggleHidden = { model, hidden -> store.setModelHidden(env, model, hidden) },
+            onUpdateProvider = { store.updateCatalogProvider(env, it) },
+            canUpdateProviders = environment?.capabilities?.sessionCanManageProviders == true,
             catalogRefreshing = env.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(env) },
             planModeEnabled = preferences.planModeEnabled,

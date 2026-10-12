@@ -39,6 +39,18 @@ fun collectComposerContextReferences(text: String): List<ComposerContextReferenc
         )
     }.toList()
 
+/** Match the other clients' explicit request to respond to attachment-only messages. */
+internal fun composerMessageText(text: String, hasAttachments: Boolean): String {
+    val references = collectComposerContextReferences(text)
+    val imageOnly = references.isNotEmpty() && references.all { it.kind == "image" } &&
+        references.asReversed().fold(text) { remainder, reference ->
+            remainder.removeRange(reference.range)
+        }.isBlank()
+    return if ((text.isBlank() && hasAttachments) || imageOnly) {
+        "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]"
+    } else text
+}
+
 /**
  * `replaceComposerContextReferences` for the plain-text bubble: each
  * reference becomes its label, suffixed "(unavailable)" when the message's

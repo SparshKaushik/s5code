@@ -128,7 +128,9 @@ internal fun pendingBackgroundWork(tasks: List<PendingBackgroundTask>): PendingB
         val named = label != kind.singular
         return PendingBackgroundWork(
             if (waiting) {
-                if (named) "Waiting on ${kind.singular} $label" else "Waiting on a ${kind.singular}"
+                if (named) {
+                    if (kind.singular == "monitor") label else "Waiting on ${kind.singular} $label"
+                } else "Waiting on a ${kind.singular}"
             } else {
                 if (named) "Running: $label" else "Running a ${kind.singular}"
             },

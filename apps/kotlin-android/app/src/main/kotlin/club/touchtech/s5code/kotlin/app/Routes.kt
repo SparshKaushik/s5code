@@ -36,6 +36,7 @@ object Routes {
 
     const val Thread = "threads/{environmentId}/{threadId}"
     const val ThreadDevices = "threads/{environmentId}/{threadId}/devices"
+    const val ThreadBrowser = "threads/{environmentId}/{threadId}/browser"
     const val ThreadRewind = "threads/{environmentId}/{threadId}/rewind"
     const val ThreadFiles = "threads/{environmentId}/{threadId}/files"
     // File viewers carry the path as a query parameter so a deep link (or a

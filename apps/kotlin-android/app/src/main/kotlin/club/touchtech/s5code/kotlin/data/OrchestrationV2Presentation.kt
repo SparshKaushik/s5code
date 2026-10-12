@@ -86,8 +86,11 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         when (type) {
             "user_message" -> {
                 if (runs[runId]?.v2String("status") in setOf("queued", "preparing")) null
-                else FeedEntry.UserMessage(id, item.v2String("text").orEmpty(), timeLabel(item.v2String("startedAt")),
-                    attachments, contextRecordLabels(item["context"]), atMillis = at)
+                else userMessagePresentation(item).let { message ->
+                    FeedEntry.UserMessage(id, message.text, timeLabel(item.v2String("startedAt")),
+                        attachments, contextRecordLabels(item["context"]), atMillis = at,
+                        attribution = message.attribution)
+                }
             }
             "assistant_message" -> if (item.v2String("text").isNullOrBlank() && attachments.isEmpty()) null
                 else FeedEntry.AgentMessage(id, item.v2String("text").orEmpty(), timeLabel(item.v2String("startedAt")),
@@ -171,8 +174,15 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     val rootFailure = projection.latestRootFailure(latestRun)
     val sessionError = projection.providerSessions.lastOrNull { it.v2String("providerInstanceId") == projection.thread.v2String("providerInstanceId") }?.v2String("lastError")
     val failure = rootFailure?.takeIf { sessionError == null || sessionError == it.v2String("message") }
+    val appEntries = items.mapNotNull { row ->
+        if (row.item.v2String("type") != "dynamic_tool") return@mapNotNull null
+        val app = mcpAppReference(row.item) ?: return@mapNotNull null
+        row.sourceItemId to FeedEntry.McpApp("mcp-app:${row.sourceItemId}", row.sourceItemId,
+            row.sourceThreadId, app, turnItemDetailRevision(row.item), row.item.v2String("runId"),
+            parseInstant(row.item.v2String("startedAt")) ?: 0)
+    }.toMap()
     return V2Presentation(
-        groupConsecutiveThoughts(feed),
+        groupConsecutiveThoughts(feed.flatMap { entry -> listOfNotNull(entry, appEntries[entry.id]) }),
         approvalItem?.let { PendingApproval(it.v2String("requestId")!!, it.v2String("title") ?: "Approval required",
             it.v2String("prompt").orEmpty(), null, approvalKindOf(it), it.v2String("appName"),
             it.v2String("requestKind"), approvalOptionsOf(it)) },

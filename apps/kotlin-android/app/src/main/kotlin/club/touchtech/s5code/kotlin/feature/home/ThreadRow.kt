@@ -30,6 +30,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -89,7 +90,8 @@ fun ThreadRow(
         thread.status == ThreadStatus.AwaitingApproval || thread.status == ThreadStatus.AwaitingInput
     val titleMatch = searchMatch?.takeIf { it.source == SearchMatchSource.Title }
     S5Card(
-        modifier = modifier.fillMaxWidth(),
+        modifier = modifier.fillMaxWidth().alpha(
+            if (thread.status == ThreadStatus.Working || thread.status == ThreadStatus.Waiting) 0.6f else 1f),
         tone = if (needsAttention) S5CardTone.Hero else S5CardTone.Standard,
         onClick = onClick,
     ) {

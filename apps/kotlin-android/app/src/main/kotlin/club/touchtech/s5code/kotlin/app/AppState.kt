@@ -56,6 +56,8 @@ import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ModelFavorite
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.add
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
 import club.touchtech.s5code.kotlin.model.ProviderInstance
 import club.touchtech.s5code.kotlin.model.QuestionAttachment
@@ -397,11 +399,39 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             // and then have the restore put the stale selection back.
             observePersistence()
             observeDraftProviderAvailability()
+            observeModelPreferencesMigration()
             restoreAndDrainOutbox()
             pushRegistration.start()
             // Check for app updates in the background on launch
             updates.checkForUpdates()
         }
+    }
+
+    private fun observeModelPreferencesMigration() {
+        val attempted = mutableSetOf<EnvironmentId>()
+        workspace.environments.onEach { environments ->
+            environments.filter { it.capabilities.sessionCanWriteSettings && it.serverSettings.favorites == null && it.id !in attempted }
+                .forEach { environment ->
+                    attempted += environment.id
+                    viewModelScope.launch {
+                        try {
+                            workspace.updateServerSettings(environment.id, kotlinx.serialization.json.buildJsonObject {
+                                put("migrateModelPreferences", kotlinx.serialization.json.buildJsonObject {
+                                    put("favorites", kotlinx.serialization.json.buildJsonArray {
+                                        preferences.value.modelFavorites.forEach { favorite ->
+                                            add(kotlinx.serialization.json.buildJsonObject {
+                                                put("provider", favorite.instanceId)
+                                                put("model", favorite.model)
+                                            })
+                                        }
+                                    })
+                                })
+                            })
+                        } catch (cancelled: CancellationException) { throw cancelled }
+                        catch (_: Exception) { /* Legacy local preferences remain available. */ }
+                    }
+                }
+        }.launchIn(viewModelScope)
     }
 
     /**
@@ -1647,31 +1677,74 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    /**
-     * Stars or unstars a model in the picker. Favorites are a client-local
-     * preference (the other clients keep theirs in client settings too), so
-     * this only touches [RuntimePreferences] and persistence does the rest.
-     */
-    fun toggleModelFavorite(instanceId: String, model: String) {
-        _preferences.update { preferences ->
-            val existing =
-                preferences.modelFavorites.indexOfFirst {
-                    it.instanceId == instanceId && it.model == model
-                }
-            preferences.copy(
-                modelFavorites =
-                    if (existing >= 0) {
-                        preferences.modelFavorites.filterIndexed { index, _ -> index != existing }
-                    } else {
-                        preferences.modelFavorites + ModelFavorite(instanceId, model)
-                    }
-            )
+    /** Stars models in the connected environment; local values remain the legacy fallback. */
+    fun toggleModelFavorite(environmentId: EnvironmentId, instanceId: String, model: String) {
+        val settings = workspace.environments.value.firstOrNull { it.id == environmentId }?.serverSettings
+        val favorites = settings?.favorites?.map { ModelFavorite(it.provider, it.model) }
+            ?: preferences.value.modelFavorites
+        val favorite = favorites.none { it.instanceId == instanceId && it.model == model }
+        if (settings?.favorites == null) {
+            _preferences.update { preferences ->
+                preferences.copy(modelFavorites = if (favorite) {
+                    (preferences.modelFavorites + ModelFavorite(instanceId, model)).distinct()
+                } else {
+                    preferences.modelFavorites.filterNot { it.instanceId == instanceId && it.model == model }
+                })
+            }
+        }
+        viewModelScope.launch {
+            try {
+                workspace.updateServerSettings(environmentId, kotlinx.serialization.json.buildJsonObject {
+                    if (settings?.favorites == null) put("migrateModelPreferences", kotlinx.serialization.json.buildJsonObject {
+                        put("favorites", kotlinx.serialization.json.buildJsonArray {
+                            favorites.forEach { saved -> add(kotlinx.serialization.json.buildJsonObject {
+                                put("provider", saved.instanceId)
+                                put("model", saved.model)
+                            }) }
+                        })
+                    })
+                    put("setModelFavorites", kotlinx.serialization.json.buildJsonArray {
+                        add(kotlinx.serialization.json.buildJsonObject {
+                            put("provider", instanceId)
+                            put("model", model)
+                            put("favorite", favorite)
+                        })
+                    })
+                })
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { showError(error.message ?: "Could not save model favorites.") }
+        }
+    }
+
+    /** Hide or restore a model for clients connected to this environment. */
+    fun setModelHidden(environmentId: EnvironmentId, model: ModelFavorite, hidden: Boolean) {
+        viewModelScope.launch {
+            try {
+                workspace.updateServerSettings(environmentId, kotlinx.serialization.json.buildJsonObject {
+                    put("setModelsHidden", kotlinx.serialization.json.buildJsonArray {
+                        add(kotlinx.serialization.json.buildJsonObject {
+                            put("provider", model.instanceId)
+                            put("model", model.model)
+                            put("hidden", hidden)
+                        })
+                    })
+                })
+            } catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { showError(error.message ?: "Could not save model visibility.") }
         }
     }
 
     /** In-flight model-catalog refresh per environment, for the picker's spinner. */
     private val _catalogRefreshing = MutableStateFlow<Set<String>>(emptySet())
     val catalogRefreshing: StateFlow<Set<String>> = _catalogRefreshing.asStateFlow()
+
+    fun updateCatalogProvider(environmentId: EnvironmentId, provider: ProviderInstance) {
+        viewModelScope.launch {
+            try { workspace.updateProvider(environmentId, provider.driver, provider.instanceId, null) }
+            catch (cancelled: CancellationException) { throw cancelled }
+            catch (error: Exception) { showError(error.message ?: "The provider could not be updated.") }
+        }
+    }
 
     /**
      * Re-asks one environment's server for its provider catalog, including a

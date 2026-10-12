@@ -72,6 +72,9 @@ data class ServerProviderModelDto(
 )
 
 @Serializable
+data class ServerProviderUpdateRequiredModelDto(val slug: String, val name: String, val minVersion: String)
+
+@Serializable
 data class ServerProviderSlashCommandDto(
     val name: String = "",
     val description: String? = null,
@@ -115,6 +118,7 @@ data class ServerProviderAuthDto(
     val type: String? = null,
     val label: String? = null,
     val email: String? = null,
+    val workspaceId: String? = null,
 )
 
 /**
@@ -147,6 +151,7 @@ data class ServerProviderDto(
     val showInteractionModeToggle: Boolean? = null,
     val requiresNewThreadForModelChange: Boolean = false,
     val models: List<ServerProviderModelDto> = emptyList(),
+    val updateRequiredModels: List<ServerProviderUpdateRequiredModelDto> = emptyList(),
     val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
     val skills: List<ServerProviderSkillDto> = emptyList(),
     /** Per-directory snapshots; a cwd match replaces the provider-level lists. */
@@ -222,6 +227,7 @@ data class ServerSelfUpdateResultDto(
 
 @Serializable
 data class ServerConfigDto(
+    val auth: ServerAuthDescriptorDto? = null,
     val scratchWorkspaceRoot: String? = null,
     val environment: ServerEnvironmentDto = ServerEnvironmentDto(),
     val cwd: String = "",
@@ -242,6 +248,9 @@ data class ServerConfigDto(
     val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
 )
 
+@Serializable
+data class ServerAuthDescriptorDto(val serverUpdateScope: String? = null)
+
 /**
  * `ServerDirectEndpoint`: one advertised address the same server also answers.
  * `kind` is `lan` | `tailnet` on today's servers but stays a string — a new
@@ -261,6 +270,9 @@ data class ServerDirectEndpointDto(
  */
 @Serializable
 data class ServerConfigSettingsDto(
+    /** Null means the environment has not migrated client preferences yet. */
+    val favorites: List<ModelFavoriteDto>? = null,
+    val providerModelPreferences: Map<String, ProviderModelPreferencesDto>? = null,
     val environmentIcon: String? = null,
     /** Base directory the add-project flow opens its folder browser on. */
     val addProjectBaseDirectory: String = "",
@@ -335,9 +347,19 @@ data class ServerConfigSettingsDto(
     val projectSettingsOverrides: JsonObject? = null,
 )
 
+@Serializable
+data class ModelFavoriteDto(val provider: String, val model: String)
+
+@Serializable
+data class ProviderModelPreferencesDto(
+    val hiddenModels: List<String> = emptyList(),
+    val modelOrder: List<String> = emptyList(),
+)
+
 /** `StorageCleanupSettings`: retention rules in days; null clears the rule. */
 @Serializable
 data class ServerStorageCleanupDto(
+    val worktreeKeepWhen: String = "uncommitted-changes",
     val worktreeAfterDays: Int? = null,
     val worktreeOnMerge: Boolean = false,
     val worktreeOnDelete: Boolean = false,
@@ -381,6 +403,7 @@ data class ServerConfigStreamPayloadDto(
 
 @Serializable
 data class ServerCapabilitiesDto(
+    val serverBrowser: Boolean = false,
     val serverResolvedCommandContext: Boolean = false,
     val threadVisitedTracking: Boolean = false,
     val connectionProbe: Boolean = false,

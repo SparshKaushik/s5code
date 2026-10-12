@@ -187,6 +187,7 @@ data class ThreadShellDto(
     val pendingBackgroundTasks: List<JsonObject> = emptyList(),
     val lastError: String? = null,
     val lastVisitedAt: String? = null,
+    val lastErrorClass: String? = null,
     val lineage: JsonObject? = null,
     val creationSource: String? = null,
     val historyOrigin: String? = null,

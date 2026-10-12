@@ -85,6 +85,14 @@ data class GitActionResult(
 data class AssetBytesRead(val bytes: ByteArray, val truncated: Boolean)
 
 interface WorkspaceGateway {
+    fun pendingChildInputs(environmentId: EnvironmentId, threadId: ThreadId): Flow<List<club.touchtech.s5code.kotlin.model.PendingChildInput>> =
+        kotlinx.coroutines.flow.flowOf(emptyList())
+    fun browserTabs(environmentId: EnvironmentId, threadId: ThreadId): Flow<List<JsonObject>> = kotlinx.coroutines.flow.flowOf(emptyList())
+    suspend fun browserAccess(environmentId: EnvironmentId): DeviceHubAccess = error("Browser streaming unavailable.")
+    suspend fun browserCommand(environmentId: EnvironmentId, method: String, input: JsonObject): JsonObject =
+        error("Browser streaming unavailable.")
+    suspend fun mcpAppRequest(environmentId: EnvironmentId, method: String, input: JsonObject): JsonObject =
+        error("MCP apps unavailable.")
     val environments: StateFlow<List<Environment>>
     val projects: StateFlow<List<Project>>
     val threads: StateFlow<List<ThreadSummary>>

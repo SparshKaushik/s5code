@@ -6,6 +6,7 @@ import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -182,8 +183,8 @@ class EnvironmentHttpTest {
         assertTrue(form.contains("subject_token_type=urn%3At3%3Aparams%3Aoauth%3Atoken-type%3Aenvironment-bootstrap"))
         assertTrue(form.contains("client_device_type=mobile"))
         assertTrue(form.contains("client_os=Android"))
-        // Administrative scopes are deliberately not requested.
-        assertTrue(form.contains("orchestration%3Aread"))
+        // Inherit the pairing grant, including granular permissions on new servers.
+        assertFalse(form.contains("scope="))
         assertTrue("the exchange must not need a second round trip", server.requestCount == 1)
     }
 }

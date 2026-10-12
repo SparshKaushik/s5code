@@ -256,7 +256,7 @@ private fun matchesFilter(thread: ThreadSummary, filter: ThreadFilter): Boolean 
             thread.status == ThreadStatus.Working ||
                 thread.status == ThreadStatus.Queued ||
                 thread.status == ThreadStatus.Idle ||
-                thread.status == ThreadStatus.Failed
+                thread.status == ThreadStatus.Failed || thread.status == ThreadStatus.Limited
         ThreadFilter.Pending ->
             thread.status == ThreadStatus.AwaitingApproval ||
                 thread.status == ThreadStatus.AwaitingInput
@@ -412,7 +412,7 @@ private fun statusRank(status: ThreadStatus): Int =
     when (status) {
         ThreadStatus.AwaitingApproval -> 0
         ThreadStatus.AwaitingInput -> 1
-        ThreadStatus.Failed -> 2
+        ThreadStatus.Failed, ThreadStatus.Limited -> 2
         ThreadStatus.Working -> 3
         ThreadStatus.Queued -> 4
         ThreadStatus.Waiting -> 4

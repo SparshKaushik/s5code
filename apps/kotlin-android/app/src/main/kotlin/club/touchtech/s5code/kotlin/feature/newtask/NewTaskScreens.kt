@@ -1,5 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.newtask
 
+import club.touchtech.s5code.kotlin.model.ModelFavorite
+
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -530,7 +532,7 @@ fun NewTaskDraftScreen(
     val cloneBlocksStart =
         awaitingKnownClone || (projectClone != null && projectClone.phase != "done")
     val canStart =
-        draft.prompt.isNotBlank() && !creating &&
+        (draft.prompt.isNotBlank() || draft.attachments.isNotEmpty()) && !creating &&
             environment?.isEnabled != false && !cloneBlocksStart
 
     val start: () -> Unit = start@{
@@ -865,8 +867,12 @@ fun NewTaskDraftScreen(
             onDismiss = { settingsOpen = false },
             // A draft has no context to hand over, so searching every agent is free.
             searchScope = ModelSearchScope.AllProviders,
-            favorites = preferences.modelFavorites,
-            onToggleFavorite = { store.toggleModelFavorite(it.instanceId, it.model) },
+            favorites = environment?.serverSettings?.favorites?.map { ModelFavorite(it.provider, it.model) }
+                ?: preferences.modelFavorites,
+            onToggleFavorite = { store.toggleModelFavorite(draft.environmentId, it.instanceId, it.model) },
+            onToggleHidden = { model, hidden -> store.setModelHidden(draft.environmentId, model, hidden) },
+            onUpdateProvider = { store.updateCatalogProvider(draft.environmentId, it) },
+            canUpdateProviders = environment?.capabilities?.sessionCanManageProviders == true,
             catalogRefreshing = draft.environmentId.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(draft.environmentId) },
             planModeEnabled = preferences.planModeEnabled,

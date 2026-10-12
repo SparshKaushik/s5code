@@ -125,8 +125,10 @@ fun FeedEntryRow(
      * failures, so implementations catch their own.
      */
     onRetryPreparation: suspend (runId: String) -> Unit = {},
+    mcpAppContent: @Composable (FeedEntry.McpApp) -> Unit = { Text("Interactive app") },
 ) {
     when (entry) {
+        is FeedEntry.McpApp -> mcpAppContent(entry)
         is FeedEntry.TurnDivider ->
             Row(
                 modifier.fillMaxWidth().padding(vertical = S5Theme.spacing.medium),
@@ -302,11 +304,18 @@ fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: 
             modifier = Modifier.size(16.dp),
             tint = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(
-            row.summary,
-            style = MaterialTheme.typography.labelMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-        )
+        Column(Modifier.weight(1f)) {
+            Text(
+                row.summary,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            row.thought?.let { thought ->
+                Text(thought, style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1, overflow = TextOverflow.Ellipsis)
+            }
+        }
     }
 }
 
@@ -326,6 +335,10 @@ private fun UserBubble(
             modifier = Modifier.widthIn(max = 520.dp),
         ) {
             Column(Modifier.padding(S5Theme.spacing.large)) {
+                entry.attribution?.let { label ->
+                    Text(label, style = MaterialTheme.typography.labelSmall,
+                        modifier = Modifier.padding(bottom = S5Theme.spacing.tiny))
+                }
                 // `t3-context://` links resolve to their record labels (or an
                 // "(unavailable)" marker) before review-comment segmentation:
                 // a label can never look like a <review-comment> block.

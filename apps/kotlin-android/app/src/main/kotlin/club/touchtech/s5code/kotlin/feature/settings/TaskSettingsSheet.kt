@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.feature.settings
 import androidx.compose.foundation.interaction.DragInteraction
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -85,6 +86,9 @@ fun TaskSettingsSheet(
     searchScope: ModelSearchScope = ModelSearchScope.AllProviders,
     favorites: List<ModelFavorite> = emptyList(),
     onToggleFavorite: (ModelFavorite) -> Unit = {},
+    onToggleHidden: (ModelFavorite, Boolean) -> Unit = { _, _ -> },
+    onUpdateProvider: (ProviderInstance) -> Unit = {},
+    canUpdateProviders: Boolean = false,
     catalogRefreshing: Boolean = false,
     onRefreshCatalog: () -> Unit = {},
     /**
@@ -139,13 +143,18 @@ fun TaskSettingsSheet(
     }
 
     var query by remember { mutableStateOf("") }
+    var showHidden by remember { mutableStateOf(false) }
     // Rows and searches both resolve display names through the catalog, so the
     // picker never shows a raw slug while the wire key stays the slug.
     val catalogById =
         remember(catalog) { catalog.associateBy { it.instance.instanceId } }
     val groups =
-        remember(catalog, settings.provider, query, searchScope) {
-            modelSearchResults(catalog, settings.provider, query, searchScope)
+        remember(catalog, settings.provider, settings.model, query, searchScope, showHidden) {
+            val visibleCatalog = catalog.map { entry -> entry.copy(models = entry.models.filter {
+                showHidden || it !in entry.hiddenModels ||
+                    (entry.instance == settings.provider && it == settings.model)
+            }) }
+            modelSearchResults(visibleCatalog, settings.provider, query, searchScope)
         }
     // Every knob below the model is the server's to describe. See [ProviderOptions].
     val descriptors =
@@ -166,6 +175,7 @@ fun TaskSettingsSheet(
                         catalog.firstOrNull { it.instance.instanceId == favorite.instanceId }
                             ?: return@mapNotNull null
                     if (favorite.model !in entry.models) return@mapNotNull null
+                    if (favorite.model in entry.hiddenModels) return@mapNotNull null
                     if (searchScope == ModelSearchScope.ActiveProvider &&
                         entry.instance.instanceId != settings.provider.instanceId
                     ) {
@@ -379,6 +389,15 @@ fun TaskSettingsSheet(
                 }
             }
             groups.forEach { group ->
+                val updateRequired = catalogById[group.instance.instanceId]?.updateRequiredModels.orEmpty()
+                if (updateRequired.isNotEmpty()) item(key = "update_${group.instance.instanceId}") {
+                    Column(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
+                        Text("Update ${group.instance.label} to use ${updateRequired.joinToString(", ")}",
+                            style = MaterialTheme.typography.bodySmall)
+                        androidx.compose.material3.TextButton(enabled = canUpdateProviders,
+                            onClick = { onUpdateProvider(group.instance) }) { Text("Update provider") }
+                    }
+                }
                 // Only labelled once the search spans more than the selected agent:
                 // a single group's heading would repeat the agent row above it.
                 if (groups.size > 1) {
@@ -400,6 +419,7 @@ fun TaskSettingsSheet(
                         buildList {
                             if (catalogEntry?.defaultModels?.contains(model) == true) add("Default")
                             if (catalogEntry?.legacyModels?.contains(model) == true) add("Legacy")
+                            if (catalogEntry?.hiddenModels?.contains(model) == true) add("Hidden")
                         }
                     Box(Modifier.padding(horizontal = S5Theme.spacing.gutter)) {
                         S5SelectableRow(
@@ -420,6 +440,7 @@ fun TaskSettingsSheet(
                                     }
                                 },
                             trailing = {
+                                Row {
                                 FavoriteToggle(
                                     favorited =
                                         (group.instance.instanceId to model) in favoriteKeys,
@@ -429,6 +450,11 @@ fun TaskSettingsSheet(
                                         )
                                     },
                                 )
+                                androidx.compose.material3.TextButton(onClick = {
+                                    onToggleHidden(ModelFavorite(group.instance.instanceId, model),
+                                        catalogEntry?.hiddenModels?.contains(model) != true)
+                                }) { Text(if (catalogEntry?.hiddenModels?.contains(model) == true) "Show" else "Hide") }
+                                }
                             },
                             position = rowPosition(index, group.models.size),
                         )
@@ -436,6 +462,11 @@ fun TaskSettingsSheet(
                 }
             }
 
+            item(key = "hidden_models") {
+                androidx.compose.material3.TextButton(onClick = { showHidden = !showHidden }) {
+                    Text(if (showHidden) "Hide hidden models" else "Show hidden models")
+                }
+            }
             if (planModeEnabled) {
                 item(key = "header_mode", contentType = "header") {
                     S5SectionHeader("Mode")

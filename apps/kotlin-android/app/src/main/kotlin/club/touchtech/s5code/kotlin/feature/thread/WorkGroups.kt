@@ -33,6 +33,7 @@ sealed interface FeedRow {
         val hiddenCount: Int,
         val expanded: Boolean,
         val summary: String,
+        val thought: String? = null,
     ) : FeedRow {
         override val key: String
             get() = "work-toggle:$groupId"
@@ -189,6 +190,10 @@ fun presentFeed(
                 hiddenCount = group.sumOf { it.thoughtParts },
                 expanded = expanded,
                 summary = workGroupSummary(group, activeWorkStartedAtMillis != null),
+                thought = if (!expanded && activeWorkStartedAtMillis != null && end == feed.lastIndex)
+                    group.filterIsInstance<FeedEntry.Reasoning>().lastOrNull()?.let {
+                        liveThoughtLine(it.extraParts.lastOrNull() ?: it.text).takeIf(String::isNotBlank)
+                    } else null,
             )
         if (expanded) {
             group.forEach { rows += FeedRow.Entry(it) }
@@ -280,7 +285,8 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
                 .filter {
                     it.id != firstAssistantIdByTurn[turnId] &&
                         it.id != terminalAssistantIdByTurn[turnId] &&
-                        it !is FeedEntry.QuestionAnswer
+                        it !is FeedEntry.QuestionAnswer && it !is FeedEntry.McpApp &&
+                        !(it is FeedEntry.Subagent && it.active)
                 }
                 .map { it.id }
                 .toSet()
