@@ -45,6 +45,7 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.core.net.toUri
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Remote
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
@@ -114,7 +115,7 @@ fun GitOverviewScreen(
             context.startActivity(
                 android.content.Intent(
                     android.content.Intent.ACTION_VIEW,
-                    android.net.Uri.parse(url),
+                    url.toUri(),
                 )
             )
         }.onFailure { store.showError("The pull request could not be opened.") }
@@ -892,7 +893,7 @@ fun PullRequestsScreen(store: AppStore, environmentId: String, onBack: () -> Uni
                                         context.startActivity(
                                             android.content.Intent(
                                                 android.content.Intent.ACTION_VIEW,
-                                                android.net.Uri.parse(url),
+                                                url.toUri(),
                                             )
                                         )
                                     }

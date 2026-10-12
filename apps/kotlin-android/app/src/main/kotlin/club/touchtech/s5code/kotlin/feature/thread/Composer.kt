@@ -110,6 +110,7 @@ fun ThreadComposer(
     value: String,
     /** Slash commands the thread's provider advertises. */
     commands: List<SlashCommand>,
+    modifier: Modifier = Modifier,
     /**
      * Skills the provider resolved for the thread's cwd (`$` trigger plus the
      * `skill:` rows inside the slash menu), already filtered to the ones a user
@@ -178,7 +179,6 @@ fun ThreadComposer(
     onRemoveAttachment: (ComposerAttachment) -> Unit,
     queuedMessages: Int,
     connectionState: ConnectionState,
-    modifier: Modifier = Modifier,
     provider: ProviderInstance,
     /** Display name for the chip, resolved from the catalog — never the slug. */
     modelLabel: String,

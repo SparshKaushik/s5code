@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
+import androidx.core.graphics.toColorInt
 import club.touchtech.s5code.kotlin.data.displayLimitWindows
 import club.touchtech.s5code.kotlin.data.formatLimitDuration
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
@@ -59,7 +60,7 @@ private fun accountName(account: LimitAccount): String {
 private val PACE_LABELS = mapOf("ahead" to "Ahead of pace", "on" to "On pace", "under" to "Under pace")
 
 private fun accountColor(account: LimitAccount, index: Int): Color {
-    val accent = account.accentColor?.let { runCatching { Color(android.graphics.Color.parseColor(it)) }.getOrNull() }
+    val accent = account.accentColor?.let { runCatching { Color(it.toColorInt()) }.getOrNull() }
     if (accent != null) return accent
     // Hash the key so a hub account without a tint still lands on a stable color.
     val palette = listOf(0xFF6E56CF, 0xFF0E7490, 0xFFB45309, 0xFF15803D, 0xFFBE185D)

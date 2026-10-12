@@ -168,16 +168,12 @@ fun Modifier.composerPastedTextReceiver(
     shouldFold: (String) -> Boolean,
     onFolded: (String) -> Unit,
 ): Modifier =
-    composed {
-        contentReceiver { content ->
-            val remaining =
-                content.consume { item ->
-                    val text = item.text?.toString() ?: return@consume false
-                    if (!shouldFold(text)) return@consume false
-                    onFolded(text)
-                    true
-                }
-            remaining
+    contentReceiver { content ->
+        content.consume { item ->
+            val text = item.text?.toString() ?: return@consume false
+            if (!shouldFold(text)) return@consume false
+            onFolded(text)
+            true
         }
     }
 

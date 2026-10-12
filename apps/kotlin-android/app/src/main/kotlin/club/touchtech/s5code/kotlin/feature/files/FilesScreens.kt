@@ -57,6 +57,7 @@ import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
+import androidx.core.net.toUri
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.Routes
 import club.touchtech.s5code.kotlin.data.Remote
@@ -762,7 +763,7 @@ fun WebPreviewScreen(
                                 context.startActivity(
                                     android.content.Intent(
                                         android.content.Intent.ACTION_VIEW,
-                                        android.net.Uri.parse(url),
+                                        url.toUri(),
                                     )
                                 )
                             }.onFailure { loadError = "No app can open this PDF." }

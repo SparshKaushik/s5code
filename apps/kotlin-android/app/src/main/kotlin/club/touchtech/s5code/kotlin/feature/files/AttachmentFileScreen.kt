@@ -32,6 +32,7 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.core.content.FileProvider
+import androidx.core.net.toUri
 import coil3.compose.AsyncImage
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Remote
@@ -98,8 +99,8 @@ fun AttachmentFileScreen(
         val url = signedUrl ?: return
         val intent =
             Intent(Intent.ACTION_VIEW).apply {
-                if (mimeType.isNotBlank()) setDataAndType(android.net.Uri.parse(url), mimeType)
-                else data = android.net.Uri.parse(url)
+                if (mimeType.isNotBlank()) setDataAndType(url.toUri(), mimeType)
+                else data = url.toUri()
             }
         runCatching { context.startActivity(intent) }
             .onFailure { viewError = "No app can open this file." }

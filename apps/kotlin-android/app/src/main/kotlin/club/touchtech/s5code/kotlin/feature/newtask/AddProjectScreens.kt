@@ -180,7 +180,7 @@ private fun resolveAddProjectEnvironment(
 }
 
 @Composable
-private fun environmentOption(option: EnvironmentOption, index: Int, count: Int,
+private fun EnvironmentOptionRow(option: EnvironmentOption, index: Int, count: Int,
     selected: Boolean, onSelect: () -> Unit) {
     S5SelectableRow(
         label = option.environment.label,
@@ -262,7 +262,7 @@ fun AddProjectSourceScreen(
                 if (options.size > 1) {
                     S5RowGroup(title = "Environments") {
                         options.forEachIndexed { index, option ->
-                            environmentOption(
+                            EnvironmentOptionRow(
                                 option = option,
                                 index = index,
                                 count = options.size,

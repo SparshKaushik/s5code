@@ -1506,7 +1506,7 @@ private fun normalizeChangedFileUri(value: String): String? {
                 .firstNotNullOfOrNull { part ->
                     part.removePrefix("path=").takeIf { part.startsWith("path=") }
                 }
-                ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8) }
+                ?.let { java.net.URLDecoder.decode(it, Charsets.UTF_8.name()) }
                 ?: return null
     } else if (Regex("^[a-z][a-z0-9+.-]*:", RegexOption.IGNORE_CASE).containsMatchIn(path)) {
         return null
@@ -1515,7 +1515,7 @@ private fun normalizeChangedFileUri(value: String): String? {
     if (queryIndex >= 0) path = path.substring(0, queryIndex)
     val normalized =
         try {
-            java.net.URLDecoder.decode(path.trim(), Charsets.UTF_8)
+            java.net.URLDecoder.decode(path.trim(), Charsets.UTF_8.name())
         } catch (_: Exception) {
             path.trim()
         }
