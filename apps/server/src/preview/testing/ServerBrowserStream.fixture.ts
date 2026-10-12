@@ -7,6 +7,7 @@ import {
   AuthSessionId,
 } from "@t3tools/contracts";
 import * as Context from "effect/Context";
+import * as Console from "effect/Console";
 import * as Deferred from "effect/Deferred";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
@@ -22,7 +23,7 @@ import { routeLayer } from "../ServerBrowserStream.ts";
 // This fixture runs in its own process. Its HTTP scopes live until that process
 // exits, so graceful shutdown does not wait for Bun's upgraded requests to drain.
 for (const slow of [false, true]) {
-  const scope = Effect.runSync(Scope.make());
+  const scope = Scope.makeUnsafe();
   await Effect.runPromise(
     Effect.gen(function* () {
       const output = yield* Queue.make<ServerBrowser.ServerBrowserViewerOutput>();
@@ -131,6 +132,8 @@ for (const slow of [false, true]) {
     }).pipe(Effect.provideService(Scope.Scope, scope), Effect.timeout("10 seconds")),
   );
 }
-console.log(
-  "Standalone Bun preview streamed frames and control, handled input and ACKs, and closed a slow viewer.",
+await Effect.runPromise(
+  Console.log(
+    "Standalone Bun preview streamed frames and control, handled input and ACKs, and closed a slow viewer.",
+  ),
 );
