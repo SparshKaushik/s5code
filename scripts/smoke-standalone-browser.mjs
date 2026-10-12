@@ -61,17 +61,27 @@ try {
   const sqliteShim = NodeURL.fileURLToPath(
     new URL("../apps/server/src/provider/sqliteCompat.ts", import.meta.url),
   );
-  const external = CLI_RUNTIME_EXTERNAL_PREFIXES.map((prefix) => `${prefix}*`);
+  const serverManifest = NodeURL.fileURLToPath(
+    new URL("../apps/server/package.json", import.meta.url),
+  );
   const compileScript = `
+    import { createRequire } from "node:module";
+    const require = createRequire(${JSON.stringify(serverManifest)});
     const result = await Bun.build({
       entrypoints: ${JSON.stringify([entry, archive])},
       compile: { outfile: ${JSON.stringify(binary)} },
       splitting: true,
-      external: ${JSON.stringify(external)},
       plugins: [{
         name: "standalone-sqlite-shim",
         setup(build) {
           build.onResolve({ filter: /^node:sqlite$/ }, () => ({ path: ${JSON.stringify(sqliteShim)} }));
+          // The stream fixture mocks provider services; their unrelated native
+          // imports stay disk-backed. Playwright still loads from the archive.
+          build.onResolve({ filter: /^[^./]/ }, ({ path }) => {
+            if (!${JSON.stringify(CLI_RUNTIME_EXTERNAL_PREFIXES)}.some((prefix) => path.startsWith(prefix))) return;
+            try { return { path: require.resolve(path), external: true }; }
+            catch { return { path, external: true }; }
+          });
         },
       }],
     });
