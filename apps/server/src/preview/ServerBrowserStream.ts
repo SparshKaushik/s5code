@@ -102,11 +102,15 @@ const makeHandler = (browser: ServerBrowser.ServerBrowser["Service"]) =>
               },
             }),
           );
-        const incoming = NodeHttpServerRequest.toIncomingMessage(request);
+        // Bun serves a Fetch Request, without Node's headers or TCP socket.
+        const incoming =
+          request.source instanceof Request
+            ? undefined
+            : NodeHttpServerRequest.toIncomingMessage(request);
         // JPEGs are already compressed. Disabling deflate also keeps all
         // pending writes in the socket buffer we bound below, not a zlib queue.
-        delete incoming.headers["sec-websocket-extensions"];
-        const transport = incoming.socket;
+        if (incoming) delete incoming.headers["sec-websocket-extensions"];
+        const transport = incoming?.socket;
         const socket = yield* request.upgrade;
         // The reader performs the upgrade; writes wait for it.
         const reader = yield* socket.reader;
@@ -128,14 +132,16 @@ const makeHandler = (browser: ServerBrowser.ServerBrowser["Service"]) =>
         // `write` returns once the frame is queued, so Chromium's ack for each
         // frame waits for the viewer's `ack` message instead.
         const unacknowledged: Array<Effect.Effect<void>> = [];
-        const disconnectSlowViewer = Effect.sync(() => transport.destroy()).pipe(
-          Effect.andThen(Effect.interrupt),
-        );
+        const disconnectSlowViewer = (
+          transport
+            ? Effect.sync(() => transport.destroy())
+            : writer.write(new Socket.CloseEvent(1013, "viewer too slow"))
+        ).pipe(Effect.andThen(Effect.interrupt));
         const write = (data: Uint8Array | string) =>
           Effect.suspend(() => {
             const bytes = typeof data === "string" ? Buffer.byteLength(data) : data.byteLength;
             // Include the WebSocket frame header in the budget.
-            if (transport.writableLength + bytes + 14 > MAX_SOCKET_BUFFER_BYTES) {
+            if ((transport?.writableLength ?? 0) + bytes + 14 > MAX_SOCKET_BUFFER_BYTES) {
               return disconnectSlowViewer;
             }
             return writer.write(data);

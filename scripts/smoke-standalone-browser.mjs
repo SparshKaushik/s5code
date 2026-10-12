@@ -5,6 +5,7 @@ import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
+import { CLI_RUNTIME_EXTERNAL_PREFIXES } from "./lib/cli-external-packages.ts";
 
 const require = NodeModule.createRequire(new URL("../apps/server/package.json", import.meta.url));
 const packageDirectory = NodePath.dirname(require.resolve("playwright-core/package.json"));
@@ -26,10 +27,14 @@ try {
   const contextsModule = NodeURL.fileURLToPath(
     new URL("../apps/server/src/preview/ServerBrowserContexts.ts", import.meta.url),
   );
+  const streamFixture = NodeURL.fileURLToPath(
+    new URL("../apps/server/src/preview/testing/ServerBrowserStream.fixture.ts", import.meta.url),
+  );
   await NodeFSP.writeFile(
     entry,
     `
       import * as NodeAssert from "node:assert/strict";
+      import ${JSON.stringify(streamFixture)};
       import { ServerBrowserContexts } from ${JSON.stringify(contextsModule)};
       const pool = new ServerBrowserContexts({
         profilesDir: process.env.SMOKE_PROFILES_DIR,
@@ -47,17 +52,35 @@ try {
       } finally {
         await pool.close();
       }
+      // The stream fixture owns ephemeral HTTP servers in this child process.
+      process.exit(0);
     `,
   );
   const binary = NodePath.join(directory, "browser");
-  NodeChildProcess.execFileSync(
-    "bun",
-    ["build", "--compile", "--splitting", entry, archive, "--outfile", binary],
-    {
-      cwd: directory,
-      stdio: "inherit",
-    },
+  // Match the server bundle's native-package boundary and SQLite shim.
+  const sqliteShim = NodeURL.fileURLToPath(
+    new URL("../apps/server/src/provider/sqliteCompat.ts", import.meta.url),
   );
+  const external = CLI_RUNTIME_EXTERNAL_PREFIXES.map((prefix) => `${prefix}*`);
+  const compileScript = `
+    const result = await Bun.build({
+      entrypoints: ${JSON.stringify([entry, archive])},
+      compile: { outfile: ${JSON.stringify(binary)} },
+      splitting: true,
+      external: ${JSON.stringify(external)},
+      plugins: [{
+        name: "standalone-sqlite-shim",
+        setup(build) {
+          build.onResolve({ filter: /^node:sqlite$/ }, () => ({ path: ${JSON.stringify(sqliteShim)} }));
+        },
+      }],
+    });
+    if (!result.success) throw new AggregateError(result.logs, "Browser smoke compilation failed");
+  `;
+  NodeChildProcess.execFileSync("bun", ["--eval", compileScript], {
+    cwd: directory,
+    stdio: "inherit",
+  });
   NodeChildProcess.execFileSync(binary, [], {
     cwd: directory,
     env: {
