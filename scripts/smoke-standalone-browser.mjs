@@ -86,7 +86,8 @@ try {
         if (!isExternalCliDependency(id)) return id;
         let resolved = id;
         try {
-          resolved = require.resolve(id);
+          // Match Cursor's Bun export condition rather than Node's CJS entry.
+          resolved = require.resolve(id === "@cursor/sdk" ? "@cursor/sdk/bundled" : id);
         } catch {}
         fixtureExternals.add(resolved);
         return resolved;
