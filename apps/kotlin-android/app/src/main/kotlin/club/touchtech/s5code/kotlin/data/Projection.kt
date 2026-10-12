@@ -303,7 +303,7 @@ fun threadSummaryFrom(
         // row. A recovered session still carries the last error it saw, and a red
         // excerpt on a working thread is the "stale label" the repo's guidance
         // calls out.
-        lastError = shell.session?.lastError?.takeIf { status == ThreadStatus.Failed },
+        lastError = shell.session?.lastError?.takeIf { status in setOf(ThreadStatus.Failed, ThreadStatus.Limited) },
         // `resolveThreadPrSource`: the link array replaces legacy references only
         // on servers that project it (null = unsupported). The badge resolver owns
         // stacks and linked counts; the single link falls back to the legacy or

@@ -973,7 +973,13 @@ class EnvironmentSession(
 
     /** Apply the authoritative acknowledgement before another settings action can read stale state. */
     suspend fun updateSettings(patch: JsonObject) {
-        val settings = request(WsMethods.ServerUpdateSettings, buildJsonObject { put("patch", patch) }, ServerConfigSettingsDto.serializer())
+        val live = awaitConnection()
+        val payload = buildJsonObject { put("patch", patch) }
+        state.value.requireRpcPermissions(WsMethods.ServerUpdateSettings, payload)
+        val previous = state.value.serverSettings
+        val settings = live.call(WsMethods.ServerUpdateSettings, payload, ServerConfigSettingsDto.serializer())
+        // An event may already contain another client's later write.
+        if (state.value.serverSettings !== previous) return
         _state.value = _state.value.copy(serverSettings = settings,
             addProjectBaseDirectory = settings.addProjectBaseDirectory,
             autoSettleOnMerge = settings.sidebarAutoSettleOnMerge,

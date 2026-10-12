@@ -602,7 +602,8 @@ private fun EnvironmentMaintenance(
         remember(environment.id) { store.workspace.providerStatuses(environment.id) }
             .collectAsStateWithLifecycle()
     val caps = environment.capabilities
-    val allowed = connected && caps.sessionAuthenticated && caps.sessionCanMaintain
+    val allowed = connected && caps.sessionAuthenticated &&
+        (caps.sessionCanMaintain || caps.sessionCanManageProviders)
     var pending by remember(environment.id) { mutableStateOf<String?>(null) }
     var checkedRelease by remember(environment.id) { mutableStateOf<String?>(null) }
     var upToDate by remember(environment.id) { mutableStateOf(false) }
@@ -672,7 +673,7 @@ private fun EnvironmentMaintenance(
         }
 
         val canSelfUpdate =
-            caps.serverSelfUpdate != null &&
+            caps.sessionCanMaintain && caps.serverSelfUpdate != null &&
                 (caps.serverSelfUpdate != "desktop-managed" || caps.desktopAppUpdate)
         S5RowGroup(title = "T3 Code") {
             S5SettingsRow(
@@ -791,7 +792,7 @@ private fun EnvironmentMaintenance(
                     enabled = !disabled,
                 )
             }
-            enabledProviders.filter { it.updateAvailable }.forEach { provider ->
+            enabledProviders.filter { it.updateAvailable && caps.sessionCanManageProviders }.forEach { provider ->
                 Row(
                     Modifier.fillMaxWidth().padding(horizontal = S5Theme.spacing.gutter),
                     horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
