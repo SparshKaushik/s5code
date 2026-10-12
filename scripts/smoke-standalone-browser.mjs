@@ -63,6 +63,21 @@ try {
     new URL("../apps/server/src/provider/sqliteCompat.ts", import.meta.url),
   );
   const bundleDirectory = NodePath.join(directory, "bundle");
+  // Browser and auth services are mocked in the stream fixture, so it must
+  // never start a provider SDK. Fail explicitly if one is reached accidentally.
+  const cursorFixture = NodePath.join(directory, "unused-cursor-sdk.mjs");
+  await NodeFSP.writeFile(
+    cursorFixture,
+    `
+      const unavailable = () => { throw new Error("The stream fixture must not call Cursor"); };
+      export const Agent = new Proxy(unavailable, { get: unavailable });
+      export const Cursor = Agent;
+      export const InMemoryCredentialStore = Agent;
+      export const createAgentPlatform = unavailable;
+      export class AuthenticationError extends Error {}
+      export class CursorSdkError extends Error {}
+    `,
+  );
   const fixtureExternals = new Set();
   await build({
     config: false,
@@ -73,10 +88,10 @@ try {
     shims: true,
     dts: false,
     logLevel: "error",
-    alias: { "node:sqlite": sqliteShim },
+    alias: { "node:sqlite": sqliteShim, "@cursor/sdk": cursorFixture },
     deps: {
-      alwaysBundle: shouldBundleCliDependency,
-      neverBundle: isExternalCliDependency,
+      alwaysBundle: (id) => id === "@cursor/sdk" || shouldBundleCliDependency(id),
+      neverBundle: (id) => id !== "@cursor/sdk" && isExternalCliDependency(id),
       onlyBundle: false,
     },
     outputOptions: {
@@ -86,8 +101,7 @@ try {
         if (!isExternalCliDependency(id)) return id;
         let resolved = id;
         try {
-          // Match Cursor's Bun export condition rather than Node's CJS entry.
-          resolved = require.resolve(id === "@cursor/sdk" ? "@cursor/sdk/bundled" : id);
+          resolved = require.resolve(id);
         } catch {}
         fixtureExternals.add(resolved);
         return resolved;
