@@ -179,7 +179,7 @@ export const piUsageFormat: TranscriptUsageFormat<PiScanState> = {
       responseId: true,
     },
   },
-  mightCarryUsage: (line) => line.includes('"usage"') || line.includes('"session"'),
+  usageMarkers: ['"usage"', '"session"'],
   parseLine: (line, state) => orEmpty(parsePiLine(line, state)),
   parseProjected: (projected, state) => orEmpty(parsePiRecord(projected, state)),
   state: {

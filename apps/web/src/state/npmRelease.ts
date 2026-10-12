@@ -1,0 +1,41 @@
+import { useAtomValue } from "@effect/atom-react";
+import { cliReleaseTagUrl } from "@t3tools/shared/cliRelease";
+import * as Effect from "effect/Effect";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
+import { AsyncResult, Atom } from "effect/reactivity";
+
+/**
+ * Whether server `<version>` is published. S5 Code servers install from the
+ * fork's GitHub Releases, not npm. A 404 is false; network and API errors
+ * stay unknown. Both re-check every few minutes, so a release
+ * that lands later shows up without a reload.
+ */
+const npmReleasePublishedAtom = Atom.family((version: string) =>
+  Atom.make(
+    Effect.gen(function* () {
+      const response = yield* HttpClient.get(cliReleaseTagUrl(version));
+      if (response.status === 404) return false;
+      const body = yield* HttpClientResponse.filterStatusOk(response).pipe(
+        Effect.flatMap((ok) => ok.json),
+      );
+      return typeof body === "object" && body !== null && "tag_name" in body
+        ? body.tag_name === `v${version}`
+        : false;
+    }).pipe(Effect.provide(FetchHttpClient.layer)),
+  ).pipe(
+    Atom.withRefresh("5 minutes"),
+    Atom.keepAlive,
+    Atom.withLabel(`npm-release-published:${version}`),
+  ),
+);
+
+const NO_VERSION_ATOM = Atom.make(AsyncResult.success(false)).pipe(
+  Atom.withLabel("npm-release-published:none"),
+);
+
+/** True only once the release confirms the version, so callers can hide work that
+    would download it until then. */
+export function useNpmReleasePublished(version: string | null): boolean {
+  const result = useAtomValue(version ? npmReleasePublishedAtom(version) : NO_VERSION_ATOM);
+  return AsyncResult.getOrElse(result, () => false);
+}
