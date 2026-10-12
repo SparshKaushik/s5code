@@ -122,6 +122,7 @@ export class ElectronDialog extends Context.Service<
     ) => Effect.Effect<boolean, ElectronDialogConfirmError>;
     readonly showMessageBox: (
       options: Electron.MessageBoxOptions,
+      owner?: Electron.BrowserWindow,
     ) => Effect.Effect<Electron.MessageBoxReturnValue, ElectronDialogShowMessageBoxError>;
     readonly showErrorBox: (title: string, content: string) => Effect.Effect<void>;
   }
@@ -222,9 +223,12 @@ export const make = ElectronDialog.of({
     });
     return result.response === CONFIRM_BUTTON_INDEX;
   }),
-  showMessageBox: (options) =>
+  showMessageBox: (options, owner) =>
     Effect.tryPromise({
-      try: () => Electron.dialog.showMessageBox(options),
+      try: () =>
+        owner === undefined
+          ? Electron.dialog.showMessageBox(options)
+          : Electron.dialog.showMessageBox(owner, options),
       catch: (cause) =>
         new ElectronDialogShowMessageBoxError({
           type: options.type ?? null,

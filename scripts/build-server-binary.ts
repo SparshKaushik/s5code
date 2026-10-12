@@ -15,7 +15,7 @@ import { Command, Flag } from "effect/cli";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as NodeModule from "node:module";
 
-import { HostProcessArchitecture, HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import serverPackageJson from "../apps/server/package.json" with { type: "json" };
 import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
@@ -57,6 +57,9 @@ import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
  * tree-sitter bindings must be extracted before importing the SDK; virtual
  * assets cannot be spawned or dlopened. The standalone-only resolver override
  * points the SDK at that cache without changing its provider behavior.
+ * Playwright is embedded as a package archive as well: its dynamic require
+ * escapes Bun's module graph, and its runtime reads files beside package.json.
+ * The browser loader restores that layout on first use.
  *
  * The web client is NOT embedded. Bun's `--asset` flag (the only way to embed a
  * directory tree at a stable path) ships in Bun 1.4; on 1.3.x it is silently
@@ -373,6 +376,32 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     { verbose: options.verbose },
   );
 
+  const playwrightManifest = yield* Effect.try({
+    try: () =>
+      NodeModule.createRequire(path.join(repoRoot, "apps/server/package.json")).resolve(
+        "playwright-core/package.json",
+      ),
+    catch: (cause) =>
+      new ServerBinaryBuildError({
+        kind: "missing-playwright-runtime",
+        detail: `Could not resolve playwright-core for standalone packaging. (${String(cause)})`,
+      }),
+  });
+  const playwrightArchive = path.join(scratch, "playwright-core-runtime.tgz");
+  yield* runCommand(
+    "archive Playwright runtime",
+    "tar",
+    [
+      "-czf",
+      playwrightArchive,
+      "--exclude=node_modules",
+      "-C",
+      path.dirname(playwrightManifest),
+      ".",
+    ],
+    { verbose: options.verbose },
+  );
+
   // --splitting is required (see the module comment): it keeps the Node SQLite
   // driver in a lazily-loaded chunk so its top-level `node:sqlite` import is
   // never hoisted into the entry, which would kill the binary at startup.
@@ -386,7 +415,7 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     ${patchStandaloneCursorSdk.toString()}
     let cursorPatched = false;
     const result = await Bun.build({
-      entrypoints: ${yield* encodeJsonString([entryPath, fffLibraryPath, cursorArchive])},
+      entrypoints: ${yield* encodeJsonString([entryPath, fffLibraryPath, cursorArchive, playwrightArchive])},
       compile: ${yield* encodeJsonString({ target: options.target, outfile })},
       splitting: true,
       minify: true,
@@ -453,6 +482,12 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
       detail: `Cursor's native-helper archive did not end up embedded in ${outfile}.`,
     });
   }
+  if (!containsBytes(compiled, "playwright-core-runtime-")) {
+    return yield* new ServerBinaryBuildError({
+      kind: "playwright-runtime-not-embedded",
+      detail: `Playwright's runtime archive did not end up embedded in ${outfile}.`,
+    });
+  }
   for (const name of ["T3CODE_SERVER_BINARY_TARGET", "T3CODE_SERVER_BINARY_REPO"] as const) {
     if (containsBytes(compiled, name)) {
       return yield* new ServerBinaryBuildError({
@@ -468,8 +503,8 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
   // builds each Linux arch on a matching runner: a cross-compiled arm64 binary
   // can omit @yuuang/ffi-rs-linux-arm64-gnu (pulled in by @ff-labs/fff-node) and
   // still look like a successful compile until --version dies at process start.
-  const hostPlatform = yield* HostProcessPlatform;
-  const hostArch = yield* HostProcessArchitecture;
+  const hostPlatform = yield* HostProcess.Platform;
+  const hostArch = yield* HostProcess.Architecture;
   if (hostPlatform === "linux" && hostArch === options.arch) {
     yield* Effect.log(`[server-binary] Smoke-testing ${outfile} --version...`);
     yield* runCommand("server binary --version", outfile, ["--version"], {

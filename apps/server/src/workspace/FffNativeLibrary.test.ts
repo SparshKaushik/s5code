@@ -4,7 +4,7 @@ import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
 
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import {
   ensureFffNativeLibrary,
@@ -100,7 +100,7 @@ it.layer(TestLayer, { excludeTestServices: true })("FffNativeLibrary", (it) => {
       const env: NodeJS.ProcessEnv = {};
 
       yield* ensureFffNativeLibrary({ baseDir }).pipe(
-        Effect.provideService(HostProcessEnvironment, env),
+        Effect.provideService(HostProcess.Environment, env),
       );
 
       // `npx t3`, the desktop app, and a dev checkout all land here. Publishing a
@@ -118,7 +118,7 @@ it.layer(TestLayer, { excludeTestServices: true })("FffNativeLibrary", (it) => {
       yield* ensureFffNativeLibrary({
         baseDir,
         asset: asset("libfff_c-abc123.so", "native-bytes"),
-      }).pipe(Effect.provideService(HostProcessEnvironment, env));
+      }).pipe(Effect.provideService(HostProcess.Environment, env));
 
       expect(env[FFF_NATIVE_LIB_PATH_ENV]).toBe(
         path.join(baseDir, "caches", "native", "libfff_c-abc123.so"),
@@ -136,7 +136,7 @@ it.layer(TestLayer, { excludeTestServices: true })("FffNativeLibrary", (it) => {
       const env: NodeJS.ProcessEnv = { [FFF_NATIVE_LIB_PATH_ENV]: handBuilt };
 
       yield* ensureFffNativeLibrary({ baseDir }).pipe(
-        Effect.provideService(HostProcessEnvironment, env),
+        Effect.provideService(HostProcess.Environment, env),
       );
 
       expect(env[FFF_NATIVE_LIB_PATH_ENV]).toBe(handBuilt);
@@ -157,7 +157,7 @@ it.layer(TestLayer, { excludeTestServices: true })("FffNativeLibrary", (it) => {
       yield* ensureFffNativeLibrary({
         baseDir,
         asset: asset("libfff_c-abc123.so", "native-bytes"),
-      }).pipe(Effect.provideService(HostProcessEnvironment, env));
+      }).pipe(Effect.provideService(HostProcess.Environment, env));
       expect(env[FFF_NATIVE_LIB_PATH_ENV]).toBeUndefined();
     }),
   );

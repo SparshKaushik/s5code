@@ -184,6 +184,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     flushMainWindowBounds: Effect.void,
     dispatchMenuAction: () => Effect.void,
     zoomMain: () => Effect.void,
+    runMainContentsCommand: () => Effect.void,
     syncAppearance: Effect.void,
     prepareCaptureReveal: Effect.void,
     dispatchSnapShotEvent: () => Effect.void,

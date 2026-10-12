@@ -1,5 +1,5 @@
 import { assert, expect, it } from "@effect/vitest";
-import { HostProcessPlatform } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
@@ -23,7 +23,7 @@ it("describes unavailable Bun PTY operations structurally", () => {
 it.effect("reports unsupported platforms with a structured startup defect", () =>
   Effect.gen(function* () {
     const exit = yield* BunPtyAdapter.make().pipe(
-      Effect.provideService(HostProcessPlatform, "win32"),
+      Effect.provideService(HostProcess.Platform, "win32"),
       Effect.exit,
     );
 

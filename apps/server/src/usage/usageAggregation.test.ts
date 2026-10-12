@@ -4,7 +4,7 @@ import { UsageCatalogModelId } from "@t3tools/contracts";
 import { resolveModelAliases, UsageAggregator } from "./usageAggregation.ts";
 import { EMPTY_CATALOG, parseModelCatalog } from "./usageModelCatalog.ts";
 import { UsagePricer, type RateTable } from "./usagePricing.ts";
-import type { UsageRecord } from "./usageTranscripts.ts";
+import type { UsageRecord } from "@t3tools/provider-core/server/usage";
 
 const rates: RateTable = new Map([
   [

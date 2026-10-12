@@ -262,7 +262,7 @@ jobs:
     needs: [preflight]
     if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' }}
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 30
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -321,6 +321,9 @@ jobs:
       # No Electron setup here: `t3` (apps/server) has no Electron dependency
       # and none of its tests touch the runtime. Only the non-server `test`
       # job, which covers @t3tools/desktop, needs the download.
+      - name: Install Chromium for server browser integration tests
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+
       - name: Test
         run: vp run --filter t3 test --shard ${{ matrix.shard }}/${{ strategy.job-total }}
 
@@ -548,6 +551,12 @@ jobs:
           binary="$(find release-publish -maxdepth 1 -name 's5code-server-*-linux-${{ matrix.arch }}' -print -quit)"
           [[ -n "$binary" && -x "$binary" ]] || { echo "Server binary not produced for ${{ matrix.arch }}." >&2; exit 1; }
           file "$binary"
+
+      - name: Install Chromium for standalone browser smoke test
+        run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
+
+      - name: Verify standalone browser runtime
+        run: node scripts/smoke-standalone-browser.mjs
 
       - name: Upload server binary
         uses: actions/upload-artifact@v7

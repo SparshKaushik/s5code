@@ -7,7 +7,7 @@ import * as Scope from "effect/Scope";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ProcessRunner from "../processRunner.ts";
 import { BOOT_SERVICE_UNIT_ENV } from "./bootService.ts";
@@ -119,7 +119,7 @@ export const prepareServerBinaryUpdate = Effect.fn("cloud.binary_update.prepare"
     const path = yield* Path.Path;
     const httpClient = yield* HttpClient.HttpClient;
     const runner = yield* ProcessRunner.ProcessRunner;
-    const env = yield* HostProcessEnvironment;
+    const env = yield* HostProcess.Environment;
 
     const executablePath = yield* fs
       .realPath(input.identity.executablePath)

@@ -6,7 +6,7 @@ import * as Path from "effect/Path";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 
-import { HostProcessEnvironment } from "@t3tools/shared/hostProcess";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ProcessRunner from "../processRunner.ts";
 import { BOOT_SERVICE_UNIT_ENV } from "./bootService.ts";
@@ -109,7 +109,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
             ProcessRunner.ProcessRunner,
             makeRunner({ onRun: (command) => validated.push(command) }),
           ),
-          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.provideService(HostProcess.Environment, {}),
         );
 
         expect(stages).toEqual(["downloading", "installing"]);
@@ -137,7 +137,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
         }).pipe(
           Effect.provideService(HttpClient.HttpClient, makeHttpClient(REPLACEMENT_BYTES)),
           Effect.provideService(ProcessRunner.ProcessRunner, makeRunner({})),
-          Effect.provideService(HostProcessEnvironment, {
+          Effect.provideService(HostProcess.Environment, {
             [BOOT_SERVICE_UNIT_ENV]: "t3code.service",
           }),
         );
@@ -156,7 +156,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
         }).pipe(
           Effect.provideService(HttpClient.HttpClient, makeHttpClient(null)),
           Effect.provideService(ProcessRunner.ProcessRunner, makeRunner({})),
-          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.provideService(HostProcess.Environment, {}),
           Effect.flip,
         );
         expect(error.step).toBe("download");
@@ -175,7 +175,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
         }).pipe(
           Effect.provideService(HttpClient.HttpClient, makeHttpClient(REPLACEMENT_BYTES)),
           Effect.provideService(ProcessRunner.ProcessRunner, makeRunner({ stdout: "t3 v0.9.0" })),
-          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.provideService(HostProcess.Environment, {}),
           Effect.flip,
         );
         expect(error.step).toBe("validate");
@@ -197,7 +197,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
         }).pipe(
           Effect.provideService(HttpClient.HttpClient, makeHttpClient(REPLACEMENT_BYTES)),
           Effect.provideService(ProcessRunner.ProcessRunner, makeRunner({ exitCode: 127 })),
-          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.provideService(HostProcess.Environment, {}),
           Effect.flip,
         );
         expect(error.step).toBe("validate");
@@ -231,7 +231,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
                 }),
             }),
           ),
-          Effect.provideService(HostProcessEnvironment, {}),
+          Effect.provideService(HostProcess.Environment, {}),
           Effect.flip,
         );
         expect(error.step).toBe("validate");
