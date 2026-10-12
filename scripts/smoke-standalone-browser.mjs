@@ -5,7 +5,8 @@ import * as NodeModule from "node:module";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
 import * as NodeURL from "node:url";
-import { CLI_RUNTIME_EXTERNAL_PREFIXES } from "./lib/cli-external-packages.ts";
+import { build } from "vite-plus/pack";
+import { isExternalCliDependency, shouldBundleCliDependency } from "./lib/cli-external-packages.ts";
 
 const require = NodeModule.createRequire(new URL("../apps/server/package.json", import.meta.url));
 const packageDirectory = NodePath.dirname(require.resolve("playwright-core/package.json"));
@@ -61,29 +62,43 @@ try {
   const sqliteShim = NodeURL.fileURLToPath(
     new URL("../apps/server/src/provider/sqliteCompat.ts", import.meta.url),
   );
-  const serverManifest = NodeURL.fileURLToPath(
-    new URL("../apps/server/package.json", import.meta.url),
-  );
+  const bundleDirectory = NodePath.join(directory, "bundle");
+  const fixtureExternals = new Set();
+  await build({
+    config: false,
+    entry: [entry],
+    outDir: bundleDirectory,
+    platform: "node",
+    format: "esm",
+    shims: true,
+    dts: false,
+    logLevel: "error",
+    alias: { "node:sqlite": sqliteShim },
+    deps: {
+      alwaysBundle: shouldBundleCliDependency,
+      neverBundle: isExternalCliDependency,
+      onlyBundle: false,
+    },
+    outputOptions: {
+      // The stream fixture's unrelated provider imports stay disk-backed.
+      // Playwright still loads from the embedded runtime archive.
+      paths(id) {
+        if (!isExternalCliDependency(id)) return id;
+        let resolved = id;
+        try {
+          resolved = require.resolve(id);
+        } catch {}
+        fixtureExternals.add(resolved);
+        return resolved;
+      },
+    },
+  });
   const compileScript = `
-    import { createRequire } from "node:module";
-    const require = createRequire(${JSON.stringify(serverManifest)});
     const result = await Bun.build({
-      entrypoints: ${JSON.stringify([entry, archive])},
+      entrypoints: ${JSON.stringify([NodePath.join(bundleDirectory, "browser.mjs"), archive])},
       compile: { outfile: ${JSON.stringify(binary)} },
       splitting: true,
-      plugins: [{
-        name: "standalone-sqlite-shim",
-        setup(build) {
-          build.onResolve({ filter: /^node:sqlite$/ }, () => ({ path: ${JSON.stringify(sqliteShim)} }));
-          // The stream fixture mocks provider services; their unrelated native
-          // imports stay disk-backed. Playwright still loads from the archive.
-          build.onResolve({ filter: /^[^./]/ }, ({ path }) => {
-            if (!${JSON.stringify(CLI_RUNTIME_EXTERNAL_PREFIXES)}.some((prefix) => path.startsWith(prefix))) return;
-            try { return { path: require.resolve(path), external: true }; }
-            catch { return { path, external: true }; }
-          });
-        },
-      }],
+      external: ${JSON.stringify([...fixtureExternals])},
     });
     if (!result.success) throw new AggregateError(result.logs, "Browser smoke compilation failed");
   `;
