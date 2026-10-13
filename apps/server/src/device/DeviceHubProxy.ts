@@ -83,6 +83,20 @@ const forwardHeaders = (request: HttpServerRequest.HttpServerRequest, origin: st
 };
 
 /**
+ * The hub-side socket. Closing a `ws` socket that is still connecting (the
+ * client went away first, or the open timed out) emits an `error` event after
+ * the proxy has stopped listening, and an unheard `error` event crashes the
+ * whole server. A remote hub over a tunnel takes long enough to connect that
+ * a reconnecting Device panel hit this repeatedly. Failures still reach the
+ * proxy through the socket's own handlers.
+ */
+export const upstreamWebSocket = (url: string, headers: Readonly<Record<string, string>>) => {
+  const socket = new NodeSocket.NodeWS.WebSocket(url, { headers });
+  socket.on("error", () => {});
+  return socket;
+};
+
+/**
  * Pipe a client WebSocket to the hub's with no framing changes. Frames are
  * opaque: H.264 access units one way, input packets the other.
  */
@@ -95,10 +109,7 @@ const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
   const upstream = yield* Socket.makeWebSocket(upstreamUrl, {
     openTimeout: "10 seconds",
   }).pipe(
-    Effect.provideService(
-      Socket.WebSocketConstructor,
-      (url) => new NodeSocket.NodeWS.WebSocket(url, { headers }),
-    ),
+    Effect.provideService(Socket.WebSocketConstructor, (url) => upstreamWebSocket(url, headers)),
   );
   yield* Effect.scoped(
     Effect.gen(function* () {

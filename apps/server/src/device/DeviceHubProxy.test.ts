@@ -185,3 +185,25 @@ it.each(["/panel/2/stream.avcc", "/panel/1/webrtc/offer", "/panel/3/exec"])(
     expect(requests).toEqual([]);
   },
 );
+
+describe("DeviceHubProxy upstream socket", () => {
+  it("survives being closed while the hub handshake is still pending", async () => {
+    const net = await import("node:net");
+    // Accepts the connection but never answers the upgrade, like a slow tunnel.
+    const server = net.createServer(() => {});
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const { port } = server.address() as { port: number };
+    const uncaught: unknown[] = [];
+    const record = (error: unknown) => uncaught.push(error);
+    process.on("uncaughtException", record);
+    try {
+      const socket = DeviceHubProxy.upstreamWebSocket(`ws://127.0.0.1:${port}/api/devices/ws`, {});
+      socket.close();
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(uncaught).toEqual([]);
+    } finally {
+      process.off("uncaughtException", record);
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});
