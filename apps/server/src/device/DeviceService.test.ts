@@ -24,6 +24,7 @@ import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
 
 import * as DeviceService from "./DeviceService.ts";
 import * as SimboxHost from "./SimboxDeviceHost.ts";
+import * as SimboxRunnerStore from "./SimboxRunnerStore.ts";
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -73,8 +74,10 @@ const fixture = Effect.fn("fixture")(function* (
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
   respond?: (request: Parameters<Parameters<typeof HttpClient.make>[0]>[0]) => Response | undefined,
   configureAgent?: Parameters<typeof DeviceService.makeWithHosts>[2],
+  simboxStore?: Parameters<typeof DeviceService.makeWithHosts>[4],
+  initialSettings: Partial<typeof DEFAULT_SERVER_SETTINGS> = {},
 ) {
-  const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
+  const settings = yield* Ref.make({ ...DEFAULT_SERVER_SETTINGS, ...initialSettings });
   const starts: string[] = [];
   const agentStarts: string[] = [];
   const agentStops: string[] = [];
@@ -139,6 +142,7 @@ const fixture = Effect.fn("fixture")(function* (
     undefined,
     configureAgent,
     installTool,
+    simboxStore,
   ).pipe(
     Effect.provide(NodeCrypto.layer),
     Effect.provideService(DeviceHost.DeviceHost, host),
@@ -817,6 +821,89 @@ describe("automatic Simbox device attachment", () => {
         yield* f.service.registerSimbox(threadA, { ...input, stop: true });
         expect((yield* f.service.state).sessions).toHaveLength(0);
         expect((yield* f.service.state).hosts.some((h) => h.kind === "simbox")).toBe(false);
+      }),
+  );
+  it.effect(
+    "keeps attached runners across a restart and device support off/on, forgetting them on stop",
+    () =>
+      Effect.gen(function* () {
+        const input = registration();
+        const hostId = SimboxHost.hostId(input.runId);
+        const threadId = ThreadId.make("simbox-thread-restore");
+        const store = SimboxRunnerStore.memory();
+        const respond = (request: { url: string }) =>
+          request.url.includes("/simbox-device-hub")
+            ? request.url.endsWith("/boot") || request.url.endsWith("/start")
+              ? Response.json({ ok: true })
+              : Response.json({
+                  simulators: [
+                    {
+                      id: "SIM-1234",
+                      name: "iPhone 17 Pro",
+                      platform: "ios",
+                      booted: true,
+                      physical: false,
+                      version: "iOS 26.4",
+                    },
+                  ],
+                  emulators: [],
+                })
+            : undefined;
+        const attached = (f: { service: DeviceService.DeviceService["Service"] }) =>
+          Effect.gen(function* () {
+            for (let i = 0; i < 500; i++) {
+              const state = yield* f.service.state;
+              if (state.hosts.some((h) => h.id === hostId) && state.sessions.length > 0)
+                return true;
+              yield* Effect.yieldNow;
+            }
+            return false;
+          });
+
+        const first = yield* fixture(
+          Effect.void,
+          undefined,
+          false,
+          undefined,
+          false,
+          undefined,
+          respond,
+          undefined,
+          store,
+        );
+        yield* first.service.configure({ enabled: true, agentAccessEnabled: true });
+        yield* first.service.registerSimbox(threadId, input);
+        expect((yield* store.load).map((r) => r.registration.runId)).toEqual([input.runId]);
+
+        // A restarted server re-attaches the runner to its thread on its own.
+        const restarted = yield* fixture(
+          Effect.void,
+          undefined,
+          false,
+          undefined,
+          false,
+          undefined,
+          respond,
+          undefined,
+          store,
+          { enableDeviceSupport: true, enableAgentDeviceAccess: true },
+        );
+        expect(yield* attached(restarted)).toBe(true);
+        expect((yield* restarted.service.state).sessions[0]?.threadId).toBe(threadId);
+
+        // Switching device support off detaches it but keeps it for later.
+        yield* restarted.service.configure({ enabled: false });
+        yield* TestClock.adjust("15 seconds");
+        for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
+        expect((yield* restarted.service.state).hosts.some((h) => h.id === hostId)).toBe(false);
+        expect(yield* store.load).toHaveLength(1);
+
+        yield* restarted.service.configure({ enabled: true });
+        expect(yield* attached(restarted)).toBe(true);
+
+        // An explicit stop forgets it for good.
+        yield* restarted.service.registerSimbox(threadId, { ...input, stop: true });
+        expect(yield* store.load).toEqual([]);
       }),
   );
   it.effect("requires consent and does not boot an unselected device after an ordinary exec", () =>

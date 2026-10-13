@@ -70,6 +70,7 @@ import * as SshDeviceHost from "./SshDeviceHost.ts";
 import * as Exit from "effect/Exit";
 import * as LocalDeviceHost from "./LocalDeviceHost.ts";
 import * as SimboxDeviceHost from "./SimboxDeviceHost.ts";
+import * as SimboxRunnerStore from "./SimboxRunnerStore.ts";
 
 /** Origin-relative prefix the hub is proxied under. See DeviceHubProxy. */
 export const DEVICE_HUB_ROUTE_PREFIX = "/api/device-hub";
@@ -191,6 +192,7 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       }),
     ),
   installTool?: (tool: "hub" | "agent") => Effect.Effect<unknown, DeviceError>,
+  simboxStore: SimboxRunnerStore.SimboxRunnerStore = SimboxRunnerStore.memory(),
 ) {
   const settings = yield* ServerSettings.ServerSettingsService;
   const crypto = yield* Crypto.Crypto;
@@ -199,6 +201,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
     yield* Effect.context<Effect.Services<ReturnType<typeof SimboxDeviceHost.make>>>();
   const simboxHosts = new Map<string, Effect.Success<ReturnType<typeof SimboxDeviceHost.make>>>();
   const configuredSimboxHosts = new Set<DeviceHostId>();
+  // Runners outlive this process and device support being switched off; they
+  // are forgotten only once their run ends or the CLI stops them.
+  const savedRunners = new Map(
+    (yield* simboxStore.load).map((runner) => [runner.registration.runId, runner] as const),
+  );
+  const persistRunners = Effect.suspend(() => simboxStore.save([...savedRunners.values()]));
+  let restoreSimboxRunners: Effect.Effect<void> = Effect.void;
   const lifecycleLock = yield* Semaphore.make(1);
   const readDeviceSettings = settings.getSettings.pipe(
     Effect.map((value) => ({
@@ -586,6 +595,12 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       if (nextEnabled && nextAgentAccess && input.agentAccessEnabled === true) {
         yield* agentReadinessIfSupported();
       }
+      if (
+        nextEnabled &&
+        nextAgentAccess &&
+        !(currentSettings.enabled && currentSettings.agentAccessEnabled)
+      )
+        yield* Effect.suspend(() => restoreSimboxRunners).pipe(Effect.forkIn(scope));
       return yield* list;
     },
   );
@@ -928,9 +943,10 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       Effect.map(({ state }) => state.sessions.filter((session) => session.threadId === threadId)),
     );
 
-  const removeSimbox = (runId: string) =>
+  const removeSimbox = (runId: string, forget = true) =>
     lifecycleLock.withPermit(
       Effect.gen(function* () {
+        if (forget && savedRunners.delete(runId)) yield* persistRunners;
         const registered = simboxHosts.get(runId);
         if (!registered) return;
         simboxHosts.delete(runId);
@@ -980,7 +996,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
                 yield* Effect.sleep("15 seconds");
                 const alive = yield* next.refresh.pipe(Effect.orElseSucceed(() => true));
                 if (!alive) {
-                  yield* removeSimbox(input.runId);
+                  // Switching device support off stops hosts too; keep those
+                  // runners so switching it back on restores them.
+                  const enabled = yield* readDeviceSettings.pipe(
+                    Effect.map((consent) => consent.enabled && consent.agentAccessEnabled),
+                    Effect.orElseSucceed(() => true),
+                  );
+                  yield* removeSimbox(input.runId, enabled);
                   return;
                 }
                 if (configuredSimboxHosts.has(next.host.id)) {
@@ -1007,6 +1029,8 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       if (!registered) return [];
       const hostId = registered.host.id;
       yield* registered.update(input);
+      savedRunners.set(input.runId, { threadId, registration: { ...input, stop: false } });
+      yield* persistRunners;
       const ready = yield* readiness(registered.host.id);
       const state = yield* refresh(ready);
       const candidates = state.devices.filter(
@@ -1041,6 +1065,16 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         }),
       ];
     });
+
+  restoreSimboxRunners = Effect.forEach(
+    [...savedRunners.values()],
+    (runner) =>
+      simboxHosts.has(runner.registration.runId)
+        ? Effect.void
+        : registerSimbox(runner.threadId, runner.registration).pipe(Effect.ignore),
+    { discard: true, concurrency: "unbounded" },
+  );
+  yield* Effect.suspend(() => restoreSimboxRunners).pipe(Effect.forkIn(scope));
 
   return {
     ...DeviceService.of({
@@ -1204,6 +1238,10 @@ export const make = Effect.gen(function* () {
             }),
         ),
       ),
+    yield* SimboxRunnerStore.file(path.join(config.stateDir, "device", "simbox-runners.json")).pipe(
+      Effect.provideService(FileSystem.FileSystem, fs),
+      Effect.provideService(Path.Path, path),
+    ),
   );
   const hostContext =
     yield* Effect.context<Effect.Services<ReturnType<typeof SshDeviceHost.make>>>();
