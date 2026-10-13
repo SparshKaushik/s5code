@@ -12,7 +12,10 @@ const tunnel = Schema.String.check(
       const url = new URL(value);
       return (
         url.protocol === "https:" &&
-        /^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname) &&
+        // A quick tunnel, or a Simbox named tunnel: one random label under a
+        // Simbox runner zone.
+        (/^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname) ||
+          /^r-[0-9a-f]{16}\.(runnerbox|simbox)\.dpdns\.org$/.test(url.hostname)) &&
         !url.port &&
         !url.username &&
         !url.password &&

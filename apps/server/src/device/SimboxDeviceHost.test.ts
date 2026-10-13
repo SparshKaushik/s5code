@@ -178,8 +178,17 @@ describe("Simbox device host", () => {
       "https://runner.trycloudflare.com/private",
       "https://user:password@runner.trycloudflare.com",
       "https://runner.trycloudflare.com.evil.example",
+      "https://runnerbox.dpdns.org",
+      "https://r-0123456789abcdef.runnerbox.dpdns.org.evil.example",
+      "https://evil.r-0123456789abcdef.runnerbox.dpdns.org",
+      "https://r-0123456789abcdef.other.dpdns.org",
     ])
       expect(() => decode({ ...registration(), tunnelUrl })).toThrow();
+    for (const tunnelUrl of [
+      "https://r-0123456789abcdef.runnerbox.dpdns.org",
+      "https://r-0123456789abcdef.simbox.dpdns.org",
+    ])
+      expect(decode({ ...registration(), tunnelUrl }).tunnelUrl).toBe(tunnelUrl);
     expect(() => decode({ ...registration(), apiUrl: "https://evil.example" })).toThrow();
     expect(() => decode({ ...registration(), runId: "-".repeat(36) })).toThrow();
   });
