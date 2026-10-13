@@ -1031,6 +1031,13 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
       yield* registered.update(input);
       savedRunners.set(input.runId, { threadId, registration: { ...input, stop: false } });
       yield* persistRunners;
+      // Attaching required both consents already; the local setup wizard has
+      // nothing left to ask, and on a server that cannot run simulators it
+      // would otherwise stand between the user and this runner.
+      if (!consent.onboardingCompleted) {
+        yield* settings.updateSettings({ deviceOnboardingCompleted: true }).pipe(Effect.ignore);
+        yield* publish((state) => ({ ...state, onboardingCompleted: true }));
+      }
       const ready = yield* readiness(registered.host.id);
       const state = yield* refresh(ready);
       const candidates = state.devices.filter(

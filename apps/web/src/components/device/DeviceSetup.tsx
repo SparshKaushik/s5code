@@ -24,9 +24,12 @@ export const agentDeviceDescription =
   "Allow new agent sessions in this environment to start and control local and remote devices, with required tools set up automatically.";
 
 export function platformSetupStatus(state: DeviceServiceState, platform: DevicePlatform) {
-  const availability = state.hosts
+  // Any host that can run the platform counts: a remote Simbox or SSH host
+  // supports iOS even when this server cannot.
+  const candidates = state.hosts
     .flatMap((host) => host.platforms)
-    .find((candidate) => candidate.platform === platform);
+    .filter((candidate) => candidate.platform === platform);
+  const availability = candidates.find((candidate) => candidate.available) ?? candidates[0];
   if (!availability?.available) {
     return {
       ready: false,
@@ -69,6 +72,14 @@ export function DeviceSetup(props: {
   const localPlatformsUnavailable = props.state.hosts.some(
     (host) => host.kind === "local" && !host.platforms.some((platform) => platform.available),
   );
+  // `hostStatus` is this server's own hub, which never becomes ready where it
+  // cannot run simulators; a ready remote host, or remote hosts being the only
+  // option, is enough to continue.
+  const canProceed =
+    enabled &&
+    (props.state.hostStatus === "ready" ||
+      Object.values(props.state.hostStatuses).some((host) => host.status === "ready") ||
+      localPlatformsUnavailable);
 
   const update = async (
     kind: NonNullable<typeof pending>,
@@ -181,15 +192,12 @@ export function DeviceSetup(props: {
           </Button>
         )}
         {step < 2 ? (
-          <Button
-            disabled={props.state.hostStatus !== "ready" || pending !== null}
-            onClick={() => setStep(step + 1)}
-          >
+          <Button disabled={!canProceed || pending !== null} onClick={() => setStep(step + 1)}>
             Continue
           </Button>
         ) : (
           <Button
-            disabled={!canConfigure || props.state.hostStatus !== "ready" || pending !== null}
+            disabled={!canConfigure || !canProceed || pending !== null}
             onClick={() => void update("complete", { onboardingCompleted: true })}
           >
             {pending === "complete" ? "Saving…" : "Done"}
