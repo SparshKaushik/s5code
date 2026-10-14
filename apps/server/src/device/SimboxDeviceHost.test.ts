@@ -48,6 +48,53 @@ describe("Simbox device host", () => {
       expect(attempts).toBe(2);
     }),
   );
+  it.effect("rides out a dropped quick tunnel and reconnects through its new URL", () =>
+    Effect.gen(function* () {
+      const firstAttempt = yield* Deferred.make<void>();
+      const input = registration();
+      let tunnelUrl = input.tunnelUrl;
+      const hubRequests: Array<string> = [];
+      const client = HttpClient.make((request) =>
+        Effect.gen(function* () {
+          if (request.url.endsWith("/v1/runs/current"))
+            return HttpClientResponse.fromWeb(
+              request,
+              Response.json({
+                run: {
+                  id: input.runId,
+                  state: "live",
+                  tunnelUrl,
+                  daemonToken: input.daemonToken,
+                  expiresAt: null,
+                },
+              }),
+            );
+          hubRequests.push(request.url);
+          if (hubRequests.length === 1) yield* Deferred.succeed(firstAttempt, undefined);
+          return HttpClientResponse.fromWeb(
+            request,
+            hubRequests.length === 1
+              ? new Response("Cloudflare Tunnel error", { status: 530 })
+              : Response.json({ simulators: [], emulators: [] }),
+          );
+        }),
+      );
+      const remote = yield* SimboxHost.make(input).pipe(
+        Effect.provideService(HttpClient.HttpClient, client),
+      );
+      const connecting = yield* remote.host.ensureReady(() => Effect.void).pipe(Effect.forkChild);
+      yield* Deferred.await(firstAttempt);
+      tunnelUrl = "https://restarted.trycloudflare.com";
+      yield* TestClock.adjust("3 seconds");
+      expect((yield* Fiber.join(connecting)).hub.origin).toBe(
+        "https://restarted.trycloudflare.com/simbox-device-hub",
+      );
+      expect(hubRequests).toEqual([
+        "https://initial.trycloudflare.com/simbox-device-hub/api/devices",
+        "https://restarted.trycloudflare.com/simbox-device-hub/api/devices",
+      ]);
+    }),
+  );
   it.effect(
     "authenticates the runner, refreshes all connection targets, and detects ended/replaced runs",
     () =>
@@ -131,8 +178,18 @@ describe("Simbox device host", () => {
       "https://runner.trycloudflare.com/private",
       "https://user:password@runner.trycloudflare.com",
       "https://runner.trycloudflare.com.evil.example",
+      "https://simboxtouchtech.dpdns.org",
+      "https://r-0123456789abcdef.simboxtouchtech.dpdns.org.evil.example",
+      "https://evil.r-0123456789abcdef.simboxtouchtech.dpdns.org",
+      "https://r-0123456789abcdef.runnerbox.dpdns.org",
+      "https://r-0123456789abcdef.other.dpdns.org",
     ])
       expect(() => decode({ ...registration(), tunnelUrl })).toThrow();
+    for (const tunnelUrl of [
+      "https://r-0123456789abcdef.simboxtouchtech.dpdns.org",
+      "https://r-0123456789abcdef.simbox.dpdns.org",
+    ])
+      expect(decode({ ...registration(), tunnelUrl }).tunnelUrl).toBe(tunnelUrl);
     expect(() => decode({ ...registration(), apiUrl: "https://evil.example" })).toThrow();
     expect(() => decode({ ...registration(), runId: "-".repeat(36) })).toThrow();
   });

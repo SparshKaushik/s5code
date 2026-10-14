@@ -163,4 +163,36 @@ describe("device setup guidance", () => {
     });
     expect(platformSetupStatus(state, "android").message).toBe("Android Emulator is missing.");
   });
+
+  it("counts a remote host that runs the platform even when this server cannot", () => {
+    const local = deviceState().hosts[0]!;
+    const state = deviceState({
+      hosts: [
+        {
+          ...local,
+          platforms: [
+            { platform: "ios", available: false, reason: "iOS Simulators need macOS with Xcode." },
+          ],
+        },
+        {
+          ...local,
+          id: "simbox-run" as typeof local.id,
+          kind: "simbox",
+          label: "Simbox run",
+          platforms: [{ platform: "ios", available: true }],
+        },
+      ],
+      devices: [
+        {
+          id: "SIM-1",
+          hostId: "simbox-run",
+          name: "iPhone 17e",
+          platform: "ios",
+          booted: true,
+          physical: false,
+        } as DeviceServiceState["devices"][number],
+      ],
+    });
+    expect(platformSetupStatus(state, "ios").ready).toBe(true);
+  });
 });

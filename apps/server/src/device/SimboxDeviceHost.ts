@@ -12,7 +12,10 @@ const tunnel = Schema.String.check(
       const url = new URL(value);
       return (
         url.protocol === "https:" &&
-        /^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname) &&
+        // A quick tunnel, or a Simbox named tunnel: one random label under a
+        // Simbox runner zone.
+        (/^[a-z0-9-]+\.trycloudflare\.com$/.test(url.hostname) ||
+          /^r-[0-9a-f]{16}\.(simboxtouchtech|simbox)\.dpdns\.org$/.test(url.hostname)) &&
         !url.port &&
         !url.username &&
         !url.password &&
@@ -139,7 +142,10 @@ export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registr
       };
     return true;
   });
-  const ensureReady = Effect.gen(function* () {
+  // Quick tunnels drop for seconds at a time (Cloudflare 530) and a loaded
+  // runner can answer slowly; both recover without user action. Each attempt
+  // re-reads the run so a restarted tunnel's new URL is used.
+  const probe = Effect.gen(function* () {
     if (!(yield* refresh))
       return yield* new DeviceHost.DeviceHostError({
         hostId: id,
@@ -161,6 +167,12 @@ export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registr
                 step: "starting Simbox device hub",
                 cause: new Error("Hub starting"),
               });
+            if (response.status >= 500)
+              return yield* new DeviceHost.DeviceHostError({
+                hostId: id,
+                step: "reaching Simbox device hub",
+                cause: new Error(`Runner unreachable (HTTP ${response.status})`),
+              });
             yield* HttpClientResponse.filterStatusOk(response);
           }),
         ),
@@ -169,20 +181,36 @@ export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registr
         Effect.mapError((cause) =>
           isHostError(cause)
             ? cause
-            : new DeviceHost.DeviceHostError({
-                hostId: id,
-                step: "connecting to Simbox device hub",
-                cause,
-              }),
+            : cause._tag === "TimeoutError" ||
+                (cause._tag === "HttpClientError" && cause.reason._tag === "TransportError")
+              ? new DeviceHost.DeviceHostError({
+                  hostId: id,
+                  step: "reaching Simbox device hub",
+                  cause,
+                })
+              : new DeviceHost.DeviceHostError({
+                  hostId: id,
+                  step: "connecting to Simbox device hub",
+                  cause,
+                }),
         ),
-        Effect.retry({
-          schedule: Schedule.spaced("2 seconds"),
-          times: 120,
-          while: (error) => error.step === "starting Simbox device hub",
-        }),
       );
-    return ready;
   });
+  const ensureReady = probe.pipe(
+    Effect.retry({
+      schedule: Schedule.spaced("3 seconds"),
+      times: 5,
+      while: (error) =>
+        error.step === "reaching Simbox device hub" ||
+        error.step === "refreshing Simbox connection",
+    }),
+    Effect.retry({
+      schedule: Schedule.spaced("2 seconds"),
+      times: 120,
+      while: (error) => error.step === "starting Simbox device hub",
+    }),
+    Effect.as(ready),
+  );
   const host: DeviceHost.DeviceHost["Service"] = {
     id,
     summary: Effect.succeed({

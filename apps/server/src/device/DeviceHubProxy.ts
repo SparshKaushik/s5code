@@ -22,7 +22,6 @@ import {
   HttpServerResponse,
 } from "effect/http";
 import * as Socket from "effect/socket/Socket";
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
 import * as DeviceService from "./DeviceService.ts";
@@ -83,6 +82,20 @@ const forwardHeaders = (request: HttpServerRequest.HttpServerRequest, origin: st
 };
 
 /**
+ * The hub-side socket, carrying a remote hub's auth headers. Uses the
+ * runtime's own WebSocket, which accepts headers in both Bun and Node. The
+ * `ws` package is not usable here: under Bun (the packaged server) it
+ * treats a successful 101 upgrade from a TLS hub as an unexpected response
+ * and never opens, and a `ws` socket closed mid-handshake emits an `error`
+ * that crashes the server unless something listens for it.
+ */
+export const upstreamWebSocket = (url: string, headers: Readonly<Record<string, string>>) =>
+  new (globalThis.WebSocket as unknown as new (
+    url: string,
+    options: { readonly headers: Readonly<Record<string, string>> },
+  ) => globalThis.WebSocket)(url, { headers });
+
+/**
  * Pipe a client WebSocket to the hub's with no framing changes. Frames are
  * opaque: H.264 access units one way, input packets the other.
  */
@@ -95,10 +108,7 @@ const proxyWebSocket = Effect.fn("DeviceHubProxy.proxyWebSocket")(function* (
   const upstream = yield* Socket.makeWebSocket(upstreamUrl, {
     openTimeout: "10 seconds",
   }).pipe(
-    Effect.provideService(
-      Socket.WebSocketConstructor,
-      (url) => new NodeSocket.NodeWS.WebSocket(url, { headers }),
-    ),
+    Effect.provideService(Socket.WebSocketConstructor, (url) => upstreamWebSocket(url, headers)),
   );
   yield* Effect.scoped(
     Effect.gen(function* () {
