@@ -48,18 +48,19 @@ export const file = Effect.fn("SimboxRunnerStore.file")(function* (location: str
     ),
     save: (runners) =>
       Effect.gen(function* () {
-        yield* fs.makeDirectory(path.dirname(location), { recursive: true });
+        const directory = path.dirname(location);
+        yield* fs.makeDirectory(directory, { recursive: true });
         const content = yield* encode(runners);
-        const temporary = yield* fs.makeTempFile({
-          directory: path.dirname(location),
-          prefix: ".simbox-runners-",
-        });
-        yield* Effect.gen(function* () {
-          yield* fs.chmod(temporary, 0o600);
-          yield* fs.writeFileString(temporary, content);
-          yield* fs.rename(temporary, location);
-        }).pipe(Effect.ensuring(fs.remove(temporary, { force: true }).pipe(Effect.ignore)));
-      }).pipe(Effect.ignore),
+        // Written beside the target so the rename is atomic, then the private
+        // temp directory is removed whether or not the write landed.
+        const temporary = yield* Effect.acquireRelease(
+          fs.makeTempDirectory({ directory, prefix: ".simbox-runners-" }),
+          (created) => fs.remove(created, { recursive: true }).pipe(Effect.ignore),
+        );
+        const staged = path.join(temporary, "runners.json");
+        yield* fs.writeFileString(staged, content, { mode: 0o600 });
+        yield* fs.rename(staged, location);
+      }).pipe(Effect.scoped, Effect.ignore),
   };
   return store;
 });

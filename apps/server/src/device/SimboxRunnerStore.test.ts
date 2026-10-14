@@ -35,6 +35,9 @@ it.layer(NodeServices.layer)("Simbox runner store", (it) => {
       yield* store.save([runner]);
       expect(yield* (yield* SimboxRunnerStore.file(file)).load).toEqual([runner]);
       expect((yield* fs.stat(file)).mode & 0o777).toBe(0o600);
+      // Saving again leaves no staging directories behind.
+      yield* store.save([runner]);
+      expect(yield* fs.readDirectory(path.dirname(file))).toEqual(["simbox-runners.json"]);
       yield* fs.writeFileString(file, "{not json");
       expect(yield* store.load).toEqual([]);
     }).pipe(Effect.scoped),
