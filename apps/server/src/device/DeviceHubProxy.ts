@@ -22,7 +22,6 @@ import {
   HttpServerResponse,
 } from "effect/http";
 import * as Socket from "effect/socket/Socket";
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
 
 import { authenticateMediaRequest } from "../auth/http.ts";
 import * as DeviceService from "./DeviceService.ts";
@@ -83,18 +82,18 @@ const forwardHeaders = (request: HttpServerRequest.HttpServerRequest, origin: st
 };
 
 /**
- * The hub-side socket. Closing a `ws` socket that is still connecting (the
- * client went away first, or the open timed out) emits an `error` event after
- * the proxy has stopped listening, and an unheard `error` event crashes the
- * whole server. A remote hub over a tunnel takes long enough to connect that
- * a reconnecting Device panel hit this repeatedly. Failures still reach the
- * proxy through the socket's own handlers.
+ * The hub-side socket, carrying a remote hub's auth headers. Uses the
+ * runtime's own WebSocket, which accepts headers in both Bun and Node. The
+ * `ws` package is not usable here: under Bun (the packaged server) it
+ * treats a successful 101 upgrade from a TLS hub as an unexpected response
+ * and never opens, and a `ws` socket closed mid-handshake emits an `error`
+ * that crashes the server unless something listens for it.
  */
-export const upstreamWebSocket = (url: string, headers: Readonly<Record<string, string>>) => {
-  const socket = new NodeSocket.NodeWS.WebSocket(url, { headers });
-  socket.on("error", () => {});
-  return socket;
-};
+export const upstreamWebSocket = (url: string, headers: Readonly<Record<string, string>>) =>
+  new (globalThis.WebSocket as unknown as new (
+    url: string,
+    options: { readonly headers: Readonly<Record<string, string>> },
+  ) => globalThis.WebSocket)(url, { headers });
 
 /**
  * Pipe a client WebSocket to the hub's with no framing changes. Frames are

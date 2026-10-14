@@ -8,6 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
+import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { HttpClient, HttpClientResponse, HttpRouter } from "effect/http";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import * as DeviceService from "./DeviceService.ts";
@@ -187,6 +188,28 @@ it.each(["/panel/2/stream.avcc", "/panel/1/webrtc/offer", "/panel/3/exec"])(
 );
 
 describe("DeviceHubProxy upstream socket", () => {
+  it("opens with the hub's auth headers", async () => {
+    const server = new NodeSocket.NodeWS.WebSocketServer({ port: 0, host: "127.0.0.1" });
+    await new Promise<void>((resolve) => server.once("listening", () => resolve()));
+    const { port } = server.address() as { port: number };
+    const authorization = new Promise<string | undefined>((resolve) =>
+      server.once("connection", (_socket, request) => resolve(request.headers.authorization)),
+    );
+    try {
+      const socket = DeviceHubProxy.upstreamWebSocket(`ws://127.0.0.1:${port}/api/devices/ws`, {
+        authorization: "Bearer runner-token",
+      });
+      await new Promise((resolve, reject) => {
+        socket.addEventListener("open", resolve, { once: true });
+        socket.addEventListener("error", reject, { once: true });
+      });
+      expect(await authorization).toBe("Bearer runner-token");
+      socket.close();
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+
   it("survives being closed while the hub handshake is still pending", async () => {
     const net = await import("node:net");
     // Accepts the connection but never answers the upgrade, like a slow tunnel.
@@ -198,12 +221,15 @@ describe("DeviceHubProxy upstream socket", () => {
     process.on("uncaughtException", record);
     try {
       const socket = DeviceHubProxy.upstreamWebSocket(`ws://127.0.0.1:${port}/api/devices/ws`, {});
+      const closed = new Promise((resolve) =>
+        socket.addEventListener("close", resolve, { once: true }),
+      );
       socket.close();
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await closed;
       expect(uncaught).toEqual([]);
     } finally {
       process.off("uncaughtException", record);
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      server.close();
     }
   });
 });
