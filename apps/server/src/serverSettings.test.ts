@@ -596,7 +596,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           .pipe(Effect.flatMap(Schema.decodeUnknownEffect(Schema.fromJsonString(ServerSettings))));
 
         yield* serverSettings.updateSettings({ usagePriceOverrides: { "example-model": prices } });
-        const usageModelAliases = { "example-preview": "example-model" };
+        const usageModelMappings = { "example-preview": "example-model" };
         const sourceId = UsageLimitSourceId.make("hub");
         const usageLimitSources = {
           [sourceId]: {
@@ -607,7 +607,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
           },
         };
         const saved = yield* serverSettings.updateSettings({
-          usageModelAliases,
+          usageModelMappings,
           usageLimitSources,
         });
         const updated = yield* serverSettings.updateSettings({
@@ -616,7 +616,7 @@ it.layer(NodeServices.layer)("server settings", (it) => {
         assert.deepStrictEqual(updated.usageLimitSources, saved.usageLimitSources);
         const persisted = yield* readPersisted;
         assert.deepStrictEqual(persisted.usagePriceOverrides, { "example-model": prices });
-        assert.deepStrictEqual(persisted.usageModelAliases, usageModelAliases);
+        assert.deepStrictEqual(persisted.usageModelMappings, usageModelMappings);
         assert.deepStrictEqual(persisted.usageLimitSources, usageLimitSources);
         assert.equal(persisted.storageCleanup.worktreeSettledAfterDays, 0);
         assert.equal(persisted.storageCleanup.worktreeKeepWhen, "any-local-files");

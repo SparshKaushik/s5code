@@ -22,7 +22,7 @@ export const npmReleasePublishedAtom = Atom.family((version: string) =>
         ? body.tag_name === `v${version}`
         : false;
     }).pipe(
-      // Tracing headers would make the browser send a CORS preflight, which npm rejects.
+      // Tracing headers would make the browser send a CORS preflight, which the release API rejects.
       Effect.provideService(HttpClient.TracerPropagationEnabled, false),
       Effect.provide(FetchHttpClient.layer),
     ),

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - The ownership lock is a native SQLite handle held for the server's lifetime.
+// SQLite loads through sqliteCompat so the Bun-compiled binary can take the lock.
 import * as NodeFS from "node:fs";
 import * as NodePath from "node:path";
-import * as NodeSqlite from "node:sqlite";
 
 import { SERVER_EXIT_CODE_STATE_DIR_OWNED } from "@t3tools/contracts";
 import * as HostProcess from "@t3tools/shared/HostProcess";
@@ -13,6 +13,7 @@ import * as Runtime from "effect/Runtime";
 import * as Schema from "effect/Schema";
 
 import * as ProcessRunner from "./processRunner.ts";
+import { DatabaseSync } from "./provider/sqliteCompat.ts";
 import {
   clearPersistedServerRuntimeState,
   isProcessAlive,
@@ -101,7 +102,7 @@ export const acquireServerOwnership = Effect.fn("acquireServerOwnership")(functi
     Effect.try({
       try: () => {
         NodeFS.mkdirSync(stateDir, { recursive: true });
-        const db = new NodeSqlite.DatabaseSync(NodePath.join(stateDir, "server-owner.sqlite"));
+        const db = new DatabaseSync(NodePath.join(stateDir, "server-owner.sqlite"));
         try {
           db.exec("PRAGMA busy_timeout = 0; BEGIN EXCLUSIVE;");
         } catch (cause) {
