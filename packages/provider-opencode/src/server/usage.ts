@@ -257,74 +257,114 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
         const predicates = table === "session_message" ? ["type = 'assistant'"] : [];
 
         if (timestamp !== "NULL") predicates.push("time_created >= ?");
-        const lastRowId = (yield* sql.unsafe<{ readonly last_row_id: number | null }>(
-          `SELECT MAX(rowid) AS last_row_id FROM ${table}`,
-        ))[0]?.last_row_id;
-        if (lastRowId === null || lastRowId === undefined) continue;
+        predicates.push("rowid > ?", "rowid <= ?");
+        const [range] = yield* sql.unsafe<{
+          readonly first_row_id: number | null;
+          readonly last_row_id: number | null;
+        }>(
+          `SELECT (SELECT MIN(rowid) FROM ${table}) AS first_row_id, (SELECT MAX(rowid) FROM ${table}) AS last_row_id`,
+        );
+        const firstRowId = range?.first_row_id;
+        const lastRowId = range?.last_row_id;
+        if (typeof firstRowId !== "number" || typeof lastRowId !== "number") continue;
+        const windowParams = (after: number) => [
+          ...(timestamp === "NULL" ? [] : [sinceMs]),
+          after,
+          Math.min(after + MESSAGE_PAGE_SIZE, lastRowId),
+        ];
+        const appendRow = (row: {
+          readonly id: unknown;
+          readonly session_id: unknown;
+          readonly data: unknown;
+          readonly created: unknown;
+        }) =>
+          append(
+            file.records,
+            parseOpenCodeMessage(text(row.data), {
+              kiroContext,
+              id: text(row.id),
+              sessionId: text(row.session_id),
+              ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
+            }),
+          );
+        // SqlClient materializes each result with StatementSync.all(), and the
+        // window can exclude most rows. Each statement covers MESSAGE_PAGE_SIZE
+        // rowids, however few match, and rows appended mid-scan are left out.
+        // Untraced, as a large history runs thousands of them.
+        if (!columns.has("seq")) {
+          for (let after = firstRowId - 1; after < lastRowId; after += MESSAGE_PAGE_SIZE) {
+            const rows = yield* sql
+              .unsafe<{
+                readonly id: unknown;
+                readonly session_id: unknown;
+                readonly data: unknown;
+                readonly created: unknown;
+              }>(
+                `SELECT id, session_id, data, ${timestamp} AS created
+                 FROM ${table} WHERE ${predicates.join(" AND ")} ORDER BY rowid`,
+                windowParams(after),
+              )
+              .pipe(Effect.withTracerEnabled(false));
+            for (const row of rows) appendRow(row);
+            yield* Effect.yieldNow;
+          }
+          continue;
+        }
         // Kiro cache estimates depend on native session order, which can differ
-        // from insertion order after a session import. Page that order too.
-        const orderedBySequence = columns.has("seq");
-        const orderSession = "COALESCE(session_id, '')";
-        const orderSequence = "COALESCE(seq, 0)";
-        let after: { rowId: number; session: string; sequence: number } | undefined;
-        // SqlClient materializes each result with StatementSync.all(). Keep
-        // message bodies in small pages, and exclude rows appended mid-scan.
-        while (true) {
-          const pagePredicates = [
-            ...predicates,
-            "rowid <= ?",
-            ...(after === undefined
-              ? []
-              : [
-                  orderedBySequence
-                    ? `(${orderSession}, ${orderSequence}, rowid) > (?, ?, ?)`
-                    : "rowid > ?",
-                ]),
-          ];
+        // from insertion order after a session import. Collect the order keys in
+        // the same bounded windows, then read bodies by rowid in that order.
+        const keys: Array<{
+          readonly row_id: number;
+          readonly order_session: string;
+          readonly order_sequence: number;
+        }> = [];
+        for (let after = firstRowId - 1; after < lastRowId; after += MESSAGE_PAGE_SIZE) {
+          keys.push(
+            ...(yield* sql
+              .unsafe<{
+                readonly row_id: number;
+                readonly order_session: string;
+                readonly order_sequence: number;
+              }>(
+                `SELECT rowid AS row_id, COALESCE(session_id, '') AS order_session,
+                        COALESCE(seq, 0) AS order_sequence
+                 FROM ${table} WHERE ${predicates.join(" AND ")}`,
+                windowParams(after),
+              )
+              .pipe(Effect.withTracerEnabled(false))),
+          );
+          yield* Effect.yieldNow;
+        }
+        keys.sort(
+          (left, right) =>
+            (left.order_session < right.order_session
+              ? -1
+              : left.order_session > right.order_session
+                ? 1
+                : 0) ||
+            left.order_sequence - right.order_sequence ||
+            left.row_id - right.row_id,
+        );
+        for (let index = 0; index < keys.length; index += MESSAGE_PAGE_SIZE) {
+          const rowIds = keys.slice(index, index + MESSAGE_PAGE_SIZE).map((key) => key.row_id);
           const rows = yield* sql
             .unsafe<{
               readonly row_id: number;
-              readonly order_session: string;
-              readonly order_sequence: number;
               readonly id: unknown;
               readonly session_id: unknown;
               readonly data: unknown;
               readonly created: unknown;
             }>(
-              `SELECT rowid AS row_id, id, session_id, data, ${timestamp} AS created,
-                    ${orderedBySequence ? orderSession : "''"} AS order_session,
-                    ${orderedBySequence ? orderSequence : "0"} AS order_sequence
-             FROM ${table} WHERE ${pagePredicates.join(" AND ")}
-             ORDER BY ${orderedBySequence ? `${orderSession}, ${orderSequence}, ` : ""}rowid LIMIT ${MESSAGE_PAGE_SIZE}`,
-              [
-                ...(timestamp === "NULL" ? [] : [sinceMs]),
-                lastRowId,
-                ...(after === undefined
-                  ? []
-                  : orderedBySequence
-                    ? [after.session, after.sequence, after.rowId]
-                    : [after.rowId]),
-              ],
+              `SELECT rowid AS row_id, id, session_id, data, ${timestamp} AS created
+               FROM ${table} WHERE rowid IN (${rowIds.map(() => "?").join(", ")})`,
+              rowIds,
             )
             .pipe(Effect.withTracerEnabled(false));
-          for (const row of rows) {
-            append(
-              file.records,
-              parseOpenCodeMessage(text(row.data), {
-                kiroContext,
-                id: text(row.id),
-                sessionId: text(row.session_id),
-                ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
-              }),
-            );
+          const byRowId = new Map(rows.map((row) => [row.row_id, row]));
+          for (const rowId of rowIds) {
+            const row = byRowId.get(rowId);
+            if (row) appendRow(row);
           }
-          if (rows.length < MESSAGE_PAGE_SIZE) break;
-          const last = rows[rows.length - 1]!;
-          after = {
-            rowId: last.row_id,
-            session: last.order_session,
-            sequence: last.order_sequence,
-          };
           yield* Effect.yieldNow;
         }
       }
