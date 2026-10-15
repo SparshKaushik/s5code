@@ -66,6 +66,7 @@ try {
   // Browser and auth services are mocked in the stream fixture, so it must
   // never start a provider SDK. Fail explicitly if one is reached accidentally.
   const cursorFixture = NodePath.join(directory, "unused-cursor-sdk.mjs");
+  const isCursorSdk = (id) => id === "@cursor/sdk" || id === "@cursor/sdk/sqlite";
   await NodeFSP.writeFile(
     cursorFixture,
     `
@@ -76,6 +77,7 @@ try {
       export const createAgentPlatform = unavailable;
       export class AuthenticationError extends Error {}
       export class CursorSdkError extends Error {}
+      export const SqliteLocalAgentStore = Agent;
     `,
   );
   const fixtureExternals = new Set();
@@ -88,10 +90,14 @@ try {
     shims: true,
     dts: false,
     logLevel: "error",
-    alias: { "node:sqlite": sqliteShim, "@cursor/sdk": cursorFixture },
+    alias: {
+      "node:sqlite": sqliteShim,
+      "@cursor/sdk/sqlite": cursorFixture,
+      "@cursor/sdk": cursorFixture,
+    },
     deps: {
-      alwaysBundle: (id) => id === "@cursor/sdk" || shouldBundleCliDependency(id),
-      neverBundle: (id) => id !== "@cursor/sdk" && isExternalCliDependency(id),
+      alwaysBundle: (id) => isCursorSdk(id) || shouldBundleCliDependency(id),
+      neverBundle: (id) => !isCursorSdk(id) && isExternalCliDependency(id),
       onlyBundle: false,
     },
     outputOptions: {

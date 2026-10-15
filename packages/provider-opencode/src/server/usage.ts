@@ -281,30 +281,32 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
                     : "rowid > ?",
                 ]),
           ];
-          const rows = yield* sql.unsafe<{
-            readonly row_id: number;
-            readonly order_session: string;
-            readonly order_sequence: number;
-            readonly id: unknown;
-            readonly session_id: unknown;
-            readonly data: unknown;
-            readonly created: unknown;
-          }>(
-            `SELECT rowid AS row_id, id, session_id, data, ${timestamp} AS created,
+          const rows = yield* sql
+            .unsafe<{
+              readonly row_id: number;
+              readonly order_session: string;
+              readonly order_sequence: number;
+              readonly id: unknown;
+              readonly session_id: unknown;
+              readonly data: unknown;
+              readonly created: unknown;
+            }>(
+              `SELECT rowid AS row_id, id, session_id, data, ${timestamp} AS created,
                     ${orderedBySequence ? orderSession : "''"} AS order_session,
                     ${orderedBySequence ? orderSequence : "0"} AS order_sequence
              FROM ${table} WHERE ${pagePredicates.join(" AND ")}
              ORDER BY ${orderedBySequence ? `${orderSession}, ${orderSequence}, ` : ""}rowid LIMIT ${MESSAGE_PAGE_SIZE}`,
-            [
-              ...(timestamp === "NULL" ? [] : [sinceMs]),
-              lastRowId,
-              ...(after === undefined
-                ? []
-                : orderedBySequence
-                  ? [after.session, after.sequence, after.rowId]
-                  : [after.rowId]),
-            ],
-          );
+              [
+                ...(timestamp === "NULL" ? [] : [sinceMs]),
+                lastRowId,
+                ...(after === undefined
+                  ? []
+                  : orderedBySequence
+                    ? [after.session, after.sequence, after.rowId]
+                    : [after.rowId]),
+              ],
+            )
+            .pipe(Effect.withTracerEnabled(false));
           for (const row of rows) {
             append(
               file.records,

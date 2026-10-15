@@ -7,6 +7,7 @@ import {
   type DesktopUpdateCheckResult,
   type DesktopUpdateState,
 } from "@t3tools/contracts";
+import { errorTag } from "@t3tools/shared/observability";
 import * as Cause from "effect/Cause";
 import * as Context from "effect/Context";
 import * as DateTime from "effect/DateTime";
@@ -50,6 +51,7 @@ import {
   reduceDesktopUpdateStateOnInstallFailure,
   reduceDesktopUpdateStateOnNoUpdate,
   reduceDesktopUpdateStateOnUpdateAvailable,
+  resolveNotAppliedInstallVersion,
 } from "./updateMachine.ts";
 
 const AUTO_UPDATE_STARTUP_DELAY = "15 seconds";
@@ -77,6 +79,14 @@ const UpdateInfo = Schema.Struct({
 const DownloadProgressInfo = Schema.Struct({
   percent: Schema.Number,
 });
+/** Saved in the runtime folder before an install quits the app, read on the next start. */
+export const DESKTOP_UPDATE_INSTALL_RECORD_FILE = "desktop-update-install.json";
+const DesktopUpdateInstallRecord = Schema.fromJsonString(
+  Schema.Struct({ fromVersion: Schema.String, targetVersion: Schema.String }),
+);
+const decodeInstallRecord = Schema.decodeUnknownEffect(DesktopUpdateInstallRecord);
+const encodeInstallRecord = Schema.encodeEffect(DesktopUpdateInstallRecord);
+
 const decodeAppUpdateYmlConfig = Schema.decodeUnknownEffect(AppUpdateYmlConfig);
 const decodeUpdateInfo = Schema.decodeUnknownEffect(UpdateInfo);
 const decodeDownloadProgressInfo = Schema.decodeUnknownEffect(DownloadProgressInfo);
@@ -214,6 +224,63 @@ const {
   logError: logUpdaterError,
 } = DesktopObservability.makeComponentLogger("desktop-updater");
 
+function redactMessage(message: string): string {
+  // Updater HTTP errors append response bodies and headers after the first line.
+  return (message.split(/[\r\n]/, 1)[0] ?? "")
+    .replace(/\b(?:https?|file):\/\/[^\s"'<>]+/gi, "[redacted URL]")
+    .replace(/\b(?:Bearer|Basic)\s+[^\s,;]+/gi, "[redacted credential]")
+    .replace(
+      /\b(?:authorization|proxy-authorization|cookie|set-cookie)\s*[:=].*$/gi,
+      "[redacted header]",
+    )
+    .replace(
+      /\b[\w-]*(?:token|password|secret|credential|api[_-]?key)[\w-]*\s*[:=]\s*(?:"[^"]*"|'[^']*'|[^\s,;]+)/gi,
+      "[redacted credential]",
+    )
+    .slice(0, 512);
+}
+
+function summarizeCause(cause: unknown, depth: number): string {
+  if (depth >= 3) return "[truncated cause]";
+  if (Cause.isCause(cause)) {
+    return cause.reasons
+      .slice(0, 3)
+      .map((reason) =>
+        reason._tag === "Fail"
+          ? summarizeCause(reason.error, depth + 1)
+          : reason._tag === "Die"
+            ? summarizeCause(reason.defect, depth + 1)
+            : "Interrupted",
+      )
+      .join("; ");
+  }
+  if (typeof cause === "string") return redactMessage(cause);
+  if (typeof cause !== "object" || cause === null) return errorTag(cause);
+
+  const error = cause as {
+    readonly message?: unknown;
+    readonly code?: unknown;
+    readonly cause?: unknown;
+  };
+  const code =
+    typeof error.code === "string" && /^[A-Z][A-Z0-9_]{0,127}$/.test(error.code)
+      ? ` [${error.code}]`
+      : "";
+  const message = typeof error.message === "string" ? `: ${redactMessage(error.message)}` : "";
+  const nested =
+    error.cause === undefined ? "" : `; caused by ${summarizeCause(error.cause, depth + 1)}`;
+  return `${errorTag(cause)}${code}${message}${nested}`;
+}
+
+/** Log a bounded cause summary without stacks, response payloads, or request credentials. */
+export function describeUpdateErrorCause(cause: unknown): string {
+  try {
+    return summarizeCause(cause, 0).slice(0, 1024);
+  } catch {
+    return "UnknownError";
+  }
+}
+
 function parseAppUpdateYml(raw: string): Effect.Effect<Option.Option<AppUpdateYmlConfig>> {
   const entries: Record<string, string> = {};
   for (const line of raw.split("\n")) {
@@ -291,20 +358,6 @@ function isArm64HostRunningIntelBuild(runtimeInfo: DesktopRuntimeInfo): boolean 
   return runtimeInfo.hostArch === "arm64" && runtimeInfo.appArch === "x64";
 }
 
-function formatUpdaterErrorCause(cause: unknown): string {
-  if (cause instanceof Error) {
-    return cause.stack ?? cause.message;
-  }
-  if (typeof cause === "string") {
-    return cause;
-  }
-  try {
-    return JSON.stringify(cause);
-  } catch {
-    return String(cause);
-  }
-}
-
 /** @public Service construction is part of the canonical Effect module API. */
 export const make = Effect.gen(function* () {
   const config = yield* DesktopConfig.DesktopConfig;
@@ -326,6 +379,7 @@ export const make = Effect.gen(function* () {
   const updaterConfiguredRef = yield* Ref.make(false);
   const lastLoggedDownloadMilestoneRef = yield* Ref.make(-1);
   const downloadedUpdateFileRef = yield* Ref.make<Option.Option<string>>(Option.none());
+  const notAppliedVersionRef = yield* Ref.make(Option.none<string>());
   const updateStateRef = yield* Ref.make<DesktopUpdateState>(
     createInitialDesktopUpdateState(
       environment.appVersion,
@@ -479,6 +533,7 @@ export const make = Effect.gen(function* () {
             );
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
+              cause: describeUpdateErrorCause(error.cause),
               channel: error.channel,
             });
             return true;
@@ -527,6 +582,7 @@ export const make = Effect.gen(function* () {
             );
             yield* logUpdaterError(error.message, {
               errorTag: error._tag,
+              cause: describeUpdateErrorCause(error.cause),
               channel: error.channel,
             });
             return { accepted: true, completed: false };
@@ -549,6 +605,7 @@ export const make = Effect.gen(function* () {
           );
           yield* logUpdaterError(error.message, {
             errorTag: error._tag,
+            cause: describeUpdateErrorCause(error.cause),
             action: error.action,
           });
           return { accepted: true, completed: false };
@@ -581,11 +638,57 @@ export const make = Effect.gen(function* () {
     .remove(updateRestartMarkerPath, { force: true })
     .pipe(Effect.ignore);
 
+  // Records the version an install hands to the OS installer, so the next
+  // start can tell whether it applied. Best effort, like the restart marker.
+  const installRecordPath = environment.path.join(
+    updateRestartMarkerDir,
+    DESKTOP_UPDATE_INSTALL_RECORD_FILE,
+  );
+  const writeInstallRecord = (targetVersion: string) =>
+    encodeInstallRecord({ fromVersion: environment.appVersion, targetVersion }).pipe(
+      Effect.flatMap((text) => fileSystem.writeFileString(installRecordPath, text)),
+      Effect.catch((error) =>
+        logUpdaterWarning("Could not record the update install.", { errorTag: error._tag }),
+      ),
+    );
+  const removeInstallRecord = fileSystem
+    .remove(installRecordPath, { force: true })
+    .pipe(Effect.ignore);
+
+  // Reads the record of the last install. Returns the version it did not
+  // apply, when the app came back on the version it installed from. That
+  // record stays through later starts, until the version changes or a new
+  // install replaces it, so no restart forgets the failed version.
+  const readNotAppliedInstallVersion = fileSystem.readFileString(installRecordPath).pipe(
+    Effect.flatMap(decodeInstallRecord),
+    Effect.option,
+    Effect.map((record) =>
+      Option.flatMap(record, (value) =>
+        Option.fromNullishOr(resolveNotAppliedInstallVersion(value, environment.appVersion)),
+      ),
+    ),
+    Effect.tap((notAppliedVersion) =>
+      Option.isNone(notAppliedVersion) ? removeInstallRecord : Effect.void,
+    ),
+  );
+
+  const baseUpdateState = (channel: DesktopUpdateChannel, enabled: boolean) =>
+    Ref.get(notAppliedVersionRef).pipe(
+      Effect.map((notAppliedVersion) => ({
+        ...createBaseUpdateState(channel, enabled, environment),
+        ...Option.match(notAppliedVersion, {
+          onNone: () => ({}),
+          onSome: (version) => ({ notAppliedVersion: version }),
+        }),
+      })),
+    );
+
   const resetInstallAction = Effect.all(
     [
       finishUpdateAction("install"),
       Ref.set(desktopState.quitting, false),
       removeUpdateRestartMarker,
+      removeInstallRecord,
     ],
     { discard: true },
   );
@@ -618,7 +721,7 @@ export const make = Effect.gen(function* () {
         DesktopUpdateQuarantineClearError: (error) =>
           logUpdaterWarning("failed to clear macOS quarantine attributes before update install", {
             appPath: error.appPath,
-            cause: formatUpdaterErrorCause(error.cause),
+            cause: describeUpdateErrorCause(error.cause),
           }),
       }),
     );
@@ -636,6 +739,7 @@ export const make = Effect.gen(function* () {
 
     yield* Ref.set(desktopState.quitting, false);
     yield* removeUpdateRestartMarker;
+    yield* removeInstallRecord;
     yield* Effect.gen(function* () {
       const instances = yield* pool.list;
       const restartExit = yield* Effect.forEach(instances, (instance) => instance.start, {
@@ -649,7 +753,7 @@ export const make = Effect.gen(function* () {
       yield* desktopWindow.revealOrCreateMain.pipe(
         Effect.catchCause((cause) =>
           logUpdaterError("failed to restore main window after update install failure", {
-            cause: formatUpdaterErrorCause(Cause.squash(cause)),
+            cause: describeUpdateErrorCause(cause),
           }),
         ),
       );
@@ -713,6 +817,8 @@ export const make = Effect.gen(function* () {
 
         return yield* Effect.gen(function* () {
           yield* writeUpdateRestartMarker;
+          const { downloadedVersion } = yield* Ref.get(updateStateRef);
+          if (downloadedVersion !== null) yield* writeInstallRecord(downloadedVersion);
           // Stop every backend in the pool, not just the primary. With
           // parallel WSL + Windows backends, leaving the WSL instance up
           // means quitAndInstall's app.quit() exits before the pool's
@@ -761,10 +867,10 @@ export const make = Effect.gen(function* () {
                 yield* recoverFailedInstall(error.message);
                 yield* logUpdaterError(error.message, {
                   errorTag: error._tag,
+                  cause: describeUpdateErrorCause(error.cause),
                   channel: error.channel,
                   isSilent: error.isSilent,
                   isForceRunAfter: error.isForceRunAfter,
-                  cause: formatUpdaterErrorCause(error.cause),
                 });
                 return { accepted: true, completed: false, failed: true };
               },
@@ -776,7 +882,7 @@ export const make = Effect.gen(function* () {
               yield* logUpdaterError(error.message, {
                 errorTag: error._tag,
                 operation: error.operation,
-                cause: formatUpdaterErrorCause(error.cause),
+                cause: describeUpdateErrorCause(error.cause),
               });
               return { accepted: true, completed: false, failed: true };
             }),
@@ -791,8 +897,8 @@ export const make = Effect.gen(function* () {
               yield* recoverFailedInstall(error.message);
               yield* logUpdaterError(error.message, {
                 errorTag: error._tag,
+                cause: describeUpdateErrorCause(error.cause),
                 action: error.action,
-                cause: formatUpdaterErrorCause(Cause.squash(cause)),
               });
               return { accepted: true, completed: false, failed: true };
             }),
@@ -831,6 +937,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdatePollerError({ poller: "startup", cause });
         return logUpdaterError(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           poller: error.poller,
         });
       }),
@@ -846,6 +953,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdatePollerError({ poller: "poll", cause });
         return logUpdaterError(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           poller: error.poller,
         });
       }),
@@ -901,6 +1009,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "update-available", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -930,8 +1039,8 @@ export const make = Effect.gen(function* () {
       yield* recoverFailedInstall(error.message);
       yield* logUpdaterError(error.message, {
         errorTag: error._tag,
+        cause: describeUpdateErrorCause(error.cause),
         operation: error.operation,
-        cause: formatUpdaterErrorCause(cause),
       });
       return;
     }
@@ -951,8 +1060,8 @@ export const make = Effect.gen(function* () {
 
     yield* logUpdaterError(error.message, {
       errorTag: error._tag,
+      cause: describeUpdateErrorCause(error.cause),
       operation: error.operation,
-      cause: formatUpdaterErrorCause(cause),
     });
   });
 
@@ -982,6 +1091,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "download-progress", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -1012,6 +1122,7 @@ export const make = Effect.gen(function* () {
         const error = new DesktopUpdateEventHandlingError({ event: "update-downloaded", cause });
         return logUpdaterWarning(error.message, {
           errorTag: error._tag,
+          cause: describeUpdateErrorCause(error.cause),
           event: error.event,
         });
       }),
@@ -1042,6 +1153,15 @@ export const make = Effect.gen(function* () {
       const appUpdateYmlConfig = yield* readAppUpdateYml;
       yield* Ref.set(appUpdateYmlConfigRef, appUpdateYmlConfig);
 
+      const notAppliedVersion = yield* readNotAppliedInstallVersion;
+      yield* Ref.set(notAppliedVersionRef, notAppliedVersion);
+      if (Option.isSome(notAppliedVersion)) {
+        yield* logUpdaterWarning("the last update install did not apply", {
+          version: environment.appVersion,
+          targetVersion: notAppliedVersion.value,
+        });
+      }
+
       if (config.mockUpdates) {
         yield* electronUpdater.setFeedURL({
           provider: "generic",
@@ -1051,7 +1171,7 @@ export const make = Effect.gen(function* () {
 
       const settings = yield* desktopSettings.get;
       const enabled = yield* shouldEnableAutoUpdates;
-      yield* setState(createBaseUpdateState(settings.updateChannel, enabled, environment));
+      yield* setState(yield* baseUpdateState(settings.updateChannel, enabled));
       if (!enabled) {
         return;
       }
@@ -1122,7 +1242,7 @@ export const make = Effect.gen(function* () {
           );
 
         const enabled = yield* shouldEnableAutoUpdates;
-        yield* setState(createBaseUpdateState(nextChannel, enabled, environment));
+        yield* setState(yield* baseUpdateState(nextChannel, enabled));
 
         if (!enabled || !(yield* Ref.get(updaterConfiguredRef))) {
           return yield* Ref.get(updateStateRef);

@@ -10,7 +10,7 @@ import { AsyncResult, Atom } from "effect/reactivity";
  * stay unknown. Both re-check every few minutes, so a release
  * that lands later shows up without a reload.
  */
-const npmReleasePublishedAtom = Atom.family((version: string) =>
+export const npmReleasePublishedAtom = Atom.family((version: string) =>
   Atom.make(
     Effect.gen(function* () {
       const response = yield* HttpClient.get(cliReleaseTagUrl(version));
@@ -21,7 +21,11 @@ const npmReleasePublishedAtom = Atom.family((version: string) =>
       return typeof body === "object" && body !== null && "tag_name" in body
         ? body.tag_name === `v${version}`
         : false;
-    }).pipe(Effect.provide(FetchHttpClient.layer)),
+    }).pipe(
+      // Tracing headers would make the browser send a CORS preflight, which npm rejects.
+      Effect.provideService(HttpClient.TracerPropagationEnabled, false),
+      Effect.provide(FetchHttpClient.layer),
+    ),
   ).pipe(
     Atom.withRefresh("5 minutes"),
     Atom.keepAlive,
