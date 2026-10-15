@@ -803,6 +803,44 @@ describe("shared device stream readiness and recovery", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("decodes the Android keyframe that configured the decoder without restarting the encoder", async () => {
+    const { client, sockets, sps, decoders, decodedFrame, events } = recoveryFixture("android");
+    client.start();
+    sockets[0]!.onopen?.();
+    // serve-emu answers every keyframe request by restarting its encoder, which
+    // announces a new session before the keyframe; requests would loop forever.
+    sockets[0]!.onmessage?.({ data: JSON.stringify({ type: "video-session" }) });
+    sockets[0]!.onmessage?.({ data: sps });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(decoders[0]!.decode).toHaveBeenCalledOnce();
+    expect(sockets[0]!.send).not.toHaveBeenCalled();
+    decodedFrame();
+    expect(events.onStatus).toHaveBeenLastCalledWith("streaming", undefined);
+    client.stop();
+  });
+
+  it("decodes Android frames that arrive while the decoder is being configured, in order", async () => {
+    const { client, sockets, sps, Decoder, decoders } = recoveryFixture("android");
+    const chunks = vi.mocked(EncodedVideoChunk);
+    let resolveSupport!: (support: { supported: boolean }) => void;
+    Decoder.isConfigSupported.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveSupport = resolve;
+        }),
+    );
+    client.start();
+    sockets[0]!.onopen?.();
+    sockets[0]!.onmessage?.({ data: sps });
+    sockets[0]!.onmessage?.({ data: new Uint8Array([0, 0, 0, 1, 0x41, 0x9a]).buffer });
+    resolveSupport({ supported: true });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(decoders[0]!.decode).toHaveBeenCalledTimes(2);
+    expect(chunks.mock.calls.map(([init]) => init.type)).toEqual(["key", "delta"]);
+    expect(sockets[0]!.send).not.toHaveBeenCalled();
+    client.stop();
+  });
+
   it("discards decoder support results and output from a previous Android socket", async () => {
     const { client, sockets, sps, events, Decoder, decoders, decodedFrame, drawImage } =
       recoveryFixture("android");

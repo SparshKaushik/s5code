@@ -373,6 +373,11 @@ export function createDeviceStreamClient(
   let screen: DeviceScreenSize | null = null;
   let firstFrame = false;
   let configuring = false;
+  /**
+   * Android packets that arrive while the decoder is being configured, starting
+   * with the keyframe that carried its SPS; decoded in order once it is ready.
+   */
+  let held: Array<{ isKey: boolean; data: Uint8Array; timestamp: number | null }> = [];
   let mjpeg = false;
   let generation = 0;
   let decoderEpoch = 0;
@@ -528,6 +533,7 @@ export function createDeviceStreamClient(
     }
     videoDecoder = null;
     awaitingKeyframe = true;
+    held = [];
   };
 
   const recoverDecoder = () => {
@@ -917,11 +923,13 @@ export function createDeviceStreamClient(
       if (typeof event.data === "string") {
         // The encoder restarts at a new size when the device rotates; the
         // next keyframe carries a fresh SPS, so the decoder is rebuilt from it.
+        // serve-emu sends that keyframe unprompted. Asking for one here would
+        // restart the encoder again, which announces another session, so the
+        // decoder would be torn down before every keyframe and never paint.
         if (isVideoSessionMessage(event.data)) {
           closeDecoder();
           configuring = false;
           connecting();
-          requestKeyframe();
         }
         return;
       }
@@ -932,9 +940,14 @@ export function createDeviceStreamClient(
         (packet.isKey && (!videoDecoder || videoDecoder.state !== "configured"));
       const scanned = needsScan ? scanAccessUnit(packet.data) : null;
       const isKey = packet.isKey ?? scanned?.isKey ?? false;
+      const unit = { isKey, data: packet.data, timestamp: packet.timestamp };
+      if (configuring) {
+        if (held.length < SOFT_DECODE_QUEUE) held.push(unit);
+        return;
+      }
       if (scanned?.sps && (!videoDecoder || videoDecoder.state !== "configured")) {
-        if (configuring) return;
         configuring = true;
+        held = [unit];
         const epoch = decoderEpoch;
         const isCurrent = () => !stopped && socket === ws;
         void configureDecoder({ codec: avcCodecString(scanned.sps) }, isCurrent).then(
@@ -942,7 +955,15 @@ export function createDeviceStreamClient(
             if (!isCurrent() || epoch !== decoderEpoch) return;
             configuring = false;
             awaitingKeyframe = true;
-            if (configured) requestKeyframe();
+            const queued = held;
+            held = [];
+            if (!configured) return;
+            // Decoding the keyframe that configured the decoder, rather than
+            // asking for another, avoids an encoder restart per configuration.
+            for (const queuedUnit of queued) {
+              decode(queuedUnit.isKey, queuedUnit.data, queuedUnit.timestamp);
+            }
+            if (awaitingKeyframe) requestKeyframe();
           },
         );
         return;
