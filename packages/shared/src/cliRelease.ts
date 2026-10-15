@@ -92,6 +92,11 @@ export function cliReleaseChannelOf(version: string): CliReleaseChannel {
   return channel === "nightly" || channel === "preview" ? channel : "stable";
 }
 
+/** GitHub's release-by-tag endpoint for one version; 404 until the release is published. */
+export function cliReleaseTagUrl(version: string): string {
+  return `https://api.github.com/repos/${CLI_RELEASE_REPOSITORY}/releases/tags/v${encodeURIComponent(version)}`;
+}
+
 /**
  * One page of GitHub's list-releases endpoint, newest first. Callers walk pages
  * until a channel match turns up; a busy nightly train can push the newest
