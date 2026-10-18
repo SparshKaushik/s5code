@@ -22,6 +22,8 @@ internal object WsMethods {
     const val OrchestrationGetThreadProjection = "orchestration.getThreadProjection"
     /** Full input/output for one withheld or summarized turn item. */
     const val OrchestrationGetTurnItem = "orchestration.getTurnItem"
+    const val OrchestrationSubscribeCommandOutput = "orchestration.subscribeCommandOutput"
+    const val ServerGetDatabaseStorage = "server.getDatabaseStorage"
 
     /**
      * `secrets.answerRequest` — the agent's private-secret card. Declared with

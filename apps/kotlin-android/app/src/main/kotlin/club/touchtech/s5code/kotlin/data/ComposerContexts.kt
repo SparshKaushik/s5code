@@ -2,6 +2,7 @@ package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
+import club.touchtech.s5code.kotlin.model.ThreadPullRequestLink
 import club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto
 import java.util.UUID
 import kotlinx.serialization.json.JsonObject
@@ -111,9 +112,38 @@ fun referencedComposerContextRecords(
     }
 
 /**
+ * `composerPullRequestsFromLinks`: the thread's own linked pull requests as `#`
+ * candidates. Tombstoned stack members and links the host never synced are
+ * skipped; a link can point at any repository, so it keeps its own.
+ */
+internal fun composerPullRequestsFromLinks(
+    links: List<ThreadPullRequestLink>,
+    projectId: String,
+): List<ComposerPullRequestCandidate> =
+    links
+        .filter { it.source != "stack-dismissed" }
+        .mapNotNull { link ->
+            val snapshot = link.snapshot ?: return@mapNotNull null
+            ComposerPullRequestCandidate(
+                projectId = projectId,
+                repository = link.repository,
+                number = link.number,
+                title = snapshot.title,
+                url = link.url,
+                headBranch = snapshot.headBranch,
+                baseBranch = snapshot.baseBranch,
+                state = snapshot.state,
+                isDraft = snapshot.isDraft,
+                updatedAt = snapshot.updatedAt ?: link.linkedAt,
+            )
+        }
+
+/**
  * `filterComposerPullRequestMatches`: numeric `#` fragments match by number
- * substring, de-duplicated per number, an exact number always outranking a
- * substring hit so the limit cannot drop the pull request typed in full.
+ * substring, de-duplicated per repository and number. [linked] rows (the
+ * thread's own pull requests) skip the project/repository filter. An exact
+ * number outranks a linked row, which outranks recency, so the limit cannot drop
+ * the pull request typed in full.
  */
 internal fun filterComposerPullRequestMatches(
     entries: List<ComposerPullRequestCandidate>,
@@ -121,21 +151,35 @@ internal fun filterComposerPullRequestMatches(
     repository: String,
     query: String,
     limit: Int,
-): List<ComposerPullRequestCandidate> =
-    entries
-        .asSequence()
-        .filter { entry ->
-            entry.projectId == projectId &&
-                entry.repository.equals(repository, ignoreCase = true) &&
-                entry.number.toString().contains(query)
-        }
-        .distinctBy { it.number }
+    linked: List<ComposerPullRequestCandidate> = emptyList(),
+): List<ComposerPullRequestCandidate> {
+    val repo = repository.trim().lowercase()
+    fun keyOf(entry: ComposerPullRequestCandidate) = "${entry.repository.trim().lowercase()}#${entry.number}"
+    val linkedMatches = linked.filter { it.number.toString().contains(query) }
+    val linkedKeys = linkedMatches.mapTo(hashSetOf(), ::keyOf)
+    val matching = entries.filter { entry ->
+        entry.projectId == projectId &&
+            entry.repository.trim().lowercase() == repo &&
+            entry.number.toString().contains(query)
+    }
+    return (matching + linkedMatches)
+        .distinctBy(::keyOf)
         .sortedWith(
             compareByDescending<ComposerPullRequestCandidate> { it.number.toString() == query }
+                .thenByDescending { keyOf(it) in linkedKeys }
                 .thenByDescending { it.updatedAt }
         )
         .take(limit)
-        .toList()
+}
+
+/**
+ * The `#` row's secondary line: state, then the repository when it is not the
+ * project's own (a linked pull request can live anywhere), then the title.
+ */
+internal fun composerPullRequestDescription(entry: ComposerPullRequestCandidate, repository: String?): String {
+    val repo = if (entry.repository.equals(repository, ignoreCase = true)) "" else "${entry.repository} · "
+    return "${if (entry.isDraft) "Draft" else entry.state} · $repo${entry.title}"
+}
 
 /**
  * `resolveProviderWorkspaceSnapshot`: the snapshot whose cwd matches, or nothing

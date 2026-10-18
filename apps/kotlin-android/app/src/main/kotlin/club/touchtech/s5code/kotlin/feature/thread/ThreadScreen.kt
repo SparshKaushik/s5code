@@ -1,6 +1,11 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
+import club.touchtech.s5code.kotlin.data.forProject
 import club.touchtech.s5code.kotlin.model.ModelFavorite
+import club.touchtech.s5code.kotlin.model.HandoffEndpoint
+import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
+import androidx.compose.material.icons.rounded.SwapHoriz
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.rounded.Public
 
 import androidx.compose.animation.AnimatedVisibility
@@ -49,11 +54,14 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
+import club.touchtech.s5code.kotlin.data.childInputsTitle
 import club.touchtech.s5code.kotlin.data.clampFileAttachmentUploadBytes
 import club.touchtech.s5code.kotlin.data.fileAttachmentTooLargeMessage
 import club.touchtech.s5code.kotlin.data.formatComposerContextReference
@@ -141,9 +149,10 @@ fun ThreadScreen(
     val queuedMessages by store.outbox.collectAsStateWithLifecycle()
     val providerCatalog by store.workspace.providerCatalog.collectAsStateWithLifecycle()
     val providerCatalogs by store.workspace.providerCatalogs.collectAsStateWithLifecycle()
+    val threadProjectId = detail?.summary?.projectId?.value
     val machineCatalog =
-        remember(env, providerCatalogs, providerCatalog) {
-            providerCatalogs[env]?.takeIf { it.isNotEmpty() } ?: providerCatalog
+        remember(env, providerCatalogs, providerCatalog, threadProjectId) {
+            (providerCatalogs[env]?.takeIf { it.isNotEmpty() } ?: providerCatalog).forProject(threadProjectId)
         }
     val attachmentError by store.attachmentError.collectAsStateWithLifecycle()
     val composerError =
@@ -294,6 +303,16 @@ fun ThreadScreen(
             } || current.page?.hasMore == true
         }
     val effectiveSettings = draft.settings ?: current.settings
+    // `pendingHandoff`: the composer's selection against the model the thread
+    // last ran on. The catalog key stands in for provider config changes.
+    val pendingHandoff =
+        remember(current.handoffSource, effectiveSettings.provider.instanceId, effectiveSettings.model, machineCatalog) {
+            store.workspace.pendingHandoff(
+                env,
+                current.handoffSource,
+                HandoffEndpoint(effectiveSettings.provider.instanceId, effectiveSettings.model),
+            )
+        }
     val skills by
         store.workspace
             .providerSkills(env, effectiveSettings.provider, workspaceRoot)
@@ -407,6 +426,8 @@ fun ThreadScreen(
                     }
             }
         }
+    // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
+    val canSteer = current.canSteer && !isCompacting
     val rows =
         remember(
             current.feed,
@@ -615,9 +636,15 @@ fun ThreadScreen(
         bottomBar = {
             // Scaffold overlays direct slot children; controls must sit above the composer.
             Column(Modifier.fillMaxWidth()) {
-            childInputs.forEach { child ->
-                androidx.compose.material3.TextButton(onClick = { onOpenThread(environmentId, child.threadId) }) {
-                    Text("${child.title} ${if (child.approval) "needs approval" else "has a question"}")
+            // RN's child-input banner: one line over every blocked subagent, opening the first.
+            childInputs.firstOrNull()?.let { child ->
+                androidx.compose.material3.TextButton(
+                    onClick = { onOpenThread(environmentId, child.threadId) },
+                    modifier = Modifier.semantics {
+                        contentDescription = "Open ${if (child.approval) "approval" else "question"} from ${child.title}"
+                    },
+                ) {
+                    Text(childInputsTitle(childInputs))
                 }
             }
             // Why the last send never left the queue, dismissable above the
@@ -846,13 +873,13 @@ fun ThreadScreen(
                             ),
                 )
             }
-            V2ThreadControls(store, env, id, current, working, followUp,
+            V2ThreadControls(store, env, id, current, working, followUp, canSteer = canSteer,
                 onFollowUp = { followUp = it }, onOpenThread = { onOpenThread(environmentId, it) })
             if (current.providerNativeSubagent) {
                 Text("Provider-managed subagent · ${summary.status}", modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodySmall)
             } else ThreadComposer(
-                sendLabel = if (working) { if (current.canSteer && followUp == "steer") "Steer" else "Queue" } else "Send",
+                sendLabel = if (working) { if (canSteer && followUp == "steer") "Steer" else "Queue" } else "Send",
                 value = draft.text,
                 commands =
                     remember(effectiveSettings.provider, workspaceRoot) {
@@ -865,9 +892,11 @@ fun ThreadScreen(
                         { query: String ->
                             store.workspace.searchComposerPullRequests(
                                 env, summary.projectId, repository, query,
+                                threadPullRequests = current.pullRequests,
                             )
                         }
                     },
+                pullRequestRepository = pullRequestRepository,
                 onPickPullRequest = pickPullRequest@{ pullRequest, rangeStart, rangeEnd ->
                     // RN's COMPOSER_CONTEXT_MAX_RECORDS — a draft carries at most
                     // this many context payloads.
@@ -964,7 +993,7 @@ fun ThreadScreen(
                                 dispatchMode =
                                     when {
                                         isGoalCommand(text, images.isNotEmpty()) -> "queue"
-                                        working && current.canSteer && followUp == "steer" -> "steer"
+                                        working && canSteer && followUp == "steer" -> "steer"
                                         else -> "queue"
                                     },
                             )
@@ -1167,6 +1196,18 @@ fun ThreadScreen(
                             }
                         }
                     }
+                    // The handoff the next send would trigger, at the end of the
+                    // feed: just above the approval gate in this reversed list.
+                    pendingHandoff?.let { handoff ->
+                        item(key = "pending-handoff") {
+                            Box(Modifier.animateItem()) {
+                                PendingHandoffDivider(
+                                    from = handoffEndpointLabel(handoff.from, machineCatalog),
+                                    to = handoffEndpointLabel(handoff.to, machineCatalog),
+                                )
+                            }
+                        }
+                    }
                     items(
                         count = rows.size,
                         key = { index -> rows[rows.lastIndex - index].key },
@@ -1232,6 +1273,12 @@ fun ThreadScreen(
                                     resolveToolOutputImage = { call, index ->
                                         store.workspace.toolOutputImageUrl(env, call.sourceThreadId?.let(::ThreadId) ?: id, call.id, index)
                                     },
+                                    commandOutput =
+                                        if (environment?.capabilities?.commandOutputStreaming == true) {
+                                            { call -> store.workspace.commandOutput(env, call.sourceThreadId ?: id.value, call.id) }
+                                        } else {
+                                            null
+                                        },
                                     onRetryPreparation = { runId ->
                                         runCatching {
                                                 store.workspace.retryPreparedRun(env, id, runId)
@@ -1532,5 +1579,50 @@ private fun FloatingStatusPill(
                 )
             }
         }
+    }
+}
+
+/** A handoff side's label: the model's display name, else the instance's, else its id. */
+private fun handoffEndpointLabel(endpoint: HandoffEndpoint, catalog: List<ProviderCatalogEntry>): String {
+    val entry = catalog.firstOrNull { it.instance.instanceId == endpoint.instanceId }
+    return endpoint.model?.let { model -> entry?.modelLabel(model) ?: model }
+        ?: entry?.instance?.label
+        ?: endpoint.instanceId
+}
+
+/**
+ * "Context handoff pending" at the end of the feed: sending now moves the
+ * conversation to another provider session. Ported from `ThreadHandoffDivider`.
+ */
+@Composable
+private fun PendingHandoffDivider(from: String, to: String) {
+    val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    Column(
+        Modifier.fillMaxWidth().padding(vertical = S5Theme.spacing.small)
+            .semantics(mergeDescendants = true) {},
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+    ) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            HorizontalDivider(Modifier.weight(1f))
+            Icon(
+                Icons.Rounded.SwapHoriz,
+                contentDescription = null,
+                modifier = Modifier.size(14.dp),
+                tint = muted,
+            )
+            Text("Context handoff pending", style = MaterialTheme.typography.labelSmall, color = muted)
+            HorizontalDivider(Modifier.weight(1f))
+        }
+        Text(
+            "$from → $to",
+            style = MaterialTheme.typography.labelSmall,
+            color = muted,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }

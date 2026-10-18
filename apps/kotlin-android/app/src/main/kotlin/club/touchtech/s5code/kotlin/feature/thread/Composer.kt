@@ -72,6 +72,7 @@ import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import kotlinx.coroutines.delay
 import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
+import club.touchtech.s5code.kotlin.data.composerPullRequestDescription
 import club.touchtech.s5code.kotlin.platform.active
 import club.touchtech.s5code.kotlin.platform.composerImageReceiver
 import club.touchtech.s5code.kotlin.platform.composerPastedTextReceiver
@@ -125,6 +126,8 @@ fun ThreadComposer(
      * repository — the trigger then behaves like plain text.
      */
     onSearchPullRequests: (suspend (String) -> List<ComposerPullRequestCandidate>)? = null,
+    /** The project's repository; `#` rows from elsewhere name their own. */
+    pullRequestRepository: String? = null,
     /**
      * A `#` row was tapped: splice `formatComposerContextReference` over the
      * `[rangeStart, rangeEnd)` token and store the record with the draft.
@@ -393,6 +396,7 @@ fun ThreadComposer(
             commands = commandSuggestions + skillSuggestions,
             paths = pathSuggestions,
             pullRequests = pullRequestSuggestions,
+            pullRequestRepository = pullRequestRepository,
             groupLabel =
                 when (trigger?.kind) {
                     ComposerTriggerKind.PullRequest -> "Pull requests"
@@ -709,6 +713,7 @@ internal fun SuggestionPopover(
     paths: List<String>,
     pullRequests: List<ComposerPullRequestCandidate>,
     groupLabel: String,
+    pullRequestRepository: String? = null,
     onPick: (ComposerSuggestion) -> Unit,
     onPickPullRequest: (ComposerPullRequestCandidate) -> Unit,
 ) {
@@ -762,8 +767,7 @@ internal fun SuggestionPopover(
                     pullRequests.forEachIndexed { index, pullRequest ->
                         SuggestionRow(
                             label = "#${pullRequest.number}",
-                            description =
-                                "${if (pullRequest.isDraft) "Draft" else pullRequest.state} · ${pullRequest.title}",
+                            description = composerPullRequestDescription(pullRequest, pullRequestRepository),
                             icon = Icons.AutoMirrored.Rounded.CallSplit,
                             onClick = { onPickPullRequest(pullRequest) },
                             divided = index != pullRequests.lastIndex,

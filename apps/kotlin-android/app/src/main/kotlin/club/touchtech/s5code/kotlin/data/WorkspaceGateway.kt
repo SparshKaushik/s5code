@@ -177,6 +177,8 @@ interface WorkspaceGateway {
      * `useComposerPullRequestSearch` on the RN client: `#` token candidates for
      * one repository — a debounced `pullRequests.list` (all states, paged wide),
      * plus `pullRequests.detail` when the query is a number the page lacks.
+     * [threadPullRequests] are the thread's own links, offered to numeric
+     * queries whatever their repository.
      */
     suspend fun searchComposerPullRequests(
         environmentId: EnvironmentId,
@@ -184,6 +186,7 @@ interface WorkspaceGateway {
         repository: String,
         query: String,
         limit: Int = 20,
+        threadPullRequests: List<ThreadPullRequestLink> = emptyList(),
     ): List<ComposerPullRequestCandidate>
 
     /**
@@ -368,6 +371,23 @@ interface WorkspaceGateway {
     /* ── Turn-item detail reads ──────────────────────────────────────── */
 
     /**
+     * `orchestration.subscribeCommandOutput`: one command row's output while it
+     * is shown expanded, folded frame by frame with [applyCommandOutputFrame].
+     * Completes after the frame that reports the command settled. Only for
+     * servers advertising `commandOutputStreaming`.
+     */
+    fun commandOutput(environmentId: EnvironmentId, threadId: String, itemId: String): Flow<CommandOutputView> =
+        kotlinx.coroutines.flow.emptyFlow()
+
+    /**
+     * `server.getDatabaseStorage`: the state database's reclaimable space, null
+     * while the server has not measured it. Only for servers advertising
+     * `databaseStorage`.
+     */
+    fun databaseStorage(environmentId: EnvironmentId): Flow<club.touchtech.s5code.kotlin.transport.wire.DatabaseStorageStatusDto?> =
+        kotlinx.coroutines.flow.flowOf(null)
+
+    /**
      * `orchestration.getTurnItem`: the full input/output of one turn item that
      * withheld it (`FeedEntry.ToolCall.fetchesDetail`). [revision] is the row's
      * `detailRevision`; a still-current answer may come back as null when the
@@ -410,6 +430,23 @@ interface WorkspaceGateway {
 
     /** Clears one thread's send failure — a resend or a manual dismiss. */
     fun clearThreadComposerError(threadKey: String, messageId: String? = null) = Unit
+
+    /**
+     * Whether [instanceId] is switched off for [projectId] (null: outside any
+     * project) on a server with per-project provider switches — a send naming
+     * it is refused with [MODEL_TURNED_OFF_TITLE] instead of dispatched.
+     */
+    fun isModelTurnedOffForProject(environmentId: EnvironmentId, projectId: String?, instanceId: String): Boolean = false
+
+    /**
+     * The context handoff sending with [selection] would trigger on a thread
+     * whose latest run used [source], or null when the native session continues.
+     */
+    fun pendingHandoff(
+        environmentId: EnvironmentId,
+        source: club.touchtech.s5code.kotlin.model.HandoffEndpoint?,
+        selection: club.touchtech.s5code.kotlin.model.HandoffEndpoint,
+    ): PendingHandoff? = null
 
     /* ── Scheduled-task webhooks ─────────────────────────────────────── */
 

@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.feature.newtask
 
+import club.touchtech.s5code.kotlin.data.forProject
 import club.touchtech.s5code.kotlin.model.ModelFavorite
 
 import androidx.compose.foundation.clickable
@@ -424,10 +425,10 @@ fun NewTaskDraftScreen(
     val providerCatalog by store.workspace.providerCatalog.collectAsStateWithLifecycle()
     val providerCatalogs by store.workspace.providerCatalogs.collectAsStateWithLifecycle()
     val machineCatalog =
-        remember(draft.environmentId, providerCatalogs, providerCatalog, environments) {
+        remember(draft.environmentId, draft.projectKey, providerCatalogs, providerCatalog, environments) {
             val scoped = providerCatalogs[draft.environmentId]
             if (scoped != null && scoped.isNotEmpty()) {
-                scoped
+                scoped.forProject(draft.projectKey.ifEmpty { null })
             } else if (environments.none { it.id == draft.environmentId }) {
                 providerCatalog
             } else {
@@ -672,6 +673,7 @@ fun NewTaskDraftScreen(
                             )
                         }
                     },
+                pullRequestRepository = pullRequestRepository,
                 onPickPullRequest = onPickPr@{ pullRequest, rangeStart, rangeEnd ->
                     // COMPOSER_CONTEXT_MAX_RECORDS — a draft carries at most
                     // this many context payloads.
@@ -979,6 +981,8 @@ private fun NewTaskComposerDock(
     /** `#` mention search; null leaves the trigger as plain text. */
     onSearchPullRequests:
         (suspend (String) -> List<ComposerPullRequestCandidate>)? = null,
+    /** The project's repository; `#` rows from elsewhere name their own. */
+    pullRequestRepository: String? = null,
     /**
      * The pick writes the mention link into the draft and appends its context
      * record; the ranges index the current prompt text.
@@ -1129,6 +1133,7 @@ private fun NewTaskComposerDock(
             commands = commandSuggestions + skillSuggestions,
             paths = pathSuggestions,
             pullRequests = pullRequestSuggestions,
+            pullRequestRepository = pullRequestRepository,
             groupLabel =
                 when (trigger?.kind) {
                     ComposerTriggerKind.PullRequest -> "Pull requests"

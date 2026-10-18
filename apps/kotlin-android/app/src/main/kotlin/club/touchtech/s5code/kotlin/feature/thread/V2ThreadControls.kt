@@ -13,7 +13,9 @@ import kotlinx.serialization.json.*
 /** Server queues are shared between clients; local outbox messages remain delivery state. */
 @Composable
 internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId, detail: ThreadDetail,
-    working: Boolean, followUp: String, onFollowUp: (String) -> Unit, onOpenThread: (String) -> Unit) {
+    working: Boolean, followUp: String, onFollowUp: (String) -> Unit, onOpenThread: (String) -> Unit,
+    /** [ThreadDetail.canSteer] unless the turn is compacting, which queues follow-ups instead. */
+    canSteer: Boolean = detail.canSteer) {
     val scope = rememberCoroutineScope()
     var queueOpen by remember(id) { mutableStateOf(false) }
     var agentsOpen by remember(id) { mutableStateOf(false) }
@@ -35,7 +37,7 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
                 Text(if (detail.queueHeld) "Queue paused · ${detail.queuedRuns.size}" else "${detail.queuedRuns.size} queued")
             }
             if (detail.relationships.isNotEmpty()) TextButton(onClick = { agentsOpen = true }) { Text("Threads & agents") }
-            if (working && detail.canSteer && !detail.providerNativeSubagent) {
+            if (working && canSteer && !detail.providerNativeSubagent) {
                 TextButton(onClick = { onFollowUp(if (followUp == "queue") "steer" else "queue") }) {
                     Text("Follow-up: ${if (followUp == "queue") "Queue" else "Steer"}")
                 }

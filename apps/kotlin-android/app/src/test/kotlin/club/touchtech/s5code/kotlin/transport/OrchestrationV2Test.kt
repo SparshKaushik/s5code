@@ -74,6 +74,20 @@ class OrchestrationV2Test {
         assertEquals(listOf("inherited"), reverted.visibleTurnItems.map { it.sourceItemId })
     }
 
+    @Test fun `a pull request link update replaces only the matching link and never inserts`() {
+        fun link(number: Int, title: String) = obj(
+            """{"host":"github.com","repository":"acme/app","number":$number,"url":"https://github.com/acme/app/pull/$number","source":"manual","linkedAt":"2026-10-01T00:00:00Z","snapshot":{"state":"open","title":"$title"}}"""
+        )
+        val thread = JsonObject(metadata + ("pullRequests" to JsonArray(listOf(link(1, "one"), link(2, "two")))))
+        val projection = V2ProjectionDto(thread)
+        val updated = applyV2Event(projection, event("thread.pull-request-link-updated", link(2, "merged two")), false, null)
+        assertEquals(listOf("one", "merged two"), updated.pullRequestLinks().map { it.snapshot?.title })
+        val unknown = applyV2Event(projection, event("thread.pull-request-link-updated", link(3, "three")), false, null)
+        assertEquals(listOf(1, 2), unknown.pullRequestLinks().map { it.number })
+        // A thread without the array (an older server) stays as it was.
+        assertEquals(metadata, applyV2Event(V2ProjectionDto(metadata), event("thread.pull-request-link-updated", link(2, "x")), false, null).thread)
+    }
+
     @Test fun `bounded replay does not resurrect missing old rows and history cannot overwrite streaming`() {
         val live = item("live", 10)
         val projection = V2ProjectionDto(metadata, turnItems = listOf(live), visibleTurnItems = listOf(row(live)))

@@ -49,6 +49,8 @@ data class StoredPreferences(
      * even though this client has no legacy list to restore.
      */
     val legacyThreadListEnabled: Boolean = false,
+    /** Environment ids whose "Reclaim … GiB" maintenance notice was dismissed. */
+    val dismissedDatabaseStorageNotices: List<String> = emptyList(),
 )
 
 /** One starred model: provider instance id plus model slug. */

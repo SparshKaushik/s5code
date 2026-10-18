@@ -360,7 +360,7 @@ class RelayClient(
                 }
             response.use {
                 val body = it.body.string()
-                if (!it.isSuccessful) throw relayFailure(it.code, body)
+                if (!it.isSuccessful) throw relayFailure(it.code, body, it.header("traceparent"))
                 try {
                     json.decodeFromString(serializer, body)
                 } catch (cause: Exception) {
@@ -373,12 +373,20 @@ class RelayClient(
      * Turns a relay error body into something a screen can show. Relay errors are
      * tagged (`RelayProtectedError`), and the tag is more useful than the status:
      * "no active link" and "bad token" are both 401-shaped but have different
-     * fixes.
+     * fixes. An untyped failure (the relay's own gateway timeout, a proxy) has
+     * only its status, and its trace id rides the `traceparent` header.
      */
-    private fun relayFailure(status: Int, body: String): RelayError {
+    private fun relayFailure(status: Int, body: String, traceparent: String?): RelayError {
         val tag = TAG_PATTERN.find(body)?.groupValues?.getOrNull(1)
         val reason = REASON_PATTERN.find(body)?.groupValues?.getOrNull(1)
         val traceId = TRACE_ID_PATTERN.find(body)?.groupValues?.getOrNull(1)
+            ?: traceparent?.let { TRACEPARENT_TRACE_ID.matchEntire(it.trim())?.groupValues?.getOrNull(1) }
+        // A host swapping in a new tunnel leaves its allocation unready until the
+        // tunnel is up; nothing on this device changes when it is, so it retries
+        // like an unreachable endpoint instead of reading as a credential problem.
+        if (tag == "RelayEnvironmentConnectNotAuthorizedError" && reason == "managed_endpoint_allocation_not_ready") {
+            return RelayError("The environment's S5 Connect tunnel is still being set up.", traceId = traceId)
+        }
         val message =
             when (tag) {
                 "RelayAuthInvalidError" ->
@@ -388,15 +396,25 @@ class RelayClient(
                         else -> "The relay rejected the sign-in token."
                     }
                 "RelayEnvironmentConnectNotAuthorizedError" ->
-                    if (reason == "environment_link_not_found") {
-                        "The relay has no active link for this machine. Start S5 Code on it and " +
-                            "enable S5 Connect."
-                    } else {
-                        "The relay refused the connection ($reason)."
+                    when (reason) {
+                        "environment_link_not_found" ->
+                            "The relay has no active link for this machine. If it was removed from " +
+                                "S5 Connect, link it again on that machine."
+                        "endpoint_provider_not_managed" ->
+                            "This machine is linked only to publish agent activity, so it cannot accept " +
+                                "connections. On that computer, open Settings > Connections and turn S5 Connect on."
+                        else -> "The relay refused the connection ($reason)."
                     }
                 "RelayEnvironmentEndpointUnavailableError" ->
                     "That machine's tunnel is not reachable right now."
                 "RelayEnvironmentEndpointTimedOutError" -> "That machine did not answer in time."
+                null ->
+                    if (status == 504) {
+                        "Relay timed out before it finished the request (HTTP 504). Try again in a few " +
+                            "minutes. If it keeps failing, copy the trace ID when you report it."
+                    } else {
+                        "Relay returned an unexpected HTTP $status."
+                    }
                 else -> "The relay returned an error ($status)."
             }
         return RelayError(
@@ -420,5 +438,7 @@ class RelayClient(
         val TAG_PATTERN = Regex("\"_tag\"\\s*:\\s*\"([^\"]+)\"")
         val TRACE_ID_PATTERN = Regex("\"traceId\"\\s*:\\s*\"([^\"]+)\"")
         val REASON_PATTERN = Regex("\"reason\"\\s*:\\s*\"([^\"]+)\"")
+        val TRACEPARENT_TRACE_ID =
+            Regex("^[\\da-f]{2}-([\\da-f]{32})-[\\da-f]{16}-[\\da-f]{2}$", RegexOption.IGNORE_CASE)
     }
 }

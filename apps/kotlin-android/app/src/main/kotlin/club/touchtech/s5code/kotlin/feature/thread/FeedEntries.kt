@@ -63,6 +63,7 @@ import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5Markdown
 import coil3.compose.AsyncImage
+import club.touchtech.s5code.kotlin.data.CommandOutputView
 import club.touchtech.s5code.kotlin.data.SecretRequestAnswer
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
@@ -77,6 +78,7 @@ import club.touchtech.s5code.kotlin.model.PlanStepState
 import club.touchtech.s5code.kotlin.model.SentAttachment
 import club.touchtech.s5code.kotlin.model.ToolState
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonObject
@@ -119,6 +121,12 @@ fun FeedEntryRow(
      * output ([FeedEntry.ToolCall.outputImageCount]); null when unsupported.
      */
     resolveToolOutputImage: suspend (FeedEntry.ToolCall, Int) -> String? = { _, _ -> null },
+    /**
+     * `orchestration.subscribeCommandOutput` for an expanded command row; null
+     * when the server does not stream command output, so rows fall back to
+     * [fetchToolDetail].
+     */
+    commandOutput: ((FeedEntry.ToolCall) -> Flow<CommandOutputView>)? = null,
     /**
      * `prepared-run.retry` for an error row carrying
      * [FeedEntry.ErrorEntry.retryablePreparationRunId]; the caller surfaces
@@ -169,6 +177,7 @@ fun FeedEntryRow(
                 modifier,
                 fetchToolDetail,
                 resolveToolOutputImage,
+                commandOutput,
             )
 
         is FeedEntry.PlanUpdate -> PlanCard(entry, modifier)
@@ -639,9 +648,12 @@ private fun ToolRow(
     modifier: Modifier,
     fetchToolDetail: suspend (FeedEntry.ToolCall) -> JsonObject?,
     resolveToolOutputImage: suspend (FeedEntry.ToolCall, Int) -> String?,
+    commandOutput: ((FeedEntry.ToolCall) -> Flow<CommandOutputView>)?,
 ) {
     // A chevron on a row with nothing behind it is a promise the row cannot keep.
     val canExpand = toolCallCanExpand(entry)
+    // Command rows stream their output, including the final output, from the server.
+    val streamsOutput = commandOutput != null && entry.itemType == "command_execution"
     var localExpanded by remember(entry.id) { mutableStateOf(false) }
     val expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded
     val tint =
@@ -658,7 +670,7 @@ private fun ToolRow(
     var fetchedItem by remember(entry.id, entry.detailRevision) { mutableStateOf<JsonObject?>(null) }
     var detailError by remember(entry.id, entry.detailRevision) { mutableStateOf<String?>(null) }
     LaunchedEffect(expanded, entry.id, entry.detailRevision) {
-        if (!expanded || !entry.fetchesDetail || fetched || detailError != null) return@LaunchedEffect
+        if (!expanded || !entry.fetchesDetail || streamsOutput || fetched || detailError != null) return@LaunchedEffect
         try {
             fetchedItem = fetchToolDetail(entry)
             fetched = true
@@ -720,7 +732,11 @@ private fun ToolRow(
             if (expanded) {
                 val fetchedText = fetchedItem?.let(::fetchedTurnItemText)
                 val body =
-                    remember(entry.id, entry, fetchedText) { toolCallExpandedBody(entry, fetchedText) }
+                    remember(entry.id, entry, fetchedText, streamsOutput) {
+                        // A streamed row shows the command here and its output below.
+                        if (streamsOutput) toolCallExpandedBody(entry.copy(detail = ""))
+                        else toolCallExpandedBody(entry, fetchedText)
+                    }
                 if (body != null) {
                     Box(Modifier.padding(top = S5Theme.spacing.small)) {
                         S5CodeBlock(
@@ -732,7 +748,11 @@ private fun ToolRow(
                 // The output the timeline withheld: a fetched block under the
                 // call, and the fetch's own status while it is in flight or
                 // failed — RN's "Loading output…" / error line.
-                if (entry.fetchesDetail && (detailError != null || !fetched || fetchedItem == null)) {
+                if (streamsOutput) {
+                    val output = remember(entry.id, entry.sourceThreadId) { commandOutput(entry) }
+                    CommandOutputBlock(output)
+                }
+                if (!streamsOutput && entry.fetchesDetail && (detailError != null || !fetched || fetchedItem == null)) {
                     Row(
                         Modifier.padding(top = S5Theme.spacing.small),
                         verticalAlignment = Alignment.CenterVertically,

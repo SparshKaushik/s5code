@@ -89,7 +89,8 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                 else userMessagePresentation(item).let { message ->
                     FeedEntry.UserMessage(id, message.text, timeLabel(item.v2String("startedAt")),
                         attachments, contextRecordLabels(item["context"]), atMillis = at,
-                        attribution = message.attribution)
+                        attribution = message.attribution, promptTurnId = runId,
+                        inputIntent = item.v2String("inputIntent"))
                 }
             }
             "assistant_message" -> if (item.v2String("text").isNullOrBlank() && attachments.isEmpty()) null

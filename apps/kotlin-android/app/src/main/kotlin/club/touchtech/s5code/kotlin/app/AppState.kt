@@ -4,6 +4,9 @@ import android.app.Application
 import androidx.compose.runtime.Immutable
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import club.touchtech.s5code.kotlin.data.forProject
+import club.touchtech.s5code.kotlin.data.MODEL_TURNED_OFF_DETAIL
+import club.touchtech.s5code.kotlin.data.MODEL_TURNED_OFF_TITLE
 import club.touchtech.s5code.kotlin.cloud.CloudAuth
 import club.touchtech.s5code.kotlin.cloud.CloudEnvironments
 import club.touchtech.s5code.kotlin.cloud.CloudPublicConfig
@@ -440,11 +443,11 @@ class AppStore(application: Application) : AndroidViewModel(application) {
      */
     private fun observeDraftProviderAvailability() {
         combine(
-            _draft.map { it.environmentId }.distinctUntilChanged(),
+            _draft.map { it.environmentId to it.projectKey.ifEmpty { null } }.distinctUntilChanged(),
             workspace.providerCatalogs,
             workspace.providerCatalog,
-        ) { environmentId, catalogs, globalCatalog ->
-            catalogs[environmentId]?.takeIf { it.isNotEmpty() } ?: globalCatalog
+        ) { (environmentId, projectId), catalogs, globalCatalog ->
+            catalogs[environmentId]?.takeIf { it.isNotEmpty() }?.forProject(projectId) ?: globalCatalog
         }
             .onEach { catalog ->
                 if (catalog.isEmpty()) return@onEach
@@ -1076,6 +1079,19 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                             reportQueuedMessageFailure(message, reason)
                             return
                         }
+                    }
+                    // RN's `isModelSelectionUnavailable` gate: a model the
+                    // project switched off is refused here rather than by the server.
+                    val projectId =
+                        message.creation?.projectKey
+                            ?: workspace.threads.value.firstOrNull {
+                                it.environmentId == message.environmentId && it.id == message.threadId
+                            }?.projectId?.value
+                    if (workspace.isModelTurnedOffForProject(message.environmentId, projectId, message.settings.provider.instanceId)) {
+                        restoreQueuedMessageToDraft(message)
+                        completeQueuedMessage(message, creationAccepted = false)
+                        reportQueuedMessageFailure(message, "$MODEL_TURNED_OFF_TITLE. $MODEL_TURNED_OFF_DETAIL")
+                        return
                     }
                     if (message.creation != null) {
                         workspace.createThread(

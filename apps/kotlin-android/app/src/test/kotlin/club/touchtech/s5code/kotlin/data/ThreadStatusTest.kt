@@ -67,6 +67,33 @@ class ThreadStatusTest {
     }
 
     @Test
+    fun `a server that runs the settle itself is the only one that settles a quiet thread`() {
+        val quiet =
+            shell(
+                session = SessionDto(status = "ready", updatedAt = at(weekAgo)),
+                latestTurn = LatestTurnDto(turnId = "turn-1", state = "completed", completedAt = at(weekAgo)),
+                latestUserMessageAt = at(weekAgo),
+            )
+        assertEquals(ThreadStatus.Idle, threadStatusOf(quiet, now, serverSettles = true))
+        assertEquals(
+            ThreadStatus.Settled,
+            threadStatusOf(quiet.copy(settledOverride = "settled"), now, serverSettles = true),
+        )
+    }
+
+    @Test
+    fun `a blocked descendant subagent badges its parent`() {
+        assertEquals(
+            ThreadStatus.AwaitingApproval,
+            threadStatusOf(shell(), now, subagentRequest = SUBAGENT_REQUEST_APPROVAL),
+        )
+        assertEquals(
+            ThreadStatus.AwaitingInput,
+            threadStatusOf(shell(), now, subagentRequest = SUBAGENT_REQUEST_USER_INPUT),
+        )
+    }
+
+    @Test
     fun `a quiet thread auto-settles rather than sitting at the top as failed`() {
         val status =
             threadStatusOf(

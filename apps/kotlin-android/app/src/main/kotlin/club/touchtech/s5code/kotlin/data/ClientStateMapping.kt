@@ -74,6 +74,7 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         planModeEnabled = planModeEnabled,
         followUpBehavior = if (followUpBehavior == "steer") "steer" else "queue",
         legacyThreadListEnabled = legacyThreadListEnabled,
+        dismissedDatabaseStorageNotices = dismissedDatabaseStorageNotices,
     )
 
 /**
@@ -114,6 +115,8 @@ data class RuntimePreferences(
     val planModeEnabled: Boolean = false,
     /** RN's `legacyThreadListEnabled`; no legacy list exists in this client. */
     val legacyThreadListEnabled: Boolean = false,
+    /** RN's `dismissedDatabaseStorageNotices`: environments whose compaction notice is hidden. */
+    val dismissedDatabaseStorageNotices: List<String> = emptyList(),
 )
 
 fun RuntimePreferences.toStored(): StoredPreferences =
@@ -143,6 +146,7 @@ fun RuntimePreferences.toStored(): StoredPreferences =
         liveUpdatesEnabled = liveUpdatesEnabled,
         planModeEnabled = planModeEnabled,
         legacyThreadListEnabled = legacyThreadListEnabled,
+        dismissedDatabaseStorageNotices = dismissedDatabaseStorageNotices,
     )
 
 fun ComposerAttachment.toStored(): StoredAttachment =

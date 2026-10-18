@@ -240,38 +240,51 @@ data class TurnFold(
 fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFold> {
     val openTurnId = latestTurn?.takeIf { !it.settled }?.turnId
 
+    // Where each run's own prompt sits. A steer joins a run already under way,
+    // so only the prompt that started the run counts.
+    val promptIndexByTurn = mutableMapOf<String, Int>()
+    feed.forEachIndexed { index, entry ->
+        if (entry !is FeedEntry.UserMessage) return@forEachIndexed
+        if (entry.inputIntent == "steer" || entry.inputIntent == "promoted_queued_to_steer") return@forEachIndexed
+        entry.promptTurnId?.let { promptIndexByTurn.putIfAbsent(it, index) }
+    }
+
     // The first and last assistant message of a turn stay visible on either side
     // of the fold, matching `firstAssistantMessageIdByTurn` /
     // `terminalAssistantMessageIdByTurn`: a multi-answer turn reads as its
     // opening line, the fold, and the answer it ended on.
     val firstAssistantIdByTurn = mutableMapOf<String, String>()
     val terminalAssistantIdByTurn = mutableMapOf<String, String>()
-    feed.forEach { entry ->
-        if (entry is FeedEntry.AgentMessage && entry.turnId != null) {
-            firstAssistantIdByTurn.putIfAbsent(entry.turnId!!, entry.id)
-            terminalAssistantIdByTurn[entry.turnId!!] = entry.id
-        }
-    }
 
     // Grouped in feed order, so "first row" and "last answer" are positional rather
     // than derived from timestamps, which tie.
     val groups = LinkedHashMap<String, MutableList<FeedEntry>>()
     var boundary: Long? = null
+    var responseKey: String? = null
     val boundaries = mutableMapOf<String, Long?>()
-    feed.forEach { entry ->
+    feed.forEachIndexed { index, entry ->
         if (entry is FeedEntry.UserMessage) {
             // The prompt is where the user's clock starts, which is what "worked
             // for" should measure — not when the provider got round to the turn.
             boundary = entry.atMillis
-            return@forEach
+            responseKey = entry.promptTurnId
+            return@forEachIndexed
         }
-        val turnId = entry.turnId ?: return@forEach
+        val ownTurnId = entry.turnId ?: return@forEachIndexed
+        // Resuming a subagent moves its item to the resuming run, but the item
+        // keeps its place in the turn that started it. It folds with that turn,
+        // so the later run's fold still opens under its own prompt.
+        val turnId = responseKey?.takeIf { (promptIndexByTurn[ownTurnId] ?: -1) > index } ?: ownTurnId
         if (turnId !in groups) {
             groups[turnId] = mutableListOf()
             boundaries[turnId] = boundary
             boundary = null
         }
         groups.getValue(turnId) += entry
+        if (entry is FeedEntry.AgentMessage) {
+            firstAssistantIdByTurn.putIfAbsent(turnId, entry.id)
+            terminalAssistantIdByTurn[turnId] = entry.id
+        }
     }
 
     val folds = mutableMapOf<String, TurnFold>()

@@ -92,10 +92,17 @@ import kotlinx.serialization.json.putJsonObject
  * is the order a user scanning the list needs. Those three are also the blockers
  * inside snooze and settle, so they can be checked once here.
  */
-fun threadStatusOf(shell: ThreadShellDto, nowMillis: Long): ThreadStatus =
+fun threadStatusOf(
+    shell: ThreadShellDto,
+    nowMillis: Long,
+    subagentRequest: String? = null,
+    serverSettles: Boolean = false,
+): ThreadStatus =
     when {
-        shell.hasPendingApprovals -> ThreadStatus.AwaitingApproval
-        shell.hasPendingUserInput -> ThreadStatus.AwaitingInput
+        // A blocked descendant subagent blocks its ancestors too
+        // ([pendingSubagentRequestsByThread]), so the row it hides behind asks.
+        shell.hasPendingApprovals || subagentRequest == SUBAGENT_REQUEST_APPROVAL -> ThreadStatus.AwaitingApproval
+        shell.hasPendingUserInput || subagentRequest == SUBAGENT_REQUEST_USER_INPUT -> ThreadStatus.AwaitingInput
         shell.session?.status == "running" -> ThreadStatus.Working
         shell.session?.status == "starting" -> ThreadStatus.Working
         shell.backgroundLiveness != null && shell.session?.status !in setOf("error", "limited") -> ThreadStatus.Waiting
@@ -104,7 +111,7 @@ fun threadStatusOf(shell: ThreadShellDto, nowMillis: Long): ThreadStatus =
         // takes to come up, which reads as "my message was lost".
         hasQueuedTurnStart(shell, nowMillis) -> ThreadStatus.Queued
         isSnoozed(shell, nowMillis) -> ThreadStatus.Snoozed
-        isSettled(shell, nowMillis) -> ThreadStatus.Settled
+        isSettled(shell, nowMillis, serverSettles) -> ThreadStatus.Settled
         // Only the session's own status, matching `resolveThreadListV2Status`. A
         // stale `latestTurn.state == "error"` is history: the turn that failed is
         // over, the thread is idle, and badging it failed forever is the "lying
@@ -188,8 +195,12 @@ private fun isSnoozed(shell: ThreadShellDto, nowMillis: Long): Boolean {
  * state is not on the thread shell — RN reads it per row from a separate hook — so
  * this cannot see it. The cost is that a quiet thread with an open PR settles here
  * a few days before it would on mobile.
+ *
+ * [serverSettles] is the `threadSettlement` capability: such a server runs the
+ * inactivity sweep itself and reports it as the override, so the local
+ * inactivity path is only for servers that predate it.
  */
-private fun isSettled(shell: ThreadShellDto, nowMillis: Long): Boolean {
+private fun isSettled(shell: ThreadShellDto, nowMillis: Long, serverSettles: Boolean): Boolean {
     if (shell.hasPendingApprovals || shell.hasPendingUserInput || shell.hasActionableProposedPlan || shell.backgroundLiveness != null) return false
     if (shell.session?.status == "starting" || shell.session?.status == "running") return false
     // A pin overrides the lifecycle, as it does in the RN partition: pinned threads
@@ -213,6 +224,7 @@ private fun isSettled(shell: ThreadShellDto, nowMillis: Long): Boolean {
     // "active" is the explicit keep-active pin: it suppresses auto-settle until
     // real activity clears it server-side.
     if (shell.settledOverride == "active") return false
+    if (serverSettles) return false
     val lastActivityAt = threadLastActivityAt(shell) ?: return false
     return lastActivityAt < nowMillis - AUTO_SETTLE_AFTER_MS
 }
@@ -275,8 +287,10 @@ fun threadSummaryFrom(
     shell: ThreadShellDto,
     driverFor: (String) -> ProviderInstance,
     nowMillis: Long,
+    subagentRequest: String? = null,
+    serverSettles: Boolean = false,
 ): ThreadSummary {
-    val status = threadStatusOf(shell, nowMillis)
+    val status = threadStatusOf(shell, nowMillis, subagentRequest, serverSettles)
     return ThreadSummary(
         id = ThreadId(shell.id),
         environmentId = environmentId,
@@ -393,6 +407,7 @@ fun threadDetailFrom(
     nowMillis: Long,
     page: ThreadDetailPageDto? = null,
     loadingOlder: Boolean = false,
+    serverSettles: Boolean = false,
 ): ThreadDetail {
     val sortedActivities = thread.activities.sortedWith(activityOrder)
     val summary =
@@ -401,6 +416,7 @@ fun threadDetailFrom(
             thread.asShell(),
             driverFor,
             nowMillis,
+            serverSettles = serverSettles,
         )
 
     // A folded user-input record supersedes the server's synthetic user message
@@ -576,6 +592,7 @@ fun threadDetailFrom(
         pullRequests =
             threadPullRequestsOf(thread.pullRequests, thread.linkedPullRequest)
                 .map { it.toModel() },
+        handoffSource = thread.projection?.let(::handoffSourceOf),
         branchPullRequest = thread.branchPullRequest?.toModel(),
         workspaceRoot = thread.worktreePath,
         page =

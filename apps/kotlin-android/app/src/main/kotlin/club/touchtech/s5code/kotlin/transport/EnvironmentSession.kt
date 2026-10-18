@@ -173,6 +173,12 @@ data class ServerCapabilities(
      * A manual update hint needs it to say where the new binary must land.
      */
     val serverInstallation: ServerInstallationDto? = null,
+    /** Projects may turn provider instances on or off (`projectSettingsOverrides[p].providerInstances`). */
+    val projectProviderInstanceOverrides: Boolean = false,
+    /** `orchestration.subscribeCommandOutput` streams a running command's output. */
+    val commandOutputStreaming: Boolean = false,
+    /** `server.getDatabaseStorage` reports database size and reclaimable space. */
+    val databaseStorage: Boolean = false,
 )
 
 /**
@@ -453,15 +459,13 @@ class EnvironmentSession(
     )
 
     private suspend fun connect(environment: SavedEnvironment): Long {
-        // One bound on authorize→open→first-config, matching RN's
-        // CONNECTION_ESTABLISHMENT_TIMEOUT — the per-step timeouts inside stay
-        // as backstops. A connectivity drop mid-attempt aborts it too, like
-        // RN's offline watchdog, rather than letting a dead attempt run out
-        // the clock.
+        // [establish] bounds its own phases, matching RN's supervisor: setup
+        // gets the establishment timeout, synchronization its own longer one.
+        // A connectivity drop mid-attempt aborts it too, like RN's offline
+        // watchdog, rather than letting a dead attempt run out the clock.
         val established =
             coroutineScope {
-                val attempt =
-                    async { withTimeout(ESTABLISHMENT_TIMEOUT_MS) { establish(environment) } }
+                val attempt = async { establish(environment) }
                 val wentOffline =
                     online?.let { connectivity ->
                         async {
@@ -535,6 +539,10 @@ class EnvironmentSession(
                                 descriptor.capabilities.projectSettingsOverrides,
                             usageModelMappings = descriptor.capabilities.usageModelMappings,
                             serverInstallation = descriptor.capabilities.serverInstallation,
+                            projectProviderInstanceOverrides =
+                                descriptor.capabilities.projectProviderInstanceOverrides,
+                            commandOutputStreaming = descriptor.capabilities.commandOutputStreaming,
+                            databaseStorage = descriptor.capabilities.databaseStorage,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     scratchWorkspaceRoot = config.scratchWorkspaceRoot,
@@ -617,16 +625,22 @@ class EnvironmentSession(
      * Anything that throws before this returns has produced no visible session.
      */
     private suspend fun establish(environment: SavedEnvironment): Established {
-        val authorized = authorizer.authorize(environment)
-        this.authorized = authorized
-        val socketUrl =
-            http.resolveSocketUrl(
-                authorized.httpBaseUrl,
-                authorized.wsBaseUrl,
-                authorized.credential,
-                authorized.connectionMethod,
-            )
-        val opened = RpcConnection.open(client, socketUrl, scope)
+        // Authorize→open gets the short setup bound; once the socket is open
+        // the first config may take the synchronization bound on top of what
+        // setup left, since a cold server with a large database answers slowly.
+        val startedAt = System.currentTimeMillis()
+        val (authorized, opened) = withTimeout(ESTABLISHMENT_TIMEOUT_MS) {
+            val authorized = authorizer.authorize(environment)
+            this@EnvironmentSession.authorized = authorized
+            val socketUrl =
+                http.resolveSocketUrl(
+                    authorized.httpBaseUrl,
+                    authorized.wsBaseUrl,
+                    authorized.credential,
+                    authorized.connectionMethod,
+                )
+            authorized to RpcConnection.open(client, socketUrl, scope)
+        }
         httpBaseUrl = authorized.httpBaseUrl
         val firstConfig = CompletableDeferred<ServerConfigDto>()
         val configEnded = CompletableDeferred<RpcTransportClosed>()
@@ -722,7 +736,8 @@ class EnvironmentSession(
             }
         val config =
             try {
-                withTimeout(CONFIG_WAIT_MS) { firstConfig.await() }
+                val setupLeft = (ESTABLISHMENT_TIMEOUT_MS - (System.currentTimeMillis() - startedAt)).coerceAtLeast(0)
+                withTimeout(setupLeft + SYNCHRONIZATION_TIMEOUT_MS) { firstConfig.await() }
             } catch (failure: Throwable) {
                 // A timed-out, cancelled, or offline-aborted attempt must not
                 // leave a socket and config stream running detached.
@@ -1069,6 +1084,19 @@ class EnvironmentSession(
     }
 
     /**
+     * A one-shot server stream on the current connection. Unlike [subscribe] it
+     * does not resubscribe: it ends with the server's stream and fails on an RPC
+     * failure or a lost socket — for streams that finish on their own, like a
+     * command's output.
+     */
+    fun <T> streamOnce(method: String, payload: JsonElement, serializer: KSerializer<T>): Flow<T> =
+        kotlinx.coroutines.flow.flow {
+            val live = awaitConnection()
+            state.value.requireRpcPermissions(method, payload)
+            live.stream(method, payload).collect { emit(TransportJson.decodeFromJsonElement(serializer, it)) }
+        }
+
+    /**
      * Authenticated GET against the environment's HTTP API, using the credential
      * the current (or most recent) connection attempt minted. This is the
      * snapshot fast-path (`/api/orchestration/shell`, `/api/orchestration/
@@ -1129,11 +1157,11 @@ class EnvironmentSession(
         /** How long a write waits for a socket before failing instead of hanging. */
         const val AWAIT_CONNECTION_MS = 15_000L
 
-        /** The first config frame must arrive promptly or the attempt is dead. */
-        const val CONFIG_WAIT_MS = 15_000L
-
-        /** Total bound on authorize→open→first-config, matching RN's establishment timeout. */
+        /** Bound on authorize→socket open, matching RN's `CONNECTION_ESTABLISHMENT_TIMEOUT`. */
         const val ESTABLISHMENT_TIMEOUT_MS = 15_000L
+
+        /** Once the socket is open, the first config frame's bound, matching RN's `synchronizationTimeout`. */
+        const val SYNCHRONIZATION_TIMEOUT_MS = 75_000L
 
         /**
          * Client-activity reporting cadence and lease, matching RN's

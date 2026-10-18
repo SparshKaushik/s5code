@@ -178,6 +178,12 @@ data class EnvironmentCapabilities(
      * [Environment.serverSettings] does.
      */
     val serverInstallation: club.touchtech.s5code.kotlin.transport.wire.ServerInstallationDto? = null,
+    /** Projects may turn provider instances on or off (`projectSettingsOverrides[p].providerInstances`). */
+    val projectProviderInstanceOverrides: Boolean = false,
+    /** `orchestration.subscribeCommandOutput` streams a running command's output. */
+    val commandOutputStreaming: Boolean = false,
+    /** `server.getDatabaseStorage` reports database size and reclaimable space. */
+    val databaseStorage: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */
@@ -500,6 +506,14 @@ sealed interface FeedEntry {
         override val atMillis: Long = 0,
         /** Automation, Agent, or S5 Code for a user-role message sent on the user's behalf. */
         val attribution: String? = null,
+        /**
+         * The run this prompt started or joined. Kept off [turnId] so the prompt
+         * never groups into a turn's own rows; turn folding reads it to decide
+         * which prompt a resumed subagent's row answers.
+         */
+        val promptTurnId: String? = null,
+        /** The item's `inputIntent`; a steer joins a run rather than starting one. */
+        val inputIntent: String? = null,
     ) : FeedEntry
 
     /** Display slice of one `ComposerContextRecord`. */
@@ -840,6 +854,9 @@ enum class ThreadSyncPhase {
     Live,
 }
 
+/** One side of a context handoff: a provider instance and, when known, its model. */
+data class HandoffEndpoint(val instanceId: String, val model: String?)
+
 data class ThreadDetail(
     val summary: ThreadSummary,
     val feed: List<FeedEntry>,
@@ -866,6 +883,11 @@ data class ThreadDetail(
      * here; [ThreadSummary.pullRequest] stays the one-slot badge.
      */
     val pullRequests: List<ThreadPullRequestLink> = emptyList(),
+    /**
+     * The model the thread's latest started run used, null while the thread has
+     * sent nothing. The source side of a pending context handoff.
+     */
+    val handoffSource: HandoffEndpoint? = null,
     /** The pull request the server discovered from the thread's current branch. */
     val branchPullRequest: ThreadLinkedPullRequest? = null,
     val canReorderQueue: Boolean = false,
@@ -1373,7 +1395,14 @@ data class ProviderCatalogEntry(
      * `resolveProviderInteractionMode` in the RN client.
      */
     val interactionModeToggle: Boolean = true,
+    /** Machine-wide switch; a project's own switch in [projectEnabled] overrides it. */
+    val enabled: Boolean = true,
+    /** Explicit per-project switches by project id (`projectProviderInstanceOverrides`). */
+    val projectEnabled: Map<String, Boolean> = emptyMap(),
 ) {
+    /** Whether a composer scoped to [projectId] (null: no project) may offer this instance. */
+    fun enabledFor(projectId: String?): Boolean = projectId?.let(projectEnabled::get) ?: enabled
+
     /** The row label for a model slug, falling back to the slug itself. */
     fun modelLabel(model: String): String =
         modelLabels[model]?.takeIf { it.isNotEmpty() } ?: model

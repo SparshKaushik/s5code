@@ -94,7 +94,7 @@ suspend fun buildIncomingShare(
                                 else IncomingShareAttachmentType.File,
                             name = name,
                             mimeType = mimeType,
-                            sizeBytes = copied,
+                            sizeBytes = (if (isImage) fitCachedImage(target, mimeType) else null) ?: copied,
                             uri = Uri.fromFile(target).toString(),
                         )
             }

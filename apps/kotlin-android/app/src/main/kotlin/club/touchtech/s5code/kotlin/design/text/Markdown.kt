@@ -58,7 +58,7 @@ data class MdSpan(
 
 /** Parses [source] into blocks. Never throws: unknown syntax degrades to text. */
 fun parseMarkdown(source: String): List<MdBlock> {
-    val lines = source.replace("\r\n", "\n").split('\n')
+    val lines = renderCodexInlineDirectivesAsMarkdown(source.replace("\r\n", "\n")).split('\n')
     val blocks = mutableListOf<MdBlock>()
     var index = 0
 
@@ -206,6 +206,8 @@ private fun parseParagraph(source: String): ParsedParagraph {
 }
 
 /** Parses inline runs. Unclosed markers stay literal rather than eating the rest. */
+private const val MARKDOWN_ESCAPABLE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
+
 fun parseInline(source: String): List<MdSpan> {
     val spans = mutableListOf<MdSpan>()
     val buffer = StringBuilder()
@@ -224,6 +226,12 @@ fun parseInline(source: String): List<MdSpan> {
     while (index < source.length) {
         val rest = source.substring(index)
         when {
+            // A backslash before ASCII punctuation is a literal (CommonMark escape).
+            rest.length > 1 && rest[0] == '\\' && rest[1] in MARKDOWN_ESCAPABLE -> {
+                buffer.append(rest[1])
+                index += 2
+            }
+
             rest.startsWith("`") -> {
                 val end = rest.indexOf('`', startIndex = 1)
                 if (end <= 0) {
@@ -246,7 +254,8 @@ fun parseInline(source: String): List<MdSpan> {
                 } else {
                     flush()
                     val label = rest.substring(1, closeText)
-                    val href = rest.substring(openHref + 1, closeHref)
+                    // `<…>` destinations (CommonMark) carry their path verbatim.
+                    val href = rest.substring(openHref + 1, closeHref).trim().removeSurrounding("<", ">")
                     parseInline(label).forEach { span -> spans += span.copy(link = href) }
                     index += closeHref + 1
                 }

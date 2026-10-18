@@ -17,7 +17,7 @@ internal fun V2ProjectionDto.restoreCompactTurnItems(omitted: Boolean): V2Projec
 
 internal fun ThreadShellDto.normalizedV2(): ThreadShellDto {
     if (status == null) return this
-    val live = activityRunStatus ?: status
+    val live = activityRunStatus.takeUnless { it == FIELD_ABSENT } ?: status
     val turnId = activeRunId ?: latestRunId
     return copy(
         latestTurn = turnId?.let {
@@ -66,6 +66,22 @@ internal fun V2ProjectionDto.pullRequestLinks(): List<ThreadPullRequestLinkDto> 
             raw,
         )
     }.getOrNull().orEmpty()
+}
+
+/**
+ * `applyThreadPullRequestLinkUpdate`: a link sync replaces the one link whose
+ * normalized key matches and never inserts — a link removed in between stays
+ * removed. Undecodable rows are kept as-is.
+ */
+internal fun JsonObject.withPullRequestLinkUpdate(update: JsonObject): JsonObject {
+    val links = get("pullRequests") as? JsonArray ?: return this
+    val decode = { value: JsonElement ->
+        runCatching { TransportJson.decodeFromJsonElement(ThreadPullRequestLinkDto.serializer(), value) }.getOrNull()
+    }
+    val key = decode(update)?.let(::threadPullRequestKeyOf) ?: return this
+    return JsonObject(this + ("pullRequests" to JsonArray(links.map { link ->
+        if (decode(link)?.let(::threadPullRequestKeyOf) == key) update else link
+    })))
 }
 
 /**
@@ -221,6 +237,7 @@ internal fun applyV2Event(
         "thread.metadata-updated", "thread.pull-request-synced", "thread.runtime-mode-updated",
         "thread.interaction-mode-updated", "thread.model-selection-updated", "thread.provider-switched",
         "thread.visited", "thread.marked-unread" -> base.copy(thread = payload)
+        "thread.pull-request-link-updated" -> base.copy(thread = projection.thread.withPullRequestLinkUpdate(payload))
         "run.created", "run.updated" -> base.copy(runs = base.runs.v2Upsert(payload))
         "run.background-work-cancelled" -> base.copy(runs = base.runs.map { run ->
             if (run.v2String("id") == payload.v2String("runId")) JsonObject(run +

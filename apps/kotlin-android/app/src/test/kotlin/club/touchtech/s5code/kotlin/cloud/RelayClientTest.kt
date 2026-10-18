@@ -10,6 +10,8 @@ import mockwebserver3.MockWebServer
 import okhttp3.OkHttpClient
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
 import org.junit.Before
@@ -177,6 +179,68 @@ class RelayClientTest {
             fail("expected a relay error")
         } catch (error: RelayError) {
             assertTrue(error.message.contains("no active link"))
+        }
+    }
+
+    @Test
+    fun `an unready tunnel allocation is transient rather than unauthorized`() = runTest {
+        server.enqueue(json(accessTokenBody))
+        server.enqueue(
+            json(
+                """{"_tag":"RelayEnvironmentConnectNotAuthorizedError","reason":"managed_endpoint_allocation_not_ready","traceId":"trace-1"}""",
+                code = 403,
+            )
+        )
+
+        try {
+            client().connectEnvironment("env-1", deviceId = null)
+            fail("expected a relay error")
+        } catch (error: RelayError) {
+            assertEquals("The environment's S5 Connect tunnel is still being set up.", error.message)
+            assertFalse(error.unauthorized)
+            assertEquals("trace-1", error.traceId)
+        }
+        // No token refresh retry: a transient refusal goes back to the backoff ladder.
+        assertEquals(2, server.requestCount)
+    }
+
+    @Test
+    fun `an untyped gateway timeout reads its trace id from traceparent`() = runTest {
+        server.enqueue(json(accessTokenBody))
+        server.enqueue(
+            MockResponse.Builder()
+                .code(504)
+                .setHeader("traceparent", "00-0AF7651916CD43DD8448EB211C80319C-b7ad6b7169203331-01")
+                .body("upstream timed out")
+                .build()
+        )
+
+        try {
+            client().connectEnvironment("env-1", deviceId = null)
+            fail("expected a relay error")
+        } catch (error: RelayError) {
+            assertTrue(error.message.startsWith("Relay timed out before it finished the request (HTTP 504)."))
+            assertEquals("0AF7651916CD43DD8448EB211C80319C", error.traceId)
+        }
+    }
+
+    @Test
+    fun `an untyped failure without a valid traceparent reports only its status`() = runTest {
+        server.enqueue(json(accessTokenBody))
+        server.enqueue(
+            MockResponse.Builder()
+                .code(502)
+                .setHeader("traceparent", "not-a-trace")
+                .body("bad gateway")
+                .build()
+        )
+
+        try {
+            client().connectEnvironment("env-1", deviceId = null)
+            fail("expected a relay error")
+        } catch (error: RelayError) {
+            assertEquals("Relay returned an unexpected HTTP 502.", error.message)
+            assertNull(error.traceId)
         }
     }
 

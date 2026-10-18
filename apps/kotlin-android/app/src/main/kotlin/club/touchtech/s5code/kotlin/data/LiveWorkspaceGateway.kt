@@ -129,6 +129,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.flow.flow
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
@@ -427,6 +428,7 @@ class LiveWorkspaceGateway(
         repository: String,
         query: String,
         limit: Int,
+        threadPullRequests: List<ThreadPullRequestLink>,
     ): List<ComposerPullRequestCandidate> {
         val session = sessionFor(environmentId)
         val numeric = query.all { it.isDigit() }
@@ -501,6 +503,7 @@ class LiveWorkspaceGateway(
                 repository = repository,
                 query = query,
                 limit = limit,
+                linked = composerPullRequestsFromLinks(threadPullRequests, projectId.value),
             )
         }
         // Word queries match the title and both branch names, newest first.
@@ -846,6 +849,10 @@ class LiveWorkspaceGateway(
                             usageModelMappings =
                                 state?.capabilities?.usageModelMappings == true,
                             serverInstallation = state?.capabilities?.serverInstallation,
+                            projectProviderInstanceOverrides =
+                                state?.capabilities?.projectProviderInstanceOverrides == true,
+                            commandOutputStreaming = state?.capabilities?.commandOutputStreaming == true,
+                            databaseStorage = state?.capabilities?.databaseStorage == true,
                         ),
                     continueThreadsAfterServerUpdate =
                         state?.continueThreadsAfterServerUpdate == true,
@@ -870,10 +877,13 @@ class LiveWorkspaceGateway(
                 val scratch = scratchRoot != null && normalizeProjectPathForComparison(project.workspaceRoot) == normalizeProjectPathForComparison(scratchRoot)
                 allProjects += if (scratch) project.copy(title = "No project", isScratch = true) else project
             }
-            (snapshot.threads + snapshot.archivedThreads).distinctBy { it.id }.forEach { raw ->
+            val shells = (snapshot.threads + snapshot.archivedThreads).distinctBy { it.id }
+            // Before subagent rows drop: their blocked requests surface on the ancestors.
+            val subagentRequests = pendingSubagentRequestsByThread(shells)
+            shells.forEach { raw ->
                 val shell = raw.normalizedV2()
                 if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
-                val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
+                val summary = threadSummaryFrom(id, shell, ::instanceFor, now, subagentRequests[shell.id], serverSettles(id))
                 if (isArchived(shell)) archivedThreads += summary else active += summary
             }
         }
@@ -884,7 +894,7 @@ class LiveWorkspaceGateway(
             snapshot.threads.forEach { raw ->
                 val shell = raw.normalizedV2()
                 if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
-                val summary = threadSummaryFrom(id, shell, ::instanceFor, now)
+                val summary = threadSummaryFrom(id, shell, ::instanceFor, now, serverSettles = serverSettles(id))
                 if (archivedThreads.none {
                         it.environmentId == summary.environmentId && it.id == summary.id
                     }
@@ -912,33 +922,72 @@ class LiveWorkspaceGateway(
         // showing them means offering a row that cannot work.
         val perEnvironment = mutableMapOf<EnvironmentId, List<ProviderCatalogEntry>>()
         entries.forEach { (environmentId, connected) ->
+            val state = connected.session.state.value
             perEnvironment[EnvironmentId(environmentId)] =
-                buildCatalogEntries(connected.session.providers.value, connected.session.state.value.serverSettings.providerModelPreferences.orEmpty())
+                buildCatalogEntries(
+                    connected.session.providers.value,
+                    state.serverSettings.providerModelPreferences.orEmpty(),
+                    state.serverSettings.takeIf { state.capabilities.projectProviderInstanceOverrides },
+                )
         }
         _providerCatalogs.value = perEnvironment
         _providerCatalog.value =
             buildCatalogEntries(entries.values.flatMap { it.session.providers.value })
     }
 
+    override fun isModelTurnedOffForProject(environmentId: EnvironmentId, projectId: String?, instanceId: String): Boolean {
+        val session = sessions.value[environmentId.value]?.session ?: return false
+        val state = session.state.value
+        if (!state.capabilities.projectProviderInstanceOverrides) return false
+        return club.touchtech.s5code.kotlin.data.isModelTurnedOffForProject(
+            state.serverSettings, session.providers.value, projectId, instanceId,
+        )
+    }
+
+    override fun pendingHandoff(
+        environmentId: EnvironmentId,
+        source: club.touchtech.s5code.kotlin.model.HandoffEndpoint?,
+        selection: club.touchtech.s5code.kotlin.model.HandoffEndpoint,
+    ): PendingHandoff? {
+        val session = sessions.value[environmentId.value]?.session ?: return null
+        return resolvePendingHandoff(source, selection, session.providers.value)
+    }
+
+    /** `threadSettlement`: the server runs the inactivity settle itself. */
+    private fun serverSettles(environmentId: EnvironmentId): Boolean =
+        sessions.value[environmentId.value]?.session?.state?.value?.capabilities?.threadSettlement == true
+
+    /**
+     * [projectScoped] is the server's settings when it advertises
+     * `projectProviderInstanceOverrides`: instances then resolve on/off through
+     * `resolveProjectProviderInstanceEnabled`, and one switched off machine-wide
+     * stays listed when some project turned it back on — screens narrow the
+     * list with [forProject]. Older servers have no project switches, so the
+     * provider's own `enabled` decides.
+     */
     private fun buildCatalogEntries(
         providers: List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto>,
         preferences: Map<String, ProviderModelPreferencesDto> = emptyMap(),
+        projectScoped: ServerConfigSettingsDto? = null,
     ): List<ProviderCatalogEntry> =
         providers
             .filter { provider ->
                 // RN's buildModelOptions keeps non-Antigravity providers
                 // regardless of `availability`; only Antigravity hides itself
                 // when its local runtime is unavailable.
-                provider.enabled &&
+                (projectScoped != null || provider.enabled) &&
                     provider.installed &&
                     (provider.driver != "antigravity" ||
                         provider.availability != "unavailable") &&
                     provider.auth.status != "unauthenticated"
             }
             .groupBy { it.instanceId }
-            .map { (instanceId, instanceProviders) ->
+            .mapNotNull { (instanceId, instanceProviders) ->
                 val first = instanceProviders.first()
                 val models = instanceProviders.flatMap { it.models }
+                val enabled = projectScoped?.let { resolveProjectProviderInstanceEnabled(it, null, instanceId) } ?: first.enabled
+                val projectEnabled = projectScoped?.let { projectProviderInstanceOverrides(it, instanceId) }.orEmpty()
+                if (!enabled && projectEnabled.values.none { it }) return@mapNotNull null
                 ProviderCatalogEntry(
                     instance =
                         ProviderInstance(
@@ -977,6 +1026,8 @@ class LiveWorkspaceGateway(
                             .associate { it.slug to optionDescriptorsFrom(it.capabilities) }
                             .filterValues { it.isNotEmpty() },
                     interactionModeToggle = first.showInteractionModeToggle != false,
+                    enabled = enabled,
+                    projectEnabled = projectEnabled,
                 )
             }
             .sortedBy { it.instance.label.lowercase() }
@@ -1551,6 +1602,7 @@ class LiveWorkspaceGateway(
                                 cached.thread,
                                 ::instanceFor,
                                 clock.value,
+                                serverSettles = serverSettles(environmentId),
                             ).copy(syncPhase = ThreadSyncPhase.Syncing),
                         )) {
                         sync.value = ThreadSyncPhase.Syncing
@@ -1636,7 +1688,7 @@ class LiveWorkspaceGateway(
                 val page = club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto(
                     beforeCursor = cursor, hasMore = hasMore, snapshotSequence = sequence,
                 )
-                target.value = threadDetailFrom(environmentId, thread, ::instanceFor, clock.value, page, loadingOlder)
+                target.value = threadDetailFrom(environmentId, thread, ::instanceFor, clock.value, page, loadingOlder, serverSettles(environmentId))
                     .copy(syncPhase = sync.value)
                 // Expanded history stays in memory, as on RN; repeatedly caching
                 // an entire paged transcript defeats the bounded snapshot path.
@@ -1690,7 +1742,8 @@ class LiveWorkspaceGateway(
         val clockJob = CoroutineScope(coroutineContext).launch {
             clock.collect { now -> lock.withLock {
                 publishedThread?.let { thread -> target.update { detail ->
-                    detail?.copy(summary = threadSummaryFrom(environmentId, thread.asShell(), ::instanceFor, now))
+                    detail?.copy(summary = threadSummaryFrom(environmentId, thread.asShell(), ::instanceFor, now,
+                        serverSettles = serverSettles(environmentId)))
                 } }
             } }
         }
@@ -2034,6 +2087,31 @@ class LiveWorkspaceGateway(
     override suspend fun retryPreparedRun(environmentId: EnvironmentId, id: ThreadId, runId: String) {
         dispatch(environmentId, Commands.preparedRunRetry(id.value, runId))
     }
+
+    override fun commandOutput(environmentId: EnvironmentId, threadId: String, itemId: String): Flow<CommandOutputView> =
+        flow {
+            var view = CommandOutputView()
+            sessionFor(environmentId)
+                .streamOnce(
+                    WsMethods.OrchestrationSubscribeCommandOutput,
+                    buildJsonObject {
+                        put("threadId", threadId)
+                        put("itemId", itemId)
+                    },
+                    club.touchtech.s5code.kotlin.transport.wire.CommandOutputFrameDto.serializer(),
+                )
+                .collect { frame ->
+                    view = applyCommandOutputFrame(view, frame)
+                    emit(view)
+                }
+        }.flowOn(Dispatchers.Default)
+
+    override fun databaseStorage(environmentId: EnvironmentId): Flow<club.touchtech.s5code.kotlin.transport.wire.DatabaseStorageStatusDto?> =
+        sessionFor(environmentId).subscribe(
+            WsMethods.ServerGetDatabaseStorage,
+            JsonObject(emptyMap()),
+            club.touchtech.s5code.kotlin.transport.wire.DatabaseStorageStatusDto.serializer().nullable,
+        )
 
     /**
      * `orchestration.getTurnItem` — the full input/output of a row that

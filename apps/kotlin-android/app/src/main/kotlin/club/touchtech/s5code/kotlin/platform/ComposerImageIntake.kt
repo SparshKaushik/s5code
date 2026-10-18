@@ -97,10 +97,12 @@ private fun copyToCache(
                 target.delete()
                 return@runCatching null
             }
+            // A truncated copy is refused by validation anyway; only whole files shrink.
+            val fitted = if (copied < ceiling) fitCachedImage(target, mimeType) else null
             candidate.copy(
                 uri = Uri.fromFile(target).toString(),
                 name = candidate.name ?: attachmentDisplayName(resolver, source),
-                sizeBytes = copied,
+                sizeBytes = fitted ?: copied,
             )
         }
         .getOrNull()

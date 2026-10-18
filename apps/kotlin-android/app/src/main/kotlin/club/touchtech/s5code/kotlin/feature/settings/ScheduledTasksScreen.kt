@@ -9,6 +9,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import club.touchtech.s5code.kotlin.data.forProject
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Commands
 import club.touchtech.s5code.kotlin.data.providerInstanceForId
@@ -371,7 +372,7 @@ private fun WebhookDeliveriesDialog(
 
 @Composable
 private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: JsonObject?, projects: List<Project>,
-    catalog: List<ProviderCatalogEntry>, copy: (String) -> Unit, onClose: () -> Unit) {
+    machineCatalog: List<ProviderCatalogEntry>, copy: (String) -> Unit, onClose: () -> Unit) {
     var title by remember { mutableStateOf(existing?.v2String("title").orEmpty()) }
     var prompt by remember { mutableStateOf(existing?.v2String("prompt").orEmpty()) }
     val schedule = existing?.get("schedule") as? JsonObject
@@ -390,6 +391,7 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
     var weekdays by remember { mutableStateOf((schedule?.get("weekdays") as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }?.toSet() ?: (0..6).toSet()) }
     var projectId by remember { mutableStateOf(existing?.v2String("projectId") ?: projects.firstOrNull()?.id?.value.orEmpty()) }
     var projectMenu by remember { mutableStateOf(false) }
+    val catalog = remember(machineCatalog, projectId) { machineCatalog.forProject(projectId.ifEmpty { null }) }
     var bound by remember { mutableStateOf(existing?.v2String("threadId").orEmpty()) }
     val originalWorkspace = existing?.get("workspaceStrategy") as? JsonObject
     var workspace by remember { mutableStateOf(originalWorkspace?.v2String("type") ?: "root") }
@@ -422,7 +424,16 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
             item { Box {
                 TextButton(onClick = { projectMenu = true }) { Text(projects.firstOrNull { it.id.value == projectId }?.title ?: "Project") }
                 DropdownMenu(projectMenu, { projectMenu = false }) { projects.forEach { project -> DropdownMenuItem(
-                    text = { Text(project.title) }, onClick = { projectId = project.id.value; bound = ""; projectMenu = false }) } }
+                    text = { Text(project.title) }, onClick = {
+                        // A model the new project switched off cannot run there; fall back to its first.
+                        val allowed = machineCatalog.forProject(project.id.value)
+                        if (allowed.none { it.instance.instanceId == settings.provider.instanceId }) {
+                            allowed.firstOrNull()?.let { entry ->
+                                settings = settings.copy(provider = entry.instance, model = entry.models.firstOrNull().orEmpty(), options = emptyList())
+                            }
+                        }
+                        projectId = project.id.value; bound = ""; projectMenu = false
+                    }) } }
             } }
             item { OutlinedTextField(bound, { bound = it }, label = { Text("Existing thread ID (optional)") }) }
             // Webhook schedules are created on desktop/web; this editor keeps the

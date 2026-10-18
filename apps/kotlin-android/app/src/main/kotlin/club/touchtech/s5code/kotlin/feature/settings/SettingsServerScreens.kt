@@ -17,6 +17,8 @@ import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Archive
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.CallSplit
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Commit
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.History
@@ -45,6 +47,8 @@ import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
 import club.touchtech.s5code.kotlin.design.component.S5RowGroup
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5SelectableRow
+import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
+import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.component.S5SwitchRow
 import club.touchtech.s5code.kotlin.design.component.S5TextField
 import club.touchtech.s5code.kotlin.design.component.rowPosition
@@ -607,6 +611,63 @@ private fun resolvedWorktreeRules(
     )
 }
 
+/** `DATABASE_COMPACTION_RECOMMENDED_BYTES`: below this the offline conversion is not worth suggesting. */
+private const val DATABASE_COMPACTION_RECOMMENDED_BYTES = 1024.0 * 1024.0 * 1024.0
+
+/**
+ * `DatabaseStorageNotice`: suggests the offline compaction command for a
+ * database that still holds at least 1 GiB of freed pages. Dismissal is
+ * remembered per environment on this device.
+ */
+@Composable
+private fun DatabaseStorageNotice(store: AppStore, target: Environment) {
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    val status by
+        remember(target.id) { store.workspace.databaseStorage(target.id) }
+            .collectAsStateWithLifecycle(initialValue = null)
+    val copy = rememberClipboardWriter()
+    val current = status ?: return
+    if (target.id.value in preferences.dismissedDatabaseStorageNotices) return
+    if (current.incrementalVacuumEnabled || current.reclaimableBytes < DATABASE_COMPACTION_RECOMMENDED_BYTES) return
+    val gib = "%.1f".format(java.util.Locale.ROOT, current.reclaimableBytes / DATABASE_COMPACTION_RECOMMENDED_BYTES)
+    S5RowGroup(title = "Reclaim $gib GiB on ${target.label}") {
+        Column(
+            Modifier.padding(vertical = S5Theme.spacing.small),
+            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Text(
+                "Old history is cleaned up automatically, but this database still holds the freed space. " +
+                    "Run this command on ${target.label} to return it to disk; it pauses and restarts the " +
+                    "background service. Quit the desktop app first if it hosts this environment.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(current.compactCommand, style = S5Theme.code.code)
+            }
+        }
+        S5SettingsRow(
+            icon = Icons.Rounded.ContentCopy,
+            label = "Copy command",
+            onClick = { copy(current.compactCommand) },
+            position = rowPosition(0, 2),
+        )
+        S5SettingsRow(
+            icon = Icons.Rounded.Close,
+            label = "Dismiss",
+            onClick = {
+                store.updatePreferences { prefs ->
+                    prefs.copy(
+                        dismissedDatabaseStorageNotices =
+                            (prefs.dismissedDatabaseStorageNotices + target.id.value).distinct()
+                    )
+                }
+            },
+            position = rowPosition(1, 2),
+        )
+    }
+}
+
 /**
  * RN's `SettingsEnvironmentMaintenanceRouteScreen` plus the worktree/storage
  * cleanup controls web renders in `StorageSettings.tsx`. Only targets with the
@@ -624,6 +685,11 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
+            for (target in sync.targets) {
+                if (target.capabilities.databaseStorage) {
+                    androidx.compose.runtime.key(target.id) { DatabaseStorageNotice(store, target) }
+                }
+            }
             if (settings == null) {
                 NoConnectedEnvironment()
             } else {

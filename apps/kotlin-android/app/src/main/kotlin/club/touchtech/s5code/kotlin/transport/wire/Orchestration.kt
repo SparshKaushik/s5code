@@ -182,7 +182,11 @@ data class ThreadShellDto(
     val latestRunStartedAt: String? = null,
     val latestRunCompletedAt: String? = null,
     val activityRunStartedAt: String? = null,
-    val activityRunStatus: String? = null,
+    /**
+     * The run holding activity, `null` when none does. [FIELD_ABSENT] marks a
+     * server that predates the field, which falls back to [status].
+     */
+    val activityRunStatus: String? = FIELD_ABSENT,
     val pendingRuntimeRequest: JsonObject? = null,
     val pendingBackgroundTasks: List<JsonObject> = emptyList(),
     val lastError: String? = null,
@@ -499,3 +503,19 @@ data class SearchThreadsResultDto(val matches: List<ThreadSearchMatchDto> = empt
 
 /** `dispatchCommand`'s ack: the event-log sequence the command produced. */
 @Serializable data class DispatchResultDto(val sequence: Long = 0)
+
+/**
+ * `OrchestrationV2CommandOutputFrame`: one frame of a command row's output
+ * stream. `replace` carries the whole bounded tail, `append` extends it; both
+ * are terminal text for `appendTerminalOutput`. The stream ends after a frame
+ * with `running` false.
+ */
+@Serializable
+data class CommandOutputFrameDto(
+    /** replace | append */
+    val kind: String = "append",
+    val text: String = "",
+    /** Earlier output was dropped to keep the tail bounded. */
+    val truncated: Boolean = false,
+    val running: Boolean = true,
+)

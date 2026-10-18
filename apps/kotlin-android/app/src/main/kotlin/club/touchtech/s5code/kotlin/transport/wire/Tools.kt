@@ -127,6 +127,9 @@ data class ServerProviderAuthDto(
  * as soon as a user configures two instances of the same CLI.
  */
 @Serializable
+data class ServerProviderContinuationDto(val groupKey: String = "")
+
+@Serializable
 data class ServerProviderDto(
     val setup: JsonObject? = null,
     val instanceId: String = "",
@@ -150,6 +153,11 @@ data class ServerProviderDto(
      */
     val showInteractionModeToggle: Boolean? = null,
     val requiresNewThreadForModelChange: Boolean = false,
+    /**
+     * Instances sharing a `groupKey` (and driver) continue one native session
+     * across a switch; null means every switch away needs a context handoff.
+     */
+    val continuation: ServerProviderContinuationDto? = null,
     val models: List<ServerProviderModelDto> = emptyList(),
     val updateRequiredModels: List<ServerProviderUpdateRequiredModelDto> = emptyList(),
     val slashCommands: List<ServerProviderSlashCommandDto> = emptyList(),
@@ -345,6 +353,12 @@ data class ServerConfigSettingsDto(
      * not read.
      */
     val projectSettingsOverrides: JsonObject? = null,
+    /**
+     * `providerInstances`: configured provider instances by id, raw like
+     * [projectSettingsOverrides]; `resolveProjectProviderInstanceEnabled`
+     * reads `driver`, `enabled` and `config.enabled` from them.
+     */
+    val providerInstances: Map<String, JsonObject> = emptyMap(),
 )
 
 @Serializable
@@ -366,6 +380,20 @@ data class ServerStorageCleanupDto(
     val worktreeUnchanged: Boolean = false,
     val browserArtifactsAfterDays: Int? = null,
     val logsAfterDays: Int? = null,
+)
+
+/**
+ * `DatabaseStorageStatus` from `server.getDatabaseStorage`: the state database's
+ * size and the freed pages an offline compaction would return to disk.
+ */
+@Serializable
+data class DatabaseStorageStatusDto(
+    val databaseBytes: Double = 0.0,
+    val reclaimableBytes: Double = 0.0,
+    /** False on databases created before incremental auto_vacuum; `t3 doctor` converts them. */
+    val incrementalVacuumEnabled: Boolean = true,
+    /** The command to run on the host to reclaim the space offline. */
+    val compactCommand: String = "",
 )
 
 @Serializable
@@ -471,6 +499,12 @@ data class ServerCapabilitiesDto(
      * reads as itself instead of nothing.
      */
     val serverInstallation: ServerInstallationDto? = null,
+    /** Projects may turn provider instances on or off (`projectSettingsOverrides[p].providerInstances`). */
+    val projectProviderInstanceOverrides: Boolean = false,
+    /** `orchestration.subscribeCommandOutput` streams a running command's output. */
+    val commandOutputStreaming: Boolean = false,
+    /** `server.getDatabaseStorage` reports database size and reclaimable space. */
+    val databaseStorage: Boolean = false,
 )
 
 /** `ServerInstallation`: one of `npx`/`pnpm-dlx`/`bunx`, or `npm-global` + `prefix`. */

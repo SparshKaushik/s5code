@@ -81,8 +81,11 @@ private fun prettyJsonText(text: String): String {
 }
 
 /** Formats a tool input or output for display: text blocks as text, the rest as JSON. */
-private fun formatToolValue(value: JsonElement?): String? {
+private fun formatToolValue(value: JsonElement?, hasImagePreview: Boolean = false): String? {
     if (value == null || value == JsonNull) return null
+    // Claude Read returns one structured image, which the file preview already
+    // shows; lists may contain other images and keep their placeholders.
+    if (hasImagePreview && value is JsonObject && value.v2String("type") == "image") return null
     val text = textFromBlocks(value, 0)
     if (text != null) return if (text.isNotBlank()) prettyJsonText(text) else null
     val json =
@@ -129,7 +132,8 @@ internal fun turnItemOutputText(item: JsonObject): String? =
                 ?.takeIf { it.isNotBlank() }
                 ?.let { commandOutputText(it).ifBlank { null } }
         "dynamic_tool" ->
-            if (item.v2Bool("outputOmitted")) null else formatToolValue(item["output"])
+            if (item.v2Bool("outputOmitted")) null
+            else formatToolValue(item["output"], hasImagePreview = item["viewedImagePath"] != null)
         "file_search" ->
             item.v2Objects("results")
                 .map { result ->

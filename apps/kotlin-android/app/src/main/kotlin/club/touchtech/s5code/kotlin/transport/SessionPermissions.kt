@@ -19,10 +19,25 @@ internal fun SessionState.grants(permission: String): Boolean {
     return parent in scopes.orEmpty()
 }
 
+/** `MISSING_FILE_ACCESS_MESSAGE`: a host file this session lacks `filesystem:read` for. */
+internal const val MISSING_FILE_ACCESS_MESSAGE =
+    "This connection cannot read host files. Pair again with a new link to view it."
+
+/** Asset resources the host serves only to sessions holding `filesystem:read`. */
+private val HOST_FILE_ASSET_TAGS = setOf("workspace-file", "media-file", "draft-workspace-file")
+
 /** Guard writes at the transport boundary so every entry point gets the same denial. */
 internal fun SessionState.requireRpcPermissions(method: String, payload: JsonElement) {
     // Unknown auth on an old server is left to that server's authorization.
     if (!authenticated || (permissions == null && scopes == null)) return
+    // `blockedAssetUrlState`: skip the request and say to pair again, rather
+    // than letting the host's refusal read as a missing file.
+    if (method == "assets.createUrl") {
+        val tag = ((payload as? JsonObject)?.get("resource") as? JsonObject)?.get("_tag")
+        val hostFile = (tag as? kotlinx.serialization.json.JsonPrimitive)?.content in HOST_FILE_ASSET_TAGS
+        if (hostFile && !grants("filesystem:read")) throw IllegalStateException(MISSING_FILE_ACCESS_MESSAGE)
+        return
+    }
     val required = when (method) {
         "server.updateSettings" -> {
             val patch = (payload as? JsonObject)?.get("patch") as? JsonObject ?: payload as? JsonObject

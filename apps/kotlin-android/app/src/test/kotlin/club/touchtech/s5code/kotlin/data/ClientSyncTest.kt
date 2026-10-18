@@ -71,11 +71,15 @@ class ClientSyncTest {
     }
 
     @Test fun `descendant input stays reachable and lineage cycles terminate`() {
-        val child = ThreadShellDto("child", title = "Reviewer", lineage = json("""{"parentThreadId":"parent"}"""))
-        val grandchild = ThreadShellDto("grandchild", title = "Question", lineage = json("""{"parentThreadId":"child"}"""),
-            pendingRuntimeRequest = json("""{"kind":"user_input"}"""))
+        // Only a live app-created subagent asks (`subagentRequest` in threadShell.ts).
+        val child = ThreadShellDto("child", title = "Reviewer",
+            lineage = json("""{"parentThreadId":"parent","relationshipToParent":"subagent"}"""))
+        val grandchild = ThreadShellDto("grandchild", title = "Question",
+            lineage = json("""{"parentThreadId":"child","relationshipToParent":"subagent"}"""),
+            pendingRuntimeRequest = json("""{"kind":"user_input"}"""), activityRunStatus = "running")
         assertEquals("grandchild", childInputs(listOf(child, grandchild), "parent").single().threadId)
-        val cycle = child.copy(lineage = json("""{"parentThreadId":"grandchild"}"""))
+        assertTrue(childInputs(listOf(child, grandchild.copy(activityRunStatus = null)), "parent").isEmpty())
+        val cycle = child.copy(lineage = json("""{"parentThreadId":"grandchild","relationshipToParent":"subagent"}"""))
         assertTrue(childInputs(listOf(cycle, grandchild), "parent").isEmpty())
     }
 

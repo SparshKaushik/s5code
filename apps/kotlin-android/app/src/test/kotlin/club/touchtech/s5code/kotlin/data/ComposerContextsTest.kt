@@ -1,6 +1,8 @@
 package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.model.ComposerPullRequestCandidate
+import club.touchtech.s5code.kotlin.model.ThreadPullRequestLink
+import club.touchtech.s5code.kotlin.model.ThreadPullRequestSnapshot
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -78,5 +80,69 @@ class ComposerContextsTest {
                 limit = 20,
             )
         assertEquals(25, results.first().number)
+    }
+
+    private fun link(
+        repository: String,
+        number: Int,
+        source: String = "manual",
+        updatedAt: String? = null,
+        synced: Boolean = true,
+    ) =
+        ThreadPullRequestLink(
+            host = "github.com",
+            repository = repository,
+            number = number,
+            url = "https://github.com/$repository/pull/$number",
+            source = source,
+            linkedAt = "2026-02-01T00:00:00Z",
+            snapshot =
+                if (synced) {
+                    ThreadPullRequestSnapshot(
+                        state = "open",
+                        title = "Linked $number",
+                        headBranch = "linked-$number",
+                        baseBranch = "main",
+                        isDraft = false,
+                        updatedAt = updatedAt,
+                    )
+                } else {
+                    null
+                },
+        )
+
+    @Test
+    fun `thread-linked pull requests join numeric suggestions from any repository`() {
+        val linked =
+            composerPullRequestsFromLinks(
+                listOf(
+                    link("acme/lib", 34),
+                    link("acme/app", 3, updatedAt = "2026-03-01T00:00:00Z"),
+                    link("acme/lib", 35, source = "stack-dismissed"),
+                    link("acme/lib", 36, synced = false),
+                ),
+                projectId = "p1",
+            )
+        // Tombstones and links the host never synced are not candidates.
+        assertEquals(listOf(34, 3), linked.map { it.number })
+        // No snapshot timestamp: the link time stands in.
+        assertEquals("2026-02-01T00:00:00Z", linked.first().updatedAt)
+
+        val results =
+            filterComposerPullRequestMatches(
+                entries = listOf(pullRequest(3), pullRequest(30, updatedAt = "2026-05-01T00:00:00Z")),
+                projectId = "p1",
+                repository = "acme/app",
+                query = "3",
+                limit = 20,
+                linked = linked,
+            )
+        // Exact number first (deduped with its linked copy), then linked, then recency.
+        assertEquals(listOf("acme/app#3", "acme/lib#34", "acme/app#30"), results.map { "${it.repository}#${it.number}" })
+        assertEquals(
+            "open · acme/lib · Linked 34",
+            composerPullRequestDescription(results[1], "acme/app"),
+        )
+        assertEquals("open · Fix #3", composerPullRequestDescription(results[0], "ACME/app"))
     }
 }

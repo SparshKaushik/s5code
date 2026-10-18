@@ -229,6 +229,43 @@ class TurnFoldTest {
         TurnInfo(turnId, "completed", started, completed)
 
     @Test
+    fun `a resumed subagent row folds with the turn that started it`() {
+        // Resuming moves the subagent's item to the later run, but it keeps its
+        // place in the first turn; the later fold still opens under its prompt.
+        val feed =
+            listOf(
+                FeedEntry.UserMessage("u1", "go", "12:00", atMillis = 1_000, promptTurnId = "turn-1"),
+                tool("t1", "turn-1", 2_000),
+                tool("resumed", "turn-2", 2_500),
+                answer("a1", "turn-1", 3_000),
+                FeedEntry.UserMessage("u2", "more", "12:01", atMillis = 4_000, promptTurnId = "turn-2"),
+                tool("t2", "turn-2", 5_000),
+                answer("a2", "turn-2", 6_000),
+            )
+        val folds = turnFolds(feed, settled("turn-2", 4_000, 6_000))
+        val first = folds.values.single { it.turnId == "turn-1" }
+        val second = folds.values.single { it.turnId == "turn-2" }
+        assertEquals(setOf("t1", "resumed"), first.hiddenIds)
+        assertEquals("t1", first.anchorId)
+        assertEquals("t2", second.anchorId)
+        assertEquals(setOf("t2"), second.hiddenIds)
+    }
+
+    @Test
+    fun `a steer does not count as the prompt that started its run`() {
+        val feed =
+            listOf(
+                FeedEntry.UserMessage("u1", "go", "12:00", promptTurnId = "turn-1"),
+                tool("t1", "turn-1"),
+                FeedEntry.UserMessage("s1", "also", "12:00", promptTurnId = "turn-1", inputIntent = "steer"),
+                tool("t2", "turn-1"),
+                answer("a1", "turn-1"),
+            )
+        val fold = turnFolds(feed, settled("turn-1")).values.single()
+        assertEquals(setOf("t1", "t2"), fold.hiddenIds)
+    }
+
+    @Test
     fun `a finished turn collapses to its answer under a header`() {
         val feed =
             listOf(
