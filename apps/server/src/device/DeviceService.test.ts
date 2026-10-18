@@ -6,22 +6,36 @@ import {
   LOCAL_DEVICE_HOST_ID,
   ThreadId,
   type DeviceServiceState,
+  type ServerSettings as Settings,
+  type SshDeviceHostConfig,
 } from "@t3tools/contracts";
 import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
+import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as NetService from "@t3tools/shared/Net";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
+import * as Layer from "effect/Layer";
 import * as PubSub from "effect/PubSub";
+import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
+import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
+import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import { TestClock } from "effect/testing";
+import * as ServerConfig from "../config.ts";
+import * as ProcessRunner from "../processRunner.ts";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceHost from "./DeviceHost.ts";
 import { NodeRuntimeUnavailableError } from "@t3tools/shared/nodeRuntime";
 
 import * as DeviceService from "./DeviceService.ts";
+import * as SimboxHost from "./SimboxDeviceHost.ts";
+import * as SimboxRunnerStore from "./SimboxRunnerStore.ts";
 
 const decodeJson = Schema.decodeUnknownSync(Schema.fromJsonString(Schema.Unknown));
 
@@ -66,11 +80,18 @@ const fixture = Effect.fn("fixture")(function* (
   onBoot: Effect.Effect<void> = Effect.void,
   bootError?: string,
   failListAfterShutdown = false,
-  runtimeFailure?: NodeRuntimeUnavailableError | DeviceHost.DeviceHostError,
+  runtimeFailure?:
+    | NodeRuntimeUnavailableError
+    | DeviceHost.DeviceHostError
+    | DeviceHost.AgentDeviceStartError,
   inspectError = false,
   installTool?: Parameters<typeof DeviceService.makeWithHosts>[3],
+  respond?: (request: Parameters<Parameters<typeof HttpClient.make>[0]>[0]) => Response | undefined,
+  configureAgent?: Parameters<typeof DeviceService.makeWithHosts>[2],
+  simboxStore?: Parameters<typeof DeviceService.makeWithHosts>[4],
+  initialSettings: Partial<typeof DEFAULT_SERVER_SETTINGS> = {},
 ) {
-  const settings = yield* Ref.make(DEFAULT_SERVER_SETTINGS);
+  const settings = yield* Ref.make({ ...DEFAULT_SERVER_SETTINGS, ...initialSettings });
   const starts: string[] = [];
   const agentStarts: string[] = [];
   const agentStops: string[] = [];
@@ -107,7 +128,8 @@ const fixture = Effect.fn("fixture")(function* (
     platformAvailability: (platform) => Effect.succeed({ platform, available: true }),
     ensureReady: (onPhase) =>
       Effect.gen(function* () {
-        if (runtimeFailure) return yield* runtimeFailure;
+        if (runtimeFailure && runtimeFailure._tag !== "AgentDeviceStartError")
+          return yield* runtimeFailure;
         starts.push("start");
         yield* onPhase("installing", "Updating device hub from 0.9.0 to 0.10.1…");
         return ready;
@@ -133,8 +155,9 @@ const fixture = Effect.fn("fixture")(function* (
   const service = yield* DeviceService.makeWithHosts(
     new Map([[host.id, host]]),
     undefined,
-    undefined,
+    configureAgent,
     installTool,
+    simboxStore,
   ).pipe(
     Effect.provide(NodeCrypto.layer),
     Effect.provideService(DeviceHost.DeviceHost, host),
@@ -164,6 +187,8 @@ const fixture = Effect.fn("fixture")(function* (
       HttpClient.make((request) =>
         Effect.gen(function* () {
           requests.push(request.url);
+          const custom = respond?.(request);
+          if (custom) return HttpClientResponse.fromWeb(request, custom);
           if (request.url.includes("/api/screenshot")) {
             return HttpClientResponse.fromWeb(
               request,
@@ -217,6 +242,36 @@ const fixture = Effect.fn("fixture")(function* (
 });
 
 describe("device setup consent", () => {
+  it.effect("exposes daemon startup diagnostics through agent readiness and host status", () =>
+    Effect.gen(function* () {
+      const startupError = new DeviceHost.AgentDeviceStartError({
+        hostId: LOCAL_DEVICE_HOST_ID,
+        stateDir: "/test/device/agent-device",
+        exitCode: 1,
+        reason: "daemon_lock_not_directory",
+        cause: { stdout: "private startup diagnostics", code: 1 },
+      });
+      const { service, settings } = yield* fixture(Effect.void, undefined, false, startupError);
+      yield* Ref.update(settings, (current) => ({
+        ...current,
+        enableDeviceSupport: true,
+        enableAgentDeviceAccess: true,
+      }));
+      const error = yield* service.agentReadinessIfSupported().pipe(Effect.flip);
+      expect(error).toMatchObject({
+        _tag: "DeviceHostUnavailableError",
+        reason: startupError.message,
+        cause: startupError,
+      });
+      expect(error.message).toContain("daemon.lock is not a directory");
+      expect(error.message).not.toContain("private startup diagnostics");
+      expect((yield* service.state).hostStatuses[LOCAL_DEVICE_HOST_ID]).toEqual({
+        status: "failed",
+        detail: startupError.message,
+      });
+    }).pipe(Effect.scoped),
+  );
+
   it.effect(
     "preserves missing-runtime guidance and causes through manual and agent readiness",
     () =>
@@ -510,7 +565,6 @@ it.effect.each([
     Effect.gen(function* () {
       const deviceId = DeviceId.make("22222222-2222-2222-2222-222222222222");
       const paths: string[] = [];
-      // The device list is stale until shutdown re-reads it from the hub.
       let listed: "booted" | "off" | "missing" = "booted";
       const ready: DeviceHost.DeviceHostReady = {
         nodePath: process.execPath,
@@ -557,7 +611,6 @@ it.effect.each([
                           booted: listed === "booted",
                         },
                       ],
-                // A partial listing still decodes; it must not read as "off".
                 errors: listed === "missing" ? [{ message: "simctl list failed" }] : [],
               }),
             );
@@ -738,4 +791,409 @@ it.effect("failed manual installation leaves lifecycle state unchanged and can b
     expect(starts).toEqual([]);
     expect(agentStarts).toEqual([]);
   }).pipe(Effect.scoped),
+);
+
+describe("automatic Simbox device attachment", () => {
+  const registration = (): SimboxHost.Registration => ({
+    version: 1,
+    createdAt: 0,
+    runId: "039dd761-9144-4a9c-a03b-e44c893d73ad",
+    tunnelUrl: "https://fixture.trycloudflare.com",
+    daemonToken: "private-runner-token",
+    expiresAt: null,
+    platform: "ios",
+    stop: false,
+    autoBoot: true,
+    apiUrl: "https://api.simbox.touchtech.club",
+    userToken: null,
+  });
+  it.effect(
+    "boots once, attaches to each originating thread, and removes every session on stop",
+    () =>
+      Effect.gen(function* () {
+        let booted = false;
+        let boots = 0;
+        const input = registration();
+        const f = yield* fixture(
+          Effect.void,
+          undefined,
+          false,
+          undefined,
+          false,
+          undefined,
+          (request) => {
+            if (!request.url.includes("/simbox-device-hub")) return;
+            expect(request.headers.authorization).toBe("Bearer private-runner-token");
+            if (request.url.endsWith("/boot")) {
+              booted = true;
+              boots++;
+              return Response.json({ ok: true });
+            }
+            if (request.url.endsWith("/start")) return Response.json({ ok: true });
+            return Response.json({
+              simulators: [
+                {
+                  id: "SIM-1234",
+                  name: "iPhone 17 Pro",
+                  platform: "ios",
+                  booted,
+                  physical: false,
+                  version: "iOS 26.4",
+                },
+              ],
+              emulators: [],
+            });
+          },
+        );
+        yield* f.service.configure({ enabled: true, agentAccessEnabled: true });
+        const threadA = ThreadId.make("simbox-thread-a");
+        const threadB = ThreadId.make("simbox-thread-b");
+        const first = yield* f.service.registerSimbox(threadA, input);
+        expect(first).toHaveLength(1);
+        expect(first[0]?.threadId).toBe(threadA);
+        expect(first[0]?.hostId).toBe(SimboxHost.hostId(input.runId));
+        expect(yield* f.service.registerSimbox(threadA, input)).toEqual(first);
+        const second = yield* f.service.registerSimbox(threadB, input);
+        expect(second[0]?.threadId).toBe(threadB);
+        expect(boots).toBe(1);
+        const state = yield* f.service.state;
+        expect(state.sessions).toHaveLength(2);
+        expect(
+          state.devices.find((d) => d.hostId === SimboxHost.hostId(input.runId))?.supportsActions,
+        ).toBe(false);
+        yield* f.service.registerSimbox(threadA, { ...input, stop: true });
+        expect((yield* f.service.state).sessions).toHaveLength(0);
+        expect((yield* f.service.state).hosts.some((h) => h.kind === "simbox")).toBe(false);
+      }),
+  );
+  it.effect(
+    "keeps attached runners across a restart and device support off/on, forgetting them on stop",
+    () =>
+      Effect.gen(function* () {
+        const input = registration();
+        const hostId = SimboxHost.hostId(input.runId);
+        const threadId = ThreadId.make("simbox-thread-restore");
+        const store = SimboxRunnerStore.memory();
+        const respond = (request: { url: string }) =>
+          request.url.includes("/simbox-device-hub")
+            ? request.url.endsWith("/boot") || request.url.endsWith("/start")
+              ? Response.json({ ok: true })
+              : Response.json({
+                  simulators: [
+                    {
+                      id: "SIM-1234",
+                      name: "iPhone 17 Pro",
+                      platform: "ios",
+                      booted: true,
+                      physical: false,
+                      version: "iOS 26.4",
+                    },
+                  ],
+                  emulators: [],
+                })
+            : undefined;
+        const attached = (f: { service: DeviceService.DeviceService["Service"] }) =>
+          Effect.gen(function* () {
+            for (let i = 0; i < 500; i++) {
+              const state = yield* f.service.state;
+              if (state.hosts.some((h) => h.id === hostId) && state.sessions.length > 0)
+                return true;
+              yield* Effect.yieldNow;
+            }
+            return false;
+          });
+
+        const first = yield* fixture(
+          Effect.void,
+          undefined,
+          false,
+          undefined,
+          false,
+          undefined,
+          respond,
+          undefined,
+          store,
+        );
+        yield* first.service.configure({ enabled: true, agentAccessEnabled: true });
+        yield* first.service.registerSimbox(threadId, input);
+        expect((yield* store.load).map((r) => r.registration.runId)).toEqual([input.runId]);
+
+        // A restarted server re-attaches the runner to its thread on its own.
+        const restarted = yield* fixture(
+          Effect.void,
+          undefined,
+          false,
+          undefined,
+          false,
+          undefined,
+          respond,
+          undefined,
+          store,
+          { enableDeviceSupport: true, enableAgentDeviceAccess: true },
+        );
+        expect(yield* attached(restarted)).toBe(true);
+        expect((yield* restarted.service.state).sessions[0]?.threadId).toBe(threadId);
+
+        // Switching device support off detaches it but keeps it for later.
+        yield* restarted.service.configure({ enabled: false });
+        yield* TestClock.adjust("15 seconds");
+        for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
+        expect((yield* restarted.service.state).hosts.some((h) => h.id === hostId)).toBe(false);
+        expect(yield* store.load).toHaveLength(1);
+
+        yield* restarted.service.configure({ enabled: true });
+        expect(yield* attached(restarted)).toBe(true);
+
+        // An explicit stop forgets it for good.
+        yield* restarted.service.registerSimbox(threadId, { ...input, stop: true });
+        expect(yield* store.load).toEqual([]);
+      }),
+  );
+  it.effect("requires consent and does not boot an unselected device after an ordinary exec", () =>
+    Effect.gen(function* () {
+      const input = registration();
+      const f = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        (request) => {
+          if (!request.url.includes("/simbox-device-hub")) return;
+          return Response.json({
+            simulators: [
+              {
+                id: "SIM-1234",
+                name: "iPhone 17 Pro",
+                platform: "ios",
+                booted: false,
+                physical: false,
+                version: "iOS 26.4",
+              },
+            ],
+            emulators: [],
+          });
+        },
+      );
+      const rejected = yield* f.service
+        .registerSimbox(ThreadId.make("simbox-thread"), input)
+        .pipe(Effect.result);
+      expect(rejected._tag).toBe("Failure");
+      expect(f.requests).toHaveLength(0);
+      yield* f.service.configure({ enabled: true, agentAccessEnabled: true });
+      expect(
+        yield* f.service.registerSimbox(ThreadId.make("simbox-thread"), {
+          ...input,
+          autoBoot: false,
+        }),
+      ).toEqual([]);
+      expect(f.requests.some((url) => url.endsWith("/boot"))).toBe(false);
+    }),
+  );
+});
+
+it.effect(
+  "Simbox monitoring refreshes saved agent credentials and removes sessions when the API ends a run",
+  () =>
+    Effect.gen(function* () {
+      const input: SimboxHost.Registration = {
+        version: 1,
+        createdAt: 0,
+        runId: "039dd761-9144-4a9c-a03b-e44c893d73ad",
+        tunnelUrl: "https://initial.trycloudflare.com",
+        daemonToken: "initial-token",
+        expiresAt: null,
+        platform: "ios",
+        stop: false,
+        autoBoot: true,
+        apiUrl: "https://api.simbox.touchtech.club",
+        userToken: "app-token",
+        agentSession: "custom-simbox-session",
+      };
+      let run = {
+        id: input.runId,
+        state: "live",
+        tunnelUrl: input.tunnelUrl,
+        daemonToken: input.daemonToken,
+        expiresAt: null,
+      };
+      const renewed = yield* Deferred.make<void>();
+      const configurations: Array<{ token: string; url: string }> = [];
+      const f = yield* fixture(
+        Effect.void,
+        undefined,
+        false,
+        undefined,
+        false,
+        undefined,
+        (request) => {
+          if (request.url.endsWith("/v1/runs/current")) return Response.json({ run });
+          if (!request.url.includes("/simbox-device-hub")) return;
+          if (request.url.endsWith("/start")) return Response.json({ ok: true });
+          return Response.json({
+            simulators: [
+              {
+                id: "SIM-1234",
+                name: "iPhone 17 Pro",
+                platform: "ios",
+                booted: true,
+                physical: false,
+                version: "iOS 26.4",
+              },
+            ],
+            emulators: [],
+          });
+        },
+        (_id, ready) =>
+          Effect.gen(function* () {
+            configurations.push({ token: ready.agentDevice.token, url: ready.agentDevice.baseUrl });
+            if (ready.agentDevice.token === "renewed-token")
+              yield* Deferred.succeed(renewed, undefined);
+            return "/private/agent-config.json";
+          }),
+      );
+      yield* f.service.configure({ enabled: true, agentAccessEnabled: true });
+      const threadId = ThreadId.make("simbox-monitor-thread");
+      const sessions = yield* f.service.registerSimbox(threadId, input);
+      const hostId = SimboxHost.hostId(input.runId);
+      const target = yield* f.service.agentTarget({
+        hostId,
+        threadId,
+        deviceId: sessions[0]!.deviceId,
+      });
+      expect(target).toEqual([
+        "--config",
+        "/private/agent-config.json",
+        "--session",
+        "custom-simbox-session",
+      ]);
+      run = {
+        ...run,
+        tunnelUrl: "https://recovered.trycloudflare.com",
+        daemonToken: "renewed-token",
+      };
+      yield* TestClock.adjust("15 seconds");
+      yield* Deferred.await(renewed);
+      expect(configurations).toEqual([
+        { token: "initial-token", url: "https://initial.trycloudflare.com/agent-device" },
+        { token: "renewed-token", url: "https://recovered.trycloudflare.com/agent-device" },
+      ]);
+      const removed = yield* Deferred.make<void>();
+      yield* DeviceService.stateStream(f.service).pipe(
+        Stream.runForEach((state) =>
+          !state.hosts.some((host) => host.id === hostId) && state.sessions.length === 0
+            ? Deferred.succeed(removed, undefined)
+            : Effect.void,
+        ),
+        Effect.forkChild,
+      );
+      run = { ...run, state: "ended" };
+      yield* TestClock.adjust("15 seconds");
+      yield* Deferred.await(removed);
+    }),
+);
+
+it.effect("reconciles SSH host settings without publishing no-op changes", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "t3-device-reconcile-" });
+    const settings = yield* ServerSettings.ServerSettingsService;
+    // Each change is acknowledged after reconciliation consumed it, so no-ops are observable.
+    const changes = yield* Queue.unbounded<{ value: Settings; done: Deferred.Deferred<void> }>();
+    const removedFiles: string[] = [];
+    const localHost: DeviceHost.DeviceHost["Service"] = {
+      id: LOCAL_DEVICE_HOST_ID,
+      summary: Effect.succeed({
+        id: LOCAL_DEVICE_HOST_ID,
+        label: "Local",
+        kind: "local",
+        platforms: [],
+        hubInstalled: false,
+        agentDeviceInstalled: false,
+      }),
+      platformAvailability: (platform) => Effect.succeed({ platform, available: false }),
+      current: Effect.succeed(null),
+      ensureReady: () => Effect.die("Unexpected device launch"),
+      ensureAgentReady: () => Effect.die("Unexpected agent launch"),
+      stop: Effect.void,
+      stopAgent: Effect.void,
+    };
+    const service = yield* DeviceService.make.pipe(
+      Effect.provideService(DeviceHost.DeviceHost, localHost),
+      Effect.provideService(ServerSettings.ServerSettingsService, {
+        ...settings,
+        subscribeChanges: Effect.succeed(
+          Stream.fromQueue(changes).pipe(
+            Stream.flatMap(({ value, done }) =>
+              Stream.make(value).pipe(
+                Stream.concat(
+                  Stream.fromEffect(Deferred.succeed(done, undefined)).pipe(Stream.drain),
+                ),
+              ),
+            ),
+          ),
+        ),
+      }),
+      Effect.provideService(
+        FileSystem.FileSystem,
+        FileSystem.makeNoop({
+          remove: (file) => Effect.sync(() => void removedFiles.push(file)),
+        }),
+      ),
+      Effect.provideService(ProcessRunner.ProcessRunner, {
+        run: () => Effect.die("Unexpected helper launch"),
+      }),
+      Effect.provideService(
+        HttpClient.HttpClient,
+        HttpClient.make(() => Effect.die("Unexpected HTTP request")),
+      ),
+      // `ssh -G` resolves the target to a non-local address.
+      Effect.provideService(
+        ChildProcessSpawner.ChildProcessSpawner,
+        ChildProcessSpawner.make(() =>
+          Effect.succeed(
+            ChildProcessSpawner.makeHandle({
+              pid: ChildProcessSpawner.ProcessId(123),
+              stdout: Stream.make(new TextEncoder().encode("hostname 192.0.2.1\nport 22\n")),
+              stderr: Stream.empty,
+              all: Stream.empty,
+              exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(0)),
+              isRunning: Effect.succeed(false),
+              kill: () => Effect.void,
+              stdin: Sink.drain,
+              getInputFd: () => Sink.drain,
+              getOutputFd: () => Stream.empty,
+              unref: Effect.succeed(Effect.void),
+            }),
+          ),
+        ),
+      ),
+      Effect.provide(Layer.mergeAll(ServerConfig.layerTest(baseDir, baseDir), NetService.layer)),
+    );
+    const update = Effect.fnUntraced(function* (deviceHosts: ReadonlyArray<SshDeviceHostConfig>) {
+      const value = yield* settings.updateSettings({ deviceHosts: [...deviceHosts] });
+      const done = yield* Deferred.make<void>();
+      yield* Queue.offer(changes, { value, done });
+      yield* Deferred.await(done);
+      return yield* service.state;
+    });
+
+    const initial = yield* service.state;
+    expect(yield* update([])).toEqual(initial);
+
+    const host: SshDeviceHostConfig = { id: "remote", label: "Remote", target: "remote-fixture" };
+    const added = yield* update([host]);
+    expect(added.hosts.map((entry) => entry.id)).toEqual([LOCAL_DEVICE_HOST_ID, host.id]);
+    expect(yield* update([{ ...host }])).toEqual(added);
+
+    yield* service.setHostStatus(host.id, { status: "failed", detail: "stale" });
+    const removed = yield* update([]);
+    expect(removed.hosts.map((entry) => entry.id)).toEqual([LOCAL_DEVICE_HOST_ID]);
+    expect(removed.hostStatuses[host.id]).toBeUndefined();
+    expect(removedFiles).toHaveLength(1);
+  }).pipe(
+    Effect.scoped,
+    Effect.provide(Layer.mergeAll(ServerSettings.layerTest(), NodeServices.layer)),
+  ),
 );

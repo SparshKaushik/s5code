@@ -111,6 +111,20 @@ installation, and connectivity to development servers such as Metro separately.
 A simulator on another machine cannot reach Metro through your environment's
 localhost without forwarding or another reachable address.
 
+## Simbox runners
+
+Log in to the Simbox CLI on the environment server and enable **Device support**
+and **Agent device access** in **Settings → Integrations → Devices**. When an
+agent runs `simbox sim`, S5 Code attaches the runner's device to that thread
+automatically. Successful `simbox exec` commands also attach a selected or
+running device. Simbox must run on the same machine and user account as the
+environment server, and its command output must reach the agent.
+
+The Device panel provides live video and input. The Tools drawer is unavailable
+on Simbox hosts. Use `simbox stop` to end a run; its device sessions also disappear
+when the runner expires. Updating the Simbox CLI, runner, and S5 Code server is
+required to use this integration.
+
 ## Device tool updates
 
 The connected T3 server manages the device hub and agent tools on its own machine and configured SSH hosts. Required versions install automatically the next time those tools are used. Settings → Integrations → Check device tool versions reads installed versions without installing tools or starting devices.

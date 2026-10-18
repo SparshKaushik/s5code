@@ -18,3 +18,8 @@ export const {
 } = (
   typeof Bun === "undefined" ? requireCursorSdk("@cursor/sdk") : await import("@cursor/sdk")
 ) as typeof import("@cursor/sdk");
+export const { SqliteLocalAgentStore } = (
+  typeof Bun === "undefined"
+    ? requireCursorSdk("@cursor/sdk/sqlite")
+    : await import("@cursor/sdk/sqlite")
+) as typeof import("@cursor/sdk/sqlite");

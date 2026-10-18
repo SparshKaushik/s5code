@@ -34,7 +34,6 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "~/components/ui/tooltip";
 import type { DeviceStreamHandle, DeviceViewControls } from "./DeviceStreamView";
 import type { DeviceControls } from "./useDeviceControls";
 
-/** Stable floating controls for both presentations, regardless of panel width. */
 export function DeviceControlsRail(props: {
   platform: DevicePlatform;
   handle: DeviceStreamHandle | null;
@@ -43,7 +42,7 @@ export function DeviceControlsRail(props: {
   screenshotPending: boolean;
   onScreenshot: () => void;
   toolsOpen: boolean;
-  onTools: () => void;
+  onTools?: () => void;
   onFloat: () => void;
   onClose: () => void;
   onPowerOff: () => void;
@@ -179,14 +178,16 @@ export function DeviceControlsRail(props: {
             </MenuRadioGroup>
           </MenuPopup>
         </Menu>
-        <RailButton
-          tooltipSide={popupSide}
-          label="Device tools"
-          pressed={props.toolsOpen}
-          onClick={props.onTools}
-        >
-          <SlidersHorizontal />
-        </RailButton>
+        {props.onTools ? (
+          <RailButton
+            tooltipSide={popupSide}
+            label="Device tools"
+            pressed={props.toolsOpen}
+            onClick={props.onTools}
+          >
+            <SlidersHorizontal />
+          </RailButton>
+        ) : null}
         <RailButton
           tooltipSide={popupSide}
           label={props.screenshotPending ? "Capturing screenshot" : "Save screenshot"}
