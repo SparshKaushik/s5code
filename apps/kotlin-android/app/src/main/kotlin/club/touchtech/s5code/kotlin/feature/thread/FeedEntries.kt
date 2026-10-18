@@ -6,6 +6,16 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.material.icons.rounded.Link
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
+import androidx.compose.ui.semantics.onLongClick
+import club.touchtech.s5code.kotlin.data.PROMPT_LINK_MAX_PROMPT_LENGTH
+import club.touchtech.s5code.kotlin.data.buildNewThreadLink
+import club.touchtech.s5code.kotlin.design.component.S5MenuOption
+import club.touchtech.s5code.kotlin.design.component.S5OverflowMenu
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -160,7 +170,7 @@ fun FeedEntryRow(
             }
 
         is FeedEntry.UserMessage ->
-            UserBubble(entry, modifier, environmentId, resolveTranscriptAttachment, onOpenAttachment)
+            UserBubble(entry, onCopy, modifier, environmentId, resolveTranscriptAttachment, onOpenAttachment)
 
         is FeedEntry.AgentMessage ->
             AgentMessage(
@@ -339,6 +349,7 @@ fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: 
 @Composable
 private fun UserBubble(
     entry: FeedEntry.UserMessage,
+    onCopy: (String) -> Unit,
     modifier: Modifier,
     environmentId: String?,
     resolveTranscriptAttachment: suspend (String) -> String?,
@@ -346,92 +357,132 @@ private fun UserBubble(
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
     var explainedBadge by remember(entry.id) { mutableStateOf<UserMessageIntentBadge?>(null) }
+    var actionsOpen by remember(entry.id) { mutableStateOf(false) }
+    val haptics = LocalHapticFeedback.current
+    // `t3-context://` links resolve to their record labels (or an
+    // "(unavailable)" marker) before review-comment segmentation:
+    // a label can never look like a <review-comment> block.
+    val contextResolvedText =
+        remember(entry.text, entry.contextRecords) {
+            replaceComposerContextReferences(entry.text, entry.contextRecords)
+        }
+    // RN's `UserMessageCopyButton`: a prompt link shares the text with context
+    // chips as their labels, and is not offered once it is over the link limit.
+    val promptLinkText =
+        remember(entry.text) { replaceComposerContextReferences(entry.text, emptyMap(), markUnavailable = false) }
+    val actions =
+        remember(promptLinkText) {
+            listOfNotNull(
+                S5MenuOption("copy-message", "Copy message", Icons.Rounded.ContentCopy),
+                S5MenuOption("copy-prompt-link", "Copy prompt link", Icons.Rounded.Link)
+                    .takeIf { promptLinkText.isNotBlank() && promptLinkText.length <= PROMPT_LINK_MAX_PROMPT_LENGTH },
+            )
+        }
+    fun openActions() {
+        if (contextResolvedText.isBlank()) return
+        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        actionsOpen = true
+    }
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
-        Surface(
-            shape = MaterialTheme.shapes.largeIncreased,
-            color = MaterialTheme.colorScheme.primaryContainer,
-            contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
-            modifier = Modifier.widthIn(max = 520.dp),
-        ) {
-            Column(Modifier.padding(S5Theme.spacing.large)) {
-                entry.attribution?.let { label ->
-                    Text(label, style = MaterialTheme.typography.labelSmall,
-                        modifier = Modifier.padding(bottom = S5Theme.spacing.tiny))
+        S5OverflowMenu(
+            icon = Icons.Rounded.ContentCopy,
+            label = "Message actions",
+            options = actions,
+            onSelect = { id ->
+                when (id) {
+                    "copy-message" -> onCopy(contextResolvedText)
+                    "copy-prompt-link" -> onCopy(buildNewThreadLink(promptLinkText))
                 }
-                // `t3-context://` links resolve to their record labels (or an
-                // "(unavailable)" marker) before review-comment segmentation:
-                // a label can never look like a <review-comment> block.
-                val contextResolvedText =
-                    remember(entry.text, entry.contextRecords) {
-                        replaceComposerContextReferences(entry.text, entry.contextRecords)
-                    }
-                val segments =
-                    remember(contextResolvedText) {
-                        parseReviewCommentMessageSegments(contextResolvedText)
-                    }
-                val hasReviewComments = segments.any { it is ReviewCommentMessageSegment.Comment }
-                if (hasReviewComments) {
-                    Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
-                        segments.forEach { segment ->
-                            when (segment) {
-                                is ReviewCommentMessageSegment.Comment ->
-                                    ReviewCommentInlineCard(segment.comment)
-                                is ReviewCommentMessageSegment.Text ->
-                                    segment.text.trim().takeIf(String::isNotEmpty)?.let { text ->
-                                        Text(text, style = MaterialTheme.typography.bodyMedium)
+            },
+            expanded = actionsOpen,
+            onExpandedChange = { actionsOpen = it },
+            modifier = Modifier.widthIn(max = 520.dp),
+            anchor = {
+                Surface(
+                    shape = MaterialTheme.shapes.largeIncreased,
+                    color = MaterialTheme.colorScheme.primaryContainer,
+                    contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
+                    modifier =
+                        Modifier
+                            .pointerInput(entry.id, contextResolvedText) {
+                                detectTapGestures(onLongPress = { openActions() })
+                            }
+                            .semantics { onLongClick("Message actions") { openActions(); true } },
+                ) {
+                    Column(Modifier.padding(S5Theme.spacing.large)) {
+                        entry.attribution?.let { label ->
+                            Text(label, style = MaterialTheme.typography.labelSmall,
+                                modifier = Modifier.padding(bottom = S5Theme.spacing.tiny))
+                        }
+                        val segments =
+                            remember(contextResolvedText) {
+                                parseReviewCommentMessageSegments(contextResolvedText)
+                            }
+                        val hasReviewComments = segments.any { it is ReviewCommentMessageSegment.Comment }
+                        if (hasReviewComments) {
+                            Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+                                segments.forEach { segment ->
+                                    when (segment) {
+                                        is ReviewCommentMessageSegment.Comment ->
+                                            ReviewCommentInlineCard(segment.comment)
+                                        is ReviewCommentMessageSegment.Text ->
+                                            segment.text.trim().takeIf(String::isNotEmpty)?.let { text ->
+                                                Text(text, style = MaterialTheme.typography.bodyMedium)
+                                            }
                                     }
+                                }
+                            }
+                        } else {
+                            Text(contextResolvedText, style = MaterialTheme.typography.bodyMedium)
+                        }
+                        if (entry.attachments.isNotEmpty()) {
+                            Row(
+                                Modifier.padding(top = S5Theme.spacing.small),
+                                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                            ) {
+                                entry.attachments.forEach { attachment ->
+                                    SentAttachmentThumbnail(
+                                        attachment = attachment,
+                                        environmentId = environmentId,
+                                        resolveUrl = { resolveTranscriptAttachment(attachment.id) },
+                                        onPreview = { url ->
+                                            previewAttachment = attachment.copy(uri = url)
+                                        },
+                                        onOpen = { onOpenAttachment(attachment.toSentAttachment()) },
+                                    )
+                                }
                             }
                         }
-                    }
-                } else {
-                    Text(contextResolvedText, style = MaterialTheme.typography.bodyMedium)
-                }
-                if (entry.attachments.isNotEmpty()) {
-                    Row(
-                        Modifier.padding(top = S5Theme.spacing.small),
-                        horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-                    ) {
-                        entry.attachments.forEach { attachment ->
-                            SentAttachmentThumbnail(
-                                attachment = attachment,
-                                environmentId = environmentId,
-                                resolveUrl = { resolveTranscriptAttachment(attachment.id) },
-                                onPreview = { url ->
-                                    previewAttachment = attachment.copy(uri = url)
-                                },
-                                onOpen = { onOpenAttachment(attachment.toSentAttachment()) },
-                            )
+                        val intentBadge = remember(entry.inputIntent) { userMessageIntentBadge(entry.inputIntent) }
+                        Row(
+                            Modifier.padding(top = S5Theme.spacing.tiny),
+                            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            intentBadge?.let { badge ->
+                                val queued = badge.tone == UserMessageIntentTone.Queued
+                                S5StatusPill(
+                                    label = badge.label,
+                                    containerColor =
+                                        if (queued) S5Theme.status.approvalContainer
+                                        else S5Theme.status.workingContainer,
+                                    contentColor =
+                                        if (queued) S5Theme.status.onApprovalContainer
+                                        else S5Theme.status.onWorkingContainer,
+                                    modifier =
+                                        Modifier.clip(S5PillShape)
+                                            .clickable(onClickLabel = "Explain message history") {
+                                                explainedBadge = badge
+                                            }
+                                            .semantics { contentDescription = badge.accessibilityLabel },
+                                )
+                            }
+                            Text(entry.timeLabel, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
-                val intentBadge = remember(entry.inputIntent) { userMessageIntentBadge(entry.inputIntent) }
-                Row(
-                    Modifier.padding(top = S5Theme.spacing.tiny),
-                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-                    verticalAlignment = Alignment.CenterVertically,
-                ) {
-                    intentBadge?.let { badge ->
-                        val queued = badge.tone == UserMessageIntentTone.Queued
-                        S5StatusPill(
-                            label = badge.label,
-                            containerColor =
-                                if (queued) S5Theme.status.approvalContainer
-                                else S5Theme.status.workingContainer,
-                            contentColor =
-                                if (queued) S5Theme.status.onApprovalContainer
-                                else S5Theme.status.onWorkingContainer,
-                            modifier =
-                                Modifier.clip(S5PillShape)
-                                    .clickable(onClickLabel = "Explain message history") {
-                                        explainedBadge = badge
-                                    }
-                                    .semantics { contentDescription = badge.accessibilityLabel },
-                        )
-                    }
-                    Text(entry.timeLabel, style = MaterialTheme.typography.labelSmall)
-                }
-            }
-        }
+            },
+        )
     }
     explainedBadge?.let { badge ->
         AlertDialog(

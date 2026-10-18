@@ -433,6 +433,13 @@ data class ThreadSummary(
      * branch-discovered request.
      */
     val pullRequest: PullRequestRef? = null,
+    /**
+     * The shell's raw link array and legacy single link, kept for prompt links
+     * that name a pull request: those match every visible link, not the one the
+     * badge presents.
+     */
+    val pullRequestLinks: List<club.touchtech.s5code.kotlin.transport.wire.ThreadPullRequestLinkDto>? = null,
+    val linkedPullRequest: club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto? = null,
     /** Native `/goal` on the active provider thread, when the server reports one. */
     val goal: ProviderGoal? = null,
     /**

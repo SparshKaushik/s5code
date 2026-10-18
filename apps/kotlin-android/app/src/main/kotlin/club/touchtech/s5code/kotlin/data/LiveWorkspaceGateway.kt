@@ -422,6 +422,25 @@ class LiveWorkspaceGateway(
      * `useComposerPullRequestSearch`: numeric queries match by number substring
      * with an exact-number detail fallback, word queries match title/branches.
      */
+    override fun serverProviders(environmentId: EnvironmentId): List<ServerProviderDto> =
+        sessions.value[environmentId.value]?.session?.providers?.value.orEmpty()
+
+    override suspend fun pullRequestDetail(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        repository: String,
+        number: Int,
+    ): PullRequestDetailDto =
+        sessionFor(environmentId).request(
+            WsMethods.PullRequestsDetail,
+            buildJsonObject {
+                put("projectId", projectId.value)
+                put("repository", repository)
+                put("number", number)
+            },
+            PullRequestDetailDto.serializer(),
+        )
+
     override suspend fun searchComposerPullRequests(
         environmentId: EnvironmentId,
         projectId: ProjectId,

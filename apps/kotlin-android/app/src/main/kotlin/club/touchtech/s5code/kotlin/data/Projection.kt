@@ -323,6 +323,8 @@ fun threadSummaryFrom(
         // stacks and linked counts; the single link falls back to the legacy or
         // branch-discovered reference.
         pullRequest = resolveThreadPullRequestRef(shell),
+        pullRequestLinks = shell.pullRequests,
+        linkedPullRequest = shell.linkedPullRequest,
         goal = shell.goal?.let {
             ProviderGoal(
                 objective = it.objective,

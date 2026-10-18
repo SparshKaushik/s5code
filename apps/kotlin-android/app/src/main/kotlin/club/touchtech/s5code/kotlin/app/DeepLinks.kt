@@ -1,5 +1,7 @@
 package club.touchtech.s5code.kotlin.app
 
+import club.touchtech.s5code.kotlin.data.hasPromptLinkParams
+
 /**
  * What an external entry point asks the app to open.
  *
@@ -12,7 +14,11 @@ package club.touchtech.s5code.kotlin.app
 sealed interface DeepLink {
     data object Home : DeepLink
 
-    data object NewTask : DeepLink
+    /**
+     * The project picker. [promptQuery] is a prompt link's query (`prompt`,
+     * `repo`, `pr`, `provider`, `model`), resolved once the shells load.
+     */
+    data class NewTask(val promptQuery: String? = null) : DeepLink
 
     data object Connections : DeepLink
 
@@ -42,8 +48,13 @@ sealed interface DeepLink {
      */
     data class AddProject(val step: String) : DeepLink
 
-    data class Thread(val environmentId: String, val threadId: String, val child: String? = null) :
-        DeepLink
+    /** [promptQuery] carries a thread prompt link's `?prompt=` for the composer draft. */
+    data class Thread(
+        val environmentId: String,
+        val threadId: String,
+        val child: String? = null,
+        val promptQuery: String? = null,
+    ) : DeepLink
 
     /**
      * Payloads arriving from the system sharesheet. [uris] are the raw
@@ -57,7 +68,7 @@ sealed interface DeepLink {
         get() =
             when (this) {
                 Home -> Routes.Home
-                NewTask -> Routes.NewTask
+                is NewTask -> Routes.NewTask
                 Connections -> Routes.Connections
                 EnvironmentNew -> Routes.ConnectionsNew
                 ConnectOnboarding -> Routes.Connections
@@ -150,6 +161,7 @@ private const val MAX_SEGMENT_LENGTH = 256
  */
 fun parseDeepLinkPath(raw: String): DeepLink? {
     val path = raw.substringBefore('?').substringBefore('#')
+    val query = raw.substringBefore('#').substringAfter('?', "")
     if (path.trim() != path) return null
     val decoded = path.split('/').filter { it.isNotEmpty() }.map(::decode)
     if (decoded.any { it == null }) return null
@@ -158,7 +170,8 @@ fun parseDeepLinkPath(raw: String): DeepLink? {
 
     return when {
         segments.isEmpty() -> DeepLink.Home
-        segments == listOf("new") -> DeepLink.NewTask
+        segments == listOf("new") ->
+            DeepLink.NewTask(query.takeIf { hasPromptLinkParams(it) })
         segments == listOf("connections") || segments == listOf("environments") ->
             DeepLink.Connections
         segments == listOf("environment-new") -> DeepLink.EnvironmentNew
@@ -197,7 +210,12 @@ fun parseDeepLinkPath(raw: String): DeepLink? {
             ) {
                 return null
             }
-            DeepLink.Thread(environmentId, threadId, child)
+            DeepLink.Thread(
+                environmentId,
+                threadId,
+                child,
+                query.takeIf { child == null && hasPromptLinkParams(it, listOf("prompt")) },
+            )
         }
         else -> null
     }
@@ -216,5 +234,6 @@ fun parseDeepLinkUri(uriString: String): DeepLink? {
     if (uri.scheme?.lowercase() != "s5code") return null
     val host = uri.host.orEmpty()
     val path = uri.rawPath.orEmpty()
-    return parseDeepLinkPath(if (host.isEmpty()) path else "$host$path")
+    val query = uri.rawQuery?.let { "?$it" }.orEmpty()
+    return parseDeepLinkPath((if (host.isEmpty()) path else "$host$path") + query)
 }

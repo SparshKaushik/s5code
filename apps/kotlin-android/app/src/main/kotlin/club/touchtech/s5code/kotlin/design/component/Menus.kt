@@ -61,11 +61,15 @@ fun S5OverflowMenu(
     expanded: Boolean,
     onExpandedChange: (Boolean) -> Unit,
     modifier: Modifier = Modifier,
+    /** What the menu drops from; a long-press target replaces the icon button. */
+    anchor: @Composable () -> Unit = {
+        S5IconButton(icon = icon, label = label, onClick = { onExpandedChange(!expanded) })
+    },
 ) {
     var currentSubmenu by remember(expanded) { mutableStateOf<S5MenuOption?>(null) }
 
     Box(modifier) {
-        S5IconButton(icon = icon, label = label, onClick = { onExpandedChange(!expanded) })
+        anchor()
         DropdownMenu(
             expanded = expanded,
             onDismissRequest = {

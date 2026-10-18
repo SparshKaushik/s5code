@@ -143,6 +143,23 @@ interface WorkspaceGateway {
     suspend fun refreshProviders(environmentId: EnvironmentId) = Unit
 
     /**
+     * The environment's provider config as the server sent it, for callers that
+     * need what the catalog drops (status, availability, model aliases) — a
+     * prompt link's provider and model are matched against these.
+     */
+    fun serverProviders(environmentId: EnvironmentId): List<club.touchtech.s5code.kotlin.transport.wire.ServerProviderDto> =
+        emptyList()
+
+    /** `pullRequests.detail` for one request of a project's repository. */
+    suspend fun pullRequestDetail(
+        environmentId: EnvironmentId,
+        projectId: ProjectId,
+        repository: String,
+        number: Int,
+    ): club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto =
+        error("Pull requests are unavailable.")
+
+    /**
      * Slash commands the connected environments advertise for a provider instance,
      * merged. Not suspend: these ride along with the provider config the session
      * already holds, so the composer can filter them while the user types.

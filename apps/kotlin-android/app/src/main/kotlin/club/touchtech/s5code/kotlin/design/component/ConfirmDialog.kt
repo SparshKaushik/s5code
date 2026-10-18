@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.design.component
 
+import androidx.compose.foundation.layout.Row
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -17,10 +18,14 @@ data class S5ConfirmDialogRequest(
     val title: String,
     val message: String? = null,
     val confirmText: String,
-    val cancelText: String = "Cancel",
+    /** Null for a notice that only needs acknowledging. */
+    val cancelText: String? = "Cancel",
     val destructive: Boolean = false,
     val onConfirm: () -> Unit,
     val onCancel: (() -> Unit)? = null,
+    /** An optional third choice between cancel and confirm. */
+    val neutralText: String? = null,
+    val onNeutral: (() -> Unit)? = null,
 )
 
 /**
@@ -47,6 +52,12 @@ class S5ConfirmDialogController internal constructor() {
         request = null
         active.onConfirm()
     }
+
+    fun neutral() {
+        val active = request ?: return
+        request = null
+        active.onNeutral?.invoke()
+    }
 }
 
 @Composable
@@ -71,7 +82,14 @@ fun S5ConfirmDialogHost(controller: S5ConfirmDialogController) {
             }
         },
         dismissButton = {
-            TextButton(onClick = controller::cancel) { Text(request.cancelText) }
+            Row {
+                request.cancelText?.let { cancelText ->
+                    TextButton(onClick = controller::cancel) { Text(cancelText) }
+                }
+                request.neutralText?.let { neutralText ->
+                    TextButton(onClick = controller::neutral) { Text(neutralText) }
+                }
+            }
         },
     )
 }

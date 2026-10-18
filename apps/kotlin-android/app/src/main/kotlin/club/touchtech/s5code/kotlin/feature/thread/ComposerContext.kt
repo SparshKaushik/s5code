@@ -55,11 +55,13 @@ internal fun composerMessageText(text: String, hasAttachments: Boolean): String 
  * `replaceComposerContextReferences` for the plain-text bubble: each
  * reference becomes its label, suffixed "(unavailable)" when the message's
  * context records do not carry the payload — RN renders the same marker on
- * the markdown link it emits.
+ * the markdown link it emits. A prompt link passes [markUnavailable] false:
+ * it carries labels only, never payloads.
  */
 fun replaceComposerContextReferences(
     text: String,
     contextRecords: Map<String, FeedEntry.ContextRecordLabel>,
+    markUnavailable: Boolean = true,
 ): String {
     val occurrences = collectComposerContextReferences(text)
     if (occurrences.isEmpty()) return text
@@ -69,7 +71,7 @@ fun replaceComposerContextReferences(
         result.append(text, cursor, occurrence.range.first)
         val available = occurrence.contextId in contextRecords
         result.append(occurrence.label)
-        if (!available) result.append(" (unavailable)")
+        if (!available && markUnavailable) result.append(" (unavailable)")
         cursor = occurrence.range.last + 1
     }
     result.append(text, cursor, text.length)

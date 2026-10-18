@@ -373,6 +373,18 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     private val _pendingLink = MutableStateFlow<DeepLink?>(null)
     val pendingLink: StateFlow<DeepLink?> = _pendingLink.asStateFlow()
 
+    /**
+     * A prompt link waiting to fill a draft. Separate from [pendingLink]: the
+     * route opens immediately, but the draft waits for the shells and drafts
+     * that the link is matched against.
+     */
+    private val _pendingPromptLink = MutableStateFlow<DeepLink?>(null)
+    val pendingPromptLink: StateFlow<DeepLink?> = _pendingPromptLink.asStateFlow()
+
+    /** True once persisted drafts are restored; writing a draft earlier would be overwritten. */
+    private val _clientStateLoaded = MutableStateFlow(false)
+    val clientStateLoaded: StateFlow<Boolean> = _clientStateLoaded.asStateFlow()
+
     init {
         viewModelScope.launch { environmentStore.load() }
         // A share can be ingested and then orphaned by process death before the
@@ -398,6 +410,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                     environmentId = _preferences.value.homeEnvironmentId?.let(::EnvironmentId),
                     projectKey = _preferences.value.homeProjectKey,
                 )
+            _clientStateLoaded.value = true
             // Persist only after the restore has landed: saving before it would
             // write the empty defaults over the real file. The availability watch
             // waits for the same reason — it would otherwise correct the defaults
@@ -564,7 +577,16 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             }
             return
         }
+        if ((link is DeepLink.NewTask && link.promptQuery != null) ||
+            (link is DeepLink.Thread && link.promptQuery != null)
+        ) {
+            _pendingPromptLink.value = link
+        }
         _pendingLink.value = link
+    }
+
+    fun consumePendingPromptLink() {
+        _pendingPromptLink.value = null
     }
 
     /* ── Incoming shares ────────────────────────────────────────────── */

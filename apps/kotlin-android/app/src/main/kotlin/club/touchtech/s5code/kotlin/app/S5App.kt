@@ -106,6 +106,14 @@ fun S5App(
             store.consumePendingLink()
         }
 
+        PromptLinkEffect(
+            store = store,
+            navController = navController,
+            confirmController = confirmController,
+            restored = restored,
+            paired = paired,
+        )
+
         // A share waiting in the inbox presents the project picker itself, once.
         // The transition state is what stops a back-out from re-presenting it
         // forever — `transitionIncomingSharePresentation` in the RN client.

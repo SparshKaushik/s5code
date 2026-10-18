@@ -18,7 +18,7 @@ class DeepLinkTest {
     fun `known destinations resolve to their routes`() {
         assertEquals(DeepLink.Home, parseDeepLinkPath("/"))
         assertEquals(DeepLink.Home, parseDeepLinkPath(""))
-        assertEquals(DeepLink.NewTask, parseDeepLinkPath("/new"))
+        assertEquals(DeepLink.NewTask(), parseDeepLinkPath("/new"))
         assertEquals(DeepLink.Connections, parseDeepLinkPath("environments"))
         assertEquals(DeepLink.Settings, parseDeepLinkPath("/settings"))
         assertEquals(DeepLink.Archive, parseDeepLinkPath("/archive"))
@@ -92,18 +92,37 @@ class DeepLinkTest {
 
     @Test
     fun `queries and fragments are ignored rather than making a link invalid`() {
-        assertEquals(DeepLink.NewTask, parseDeepLinkPath("/new?from=widget"))
+        assertEquals(DeepLink.NewTask(), parseDeepLinkPath("/new?from=widget"))
         assertEquals(DeepLink.Home, parseDeepLinkPath("/#token=secret"))
     }
 
     @Test
     fun `custom scheme uris accept both host and path forms`() {
-        assertEquals(DeepLink.NewTask, parseDeepLinkUri("s5code://new"))
-        assertEquals(DeepLink.NewTask, parseDeepLinkUri("s5code:///new"))
+        assertEquals(DeepLink.NewTask(), parseDeepLinkUri("s5code://new"))
+        assertEquals(DeepLink.NewTask(), parseDeepLinkUri("s5code:///new"))
         assertEquals(
             DeepLink.Thread("env-1", "thread-2"),
             parseDeepLinkUri("s5code://threads/env-1/thread-2"),
         )
+    }
+
+    @Test
+    fun `prompt links keep their query for the draft`() {
+        assertEquals(
+            DeepLink.NewTask("prompt=Fix+it&repo=pingdotgg/t3code"),
+            parseDeepLinkUri("s5code://new?prompt=Fix+it&repo=pingdotgg/t3code"),
+        )
+        assertEquals(DeepLink.NewTask("pr=pingdotgg/t3code/42"), parseDeepLinkPath("/new?pr=pingdotgg/t3code/42"))
+        assertEquals(
+            DeepLink.Thread("env-1", "thread-2", promptQuery = "prompt=go"),
+            parseDeepLinkUri("s5code://threads/env-1/thread-2?prompt=go"),
+        )
+        // Only the thread itself takes a prompt; a tool route ignores it.
+        assertEquals(
+            DeepLink.Thread("env-1", "thread-2", "terminal"),
+            parseDeepLinkPath("/threads/env-1/thread-2/terminal?prompt=go"),
+        )
+        assertEquals("new", DeepLink.NewTask("prompt=x").route)
     }
 
     @Test

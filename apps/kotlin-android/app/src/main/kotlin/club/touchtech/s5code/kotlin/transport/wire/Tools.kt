@@ -62,6 +62,8 @@ data class ServerProviderModelDto(
      * because several vendors ship identically-named models.
      */
     val subProvider: String? = null,
+    /** Other names a prompt link may use for this model (`resolveSelectableModel`). */
+    val aliases: List<String> = emptyList(),
     val isDefault: Boolean = false,
     val isLegacy: Boolean = false,
     /**
