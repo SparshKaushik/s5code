@@ -1,6 +1,8 @@
 package club.touchtech.s5code.kotlin.transport.wire
 
+import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
+import kotlinx.serialization.json.JsonElement
 
 /*
  * `packages/contracts/src/pullRequest.ts`. Every field defaults so a newer
@@ -388,4 +390,90 @@ data class GitPreparePullRequestThreadResultDto(
     val branch: String = "",
     val worktreePath: String? = null,
     val isOnPullRequestHead: Boolean = true,
+)
+
+/** `PullRequestReviewerCandidate`: someone who can be asked to review. [kind]: user | team. */
+@Serializable
+data class PullRequestReviewerCandidateDto(
+    val isBot: Boolean? = null,
+    val login: String = "",
+    val name: String? = null,
+    val avatarUrl: String? = null,
+    val id: String = "",
+    val kind: String = "user",
+    val isRequested: Boolean = false,
+) {
+    val actor: PullRequestActorDto get() = PullRequestActorDto(login = login, name = name, avatarUrl = avatarUrl)
+}
+
+/** `PullRequestReviewerCandidateList`. */
+@Serializable
+data class PullRequestReviewerCandidateListDto(
+    val candidates: List<PullRequestReviewerCandidateDto> = emptyList(),
+    val truncated: Boolean = false,
+)
+
+/* `packages/contracts/src/pullRequestReviewGuide.ts`: an agent-written tour of a PR. */
+
+/** [kind]: tradeoff | contract | product | risk | accessibility. */
+@Serializable
+data class PullRequestReviewGuideAttentionDto(val kind: String = "risk", val note: String = "")
+
+/** Lines [start]..[end] of [path] on [side] (new | old). */
+@Serializable
+data class PullRequestReviewGuideExcerptDto(
+    val path: String = "",
+    val side: String = "new",
+    val start: Int = 1,
+    val end: Int = 1,
+    val caption: String = "",
+)
+
+@Serializable
+data class PullRequestReviewGuideNoteDto(
+    val path: String = "",
+    val line: Int = 1,
+    val title: String = "",
+    val body: String = "",
+)
+
+@Serializable
+data class PullRequestReviewGuideFileDto(val path: String = "", val note: String? = null)
+
+@Serializable
+data class PullRequestReviewGuideStopDto(
+    val title: String = "",
+    val summary: String = "",
+    val attention: PullRequestReviewGuideAttentionDto? = null,
+    val excerpts: List<PullRequestReviewGuideExcerptDto> = emptyList(),
+    val files: List<PullRequestReviewGuideFileDto> = emptyList(),
+    val notes: List<PullRequestReviewGuideNoteDto> = emptyList(),
+    val questions: List<String> = emptyList(),
+)
+
+/** `PullRequestReviewGuide`; [modelSelection] is kept opaque, only round-tripped through the cache. */
+@Serializable
+data class PullRequestReviewGuideDto(
+    val headSha: String = "",
+    val generatedAt: String = "",
+    val modelSelection: JsonElement? = null,
+    val stops: List<PullRequestReviewGuideStopDto> = emptyList(),
+)
+
+/** `PullRequestReviewGuideRun`, tagged Running (with [startedAt]) or Failed (with [failedAt] and [detail]). */
+@Serializable
+data class PullRequestReviewGuideRunDto(
+    @SerialName("_tag") val tag: String = "",
+    val headSha: String = "",
+    val startedAt: String? = null,
+    val failedAt: String? = null,
+    val detail: String? = null,
+)
+
+/** `PullRequestReviewGuideResult`: the saved guide, the run writing one, and the PR's head now. */
+@Serializable
+data class PullRequestReviewGuideResultDto(
+    val guide: PullRequestReviewGuideDto? = null,
+    val run: PullRequestReviewGuideRunDto? = null,
+    val currentHeadSha: String? = null,
 )

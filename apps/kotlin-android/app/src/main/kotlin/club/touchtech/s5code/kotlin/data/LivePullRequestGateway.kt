@@ -15,8 +15,9 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestLinkedThreadsResul
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListStatsResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewGuideResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewerCandidateListDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackDto
-import club.touchtech.s5code.kotlin.transport.wire.PullRequestActorDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackHeadDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentsResultDto
 import java.util.concurrent.ConcurrentHashMap
@@ -377,6 +378,59 @@ class LivePullRequestGateway(
             it.request(WsMethods.PullRequestsFilesViewed, reference.toJson(), PullRequestFilesViewedResultDto.serializer())
         }
 
+    private fun reviewerCandidatesEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "reviewerCandidates:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestReviewerCandidateListDto.serializer(),
+            tick = false,
+            persist = false,
+        ) {
+            it.request(WsMethods.PullRequestsReviewerCandidates, reference.toJson(), PullRequestReviewerCandidateListDto.serializer())
+        }
+
+    override fun reviewerCandidates(environmentId: String, reference: PullRequestReference) =
+        reviewerCandidatesEntry(environmentId, reference).observe()
+
+    override suspend fun refreshReviewerCandidates(environmentId: String, reference: PullRequestReference) {
+        fetch(reviewerCandidatesEntry(environmentId, reference), force = true)
+    }
+
+    private fun reviewGuideEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "reviewGuide:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestReviewGuideResultDto.serializer(),
+            tick = true,
+            persist = true,
+        ) {
+            it.request(WsMethods.PullRequestsReviewGuide, reference.toJson(), PullRequestReviewGuideResultDto.serializer())
+        }
+
+    override fun reviewGuide(environmentId: String, reference: PullRequestReference) =
+        reviewGuideEntry(environmentId, reference).observe()
+
+    override suspend fun refreshReviewGuide(environmentId: String, reference: PullRequestReference) {
+        fetch(reviewGuideEntry(environmentId, reference), force = true)
+    }
+
+    override suspend fun generateReviewGuide(environmentId: String, reference: PullRequestReference) {
+        val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to write a review guide.")
+        val result =
+            try {
+                session.request(WsMethods.PullRequestsGenerateReviewGuide, reference.toJson(), PullRequestReviewGuideResultDto.serializer())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                throw IllegalStateException(pullRequestErrorMessage(error), error)
+            }
+        reviewGuideEntry(environmentId, reference).state.update {
+            PullRequestQuery(value = result, hasValue = true, fetchedAt = clock())
+        }
+    }
+
     override suspend fun diff(
         environmentId: String,
         reference: PullRequestReference,
@@ -672,24 +726,16 @@ class LivePullRequestGateway(
                 )
             session.execute(WsMethods.PullRequestsRequestReviewers, payload)
         }
-        val known = reviewers.filter { !it.login.isNullOrEmpty() }
+        val candidatesEntry = reviewerCandidatesEntry(environmentId, reference)
+        val selected = selectedReviewerCandidates(candidatesEntry.state.value.value?.candidates.orEmpty(), reviewers)
+        candidatesEntry.state.update { query ->
+            query.copy(value = query.value?.let { it.copy(candidates = patchReviewerCandidates(it.candidates, selected, requested)) })
+        }
         val detail = detailEntry(environmentId, reference)
         val activity = activityEntry(environmentId, reference)
-        if (known.size < reviewers.size) {
-            refetch(detail, activity)
-            return
+        detail.state.update { query ->
+            query.copy(value = query.value?.let { it.copy(reviewers = patchRequestedReviewers(it.reviewers, selected, requested)) })
         }
-        val logins = known.mapTo(mutableSetOf()) { it.login!!.lowercase() }
-        fun update(actors: List<PullRequestActorDto>, keep: (PullRequestActorDto) -> Boolean = { false }) =
-            if (requested) {
-                actors +
-                    known
-                        .filter { candidate -> actors.none { it.login.equals(candidate.login, ignoreCase = true) } }
-                        .map { PullRequestActorDto(login = it.login!!, name = it.name, avatarUrl = it.avatarUrl) }
-            } else {
-                actors.filter { it.login.lowercase() !in logins || keep(it) }
-            }
-        detail.state.update { query -> query.copy(value = query.value?.let { it.copy(reviewers = update(it.reviewers)) }) }
         activity.state.update { query ->
             query.copy(
                 value =
@@ -698,7 +744,7 @@ class LivePullRequestGateway(
                             reviewers =
                                 value.reviewers?.let { actors ->
                                     // Someone who already reviewed stays listed after an unrequest.
-                                    update(actors) { actor ->
+                                    patchRequestedReviewers(actors, selected, requested) { actor ->
                                         value.comments.any { comment ->
                                             (comment.kind == "review" || comment.kind == "review-comment") &&
                                                 comment.author?.login.equals(actor.login, ignoreCase = true)
@@ -709,6 +755,8 @@ class LivePullRequestGateway(
                     },
             )
         }
+        // A typed-in ID has no cached identity to patch with.
+        if (selected.size < reviewers.size) refetch(detail, activity)
     }
 
     override suspend fun invalidate(environmentId: String, reference: PullRequestReference?) {

@@ -66,13 +66,19 @@ object Routes {
     const val PullRequest = "pull-requests/{environmentId}/{projectId}/{repository}/{number}?host={host}"
     private const val PULL_REQUEST_BASE = "pull-requests/{environmentId}/{projectId}/{repository}/{number}"
     const val PullRequestFiles = "$PULL_REQUEST_BASE/files?host={host}&commit={commit}"
-    const val PullRequestDiff = "$PULL_REQUEST_BASE/diff?host={host}&path={path}&commit={commit}&replacingDraftId={replacingDraftId}"
+    /** [focus] is `side:start:end`, the lines a guide excerpt opened the diff at. */
+    const val PullRequestDiff =
+        "$PULL_REQUEST_BASE/diff?host={host}&path={path}&commit={commit}&replacingDraftId={replacingDraftId}&focus={focus}"
     const val PullRequestDiscussion = "$PULL_REQUEST_BASE/discussions/{discussionId}?host={host}"
     /** [position] is a `PullRequestReviewPosition` as JSON. */
     const val PullRequestInlineComment =
         "$PULL_REQUEST_BASE/inline-comment?host={host}&draftId={draftId}&path={path}&oldPath={oldPath}" +
             "&position={position}&headSha={headSha}&code={code}"
     const val PullRequestReview = "$PULL_REQUEST_BASE/review?host={host}&mode={mode}"
+    const val PullRequestReviewers = "$PULL_REQUEST_BASE/reviewers?host={host}"
+    /** One guide stop; the guide's identity lets the screen notice a rewrite. */
+    const val PullRequestGuideStop =
+        "$PULL_REQUEST_BASE/guide/{position}?host={host}&guideHeadSha={guideHeadSha}&guideGeneratedAt={guideGeneratedAt}"
 
     const val Settings = "settings"
     const val SettingsAccount = "settings/auth"
@@ -161,6 +167,7 @@ object Routes {
         path: String? = null,
         commit: String? = null,
         replacingDraftId: String? = null,
+        focus: club.touchtech.s5code.kotlin.data.GuideDiffFocus? = null,
     ) = pullRequestChild(
         environmentId,
         reference,
@@ -168,6 +175,7 @@ object Routes {
         "path" to path,
         "commit" to commit,
         "replacingDraftId" to replacingDraftId,
+        "focus" to focus?.let { "${it.side}:${it.start}:${it.end}" },
     )
 
     fun pullRequestDiscussion(
@@ -205,6 +213,23 @@ object Routes {
         reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
         mode: String,
     ) = pullRequestChild(environmentId, reference, "review", "mode" to mode)
+
+    fun pullRequestReviewers(environmentId: String, reference: club.touchtech.s5code.kotlin.data.PullRequestReference) =
+        pullRequestChild(environmentId, reference, "reviewers")
+
+    fun pullRequestGuideStop(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        position: Int,
+        guideHeadSha: String,
+        guideGeneratedAt: String,
+    ) = pullRequestChild(
+        environmentId,
+        reference,
+        "guide/$position",
+        "guideHeadSha" to guideHeadSha,
+        "guideGeneratedAt" to guideGeneratedAt,
+    )
 
     fun connectionDetail(environmentId: String) = "connections/$environmentId"
 

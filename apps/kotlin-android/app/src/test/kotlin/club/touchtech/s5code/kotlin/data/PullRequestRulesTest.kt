@@ -202,6 +202,13 @@ class PullRequestRulesTest {
     }
 
     @Test
+    fun `offers a review request only when one can be made`() {
+        assertEquals("No reviewers", pullRequestReviewSummary(emptyList(), null).title)
+        assertEquals("Request a review", pullRequestReviewSummary(emptyList(), null, canRequest = true).title)
+        assertEquals("Awaiting review", pullRequestReviewSummary(listOf(author), null, canRequest = true).title)
+    }
+
+    @Test
     fun `does not claim a dismissed approval or an approval preceding the latest commit`() {
         val approved = review("APPROVED", "2026-10-10T09:00:00Z")
         assertTrue(pullRequestReviewSummary(emptyList(), reviews(approved, review("DISMISSED", "2026-10-10T10:00:00Z"))).reviews.isEmpty())

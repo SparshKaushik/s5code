@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
 import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.RateReview
 import androidx.compose.material.icons.rounded.Upgrade
 import club.touchtech.s5code.kotlin.app.Routes
@@ -119,9 +120,10 @@ import coil3.compose.AsyncImage
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
-/** The PR page's segments. Guide (phase 3) slots in here; files open their own screen. */
+/** The PR page's segments; Guide shows only when the server enables review guides. Files open their own screen. */
 private enum class PullRequestSegment(val label: String) {
     Overview("Overview"),
+    Guide("Guide"),
     Activity("Activity"),
 }
 
@@ -229,7 +231,10 @@ fun PullRequestDetailScreen(
     val openFiles = { onOpenRoute(Routes.pullRequestFiles(readEnvironment, readReference)) }
     var overflowOpen by remember { mutableStateOf(false) }
 
-    var segment by rememberSaveable { mutableStateOf(PullRequestSegment.Overview) }
+    val reviewGuide = rememberReviewGuide(store, readEnvironment, readReference)
+    val segments = PullRequestSegment.entries.filter { it != PullRequestSegment.Guide || reviewGuide.enabled }
+    var selectedSegment by rememberSaveable { mutableStateOf(PullRequestSegment.Overview) }
+    val segment = selectedSegment.takeIf { it in segments } ?: PullRequestSegment.Overview
     var activityFilter by remember { mutableStateOf(PullRequestActivityFilter()) }
     var refreshing by remember { mutableStateOf(false) }
     fun refresh() {
@@ -339,9 +344,9 @@ fun PullRequestDetailScreen(
                             }
                             item(key = "segments") {
                                 S5ConnectedButtonGroup(
-                                    options = PullRequestSegment.entries,
+                                    options = segments,
                                     selected = segment,
-                                    onSelect = { segment = it },
+                                    onSelect = { selectedSegment = it },
                                     label = { it.label },
                                     modifier = Modifier.fillMaxWidth(),
                                 )
@@ -369,6 +374,12 @@ fun PullRequestDetailScreen(
                                                 activity = activityQuery.value,
                                                 runner = runner,
                                                 agent = agent,
+                                                onRequestReview =
+                                                    if (permissions.canRequestReviewers) {
+                                                        { onOpenRoute(Routes.pullRequestReviewers(readEnvironment, readReference)) }
+                                                    } else {
+                                                        null
+                                                    },
                                                 onOpenUrl = { url ->
                                                     if (!openPullRequestUrl(context, url)) store.showError("The link could not be opened.")
                                                 },
@@ -389,6 +400,18 @@ fun PullRequestDetailScreen(
                                             item(key = "labels") { PullRequestLabels(detail) }
                                         }
                                         item(key = "description") { PullRequestDescription(detail.body) }
+                                    }
+                                PullRequestSegment.Guide ->
+                                    pullRequestGuideItems(reviewGuide) { position, guide ->
+                                        onOpenRoute(
+                                            Routes.pullRequestGuideStop(
+                                                readEnvironment,
+                                                readReference,
+                                                position,
+                                                guide.headSha,
+                                                guide.generatedAt,
+                                            )
+                                        )
                                     }
                                 PullRequestSegment.Activity ->
                                     pullRequestActivityItems(
@@ -592,13 +615,16 @@ private fun PullRequestStatusCard(
     activity: PullRequestActivityDto?,
     runner: PullRequestActionRunner,
     agent: PullRequestAgent,
+    /** Opens the reviewers screen; null when this session cannot request reviews. */
+    onRequestReview: (() -> Unit)?,
     onOpenUrl: (String) -> Unit,
     mergeControls: @Composable () -> Unit,
 ) {
     var checksExpanded by rememberSaveable { mutableStateOf(false) }
     var reviewersExpanded by rememberSaveable { mutableStateOf(false) }
     val checks = remember(detail.checks) { pullRequestChecksSummary(detail.checks) }
-    val review = remember(detail.reviewers, activity) { pullRequestReviewSummary(detail.reviewers, activity) }
+    val canRequest = onRequestReview != null
+    val review = remember(detail.reviewers, activity, canRequest) { pullRequestReviewSummary(detail.reviewers, activity, canRequest) }
     val providerLabel = openOnProviderLabel(detail.provider).removePrefix("Open on ")
     S5Card(tone = club.touchtech.s5code.kotlin.design.component.S5CardTone.Receded) {
         OverviewRow(
@@ -680,7 +706,14 @@ private fun PullRequestStatusCard(
                 if (review.reviews.isEmpty() && detail.reviewers.isEmpty()) {
                     Text("No reviewers yet.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
-                if (detail.url.isNotEmpty()) {
+                if (onRequestReview != null) {
+                    S5Button(
+                        text = "Request review",
+                        onClick = onRequestReview,
+                        style = S5ButtonStyle.Text,
+                        icon = Icons.Rounded.PersonAdd,
+                    )
+                } else if (detail.url.isNotEmpty()) {
                     S5Button(
                         text = "View reviewers on $providerLabel",
                         onClick = { onOpenUrl(detail.url) },

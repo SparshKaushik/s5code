@@ -38,6 +38,8 @@ data class S5MenuOption(
     val enabled: Boolean = true,
     val destructive: Boolean = false,
     val children: List<S5MenuOption> = emptyList(),
+    /** A toggle in a multi-select menu: picking it leaves the menu open for the next pick. */
+    val keepOpen: Boolean = false,
 )
 
 /**
@@ -114,8 +116,10 @@ fun S5OverflowMenu(
                             selected = child.selected,
                             enabled = child.enabled,
                             onClick = {
-                                currentSubmenu = null
-                                onExpandedChange(false)
+                                if (!child.keepOpen) {
+                                    currentSubmenu = null
+                                    onExpandedChange(false)
+                                }
                                 onSelect(child.id)
                             },
                             text = { Text(child.label) },
@@ -161,7 +165,7 @@ fun S5OverflowMenu(
                                 if (hasChildren) {
                                     currentSubmenu = option
                                 } else {
-                                    onExpandedChange(false)
+                                    if (!option.keepOpen) onExpandedChange(false)
                                     onSelect(option.id)
                                 }
                             },

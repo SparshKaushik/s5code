@@ -15,7 +15,10 @@ import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestDiffScreen
 import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestDiscussionScreen
 import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestFilesScreen
 import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestInlineCommentScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestGuideStopScreen
 import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestReviewScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestReviewersScreen
+import club.touchtech.s5code.kotlin.data.GuideDiffFocus
 import club.touchtech.s5code.kotlin.feature.pullrequests.ThreadPullRequestsScreen
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
@@ -248,6 +251,9 @@ fun S5NavGraph(
                 onEscape = onHomeEscape,
                 onOpenPullRequest = { environmentId, reference ->
                     navController.navigate(Routes.pullRequest(environmentId, reference))
+                },
+                onRequestPullRequestReview = { environmentId, reference ->
+                    navController.navigate(Routes.pullRequestReviewers(environmentId, reference))
                 },
             )
         }
@@ -752,7 +758,7 @@ fun S5NavGraph(
             Routes.PullRequestDiff,
             arguments =
                 pullRequestArgs + optionalStringArg("path") + optionalStringArg("commit") +
-                    optionalStringArg("replacingDraftId"),
+                    optionalStringArg("replacingDraftId") + optionalStringArg("focus"),
         ) { entry ->
             val arguments = entry.arguments
             PullRequestDiffScreen(
@@ -762,6 +768,7 @@ fun S5NavGraph(
                 path = arguments?.getString("path")?.takeIf(String::isNotEmpty),
                 commit = arguments?.getString("commit")?.takeIf(String::isNotEmpty),
                 replacingDraftId = arguments?.getString("replacingDraftId")?.takeIf(String::isNotEmpty),
+                focus = GuideDiffFocus.parse(arguments?.getString("focus")),
                 confirmController = confirmController,
                 onBack = navController::popBackStack,
                 onOpenRoute = { route -> navController.navigate(route) },
@@ -825,6 +832,33 @@ fun S5NavGraph(
                     navController.popBackStack()
                     navController.navigate(route)
                 },
+            )
+        }
+        composable(Routes.PullRequestReviewers, arguments = pullRequestArgs) { entry ->
+            PullRequestReviewersScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                onBack = navController::popBackStack,
+            )
+        }
+        composable(
+            Routes.PullRequestGuideStop,
+            arguments =
+                pullRequestArgs + navArgument("position") { type = NavType.IntType } +
+                    optionalStringArg("guideHeadSha") + optionalStringArg("guideGeneratedAt"),
+        ) { entry ->
+            val arguments = entry.arguments
+            PullRequestGuideStopScreen(
+                store = store,
+                environmentId = arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(arguments),
+                position = arguments?.getInt("position") ?: 0,
+                guideHeadSha = arguments?.getString("guideHeadSha").orEmpty(),
+                guideGeneratedAt = arguments?.getString("guideGeneratedAt").orEmpty(),
+                onBack = navController::popBackStack,
+                onOpenRoute = { route -> navController.navigate(route) },
+                onFinishTour = { navController.popBackStack(Routes.PullRequest, inclusive = false) },
             )
         }
         composable(Routes.PullRequests, arguments = listOf(environmentArg, threadArg)) { entry ->

@@ -129,9 +129,14 @@ private fun epoch(value: String): Long = parseInstant(value) ?: 0L
 /**
  * `pullRequestReviewSummary`: each reviewer's latest verdict counts; a comment
  * review counts only for someone with no verdict, and an approval older than
- * the newest commit no longer approves.
+ * the newest commit no longer approves. With [canRequest], the empty state
+ * offers a request rather than just reporting none.
  */
-fun pullRequestReviewSummary(reviewers: List<PullRequestActorDto>, activity: PullRequestActivityDto?): PullRequestReviewSummary {
+fun pullRequestReviewSummary(
+    reviewers: List<PullRequestActorDto>,
+    activity: PullRequestActivityDto?,
+    canRequest: Boolean = false,
+): PullRequestReviewSummary {
     val latest = LinkedHashMap<String, PullRequestCommentDto>()
     val comments = LinkedHashMap<String, PullRequestCommentDto>()
     for (review in activity?.comments.orEmpty()) {
@@ -177,9 +182,12 @@ fun pullRequestReviewSummary(reviewers: List<PullRequestActorDto>, activity: Pul
     if (commented > 0 && reviewers.isEmpty()) {
         return PullRequestReviewSummary("Reviews", "$commented commented", PullRequestTone.Muted, reviews)
     }
-    // Phase 1 is read-only, so "Request a review" reads as the state, not an action.
     return PullRequestReviewSummary(
-        if (reviewers.isNotEmpty()) "Awaiting review" else "No reviewers",
+        when {
+            reviewers.isNotEmpty() -> "Awaiting review"
+            canRequest -> "Request a review"
+            else -> "No reviewers"
+        },
         if (reviewers.isNotEmpty()) "${reviewers.size} requested" else "None assigned",
         PullRequestTone.Muted,
         reviews,

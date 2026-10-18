@@ -8,6 +8,8 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilesViewedResultD
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestLinkedThreadsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewGuideResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewerCandidateListDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackHeadDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentsResultDto
@@ -100,6 +102,25 @@ interface PullRequestGateway {
         reference: PullRequestReference,
     ): Flow<PullRequestQuery<PullRequestFilesViewedResultDto>>
 
+    /** `pullRequests.reviewerCandidates`; only for hosts whose capabilities list candidates. */
+    fun reviewerCandidates(
+        environmentId: String,
+        reference: PullRequestReference,
+    ): Flow<PullRequestQuery<PullRequestReviewerCandidateListDto>>
+
+    suspend fun refreshReviewerCandidates(environmentId: String, reference: PullRequestReference)
+
+    /** `pullRequests.reviewGuide`; only for servers with `reviewGuidesEnabled`. */
+    fun reviewGuide(environmentId: String, reference: PullRequestReference): Flow<PullRequestQuery<PullRequestReviewGuideResultDto>>
+
+    suspend fun refreshReviewGuide(environmentId: String, reference: PullRequestReference)
+
+    /**
+     * `pullRequests.generateReviewGuide`: starts an agent writing the guide for
+     * the current head. The answer (normally a Running run) replaces the cached guide.
+     */
+    suspend fun generateReviewGuide(environmentId: String, reference: PullRequestReference)
+
     /** One slice of the PR's patch over HTTP (`POST /api/pull-requests/diff`). */
     suspend fun diff(
         environmentId: String,
@@ -183,8 +204,9 @@ interface PullRequestGateway {
     suspend fun setFileViewed(environmentId: String, reference: PullRequestReference, path: String, viewed: Boolean)
 
     /**
-     * `pullRequests.requestReviewers`; patches the cached detail and activity
-     * reviewers for [reviewers] whose identity is known, refetching otherwise.
+     * `pullRequests.requestReviewers`; patches the cached candidates, detail and
+     * activity reviewers for [reviewers] found among the cached candidates, and
+     * refetches detail and activity when some were not (a typed-in ID).
      */
     suspend fun requestReviewers(
         environmentId: String,
@@ -197,12 +219,9 @@ interface PullRequestGateway {
     suspend fun invalidate(environmentId: String, reference: PullRequestReference?)
 }
 
-/** One reviewer to (un)request; [login] lets the cached reviewer lists update without a refetch. */
+/** One reviewer to (un)request, as the host identifies it. */
 data class PullRequestReviewerRequest(
     val id: String,
     /** user | team */
     val kind: String,
-    val login: String? = null,
-    val name: String? = null,
-    val avatarUrl: String? = null,
 )

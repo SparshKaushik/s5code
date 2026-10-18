@@ -16,6 +16,15 @@ class SessionPermissionsTest {
         assertFalse(legacy.copy(authenticated = false).grants("orchestration:operate"))
     }
 
+    @Test fun `writing a review guide needs operate`() {
+        val session = SessionState(authenticated = true, permissions = emptyList())
+        assertThrows(IllegalStateException::class.java) {
+            session.requireRpcPermissions("pullRequests.generateReviewGuide", json("{}"))
+        }
+        session.copy(permissions = listOf("orchestration:operate"))
+            .requireRpcPermissions("pullRequests.generateReviewGuide", json("{}"))
+    }
+
     @Test fun `operate-only sessions cannot update the server`() {
         val session = SessionState(authenticated = true, permissions = listOf("orchestration:operate"))
         assertThrows(IllegalStateException::class.java) {

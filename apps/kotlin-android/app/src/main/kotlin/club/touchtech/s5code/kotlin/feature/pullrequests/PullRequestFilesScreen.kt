@@ -77,6 +77,12 @@ import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilesViewedResultDto
+import androidx.compose.foundation.relocation.BringIntoViewRequester
+import androidx.compose.foundation.relocation.bringIntoViewRequester
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.geometry.Rect
+import club.touchtech.s5code.kotlin.data.GuideDiffFocus
+import club.touchtech.s5code.kotlin.data.guideFocusLines
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
@@ -192,6 +198,9 @@ fun rememberPullRequestFilesViewed(
         }
     return viewed
 }
+
+/** Taller than any screen, so bringing it into view aligns its top edge. */
+private const val FOCUS_VIEW_HEIGHT = 100_000f
 
 private fun fileCountLabel(count: Int) = if (count == 1) "1 file" else "$count files"
 
@@ -391,6 +400,8 @@ fun PullRequestDiffScreen(
     path: String?,
     commit: String?,
     replacingDraftId: String?,
+    /** Lines in [path] a guide excerpt points at: highlighted and scrolled to. */
+    focus: GuideDiffFocus? = null,
     confirmController: S5ConfirmDialogController,
     onBack: () -> Unit,
     onOpenRoute: (String) -> Unit,
@@ -441,10 +452,19 @@ fun PullRequestDiffScreen(
         rememberPullRequestAgent(store, environmentId, reference, detail, confirmController, onOpenThread, onOpenNewTask, visiblePath)
     var jumped by rememberSaveable(path, commit) { mutableStateOf(path == null) }
     val target = path?.let { wanted -> files.indexOfFirst { it.path == wanted } }?.takeIf { it >= 0 }
+    val focusRange = remember(files, path, focus) {
+        focus?.let { wanted -> files.firstOrNull { it.path == path }?.let { guideFocusLines(it, wanted) } }
+    }
+    val focusRequester = remember { BringIntoViewRequester() }
     LaunchedEffect(target, jumped) {
         if (!jumped && target != null) {
             listState.scrollToItem(target + headerItems)
             jumped = true
+            // The anchor sits just above the focused lines; a tall request rect pins it to the top.
+            if (focusRange != null && focusRange.first > 0) {
+                withFrameNanos {}
+                focusRequester.bringIntoView(Rect(0f, 0f, 1f, FOCUS_VIEW_HEIGHT))
+            }
         }
     }
     // Keep paging until the requested file arrives, then as the end comes into view.
@@ -632,7 +652,9 @@ fun PullRequestDiffScreen(
                         ReviewFileCard(
                             file = file,
                             expanded = file.path !in collapsed,
-                            selectedRange = selected?.takeIf { it.first == file.path }?.let { it.second..it.second },
+                            selectedRange =
+                                selected?.takeIf { it.first == file.path }?.let { it.second..it.second }
+                                    ?: focusRange?.takeIf { file.path == path },
                             rangeAnchorIndex = null,
                             onLineTap = { _, index ->
                                 selected = file.path to index
@@ -673,9 +695,14 @@ fun PullRequestDiffScreen(
                                     { fileAnnotations.file.forEach { DiffAnnotationCard(it) { openAnnotation(it) } } }
                                 },
                             afterLine =
-                                if (fileAnnotations.lines.isEmpty()) null
+                                if (fileAnnotations.lines.isEmpty() && (focusRange == null || file.path != path)) null
                                 else {
-                                    { index -> fileAnnotations.lines[index]?.forEach { DiffAnnotationCard(it) { openAnnotation(it) } } }
+                                    { index ->
+                                        fileAnnotations.lines[index]?.forEach { DiffAnnotationCard(it) { openAnnotation(it) } }
+                                        if (file.path == path && focusRange != null && index == focusRange.first - 1) {
+                                            Box(Modifier.bringIntoViewRequester(focusRequester))
+                                        }
+                                    }
                                 },
                             unavailableText = "This file's changes are unavailable here.",
                         )

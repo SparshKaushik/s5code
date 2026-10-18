@@ -86,6 +86,8 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Replay
 import androidx.compose.material.icons.rounded.TaskAlt
+import androidx.compose.material.icons.rounded.PersonAdd
+import club.touchtech.s5code.kotlin.data.pullRequestPermissions
 import kotlinx.coroutines.flow.first
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -118,6 +120,7 @@ import kotlinx.coroutines.launch
 
 private val STATUS_ACTION_ICONS =
     mapOf(
+        "request-review" to Icons.Rounded.PersonAdd,
         "ready" to Icons.Rounded.TaskAlt,
         "draft" to Icons.Rounded.EditNote,
         "close" to Icons.Rounded.Close,
@@ -156,6 +159,7 @@ fun pullRequestEnvironments(environments: List<Environment>, known: Set<String>)
 fun PullRequestListScreen(
     store: AppStore,
     onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit,
+    onRequestReview: (environmentId: String, reference: PullRequestReference) -> Unit,
     onSettings: () -> Unit,
     onConnections: () -> Unit,
     confirmController: S5ConfirmDialogController,
@@ -308,6 +312,29 @@ fun PullRequestListScreen(
         )
     }
 
+    // RN's row "Request review": the row does not carry review permissions, so re-read the detail first.
+    fun requestReview(environmentId: String, row: ScopedPullRequestEntry) {
+        val reference = row.entry.reference()
+        scope.launch {
+            try {
+                if (!gateway.connected(environmentId).first()) {
+                    throw IllegalStateException("Reconnect to request a review.")
+                }
+                gateway.refreshDetail(environmentId, reference)
+                val fresh = gateway.detail(environmentId, reference).first { it.hasValue || it.error != null }
+                val detail = fresh.value ?: throw IllegalStateException(fresh.error ?: "Couldn't read this pull request.")
+                if (!pullRequestPermissions(detail, connected = true, canWriteSourceControl = true).canRequestReviewers) {
+                    throw IllegalStateException("Review requests aren't available for this pull request.")
+                }
+                onRequestReview(environmentId, reference)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                confirmController.alert("Couldn't request a review", error.alertMessage())
+            }
+        }
+    }
+
     fun refresh() {
         if (refreshing || targets.isEmpty()) return
         refreshing = true
@@ -452,7 +479,8 @@ fun PullRequestListScreen(
                                     row = row,
                                     statusActions =
                                         if (writableEnvironments.contains(row.environmentId)) {
-                                            pullRequestListRowActions(row.entry.state, row.entry.isDraft)
+                                            (if (row.entry.state == "open") listOf("request-review") else emptyList()) +
+                                                pullRequestListRowActions(row.entry.state, row.entry.isDraft)
                                         } else {
                                             emptyList()
                                         },
@@ -473,6 +501,7 @@ fun PullRequestListScreen(
                                                 if (!openPullRequestUrl(context, entry.url)) {
                                                     store.showError("The pull request could not be opened.")
                                                 }
+                                            "request-review" -> row.environmentId?.let { requestReview(it, row) }
                                             else -> row.environmentId?.let { requestStatusAction(it, row, action) }
                                         }
                                     },
@@ -641,12 +670,14 @@ private fun PullRequestFilterRow(
                 active = selectedLabels.isNotEmpty(),
                 options =
                     listOf(S5MenuOption("label:", "All labels", selected = selectedLabels.isEmpty())) +
-                        (selectedLabels + labels).distinct().map { name ->
+                        // Stable order, so a pick does not move rows under the finger while the menu stays open.
+                        (labels + selectedLabels).distinct().map { name ->
                             S5MenuOption(
                                 "label:$name",
                                 name,
                                 selected = name in selectedLabels,
                                 enabled = name in selectedLabels || selectedLabels.size < MAX_LABEL_FILTERS,
+                                keepOpen = true,
                             )
                         },
                 onSelect = { id ->
@@ -761,7 +792,7 @@ private fun PullRequestListRow(
                         statusActions.map { action ->
                             S5MenuOption(
                                 action,
-                                pullRequestActionLabel(action),
+                                if (action == "request-review") "Request review" else pullRequestActionLabel(action),
                                 icon = STATUS_ACTION_ICONS[action],
                                 destructive = action == "close",
                             )

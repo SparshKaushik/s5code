@@ -303,6 +303,13 @@ private fun AdaptiveWorkspace(
                             popUpTo(Routes.Home)
                         }
                     },
+                    onRequestPullRequestReview = { environmentId, reference ->
+                        closeInspector()
+                        navController.navigate(Routes.pullRequest(environmentId, reference)) {
+                            popUpTo(Routes.Home)
+                        }
+                        navController.navigate(Routes.pullRequestReviewers(environmentId, reference))
+                    },
                 )
             }
             Box(Modifier.width(1.dp).fillMaxHeight()) {

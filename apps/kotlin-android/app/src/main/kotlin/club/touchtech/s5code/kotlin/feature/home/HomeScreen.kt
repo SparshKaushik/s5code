@@ -141,6 +141,7 @@ fun HomeScreen(
     hardwareShortcut: club.touchtech.s5code.kotlin.app.S5HardwareShortcutEvent? = null,
     onEscape: () -> Unit = {},
     onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit = { _, _ -> },
+    onRequestPullRequestReview: (environmentId: String, reference: PullRequestReference) -> Unit = onOpenPullRequest,
 ) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val known by store.pullRequests.knownEnvironments.collectAsStateWithLifecycle()
@@ -180,6 +181,7 @@ fun HomeScreen(
             PullRequestListScreen(
                 store = store,
                 onOpenPullRequest = onOpenPullRequest,
+                onRequestReview = onRequestPullRequestReview,
                 onSettings = onSettings,
                 onConnections = onConnections,
                 confirmController = confirmController,

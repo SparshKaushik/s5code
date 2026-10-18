@@ -67,7 +67,9 @@ internal object WsMethods {
     const val PullRequestsSetFilesViewed = "pullRequests.setFilesViewed"
     const val PullRequestsRequestReviewers = "pullRequests.requestReviewers"
     const val PullRequestsThreadComments = "pullRequests.threadComments"
+    const val PullRequestsReviewGuide = "pullRequests.reviewGuide"
     const val PullRequestsGenerateReviewGuide = "pullRequests.generateReviewGuide"
+    const val PullRequestsReviewerCandidates = "pullRequests.reviewerCandidates"
 
     const val SubscribeDeviceState = "subscribeDeviceState"
     const val DeviceList = "device.list"
