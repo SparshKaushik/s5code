@@ -4,11 +4,14 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
+import androidx.compose.material.icons.rounded.ArrowDropDown
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuGroup
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.MenuDefaults
@@ -18,6 +21,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.foundation.layout.size
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -176,6 +180,49 @@ fun S5OverflowMenu(
             }
         }
     }
+}
+
+/**
+ * A filter-row chip that drops an [S5OverflowMenu]. [active] fills the chip
+ * while its filter narrows the list, so a row of chips reads at a glance.
+ */
+@Composable
+fun S5FilterMenu(
+    label: String,
+    active: Boolean,
+    options: List<S5MenuOption>,
+    onSelect: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    icon: ImageVector? = null,
+) {
+    var expanded by remember { mutableStateOf(false) }
+    S5OverflowMenu(
+        icon = Icons.Rounded.ArrowDropDown,
+        label = label,
+        options = options,
+        onSelect = onSelect,
+        expanded = expanded,
+        onExpandedChange = { expanded = it },
+        modifier = modifier,
+        anchor = {
+            FilterChip(
+                selected = active,
+                onClick = { expanded = !expanded },
+                label = { Text(label, maxLines = 1) },
+                leadingIcon =
+                    icon?.let {
+                        { Icon(it, contentDescription = null, modifier = Modifier.size(FilterChipDefaults.IconSize)) }
+                    },
+                trailingIcon = {
+                    Icon(
+                        Icons.Rounded.ArrowDropDown,
+                        contentDescription = null,
+                        modifier = Modifier.size(FilterChipDefaults.IconSize),
+                    )
+                },
+            )
+        },
+    )
 }
 
 /**

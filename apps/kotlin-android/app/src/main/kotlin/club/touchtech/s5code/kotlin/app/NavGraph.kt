@@ -28,6 +28,8 @@ import club.touchtech.s5code.kotlin.feature.git.GitCommitScreen
 import club.touchtech.s5code.kotlin.feature.git.GitConfirmScreen
 import club.touchtech.s5code.kotlin.feature.git.GitOverviewScreen
 import club.touchtech.s5code.kotlin.feature.git.PullRequestsScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestDetailScreen
+import club.touchtech.s5code.kotlin.data.PullRequestReference
 import club.touchtech.s5code.kotlin.feature.git.SourceControlScreen
 import club.touchtech.s5code.kotlin.feature.home.HomeScreen
 import club.touchtech.s5code.kotlin.feature.newtask.AddProjectDestinationScreen
@@ -238,6 +240,9 @@ fun S5NavGraph(
                 confirmController = confirmController,
                 hardwareShortcut = hardwareShortcut,
                 onEscape = onHomeEscape,
+                onOpenPullRequest = { environmentId, reference ->
+                    navController.navigate(Routes.pullRequest(environmentId, reference))
+                },
             )
         }
 
@@ -651,6 +656,9 @@ fun S5NavGraph(
                 onOpen = { suffix ->
                     navController.navigate(Routes.threadChild(environmentId, threadId, suffix))
                 },
+                onOpenPullRequest = { targetEnvironmentId, reference ->
+                    navController.navigate(Routes.pullRequest(targetEnvironmentId, reference))
+                },
             )
         }
         composable(Routes.GitCommit, arguments = listOf(environmentArg, threadArg)) { entry ->
@@ -687,6 +695,38 @@ fun S5NavGraph(
                 onBack = navController::popBackStack,
                 onOpen = { suffix ->
                     navController.navigate(Routes.threadChild(environmentId, threadId, suffix))
+                },
+            )
+        }
+        composable(
+            Routes.PullRequest,
+            arguments =
+                listOf(
+                    environmentArg,
+                    navArgument("projectId") { type = NavType.StringType },
+                    navArgument("repository") { type = NavType.StringType },
+                    navArgument("number") { type = NavType.IntType },
+                    navArgument("host") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    },
+                ),
+        ) { entry ->
+            val arguments = entry.arguments
+            PullRequestDetailScreen(
+                store = store,
+                environmentId = arguments?.getString("environmentId").orEmpty(),
+                reference =
+                    PullRequestReference(
+                        projectId = arguments?.getString("projectId").orEmpty(),
+                        repository = arguments?.getString("repository").orEmpty(),
+                        number = arguments?.getInt("number") ?: 0,
+                        host = arguments?.getString("host")?.takeIf(String::isNotEmpty),
+                    ),
+                onBack = navController::popBackStack,
+                onOpenPullRequest = { environmentId, reference ->
+                    navController.navigate(Routes.pullRequest(environmentId, reference))
                 },
             )
         }

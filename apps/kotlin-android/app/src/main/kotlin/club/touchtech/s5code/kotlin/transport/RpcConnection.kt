@@ -22,6 +22,7 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withTimeoutOrNull
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.JsonObject
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.Response
@@ -33,6 +34,8 @@ class RpcFailure(
     val kind: RpcFailureKind,
     val tag: String?,
     override val message: String,
+    /** The tagged error struct behind a `Fail`, when the server sent one. */
+    val error: JsonObject? = null,
 ) : Exception(message)
 
 /** The socket went away. Callers treat this as transient and reconnect. */
@@ -188,7 +191,7 @@ private constructor(
                             is RpcOutcome.Success -> continuation.resume(outcome.value)
                             is RpcOutcome.Failure ->
                                 continuation.resumeWithException(
-                                    RpcFailure(outcome.kind, outcome.tag, outcome.message)
+                                    RpcFailure(outcome.kind, outcome.tag, outcome.message, outcome.error)
                                 )
                         }
                         return@launch
@@ -197,7 +200,7 @@ private constructor(
                     when (val outcome = envelope.outcome) {
                         is RpcOutcome.Success -> channel?.close()
                         is RpcOutcome.Failure ->
-                            channel?.close(RpcFailure(outcome.kind, outcome.tag, outcome.message))
+                            channel?.close(RpcFailure(outcome.kind, outcome.tag, outcome.message, outcome.error))
                     }
                 }
             is RpcFromServer.Defect ->

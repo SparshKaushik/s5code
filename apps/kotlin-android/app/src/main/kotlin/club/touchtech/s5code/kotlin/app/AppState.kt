@@ -39,6 +39,9 @@ import club.touchtech.s5code.kotlin.data.toRuntimeThreadSettings
 import club.touchtech.s5code.kotlin.data.toStoredThreadSettings
 import club.touchtech.s5code.kotlin.data.toStored
 import club.touchtech.s5code.kotlin.data.LiveWorkspaceGateway
+import club.touchtech.s5code.kotlin.data.LivePullRequestGateway
+import club.touchtech.s5code.kotlin.data.PullRequestCacheStore
+import club.touchtech.s5code.kotlin.data.PullRequestGateway
 import club.touchtech.s5code.kotlin.data.QueuedThreadMessage
 import club.touchtech.s5code.kotlin.data.ThreadOutboxStore
 import club.touchtech.s5code.kotlin.data.WorkspaceGateway
@@ -120,7 +123,11 @@ data class HomeUiState(
     val projectKey: String? = null,
     val snoozedExpanded: Boolean = false,
     val settledExpanded: Boolean = false,
+    val tab: HomeTab = HomeTab.Threads,
 )
+
+/** Home's two lists; Pull requests shows only where an environment supports it. */
+enum class HomeTab { Threads, PullRequests }
 
 /** New-task draft, shared across the whole new-task flow. */
 @Immutable
@@ -235,7 +242,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     val cloudEnvironments =
         relay?.let { CloudEnvironments(viewModelScope, it, http, environmentStore) }
 
-    val workspace: WorkspaceGateway =
+    private val liveWorkspace =
         LiveWorkspaceGateway(
             context = application,
             scope = viewModelScope,
@@ -264,6 +271,12 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 }
             },
         )
+
+    val workspace: WorkspaceGateway = liveWorkspace
+
+    /** Pull request reads for the Pull requests tab and PR pages, over the same sessions. */
+    val pullRequests: PullRequestGateway =
+        LivePullRequestGateway(viewModelScope, liveWorkspace, PullRequestCacheStore(application))
 
     /** In-app self-updater querying GitHub releases directly. */
     val updates =

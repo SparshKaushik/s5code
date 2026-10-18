@@ -291,6 +291,8 @@ data class ServerConfigSettingsDto(
     val sidebarAutoSettleAfterDays: Int? = 3,
     /** Inactivity does not settle threads with a pull request (`threadAutoSettlementScope`). */
     val sidebarAutoSettleKeepPullRequests: Boolean = false,
+    /** The PR screen offers its Guide segment (`pullRequests.reviewGuide`). */
+    val reviewGuidesEnabled: Boolean = false,
     /**
      * The user's "keep running turns across a server update" preference —
      * sent as `continueRunningThreads` when the server supports it.
@@ -498,6 +500,12 @@ data class ServerCapabilitiesDto(
     val threadPullRequests: Boolean = false,
     /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
     val threadPullRequestWatch: Boolean = false,
+    /** `pullRequests.checks` exists; PR screens read checks from their own method. */
+    val pullRequestChecks: Boolean = false,
+    /** Stack rebase/merge actions run through `pullRequests.runAction`. */
+    val pullRequestStackActions: Boolean = false,
+    /** `thread.pull-request.link`/`unlink` are understood. */
+    val threadPullRequestLinking: Boolean = false,
     /**
      * `serverInstallation`: how this server was installed (npx-style runner vs.
      * `npm-global` with a prefix), flattening the contract's small union the

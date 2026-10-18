@@ -297,6 +297,12 @@ private fun AdaptiveWorkspace(
                             navController.popBackStack()
                         }
                     },
+                    onOpenPullRequest = { environmentId, reference ->
+                        closeInspector()
+                        navController.navigate(Routes.pullRequest(environmentId, reference)) {
+                            popUpTo(Routes.Home)
+                        }
+                    },
                 )
             }
             Box(Modifier.width(1.dp).fillMaxHeight()) {

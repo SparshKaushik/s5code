@@ -100,7 +100,13 @@ internal sealed interface RpcOutcome {
      * not part of any contract, so they collapse into [kind] rather than
      * getting their own branches nothing would match on.
      */
-    data class Failure(val kind: RpcFailureKind, val tag: String?, val message: String) : RpcOutcome
+    data class Failure(
+        val kind: RpcFailureKind,
+        val tag: String?,
+        val message: String,
+        /** The raw `Fail` error, for contract errors whose text is built from fields. */
+        val error: JsonObject? = null,
+    ) : RpcOutcome
 }
 
 /** Public because [RpcFailure] carries it to callers outside this package. */
@@ -166,6 +172,7 @@ private fun parseCause(cause: JsonArray?): RpcOutcome.Failure {
             kind = RpcFailureKind.Fail,
             tag = (error as? JsonObject)?.get("_tag")?.jsonPrimitive?.contentOrNullSafe(),
             message = error?.let(::describeError) ?: "The request failed.",
+            error = error as? JsonObject,
         )
     }
     reasons.firstOrNull { it["_tag"]?.jsonPrimitive?.contentOrNullSafe() == "Die" }?.let { reason ->

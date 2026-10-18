@@ -37,7 +37,8 @@ class ClientCacheStore(private val context: Context) {
                 // writing into a cache that no longer exists.
                 ClientCacheKind.Images -> SingletonImageLoader.get(context).diskCache?.clear()
                 ClientCacheKind.Attachments,
-                ClientCacheKind.Workspace -> directoryFor(kind).deleteRecursively()
+                ClientCacheKind.Workspace,
+                ClientCacheKind.PullRequests -> directoryFor(kind).deleteRecursively()
             }
         }
         return inventory()
@@ -54,6 +55,7 @@ class ClientCacheStore(private val context: Context) {
             ClientCacheKind.Attachments -> File(context.cacheDir, COMPOSER_ATTACHMENT_CACHE_DIRECTORY)
             ClientCacheKind.Images -> File(context.cacheDir, IMAGE_CACHE_DIRECTORY)
             ClientCacheKind.Workspace -> File(context.filesDir, WORKSPACE_SNAPSHOT_DIRECTORY)
+            ClientCacheKind.PullRequests -> File(context.filesDir, PULL_REQUEST_CACHE_DIRECTORY)
         }
 
     private fun File.sizeOnDisk(): Long =

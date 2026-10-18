@@ -166,6 +166,12 @@ data class ServerCapabilities(
     val threadPullRequests: Boolean = false,
     /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
     val threadPullRequestWatch: Boolean = false,
+    /** `pullRequests.checks` exists; PR screens read checks from their own method. */
+    val pullRequestChecks: Boolean = false,
+    /** Stack rebase/merge actions run through `pullRequests.runAction`. */
+    val pullRequestStackActions: Boolean = false,
+    /** `thread.pull-request.link`/`unlink` are understood. */
+    val threadPullRequestLinking: Boolean = false,
     /** The server honors the `worktreesDirectory` setting. */
     val worktreesDirectory: Boolean = false,
     /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */
@@ -553,6 +559,11 @@ class EnvironmentSession(
                             threadPullRequests = descriptor.capabilities.threadPullRequests,
                             threadPullRequestWatch =
                                 descriptor.capabilities.threadPullRequestWatch,
+                            pullRequestChecks = descriptor.capabilities.pullRequestChecks,
+                            pullRequestStackActions =
+                                descriptor.capabilities.pullRequestStackActions,
+                            threadPullRequestLinking =
+                                descriptor.capabilities.threadPullRequestLinking,
                             worktreesDirectory = descriptor.capabilities.worktreesDirectory,
                             projectSettingsOverrides =
                                 descriptor.capabilities.projectSettingsOverrides,
@@ -1131,6 +1142,19 @@ class EnvironmentSession(
                     "Not connected.",
                 )
         return http.getAuthenticated(current.httpBaseUrl, path, current.credential, serializer)
+    }
+
+    /** Authenticated JSON POST twin of [getJson] (`/api/pull-requests/diff`). */
+    suspend fun <T> postJson(path: String, payload: JsonObject, serializer: KSerializer<T>): T {
+        val current =
+            authorized
+                ?: throw EnvironmentHttpError(
+                    EnvironmentHttpErrorKind.Unreachable,
+                    "Not connected.",
+                )
+        return http.postAuthenticated(
+            current.httpBaseUrl, path, current.credential, payload, serializer,
+        )
     }
 
     val connected: Flow<Boolean> = connection.map { it != null }

@@ -51,6 +51,13 @@ internal object WsMethods {
 
     const val PullRequestsList = "pullRequests.list"
     const val PullRequestsDetail = "pullRequests.detail"
+    const val PullRequestsListStats = "pullRequests.listStats"
+    const val PullRequestsStack = "pullRequests.stack"
+    const val PullRequestsActivity = "pullRequests.activity"
+    const val PullRequestsLinkedThreads = "pullRequests.linkedThreads"
+    const val PullRequestsFilesViewed = "pullRequests.filesViewed"
+    const val PullRequestsInvalidate = "pullRequests.invalidate"
+    const val PullRequestsSubscribeRefreshes = "pullRequests.subscribeRefreshes"
 
     const val SubscribeDeviceState = "subscribeDeviceState"
     const val DeviceList = "device.list"

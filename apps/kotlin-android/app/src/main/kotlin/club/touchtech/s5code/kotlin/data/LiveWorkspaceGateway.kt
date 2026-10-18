@@ -862,6 +862,11 @@ class LiveWorkspaceGateway(
                                 state?.capabilities?.threadPullRequests == true,
                             threadPullRequestWatch =
                                 state?.capabilities?.threadPullRequestWatch == true,
+                            pullRequestChecks = state?.capabilities?.pullRequestChecks == true,
+                            pullRequestStackActions =
+                                state?.capabilities?.pullRequestStackActions == true,
+                            threadPullRequestLinking =
+                                state?.capabilities?.threadPullRequestLinking == true,
                             worktreesDirectory =
                                 state?.capabilities?.worktreesDirectory == true,
                             projectSettingsOverrides =
@@ -1089,6 +1094,13 @@ class LiveWorkspaceGateway(
     private fun sessionFor(environmentId: EnvironmentId): EnvironmentSession =
         sessions.value[environmentId.value]?.session
             ?: error("That environment is no longer paired.")
+
+    /** The live session for a sibling gateway (pull requests); null while unpaired. */
+    internal fun session(environmentId: String): EnvironmentSession? = sessions.value[environmentId]?.session
+
+    /** Emits each time an environment's session is created, replaced or dropped. */
+    internal fun sessionFlow(environmentId: String): Flow<EnvironmentSession?> =
+        sessions.map { it[environmentId]?.session }.distinctUntilChanged()
 
     /**
      * Subscribes only to attention rows. The shell gives Home the cheap boolean;

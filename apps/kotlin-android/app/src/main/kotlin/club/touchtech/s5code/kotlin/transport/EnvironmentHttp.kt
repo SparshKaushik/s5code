@@ -197,6 +197,36 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         return executeSerialized(builder.build(), serializer)
     }
 
+    /**
+     * Authenticated JSON POST for payloads too large for the socket
+     * (`/api/pull-requests/diff`). A tagged contract error in a failed response
+     * is rethrown as [RpcFailure], so callers decode it the same way they decode
+     * the RPC twin's failure.
+     */
+    suspend fun <T> postAuthenticated(
+        httpBaseUrl: String,
+        path: String,
+        credential: EnvironmentCredential,
+        payload: kotlinx.serialization.json.JsonObject,
+        serializer: kotlinx.serialization.KSerializer<T>,
+    ): T {
+        val url = endpoint(httpBaseUrl, path)
+        val builder =
+            Request.Builder()
+                .url(url)
+                .header("x-t3-orchestration-protocol", "2")
+                .post(payload.toString().toRequestBody("application/json".toMediaType()))
+        when (credential) {
+            is EnvironmentCredential.Bearer ->
+                builder.header("authorization", "Bearer ${credential.token}")
+            is EnvironmentCredential.Dpop -> {
+                builder.header("authorization", "DPoP ${credential.token}")
+                builder.header("dpop", credential.proof("POST", url, credential.token))
+            }
+        }
+        return executeSerialized(builder.build(), serializer, taggedErrors = true)
+    }
+
     private suspend inline fun <reified T> authenticated(
         httpBaseUrl: String,
         path: String,
@@ -262,6 +292,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
     private suspend fun <T> executeSerialized(
         request: Request,
         serializer: kotlinx.serialization.KSerializer<T>,
+        taggedErrors: Boolean = false,
     ): T =
         withContext(Dispatchers.IO) {
             // Per-request wall clock: the shared client reads forever so a WebSocket
@@ -277,7 +308,10 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
                 }
             response.use {
                 val body = it.body.string()
-                if (!it.isSuccessful) throw EnvironmentHttpError.forStatus(it.code, body)
+                if (!it.isSuccessful) {
+                    if (taggedErrors) taggedHttpError(body)?.let { failure -> throw failure }
+                    throw EnvironmentHttpError.forStatus(it.code, body)
+                }
                 try {
                     json.decodeFromString(serializer, body)
                 } catch (cause: Exception) {
@@ -416,6 +450,23 @@ class EnvironmentHttpError(
     }
 }
 
+/** A failed HttpApi response whose body is a tagged contract error. */
+private fun taggedHttpError(body: String): RpcFailure? {
+    val error =
+        runCatching { kotlinx.serialization.json.Json.parseToJsonElement(body) }.getOrNull()
+            as? kotlinx.serialization.json.JsonObject ?: return null
+    val tag =
+        (error["_tag"] as? kotlinx.serialization.json.JsonPrimitive)?.takeIf { it.isString }?.content
+            ?: return null
+    val message =
+        listOf("message", "detail")
+            .firstNotNullOfOrNull { key ->
+                (error[key] as? kotlinx.serialization.json.JsonPrimitive)
+                    ?.takeIf { it.isString }?.content?.takeIf { it.isNotBlank() }
+            } ?: tag
+    return RpcFailure(RpcFailureKind.Fail, tag, message, error)
+}
+
 /* ── Wire DTOs ───────────────────────────────────────────────────────── */
 
 @Serializable
@@ -481,6 +532,12 @@ data class EnvironmentCapabilitiesDto(
     val threadPullRequests: Boolean = false,
     /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
     val threadPullRequestWatch: Boolean = false,
+    /** `pullRequests.checks` exists; PR screens read checks from their own method. */
+    val pullRequestChecks: Boolean = false,
+    /** Stack rebase/merge actions run through `pullRequests.runAction`. */
+    val pullRequestStackActions: Boolean = false,
+    /** `thread.pull-request.link`/`unlink` are understood. */
+    val threadPullRequestLinking: Boolean = false,
     /** The server honors the `worktreesDirectory` setting. */
     val worktreesDirectory: Boolean = false,
     /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */

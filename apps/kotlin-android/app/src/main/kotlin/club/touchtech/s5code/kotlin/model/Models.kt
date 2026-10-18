@@ -168,6 +168,12 @@ data class EnvironmentCapabilities(
     val threadPullRequests: Boolean = false,
     /** `thread.pull-request.watch` is understood; agents wake on PR changes. */
     val threadPullRequestWatch: Boolean = false,
+    /** `pullRequests.checks` exists; PR screens read checks from their own method. */
+    val pullRequestChecks: Boolean = false,
+    /** Stack rebase/merge actions run through `pullRequests.runAction`. */
+    val pullRequestStackActions: Boolean = false,
+    /** `thread.pull-request.link`/`unlink` are understood. */
+    val threadPullRequestLinking: Boolean = false,
     /** The server honors the `worktreesDirectory` setting. */
     val worktreesDirectory: Boolean = false,
     /** `server.updateSettings` accepts `projectSettingsOverrides` writes. */

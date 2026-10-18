@@ -33,6 +33,7 @@ import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Hub
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Inbox
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PushPin
@@ -68,6 +69,12 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
+import club.touchtech.s5code.kotlin.app.HomeTab
+import club.touchtech.s5code.kotlin.data.PullRequestReference
+import club.touchtech.s5code.kotlin.design.component.S5BottomTabs
+import club.touchtech.s5code.kotlin.design.component.S5Tab
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestListScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.pullRequestEnvironments
 import club.touchtech.s5code.kotlin.data.ReorderSection
 import club.touchtech.s5code.kotlin.data.cacheSizeLabel
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
@@ -126,6 +133,66 @@ fun HomeScreen(
     store: AppStore,
     onOpenThread: (String, String) -> Unit,
     onNewTask: () -> Unit,
+    onResumeDraft: () -> Unit,
+    onSettings: () -> Unit,
+    onConnections: () -> Unit,
+    onArchive: () -> Unit,
+    confirmController: S5ConfirmDialogController,
+    hardwareShortcut: club.touchtech.s5code.kotlin.app.S5HardwareShortcutEvent? = null,
+    onEscape: () -> Unit = {},
+    onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit = { _, _ -> },
+) {
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val known by store.pullRequests.knownEnvironments.collectAsStateWithLifecycle()
+    val home by store.home.collectAsStateWithLifecycle()
+    // The tab exists only where some environment can list pull requests.
+    val pullRequestsAvailable = remember(environments, known) { pullRequestEnvironments(environments, known).isNotEmpty() }
+    val tab = if (pullRequestsAvailable) home.tab else HomeTab.Threads
+    val bottomBar: @Composable () -> Unit = {
+        if (pullRequestsAvailable) {
+            S5BottomTabs(
+                tabs =
+                    listOf(
+                        S5Tab(HomeTab.Threads, "Threads", Icons.Rounded.Inbox),
+                        S5Tab(HomeTab.PullRequests, "Pull requests", Icons.AutoMirrored.Rounded.CallMerge),
+                    ),
+                selected = tab,
+                onSelect = { selected -> store.updateHome { it.copy(tab = selected) } },
+            )
+        }
+    }
+    when (tab) {
+        HomeTab.Threads ->
+            ThreadsHome(
+                store = store,
+                onOpenThread = onOpenThread,
+                onNewTask = onNewTask,
+                onResumeDraft = onResumeDraft,
+                onSettings = onSettings,
+                onConnections = onConnections,
+                onArchive = onArchive,
+                confirmController = confirmController,
+                hardwareShortcut = hardwareShortcut,
+                onEscape = onEscape,
+                bottomBar = bottomBar,
+            )
+        HomeTab.PullRequests ->
+            PullRequestListScreen(
+                store = store,
+                onOpenPullRequest = onOpenPullRequest,
+                onSettings = onSettings,
+                onConnections = onConnections,
+                bottomBar = bottomBar,
+            )
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ThreadsHome(
+    store: AppStore,
+    onOpenThread: (String, String) -> Unit,
+    onNewTask: () -> Unit,
     /**
      * Reopens the unsent new-task draft. Separate from [onNewTask] because it skips
      * the project step: the draft already has a project, and asking again is what
@@ -138,6 +205,7 @@ fun HomeScreen(
     confirmController: S5ConfirmDialogController,
     hardwareShortcut: club.touchtech.s5code.kotlin.app.S5HardwareShortcutEvent? = null,
     onEscape: () -> Unit = {},
+    bottomBar: @Composable () -> Unit = {},
 ) {
     val scope = rememberCoroutineScope()
     val focusManager = LocalFocusManager.current
@@ -468,6 +536,7 @@ fun HomeScreen(
         title = "S5 Code",
         subtitle = connectionStatus,
         prominence = S5TopBarProminence.Hero,
+        bottomBar = bottomBar,
         actions = {
             S5IconButton(
                 icon = if (searchVisible) Icons.Rounded.Close else Icons.Rounded.Search,

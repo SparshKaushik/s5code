@@ -62,6 +62,8 @@ object Routes {
     const val GitConfirm = "threads/{environmentId}/{threadId}/git-confirm"
     const val SourceControl = "threads/{environmentId}/{threadId}/source-control"
     const val PullRequests = "threads/{environmentId}/{threadId}/pull-requests"
+    /** One PR page, addressed the way the server reads it (`PullRequestRef`). */
+    const val PullRequest = "pull-requests/{environmentId}/{projectId}/{repository}/{number}?host={host}"
 
     const val Settings = "settings"
     const val SettingsAccount = "settings/auth"
@@ -117,6 +119,11 @@ object Routes {
         threadId,
         "review-comment?filePath=${android.net.Uri.encode(filePath)}&startIndex=$startIndex&endIndex=$endIndex",
     )
+
+    fun pullRequest(environmentId: String, reference: club.touchtech.s5code.kotlin.data.PullRequestReference) =
+        "pull-requests/${routeSegment(environmentId)}/${routeSegment(reference.projectId)}/" +
+            "${routeSegment(reference.repository)}/${reference.number}" +
+            (reference.host?.let { "?host=${android.net.Uri.encode(it)}" } ?: "")
 
     fun connectionDetail(environmentId: String) = "connections/$environmentId"
 

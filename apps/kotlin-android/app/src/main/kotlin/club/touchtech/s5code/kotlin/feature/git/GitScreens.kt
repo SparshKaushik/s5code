@@ -83,6 +83,8 @@ fun GitOverviewScreen(
     threadId: String,
     onBack: () -> Unit,
     onOpen: (String) -> Unit,
+    /** Opens a linked PR's page in-app; without it links open on the host. */
+    onOpenPullRequest: ((String, club.touchtech.s5code.kotlin.data.PullRequestReference) -> Unit)? = null,
 ) {
     val env = remember(environmentId) { EnvironmentId(environmentId) }
     val id = remember(threadId) { ThreadId(threadId) }
@@ -119,6 +121,39 @@ fun GitOverviewScreen(
                 )
             )
         }.onFailure { store.showError("The pull request could not be opened.") }
+    }
+    val projects by store.workspace.projects.collectAsStateWithLifecycle()
+    /**
+     * A link whose repository is a project in an environment that lists pull
+     * requests opens in-app — this thread's environment first. Anything else,
+     * or a URL that is not a change request, opens on the host.
+     */
+    fun openPullRequestLink(link: club.touchtech.s5code.kotlin.model.ThreadPullRequestLink) {
+        val handler = onOpenPullRequest
+        val parsed = club.touchtech.s5code.kotlin.transport.parseChangeRequestUrl(link.url)
+        if (handler != null && parsed != null) {
+            val key = "${parsed.host}/${parsed.repository}".lowercase()
+            val candidates =
+                projects.filter { project ->
+                    !project.isScratch &&
+                        project.repositoryIdentity?.canonicalKey?.lowercase() == key &&
+                        environments.any { it.id == project.environmentId && it.capabilities.pullRequests }
+                }
+            val project = candidates.firstOrNull { it.environmentId == env } ?: candidates.firstOrNull()
+            if (project != null) {
+                handler(
+                    project.environmentId.value,
+                    club.touchtech.s5code.kotlin.data.PullRequestReference(
+                        projectId = project.id.value,
+                        repository = link.repository,
+                        number = link.number,
+                        host = link.host,
+                    ),
+                )
+                return
+            }
+        }
+        openLink(link.url)
     }
     fun setWatching(link: club.touchtech.s5code.kotlin.model.ThreadPullRequestLink, watching: Boolean) {
         scope.launch {
@@ -265,7 +300,7 @@ fun GitOverviewScreen(
                                             } ?: "Status pending") +
                                             (if (link.watched) " · Watching" else ""),
                                     selected = false,
-                                    onClick = { openLink(link.url) },
+                                    onClick = { openPullRequestLink(link) },
                                     leading = {
                                         Icon(
                                             Icons.AutoMirrored.Rounded.CallMerge,

@@ -17,6 +17,7 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Delete
@@ -425,6 +426,8 @@ fun SettingsClientStorageScreen(
                                 ClientCacheKind.Attachments -> Icons.Rounded.Image
                                 ClientCacheKind.Images -> Icons.Rounded.Difference
                                 ClientCacheKind.Workspace -> Icons.Rounded.Storage
+                                ClientCacheKind.PullRequests ->
+                                    Icons.AutoMirrored.Rounded.CallMerge
                             },
                         label = entry.label,
                         supporting = entry.detail,

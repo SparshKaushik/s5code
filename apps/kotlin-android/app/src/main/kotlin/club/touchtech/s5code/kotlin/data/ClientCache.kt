@@ -25,6 +25,9 @@ enum class ClientCacheKind {
 
     /** Last-known shell rows and opened transcripts, scoped per environment. */
     Workspace,
+
+    /** Last-known pull request lists and pages, read while an environment is offline. */
+    PullRequests,
 }
 
 /** One measured category. [bytes] is real, measured from the filesystem. */
@@ -35,6 +38,7 @@ data class ClientCacheEntry(val kind: ClientCacheKind, val bytes: Long) {
                 ClientCacheKind.Attachments -> "Draft attachments"
                 ClientCacheKind.Images -> "Image previews"
                 ClientCacheKind.Workspace -> "Offline chats"
+                ClientCacheKind.PullRequests -> "Offline pull requests"
             }
 
     val detail: String
@@ -46,6 +50,8 @@ data class ClientCacheEntry(val kind: ClientCacheKind, val bytes: Long) {
                     "Project icons and workspace image previews, refetched on demand."
                 ClientCacheKind.Workspace ->
                     "Last-known project, chat-list, and opened transcript snapshots."
+                ClientCacheKind.PullRequests ->
+                    "Pull request lists and pages you opened, shown while offline."
             }
 }
 
