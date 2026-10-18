@@ -1,10 +1,10 @@
 import { build } from "vite-plus";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { writeFile } from "node:fs/promises";
+import * as NodeURL from "node:url";
+import * as NodePath from "node:path";
+import * as NodeFSP from "node:fs/promises";
 
 // Run with `node apps/kotlin-android/bridge/build.mts` after syncing RN transports.
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
+const root = NodePath.resolve(NodePath.dirname(NodeURL.fileURLToPath(import.meta.url)), "../../..");
 for (const [entry, name, file] of [
   ["apps/kotlin-android/bridge/browser.ts", "T3PreviewStream", "preview-stream.js"],
   ["packages/client-runtime/src/mcpApps/host.ts", "T3McpAppHost", "mcp-app-host.js"],
@@ -21,7 +21,7 @@ for (const [entry, name, file] of [
       write: false,
       target: "es2022",
       minify: true,
-      lib: { entry: path.join(root, entry!), name, formats: ["iife"] },
+      lib: { entry: NodePath.join(root, entry!), name, formats: ["iife"] },
     },
   });
   const bundles = Array.isArray(result) ? result : [result];
@@ -29,5 +29,8 @@ for (const [entry, name, file] of [
     .flatMap((bundle) => ("output" in bundle ? bundle.output : []))
     .find((output) => output.type === "chunk");
   if (!chunk) throw new Error(`${name} emitted no script.`);
-  await writeFile(path.join(root, "apps/kotlin-android/app/src/main/assets", file!), chunk.code);
+  await NodeFSP.writeFile(
+    NodePath.join(root, "apps/kotlin-android/app/src/main/assets", file!),
+    chunk.code,
+  );
 }
