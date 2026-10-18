@@ -156,7 +156,8 @@ describe("SchemaEnsure and Migration Recovery", () => {
             (40, 'RewindEntries'),
             (41, 'RewindEntries')
         `;
-        yield* runMigrations();
+        // Migration 63 drops projection_turns, so check the healed index before it.
+        yield* runMigrations({ toMigrationInclusive: 62 });
 
         const threads = yield* threadColumnNames();
         const projects = yield* projectColumnNames();
