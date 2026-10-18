@@ -7,7 +7,11 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentDto
 import java.nio.file.Files
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.job
+import kotlinx.coroutines.joinAll
 import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
@@ -177,7 +181,9 @@ class PullRequestReviewTest {
         val comment =
             pending("a", PullRequestReviewPosition("deleted", oldLine = 3)).copy(path = "src/new.ts", oldPath = "src/old.ts")
         val draft = ReviewDraft(comment = "Separate PR comment", comments = listOf(comment))
-        val store = PullRequestReviewDraftStore(file, this)
+        // Edits launch their own writes; join them so none lands after the damaged text below.
+        val writes = Job(coroutineContext.job)
+        val store = PullRequestReviewDraftStore(file, CoroutineScope(coroutineContext + writes))
         store.ready.first { it }
         store.update("key") { draft }
         store.update("empty") { ReviewDraft() }
@@ -186,6 +192,8 @@ class PullRequestReviewTest {
         reread.ready.first { it }
         assertEquals(mapOf("key" to draft), reread.drafts.value)
 
+        writes.children.toList().joinAll()
+        writes.complete()
         file.writeText("{not json")
         val damaged = PullRequestReviewDraftStore(file, this)
         damaged.ready.first { it }

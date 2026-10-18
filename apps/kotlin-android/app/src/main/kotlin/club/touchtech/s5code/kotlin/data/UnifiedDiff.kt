@@ -35,6 +35,10 @@ fun parseUnifiedDiff(diff: String): List<ReviewFile> {
     var hunkLines = mutableListOf<DiffLine>()
     var oldLine = 0
     var newLine = 0
+    // Lines the hunk header promised; once both run out, a trailing blank line
+    // is the diff text's final newline rather than an empty context line.
+    var oldRemaining = 0
+    var newRemaining = 0
 
     fun flushHunk() {
         val header = hunkHeader ?: return
@@ -90,24 +94,31 @@ fun parseUnifiedDiff(diff: String): List<ReviewFile> {
                 flushHunk()
                 hunkHeader = line
                 val ranges = parseHunkRanges(line)
-                oldLine = ranges.first
-                newLine = ranges.second
+                oldLine = ranges.oldStart
+                newLine = ranges.newStart
+                oldRemaining = ranges.oldCount
+                newRemaining = ranges.newCount
             }
             hunkHeader != null ->
                 when {
                     line.startsWith("+") -> {
                         hunkLines += DiffLine(DiffLineKind.Added, line.drop(1), null, newLine)
                         newLine += 1
+                        newRemaining -= 1
                     }
                     line.startsWith("-") -> {
                         hunkLines += DiffLine(DiffLineKind.Removed, line.drop(1), oldLine, null)
                         oldLine += 1
+                        oldRemaining -= 1
                     }
                     line.startsWith("\\") -> Unit // "\ No newline at end of file"
+                    line.isEmpty() && oldRemaining <= 0 && newRemaining <= 0 -> Unit
                     else -> {
                         hunkLines += DiffLine(DiffLineKind.Context, line.drop(1), oldLine, newLine)
                         oldLine += 1
                         newLine += 1
+                        oldRemaining -= 1
+                        newRemaining -= 1
                     }
                 }
         }
@@ -116,12 +127,13 @@ fun parseUnifiedDiff(diff: String): List<ReviewFile> {
     return files
 }
 
-/** Reads the old and new starting line numbers out of an `@@ -a,b +c,d @@` header. */
-private fun parseHunkRanges(header: String): Pair<Int, Int> {
-    val match = HUNK_HEADER.find(header) ?: return 1 to 1
-    val old = match.groupValues.getOrNull(1)?.toIntOrNull() ?: 1
-    val new = match.groupValues.getOrNull(2)?.toIntOrNull() ?: 1
-    return old to new
+private data class HunkRanges(val oldStart: Int, val oldCount: Int, val newStart: Int, val newCount: Int)
+
+/** Reads the line ranges out of an `@@ -a,b +c,d @@` header; an omitted count is 1. */
+private fun parseHunkRanges(header: String): HunkRanges {
+    val match = HUNK_HEADER.find(header) ?: return HunkRanges(1, Int.MAX_VALUE, 1, Int.MAX_VALUE)
+    fun group(index: Int, fallback: Int) = match.groups[index]?.value?.toIntOrNull() ?: fallback
+    return HunkRanges(group(1, 1), group(2, 1), group(3, 1), group(4, 1))
 }
 
-private val HUNK_HEADER = Regex("""^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@""")
+private val HUNK_HEADER = Regex("""^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@""")
