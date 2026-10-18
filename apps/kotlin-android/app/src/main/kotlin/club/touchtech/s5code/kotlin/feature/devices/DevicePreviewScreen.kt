@@ -8,7 +8,6 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
@@ -42,6 +41,7 @@ import club.touchtech.s5code.kotlin.data.deviceToolUpdatePolicy
 import club.touchtech.s5code.kotlin.data.deviceToolVersionLabels
 import club.touchtech.s5code.kotlin.data.selectedThreadDevicePreview
 import club.touchtech.s5code.kotlin.data.threadDevicePreviews
+import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.EnvironmentId
@@ -365,7 +365,7 @@ fun DevicePreviewScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center,
                 ) {
-                    CircularProgressIndicator()
+                    S5InlineLoading()
                 }
             } else {
                 val currentAccess = access
@@ -383,7 +383,7 @@ fun DevicePreviewScreen(
                             )
                             TextButton(onClick = { accessNonce += 1 }) { Text("Retry") }
                         } else {
-                            CircularProgressIndicator()
+                            S5InlineLoading()
                             Text(
                                 "Connecting to device...",
                                 style = MaterialTheme.typography.bodyMedium,
@@ -557,7 +557,7 @@ private fun DeviceStream(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
         ) {
-            if (status == "connecting") CircularProgressIndicator()
+            if (status == "connecting") S5InlineLoading()
             Text(
                 if (status == "error") error.orEmpty() else "Connecting to device...",
                 style = MaterialTheme.typography.bodyMedium,

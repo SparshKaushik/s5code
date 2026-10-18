@@ -38,7 +38,6 @@ import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material.icons.rounded.TrackChanges
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
 import androidx.compose.material3.Icon
-import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -73,6 +72,7 @@ import club.touchtech.s5code.kotlin.data.threadDevicePreviews
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5FloatingAction
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
+import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -1523,7 +1523,7 @@ private fun FloatingStatusPill(
                 }
             when {
                 spinning ->
-                    LoadingIndicator(Modifier.size(16.dp))
+                    S5InlineLoading(Modifier.size(16.dp))
                 status is FloatingStatus.Connection ->
                     // The dead-connection dot, same as S5WaitPill's static
                     // affordance: no spinner where nothing is retrying.
