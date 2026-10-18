@@ -292,7 +292,7 @@ Where the app actually stands, so the phase list below reads as a plan rather th
 a claim:
 
 - **Phases 0-2 (baseline, scaffold, direct connection):** done. The expressive
-  design layer, adaptive navigation, secure storage, pairing by URL *and* QR, the
+  design layer, adaptive navigation, secure storage, pairing by URL _and_ QR, the
   RPC transport, and the reconnect state machine are all live against a real
   server.
 - **Phase 3 (multi-environment home and lifecycle):** partial. Screens read live
@@ -465,7 +465,7 @@ The prompt stash was a faithful port of `apps/web/src/promptStashStore.ts` and w
 the wrong feature anyway. Web needs a holding queue because a desktop user has one
 composer and many threads behind it; a phone gives each thread its own persistent
 draft, so the queue duplicated storage the client already had. What the maintainer
-actually wanted from the desktop sidebar was the *indicator* — being able to see
+actually wanted from the desktop sidebar was the _indicator_ — being able to see
 which threads have something unsent — and that turned out to be one line on a home
 row over state that was already persisted.
 
