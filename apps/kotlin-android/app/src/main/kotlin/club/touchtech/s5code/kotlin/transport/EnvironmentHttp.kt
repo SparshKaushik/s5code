@@ -316,7 +316,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
                 buildString {
                     append("wsTicket=").append(java.net.URLEncoder.encode(ticket, "UTF-8"))
                     append("&clientSurface=mobile")
-                    append("&orchestrationProtocol=2")
+                    append("&orchestrationProtocol=").append(ORCHESTRATION_PROTOCOL_VERSION)
                     append("&clientAppVersion=")
                         .append(java.net.URLEncoder.encode(BuildConfig.VERSION_NAME, "UTF-8"))
                     append("&clientDeviceType=phone")
@@ -424,6 +424,8 @@ data class EnvironmentDescriptorDto(
     val label: String,
     val platform: EnvironmentPlatformDto = EnvironmentPlatformDto(),
     val serverVersion: String? = null,
+    /** Absent on servers shipped before protocol negotiation, which speak protocol 1. */
+    val orchestrationProtocolVersion: Int? = null,
     val capabilities: EnvironmentCapabilitiesDto = EnvironmentCapabilitiesDto(),
 )
 
@@ -465,6 +467,9 @@ data class EnvironmentPlatformDto(
  */
 @Serializable
 data class EnvironmentCapabilitiesDto(
+    /** The update path the server offers; with [desktopAppUpdate], whether it can update itself. */
+    val serverSelfUpdate: String? = null,
+    val desktopAppUpdate: Boolean = false,
     val serverBrowser: Boolean = false,
     val connectionProbe: Boolean = false,
     val threadSettlement: Boolean = false,

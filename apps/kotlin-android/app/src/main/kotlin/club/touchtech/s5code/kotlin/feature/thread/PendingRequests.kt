@@ -46,6 +46,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import club.touchtech.s5code.kotlin.design.component.S5Markdown
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -306,7 +307,8 @@ private fun UserInputQuestionFields(
             style = MaterialTheme.typography.labelMediumEmphasized,
             color = MaterialTheme.colorScheme.onSurfaceVariant,
         )
-        Text(question.prompt, style = MaterialTheme.typography.titleSmallEmphasized)
+        // Markdown so agent-provided links open on tap.
+        S5Markdown(question.prompt, textStyle = MaterialTheme.typography.titleSmallEmphasized)
         if (question.options.isNotEmpty()) {
             Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                 question.options.forEachIndexed { index, option ->

@@ -51,7 +51,13 @@ data class StoredPreferences(
     val legacyThreadListEnabled: Boolean = false,
     /** Environment ids whose "Reclaim … GiB" maintenance notice was dismissed. */
     val dismissedDatabaseStorageNotices: List<String> = emptyList(),
+    /** RN's `threadListFilters`: the home filters, restored on the next launch. */
+    val threadListFilters: StoredThreadListFilters? = null,
 )
+
+/** The home environment and project filters; null means "all". */
+@Serializable
+data class StoredThreadListFilters(val environmentId: String? = null, val projectKey: String? = null)
 
 /** One starred model: provider instance id plus model slug. */
 @Serializable

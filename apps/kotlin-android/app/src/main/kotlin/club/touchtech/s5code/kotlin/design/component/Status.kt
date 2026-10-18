@@ -8,6 +8,7 @@ import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.rounded.HourglassEmpty
 import androidx.compose.material.icons.rounded.PendingActions
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.RadioButtonChecked
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
@@ -119,9 +120,10 @@ fun statusPresentation(status: ThreadStatus): S5StatusPresentation {
                 Icons.Rounded.Schedule,
                 S5PillShape,
             )
+        // Muted, with RN Android's circle-dot (`circle.dashed.inset.filled`).
         ThreadStatus.Waiting ->
-            S5StatusPresentation("Waiting", colors.inputContainer, colors.onInputContainer, colors.input,
-                colors.onInput, Icons.Rounded.HourglassEmpty, S5PillShape)
+            S5StatusPresentation("Waiting", colors.settledContainer, colors.onSettledContainer, colors.settled,
+                colors.onSettled, Icons.Rounded.RadioButtonChecked, S5PillShape)
         ThreadStatus.Idle ->
             S5StatusPresentation(
                 "Idle",

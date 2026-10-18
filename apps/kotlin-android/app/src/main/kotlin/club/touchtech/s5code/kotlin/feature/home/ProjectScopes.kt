@@ -17,6 +17,12 @@ import club.touchtech.s5code.kotlin.model.ThreadSummary
  * row, not two.
  */
 
+/**
+ * `SCRATCH_PROJECT_SCOPE_KEY`: every environment's "No project" is one home
+ * filter. A NUL reserves the key outside valid repository identities.
+ */
+const val SCRATCH_PROJECT_SCOPE_KEY = "\u0000no-project"
+
 /** One selectable row in the project picker: a logical project across machines. */
 data class ProjectScope(
     val key: String,
@@ -56,13 +62,19 @@ private fun repositoryScopedKey(project: Project, mode: ProjectGrouping): String
     // The grouping key, not the canonical one: a checkout whose remote names a
     // fork stays in its own scope (`repositoryGroupingKeyOf` in the contracts,
     // upstream fix 017c9a0eb5 — forks must not merge into upstream's group).
-    val canonicalKey = project.repositoryIdentity?.groupingCanonicalKey ?: return null
+    val canonicalKey =
+        project.repositoryIdentity?.groupingCanonicalKey?.takeUnless { '\u0000' in it } ?: return null
     if (mode == ProjectGrouping.Repository) return canonicalKey
     val relativePath = repositoryRelativePath(project) ?: return canonicalKey
     return if (relativePath.isEmpty()) canonicalKey else "$canonicalKey::$relativePath"
 }
 
-private fun logicalProjectKey(project: Project, mode: ProjectGrouping): String {
+private fun logicalProjectKey(
+    project: Project,
+    mode: ProjectGrouping,
+    groupScratchProjects: Boolean = false,
+): String {
+    if (groupScratchProjects && project.isScratch) return SCRATCH_PROJECT_SCOPE_KEY
     if (mode == ProjectGrouping.Separate) return physicalProjectKey(project)
     return repositoryScopedKey(project, mode)
         ?: physicalProjectKey(project)
@@ -102,10 +114,13 @@ private fun selectIdentitySource(projects: List<Project>, winner: Project): Proj
 /**
  * `buildProjectGroups`: physical dedup, then logical merge on the mode.
  * Member order follows input order; the representative is the first member.
+ * [groupScratchProjects] merges every environment's scratch project into one
+ * scope — a filter equivalence, so only the home filter asks for it.
  */
 fun buildProjectScopes(
     projects: List<Project>,
     grouping: ProjectGrouping,
+    groupScratchProjects: Boolean = false,
 ): List<ProjectScope> {
     val byPhysicalKey = LinkedHashMap<String, MutableList<Project>>()
     for (project in projects) {
@@ -117,7 +132,7 @@ fun buildProjectScopes(
             if (shouldReplaceWinner(current, candidate)) candidate else current
         }
         val identitySource = selectIdentitySource(physicalProjects, winner)
-        grouped.getOrPut(logicalProjectKey(identitySource, grouping)) { mutableListOf() }
+        grouped.getOrPut(logicalProjectKey(identitySource, grouping, groupScratchProjects)) { mutableListOf() }
             .add(winner)
     }
     return grouped.map { (key, members) ->
@@ -131,6 +146,35 @@ fun buildProjectScopes(
             projects = members,
         )
     }
+}
+
+/** `buildHomeProjectScopes`: the home filter's options, limited to the selected environment. */
+fun homeProjectScopes(
+    projects: List<Project>,
+    environmentId: String?,
+    grouping: ProjectGrouping,
+): List<ProjectScope> =
+    buildProjectScopes(
+        projects.filter { environmentId == null || it.environmentId.value == environmentId },
+        grouping,
+        groupScratchProjects = true,
+    )
+
+/**
+ * `resolveScratchProjectScopeKey`: a filter saved under a scratch project's own
+ * key, before its environment config identified it as scratch, moves to the
+ * merged "No project" key. Any other key is returned unchanged.
+ */
+fun resolveScratchProjectScopeKey(key: String?, projects: List<Project>, grouping: ProjectGrouping): String? {
+    if (key == null || key == SCRATCH_PROJECT_SCOPE_KEY) return key
+    if (projects.any { logicalProjectKey(it, grouping, groupScratchProjects = true) == key }) return key
+    val scratchKey =
+        projects.any { project ->
+            project.isScratch &&
+                (physicalProjectKey(project) == key ||
+                    (grouping != ProjectGrouping.Separate && repositoryScopedKey(project, grouping) == key))
+        }
+    return if (scratchKey) SCRATCH_PROJECT_SCOPE_KEY else key
 }
 
 /** `getProjectScopeSelectionTarget`: the member on the draft's environment wins. */

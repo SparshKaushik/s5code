@@ -29,6 +29,16 @@ import kotlinx.serialization.json.*
 import java.io.File
 import java.util.UUID
 
+/** Taller apps scroll inside the inline view; full screen fills its own screen. */
+internal const val MCP_APP_INLINE_MAX_HEIGHT = 420
+private const val MCP_APP_MIN_HEIGHT = 80
+
+/** The inline row height for an app's reported content height, or null to keep the current one. */
+internal fun mcpAppInlineHeight(height: Double?): Int? {
+    if (height == null || !height.isFinite()) return null
+    return minOf(MCP_APP_INLINE_MAX_HEIGHT, Math.round(maxOf(MCP_APP_MIN_HEIGHT.toDouble(), height)).toInt())
+}
+
 private data class AppApproval(val title: String, val detail: String, val reply: CompletableDeferred<Boolean>)
 
 /** Hosts the captured document with the same MCP Apps protocol implementation as RN. */
@@ -46,6 +56,8 @@ fun McpAppView(store: AppStore, environmentId: EnvironmentId, conversationThread
     var url by remember(entry.id, attempt) { mutableStateOf<String?>(null) }
     var original by remember(entry.id, entry.revision) { mutableStateOf<JsonObject?>(null) }
     var webView by remember { mutableStateOf<WebView?>(null) }
+    // Inline follows the app's reported height; a new document starts at the cap.
+    var inlineHeight by remember(entry.id, entry.revision, attempt) { mutableIntStateOf(MCP_APP_INLINE_MAX_HEIGHT) }
     val secret = remember(entry.id, attempt, fullscreen) { UUID.randomUUID().toString() }
     suspend fun confirm(title: String, detail: String): Boolean = approvalLock.withLock {
         val request = AppApproval(title, detail, CompletableDeferred())
@@ -59,7 +71,8 @@ fun McpAppView(store: AppStore, environmentId: EnvironmentId, conversationThread
     LaunchedEffect(entry.id, attempt) {
         try {
             url = store.workspace.attachmentUrl(environmentId, entry.app.v2String("attachmentId")!!,
-                fileName = "${entry.app.v2String("tool")}.html", mimeType = "text/html", disposition = "inline")
+                fileName = "${entry.app.v2String("tool")}.html", mimeType = "text/html", disposition = "inline",
+                renderIntent = "mcp-app")
         } catch (cancelled: CancellationException) { throw cancelled }
         catch (failure: Exception) { error = failure.message ?: "The app could not be loaded." }
     }
@@ -146,6 +159,10 @@ fun McpAppView(store: AppStore, environmentId: EnvironmentId, conversationThread
                             }
                             JsonNull
                         }
+                        "sizeChanged" -> {
+                            if (!fullscreen) mcpAppInlineHeight(input["height"]?.jsonPrimitive?.doubleOrNull)?.let { inlineHeight = it }
+                            JsonNull
+                        }
                         "teardown" -> { closed = true; JsonNull }
                         "rendererGone" -> {
                             closed = true
@@ -177,7 +194,7 @@ fun McpAppView(store: AppStore, environmentId: EnvironmentId, conversationThread
         if (error != null) TextButton(onClick = { attempt += 1; closed = false }) { Text("Retry") }
         if (!closed && source != null && !fullscreen) {
             key(secret) { McpAppSurface(source, entry.app, secret, false, onMessage,
-                { webView = it }, Modifier.fillMaxWidth().height(320.dp)) }
+                { webView = it }, Modifier.fillMaxWidth().height(inlineHeight.dp)) }
         }
     }
     if (fullscreen && !closed && source != null) Dialog(onDismissRequest = { fullscreen = false },
@@ -219,11 +236,11 @@ private fun McpAppSurface(source: String, app: JsonObject, secret: String, fulls
             window.__t3AppResult=function(id,value,error){var p=pending.get(id);if(!p)return;pending.delete(id);error?p.reject(new Error(error)):p.resolve(value);};
             var host=T3McpAppHost.makeMcpAppHost({app:$safeApp,hostVersion:${JsonPrimitive(BuildConfig.VERSION_NAME)},
             post:function(m){if(live&&frame.contentWindow)frame.contentWindow.postMessage(m,'*');},
-            hostContext:function(){return {theme:'$theme',styles:{variables:{}},displayMode:'${if (fullscreen) "fullscreen" else "inline"}',availableDisplayModes:['inline','fullscreen'],containerDimensions:{width:innerWidth,height:innerHeight},platform:'mobile',deviceCapabilities:{touch:true,hover:false}};},
+            hostContext:function(){return {theme:'$theme',styles:{variables:{}},displayMode:'${if (fullscreen) "fullscreen" else "inline"}',availableDisplayModes:['inline','fullscreen'],containerDimensions:${if (fullscreen) "{width:innerWidth,height:innerHeight}" else "{width:innerWidth,maxHeight:$MCP_APP_INLINE_MAX_HEIGHT}"},platform:'mobile',deviceCapabilities:{touch:true,hover:false}};},
             callTool:function(i){return call('callTool',i);},readResource:function(i){return call('readResource',i);},
             updateModelContext:function(i){return call('updateModelContext',i);},openLink:function(url){return call('openLink',{url:url});},sendMessage:function(text){return call('sendMessage',{text:text});},
             requestDisplayMode:function(mode){return call('requestDisplayMode',{mode:mode});},downloadFile:function(files){return call('downloadFile',{files:files.map(function(f){if(f._tag!=='embedded')return f;var s='';f.bytes.forEach(function(b){s+=String.fromCharCode(b);});return {_tag:f._tag,name:f.name,mimeType:f.mimeType,base64:btoa(s)};})});},
-            onRequestTeardown:function(){post({operation:'teardown'});},onSizeChanged:function(){}});
+            onRequestTeardown:function(){post({operation:'teardown'});},onSizeChanged:function(s){if(s&&typeof s.height==='number')post({operation:'sizeChanged',input:{height:s.height}});}});
             window.__t3AppToolCall=function(item){host.toolCall({arguments:item.input,result:item.output});};
             frame.addEventListener('load',function(){loads++;if(loads>1){live=false;host.dispose();post({operation:'navigated'});}});
             window.addEventListener('message',function(e){if(live&&e.source===frame.contentWindow)host.receive(e.data);});

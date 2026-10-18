@@ -196,6 +196,7 @@ private fun ServerDaysRow(
     value: Int?,
     range: IntRange,
     allowClear: Boolean = false,
+    supporting: String? = null,
     onCommit: (Int?) -> Unit,
 ) {
     var draft by remember(value) { mutableStateOf<String?>(null) }
@@ -204,7 +205,16 @@ private fun ServerDaysRow(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
     ) {
-        Text(label, modifier = Modifier.weight(1f))
+        Column(Modifier.weight(1f)) {
+            Text(label)
+            supporting?.let {
+                Text(
+                    it,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+        }
         OutlinedTextField(
             value = draft ?: value?.toString().orEmpty(),
             onValueChange = { draft = it },
@@ -597,6 +607,7 @@ private fun resolvedWorktreeRules(
     return ServerStorageCleanupDto(
         worktreeKeepWhen = rules.v2String("worktreeKeepWhen") ?: storage.worktreeKeepWhen,
         worktreeAfterDays = (rules["worktreeAfterDays"] as? JsonPrimitive)?.intOrNull,
+        worktreeSettledAfterDays = (rules["worktreeSettledAfterDays"] as? JsonPrimitive)?.intOrNull,
         worktreeOnMerge =
             (rules["worktreeOnMerge"] as? JsonPrimitive)?.booleanOrNull
                 ?: storage.worktreeOnMerge,
@@ -680,6 +691,10 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
     val capable = rememberServerSettingsSync(store) { it.capabilities.storageCleanup }
     val settings = sync.reference?.serverSettings
     val cleanupCapable = capable.reference != null && capable.targets.size == sync.targets.size
+    // Web's StorageSettings gate: every connected machine must honor the rule.
+    val settledCapable =
+        sync.targets.isNotEmpty() && sync.targets.all { it.capabilities.settledWorktreeCleanup }
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
     S5Screen(title = "Maintenance", onBack = onBack) { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
@@ -750,6 +765,13 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
                                                         rules.worktreeAfterDays?.let(::JsonPrimitive)
                                                             ?: JsonNull,
                                                     )
+                                                    if (settledCapable) {
+                                                        put(
+                                                            "worktreeSettledAfterDays",
+                                                            rules.worktreeSettledAfterDays?.let(::JsonPrimitive)
+                                                                ?: JsonNull,
+                                                        )
+                                                    }
                                                 }
                                             }
                                         }
@@ -816,6 +838,29 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
                                 )
                             },
                         )
+                        if (settledCapable) {
+                            ServerDaysRow(
+                                label = "Delete settled worktrees (days)",
+                                value = rules.worktreeSettledAfterDays,
+                                range = 0..3650,
+                                allowClear = true,
+                                supporting =
+                                    "Remove worktrees this many days after their thread settles. " +
+                                        "Set 0 days to remove them at the next cleanup. Branches and " +
+                                        "thread history are kept." +
+                                        if (environments.size > sync.targets.size) {
+                                            " Offline machines will not get this setting."
+                                        } else {
+                                            ""
+                                        },
+                                onCommit = { days ->
+                                    writeWorktreePatch(
+                                        "worktreeSettledAfterDays",
+                                        days?.let(::JsonPrimitive) ?: JsonNull,
+                                    )
+                                },
+                            )
+                        }
                     }
                     S5RowGroup(title = "Storage cleanup") {
                         S5SwitchRow(

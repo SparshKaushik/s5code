@@ -287,6 +287,8 @@ data class ServerConfigSettingsDto(
     /** Server-side auto-settle defaults; `null` days means the idle sweep is off. */
     val sidebarAutoSettleOnMerge: Boolean = true,
     val sidebarAutoSettleAfterDays: Int? = 3,
+    /** Inactivity does not settle threads with a pull request (`threadAutoSettlementScope`). */
+    val sidebarAutoSettleKeepPullRequests: Boolean = false,
     /**
      * The user's "keep running turns across a server update" preference —
      * sent as `continueRunningThreads` when the server supports it.
@@ -375,6 +377,8 @@ data class ProviderModelPreferencesDto(
 data class ServerStorageCleanupDto(
     val worktreeKeepWhen: String = "uncommitted-changes",
     val worktreeAfterDays: Int? = null,
+    /** Days after a thread settles; 0 removes at the next cleanup (`settledWorktreeCleanup`). */
+    val worktreeSettledAfterDays: Int? = null,
     val worktreeOnMerge: Boolean = false,
     val worktreeOnDelete: Boolean = false,
     val worktreeUnchanged: Boolean = false,
@@ -402,6 +406,8 @@ data class ServerEnvironmentDto(
     val label: String = "",
     val platform: EnvironmentPlatformDto = EnvironmentPlatformDto(),
     val serverVersion: String = "",
+    /** Absent on servers shipped before protocol negotiation, which speak protocol 1. */
+    val orchestrationProtocolVersion: Int? = null,
     val capabilities: ServerCapabilitiesDto = ServerCapabilitiesDto(),
 )
 
@@ -505,6 +511,10 @@ data class ServerCapabilitiesDto(
     val commandOutputStreaming: Boolean = false,
     /** `server.getDatabaseStorage` reports database size and reclaimable space. */
     val databaseStorage: Boolean = false,
+    /** `worktreeSettledAfterDays` cleanup rules are honored. */
+    val settledWorktreeCleanup: Boolean = false,
+    /** `sidebarAutoSettleKeepPullRequests` is honored by the inactivity settle. */
+    val threadAutoSettlementScope: Boolean = false,
 )
 
 /** `ServerInstallation`: one of `npx`/`pnpm-dlx`/`bunx`, or `npm-global` + `prefix`. */

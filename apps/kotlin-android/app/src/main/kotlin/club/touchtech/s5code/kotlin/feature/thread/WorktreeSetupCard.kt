@@ -43,6 +43,10 @@ import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.WorktreeSetupSnapshot
 import club.touchtech.s5code.kotlin.model.WorktreeSetupStage
 import kotlinx.coroutines.delay
+import androidx.compose.runtime.State
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.repeatOnLifecycle
 
 /**
  * The bootstrap worktree's progress, matching RN's `WorktreeSetupCard`: a
@@ -353,13 +357,20 @@ private fun elapsed(startMillis: Long?, endMillis: Long?, nowMillis: Long): Stri
 /**
  * A once-per-second clock while setup (or the turn it handed off to) is running.
  * Stopped setups render their recorded span and never tick — a finished card has
- * no reason to repaint.
+ * no reason to repaint. The clock also stands still while the screen is not
+ * started (app backgrounded or the thread hidden behind another route) and
+ * catches up as soon as it is visible again.
  */
 @Composable
-private fun setupClock(active: Boolean) =
-    produceState(System.currentTimeMillis(), active) {
-        while (active) {
-            delay(1_000)
-            value = System.currentTimeMillis()
+private fun setupClock(active: Boolean): State<Long> {
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
+    return produceState(System.currentTimeMillis(), active, lifecycle) {
+        if (!active) return@produceState
+        lifecycle.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            while (true) {
+                value = System.currentTimeMillis()
+                delay(1_000)
+            }
         }
     }
+}

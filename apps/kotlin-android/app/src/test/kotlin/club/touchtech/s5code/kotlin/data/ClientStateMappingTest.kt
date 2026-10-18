@@ -198,4 +198,20 @@ class ClientStateMappingTest {
     fun `an empty stored provider falls back to the default instance`() {
         assertEquals(ProviderInstance.Default, storedProvider("", ""))
     }
+
+    @Test
+    fun `saved home filters round-trip and clear to nothing`() {
+        val runtime = RuntimePreferences(homeEnvironmentId = "env-1", homeProjectKey = "\u0000no-project")
+        assertEquals(StoredThreadListFilters("env-1", "\u0000no-project"), runtime.toStored().threadListFilters)
+        assertEquals(runtime, runtime.toStored().toRuntime())
+        // Clearing both filters drops the record rather than storing two nulls.
+        assertEquals(null, RuntimePreferences().toStored().threadListFilters)
+    }
+
+    @Test
+    fun `a blank saved environment means all environments`() {
+        val stored = StoredPreferences(threadListFilters = StoredThreadListFilters(environmentId = " ", projectKey = ""))
+        assertEquals(null, stored.toRuntime().homeEnvironmentId)
+        assertEquals(null, stored.toRuntime().homeProjectKey)
+    }
 }

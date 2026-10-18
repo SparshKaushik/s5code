@@ -38,6 +38,7 @@ import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.Remote
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
+import club.touchtech.s5code.kotlin.design.component.rememberAttachmentImageModel
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5CodeBlock
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
@@ -181,6 +182,8 @@ fun AttachmentFileScreen(
                 }
             is Remote.Loaded ->
                 AttachmentBody(
+                    environmentId = environmentId,
+                    attachmentId = attachmentId,
                     kind = kind,
                     url = url.value,
                     name = name,
@@ -196,6 +199,8 @@ fun AttachmentFileScreen(
 
 @Composable
 private fun AttachmentBody(
+    environmentId: String,
+    attachmentId: String,
     kind: AttachmentPreviewKind,
     url: String,
     name: String,
@@ -206,7 +211,7 @@ private fun AttachmentBody(
     modifier: Modifier = Modifier,
 ) {
     when (kind) {
-        AttachmentPreviewKind.Image -> ZoomableAttachmentImage(url, name, modifier)
+        AttachmentPreviewKind.Image -> ZoomableAttachmentImage(environmentId, attachmentId, url, name, modifier)
         AttachmentPreviewKind.Markdown,
         AttachmentPreviewKind.Text ->
             AttachmentTextBody(
@@ -228,7 +233,13 @@ private fun AttachmentBody(
 
 /** Pinch/double-tap zoom, the same gestures the workspace image preview uses. */
 @Composable
-private fun ZoomableAttachmentImage(url: String, name: String, modifier: Modifier = Modifier) {
+private fun ZoomableAttachmentImage(
+    environmentId: String,
+    attachmentId: String,
+    url: String,
+    name: String,
+    modifier: Modifier = Modifier,
+) {
     var scale by remember(url) { mutableFloatStateOf(1f) }
     var offset by remember(url) { mutableStateOf(Offset.Zero) }
     Box(
@@ -255,7 +266,7 @@ private fun ZoomableAttachmentImage(url: String, name: String, modifier: Modifie
         contentAlignment = Alignment.Center,
     ) {
         AsyncImage(
-            model = url,
+            model = rememberAttachmentImageModel(environmentId, attachmentId, url),
             contentDescription = name,
             contentScale = ContentScale.Fit,
             modifier =

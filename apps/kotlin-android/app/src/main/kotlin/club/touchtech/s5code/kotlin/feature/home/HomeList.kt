@@ -23,6 +23,20 @@ import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
  * snoozed/settled shelves — so the list can be unit-tested without Compose and
  * the UI stays a dumb renderer.
  */
+/**
+ * A saved environment filter only applies while that environment is still
+ * saved (`useHomeListOptions` in RN); the saved choice itself is kept.
+ */
+fun HomeUiState.withAvailableEnvironment(environments: List<Environment>): HomeUiState =
+    if (environmentId == null || environments.any { it.id == environmentId }) this
+    else copy(environmentId = null)
+
+/** The project scope [HomeUiState.projectKey] selects, or null when none is available. */
+fun homeProjectFilterScope(projects: List<Project>, state: HomeUiState, grouping: ProjectGrouping): ProjectScope? {
+    val key = resolveScratchProjectScopeKey(state.projectKey, projects, grouping) ?: return null
+    return homeProjectScopes(projects, state.environmentId?.value, grouping).firstOrNull { it.key == key }
+}
+
 fun homeListItems(
     threads: List<ThreadSummary>,
     projects: List<Project>,
@@ -49,12 +63,16 @@ fun homeListItems(
     val serverMatchByThread =
         serverSearchMatches.associateBy { it.environmentId.value to it.threadId.value }
 
+    // A saved project whose environment is offline or filtered out stays selected
+    // but filters nothing, as RN does.
+    val projectRefs = homeProjectFilterScope(projects, state, grouping)
+        ?.projects?.mapTo(mutableSetOf()) { it.environmentId.value to it.id.value }
     val visible =
         threads
             .asSequence()
             .filter { thread -> state.environmentId == null || thread.environmentId == state.environmentId }
             .filter { thread ->
-                state.projectKey == null || thread.projectId.value == state.projectKey
+                projectRefs == null || (thread.environmentId.value to thread.projectId.value) in projectRefs
             }
             .filter { thread -> matchesFilter(thread, state.filter) }
             .filter { thread ->

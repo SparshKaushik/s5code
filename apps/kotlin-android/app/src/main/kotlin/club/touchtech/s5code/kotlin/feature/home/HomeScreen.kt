@@ -146,7 +146,8 @@ fun HomeScreen(
     val threads by store.workspace.threads.collectAsStateWithLifecycle()
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
-    val home by store.home.collectAsStateWithLifecycle()
+    val savedHome by store.home.collectAsStateWithLifecycle()
+    val home = remember(savedHome, environments) { savedHome.withAvailableEnvironment(environments) }
     val preferences by store.preferences.collectAsStateWithLifecycle()
     val threadDrafts by store.threadDrafts.collectAsStateWithLifecycle()
     val newTaskDraft by store.draft.collectAsStateWithLifecycle()
@@ -337,6 +338,16 @@ fun HomeScreen(
             )
         }
     val counts = remember(threads) { homeFilterCounts(threads) }
+    // `buildHomeProjectScopes`: one option per logical project in the selected
+    // environment, with every "No project" merged into one.
+    val projectScopes =
+        remember(projects, home.environmentId, preferences.projectGrouping) {
+            homeProjectScopes(projects, home.environmentId?.value, preferences.projectGrouping)
+        }
+    val selectedProjectScopeKey =
+        remember(projects, home, preferences.projectGrouping) {
+            homeProjectFilterScope(projects, home, preferences.projectGrouping)?.key
+        }
     // Swipe actions are capability-gated per environment, and a merged home draws
     // rows from several at once.
     val environmentsById = remember(environments) { environments.associateBy { it.id.value } }
@@ -500,7 +511,7 @@ fun HomeScreen(
                                 )
                             )
                         }
-                        if (projects.isNotEmpty()) {
+                        if (projectScopes.isNotEmpty()) {
                             add(
                                 S5MenuOption(
                                     id = "project",
@@ -510,15 +521,14 @@ fun HomeScreen(
                                             S5MenuOption(
                                                 id = "project:",
                                                 label = "All projects",
-                                                selected = home.projectKey == null,
+                                                selected = selectedProjectScopeKey == null,
                                             )
                                         ) +
-                                            projects.map { project ->
+                                            projectScopes.map { scope ->
                                                 S5MenuOption(
-                                                    id = "project:${project.id.value}",
-                                                    label = project.title,
-                                                    selected =
-                                                        home.projectKey == project.id.value,
+                                                    id = "project:${scope.key}",
+                                                    label = scope.title,
+                                                    selected = selectedProjectScopeKey == scope.key,
                                                 )
                                             },
                                 )

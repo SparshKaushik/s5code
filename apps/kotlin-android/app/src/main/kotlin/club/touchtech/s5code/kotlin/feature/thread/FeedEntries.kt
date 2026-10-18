@@ -32,6 +32,7 @@ import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.Build
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -51,6 +52,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.text.style.TextOverflow
@@ -59,15 +61,18 @@ import club.touchtech.s5code.kotlin.design.component.S5Card
 import club.touchtech.s5code.kotlin.design.component.S5CardTone
 import club.touchtech.s5code.kotlin.design.component.S5CodeBlock
 import club.touchtech.s5code.kotlin.design.component.S5ImageLightbox
+import club.touchtech.s5code.kotlin.design.component.rememberAttachmentImageModel
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5Markdown
+import club.touchtech.s5code.kotlin.design.component.S5StatusPill
 import coil3.compose.AsyncImage
 import club.touchtech.s5code.kotlin.data.CommandOutputView
 import club.touchtech.s5code.kotlin.data.SecretRequestAnswer
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
+import club.touchtech.s5code.kotlin.design.theme.S5PillShape
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentInlineCard
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentMessageSegment
@@ -95,6 +100,8 @@ fun FeedEntryRow(
     workspaceRoot: String? = null,
     onOpenFile: (String) -> Unit = {},
     resolveTranscriptAttachment: suspend (String) -> String? = { null },
+    /** Keys sent attachment images in the image cache; see [rememberAttachmentImageModel]. */
+    environmentId: String? = null,
     /** Opens a sent attachment in the viewer route — file chips only; images keep the lightbox. */
     onOpenAttachment: (SentAttachment) -> Unit = {},
     /**
@@ -153,7 +160,7 @@ fun FeedEntryRow(
             }
 
         is FeedEntry.UserMessage ->
-            UserBubble(entry, modifier, resolveTranscriptAttachment, onOpenAttachment)
+            UserBubble(entry, modifier, environmentId, resolveTranscriptAttachment, onOpenAttachment)
 
         is FeedEntry.AgentMessage ->
             AgentMessage(
@@ -162,6 +169,7 @@ fun FeedEntryRow(
                 modifier,
                 workspaceRoot,
                 onOpenFile,
+                environmentId,
                 resolveTranscriptAttachment,
                 onOpenAttachment,
             )
@@ -332,10 +340,12 @@ fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: 
 private fun UserBubble(
     entry: FeedEntry.UserMessage,
     modifier: Modifier,
+    environmentId: String?,
     resolveTranscriptAttachment: suspend (String) -> String?,
     onOpenAttachment: (SentAttachment) -> Unit,
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
+    var explainedBadge by remember(entry.id) { mutableStateOf<UserMessageIntentBadge?>(null) }
     Row(modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Surface(
             shape = MaterialTheme.shapes.largeIncreased,
@@ -384,6 +394,7 @@ private fun UserBubble(
                         entry.attachments.forEach { attachment ->
                             SentAttachmentThumbnail(
                                 attachment = attachment,
+                                environmentId = environmentId,
                                 resolveUrl = { resolveTranscriptAttachment(attachment.id) },
                                 onPreview = { url ->
                                     previewAttachment = attachment.copy(uri = url)
@@ -393,16 +404,49 @@ private fun UserBubble(
                         }
                     }
                 }
-                Text(
-                    entry.timeLabel,
-                    style = MaterialTheme.typography.labelSmall,
-                    modifier = Modifier.padding(top = S5Theme.spacing.tiny),
-                )
+                val intentBadge = remember(entry.inputIntent) { userMessageIntentBadge(entry.inputIntent) }
+                Row(
+                    Modifier.padding(top = S5Theme.spacing.tiny),
+                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    intentBadge?.let { badge ->
+                        val queued = badge.tone == UserMessageIntentTone.Queued
+                        S5StatusPill(
+                            label = badge.label,
+                            containerColor =
+                                if (queued) S5Theme.status.approvalContainer
+                                else S5Theme.status.workingContainer,
+                            contentColor =
+                                if (queued) S5Theme.status.onApprovalContainer
+                                else S5Theme.status.onWorkingContainer,
+                            modifier =
+                                Modifier.clip(S5PillShape)
+                                    .clickable(onClickLabel = "Explain message history") {
+                                        explainedBadge = badge
+                                    }
+                                    .semantics { contentDescription = badge.accessibilityLabel },
+                        )
+                    }
+                    Text(entry.timeLabel, style = MaterialTheme.typography.labelSmall)
+                }
             }
         }
     }
+    explainedBadge?.let { badge ->
+        AlertDialog(
+            onDismissRequest = { explainedBadge = null },
+            title = { Text("Message history") },
+            text = { Text(badge.explanation) },
+            confirmButton = { TextButton(onClick = { explainedBadge = null }) { Text("OK") } },
+        )
+    }
     S5ImageLightbox(
-        model = previewAttachment?.uri?.takeIf(String::isNotBlank),
+        model = rememberAttachmentImageModel(
+            environmentId,
+            previewAttachment?.id,
+            previewAttachment?.uri?.takeIf(String::isNotBlank),
+        ),
         contentDescription = previewAttachment?.name,
         imageKey = previewAttachment?.id,
         onDismiss = { previewAttachment = null },
@@ -416,6 +460,7 @@ private fun AgentMessage(
     modifier: Modifier,
     workspaceRoot: String?,
     onOpenFile: (String) -> Unit,
+    environmentId: String?,
     resolveTranscriptAttachment: suspend (String) -> String?,
     onOpenAttachment: (SentAttachment) -> Unit,
 ) {
@@ -439,6 +484,7 @@ private fun AgentMessage(
                 entry.attachments.forEach { attachment ->
                     SentAttachmentThumbnail(
                         attachment = attachment,
+                        environmentId = environmentId,
                         resolveUrl = { resolveTranscriptAttachment(attachment.id) },
                         onPreview = { url ->
                             previewAttachment = attachment.copy(uri = url)
@@ -470,7 +516,7 @@ private fun AgentMessage(
         }
     }
     S5ImageLightbox(
-        model = previewAttachment?.uri,
+        model = rememberAttachmentImageModel(environmentId, previewAttachment?.id, previewAttachment?.uri),
         contentDescription = previewAttachment?.name,
         imageKey = previewAttachment?.id,
         onDismiss = { previewAttachment = null },
@@ -485,6 +531,7 @@ private fun AgentMessage(
 @Composable
 private fun SentAttachmentThumbnail(
     attachment: ComposerAttachment,
+    environmentId: String?,
     resolveUrl: suspend () -> String?,
     onPreview: (String) -> Unit,
     onOpen: () -> Unit,
@@ -529,7 +576,7 @@ private fun SentAttachmentThumbnail(
             shape = MaterialTheme.shapes.small,
         ) {
             AsyncImage(
-                model = resolvedUrl,
+                model = rememberAttachmentImageModel(environmentId, attachment.id, resolvedUrl),
                 contentDescription = attachment.name,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.size(44.dp),

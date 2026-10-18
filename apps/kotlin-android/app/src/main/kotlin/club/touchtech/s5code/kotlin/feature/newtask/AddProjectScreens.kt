@@ -152,6 +152,7 @@ private fun environmentOptions(environments: List<Environment>): List<Environmen
                         }
                     ConnectionState.Connected -> "Connected"
                     ConnectionState.Offline, ConnectionState.Disabled -> "Offline"
+                    ConnectionState.Unsupported -> environment.lastError.ifBlank { "Client not supported" }
                     ConnectionState.AuthRequired ->
                         if (environment.lastError.isNotBlank()) {
                             "Connection failed. Reason: ${environment.lastError}"

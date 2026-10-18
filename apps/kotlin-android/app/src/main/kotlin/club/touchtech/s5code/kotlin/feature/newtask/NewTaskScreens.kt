@@ -164,7 +164,10 @@ private fun projectEmptyState(
         )
     }
     val offline = enabled.all { it.state == ConnectionState.Offline }
-    val error = enabled.firstOrNull { it.state == ConnectionState.AuthRequired }
+    val error =
+        enabled.firstOrNull {
+            it.state == ConnectionState.AuthRequired || it.state == ConnectionState.Unsupported
+        }
     val connecting =
         enabled.any {
             it.state == ConnectionState.Connecting || it.state == ConnectionState.Recovering
@@ -478,6 +481,18 @@ fun NewTaskDraftScreen(
     }
 
     val project = remember(projects, draft) { projects.firstOrNull { it.environmentId == draft.environmentId && it.id.value == draft.projectKey } }
+    // The picker names a project by its repository scope; a workspace inside it
+    // (e.g. apps/server) is titled by its folder, which is ambiguous on its own.
+    val projectLabel =
+        remember(projects, project, preferences.projectGrouping) {
+            project?.let { selected ->
+                buildProjectScopes(projects, preferences.projectGrouping)
+                    .firstOrNull { scope ->
+                        scope.projects.any { it.environmentId == selected.environmentId && it.id == selected.id }
+                    }
+                    ?.title ?: selected.title
+            }
+        }
     LaunchedEffect(project?.isScratch) {
         if (project?.isScratch == true) store.updateDraft { it.copy(workspaceMode = WorkspaceMode.CurrentCheckout, branch = "", worktreePath = null) }
     }
@@ -568,7 +583,7 @@ fun NewTaskDraftScreen(
     }
 
     S5Screen(
-        title = "New task",
+        title = "New thread",
         prominence = S5TopBarProminence.Section,
         onBack = onBack,
         bottomBar = {
@@ -806,7 +821,7 @@ fun NewTaskDraftScreen(
                 }
             }
             NewTaskHero(
-                projectTitle = project?.title ?: "a project",
+                projectTitle = projectLabel ?: "a project",
                 onProject = onProject,
                 environmentLabel = environment?.label ?: draft.environmentId.value,
                 environmentIcon =

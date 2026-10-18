@@ -110,6 +110,16 @@ fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
                 Icons.Rounded.Key,
                 offline = true,
             )
+        // RN's "unsupported" phase; the row shows the detail saying whether the
+        // app or the host needs the update.
+        ConnectionState.Unsupported ->
+            S5ConnectionPresentation(
+                "Client not supported",
+                colors.failedContainer,
+                colors.onFailedContainer,
+                Icons.Rounded.SyncProblem,
+                offline = true,
+            )
         // Deliberately not an error tone: off is a choice the user made, so the
         // row recedes to neutral surface colors rather than alarming.
         ConnectionState.Disabled ->

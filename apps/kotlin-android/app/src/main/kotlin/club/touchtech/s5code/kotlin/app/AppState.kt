@@ -395,6 +395,8 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 _home.value.copy(
                     snoozedExpanded = loaded.preferences.snoozedThreadsExpanded,
                     settledExpanded = loaded.preferences.settledThreadsExpanded,
+                    environmentId = _preferences.value.homeEnvironmentId?.let(::EnvironmentId),
+                    projectKey = _preferences.value.homeProjectKey,
                 )
             // Persist only after the restore has landed: saving before it would
             // write the empty defaults over the real file. The availability watch
@@ -738,10 +740,11 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         )
 
     /**
-     * Home UI state, mirroring the two shelf toggles into preferences so they
-     * survive process death. The rest of [HomeUiState] (query, filter, scope) is
-     * deliberately not persisted: reopening the app inside someone's stale search
-     * is worse than reopening on the full list.
+     * Home UI state, mirroring the two shelf toggles and the environment and
+     * project filters (RN's saved `threadListFilters`) into preferences so they
+     * survive process death. Query and status filter are deliberately not
+     * persisted: reopening the app inside someone's stale search is worse than
+     * reopening on the full list.
      */
     fun updateHome(transform: (HomeUiState) -> HomeUiState) {
         _home.update(transform)
@@ -749,6 +752,8 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             it.copy(
                 snoozedThreadsExpanded = _home.value.snoozedExpanded,
                 settledThreadsExpanded = _home.value.settledExpanded,
+                homeEnvironmentId = _home.value.environmentId?.value,
+                homeProjectKey = _home.value.projectKey,
             )
         }
     }

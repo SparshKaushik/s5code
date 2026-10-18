@@ -23,6 +23,8 @@ enum class ConnectionState {
     Recovering,
     Offline,
     AuthRequired,
+    /** The server speaks another orchestration protocol; `lastError` says what to update. */
+    Unsupported,
     /** Paired but switched off locally: no session exists and nothing is retried. */
     Disabled,
 }
@@ -184,6 +186,10 @@ data class EnvironmentCapabilities(
     val commandOutputStreaming: Boolean = false,
     /** `server.getDatabaseStorage` reports database size and reclaimable space. */
     val databaseStorage: Boolean = false,
+    /** `worktreeSettledAfterDays` cleanup rules are honored. */
+    val settledWorktreeCleanup: Boolean = false,
+    /** `sidebarAutoSettleKeepPullRequests` is honored by the inactivity settle. */
+    val threadAutoSettlementScope: Boolean = false,
 )
 
 /** `capabilities.fileAttachments` — the server's per-file upload ceiling. */

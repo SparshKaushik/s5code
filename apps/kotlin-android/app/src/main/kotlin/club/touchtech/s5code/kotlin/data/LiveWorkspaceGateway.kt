@@ -791,6 +791,7 @@ class LiveWorkspaceGateway(
                                     SessionPhase.Backoff -> ConnectionState.Recovering
                                     SessionPhase.Offline -> ConnectionState.Offline
                                     SessionPhase.Unauthorized -> ConnectionState.AuthRequired
+                                    SessionPhase.Unsupported -> ConnectionState.Unsupported
                                     SessionPhase.Idle -> ConnectionState.Offline
                                 }
                         },
@@ -853,6 +854,8 @@ class LiveWorkspaceGateway(
                                 state?.capabilities?.projectProviderInstanceOverrides == true,
                             commandOutputStreaming = state?.capabilities?.commandOutputStreaming == true,
                             databaseStorage = state?.capabilities?.databaseStorage == true,
+                            settledWorktreeCleanup = state?.capabilities?.settledWorktreeCleanup == true,
+                            threadAutoSettlementScope = state?.capabilities?.threadAutoSettlementScope == true,
                         ),
                     continueThreadsAfterServerUpdate =
                         state?.continueThreadsAfterServerUpdate == true,
@@ -2558,6 +2561,7 @@ class LiveWorkspaceGateway(
         fileName: String?,
         mimeType: String?,
         disposition: String?,
+        renderIntent: String?,
     ): String {
         val result =
             sessionFor(environmentId)
@@ -2572,6 +2576,7 @@ class LiveWorkspaceGateway(
                                 if (fileName != null) put("fileName", fileName)
                                 if (mimeType != null) put("mimeType", mimeType)
                                 if (disposition != null) put("disposition", disposition)
+                                if (renderIntent != null) put("renderIntent", renderIntent)
                             },
                         )
                     },

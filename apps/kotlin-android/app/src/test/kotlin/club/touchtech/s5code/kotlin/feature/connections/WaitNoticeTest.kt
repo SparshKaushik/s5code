@@ -100,6 +100,14 @@ class WaitNoticeTest {
     fun `stalled phases never spin`() {
         assertFalse(notice(ConnectionState.Offline)!!.spinning)
         assertFalse(notice(ConnectionState.AuthRequired)!!.spinning)
+        assertFalse(notice(ConnectionState.Unsupported)!!.spinning)
+    }
+
+    @Test
+    fun `an incompatible environment says the client is not supported`() {
+        val result = notice(ConnectionState.Unsupported)!!
+        assertEquals(WaitPhase.Unsupported, result.phase)
+        assertEquals("Client not supported", result.title)
     }
 
     @Test

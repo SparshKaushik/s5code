@@ -58,6 +58,11 @@ enum class SessionPhase {
     Offline,
     /** The token was rejected. Retrying will not help; re-pairing will. */
     Unauthorized,
+    /**
+     * The server speaks another orchestration protocol. Parked like
+     * [Unauthorized]: updating the app or the server is the fix.
+     */
+    Unsupported,
 }
 
 data class SessionState(
@@ -179,6 +184,10 @@ data class ServerCapabilities(
     val commandOutputStreaming: Boolean = false,
     /** `server.getDatabaseStorage` reports database size and reclaimable space. */
     val databaseStorage: Boolean = false,
+    /** `worktreeSettledAfterDays` cleanup rules are honored. */
+    val settledWorktreeCleanup: Boolean = false,
+    /** `sidebarAutoSettleKeepPullRequests` is honored by the inactivity settle. */
+    val threadAutoSettlementScope: Boolean = false,
 )
 
 /**
@@ -297,7 +306,8 @@ class EnvironmentSession(
         // the app regains foreground, because the account behind a relay token
         // may have been refreshed while the app was away. A still-dead token
         // just lands back on Unauthorized — one attempt, not a loop.
-        if (state.value.phase == SessionPhase.Unauthorized) {
+        // An unsupported server may have been updated while the app was away.
+        if (state.value.phase == SessionPhase.Unauthorized || state.value.phase == SessionPhase.Unsupported) {
             retryNow()
             return
         }
@@ -377,6 +387,11 @@ class EnvironmentSession(
             ) {
                 _state.value =
                     _state.value.copy(phase = SessionPhase.Unauthorized, lastError = failure.message)
+                return
+            }
+            if (failure is EnvironmentUnsupportedError) {
+                _state.value =
+                    _state.value.copy(phase = SessionPhase.Unsupported, lastError = failure.message)
                 return
             }
 
@@ -489,6 +504,10 @@ class EnvironmentSession(
         try {
             val descriptor = config.environment
             _label.value = descriptor.label.ifBlank { environment.label }
+            orchestrationProtocolCompatibilityError(
+                descriptor.orchestrationProtocolVersion,
+                _label.value,
+            )?.let { throw EnvironmentUnsupportedError(it) }
             _state.value =
                 SessionState(
                     phase = SessionPhase.Connected,
@@ -543,6 +562,8 @@ class EnvironmentSession(
                                 descriptor.capabilities.projectProviderInstanceOverrides,
                             commandOutputStreaming = descriptor.capabilities.commandOutputStreaming,
                             databaseStorage = descriptor.capabilities.databaseStorage,
+                            settledWorktreeCleanup = descriptor.capabilities.settledWorktreeCleanup,
+                            threadAutoSettlementScope = descriptor.capabilities.threadAutoSettlementScope,
                         ),
                     addProjectBaseDirectory = config.settings.addProjectBaseDirectory,
                     scratchWorkspaceRoot = config.scratchWorkspaceRoot,
@@ -1125,6 +1146,9 @@ class EnvironmentSession(
                 EnvironmentHttpErrorKind.Unauthorized,
                 state.value.lastError ?: "This environment needs to be paired again.",
             )
+        }
+        if (phase == SessionPhase.Unsupported) {
+            throw EnvironmentUnsupportedError(state.value.lastError ?: "Client not supported")
         }
         return withTimeout(AWAIT_CONNECTION_MS) { connection.first { it != null }!! }
     }

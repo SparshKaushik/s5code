@@ -314,14 +314,15 @@ class TurnFoldTest {
         // The bug this pins: the footer was only attached after a non-work row or
         // after a *folded* run, so a turn whose last rows were a short run of tool
         // calls got a trigger at the top and nothing at the bottom — exactly the
-        // long turn that needs one.
+        // long turn that needs one. The opening answer stays visible above the
+        // header, which sits on the first hidden row as in RN.
         val feed = listOf(prompt("u1"), answer("a1", "turn-1"), tool("t1", "turn-1"))
         val rows = presentFeed(feed, emptySet(), settled("turn-1"), setOf("turn-1"))
         assertEquals(
             listOf(
                 "u1",
-                "turn-fold:turn-1:header",
                 "a1",
+                "turn-fold:turn-1:header",
                 "work-toggle:work-group:t1",
                 "turn-fold:turn-1:footer",
             ),
@@ -344,8 +345,8 @@ class TurnFoldTest {
         assertEquals(
             listOf(
                 "u1",
-                "turn-fold:turn-1:header",
                 "a1",
+                "turn-fold:turn-1:header",
                 "work-toggle:work-group:t1",
                 "t1",
                 "t2",
@@ -359,8 +360,8 @@ class TurnFoldTest {
         assertEquals(
             listOf(
                 "u1",
-                "turn-fold:turn-1:header",
                 "a1",
+                "turn-fold:turn-1:header",
                 "work-toggle:work-group:t1",
                 "turn-fold:turn-1:footer",
             ),

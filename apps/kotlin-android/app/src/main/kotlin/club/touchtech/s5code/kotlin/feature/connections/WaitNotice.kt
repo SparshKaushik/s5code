@@ -28,6 +28,9 @@ enum class WaitPhase {
     /** The environment answered, but the pairing or token is no longer valid. */
     SignInNeeded,
 
+    /** The environment speaks another orchestration protocol; an update is needed. */
+    Unsupported,
+
     /** Connected, nothing loaded yet, waiting on the first snapshot. */
     Loading,
 }
@@ -46,7 +49,8 @@ data class WaitNotice(val phase: WaitPhase, val title: String, val detail: Strin
                 WaitPhase.Loading -> true
                 WaitPhase.Offline,
                 WaitPhase.Off,
-                WaitPhase.SignInNeeded -> false
+                WaitPhase.SignInNeeded,
+                WaitPhase.Unsupported -> false
             }
 }
 
@@ -156,6 +160,12 @@ fun waitNotice(
                 "$label needs sign-in again",
                 "Pair this device with $label to load the $resourceName.",
             )
+        ConnectionState.Unsupported ->
+            WaitNotice(
+                WaitPhase.Unsupported,
+                "Client not supported",
+                "Update the app or $label to load the $resourceName.",
+            )
         ConnectionState.Disabled ->
             WaitNotice(
                 WaitPhase.Off,
@@ -187,6 +197,7 @@ private val ConnectionState.waitRank: Int
             ConnectionState.Connecting -> 1
             ConnectionState.Recovering -> 2
             ConnectionState.AuthRequired -> 3
+            ConnectionState.Unsupported -> 3
             ConnectionState.Offline -> 4
             // Worst: a switched-off environment never explains a wait by itself.
             ConnectionState.Disabled -> 5

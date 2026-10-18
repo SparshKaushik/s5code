@@ -11,6 +11,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.Path
@@ -62,6 +63,7 @@ fun S5ProviderMark(
             ProviderMarkKind.Codex -> drawGeometry(CODEX, paths, tint)
             ProviderMarkKind.OpenCode -> drawOpenCodeMark(tint)
             ProviderMarkKind.Pi -> drawPiMark(paths)
+            ProviderMarkKind.Muse -> drawMuseMark(paths)
             ProviderMarkKind.Antigravity -> {
                 if (antigravityBitmap != null) {
                     drawImage(
@@ -77,7 +79,7 @@ fun S5ProviderMark(
     }
 }
 
-private enum class ProviderMarkKind { Claude, Cursor, Grok, OpenCode, Codex, Antigravity, Pi, Generic }
+private enum class ProviderMarkKind { Claude, Cursor, Grok, OpenCode, Codex, Antigravity, Pi, Muse, Generic }
 
 private fun providerMarkKind(driver: String): ProviderMarkKind =
     when (driver.lowercase()) {
@@ -88,6 +90,7 @@ private fun providerMarkKind(driver: String): ProviderMarkKind =
         "codex" -> ProviderMarkKind.Codex
         "antigravity" -> ProviderMarkKind.Antigravity
         "pi" -> ProviderMarkKind.Pi
+        "muse" -> ProviderMarkKind.Muse
         else -> ProviderMarkKind.Generic
     }
 
@@ -106,6 +109,7 @@ private fun geometryFor(kind: ProviderMarkKind): BrandGeometry? =
         ProviderMarkKind.Grok -> GROK
         ProviderMarkKind.Codex -> CODEX
         ProviderMarkKind.Pi -> PI
+        ProviderMarkKind.Muse -> MUSE
         else -> null
     }
 
@@ -144,6 +148,46 @@ private fun DrawScope.drawPiMark(paths: List<Path>) {
     withTransform({ scale(scale, scale, pivot = Offset.Zero) }) {
         drawRoundRect(Color.Black, size = Size(800f, 800f), cornerRadius = CornerRadius(160f))
         paths.forEach { drawPath(it, Color.White) }
+    }
+}
+
+/**
+ * Meta's blue mark from `packages/provider-muse/src/client.ts`: the same in
+ * both themes, with its two brand gradients in viewBox units.
+ */
+private fun DrawScope.drawMuseMark(paths: List<Path>) {
+    val scale = min(size.width / MUSE.viewportWidth, size.height / MUSE.viewportHeight)
+    val left = (size.width - MUSE.viewportWidth * scale) / 2f
+    val top = (size.height - MUSE.viewportHeight * scale) / 2f
+    withTransform({
+        translate(left, top)
+        scale(scale, scale, pivot = Offset.Zero)
+    }) {
+        paths.getOrNull(0)?.let { drawPath(it, Color(0xFF0081FB)) }
+        paths.getOrNull(1)?.let {
+            drawPath(
+                it,
+                Brush.linearGradient(
+                    0f to Color(0xFF0064E1),
+                    0.4f to Color(0xFF0064E1),
+                    0.83f to Color(0xFF0073EE),
+                    1f to Color(0xFF0082FB),
+                    start = Offset(61f, 117f),
+                    end = Offset(259f, 127f),
+                ),
+            )
+        }
+        paths.getOrNull(2)?.let {
+            drawPath(
+                it,
+                Brush.linearGradient(
+                    0f to Color(0xFF0082FB),
+                    1f to Color(0xFF0064E0),
+                    start = Offset(45f, 139f),
+                    end = Offset(45f, 66f),
+                ),
+            )
+        }
     }
 }
 
@@ -216,5 +260,16 @@ private val PI =
         listOf(
             "M165.29 165.29H517.36V400H400V517.36H282.65V634.72H165.29ZM282.65 282.65V400H400V282.65Z",
             "M517.36 400H634.72V634.72H517.36Z",
+        ),
+    )
+
+private val MUSE =
+    BrandGeometry(
+        287.56f,
+        191f,
+        listOf(
+            "m31.06,125.96c0,10.98 2.41,19.41 5.56,24.51 4.13,6.68 10.29,9.51 16.57,9.51 8.1,0 15.51-2.01 29.79-21.76 11.44-15.83 24.92-38.05 33.99-51.98l15.36-23.6c10.67-16.39 23.02-34.61 37.18-46.96 11.56-10.08 24.03-15.68 36.58-15.68 21.07,0 41.14,12.21 56.5,35.11 16.81,25.08 24.97,56.67 24.97,89.27 0,19.38-3.82,33.62-10.32,44.87-6.28,10.88-18.52,21.75-39.11,21.75l0-31.02c17.63,0 22.03-16.2 22.03-34.74 0-26.42-6.16-55.74-19.73-76.69-9.63-14.86-22.11-23.94-35.84-23.94-14.85,0-26.8,11.2-40.23,31.17-7.14,10.61-14.47,23.54-22.7,38.13l-9.06,16.05c-18.2,32.27-22.81,39.62-31.91,51.75-15.95,21.24-29.57,29.29-47.5,29.29-21.27,0-34.72-9.21-43.05-23.09-6.8-11.31-10.14-26.15-10.14-43.06z",
+            "m24.49,37.3c14.24-21.95 34.79-37.3 58.36-37.3 13.65,0 27.22,4.04 41.39,15.61 15.5,12.65 32.02,33.48 52.63,67.81l7.39,12.32c17.84,29.72 27.99,45.01 33.93,52.22 7.64,9.26 12.99,12.02 19.94,12.02 17.63,0 22.03-16.2 22.03-34.74l27.4-.86c0,19.38-3.82,33.62-10.32,44.87-6.28,10.88-18.52,21.75-39.11,21.75-12.8,0-24.14-2.78-36.68-14.61-9.64-9.08-20.91-25.21-29.58-39.71l-25.79-43.08c-12.94-21.62-24.81-37.74-31.68-45.04-7.39-7.85-16.89-17.33-32.05-17.33-12.27,0-22.69,8.61-31.41,21.78z",
+            "m82.35,31.23c-12.27,0-22.69,8.61-31.41,21.78-12.33,18.61-19.88,46.33-19.88,72.95 0,10.98 2.41,19.41 5.56,24.51l-26.48,17.44c-6.8-11.31-10.14-26.15-10.14-43.06 0-30.75 8.44-62.8 24.49-87.55 14.24-21.95 34.79-37.3 58.36-37.3z",
         ),
     )

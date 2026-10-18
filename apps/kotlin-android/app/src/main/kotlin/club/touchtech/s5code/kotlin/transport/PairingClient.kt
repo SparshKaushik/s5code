@@ -29,6 +29,9 @@ class PairingClient(
 
     suspend fun pair(target: PairingTarget): Paired {
         val descriptor = http.descriptor(target.httpBaseUrl)
+        // Checked before redeeming the one-time code, so a link to an
+        // incompatible server is not spent.
+        pairingBlockedByProtocol(descriptor)?.let { throw EnvironmentUnsupportedError(it) }
         val token =
             http.exchangePairingCredential(
                     httpBaseUrl = target.httpBaseUrl,

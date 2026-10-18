@@ -444,7 +444,17 @@ fun formatLimitDuration(ms: Long): String {
 }
 
 /** `formatResetsIn`: `resets in 2h 13m`, or null without a reset. */
-fun formatResetsIn(window: UsageLimitWindow, now: Long): String? {
-    val resetsAt = resetMillis(window) ?: return null
-    return if (resetsAt <= now) "resets now" else "resets in ${formatLimitDuration(resetsAt - now)}"
-}
+fun formatResetsIn(window: UsageLimitWindow, now: Long): String? =
+    resetMillis(window)?.let { formatResetLabel(it, now) }
+
+/**
+ * The reset wording for one instant. Inside the final minute the countdown
+ * would read "resets in 0m", so it says "Resets momentarily" until the reset
+ * passes, then "resets now".
+ */
+fun formatResetLabel(resetsAt: Long, now: Long): String =
+    when {
+        resetsAt <= now -> "resets now"
+        resetsAt - now < MINUTE_MS -> "Resets momentarily"
+        else -> "resets in ${formatLimitDuration(resetsAt - now)}"
+    }

@@ -1233,6 +1233,7 @@ fun ThreadScreen(
                                     onOpenFile = { path ->
                                         onOpen("${club.touchtech.s5code.kotlin.app.Routes.fileRouteSuffix(path)}?path=${android.net.Uri.encode(path)}")
                                     },
+                                    environmentId = environmentId,
                                     resolveTranscriptAttachment = { attachmentId ->
                                         runCatching { store.workspace.attachmentUrl(env, attachmentId) }
                                             .onFailure {

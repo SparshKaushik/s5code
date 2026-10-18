@@ -31,6 +31,7 @@ import androidx.compose.ui.unit.dp
 import androidx.core.graphics.toColorInt
 import club.touchtech.s5code.kotlin.data.displayLimitWindows
 import club.touchtech.s5code.kotlin.data.formatLimitDuration
+import club.touchtech.s5code.kotlin.data.formatResetLabel
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.LimitAccount
 import club.touchtech.s5code.kotlin.model.LimitPool
@@ -167,9 +168,7 @@ private fun LimitWindowCard(
                     window.pace?.let { PACE_LABELS[it] },
                     window.resets.firstOrNull { it.restoresPercent > 0 }?.let { reset ->
                         val member = window.members.firstOrNull { it.first.key == reset.accountKey }
-                        val when_ =
-                            if (reset.atMillis <= now) "resets now"
-                            else "resets in ${formatLimitDuration(reset.atMillis - now)}"
+                        val when_ = formatResetLabel(reset.atMillis, now)
                         buildString {
                             member?.let { append("${accountName(it.first)} $when_") }
                                 ?: append(when_)

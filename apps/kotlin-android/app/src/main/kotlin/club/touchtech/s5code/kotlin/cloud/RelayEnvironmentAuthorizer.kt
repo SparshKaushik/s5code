@@ -60,6 +60,10 @@ class RelayEnvironmentAuthorizer(
                 "That tunnel is serving a different machine than the relay reported.",
             )
         }
+        club.touchtech.s5code.kotlin.transport.orchestrationProtocolCompatibilityError(
+            descriptor.orchestrationProtocolVersion,
+            descriptor.label,
+        )?.let { throw club.touchtech.s5code.kotlin.transport.EnvironmentUnsupportedError(it) }
 
         val access =
             http.exchangeProofBoundCredential(

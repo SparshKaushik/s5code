@@ -584,6 +584,8 @@ interface WorkspaceGateway {
         fileName: String? = null,
         mimeType: String? = null,
         disposition: String? = null,
+        /** `"mcp-app"` lets the server serve a saved MCP app with its host color scheme. */
+        renderIntent: String? = null,
     ): String
 
     /**

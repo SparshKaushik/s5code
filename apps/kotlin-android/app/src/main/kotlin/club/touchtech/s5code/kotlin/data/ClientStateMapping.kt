@@ -75,6 +75,8 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         followUpBehavior = if (followUpBehavior == "steer") "steer" else "queue",
         legacyThreadListEnabled = legacyThreadListEnabled,
         dismissedDatabaseStorageNotices = dismissedDatabaseStorageNotices,
+        homeEnvironmentId = threadListFilters?.environmentId?.takeIf(String::isNotBlank),
+        homeProjectKey = threadListFilters?.projectKey?.takeIf(String::isNotEmpty),
     )
 
 /**
@@ -117,6 +119,12 @@ data class RuntimePreferences(
     val legacyThreadListEnabled: Boolean = false,
     /** RN's `dismissedDatabaseStorageNotices`: environments whose compaction notice is hidden. */
     val dismissedDatabaseStorageNotices: List<String> = emptyList(),
+    /**
+     * RN's saved `threadListFilters`. A saved project whose environment is
+     * offline stays selected without effect rather than being cleared.
+     */
+    val homeEnvironmentId: String? = null,
+    val homeProjectKey: String? = null,
 )
 
 fun RuntimePreferences.toStored(): StoredPreferences =
@@ -147,6 +155,9 @@ fun RuntimePreferences.toStored(): StoredPreferences =
         planModeEnabled = planModeEnabled,
         legacyThreadListEnabled = legacyThreadListEnabled,
         dismissedDatabaseStorageNotices = dismissedDatabaseStorageNotices,
+        threadListFilters =
+            if (homeEnvironmentId == null && homeProjectKey == null) null
+            else StoredThreadListFilters(homeEnvironmentId, homeProjectKey),
     )
 
 fun ComposerAttachment.toStored(): StoredAttachment =

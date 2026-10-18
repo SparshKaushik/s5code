@@ -32,6 +32,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.core.net.toUri
 import coil3.compose.AsyncImage
+import club.touchtech.s5code.kotlin.data.attachmentImageRequest
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -58,6 +59,20 @@ fun S5AttachmentPreviewDialog(
         imageKey = attachment?.id,
         onDismiss = onDismiss,
     )
+}
+
+/**
+ * A signed attachment URL as an image model cached under the attachment id, so
+ * a re-signed URL after a reconnect does not download the image again. Without
+ * an environment (a local draft URI) the URL is the model.
+ */
+@Composable
+fun rememberAttachmentImageModel(environmentId: String?, attachmentId: String?, url: String?): Any? {
+    val context = LocalContext.current
+    return remember(environmentId, attachmentId, url) {
+        if (url == null || environmentId == null || attachmentId == null) url
+        else attachmentImageRequest(context, environmentId, attachmentId, url)
+    }
 }
 
 @Composable

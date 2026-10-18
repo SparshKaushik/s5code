@@ -10,11 +10,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.InlineTextContent
 import androidx.compose.foundation.text.appendInlineContent
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.WrapText
 import androidx.compose.material.icons.rounded.CheckBox
 import androidx.compose.material.icons.rounded.CheckBoxOutlineBlank
 import androidx.compose.material.icons.rounded.ContentCopy
@@ -123,12 +125,18 @@ private fun MarkdownBlock(
                 }
             }
 
-        is MdBlock.Code ->
+        is MdBlock.Code -> {
+            // Long lines scroll by default; the header's wrap button folds them
+            // in place, per block.
+            var wrap by remember(block) { mutableStateOf(false) }
             S5CodeBlock(
                 lines = block.lines,
                 language = block.language,
                 onCopy = onCopyCode?.let { copy -> { copy(block.lines.joinToString("\n")) } },
+                wrap = wrap,
+                onToggleWrap = { wrap = !wrap },
             )
+        }
 
         is MdBlock.Bullets ->
             Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny)) {
@@ -140,7 +148,11 @@ private fun MarkdownBlock(
                                     item.marker ?: "•",
                                     style = textStyle,
                                     color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    modifier = Modifier.width(24.dp),
+                                    // A minimum, not a fixed width: "10." and
+                                    // "100." would otherwise clip.
+                                    maxLines = 1,
+                                    softWrap = false,
+                                    modifier = Modifier.widthIn(min = 24.dp).padding(end = 4.dp),
                                 )
                             true ->
                                 Icon(
@@ -265,6 +277,8 @@ fun S5CodeBlock(
     language: String? = null,
     onCopy: (() -> Unit)? = null,
     wrap: Boolean = false,
+    /** Shows a wrap button in the header that flips [wrap]. */
+    onToggleWrap: (() -> Unit)? = null,
 ) {
     val scroll = rememberScrollState()
     val resolvedLanguage = remember(language) { codeLanguageOf(language) }
@@ -275,7 +289,7 @@ fun S5CodeBlock(
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
     ) {
         Column(Modifier.padding(S5Theme.spacing.small)) {
-            if (language != null || onCopy != null) {
+            if (language != null || onCopy != null || onToggleWrap != null) {
                 Row(
                     Modifier.fillMaxWidth().padding(bottom = S5Theme.spacing.tiny),
                     verticalAlignment = Alignment.CenterVertically,
@@ -287,6 +301,13 @@ fun S5CodeBlock(
                         modifier = Modifier.padding(start = S5Theme.spacing.small),
                     )
                     Box(Modifier.weight(1f))
+                    if (onToggleWrap != null) {
+                        S5IconButton(
+                            icon = Icons.AutoMirrored.Rounded.WrapText,
+                            label = if (wrap) "Don't wrap lines" else "Wrap lines",
+                            onClick = onToggleWrap,
+                        )
+                    }
                     if (onCopy != null) {
                         S5IconButton(
                             icon = Icons.Rounded.ContentCopy,

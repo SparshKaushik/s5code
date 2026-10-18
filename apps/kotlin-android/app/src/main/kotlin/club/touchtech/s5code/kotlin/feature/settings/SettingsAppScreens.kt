@@ -19,6 +19,7 @@ import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.automirrored.rounded.HelpOutline
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.Bedtime
@@ -236,6 +237,12 @@ fun SettingsThreadsScreen(store: AppStore, onBack: () -> Unit) {
                 }
             }
             if (autoSettleReference != null) {
+                // Web's `supportsAutoSettlementScope`: only offered when every
+                // connected machine honors it, and only while the idle sweep is on.
+                val keepPullRequestsRow =
+                    autoSettleReference.autoSettleAfterDays != null &&
+                        syncTargets.all { it.capabilities.threadAutoSettlementScope }
+                val autoSettleRows = if (keepPullRequestsRow) 3 else 2
                 S5RowGroup(title = "Auto-settle") {
                     S5SwitchRow(
                         icon = Icons.Rounded.CallSplit,
@@ -246,7 +253,7 @@ fun SettingsThreadsScreen(store: AppStore, onBack: () -> Unit) {
                                 buildJsonObject { put("sidebarAutoSettleOnMerge", enabled) }
                             )
                         },
-                        position = rowPosition(0, 2),
+                        position = rowPosition(0, autoSettleRows),
                     )
                     val afterDays = autoSettleReference.autoSettleAfterDays
                     S5SwitchRow(
@@ -266,8 +273,23 @@ fun SettingsThreadsScreen(store: AppStore, onBack: () -> Unit) {
                                 }
                             )
                         },
-                        position = rowPosition(1, 2),
+                        position = rowPosition(1, autoSettleRows),
                     )
+                    if (keepPullRequestsRow) {
+                        S5SwitchRow(
+                            icon = Icons.AutoMirrored.Rounded.CallMerge,
+                            label = "Keep threads with a PR",
+                            supporting =
+                                "Inactivity does not settle threads with a pull request. Merge and close still do.",
+                            checked = autoSettleReference.serverSettings.sidebarAutoSettleKeepPullRequests,
+                            onCheckedChange = { enabled ->
+                                writeAutoSettle(
+                                    buildJsonObject { put("sidebarAutoSettleKeepPullRequests", enabled) }
+                                )
+                            },
+                            position = rowPosition(2, autoSettleRows),
+                        )
+                    }
                 }
                 val afterDays = autoSettleReference.autoSettleAfterDays
                 if (afterDays != null) {
