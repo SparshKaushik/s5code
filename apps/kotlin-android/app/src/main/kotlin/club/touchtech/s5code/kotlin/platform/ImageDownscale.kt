@@ -3,7 +3,7 @@ package club.touchtech.s5code.kotlin.platform
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
-import android.media.ExifInterface
+import androidx.exifinterface.media.ExifInterface
 import club.touchtech.s5code.kotlin.data.downscalableImageMimeType
 import club.touchtech.s5code.kotlin.data.fitImageAttachmentSize
 import java.io.File

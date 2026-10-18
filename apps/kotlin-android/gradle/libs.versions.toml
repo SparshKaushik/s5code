@@ -13,6 +13,7 @@ navigationCompose = "2.9.8"
 lifecycle = "2.11.0"
 coreKtx = "1.19.0"
 graphicsShapes = "1.0.1"
+exifinterface = "1.4.2"
 kotlinxSerialization = "1.9.0"
 kotlinxCoroutines = "1.10.2"
 # OkHttp carries both the HTTP client and the WebSocket the RPC protocol runs
@@ -52,6 +53,7 @@ androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-p
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
 androidx-graphics-shapes = { group = "androidx.graphics", name = "graphics-shapes", version.ref = "graphicsShapes" }
+androidx-exifinterface = { group = "androidx.exifinterface", name = "exifinterface", version.ref = "exifinterface" }
 
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 compose-foundation = { group = "androidx.compose.foundation", name = "foundation" }
