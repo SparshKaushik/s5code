@@ -690,7 +690,6 @@ describe("DesktopUpdates", () => {
         const updates = yield* DesktopUpdates.DesktopUpdates;
         yield* updates.configure;
         assert.equal((yield* updates.getState).notAppliedVersion, "1.2.4");
-        // Kept, so the next start on 1.2.3 still knows 1.2.4 did not apply.
         assert.isDefined(harness.previousInstallRecord());
 
         harness.emit("update-available", { version: "1.2.4" });
@@ -766,9 +765,7 @@ describe("DesktopUpdates", () => {
         assert.isTrue(result.accepted);
         assert.isFalse(yield* Ref.get(desktopState.quitting));
         assert.deepEqual(harness.installSteps, ["quitAndInstall", "startBackend"]);
-        // The restarted old backend must release its tunnel on a later quit.
         assert.equal(harness.updateRestartMarkers.size, 0);
-        // The app never quit, so the next start must not report an unapplied install.
         assert.equal(harness.installRecords.size, 0);
       }),
     ).pipe(Effect.provide(Layer.merge(TestClock.layer(), harness.layer)));
@@ -847,7 +844,7 @@ describe("DesktopUpdates", () => {
     const downloadedFile = "/tmp/S5-Code-1.2.4-arm64.zip";
     const harness = makeHarness({
       squirrelCompatibleSignature: false,
-      appPath: "/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar",
+      appPath: "/Applications/S5 Code (Beta).app/Contents/Resources/app.asar",
       downloadUpdate: Effect.succeed([downloadedFile]),
     });
 
@@ -870,7 +867,7 @@ describe("DesktopUpdates", () => {
         assert.deepEqual(harness.bundleReplaceCalls(), [
           {
             downloadedZipPath: downloadedFile,
-            appPath: "/Applications/S5 Code (Alpha).app",
+            appPath: "/Applications/S5 Code (Beta).app",
           },
         ]);
       }),
@@ -880,7 +877,7 @@ describe("DesktopUpdates", () => {
   it.effect("replaces the app bundle for unsigned macOS updates instead of using Squirrel", () => {
     const harness = makeHarness({
       squirrelCompatibleSignature: false,
-      appPath: "/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar",
+      appPath: "/Applications/S5 Code (Beta).app/Contents/Resources/app.asar",
     });
 
     return Effect.scoped(
@@ -901,7 +898,7 @@ describe("DesktopUpdates", () => {
         assert.deepEqual(harness.bundleReplaceCalls(), [
           {
             downloadedZipPath: "/tmp/S5-Code-1.2.4-arm64.zip",
-            appPath: "/Applications/S5 Code (Alpha).app",
+            appPath: "/Applications/S5 Code (Beta).app",
           },
         ]);
         assert.isTrue(yield* Ref.get(desktopState.quitting));
@@ -913,7 +910,7 @@ describe("DesktopUpdates", () => {
     const cause = new Error("replacement helper failed to start");
     const harness = makeHarness({
       squirrelCompatibleSignature: false,
-      appPath: "/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar",
+      appPath: "/Applications/S5 Code (Beta).app/Contents/Resources/app.asar",
       unsignedMacInstall: Effect.fail(
         new MacUnsignedUpdateInstall.MacUnsignedUpdateInstallError({
           operation: "replace",

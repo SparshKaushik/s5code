@@ -12,7 +12,7 @@ describe("isSquirrelCompatibleMacSignature", () => {
     assert.isFalse(
       isSquirrelCompatibleMacSignature(
         [
-          "Executable=/Applications/S5 Code (Alpha).app/Contents/MacOS/S5 Code (Alpha)",
+          "Executable=/Applications/S5 Code (Beta).app/Contents/MacOS/S5 Code (Beta)",
           "Identifier=club.touchtech.s5code",
           "Format=app bundle with Mach-O thin (arm64)",
           "Signature=adhoc",
@@ -57,8 +57,8 @@ describe("isSquirrelCompatibleMacSignature", () => {
 describe("findMacAppBundleName", () => {
   it("returns the only .app entry", () => {
     assert.equal(
-      findMacAppBundleName(["Contents", "S5 Code (Alpha).app", "README.txt"]),
-      "S5 Code (Alpha).app",
+      findMacAppBundleName(["Contents", "S5 Code (Beta).app", "README.txt"]),
+      "S5 Code (Beta).app",
     );
   });
 
@@ -74,22 +74,22 @@ describe("findMacAppBundleName", () => {
 describe("resolveMacAppBundlePath", () => {
   it("walks up from app.asar to the .app bundle", () => {
     assert.equal(
-      resolveMacAppBundlePath("/Applications/S5 Code (Alpha).app/Contents/Resources/app.asar"),
-      "/Applications/S5 Code (Alpha).app",
+      resolveMacAppBundlePath("/Applications/S5 Code (Beta).app/Contents/Resources/app.asar"),
+      "/Applications/S5 Code (Beta).app",
     );
   });
 
   it("walks up from the MacOS executable to the .app bundle", () => {
     assert.equal(
-      resolveMacAppBundlePath("/Applications/S5 Code (Alpha).app/Contents/MacOS/S5 Code (Alpha)"),
-      "/Applications/S5 Code (Alpha).app",
+      resolveMacAppBundlePath("/Applications/S5 Code (Beta).app/Contents/MacOS/S5 Code (Beta)"),
+      "/Applications/S5 Code (Beta).app",
     );
   });
 
   it("returns the path when it is already an app bundle", () => {
     assert.equal(
-      resolveMacAppBundlePath("/Applications/S5 Code (Alpha).app"),
-      "/Applications/S5 Code (Alpha).app",
+      resolveMacAppBundlePath("/Applications/S5 Code (Beta).app"),
+      "/Applications/S5 Code (Beta).app",
     );
   });
 
@@ -102,16 +102,16 @@ describe("macBundleReplaceShellScript", () => {
   it("waits for the captured pid then replaces and relaunches the app", () => {
     const script = macBundleReplaceShellScript({
       pid: 4242,
-      sourceAppPath: "/tmp/update's/S5 Code (Alpha).app",
-      destAppPath: "/Applications/S5 Code (Alpha).app",
+      sourceAppPath: "/tmp/update's/S5 Code (Beta).app",
+      destAppPath: "/Applications/S5 Code (Beta).app",
       cleanupPath: "/tmp/update's",
     });
 
     assert.include(script, "kill -0 4242");
-    assert.include(script, "mv '/Applications/S5 Code (Alpha).app' \"$backup\"");
-    assert.include(script, "ditto '/tmp/update'\\''s/S5 Code (Alpha).app'");
-    assert.include(script, "mv \"$backup\" '/Applications/S5 Code (Alpha).app'");
+    assert.include(script, "mv '/Applications/S5 Code (Beta).app' \"$backup\"");
+    assert.include(script, "ditto '/tmp/update'\\''s/S5 Code (Beta).app'");
+    assert.include(script, "mv \"$backup\" '/Applications/S5 Code (Beta).app'");
     assert.include(script, "rm -rf \"$backup\" '/tmp/update'\\''s'");
-    assert.include(script, "open '/Applications/S5 Code (Alpha).app'");
+    assert.include(script, "open '/Applications/S5 Code (Beta).app'");
   });
 });
