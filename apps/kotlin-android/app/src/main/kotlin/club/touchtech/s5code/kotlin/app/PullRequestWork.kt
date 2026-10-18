@@ -25,10 +25,13 @@ sealed interface PullRequestWorkDestination {
  * into the single new-task draft for something else. RN gives every task its
  * own draft, so it never has to ask.
  */
-fun AppStore.newTaskDraftWouldBeReplaced(pr: PullRequestDetailDto): Boolean {
-    val draft = draft.value
-    return draft.prompt.isNotBlank() && draft.pullRequestReference != pr.url
-}
+fun AppStore.newTaskDraftWouldBeReplaced(environmentId: String, pr: PullRequestDetailDto): Boolean =
+    newTaskDraftWouldBeReplaced(draft.value, environmentId, pr.url)
+
+/** Pure core of [AppStore.newTaskDraftWouldBeReplaced]; "same PR" matches [preparePullRequestWork]. */
+internal fun newTaskDraftWouldBeReplaced(draft: NewTaskDraft, environmentId: String, pullRequestUrl: String): Boolean =
+    draft.hasContent &&
+        !(draft.pullRequestReference == pullRequestUrl && draft.environmentId.value == environmentId)
 
 /**
  * `usePullRequestThreads.ask`: attaches [pr] as composer context (once per
@@ -89,7 +92,7 @@ fun AppStore.preparePullRequestWork(
         return PullRequestWorkDestination.Thread(environmentId, thread.id)
     }
     val key = "new-task"
-    updateDraft { current ->
+    updateDraft(setsPullRequest = true) { current ->
         // Continuing the same PR's draft keeps what was written; anything else starts over.
         val same = current.pullRequestReference == pr.url && current.environmentId.value == environmentId
         if (!same) pullRequestAgentPrompts.remove(key)

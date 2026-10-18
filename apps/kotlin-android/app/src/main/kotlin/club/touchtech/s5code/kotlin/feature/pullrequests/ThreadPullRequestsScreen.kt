@@ -60,6 +60,7 @@ import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ThreadDetail
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadPullRequestLink
+import club.touchtech.s5code.kotlin.model.ThreadStatus
 import club.touchtech.s5code.kotlin.transport.parseChangeRequestUrl
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.flowOf
@@ -96,11 +97,15 @@ fun ThreadPullRequestsScreen(
     val threads by store.workspace.threads.collectAsStateWithLifecycle()
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    // Archived and subagent threads are not in the live list, so a null
+    // summary also rules out starting a watch, as RN's thread checks do.
+    val summary = remember(threads, environmentId, threadId) { threads.firstOrNull { it.environmentId == env && it.id == id } }
     val project =
-        remember(threads, projects, environmentId, threadId) {
-            val projectId = threads.firstOrNull { it.environmentId == env && it.id == id }?.projectId
-            projects.firstOrNull { it.environmentId == env && it.id == projectId }
-        }
+        remember(summary, projects) { projects.firstOrNull { it.environmentId == env && it.id == summary?.projectId } }
+    // `useLinkedPullRequestActions`: every write needs `orchestration:operate`.
+    val canEdit = linkCapable && capabilities.sessionAllowsOperate
+    val canWatch = capabilities.threadPullRequestWatch && capabilities.sessionAllowsOperate
+    val canStartWatch = canWatch && summary != null && !summary.archived && summary.status != ThreadStatus.Settled
     var linkOpen by remember { mutableStateOf(false) }
     var linkInput by remember { mutableStateOf("") }
     var linking by remember { mutableStateOf(false) }
@@ -146,10 +151,8 @@ fun ThreadPullRequestsScreen(
 
     fun submitLink() {
         val result =
-            resolveLinkPullRequestInput(linkInput, pullRequestLinkProject(project?.repositoryIdentity)) { link ->
-                val key = "${link.host}/${link.repository}".lowercase()
-                projects.any { it.environmentId == env && it.repositoryIdentity?.canonicalKey?.lowercase() == key }
-            }
+            // RN's `hasProject: () => true`: a thread may follow any repository's PR.
+            resolveLinkPullRequestInput(linkInput, pullRequestLinkProject(project?.repositoryIdentity))
         when (result) {
             null -> confirmController.alert("Couldn't link this pull request", "Use a pull request URL, 123, or #123.")
             is PullRequestLinkInputResult.Error -> confirmController.alert("Couldn't link this pull request", result.message)
@@ -178,7 +181,7 @@ fun ThreadPullRequestsScreen(
         subtitle = if (lines.isEmpty()) "" else "$openCount open · ${lines.size} linked",
         onBack = onBack,
         actions = {
-            if (linkCapable) S5IconButton(icon = Icons.Rounded.Add, label = "Link pull request", onClick = { linkOpen = true })
+            if (canEdit) S5IconButton(icon = Icons.Rounded.Add, label = "Link pull request", onClick = { linkOpen = true })
         },
     ) { padding ->
         if (lines.isEmpty()) {
@@ -211,20 +214,23 @@ fun ThreadPullRequestsScreen(
                                         add(S5MenuOption("copy", "Copy link", Icons.Rounded.ContentCopy))
                                         add(S5MenuOption("browser", "Open in browser", Icons.AutoMirrored.Rounded.OpenInNew))
                                         val open = link.snapshot == null || link.snapshot.state == "open"
-                                        if (capabilities.threadPullRequestWatch && (open || link.watched)) {
+                                        // Stopping stays reachable on a closed PR; starting needs an open one.
+                                        if (if (link.watched) canWatch else (canStartWatch && open)) {
                                             add(
                                                 if (link.watched) S5MenuOption("watch", "Stop watching", Icons.Rounded.VisibilityOff)
                                                 else S5MenuOption("watch", "Watch for changes", Icons.Rounded.Visibility)
                                             )
                                         }
-                                        add(
-                                            S5MenuOption(
-                                                "unlink",
-                                                if (link.source == "stack") "Dismiss from thread" else "Unlink from thread",
-                                                Icons.Rounded.LinkOff,
-                                                destructive = true,
+                                        if (canEdit) {
+                                            add(
+                                                S5MenuOption(
+                                                    "unlink",
+                                                    if (link.source == "stack") "Dismiss from thread" else "Unlink from thread",
+                                                    Icons.Rounded.LinkOff,
+                                                    destructive = true,
+                                                )
                                             )
-                                        )
+                                        }
                                     },
                                 onSelect = { option ->
                                     when (option) {

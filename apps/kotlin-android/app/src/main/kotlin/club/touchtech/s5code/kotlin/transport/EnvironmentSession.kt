@@ -17,8 +17,11 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.ensureActive
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -386,7 +389,9 @@ class EnvironmentSession(
 
             val outcome = runCatching { connect(environment) }
             val failure = outcome.exceptionOrNull()
-            if (failure is CancellationException) throw failure
+            // Only this loop's own cancellation ends it; a cancellation that
+            // leaked out of a child is one more failed attempt.
+            if (failure is CancellationException) currentCoroutineContext().ensureActive()
 
             if (failure is EnvironmentHttpError &&
                 failure.kind == EnvironmentHttpErrorKind.Unauthorized
@@ -661,7 +666,7 @@ class EnvironmentSession(
         // the first config may take the synchronization bound on top of what
         // setup left, since a cold server with a large database answers slowly.
         val startedAt = System.currentTimeMillis()
-        val (authorized, opened) = withTimeout(ESTABLISHMENT_TIMEOUT_MS) {
+        val (authorized, opened) = withTransportTimeout(ESTABLISHMENT_TIMEOUT_MS, "Timed out connecting to the environment.") {
             val authorized = authorizer.authorize(environment)
             this@EnvironmentSession.authorized = authorized
             val socketUrl =
@@ -769,7 +774,10 @@ class EnvironmentSession(
         val config =
             try {
                 val setupLeft = (ESTABLISHMENT_TIMEOUT_MS - (System.currentTimeMillis() - startedAt)).coerceAtLeast(0)
-                withTimeout(setupLeft + SYNCHRONIZATION_TIMEOUT_MS) { firstConfig.await() }
+                withTransportTimeout(
+                    setupLeft + SYNCHRONIZATION_TIMEOUT_MS,
+                    "Timed out waiting for the environment to synchronize.",
+                ) { firstConfig.await() }
             } catch (failure: Throwable) {
                 // A timed-out, cancelled, or offline-aborted attempt must not
                 // leave a socket and config stream running detached.
@@ -1116,19 +1124,6 @@ class EnvironmentSession(
     }
 
     /**
-     * A one-shot server stream on the current connection. Unlike [subscribe] it
-     * does not resubscribe: it ends with the server's stream and fails on an RPC
-     * failure or a lost socket — for streams that finish on their own, like a
-     * command's output.
-     */
-    fun <T> streamOnce(method: String, payload: JsonElement, serializer: KSerializer<T>): Flow<T> =
-        kotlinx.coroutines.flow.flow {
-            val live = awaitConnection()
-            state.value.requireRpcPermissions(method, payload)
-            live.stream(method, payload).collect { emit(TransportJson.decodeFromJsonElement(serializer, it)) }
-        }
-
-    /**
      * Authenticated GET against the environment's HTTP API, using the credential
      * the current (or most recent) connection attempt minted. This is the
      * snapshot fast-path (`/api/orchestration/shell`, `/api/orchestration/
@@ -1174,7 +1169,9 @@ class EnvironmentSession(
         if (phase == SessionPhase.Unsupported) {
             throw EnvironmentUnsupportedError(state.value.lastError ?: "Client not supported")
         }
-        return withTimeout(AWAIT_CONNECTION_MS) { connection.first { it != null }!! }
+        return withTransportTimeout(AWAIT_CONNECTION_MS, "The environment is not connected.") {
+            connection.first { it != null }!!
+        }
     }
 
     internal companion object {
@@ -1230,6 +1227,24 @@ internal val TransportJson: Json = Json {
     coerceInputValues = true
     isLenient = true
 }
+
+/**
+ * [withTimeout] that fails with [RpcTransportClosed] instead of
+ * [TimeoutCancellationException]. A timeout is a transport failure, but as a
+ * `CancellationException` every `catch (CancellationException) { throw }` up
+ * the stack would mistake it for its own cancellation and quietly stop — a
+ * reconnect loop ending for good, a write vanishing without an error.
+ */
+internal suspend fun <T> withTransportTimeout(
+    millis: Long,
+    message: String,
+    block: suspend CoroutineScope.() -> T,
+): T =
+    try {
+        withTimeout(millis, block)
+    } catch (_: TimeoutCancellationException) {
+        throw RpcTransportClosed(message)
+    }
 
 internal suspend fun <T> RpcConnection.call(
     method: String,

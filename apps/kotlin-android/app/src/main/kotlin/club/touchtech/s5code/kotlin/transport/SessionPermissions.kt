@@ -34,6 +34,9 @@ internal const val MISSING_FILE_ACCESS_MESSAGE =
 /** Asset resources the host serves only to sessions holding `filesystem:read`. */
 private val HOST_FILE_ASSET_TAGS = setOf("workspace-file", "media-file", "draft-workspace-file")
 
+/** A request this session's grants refuse; retrying cannot help, pairing again can. */
+class RpcPermissionDenied(message: String) : IllegalStateException(message)
+
 /** Guard writes at the transport boundary so every entry point gets the same denial. */
 internal fun SessionState.requireRpcPermissions(method: String, payload: JsonElement) {
     // Unknown auth on an old server is left to that server's authorization.
@@ -43,7 +46,7 @@ internal fun SessionState.requireRpcPermissions(method: String, payload: JsonEle
     if (method == "assets.createUrl") {
         val tag = ((payload as? JsonObject)?.get("resource") as? JsonObject)?.get("_tag")
         val hostFile = (tag as? kotlinx.serialization.json.JsonPrimitive)?.content in HOST_FILE_ASSET_TAGS
-        if (hostFile && !grants("filesystem:read")) throw IllegalStateException(MISSING_FILE_ACCESS_MESSAGE)
+        if (hostFile && !grants("filesystem:read")) throw RpcPermissionDenied(MISSING_FILE_ACCESS_MESSAGE)
         return
     }
     val required = when (method) {
@@ -80,6 +83,6 @@ internal fun SessionState.requireRpcPermissions(method: String, payload: JsonEle
         else -> emptyList()
     }
     required.firstOrNull { !grants(it) }?.let {
-        throw IllegalStateException("This connection does not grant $it. Pair again with the required permission.")
+        throw RpcPermissionDenied("This connection does not grant $it. Pair again with the required permission.")
     }
 }

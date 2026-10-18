@@ -40,6 +40,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.data.PullRequestActivityFilter
 import club.touchtech.s5code.kotlin.data.PullRequestActivityKind
+import club.touchtech.s5code.kotlin.data.PullRequestTimeline
 import club.touchtech.s5code.kotlin.data.PullRequestTimelineEvent
 import club.touchtech.s5code.kotlin.data.filterPullRequestActivity
 import club.touchtech.s5code.kotlin.data.pullRequestTimeline
@@ -58,12 +59,21 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewThreadDto
 
 private const val COMMENT_COLLAPSED_HEIGHT = 240
 
+/** The Activity segment's filtered timeline, built by [pullRequestActivityView]. */
+class PullRequestActivityView(val hiddenCount: Int, val timeline: PullRequestTimeline)
+
+/** Filters and sorts [activity]; the screen remembers it per activity and filter, not per recomposition. */
+fun pullRequestActivityView(activity: PullRequestActivityDto, filter: PullRequestActivityFilter): PullRequestActivityView {
+    val filtered = filterPullRequestActivity(activity, filter)
+    return PullRequestActivityView(filtered.hiddenCount, pullRequestTimeline(filtered.activity, filter.newestFirst))
+}
+
 /**
  * The Activity segment: filter controls, then comments, discussions and
  * commits by date. A discussion opens its thread; a commit, its diff.
  */
 fun LazyListScope.pullRequestActivityItems(
-    activity: PullRequestActivityDto?,
+    activity: PullRequestActivityView?,
     filter: PullRequestActivityFilter,
     onFilterChange: (PullRequestActivityFilter) -> Unit,
     loading: Boolean,
@@ -87,9 +97,8 @@ fun LazyListScope.pullRequestActivityItems(
         }
         return
     }
-    val filtered = filterPullRequestActivity(activity, filter)
-    val timeline = pullRequestTimeline(filtered.activity, filter.newestFirst)
-    item(key = "activity-filters") { ActivityFilters(filter, filtered.hiddenCount, onFilterChange) }
+    val timeline = activity.timeline
+    item(key = "activity-filters") { ActivityFilters(filter, activity.hiddenCount, onFilterChange) }
     if (error != null) item(key = "activity-error") { S5Notice(icon = Icons.Rounded.CloudOff, text = error) }
     if (timeline.events.isEmpty()) {
         item(key = "activity-empty") {

@@ -49,4 +49,15 @@ class CodexDirectivesTest {
         assertEquals("my_file.kt", spans.single().text)
         assertEquals("src/my_file.kt", spans.single().link)
     }
+
+    @Test
+    fun `citation paths with parentheses and brackets stay whole`() {
+        val group = parseInline(renderCodexInlineDirectivesAsMarkdown(""":codex-file-citation{path="app/(marketing)/page.tsx"}"""))
+        assertEquals("page.tsx", group.single().text)
+        assertEquals("app/(marketing)/page.tsx", group.single().link)
+        val dynamic = parseInline(renderCodexInlineDirectivesAsMarkdown(""":codex-file-citation{path="pages/[id].tsx" line_range_start="3"} next"""))
+        assertEquals("[id].tsx", dynamic.first().text)
+        assertEquals("pages/[id].tsx#L3", dynamic.first().link)
+        assertEquals(" next", dynamic.last().text)
+    }
 }

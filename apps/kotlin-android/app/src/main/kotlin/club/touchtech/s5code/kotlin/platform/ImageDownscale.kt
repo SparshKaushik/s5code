@@ -16,6 +16,26 @@ private const val PHOTO_JPEG_QUALITY = 85
  * returns its new byte size. Null when the image fits, is another format, or
  * anything fails, so the caller keeps the original bytes.
  */
+/** Rotate by [degrees], then mirror horizontally when [mirror]: one EXIF orientation applied to pixels. */
+internal data class ExifTransform(val degrees: Float, val mirror: Boolean) {
+    companion object {
+        val Identity = ExifTransform(0f, false)
+    }
+}
+
+/** All eight EXIF orientations, including the mirrored ones front cameras write. */
+internal fun exifOrientationTransform(orientation: Int): ExifTransform =
+    when (orientation) {
+        ExifInterface.ORIENTATION_FLIP_HORIZONTAL -> ExifTransform(0f, true)
+        ExifInterface.ORIENTATION_ROTATE_180 -> ExifTransform(180f, false)
+        ExifInterface.ORIENTATION_FLIP_VERTICAL -> ExifTransform(180f, true)
+        ExifInterface.ORIENTATION_TRANSPOSE -> ExifTransform(90f, true)
+        ExifInterface.ORIENTATION_ROTATE_90 -> ExifTransform(90f, false)
+        ExifInterface.ORIENTATION_TRANSVERSE -> ExifTransform(270f, true)
+        ExifInterface.ORIENTATION_ROTATE_270 -> ExifTransform(270f, false)
+        else -> ExifTransform.Identity
+    }
+
 internal fun fitCachedImage(file: File, mimeType: String): Long? {
     val format = downscalableImageMimeType(mimeType) ?: return null
     val temp = File(file.parentFile, "${file.name}.fit")
@@ -23,20 +43,14 @@ internal fun fitCachedImage(file: File, mimeType: String): Long? {
         val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
         BitmapFactory.decodeFile(file.path, bounds)
         if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
-        // The re-encode drops EXIF, so the rotation it describes is applied to the pixels.
+        // The re-encode drops EXIF, so the rotation or mirroring it describes is applied to the pixels.
         val orientation =
             runCatching {
                     ExifInterface(file.path)
                         .getAttributeInt(ExifInterface.TAG_ORIENTATION, ExifInterface.ORIENTATION_NORMAL)
                 }
                 .getOrDefault(ExifInterface.ORIENTATION_NORMAL)
-        val degrees =
-            when (orientation) {
-                ExifInterface.ORIENTATION_ROTATE_90 -> 90f
-                ExifInterface.ORIENTATION_ROTATE_180 -> 180f
-                ExifInterface.ORIENTATION_ROTATE_270 -> 270f
-                else -> 0f
-            }
+        val transform = exifOrientationTransform(orientation)
         val (width, height) = fitImageAttachmentSize(bounds.outWidth, bounds.outHeight) ?: return null
         var sample = 1
         while (bounds.outWidth / (sample * 2) >= width && bounds.outHeight / (sample * 2) >= height) sample *= 2
@@ -44,13 +58,14 @@ internal fun fitCachedImage(file: File, mimeType: String): Long? {
             BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
                 ?: return null
         val scaled =
-            if (decoded.width == width && decoded.height == height && degrees == 0f) {
+            if (decoded.width == width && decoded.height == height && transform == ExifTransform.Identity) {
                 decoded
             } else {
                 val matrix =
                     Matrix().apply {
                         setScale(width.toFloat() / decoded.width, height.toFloat() / decoded.height)
-                        if (degrees != 0f) postRotate(degrees)
+                        if (transform.degrees != 0f) postRotate(transform.degrees)
+                        if (transform.mirror) postScale(-1f, 1f)
                     }
                 Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
             }

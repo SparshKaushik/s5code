@@ -202,4 +202,18 @@ class ThreadOutboxTest {
             creation = StoredQueuedThreadCreation("project-1", "main", newWorktree = true),
             threadId = ThreadId("pending-thread"),
         )
+
+    @Test
+    fun `a missing grant is handed back to the draft while a dropped socket retries`() {
+        assertFalse(
+            isTransientOutboxFailure(
+                club.touchtech.s5code.kotlin.transport.RpcPermissionDenied(
+                    "This connection does not grant source-control:write. Pair again with the required permission.",
+                )
+            )
+        )
+        assertTrue(isTransientOutboxFailure(club.touchtech.s5code.kotlin.transport.RpcTransportClosed("The environment is not connected.")))
+        assertTrue(isTransientOutboxFailure(IllegalStateException("network unreachable")))
+        assertFalse(isTransientOutboxFailure(IllegalStateException("The project for this pull request is no longer available.")))
+    }
 }

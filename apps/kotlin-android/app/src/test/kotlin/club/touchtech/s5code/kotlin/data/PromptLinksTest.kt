@@ -258,6 +258,18 @@ class PromptLinksTest {
     }
 
     @Test
+    fun `a new-task link asks before replacing any draft content, prompt or not`() {
+        assertEquals(LinkedDraftAction.Fill, linkedNewTaskDraftAction(" ", hasOtherContent = false, prompt = null))
+        assertEquals(LinkedDraftAction.Fill, linkedNewTaskDraftAction("", hasOtherContent = false, prompt = "Do it"))
+        assertEquals(LinkedDraftAction.Keep, linkedNewTaskDraftAction("Do it", hasOtherContent = false, prompt = "Do it"))
+        // A pr= link without a prompt would still retarget the typed draft.
+        assertEquals(LinkedDraftAction.Ask, linkedNewTaskDraftAction("My notes", hasOtherContent = false, prompt = null))
+        // Attachments or context records alone count as content.
+        assertEquals(LinkedDraftAction.Ask, linkedNewTaskDraftAction("", hasOtherContent = true, prompt = null))
+        assertEquals(LinkedDraftAction.Ask, linkedNewTaskDraftAction("Do it", hasOtherContent = true, prompt = "Do it"))
+    }
+
+    @Test
     fun `prefers the most recently active machine that offers threads without a project`() {
         val (a, b, c) = listOf("a", "b", "c").map(::EnvironmentId)
         assertEquals(b, promptLinkScratchEnvironmentId(listOf(a, b, c), listOf(c, b)))

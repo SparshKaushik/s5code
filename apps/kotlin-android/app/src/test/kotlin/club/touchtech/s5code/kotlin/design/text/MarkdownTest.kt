@@ -173,6 +173,13 @@ class MarkdownTest {
     }
 
     @Test
+    fun `bare link destinations keep balanced parentheses`() {
+        val spans = parseInline("see [docs](https://e.dev/a_(b)) now")
+        assertEquals("https://e.dev/a_(b)", spans.single { it.text == "docs" }.link)
+        assertEquals(" now", spans.last().text)
+    }
+
+    @Test
     fun `unclosed markers stay literal`() {
         assertEquals("a * b", parseInline("a * b").joinToString("") { it.text })
         assertEquals("a ` b", parseInline("a ` b").joinToString("") { it.text })

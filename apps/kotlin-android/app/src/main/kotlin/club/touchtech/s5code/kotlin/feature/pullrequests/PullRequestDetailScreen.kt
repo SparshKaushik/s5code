@@ -236,6 +236,8 @@ fun PullRequestDetailScreen(
     var selectedSegment by rememberSaveable { mutableStateOf(PullRequestSegment.Overview) }
     val segment = selectedSegment.takeIf { it in segments } ?: PullRequestSegment.Overview
     var activityFilter by remember { mutableStateOf(PullRequestActivityFilter()) }
+    val activityView =
+        remember(activityQuery.value, activityFilter) { activityQuery.value?.let { pullRequestActivityView(it, activityFilter) } }
     var refreshing by remember { mutableStateOf(false) }
     fun refresh() {
         if (refreshing) return
@@ -415,7 +417,7 @@ fun PullRequestDetailScreen(
                                     }
                                 PullRequestSegment.Activity ->
                                     pullRequestActivityItems(
-                                        activity = activityQuery.value,
+                                        activity = activityView,
                                         filter = activityFilter,
                                         onFilterChange = { activityFilter = it },
                                         loading = !activityQuery.hasValue && (activityQuery.loading || online),

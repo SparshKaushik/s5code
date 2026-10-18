@@ -15,6 +15,7 @@ import club.touchtech.s5code.kotlin.data.PromptLinkModelSelection
 import club.touchtech.s5code.kotlin.data.PromptLinkRepository
 import club.touchtech.s5code.kotlin.data.PromptLinkResult
 import club.touchtech.s5code.kotlin.data.latestThreadEnvironmentIds
+import club.touchtech.s5code.kotlin.data.linkedNewTaskDraftAction
 import club.touchtech.s5code.kotlin.data.linkedThreadDraftAction
 import club.touchtech.s5code.kotlin.data.parseNewThreadLink
 import club.touchtech.s5code.kotlin.data.parseThreadLinkPrompt
@@ -165,17 +166,21 @@ private class PromptLinkResolver(
 
     /**
      * RN gives every linked task a fresh draft; this client keeps a single
-     * new-task draft, so text the user typed there is not replaced without
+     * new-task draft, so what the user put there is not replaced without
      * asking. "Keep mine" leaves the draft and the link both untouched.
      */
     private suspend fun mayReplaceNewTaskDraft(prompt: LinkedPrompt?): Boolean {
-        prompt ?: return true
-        if (linkedThreadDraftAction(store.draft.value.prompt, prompt.text) != LinkedDraftAction.Ask) {
-            return true
-        }
+        val draft = store.draft.value
+        val action =
+            linkedNewTaskDraftAction(
+                draft.prompt,
+                hasOtherContent = draft.attachments.isNotEmpty() || draft.contextRecords.isNotEmpty(),
+                prompt = prompt?.text,
+            )
+        if (action != LinkedDraftAction.Ask) return true
         return choose(
-            title = "Linked prompt ready. Replace draft?",
-            message = promptLinkNotice(prompt.hiddenCharacters),
+            title = if (prompt != null) "Linked prompt ready. Replace draft?" else "Replace your new task draft?",
+            message = prompt?.let { promptLinkNotice(it.hiddenCharacters) },
             confirmText = "Replace",
             cancelText = "Keep mine",
         ) == PromptLinkChoice.Confirm
@@ -211,14 +216,14 @@ private class PromptLinkResolver(
             }
         }
         val selection = modelSelection(project.environmentId, request)
-        store.updateDraft { draft ->
-            val prompt = request.prompt
+        // The caller asked before replacing anything, so this is a fresh draft.
+        store.updateDraft(setsPullRequest = true) { draft ->
             draft.copy(
                 environmentId = project.environmentId,
                 projectKey = project.id.value,
-                prompt = prompt?.text ?: draft.prompt,
-                attachments = if (prompt != null) emptyList() else draft.attachments,
-                contextRecords = if (prompt != null) emptyList() else draft.contextRecords,
+                prompt = request.prompt?.text.orEmpty(),
+                attachments = emptyList(),
+                contextRecords = emptyList(),
                 branch = branch,
                 workspaceMode = workspaceMode,
                 worktreePath = null,

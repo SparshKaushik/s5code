@@ -129,6 +129,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flowOf
@@ -140,6 +141,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.retryWhen
 import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.transformWhile
 import kotlinx.coroutines.flow.update
 import kotlin.coroutines.coroutineContext
 import kotlinx.coroutines.coroutineScope
@@ -984,9 +986,12 @@ class LiveWorkspaceGateway(
         return resolvePendingHandoff(source, selection, session.providers.value)
     }
 
-    /** `threadSettlement`: the server runs the inactivity settle itself. */
+    /**
+     * `threadAutoSettlement`: the server runs the inactivity settle itself.
+     * `threadSettlement` predates that — it only accepts settle commands.
+     */
     private fun serverSettles(environmentId: EnvironmentId): Boolean =
-        sessions.value[environmentId.value]?.session?.state?.value?.capabilities?.threadSettlement == true
+        sessions.value[environmentId.value]?.session?.state?.value?.capabilities?.threadAutoSettlement == true
 
     /**
      * [projectScoped] is the server's settings when it advertises
@@ -2166,8 +2171,12 @@ class LiveWorkspaceGateway(
     override fun commandOutput(environmentId: EnvironmentId, threadId: String, itemId: String): Flow<CommandOutputView> =
         flow {
             var view = CommandOutputView()
-            sessionFor(environmentId)
-                .streamOnce(
+            // Follows the connection like RN's subscription atom: a dropped
+            // socket resubscribes, and the server's first frame is a `replace`,
+            // so the rebuilt view never doubles output. Done once the command
+            // settles.
+            emitAll(sessionFor(environmentId)
+                .subscribe(
                     WsMethods.OrchestrationSubscribeCommandOutput,
                     buildJsonObject {
                         put("threadId", threadId)
@@ -2175,10 +2184,11 @@ class LiveWorkspaceGateway(
                     },
                     club.touchtech.s5code.kotlin.transport.wire.CommandOutputFrameDto.serializer(),
                 )
-                .collect { frame ->
+                .transformWhile { frame ->
                     view = applyCommandOutputFrame(view, frame)
                     emit(view)
-                }
+                    view.running
+                })
         }.flowOn(Dispatchers.Default)
 
     override fun databaseStorage(environmentId: EnvironmentId): Flow<club.touchtech.s5code.kotlin.transport.wire.DatabaseStorageStatusDto?> =

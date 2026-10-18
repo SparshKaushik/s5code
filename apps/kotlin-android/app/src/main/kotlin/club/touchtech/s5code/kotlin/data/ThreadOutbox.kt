@@ -9,6 +9,8 @@ import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.transport.RpcFailure
 import club.touchtech.s5code.kotlin.transport.RpcFailureKind
+import club.touchtech.s5code.kotlin.transport.RpcPermissionDenied
+import club.touchtech.s5code.kotlin.transport.RpcTransportClosed
 import java.io.File
 import java.time.Instant
 import java.util.UUID
@@ -70,6 +72,19 @@ internal fun duplicateCreationAcknowledgesDelivery(
     val detail = failure.message.lowercase()
     return "thread '${message.threadId.value.lowercase()}' already exists" in detail &&
         "cannot be created twice" in detail
+}
+
+/**
+ * Whether a failed drain should wait and retry rather than hand the message
+ * back to its draft. A permission refusal never heals by retrying, even though
+ * its wording ("This connection does not grant …") reads like a transport one.
+ */
+internal fun isTransientOutboxFailure(error: Throwable): Boolean {
+    if (error is RpcTransportClosed) return true
+    if (error is RpcPermissionDenied) return false
+    val message = error.message.orEmpty().lowercase()
+    return listOf("socket", "connection", "network", "timeout", "closed", "offline")
+        .any(message::contains)
 }
 
 internal fun isPendingCreationMissingThread(

@@ -49,6 +49,7 @@ import club.touchtech.s5code.kotlin.data.WorkspaceGateway
 import club.touchtech.s5code.kotlin.data.WorkspaceSnapshotStore
 import club.touchtech.s5code.kotlin.data.acceptComposerImages
 import club.touchtech.s5code.kotlin.data.duplicateCreationAcknowledgesDelivery
+import club.touchtech.s5code.kotlin.data.isTransientOutboxFailure
 import club.touchtech.s5code.kotlin.data.newQueuedThreadMessage
 import club.touchtech.s5code.kotlin.data.queuedCreationAlreadyExists
 import club.touchtech.s5code.kotlin.data.threadOutboxRetryDelayMillis
@@ -167,6 +168,18 @@ data class NewTaskDraft(
      */
     val cloning: Boolean = false,
 )
+
+/** Whether the draft holds anything the user would lose: text, attachments or `#` context. */
+val NewTaskDraft.hasContent: Boolean
+    get() = prompt.isNotBlank() || attachments.isNotEmpty() || contextRecords.isNotEmpty()
+
+/**
+ * The draft with its content and pull request checkout dropped, keeping the
+ * picked workspace and settings. A stale PR reference would otherwise check the
+ * next, unrelated task out into that PR's worktree.
+ */
+fun NewTaskDraft.discarded(): NewTaskDraft =
+    copy(prompt = "", attachments = emptyList(), contextRecords = emptyList(), pullRequestReference = null)
 
 /** Per-thread composer draft: prompt text plus its pending attachments. */
 @Immutable
@@ -835,11 +848,14 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     /**
      * A pull request checkout belongs to the workspace it was picked with:
      * choosing another project, branch or mode drops it, as RN replaces the
-     * whole `workspaceSelection`.
+     * whole `workspaceSelection`. A transform that picks the pull request
+     * itself passes [setsPullRequest], so pointing the draft at the same PR on
+     * another environment keeps it.
      */
-    fun updateDraft(transform: (NewTaskDraft) -> NewTaskDraft) =
+    fun updateDraft(setsPullRequest: Boolean = false, transform: (NewTaskDraft) -> NewTaskDraft) =
         _draft.update { current ->
             val next = transform(current)
+            if (setsPullRequest) return@update next
             val moved =
                 next.environmentId != current.environmentId ||
                     next.projectKey != current.projectKey ||
@@ -1017,9 +1033,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         outboxMutation.withLock {
             _outbox.update { current -> (current + durable).sortedBy { it.delivery.createdAt } }
         }
-        updateDraft {
-            it.copy(prompt = "", attachments = emptyList(), contextRecords = emptyList(), importedShareIds = emptyList())
-        }
+        updateDraft { it.discarded().copy(importedShareIds = emptyList()) }
         val project = workspace.projects.value.firstOrNull {
             it.environmentId == draft.environmentId && it.id.value == draft.projectKey
         }
@@ -1273,7 +1287,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
      */
     private fun restoreQueuedMessageToDraft(message: QueuedThreadMessage) {
         if (message.creation != null) {
-            updateDraft { draft ->
+            updateDraft(setsPullRequest = true) { draft ->
                 draft.copy(
                     environmentId = message.environmentId,
                     projectKey = message.creation.projectKey,
@@ -1350,13 +1364,6 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 message.delivery.messageId,
             )
         }
-    }
-
-    private fun isTransientOutboxFailure(error: Throwable): Boolean {
-        if (error is club.touchtech.s5code.kotlin.transport.RpcTransportClosed) return true
-        val message = error.message.orEmpty().lowercase()
-        return listOf("socket", "connection", "network", "timeout", "closed", "offline")
-            .any(message::contains)
     }
 
     /**

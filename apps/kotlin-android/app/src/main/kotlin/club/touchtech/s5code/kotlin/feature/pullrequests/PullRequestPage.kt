@@ -258,7 +258,7 @@ fun rememberPullRequestAgent(
                 busy = false
             }
         }
-        if (thread == null && store.newTaskDraftWouldBeReplaced(current)) {
+        if (thread == null && store.newTaskDraftWouldBeReplaced(environmentId, current)) {
             confirmController.show(
                 S5ConfirmDialogRequest(
                     title = "Replace your new task draft?",

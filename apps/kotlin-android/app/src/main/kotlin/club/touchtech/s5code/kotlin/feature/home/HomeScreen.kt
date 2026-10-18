@@ -70,6 +70,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.HomeTab
+import club.touchtech.s5code.kotlin.app.discarded
 import club.touchtech.s5code.kotlin.data.PullRequestReference
 import club.touchtech.s5code.kotlin.design.component.S5BottomTabs
 import club.touchtech.s5code.kotlin.design.component.S5Tab
@@ -820,9 +821,7 @@ private fun ThreadsHome(
                                     item = item,
                                     onClick = onResumeDraft,
                                     onDiscard = {
-                                        store.updateDraft {
-                                            it.copy(prompt = "", attachments = emptyList())
-                                        }
+                                        store.updateDraft { it.discarded() }
                                     },
                                 )
 

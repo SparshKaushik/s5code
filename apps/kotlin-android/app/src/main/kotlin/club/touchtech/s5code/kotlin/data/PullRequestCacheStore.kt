@@ -3,7 +3,10 @@ package club.touchtech.s5code.kotlin.data
 import android.content.Context
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.Serializable
@@ -35,6 +38,12 @@ class PullRequestCacheStore private constructor(
 
     data class Entry(val fetchedAt: Long, val value: JsonElement)
 
+    /** One writer at a time, so overlapping writes cannot interleave or reorder. */
+    private val writes = Mutex()
+
+    /** Newest `fetchedAt` written per file, so a slower, older fetch never overwrites a newer one. */
+    private val writtenAt = HashMap<String, Long>()
+
     suspend fun read(environmentId: String, key: String): Entry? =
         withContext(Dispatchers.IO) {
             val file = File(File(root, safeName(environmentId)), safeName(key))
@@ -50,14 +59,19 @@ class PullRequestCacheStore private constructor(
         }
 
     suspend fun write(environmentId: String, key: String, fetchedAt: Long, value: JsonElement) {
-        withContext(Dispatchers.IO) {
-            val directory = File(root, safeName(environmentId))
-            writeAtomically(
-                File(directory, safeName(key)),
-                StoredEntry.serializer(),
-                StoredEntry(environmentId = environmentId, key = key, fetchedAt = fetchedAt, value = value),
-            )
-            prune(directory)
+        writes.withLock {
+            withContext(Dispatchers.IO) {
+                val directory = File(root, safeName(environmentId))
+                val file = File(directory, safeName(key))
+                if ((writtenAt[file.path] ?: Long.MIN_VALUE) > fetchedAt) return@withContext
+                writtenAt[file.path] = fetchedAt
+                writeAtomically(
+                    file,
+                    StoredEntry.serializer(),
+                    StoredEntry(environmentId = environmentId, key = key, fetchedAt = fetchedAt, value = value),
+                )
+                prune(directory)
+            }
         }
     }
 
@@ -69,7 +83,9 @@ class PullRequestCacheStore private constructor(
         }
 
     suspend fun writeListState(state: PullRequestListState) {
-        withContext(Dispatchers.IO) { writeAtomically(controlsFile, PullRequestListState.serializer(), state) }
+        writes.withLock {
+            withContext(Dispatchers.IO) { writeAtomically(controlsFile, PullRequestListState.serializer(), state) }
+        }
     }
 
     /** Pages a user scrolled long ago go first; each environment keeps its newest [MAX_ENTRIES]. */
@@ -81,10 +97,12 @@ class PullRequestCacheStore private constructor(
 
     private fun <T> writeAtomically(file: File, serializer: KSerializer<T>, value: T) {
         file.parentFile?.mkdirs()
-        val temporary = File(file.parentFile, "${file.name}.tmp")
-        temporary.writeText(json.encodeToString(serializer, value))
-        if (!temporary.renameTo(file)) {
-            file.writeText(temporary.readText())
+        // A unique name, so a write cannot rename another one's half-written file.
+        val temporary = File(file.parentFile, "${file.name}.${UUID.randomUUID()}.tmp")
+        try {
+            temporary.writeText(json.encodeToString(serializer, value))
+            if (!temporary.renameTo(file)) file.writeText(temporary.readText())
+        } finally {
             temporary.delete()
         }
     }

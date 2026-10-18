@@ -132,7 +132,7 @@ interface PullRequestGateway {
     /** Refetches the PR page's reads: detail, activity and stack. */
     suspend fun refresh(environmentId: String, reference: PullRequestReference)
 
-    /** Refetches only the detail, unless it is final (merged). */
+    /** Refetches only the detail; throws with a readable message when that fails. */
     suspend fun refreshDetail(environmentId: String, reference: PullRequestReference)
 
     /** The listing row a PR page can draw before its detail loads. */

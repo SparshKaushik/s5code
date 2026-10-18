@@ -27,6 +27,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
@@ -64,7 +65,8 @@ import kotlinx.serialization.json.putJsonArray
  * - each read has a TTL and refetches when a screen subscribes after it;
  * - `pullRequests.subscribeRefreshes` ticks refetch subscribed reads, and a
  *   moved revision marks unsubscribed ones stale;
- * - a merged PR is final, so its reads never refetch on their own;
+ * - reads nobody has watched for [IDLE_TTL_MS] drop from memory (the disk
+ *   copy stays), as upstream's writable families idle out after five minutes;
  * - persisted reads restore from disk first, and a failed refetch keeps the
  *   last value beside its error.
  *
@@ -89,7 +91,6 @@ class LivePullRequestGateway(
         val persist: Boolean,
         /** Refetch interval while subscribed; 0 for none. */
         val pollMs: Long = 0,
-        val isFinal: () -> Boolean = { false },
         val onValue: (T) -> Unit = {},
         val fetch: suspend (EnvironmentSession) -> T,
     ) {
@@ -99,6 +100,32 @@ class LivePullRequestGateway(
         var restored = false
         var revision: Int? = null
         var attemptedAt = 0L
+        private var eviction: Job? = null
+
+        /** The [entries] key, which is also the [pages] key of a list read. */
+        val mapKey: String get() = "$environmentId\u0000$key"
+
+        /**
+         * Drops the in-memory value once nobody has watched for [IDLE_TTL_MS].
+         * The entry itself stays mapped, so a flow a screen built earlier keeps
+         * observing the same entry that refreshes and writes update; its next
+         * subscriber restores from disk like a cold start.
+         */
+        private fun scheduleEviction() {
+            eviction?.cancel()
+            eviction =
+                scope.launch {
+                    delay(IDLE_TTL_MS)
+                    mutex.withLock {
+                        if (subscribers.get() > 0) return@withLock
+                        state.value = PullRequestQuery()
+                        restored = false
+                        revision = null
+                        attemptedAt = 0L
+                        pages.update { it - mapKey }
+                    }
+                }
+        }
 
         fun observe(): Flow<PullRequestQuery<T>> = flow {
             subscribers.incrementAndGet()
@@ -117,7 +144,7 @@ class LivePullRequestGateway(
                     state.collect { emit(it) }
                 }
             } finally {
-                subscribers.decrementAndGet()
+                if (subscribers.decrementAndGet() == 0) scheduleEviction()
             }
         }
     }
@@ -137,6 +164,9 @@ class LivePullRequestGateway(
     override val knownEnvironments: StateFlow<Set<String>> =
         listState.map { it.environments }.stateIn(scope, SharingStarted.Eagerly, emptySet())
 
+    /** Wakes the single list-state writer; conflated, so it always writes the latest state, in order. */
+    private val listStateChanged = Channel<Unit>(Channel.CONFLATED)
+
     init {
         scope.launch {
             val saved = cache.readListState()
@@ -148,13 +178,13 @@ class LivePullRequestGateway(
                     environments = saved.environments + held.environments,
                 )
             }
+            for (change in listStateChanged) runCatching { cache.writeListState(listState.value) }
         }
     }
 
     private fun updateListState(transform: (PullRequestListState) -> PullRequestListState) {
         listState.update(transform)
-        val snapshot = listState.value
-        scope.launch { runCatching { cache.writeListState(snapshot) } }
+        listStateChanged.trySend(Unit)
     }
 
     override fun setListControls(scope: String, controls: PullRequestListControls) =
@@ -316,7 +346,6 @@ class LivePullRequestGateway(
             serializer = PullRequestDetailDto.serializer(),
             tick = true,
             persist = true,
-            isFinal = { isMerged(environmentId, reference) },
         ) { it.request(WsMethods.PullRequestsDetail, reference.toJson(), PullRequestDetailDto.serializer()) }
 
     private fun activityEntry(environmentId: String, reference: PullRequestReference) =
@@ -327,7 +356,6 @@ class LivePullRequestGateway(
             serializer = PullRequestActivityDto.serializer(),
             tick = true,
             persist = true,
-            isFinal = { isMerged(environmentId, reference) },
         ) { it.request(WsMethods.PullRequestsActivity, reference.toJson(), PullRequestActivityDto.serializer()) }
 
     private fun stackEntry(environmentId: String, reference: PullRequestReference) =
@@ -338,7 +366,6 @@ class LivePullRequestGateway(
             serializer = PullRequestStackDto.serializer().nullable,
             tick = true,
             persist = true,
-            isFinal = { isMerged(environmentId, reference) },
         ) { it.request(WsMethods.PullRequestsStack, reference.toJson(), PullRequestStackDto.serializer().nullable) }
 
     override fun detail(environmentId: String, reference: PullRequestReference) =
@@ -462,8 +489,9 @@ class LivePullRequestGateway(
     }
 
     override suspend fun refreshDetail(environmentId: String, reference: PullRequestReference) {
-        val entry = detailEntry(environmentId, reference)
-        if (!entry.isFinal()) fetch(entry, force = true)
+        fetch(detailEntry(environmentId, reference), force = true)?.let {
+            throw IllegalStateException(pullRequestErrorMessage(it), it)
+        }
     }
 
     override fun summary(environmentId: String, reference: PullRequestReference): PullRequestListEntryDto? =
@@ -780,18 +808,12 @@ class LivePullRequestGateway(
         tick: Boolean,
         persist: Boolean,
         pollMs: Long = 0,
-        isFinal: () -> Boolean = { false },
         onValue: (T) -> Unit = {},
         fetch: suspend (EnvironmentSession) -> T,
     ): Entry<T> =
         entries.getOrPut("$environmentId\u0000$key") {
-            Entry(environmentId, key, ttlMs, serializer, tick, persist, pollMs, isFinal, onValue, fetch)
+            Entry(environmentId, key, ttlMs, serializer, tick, persist, pollMs, onValue, fetch)
         } as Entry<T>
-
-    private fun isMerged(environmentId: String, reference: PullRequestReference): Boolean {
-        val detail = entries["$environmentId\u0000detail:${reference.cacheKey}"]?.state?.value?.value
-        return (detail as? PullRequestDetailDto)?.state == "merged"
-    }
 
     private fun readySession(environmentId: String): EnvironmentSession? =
         workspace.session(environmentId)?.takeIf {
@@ -819,7 +841,6 @@ class LivePullRequestGateway(
                 ttlMs = entry.ttlMs,
                 fetchedRevision = entry.revision,
                 currentRevision = revisions[entry.environmentId],
-                final = current.hasValue && entry.isFinal(),
             )
         if (stale) fetch(entry)
     }
@@ -893,7 +914,7 @@ class LivePullRequestGateway(
                                     val previous = revisions.put(environmentId, revision)
                                     if (previous != null && previous != revision) {
                                         subscribed(environmentId)
-                                            .filter { it.tick && !(it.state.value.hasValue && it.isFinal()) }
+                                            .filter { it.tick }
                                             .forEach { scope.launch { fetch(it) } }
                                     }
                                 }
@@ -911,6 +932,7 @@ class LivePullRequestGateway(
         const val READ_TTL_MS = 60_000L
         const val FILES_VIEWED_TTL_MS = 15_000L
         const val LINKED_THREADS_POLL_MS = 10_000L
+        const val IDLE_TTL_MS = 5 * 60_000L
         const val MAX_STATS_REFS = 500
         const val MAX_STATS = 2_000
         const val STATS_KEY = "listStats"

@@ -399,6 +399,20 @@ fun linkedThreadDraftAction(currentText: String, prompt: String): LinkedDraftAct
         else -> LinkedDraftAction.Ask
     }
 
+/**
+ * A new-task link replaces the single new-task draft — its text, attachments,
+ * `#` context and workspace — so anything there is asked about first, even when
+ * the link carries no prompt of its own. [hasOtherContent] is attachments or
+ * context records.
+ */
+fun linkedNewTaskDraftAction(currentText: String, hasOtherContent: Boolean, prompt: String?): LinkedDraftAction =
+    when {
+        hasOtherContent -> LinkedDraftAction.Ask
+        currentText.isBlank() -> LinkedDraftAction.Fill
+        prompt != null && currentText == prompt -> LinkedDraftAction.Keep
+        else -> LinkedDraftAction.Ask
+    }
+
 /* ── Model selection ─────────────────────────────────────────────────── */
 
 private val PROMPT_LINK_PROVIDER_ALIASES = mapOf("claude" to "claudeagent")

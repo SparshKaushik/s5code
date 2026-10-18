@@ -289,16 +289,22 @@ class PullRequestRulesTest {
 
     @Test
     fun `refetches a missing read, an expired one, and one the server's revision has moved past`() {
-        assertTrue(isPullRequestQueryStale(null, 0, 30_000, null, null, final = true))
-        assertFalse(isPullRequestQueryStale(1_000, 30_999, 30_000, 1, 1, final = false))
-        assertTrue(isPullRequestQueryStale(1_000, 31_000, 30_000, 1, 1, final = false))
-        assertTrue(isPullRequestQueryStale(1_000, 2_000, 30_000, 1, 2, final = false))
+        assertTrue(isPullRequestQueryStale(null, 0, 30_000, null, null))
+        assertFalse(isPullRequestQueryStale(1_000, 30_999, 30_000, 1, 1))
+        assertTrue(isPullRequestQueryStale(1_000, 31_000, 30_000, 1, 1))
+        assertTrue(isPullRequestQueryStale(1_000, 2_000, 30_000, 1, 2))
     }
 
     @Test
-    fun `judges a read made before the first revision by age alone, and never refetches a merged one`() {
-        assertFalse(isPullRequestQueryStale(1_000, 2_000, 30_000, null, 3, final = false))
-        assertFalse(isPullRequestQueryStale(1_000, 2_000, 30_000, 2, null, final = false))
-        assertFalse(isPullRequestQueryStale(1_000, 999_999, 60_000, 1, 9, final = true))
+    fun `judges a read made before the first revision by age alone`() {
+        assertFalse(isPullRequestQueryStale(1_000, 2_000, 30_000, null, 3))
+        assertFalse(isPullRequestQueryStale(1_000, 2_000, 30_000, 2, null))
+    }
+
+    @Test
+    fun `a merged pull request's reads still expire, so a reopened or edited PR is not frozen`() {
+        // Upstream only treats the linked summary as final; detail, activity and stack keep their TTL.
+        assertTrue(isPullRequestQueryStale(1_000, 999_999, 60_000, 1, 1))
+        assertTrue(isPullRequestQueryStale(1_000, 2_000, 60_000, 1, 9))
     }
 }

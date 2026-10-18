@@ -196,7 +196,7 @@ private fun isSnoozed(shell: ThreadShellDto, nowMillis: Long): Boolean {
  * this cannot see it. The cost is that a quiet thread with an open PR settles here
  * a few days before it would on mobile.
  *
- * [serverSettles] is the `threadSettlement` capability: such a server runs the
+ * [serverSettles] is the `threadAutoSettlement` capability: such a server runs the
  * inactivity sweep itself and reports it as the override, so the local
  * inactivity path is only for servers that predate it.
  */

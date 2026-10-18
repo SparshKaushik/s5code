@@ -208,6 +208,53 @@ private fun parseParagraph(source: String): ParsedParagraph {
 /** Parses inline runs. Unclosed markers stay literal rather than eating the rest. */
 private const val MARKDOWN_ESCAPABLE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
+/**
+ * Index of the `]` closing the link label opened at [rest]`[0]`, or -1.
+ * Escaped characters and balanced inner brackets stay in the label, so a
+ * citation like `[\[id\].tsx](…)` keeps its whole name.
+ */
+private fun linkLabelEnd(rest: String): Int {
+    var depth = 0
+    var i = 1
+    while (i < rest.length) {
+        when (rest[i]) {
+            '\\' -> i++
+            '[' -> depth++
+            ']' -> if (depth == 0) return i else depth--
+        }
+        i++
+    }
+    return -1
+}
+
+/**
+ * The destination of the `(…)` opened at [open] and the index of its closing
+ * `)`, or null. A `<…>` destination (CommonMark; codex file citations) runs to
+ * its `>` verbatim, so `app/(marketing)/page.tsx` survives; a bare one closes
+ * on the first unbalanced, unescaped `)`.
+ */
+private fun linkDestination(rest: String, open: Int): Pair<String, Int>? {
+    var i = open + 1
+    while (i < rest.length && rest[i] == ' ') i++
+    if (rest.getOrNull(i) == '<') {
+        val closeAngle = rest.indexOf('>', i + 1)
+        if (closeAngle < 0) return null
+        val close = rest.indexOf(')', closeAngle + 1)
+        if (close < 0) return null
+        return rest.substring(i + 1, closeAngle) to close
+    }
+    var depth = 0
+    while (i < rest.length) {
+        when (rest[i]) {
+            '\\' -> i++
+            '(' -> depth++
+            ')' -> if (depth == 0) return rest.substring(open + 1, i).trim() to i else depth--
+        }
+        i++
+    }
+    return null
+}
+
 fun parseInline(source: String): List<MdSpan> {
     val spans = mutableListOf<MdSpan>()
     val buffer = StringBuilder()
@@ -245,17 +292,17 @@ fun parseInline(source: String): List<MdSpan> {
             }
 
             rest.startsWith("[") -> {
-                val closeText = rest.indexOf(']')
-                val openHref = if (closeText >= 0) rest.indexOf('(', startIndex = closeText) else -1
-                val closeHref = if (openHref >= 0) rest.indexOf(')', startIndex = openHref) else -1
-                if (closeText <= 0 || openHref != closeText + 1 || closeHref < 0) {
+                val closeText = linkLabelEnd(rest)
+                val destination =
+                    if (closeText > 0 && rest.getOrNull(closeText + 1) == '(') linkDestination(rest, closeText + 1)
+                    else null
+                if (destination == null) {
                     buffer.append('[')
                     index++
                 } else {
                     flush()
                     val label = rest.substring(1, closeText)
-                    // `<…>` destinations (CommonMark) carry their path verbatim.
-                    val href = rest.substring(openHref + 1, closeHref).trim().removeSurrounding("<", ">")
+                    val (href, closeHref) = destination
                     parseInline(label).forEach { span -> spans += span.copy(link = href) }
                     index += closeHref + 1
                 }

@@ -446,8 +446,8 @@ fun pullRequestChecksUrl(provider: String, url: String) =
 
 /**
  * Whether a cached PR read should refetch: past its TTL, or the server's
- * refresh revision moved since it was read. A final read (a merged PR) never
- * changes again, so only a missing value refetches it.
+ * refresh revision moved since it was read. A merged PR is not exempt: its
+ * detail, activity and stack still change (comments, reverts, a reopen).
  */
 fun isPullRequestQueryStale(
     fetchedAt: Long?,
@@ -455,10 +455,8 @@ fun isPullRequestQueryStale(
     ttlMs: Long,
     fetchedRevision: Int?,
     currentRevision: Int?,
-    final: Boolean,
 ): Boolean {
     if (fetchedAt == null) return true
-    if (final) return false
     // A read made before the first revision arrived is judged by age alone.
     if (currentRevision != null && fetchedRevision != null && fetchedRevision != currentRevision) return true
     return now - fetchedAt >= ttlMs
