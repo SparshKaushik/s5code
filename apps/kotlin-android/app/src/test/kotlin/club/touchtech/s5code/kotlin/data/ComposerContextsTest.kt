@@ -53,6 +53,17 @@ class ComposerContextsTest {
     }
 
     @Test
+    fun `a diff file's context names the file instead of the PR`() {
+        val record = pullRequestComposerContext(pullRequest(7), contextId = "xyz", filePath = " src/app/Main.kt ")
+        assertEquals("Main.kt", record.label)
+        assertEquals("src/app/Main.kt", record.filePath)
+        assertTrue("The current diff file is \"src/app/Main.kt\"." in record.text)
+        val whole = pullRequestComposerContext(pullRequest(7), contextId = "xyz", filePath = "  ")
+        assertEquals("#7", whole.label)
+        assertEquals("PR #7", whole.filePath)
+    }
+
+    @Test
     fun `numeric fragment matches by substring with exact number first`() {
         val older = pullRequest(120, updatedAt = "2026-01-01T00:00:00Z")
         val exact = pullRequest(12, updatedAt = "2026-01-02T00:00:00Z")

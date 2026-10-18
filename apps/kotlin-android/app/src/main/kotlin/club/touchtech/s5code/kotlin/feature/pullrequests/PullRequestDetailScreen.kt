@@ -32,6 +32,23 @@ import androidx.compose.material.icons.rounded.Layers
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.Error
+import androidx.compose.material.icons.rounded.AddComment
+import androidx.compose.material.icons.rounded.AutoAwesome
+import androidx.compose.material.icons.rounded.Check
+import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.RateReview
+import androidx.compose.material.icons.rounded.Upgrade
+import club.touchtech.s5code.kotlin.app.Routes
+import club.touchtech.s5code.kotlin.data.PullRequestAgentTask
+import club.touchtech.s5code.kotlin.data.allowedUpdateMethods
+import club.touchtech.s5code.kotlin.data.canPerformPullRequestAction
+import club.touchtech.s5code.kotlin.data.pullRequestActionLabel
+import club.touchtech.s5code.kotlin.data.pullRequestBranchTitle
+import club.touchtech.s5code.kotlin.data.pullRequestReviewKey
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
+import club.touchtech.s5code.kotlin.design.component.S5MenuOption
+import club.touchtech.s5code.kotlin.design.component.S5OverflowMenu
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
@@ -102,7 +119,7 @@ import coil3.compose.AsyncImage
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
-/** The PR page's segments. Guide (phase 3) and Files (phase 2) slot in here. */
+/** The PR page's segments. Guide (phase 3) slots in here; files open their own screen. */
 private enum class PullRequestSegment(val label: String) {
     Overview("Overview"),
     Activity("Activity"),
@@ -136,18 +153,24 @@ private fun PullRequestListEntryDto.identity() =
     )
 
 /**
- * A read-only PR page: identity, then Overview (stack, checks, reviewers,
- * branch, labels, description) or Activity (the filtered timeline). Reads come
- * from the PR's own environment, or a connected one with the same repository
- * while it is offline, and fall back to the last copy saved on this device.
+ * A PR page: identity, then Overview (stack, checks, reviewers, branch, merge,
+ * labels, description) or Activity (the filtered timeline), with review,
+ * status and agent actions around them. Reads come from the PR's own
+ * environment, or a connected one with the same repository while it is
+ * offline, and fall back to the last copy saved on this device. Screens this
+ * page opens are addressed at the environment it reads from.
  */
 @Composable
 fun PullRequestDetailScreen(
     store: AppStore,
     environmentId: String,
     reference: PullRequestReference,
+    confirmController: S5ConfirmDialogController,
     onBack: () -> Unit,
     onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit,
+    onOpenRoute: (String) -> Unit,
+    onOpenThread: (environmentId: String, threadId: String) -> Unit,
+    onOpenNewTask: () -> Unit,
 ) {
     val gateway = store.pullRequests
     val context = LocalContext.current
@@ -187,6 +210,24 @@ fun PullRequestDetailScreen(
         .collectAsStateWithLifecycle(PullRequestQuery())
     val summary = remember(readEnvironment, readReference, detail) { gateway.summary(readEnvironment, readReference) }
     val identity = detail?.identity() ?: summary?.identity()
+    val permissions = rememberPullRequestPermissions(store, readEnvironment, detail)
+    val runner = rememberPullRequestActionRunner(store, readEnvironment, readReference, detail, permissions, confirmController)
+    val agent =
+        rememberPullRequestAgent(store, readEnvironment, readReference, detail, confirmController, onOpenThread, onOpenNewTask)
+    val drafts by store.reviewDrafts.drafts.collectAsStateWithLifecycle()
+    val pendingComments = drafts[pullRequestReviewKey(readEnvironment, readReference)]?.comments?.size ?: 0
+    val stackState =
+        PullRequestStackState(
+            stack = stackQuery.value,
+            fresh = stackSupported && stackQuery.hasValue && !stackQuery.fromCache && !stackQuery.loading && stackQuery.error == null,
+            failed = stackQuery.error != null,
+            supportsStackActions =
+                stackSupported && detail?.capabilities?.stackActions == true &&
+                    environment?.capabilities?.pullRequestStackActions == true,
+        )
+    val openReview = { mode: String -> onOpenRoute(Routes.pullRequestReview(readEnvironment, readReference, mode)) }
+    val openFiles = { onOpenRoute(Routes.pullRequestFiles(readEnvironment, readReference)) }
+    var overflowOpen by remember { mutableStateOf(false) }
 
     var segment by rememberSaveable { mutableStateOf(PullRequestSegment.Overview) }
     var activityFilter by remember { mutableStateOf(PullRequestActivityFilter()) }
@@ -208,7 +249,24 @@ fun PullRequestDetailScreen(
         subtitle = reference.repository,
         onBack = onBack,
         loading = refreshing || (detailQuery.loading && detail != null),
+        bottomBar = {
+            if (detail != null) {
+                PullRequestActionBar(
+                    agent = agent,
+                    permissions = permissions,
+                    pendingComments = pendingComments,
+                    onOpenReview = { openReview("review") },
+                    onOpenFiles = openFiles,
+                )
+            }
+        },
         actions = {
+            if (permissions.verdicts.isNotEmpty()) {
+                S5IconButton(icon = Icons.Rounded.RateReview, label = "Submit review", onClick = { openReview("review") })
+            }
+            if (permissions.canComment) {
+                S5IconButton(icon = Icons.Rounded.AddComment, label = "Add comment", onClick = { openReview("comment") })
+            }
             identity?.url?.takeIf { it.isNotEmpty() }?.let { url ->
                 S5IconButton(
                     icon = Icons.AutoMirrored.Rounded.OpenInNew,
@@ -216,6 +274,31 @@ fun PullRequestDetailScreen(
                     onClick = {
                         if (!openPullRequestUrl(context, url)) store.showError("The pull request could not be opened.")
                     },
+                )
+            }
+            if (detail != null && canPerformPullRequestAction(detail, "delete-branch")) {
+                S5OverflowMenu(
+                    icon = Icons.Rounded.MoreVert,
+                    label = "Pull request actions",
+                    options =
+                        listOf(
+                            S5MenuOption(
+                                id = "delete-branch",
+                                label = pullRequestActionLabel("delete-branch"),
+                                icon = Icons.Rounded.DeleteOutline,
+                                supporting =
+                                    when {
+                                        runner.busy -> "Deleting…"
+                                        online -> detail.headBranch
+                                        else -> "Reconnect to delete this branch."
+                                    },
+                                enabled = runner.available("delete-branch"),
+                                destructive = true,
+                            )
+                        ),
+                    onSelect = runner::request,
+                    expanded = overflowOpen,
+                    onExpandedChange = { overflowOpen = it },
                 )
             }
         },
@@ -244,14 +327,16 @@ fun PullRequestDetailScreen(
                                 PaddingValues(
                                     start = S5Theme.spacing.gutter,
                                     end = S5Theme.spacing.gutter,
-                                    bottom = S5Theme.spacing.xxLarge,
+                                    bottom = S5Theme.spacing.xxLarge + 72.dp,
                                 ),
                             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.medium),
                         ) {
                             detailQuery.error?.let { message ->
                                 item(key = "error") { S5Notice(icon = Icons.Rounded.CloudOff, text = message) }
                             }
-                            item(key = "identity") { PullRequestIdentityBlock(identity) }
+                            item(key = "identity") {
+                                PullRequestIdentityBlock(identity, status = detail?.let { { PullRequestStatusMenu(it, runner) } })
+                            }
                             item(key = "segments") {
                                 S5ConnectedButtonGroup(
                                     options = PullRequestSegment.entries,
@@ -279,9 +364,26 @@ fun PullRequestDetailScreen(
                                             )
                                         }
                                         item(key = "status") {
-                                            PullRequestStatusCard(detail, activityQuery.value, onOpenUrl = { url ->
-                                                if (!openPullRequestUrl(context, url)) store.showError("The link could not be opened.")
-                                            })
+                                            PullRequestStatusCard(
+                                                detail = detail,
+                                                activity = activityQuery.value,
+                                                runner = runner,
+                                                agent = agent,
+                                                onOpenUrl = { url ->
+                                                    if (!openPullRequestUrl(context, url)) store.showError("The link could not be opened.")
+                                                },
+                                            ) {
+                                                PullRequestMergeControls(
+                                                    store = store,
+                                                    environmentId = readEnvironment,
+                                                    reference = readReference,
+                                                    pr = detail,
+                                                    permissions = permissions,
+                                                    stack = stackState,
+                                                    confirmController = confirmController,
+                                                    onRefreshStack = ::refresh,
+                                                )
+                                            }
                                         }
                                         if (detail.labels.isNotEmpty()) {
                                             item(key = "labels") { PullRequestLabels(detail) }
@@ -295,6 +397,12 @@ fun PullRequestDetailScreen(
                                         onFilterChange = { activityFilter = it },
                                         loading = !activityQuery.hasValue && (activityQuery.loading || online),
                                         error = activityQuery.error,
+                                        onOpenDiscussion = { threadId ->
+                                            onOpenRoute(Routes.pullRequestDiscussion(readEnvironment, readReference, threadId))
+                                        },
+                                        onOpenCommit = { oid ->
+                                            onOpenRoute(Routes.pullRequestDiff(readEnvironment, readReference, commit = oid))
+                                        },
                                     )
                             }
                         }
@@ -305,15 +413,19 @@ fun PullRequestDetailScreen(
 }
 
 @Composable
-private fun PullRequestIdentityBlock(identity: PullRequestIdentity) {
+private fun PullRequestIdentityBlock(identity: PullRequestIdentity, status: (@Composable () -> Unit)?) {
     val copy = rememberClipboardWriter()
-    val status = pullRequestStatus(identity.state, identity.isDraft)
+    val fallbackStatus = pullRequestStatus(identity.state, identity.isDraft)
     val conflict = pullRequestConflict(identity.state, identity.isDraft, identity.mergeability, identity.baseBranch)
     val now = remember(identity.updatedAt) { System.currentTimeMillis() }
     Column(Modifier.padding(top = S5Theme.spacing.small), verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
-            Icon(status.icon, contentDescription = null, tint = status.tone.color(), modifier = Modifier.size(18.dp))
-            Text(status.label, style = MaterialTheme.typography.labelLarge, color = status.tone.color())
+            if (status != null) {
+                status()
+            } else {
+                Icon(fallbackStatus.icon, contentDescription = null, tint = fallbackStatus.tone.color(), modifier = Modifier.size(18.dp))
+                Text(fallbackStatus.label, style = MaterialTheme.typography.labelLarge, color = fallbackStatus.tone.color())
+            }
             if (identity.additions + identity.deletions > 0) {
                 Text("+${identity.additions}", style = S5Theme.code.code, color = S5Theme.status.added)
                 Text("−${identity.deletions}", style = S5Theme.code.code, color = S5Theme.status.removed)
@@ -475,7 +587,14 @@ private fun toneIcon(tone: PullRequestTone): ImageVector =
 
 /** Checks, reviewers and branch state in one card, each line expanding in place. */
 @Composable
-private fun PullRequestStatusCard(detail: PullRequestDetailDto, activity: PullRequestActivityDto?, onOpenUrl: (String) -> Unit) {
+private fun PullRequestStatusCard(
+    detail: PullRequestDetailDto,
+    activity: PullRequestActivityDto?,
+    runner: PullRequestActionRunner,
+    agent: PullRequestAgent,
+    onOpenUrl: (String) -> Unit,
+    mergeControls: @Composable () -> Unit,
+) {
     var checksExpanded by rememberSaveable { mutableStateOf(false) }
     var reviewersExpanded by rememberSaveable { mutableStateOf(false) }
     val checks = remember(detail.checks) { pullRequestChecksSummary(detail.checks) }
@@ -491,6 +610,17 @@ private fun PullRequestStatusCard(detail: PullRequestDetailDto, activity: PullRe
             onClick = { checksExpanded = !checksExpanded },
         ) {
             Column(Modifier.padding(horizontal = S5Theme.spacing.large), verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+                if (detail.state == "open" && detail.checks.any { it.status == "failure" } && agent.canAsk) {
+                    PullRequestAgentButton(agent, PullRequestAgentTask.Feedback, "Fix failing checks")
+                }
+                if (runner.available("approve-workflows")) {
+                    S5Button(
+                        text = "Approve workflows · ${detail.workflowApprovalsRequired} waiting",
+                        onClick = { runner.request("approve-workflows") },
+                        style = S5ButtonStyle.Text,
+                        icon = Icons.Rounded.Check,
+                    )
+                }
                 if (detail.checks.isEmpty()) {
                     Text("No checks reported.", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
@@ -560,13 +690,81 @@ private fun PullRequestStatusCard(detail: PullRequestDetailDto, activity: PullRe
                 }
             }
         }
-        OverviewRow(
-            icon = if (detail.mergeability == "conflicting") Icons.Rounded.Error else Icons.AutoMirrored.Rounded.CallSplit,
-            title = "Branch",
-            value = pullRequestBranchSummary(detail),
-            tint = if (detail.mergeability == "conflicting") S5Theme.status.failed else MaterialTheme.colorScheme.onSurfaceVariant,
+        PullRequestBranchRow(detail, runner, agent)
+        mergeControls()
+    }
+}
+
+/** One agent task as a text button, or a thread picker when several threads are linked. */
+@Composable
+private fun PullRequestAgentButton(agent: PullRequestAgent, task: PullRequestAgentTask, title: String) {
+    var open by remember { mutableStateOf(false) }
+    val button: @Composable () -> Unit = {
+        S5Button(
+            text = title,
+            onClick = { if (agent.threads.size > 1) open = true else agent.start(task) },
+            style = S5ButtonStyle.Text,
+            icon = Icons.Rounded.AutoAwesome,
+            enabled = !agent.isDisabled(task),
         )
     }
+    if (agent.threads.size <= 1) return button()
+    S5OverflowMenu(
+        icon = Icons.Rounded.AutoAwesome,
+        label = title,
+        options = agent.threadOptions(task),
+        onSelect = agent::select,
+        expanded = open,
+        onExpandedChange = { open = it },
+        anchor = button,
+    )
+}
+
+/** `PullRequestBranchRow`: conflict state, opening Resolve conflicts and Update branch when available. */
+@Composable
+private fun PullRequestBranchRow(detail: PullRequestDetailDto, runner: PullRequestActionRunner, agent: PullRequestAgent) {
+    val methods = if (runner.available("update-branch")) detail.allowedUpdateMethods() else emptyList()
+    val canResolve = agent.canAsk && detail.state == "open" && detail.mergeability == "conflicting"
+    val conflicting = detail.mergeability == "conflicting"
+    val clean = detail.mergeability == "mergeable"
+    var open by remember { mutableStateOf(false) }
+    val row: @Composable () -> Unit = {
+        OverviewRow(
+            icon =
+                when {
+                    conflicting -> Icons.Rounded.Error
+                    clean -> Icons.Rounded.CheckCircle
+                    else -> Icons.AutoMirrored.Rounded.CallSplit
+                },
+            title = pullRequestBranchTitle(detail),
+            value =
+                when {
+                    runner.busy -> "Updating…"
+                    conflicting || (clean && detail.baseComparison != "behind") -> null
+                    else -> pullRequestBranchSummary(detail)
+                },
+            tint =
+                when {
+                    conflicting -> S5Theme.status.failed
+                    clean -> S5Theme.status.settled
+                    else -> MaterialTheme.colorScheme.onSurfaceVariant
+                },
+            expanded = if (methods.isNotEmpty() || canResolve) false else null,
+            onClick = if (methods.isNotEmpty() || canResolve) ({ open = true }) else null,
+        )
+    }
+    if (methods.isEmpty() && !canResolve) return row()
+    S5OverflowMenu(
+        icon = Icons.Rounded.ExpandMore,
+        label = "Branch",
+        options =
+            (if (canResolve) listOf(agent.menuOption(PullRequestAgentTask.Conflicts)) else emptyList()) +
+                methods.map { S5MenuOption(it, "Update with $it", Icons.Rounded.Upgrade) },
+        onSelect = { id -> if (id in methods) runner.perform("update-branch", id) else agent.select(id) },
+        expanded = open,
+        onExpandedChange = { open = it },
+        anchor = row,
+    )
 }
 
 @Composable

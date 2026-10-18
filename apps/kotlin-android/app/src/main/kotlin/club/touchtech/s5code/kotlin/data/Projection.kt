@@ -276,6 +276,9 @@ fun projectFrom(environmentId: EnvironmentId, dto: ProjectShellDto): Project =
                     rootPath = identity.rootPath,
                     originCanonicalKey = identity.origin?.canonicalKey,
                     originDisplayName = identity.origin?.displayName,
+                    provider = identity.provider,
+                    remoteUrl = identity.locator?.remoteUrl,
+                    webUrl = identity.webUrl,
                 )
             },
         createdAtMillis = parseInstant(dto.createdAt),

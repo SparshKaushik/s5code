@@ -182,6 +182,7 @@ fun HomeScreen(
                 onOpenPullRequest = onOpenPullRequest,
                 onSettings = onSettings,
                 onConnections = onConnections,
+                confirmController = confirmController,
                 bottomBar = bottomBar,
             )
     }

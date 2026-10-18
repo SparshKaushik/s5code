@@ -379,6 +379,33 @@ interface WorkspaceGateway {
     ) = Unit
 
     /**
+     * `thread.pull-request.link` / `unlink` with a normalized key. Only call
+     * when the server advertises `threadPullRequests`; older single-link
+     * servers are not offered linking, matching the RN client.
+     */
+    suspend fun setPullRequestLinked(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        host: String,
+        repository: String,
+        number: Int,
+        url: String,
+        linked: Boolean,
+    ) = Unit
+
+    /**
+     * `git.preparePullRequestThread`: checks the pull request at [reference]
+     * (its URL) out for a new thread, in its own worktree for `worktree` mode.
+     */
+    suspend fun preparePullRequestThread(
+        environmentId: EnvironmentId,
+        cwd: String,
+        reference: String,
+        mode: String,
+    ): club.touchtech.s5code.kotlin.transport.wire.GitPreparePullRequestThreadResultDto =
+        error("Pull request checkout is unavailable.")
+
+    /**
      * `prepared-run.retry`: replays a failed prepared run after a workspace
      * preparation failure. [runId] comes from the error row's
      * `retryablePreparationRunId`, which is only set where a retry applies.

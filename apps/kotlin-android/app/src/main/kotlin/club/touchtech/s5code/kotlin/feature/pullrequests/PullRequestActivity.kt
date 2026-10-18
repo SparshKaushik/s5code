@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.pullrequests
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -59,8 +60,7 @@ private const val COMMENT_COLLAPSED_HEIGHT = 240
 
 /**
  * The Activity segment: filter controls, then comments, discussions and
- * commits by date. Discussions and commits are not tappable until the
- * discussion and file screens land (phase 2).
+ * commits by date. A discussion opens its thread; a commit, its diff.
  */
 fun LazyListScope.pullRequestActivityItems(
     activity: PullRequestActivityDto?,
@@ -68,6 +68,8 @@ fun LazyListScope.pullRequestActivityItems(
     onFilterChange: (PullRequestActivityFilter) -> Unit,
     loading: Boolean,
     error: String?,
+    onOpenDiscussion: (threadId: String) -> Unit,
+    onOpenCommit: (oid: String) -> Unit,
 ) {
     if (activity == null) {
         item(key = "activity-state") {
@@ -102,8 +104,9 @@ fun LazyListScope.pullRequestActivityItems(
     items(timeline.events, key = { it.key }) { event ->
         when (event) {
             is PullRequestTimelineEvent.Comment -> TimelineComment(event.comment)
-            is PullRequestTimelineEvent.Discussion -> TimelineDiscussion(event.thread)
-            is PullRequestTimelineEvent.Commit -> TimelineCommit(event.commit)
+            is PullRequestTimelineEvent.Discussion ->
+                TimelineDiscussion(event.thread, onClick = { onOpenDiscussion(event.thread.id) })
+            is PullRequestTimelineEvent.Commit -> TimelineCommit(event.commit, onClick = { onOpenCommit(event.commit.oid) })
         }
     }
     if (timeline.truncated) {
@@ -208,7 +211,7 @@ private fun TimelineComment(comment: PullRequestCommentDto) {
 }
 
 @Composable
-private fun TimelineDiscussion(thread: PullRequestReviewThreadDto) {
+private fun TimelineDiscussion(thread: PullRequestReviewThreadDto, onClick: () -> Unit) {
     val first = thread.comments.firstOrNull()
     TimelineEvent(
         icon = Icons.AutoMirrored.Rounded.Chat,
@@ -219,6 +222,7 @@ private fun TimelineDiscussion(thread: PullRequestReviewThreadDto) {
             Modifier.fillMaxWidth()
                 .clip(MaterialTheme.shapes.large)
                 .background(MaterialTheme.colorScheme.surfaceContainer)
+                .clickable(onClick = onClick)
                 .padding(S5Theme.spacing.medium),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
         ) {
@@ -240,9 +244,11 @@ private fun TimelineDiscussion(thread: PullRequestReviewThreadDto) {
 }
 
 @Composable
-private fun TimelineCommit(commit: PullRequestCommitDto) {
+private fun TimelineCommit(commit: PullRequestCommitDto, onClick: () -> Unit) {
     TimelineEvent(icon = Icons.Rounded.Commit, tint = MaterialTheme.colorScheme.onSurfaceVariant) {
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+        Row(
+            modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.small).clickable(onClick = onClick),
+            verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
             PullRequestAvatar(commit.authors?.firstOrNull(), size = 22.dp)
             Text(commit.messageHeadline, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
             Text(commit.oid.take(7), style = S5Theme.code.code, color = MaterialTheme.colorScheme.onSurfaceVariant)

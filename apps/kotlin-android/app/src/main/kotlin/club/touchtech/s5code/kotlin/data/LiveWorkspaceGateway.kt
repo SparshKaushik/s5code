@@ -58,6 +58,7 @@ import club.touchtech.s5code.kotlin.transport.DirectEnvironmentAuthorizer
 import club.touchtech.s5code.kotlin.transport.EnvironmentSession
 import club.touchtech.s5code.kotlin.transport.SessionPhase
 import club.touchtech.s5code.kotlin.transport.grants
+import club.touchtech.s5code.kotlin.transport.allowsRpc
 import club.touchtech.s5code.kotlin.transport.restoreCompactTurnItems
 import club.touchtech.s5code.kotlin.transport.WsMethods
 import club.touchtech.s5code.kotlin.transport.applyShellStreamItem
@@ -846,6 +847,9 @@ class LiveWorkspaceGateway(
                             sessionCanMaintain = state?.grants("environment:maintain") == true,
                             sessionCanWriteSettings = state?.grants("settings:write") == true,
                             sessionCanManageProviders = state?.grants("providers:manage") == true,
+                            sessionAllowsSourceControlWrite =
+                                state?.allowsRpc("source-control:write") == true,
+                            sessionAllowsOperate = state?.allowsRpc("orchestration:operate") == true,
                             sessionPermissions = state?.permissions ?: state?.scopes,
                             sessionExpiresAt = state?.sessionExpiresAt,
                             serverSelfUpdate = state?.capabilities?.serverSelfUpdate,
@@ -2117,6 +2121,43 @@ class LiveWorkspaceGateway(
             ),
         )
     }
+
+    override suspend fun setPullRequestLinked(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        host: String,
+        repository: String,
+        number: Int,
+        url: String,
+        linked: Boolean,
+    ) {
+        if (!sessionFor(environmentId).state.value.capabilities.threadPullRequests) {
+            throw IllegalStateException("This environment cannot link pull requests to threads.")
+        }
+        val key =
+            club.touchtech.s5code.kotlin.transport.normalizeThreadPullRequestKey(host, repository, number, url)
+        dispatch(
+            environmentId,
+            if (linked) Commands.pullRequestLink(id.value, key.host, key.repository, key.number, url)
+            else Commands.pullRequestUnlink(id.value, key.host, key.repository, key.number),
+        )
+    }
+
+    override suspend fun preparePullRequestThread(
+        environmentId: EnvironmentId,
+        cwd: String,
+        reference: String,
+        mode: String,
+    ): club.touchtech.s5code.kotlin.transport.wire.GitPreparePullRequestThreadResultDto =
+        sessionFor(environmentId).request(
+            WsMethods.GitPreparePullRequestThread,
+            buildJsonObject {
+                put("cwd", cwd)
+                put("reference", reference)
+                put("mode", mode)
+            },
+            club.touchtech.s5code.kotlin.transport.wire.GitPreparePullRequestThreadResultDto.serializer(),
+        )
 
     override suspend fun retryPreparedRun(environmentId: EnvironmentId, id: ThreadId, runId: String) {
         dispatch(environmentId, Commands.preparedRunRetry(id.value, runId))

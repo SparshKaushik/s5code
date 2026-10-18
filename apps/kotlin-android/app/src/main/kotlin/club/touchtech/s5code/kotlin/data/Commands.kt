@@ -214,6 +214,29 @@ object Commands {
         }
     }
 
+    /** `thread.pull-request.link` from a person: source is always manual. */
+    fun pullRequestLink(threadId: String, host: String, repository: String, number: Int, url: String): JsonObject =
+        buildJsonObject {
+            put("type", "thread.pull-request.link")
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("host", host)
+            put("repository", repository)
+            put("number", number)
+            put("url", url)
+            put("source", "manual")
+        }
+
+    fun pullRequestUnlink(threadId: String, host: String, repository: String, number: Int): JsonObject =
+        buildJsonObject {
+            put("type", "thread.pull-request.unlink")
+            put("commandId", newCommandId())
+            put("threadId", threadId)
+            put("host", host)
+            put("repository", repository)
+            put("number", number)
+        }
+
     fun respondToApproval(threadId: String, requestId: String, decision: String): JsonObject =
         buildJsonObject {
             put("type", "runtime-request.respond")

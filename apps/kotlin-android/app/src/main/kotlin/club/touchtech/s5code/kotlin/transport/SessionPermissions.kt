@@ -19,6 +19,14 @@ internal fun SessionState.grants(permission: String): Boolean {
     return parent in scopes.orEmpty()
 }
 
+/**
+ * Whether [requireRpcPermissions] would let a method needing [permission]
+ * through: unknown auth on an old server is left to that server, so the UI
+ * offers what the transport would send.
+ */
+internal fun SessionState.allowsRpc(permission: String): Boolean =
+    !authenticated || (permissions == null && scopes == null) || grants(permission)
+
 /** `MISSING_FILE_ACCESS_MESSAGE`: a host file this session lacks `filesystem:read` for. */
 internal const val MISSING_FILE_ACCESS_MESSAGE =
     "This connection cannot read host files. Pair again with a new link to view it."
@@ -67,7 +75,8 @@ internal fun SessionState.requireRpcPermissions(method: String, payload: JsonEle
         "orchestration.dispatchCommand", "orchestration.launchThread", "orchestration.stopWorkflow",
         "projects.mutate", "secrets.answerRequest", "mcpApps.callTool", "mcpApps.updateModelContext",
         "scheduledTasks.upsert", "scheduledTasks.setEnabled",
-        "scheduledTasks.delete", "scheduledTasks.runNow", "scheduledTasks.rotateWebhookToken" -> listOf("orchestration:operate")
+        "scheduledTasks.delete", "scheduledTasks.runNow", "scheduledTasks.rotateWebhookToken",
+        "pullRequests.generateReviewGuide" -> listOf("orchestration:operate")
         else -> emptyList()
     }
     required.firstOrNull { !grants(it) }?.let {

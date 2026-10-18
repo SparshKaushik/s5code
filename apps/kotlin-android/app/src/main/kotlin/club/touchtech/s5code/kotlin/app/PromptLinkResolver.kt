@@ -184,10 +184,11 @@ private class PromptLinkResolver(
     private suspend fun openProjectDraft(project: Project, request: LinkedDraftRequest) {
         var branch = project.branch
         var workspaceMode = WorkspaceMode.CurrentCheckout
+        var pullRequestReference: String? = null
         var pullRequestUnavailable: Int? = null
         request.pullRequest?.let { pullRequest ->
-            // The draft starts a worktree from the PR's head branch; Send, not
-            // the link, is what creates it.
+            // The draft checks the PR out in its own worktree; Send, not the
+            // link, is what prepares it (`git.preparePullRequestThread`).
             val detail =
                 try {
                     store.workspace.pullRequestDetail(
@@ -204,6 +205,7 @@ private class PromptLinkResolver(
             if (detail != null && detail.headBranch.isNotBlank()) {
                 branch = detail.headBranch
                 workspaceMode = WorkspaceMode.NewWorktree
+                pullRequestReference = detail.url.takeIf(String::isNotBlank)
             } else {
                 pullRequestUnavailable = pullRequest.number
             }
@@ -220,6 +222,7 @@ private class PromptLinkResolver(
                 branch = branch,
                 workspaceMode = workspaceMode,
                 worktreePath = null,
+                pullRequestReference = pullRequestReference,
                 cloning = false,
                 settings = draft.settings.withSelection(selection),
             )

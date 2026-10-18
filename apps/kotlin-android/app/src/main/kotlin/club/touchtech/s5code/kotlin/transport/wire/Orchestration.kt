@@ -74,6 +74,9 @@ data class RepositoryOriginDto(
 )
 
 @Serializable
+data class RepositoryIdentityLocatorDto(val remoteUrl: String? = null)
+
+@Serializable
 data class RepositoryIdentityDto(
     val canonicalKey: String = "",
     val displayName: String? = null,
@@ -81,6 +84,9 @@ data class RepositoryIdentityDto(
     val name: String? = null,
     val rootPath: String? = null,
     val origin: RepositoryOriginDto? = null,
+    val provider: String? = null,
+    val locator: RepositoryIdentityLocatorDto? = null,
+    val webUrl: String? = null,
 ) {
     /** What clients group checkouts by: the fork's own remote, else the canonical repo. */
     val groupingKey: String get() = origin?.canonicalKey ?: canonicalKey

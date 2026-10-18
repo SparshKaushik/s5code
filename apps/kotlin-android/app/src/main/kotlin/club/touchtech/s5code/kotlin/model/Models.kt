@@ -142,6 +142,13 @@ data class EnvironmentCapabilities(
     val sessionCanMaintain: Boolean = false,
     val sessionCanWriteSettings: Boolean = false,
     val sessionCanManageProviders: Boolean = false,
+    /**
+     * The transport would send a `source-control:write` method (pull request
+     * writes, PR checkouts); unknown auth on an old server counts as allowed.
+     */
+    val sessionAllowsSourceControlWrite: Boolean = false,
+    /** As [sessionAllowsSourceControlWrite], for `orchestration:operate`. */
+    val sessionAllowsOperate: Boolean = false,
     val sessionPermissions: List<String>? = null,
     val sessionExpiresAt: String? = null,
     /**
@@ -249,6 +256,12 @@ data class RepositoryIdentity(
      */
     val originCanonicalKey: String? = null,
     val originDisplayName: String? = null,
+    /** Source-control host kind (github, gitlab, forgejo…), when reported. */
+    val provider: String? = null,
+    /** `locator.remoteUrl`: the remote the identity was read from. */
+    val remoteUrl: String? = null,
+    /** The server-resolved web URL of the repository, when known. */
+    val webUrl: String? = null,
 ) {
     /** `repositoryGroupingKeyOf`: a fork's own remote, otherwise the canonical key. */
     val groupingCanonicalKey: String get() = originCanonicalKey ?: canonicalKey
@@ -1091,6 +1104,8 @@ data class ReviewFile(
     val deletions: Int,
     val status: ReviewFileStatus,
     val hunks: List<DiffHunk>,
+    /** The pre-image path, when git reports one different from [path]. */
+    val oldPath: String? = null,
 )
 
 enum class ReviewFileStatus {

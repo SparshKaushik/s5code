@@ -42,6 +42,7 @@ import club.touchtech.s5code.kotlin.data.LiveWorkspaceGateway
 import club.touchtech.s5code.kotlin.data.LivePullRequestGateway
 import club.touchtech.s5code.kotlin.data.PullRequestCacheStore
 import club.touchtech.s5code.kotlin.data.PullRequestGateway
+import club.touchtech.s5code.kotlin.data.PullRequestReviewDraftStore
 import club.touchtech.s5code.kotlin.data.QueuedThreadMessage
 import club.touchtech.s5code.kotlin.data.ThreadOutboxStore
 import club.touchtech.s5code.kotlin.data.WorkspaceGateway
@@ -143,6 +144,12 @@ data class NewTaskDraft(
      * thread row), matching the RN draft's `worktreePath` prefill.
      */
     val worktreePath: String? = null,
+    /**
+     * A pull request URL ("Work on PR"): the send checks it out in its own
+     * worktree first, mirroring RN's `workspaceSelection.pullRequestReference`.
+     * Any other workspace change drops it (see [AppStore.updateDraft]).
+     */
+    val pullRequestReference: String? = null,
     val settings: ThreadSettings = ThreadSettings(),
     /** `#` mention payloads the prompt references, as on a thread draft. */
     val contextRecords: List<ComposerContextRecord> = emptyList(),
@@ -277,6 +284,16 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     /** Pull request reads for the Pull requests tab and PR pages, over the same sessions. */
     val pullRequests: PullRequestGateway =
         LivePullRequestGateway(viewModelScope, liveWorkspace, PullRequestCacheStore(application))
+
+    /** Unsent pull request reviews, kept on this device apart from the clearable PR cache. */
+    val reviewDrafts =
+        PullRequestReviewDraftStore(
+            java.io.File(application.filesDir, "pull-request-review-drafts.json"),
+            viewModelScope,
+        )
+
+    /** The agent prompt each draft last had appended by "Work on PR", so the next task swaps it. */
+    internal val pullRequestAgentPrompts = HashMap<String, String>()
 
     /** In-app self-updater querying GitHub releases directly. */
     val updates =
@@ -744,6 +761,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             attachments = attachments.map { it.toRuntime() },
             branch = branch,
             workspaceMode = storedWorkspaceMode(workspaceMode),
+            pullRequestReference = pullRequestReference,
             settings =
                 ThreadSettings(
                     provider = storedProvider(provider, providerDriver),
@@ -764,6 +782,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             attachments = attachments.map { it.toStored() },
             branch = branch,
             workspaceMode = workspaceMode.name,
+            pullRequestReference = pullRequestReference,
             provider = settings.provider.instanceId,
             providerDriver = settings.provider.driver,
             model = settings.model,
@@ -813,7 +832,26 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             }
     }
 
-    fun updateDraft(transform: (NewTaskDraft) -> NewTaskDraft) = _draft.update(transform)
+    /**
+     * A pull request checkout belongs to the workspace it was picked with:
+     * choosing another project, branch or mode drops it, as RN replaces the
+     * whole `workspaceSelection`.
+     */
+    fun updateDraft(transform: (NewTaskDraft) -> NewTaskDraft) =
+        _draft.update { current ->
+            val next = transform(current)
+            val moved =
+                next.environmentId != current.environmentId ||
+                    next.projectKey != current.projectKey ||
+                    next.branch != current.branch ||
+                    next.workspaceMode != current.workspaceMode ||
+                    next.worktreePath != current.worktreePath
+            if (moved && next.pullRequestReference != null && next.pullRequestReference == current.pullRequestReference) {
+                next.copy(pullRequestReference = null)
+            } else {
+                next
+            }
+        }
 
     fun setThreadDraft(environmentId: String, threadId: String, text: String) =
         updateThreadDraft(environmentId, threadId) { it.copy(text = text) }
@@ -964,6 +1002,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         branch = draft.branch,
                         newWorktree = draft.workspaceMode == WorkspaceMode.NewWorktree,
                         worktreePath = draft.worktreePath,
+                        pullRequestReference = draft.pullRequestReference,
                     ),
                 contextRecords =
                     referencedComposerContextRecords(trimmedPrompt, draft.contextRecords),
@@ -1015,6 +1054,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                 branch = "",
                 newWorktree = false,
                 worktreePath = null,
+                pullRequestReference = null,
             )
         workspace.dropRetainedThreadCreation(original.key)
         val replacement =
@@ -1134,15 +1174,49 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         return
                     }
                     if (message.creation != null) {
+                        var branch = message.creation.branch
+                        var newWorktree = message.creation.newWorktree
+                        var worktreePath = message.creation.worktreePath
+                        val pullRequestReference = message.creation.pullRequestReference
+                        if (pullRequestReference != null) {
+                            // RN's outbox drain: check the PR out in its own worktree and
+                            // start the thread there, rather than branching a fresh one.
+                            val cwd =
+                                workspace.projects.value.firstOrNull {
+                                    it.environmentId == message.environmentId &&
+                                        it.id.value == message.creation.projectKey
+                                }?.workspaceRoot
+                                    ?: throw IllegalStateException("The project for this pull request is no longer available.")
+                            val checkout =
+                                workspace.preparePullRequestThread(
+                                    message.environmentId,
+                                    cwd = cwd,
+                                    reference = pullRequestReference,
+                                    mode = "worktree",
+                                )
+                            if (checkout.worktreePath == null || !checkout.isOnPullRequestHead) {
+                                restoreQueuedMessageToDraft(message)
+                                completeQueuedMessage(message, creationAccepted = false)
+                                reportQueuedMessageFailure(
+                                    message,
+                                    "The PR worktree has local changes and could not update to the PR head. " +
+                                        "Resolve them before trying again.",
+                                )
+                                return
+                            }
+                            branch = checkout.branch
+                            newWorktree = false
+                            worktreePath = checkout.worktreePath
+                        }
                         workspace.createThread(
                             environmentId = message.environmentId,
                             projectKey = message.creation.projectKey,
                             prompt = message.text,
                             settings = message.settings,
-                            branch = message.creation.branch,
-                            newWorktree = message.creation.newWorktree,
+                            branch = branch,
+                            newWorktree = newWorktree,
                             attachments = message.attachments,
-                            worktreePath = message.creation.worktreePath,
+                            worktreePath = worktreePath,
                             contextRecords = message.contextRecords,
                             threadId = message.threadId,
                             delivery = message.delivery,
@@ -1212,6 +1286,7 @@ class AppStore(application: Application) : AndroidViewModel(application) {
                         if (message.creation.newWorktree) WorkspaceMode.NewWorktree
                         else WorkspaceMode.CurrentCheckout,
                     worktreePath = message.creation.worktreePath,
+                    pullRequestReference = message.creation.pullRequestReference,
                 )
             }
         } else {

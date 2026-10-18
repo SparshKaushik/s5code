@@ -370,3 +370,22 @@ data class PullRequestFilesViewedResultDto(
     val files: List<PullRequestFileViewedDto> = emptyList(),
     val truncated: Boolean = false,
 )
+
+/** `PullRequestStackHead`: a layer's revision a stack merge expects to land. */
+@Serializable
+data class PullRequestStackHeadDto(val number: Int = 0, val headSha: String = "")
+
+/** `PullRequestThreadCommentsResult`: one more page of a review thread's replies. */
+@Serializable
+data class PullRequestThreadCommentsResultDto(
+    val comments: List<PullRequestThreadCommentDto> = emptyList(),
+    val nextCursor: String? = null,
+)
+
+/** `GitPreparePullRequestThreadResult`; only the checkout fields are read. */
+@Serializable
+data class GitPreparePullRequestThreadResultDto(
+    val branch: String = "",
+    val worktreePath: String? = null,
+    val isOnPullRequestHead: Boolean = true,
+)

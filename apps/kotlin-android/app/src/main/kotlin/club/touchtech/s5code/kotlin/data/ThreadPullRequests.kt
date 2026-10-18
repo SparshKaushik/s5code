@@ -106,7 +106,7 @@ fun resolveThreadCurrentPullRequest(
     val chains = resolveThreadPullRequestChains(visible)
     if (open.size > 1) {
         val ordered = chains
-            .map { chain -> chain.layers.asReversed().filter { it.isOpen() } }
+            .map { chain -> chain.layersFromTop().filter { it.isOpen() } }
             .filter { it.isNotEmpty() }
             .sortedByDescending { layers ->
                 layers.maxOf { parseInstant(it.linkedAt) ?: 0 }
@@ -115,7 +115,7 @@ fun resolveThreadCurrentPullRequest(
         return ThreadCurrentPullRequest.Stack(open = ordered, top = ordered.first())
     }
     if (chains.size == 1) {
-        return ThreadCurrentPullRequest.Single(chains[0].layers.last())
+        return ThreadCurrentPullRequest.Single(chains[0].layersFromTop().first())
     }
     val terminal = visible.sortedByDescending { it.latestUpdatedAtMillis() }
     return ThreadCurrentPullRequest.Single(terminal[0])
@@ -131,12 +131,20 @@ fun resolveThreadCurrentPullRequestLink(
         is ThreadCurrentPullRequest.Stack -> current.top
     }
 
-/** `ThreadPullRequestChain`: bottom to top. */
+/** `ThreadPullRequestChain`: bases first, each parent before the links built on it. */
 data class ThreadPullRequestChain(
     /** native | derived */
     val kind: String,
     val layers: List<ThreadPullRequestLinkDto>,
+    /** One per layer: 0 for the base, parent's depth + 1 above it. Siblings share a depth. */
+    val depths: List<Int> = layers.indices.toList(),
 )
+
+/** `layersFromTop`: deepest first; among equals, the later layer first. */
+private fun ThreadPullRequestChain.layersFromTop(): List<ThreadPullRequestLinkDto> =
+    layers.indices
+        .sortedWith(compareByDescending<Int> { depths[it] }.thenByDescending { it })
+        .map { layers[it] }
 
 /**
  * Groups a thread's links into stacks. Native stacks come from the host and
@@ -165,7 +173,7 @@ fun resolveThreadPullRequestChains(
             .toMap()
         members.sortBy { order[it.number] ?: 0 }
         for (member in members) placed.add(threadPullRequestKeyOf(member))
-        chains.add(ThreadPullRequestChain(kind = "native", layers = members))
+        chains.add(ThreadPullRequestChain(kind = "native", layers = members, depths = members.indices.toList()))
     }
 
     val remaining = visible.filter { threadPullRequestKeyOf(it) !in placed }
@@ -180,29 +188,38 @@ fun resolveThreadPullRequestChains(
         val key = branchKey(link, snapshot.headBranch)
         byHead[key] = if (key in byHead) null else link
     }
-    val hasChild = mutableSetOf<String>()
-    for (link in remaining) {
-        val snapshot = link.snapshot ?: continue
+    fun parentOf(link: ThreadPullRequestLinkDto): ThreadPullRequestLinkDto? {
+        val snapshot = link.snapshot ?: return null
         val parent = byHead[branchKey(link, snapshot.baseBranch)]
-        if (parent != null && parent !== link) hasChild.add(threadPullRequestKeyOf(parent))
+        return if (parent == null || parent === link) null else parent
     }
-    // Walk from each top (a link nothing builds on) down its base chain.
-    for (top in remaining) {
-        if (threadPullRequestKeyOf(top) in hasChild) continue
+    val children = mutableMapOf<String, MutableList<ThreadPullRequestLinkDto>>()
+    for (link in remaining) {
+        val parent = parentOf(link) ?: continue
+        children.getOrPut(threadPullRequestKeyOf(parent)) { mutableListOf() }.add(link)
+    }
+    // Walk up from each base (a link that builds on nothing here), depth-first,
+    // so siblings branching off one parent share a depth.
+    for (base in remaining) {
+        if (parentOf(base) != null) continue
         val layers = mutableListOf<ThreadPullRequestLinkDto>()
-        var cursor: ThreadPullRequestLinkDto? = top
-        while (cursor != null && threadPullRequestKeyOf(cursor) !in placed) {
-            placed.add(threadPullRequestKeyOf(cursor))
-            layers.add(0, cursor)
-            val parent = cursor.snapshot?.let { byHead[branchKey(cursor, it.baseBranch)] }
-            cursor = parent
+        val depths = mutableListOf<Int>()
+        val pending = ArrayDeque(listOf(base to 0))
+        while (pending.isNotEmpty()) {
+            val (link, depth) = pending.removeLast()
+            val key = threadPullRequestKeyOf(link)
+            // Two links with one identity would otherwise share a child list and expand forever.
+            if (!placed.add(key)) continue
+            layers.add(link)
+            depths.add(depth)
+            children[key].orEmpty().asReversed().forEach { pending.addLast(it to depth + 1) }
         }
-        if (layers.isNotEmpty()) chains.add(ThreadPullRequestChain(kind = "derived", layers = layers))
+        if (layers.isNotEmpty()) chains.add(ThreadPullRequestChain(kind = "derived", layers = layers, depths = depths))
     }
-    // Cycles have no top. Keep those links visible without inventing a stack order.
+    // Cycles have no base. Keep those links visible without inventing a stack order.
     for (link in remaining) {
         if (threadPullRequestKeyOf(link) !in placed) {
-            chains.add(ThreadPullRequestChain(kind = "derived", layers = listOf(link)))
+            chains.add(ThreadPullRequestChain(kind = "derived", layers = listOf(link), depths = listOf(0)))
         }
     }
     return chains
@@ -314,3 +331,88 @@ fun presentThreadLinkedPullRequests(links: List<ThreadPullRequestLinkDto>): Pull
 
 private fun ThreadPullRequestBadge.othersOrZero(): Int =
     (this as? ThreadPullRequestBadge.PullRequest)?.others ?: 0
+
+/** `PullRequestListLine`: one row of a thread's linked pull request list. */
+data class PullRequestListLine(
+    val link: ThreadPullRequestLinkDto,
+    val depth: Int,
+    /** The chain's bottom link, `host/repository#number`. */
+    val chainKey: String,
+    /** Set on a multi-layer chain's first row: (kind, size). */
+    val stack: Pair<String, Int>?,
+)
+
+/** `pullRequestListLines`: most recently updated chains first, each in its own layer order. */
+fun pullRequestListLines(chains: List<ThreadPullRequestChain>): List<PullRequestListLine> =
+    chains
+        .sortedByDescending { chain -> chain.layers.maxOf { it.latestUpdatedAtMillis() } }
+        .flatMap { chain ->
+            val bottom = chain.layers.first()
+            val chainKey = "${bottom.host}/${bottom.repository}#${bottom.number}"
+            chain.layers.mapIndexed { index, link ->
+                PullRequestListLine(
+                    link = link,
+                    depth = chain.depths[index],
+                    chainKey = chainKey,
+                    stack = if (index == 0 && chain.layers.size > 1) chain.kind to chain.layers.size else null,
+                )
+            }
+        }
+
+/**
+ * `useLinkedPullRequestLines`: chains with open work first, then finished
+ * ones, each group ordered by [pullRequestListLines].
+ */
+fun linkedPullRequestLines(links: List<ThreadPullRequestLinkDto>): List<PullRequestListLine> {
+    val chains = resolveThreadPullRequestChains(links)
+    val (open, done) = chains.partition { chain -> chain.layers.any { it.isOpen() } }
+    return pullRequestListLines(open) + pullRequestListLines(done)
+}
+
+/** The model link back on the wire shape the chain resolvers read. */
+fun ThreadPullRequestLink.toDto(): ThreadPullRequestLinkDto =
+    ThreadPullRequestLinkDto(
+        host = host,
+        repository = repository,
+        number = number,
+        url = url,
+        source = source,
+        linkedAt = linkedAt,
+        snapshot =
+            snapshot?.let {
+                ThreadPullRequestSnapshotDto(
+                    state = it.state,
+                    title = it.title,
+                    headBranch = it.headBranch,
+                    baseBranch = it.baseBranch,
+                    isDraft = it.isDraft,
+                    updatedAt = it.updatedAt,
+                    syncedAt = it.syncedAt,
+                    closedAt = it.closedAt,
+                    mergedAt = it.mergedAt,
+                    additions = it.additions,
+                    deletions = it.deletions,
+                    changedFiles = it.changedFiles,
+                    reviewDecision = it.reviewDecision,
+                    checksState = it.checksState,
+                )
+            },
+        stack =
+            stack?.let { stack ->
+                ThreadPullRequestStackDto(
+                    id = stack.id,
+                    number = stack.number,
+                    url = stack.url,
+                    base = stack.base,
+                    layers =
+                        stack.layers.map {
+                            club.touchtech.s5code.kotlin.transport.wire.ThreadPullRequestStackLayerDto(
+                                number = it.number,
+                                headBranch = it.headBranch,
+                                state = it.state,
+                            )
+                        },
+                )
+            },
+        watch = if (watched) kotlinx.serialization.json.JsonObject(emptyMap()) else null,
+    )

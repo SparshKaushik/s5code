@@ -6,8 +6,10 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -259,7 +261,10 @@ fun ReviewScreen(
                             ReviewFileCard(
                                 file = file,
                                 expanded = file.path !in collapsed,
-                                selectedTarget = selectedTarget?.takeIf { it.filePath == file.path },
+                                selectedRange =
+                                    selectedTarget
+                                        ?.takeIf { it.filePath == file.path }
+                                        ?.let { it.normalizedStart..it.normalizedEnd },
                                 rangeAnchorIndex =
                                     rangeAnchor?.takeIf { it.filePath == file.path }?.normalizedStart,
                                 onLineTap = { lines, lineIndex ->
@@ -321,15 +326,25 @@ fun ReviewScreen(
     }
 }
 
+/**
+ * One file of a diff: a header that toggles [expanded], then its hunks with
+ * syntax and word-level highlighting. Shared by the working-tree review and
+ * pull request diffs; [headerTrailing], [belowHeader] and [afterLine] (by flat
+ * line index across hunks) let a caller add controls and inline comments.
+ */
 @Composable
-private fun ReviewFileCard(
+fun ReviewFileCard(
     file: ReviewFile,
     expanded: Boolean,
-    selectedTarget: ReviewCommentTarget?,
+    selectedRange: IntRange?,
     rangeAnchorIndex: Int?,
     onLineTap: (List<club.touchtech.s5code.kotlin.model.DiffLine>, Int) -> Unit,
-    onLineLongPress: (List<club.touchtech.s5code.kotlin.model.DiffLine>, Int) -> Unit,
+    onLineLongPress: ((List<club.touchtech.s5code.kotlin.model.DiffLine>, Int) -> Unit)?,
     onToggle: () -> Unit,
+    headerTrailing: (@Composable RowScope.() -> Unit)? = null,
+    belowHeader: (@Composable ColumnScope.() -> Unit)? = null,
+    afterLine: (@Composable (Int) -> Unit)? = null,
+    unavailableText: String = "Diff not loaded. Reopen to hydrate the full patch.",
 ) {
     val language = remember(file.path) { codeLanguageOfPath(file.path) }
     S5Card(tone = S5CardTone.Standard, modifier = Modifier.fillMaxWidth()) {
@@ -374,7 +389,9 @@ private fun ReviewFileCard(
             )
             Text("+${file.additions}", style = S5Theme.code.inlineTechnical, color = S5Theme.status.added)
             Text("−${file.deletions}", style = S5Theme.code.inlineTechnical, color = S5Theme.status.removed)
+            headerTrailing?.invoke(this)
         }
+        belowHeader?.invoke(this)
 
         if (expanded) {
             if (file.status == ReviewFileStatus.Binary || file.hunks.isEmpty()) {
@@ -385,7 +402,7 @@ private fun ReviewFileCard(
                             if (file.status == ReviewFileStatus.Binary) {
                                 "Binary file — no textual diff available."
                             } else {
-                                "Diff not loaded. Reopen to hydrate the full patch."
+                                unavailableText
                             },
                     )
                 }
@@ -424,9 +441,7 @@ private fun ReviewFileCard(
                             )
                             hunk.lines.forEach { line ->
                                 val currentLineIndex = lineIndex++
-                                val selected =
-                                    selectedTarget != null &&
-                                        currentLineIndex in selectedTarget.normalizedStart..selectedTarget.normalizedEnd
+                                val selected = selectedRange != null && currentLineIndex in selectedRange
                                 val anchor = rangeAnchorIndex == currentLineIndex
                                 val annotated =
                                     if (currentLineIndex < highlightedLines.size) {
@@ -462,7 +477,8 @@ private fun ReviewFileCard(
                                         .clip(MaterialTheme.shapes.extraSmall)
                                         .combinedClickable(
                                             onClick = { onLineTap(lines, currentLineIndex) },
-                                            onLongClick = { onLineLongPress(lines, currentLineIndex) },
+                                            onLongClick =
+                                                onLineLongPress?.let { press -> { press(lines, currentLineIndex) } },
                                         )
                                         .padding(horizontal = S5Theme.spacing.small, vertical = 1.dp),
                                     verticalAlignment = Alignment.CenterVertically,
@@ -525,6 +541,7 @@ private fun ReviewFileCard(
                                         )
                                     }
                                 }
+                                afterLine?.invoke(currentLineIndex)
                             }
                         }
                     }

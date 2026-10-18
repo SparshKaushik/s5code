@@ -10,6 +10,13 @@ import androidx.navigation.NavType
 import androidx.navigation.compose.NavHost
 import androidx.navigation.compose.composable
 import androidx.navigation.navArgument
+import club.touchtech.s5code.kotlin.data.PullRequestReviewPosition
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestDiffScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestDiscussionScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestFilesScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestInlineCommentScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestReviewScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.ThreadPullRequestsScreen
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
@@ -27,7 +34,6 @@ import club.touchtech.s5code.kotlin.feature.git.GitBranchesScreen
 import club.touchtech.s5code.kotlin.feature.git.GitCommitScreen
 import club.touchtech.s5code.kotlin.feature.git.GitConfirmScreen
 import club.touchtech.s5code.kotlin.feature.git.GitOverviewScreen
-import club.touchtech.s5code.kotlin.feature.git.PullRequestsScreen
 import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestDetailScreen
 import club.touchtech.s5code.kotlin.data.PullRequestReference
 import club.touchtech.s5code.kotlin.feature.git.SourceControlScreen
@@ -698,43 +704,139 @@ fun S5NavGraph(
                 },
             )
         }
-        composable(
-            Routes.PullRequest,
-            arguments =
-                listOf(
-                    environmentArg,
-                    navArgument("projectId") { type = NavType.StringType },
-                    navArgument("repository") { type = NavType.StringType },
-                    navArgument("number") { type = NavType.IntType },
-                    navArgument("host") {
-                        type = NavType.StringType
-                        nullable = true
-                        defaultValue = null
-                    },
-                ),
-        ) { entry ->
-            val arguments = entry.arguments
+        val pullRequestArgs =
+            listOf(
+                environmentArg,
+                navArgument("projectId") { type = NavType.StringType },
+                navArgument("repository") { type = NavType.StringType },
+                navArgument("number") { type = NavType.IntType },
+                optionalStringArg("host"),
+            )
+        fun pullRequestReference(arguments: android.os.Bundle?) =
+            PullRequestReference(
+                projectId = arguments?.getString("projectId").orEmpty(),
+                repository = arguments?.getString("repository").orEmpty(),
+                number = arguments?.getInt("number") ?: 0,
+                host = arguments?.getString("host")?.takeIf(String::isNotEmpty),
+            )
+        val openPullRequestThread: (String, String) -> Unit = { environmentId, threadId ->
+            navController.navigate(Routes.thread(environmentId, threadId))
+        }
+        val openPullRequestNewTask: () -> Unit = { navController.navigate(Routes.NewTaskDraft) }
+        composable(Routes.PullRequest, arguments = pullRequestArgs) { entry ->
             PullRequestDetailScreen(
                 store = store,
-                environmentId = arguments?.getString("environmentId").orEmpty(),
-                reference =
-                    PullRequestReference(
-                        projectId = arguments?.getString("projectId").orEmpty(),
-                        repository = arguments?.getString("repository").orEmpty(),
-                        number = arguments?.getInt("number") ?: 0,
-                        host = arguments?.getString("host")?.takeIf(String::isNotEmpty),
-                    ),
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                confirmController = confirmController,
                 onBack = navController::popBackStack,
                 onOpenPullRequest = { environmentId, reference ->
                     navController.navigate(Routes.pullRequest(environmentId, reference))
                 },
+                onOpenRoute = { route -> navController.navigate(route) },
+                onOpenThread = openPullRequestThread,
+                onOpenNewTask = openPullRequestNewTask,
+            )
+        }
+        composable(Routes.PullRequestFiles, arguments = pullRequestArgs + optionalStringArg("commit")) { entry ->
+            PullRequestFilesScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                commit = entry.arguments?.getString("commit")?.takeIf(String::isNotEmpty),
+                onBack = navController::popBackStack,
+                onOpenRoute = { route -> navController.navigate(route) },
+            )
+        }
+        composable(
+            Routes.PullRequestDiff,
+            arguments =
+                pullRequestArgs + optionalStringArg("path") + optionalStringArg("commit") +
+                    optionalStringArg("replacingDraftId"),
+        ) { entry ->
+            val arguments = entry.arguments
+            PullRequestDiffScreen(
+                store = store,
+                environmentId = arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(arguments),
+                path = arguments?.getString("path")?.takeIf(String::isNotEmpty),
+                commit = arguments?.getString("commit")?.takeIf(String::isNotEmpty),
+                replacingDraftId = arguments?.getString("replacingDraftId")?.takeIf(String::isNotEmpty),
+                confirmController = confirmController,
+                onBack = navController::popBackStack,
+                onOpenRoute = { route -> navController.navigate(route) },
+                onOpenThread = openPullRequestThread,
+                onOpenNewTask = openPullRequestNewTask,
+            )
+        }
+        composable(
+            Routes.PullRequestDiscussion,
+            arguments = pullRequestArgs + navArgument("discussionId") { type = NavType.StringType },
+        ) { entry ->
+            PullRequestDiscussionScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                discussionId = entry.arguments?.getString("discussionId").orEmpty(),
+                onBack = navController::popBackStack,
+                onOpenRoute = { route -> navController.navigate(route) },
+            )
+        }
+        composable(
+            Routes.PullRequestInlineComment,
+            arguments =
+                pullRequestArgs +
+                    listOf("draftId", "path", "oldPath", "position", "headSha", "code").map(::optionalStringArg),
+        ) { entry ->
+            val arguments = entry.arguments
+            val position =
+                arguments?.getString("position")?.let { raw ->
+                    runCatching {
+                        kotlinx.serialization.json.Json.decodeFromString(PullRequestReviewPosition.serializer(), raw)
+                    }.getOrNull()
+                }
+            val headSha = arguments?.getString("headSha")
+            if (position == null || headSha.isNullOrEmpty()) {
+                LaunchedEffect(Unit) { navController.popBackStack() }
+            } else {
+                PullRequestInlineCommentScreen(
+                    store = store,
+                    environmentId = arguments.getString("environmentId").orEmpty(),
+                    reference = pullRequestReference(arguments),
+                    draftId = arguments.getString("draftId")?.takeIf(String::isNotEmpty),
+                    path = arguments.getString("path").orEmpty(),
+                    oldPath = arguments.getString("oldPath")?.takeIf(String::isNotEmpty),
+                    position = position,
+                    headSha = headSha,
+                    code = arguments.getString("code").orEmpty(),
+                    confirmController = confirmController,
+                    onBack = navController::popBackStack,
+                )
+            }
+        }
+        composable(Routes.PullRequestReview, arguments = pullRequestArgs + optionalStringArg("mode")) { entry ->
+            PullRequestReviewScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                mode = entry.arguments?.getString("mode") ?: "review",
+                onBack = navController::popBackStack,
+                onReplaceRoute = { route ->
+                    navController.popBackStack()
+                    navController.navigate(route)
+                },
             )
         }
         composable(Routes.PullRequests, arguments = listOf(environmentArg, threadArg)) { entry ->
-            PullRequestsScreen(
+            ThreadPullRequestsScreen(
                 store = store,
                 environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                threadId = entry.arguments?.getString("threadId").orEmpty(),
+                confirmController = confirmController,
                 onBack = navController::popBackStack,
+                onOpenPullRequest = { environmentId, reference ->
+                    navController.navigate(Routes.pullRequest(environmentId, reference))
+                },
             )
         }
 
@@ -869,3 +971,10 @@ private fun NavHostController.finishPairing(fromOnboarding: Boolean) {
         navigate(Routes.Home)
     }
 }
+
+private fun optionalStringArg(name: String) =
+    navArgument(name) {
+        type = NavType.StringType
+        nullable = true
+        defaultValue = null
+    }

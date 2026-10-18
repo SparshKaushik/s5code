@@ -9,6 +9,8 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestLinkedThreadsResul
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackHeadDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentsResultDto
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.StateFlow
 
@@ -114,4 +116,93 @@ interface PullRequestGateway {
 
     /** The listing row a PR page can draw before its detail loads. */
     fun summary(environmentId: String, reference: PullRequestReference): PullRequestListEntryDto?
+
+    /* ── Writes ──────────────────────────────────────────────────────────
+     * One write runs at a time per environment, in call order, matching the
+     * client-runtime's serial-per-environment commands. Each throws with a
+     * message fit for an alert when the host refuses.
+     */
+
+    /**
+     * `pullRequests.runAction`. A single merge passes [mergeMethod] and is
+     * re-checked against a fresh read first: refused when the PR can no longer
+     * merge or sits in a stack. A stack merge passes [stackNumber] with
+     * [expectedStackHeads] instead. Detail, activity and stack refetch after.
+     */
+    suspend fun runAction(
+        environmentId: String,
+        reference: PullRequestReference,
+        action: String,
+        mergeMethod: String? = null,
+        updateMethod: String? = null,
+        stackNumber: Int? = null,
+        expectedStackHeads: List<PullRequestStackHeadDto>? = null,
+    )
+
+    /** `pullRequests.comment`: a top-level comment. Activity refetches after. */
+    suspend fun comment(environmentId: String, reference: PullRequestReference, body: String)
+
+    /** `pullRequests.submitReview`. Detail and activity refetch after. */
+    suspend fun submitReview(
+        environmentId: String,
+        reference: PullRequestReference,
+        verdict: String,
+        body: String,
+        comments: List<PendingReviewComment>,
+    )
+
+    /** `pullRequests.replyToThread`. Activity refetches after. */
+    suspend fun replyToThread(environmentId: String, reference: PullRequestReference, threadId: String, body: String)
+
+    /** `pullRequests.setThreadResolution`. Activity refetches after. */
+    suspend fun setThreadResolution(
+        environmentId: String,
+        reference: PullRequestReference,
+        threadId: String,
+        resolved: Boolean,
+    )
+
+    /** `pullRequests.threadComments`: the next page of a review thread's replies. */
+    suspend fun threadComments(
+        environmentId: String,
+        reference: PullRequestReference,
+        threadId: String,
+        cursor: String,
+    ): PullRequestThreadCommentsResultDto
+
+    /**
+     * Viewed marks pressed but not yet confirmed by a fresh read, by path.
+     * Screens draw these over [filesViewed].
+     */
+    fun filesViewedOverlay(environmentId: String, reference: PullRequestReference): StateFlow<Map<String, Boolean>>
+
+    /**
+     * `pullRequests.setFilesViewed` for one file, serial per pull request.
+     * The mark shows at once; a failure reverts it and throws.
+     */
+    suspend fun setFileViewed(environmentId: String, reference: PullRequestReference, path: String, viewed: Boolean)
+
+    /**
+     * `pullRequests.requestReviewers`; patches the cached detail and activity
+     * reviewers for [reviewers] whose identity is known, refetching otherwise.
+     */
+    suspend fun requestReviewers(
+        environmentId: String,
+        reference: PullRequestReference,
+        reviewers: List<PullRequestReviewerRequest>,
+        requested: Boolean,
+    )
+
+    /** `pullRequests.invalidate`: drops the server's host cache, then refetches the PR page. */
+    suspend fun invalidate(environmentId: String, reference: PullRequestReference?)
 }
+
+/** One reviewer to (un)request; [login] lets the cached reviewer lists update without a refetch. */
+data class PullRequestReviewerRequest(
+    val id: String,
+    /** user | team */
+    val kind: String,
+    val login: String? = null,
+    val name: String? = null,
+    val avatarUrl: String? = null,
+)

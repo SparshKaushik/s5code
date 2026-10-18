@@ -102,6 +102,16 @@ class ClientStateMappingTest {
     }
 
     @Test
+    fun `pull request merge method and test-file filter round-trip`() {
+        val fresh = StoredPreferences().toRuntime()
+        assertEquals(null, fresh.pullRequestMergeMethod)
+        assertEquals(false, fresh.pullRequestHideTestFiles)
+        val picked = RuntimePreferences(pullRequestMergeMethod = "rebase", pullRequestHideTestFiles = true)
+        assertEquals(picked, picked.toStored().toRuntime())
+        assertEquals(null, StoredPreferences(pullRequestMergeMethod = " ").toRuntime().pullRequestMergeMethod)
+    }
+
+    @Test
     fun `thread settings names decode with per-field fallbacks`() {
         assertEquals(RuntimeMode.Plan, storedRuntimeMode("Plan"))
         assertEquals(RuntimeMode.Default, storedRuntimeMode(""))

@@ -77,6 +77,16 @@ import club.touchtech.s5code.kotlin.data.reference
 import club.touchtech.s5code.kotlin.data.relativeLabel
 import club.touchtech.s5code.kotlin.data.scopedPullRequestListKey
 import club.touchtech.s5code.kotlin.data.withoutScratchProjectScope
+import club.touchtech.s5code.kotlin.data.canPerformPullRequestAction
+import club.touchtech.s5code.kotlin.data.pullRequestActionLabel
+import club.touchtech.s5code.kotlin.data.pullRequestListRowActions
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.Replay
+import androidx.compose.material.icons.rounded.TaskAlt
+import kotlinx.coroutines.flow.first
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
 import club.touchtech.s5code.kotlin.design.component.S5Card
@@ -105,6 +115,14 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.launch
+
+private val STATUS_ACTION_ICONS =
+    mapOf(
+        "ready" to Icons.Rounded.TaskAlt,
+        "draft" to Icons.Rounded.EditNote,
+        "close" to Icons.Rounded.Close,
+        "reopen" to Icons.Rounded.Replay,
+    )
 
 private val STATES = listOf("open" to "Open", "closed" to "Closed", "merged" to "Merged", "all" to "All states")
 private val INVOLVEMENT = listOf("all" to "All PRs", "reviewing" to "Your review", "authored" to "By you")
@@ -140,6 +158,7 @@ fun PullRequestListScreen(
     onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit,
     onSettings: () -> Unit,
     onConnections: () -> Unit,
+    confirmController: S5ConfirmDialogController,
     bottomBar: @Composable () -> Unit,
 ) {
     val gateway = store.pullRequests
@@ -246,6 +265,47 @@ fun PullRequestListScreen(
                 pageLoading = false
             }
         }
+    }
+
+    val writableEnvironments =
+        remember(environments) {
+            environments.filter { it.capabilities.sessionAllowsSourceControlWrite }.mapTo(HashSet()) { it.id.value }
+        }
+
+    // RN's row status writes: confirm, re-read the detail (the row may be stale), write, refresh the list.
+    fun requestStatusAction(environmentId: String, row: ScopedPullRequestEntry, action: String) {
+        val entry = row.entry
+        val reference = entry.reference()
+        val label = pullRequestActionLabel(action)
+        confirmController.show(
+            S5ConfirmDialogRequest(
+                title = "$label?",
+                message = "#${entry.number} · ${entry.title}",
+                confirmText = label,
+                destructive = action == "close",
+                onConfirm = {
+                    scope.launch {
+                        try {
+                            if (!gateway.connected(environmentId).first()) {
+                                throw IllegalStateException("Reconnect to update this pull request.")
+                            }
+                            gateway.refreshDetail(environmentId, reference)
+                            val fresh = gateway.detail(environmentId, reference).first { it.hasValue || it.error != null }
+                            val detail = fresh.value ?: throw IllegalStateException(fresh.error ?: "Couldn't read this pull request.")
+                            if (!canPerformPullRequestAction(detail, action)) {
+                                throw IllegalStateException("This pull request changed. Open it to see what's available.")
+                            }
+                            gateway.runAction(environmentId, reference, action)
+                            runCatching { gateway.refreshList(targets) }
+                        } catch (cancelled: CancellationException) {
+                            throw cancelled
+                        } catch (error: Exception) {
+                            confirmController.alert("Couldn't update this pull request", error.alertMessage())
+                        }
+                    }
+                },
+            )
+        )
     }
 
     fun refresh() {
@@ -390,6 +450,12 @@ fun PullRequestListScreen(
                                 val key = scopedPullRequestListKey(row)
                                 PullRequestListRow(
                                     row = row,
+                                    statusActions =
+                                        if (writableEnvironments.contains(row.environmentId)) {
+                                            pullRequestListRowActions(row.entry.state, row.entry.isDraft)
+                                        } else {
+                                            emptyList()
+                                        },
                                     environmentLabel = if (targets.size > 1) environmentLabels[row.environmentId] else null,
                                     menuExpanded = rowMenuFor == key,
                                     onMenuExpandedChange = { open -> rowMenuFor = if (open) key else null },
@@ -407,6 +473,7 @@ fun PullRequestListScreen(
                                                 if (!openPullRequestUrl(context, entry.url)) {
                                                     store.showError("The pull request could not be opened.")
                                                 }
+                                            else -> row.environmentId?.let { requestStatusAction(it, row, action) }
                                         }
                                     },
                                 )
@@ -621,6 +688,7 @@ private fun PullRequestFilterRow(
 @Composable
 private fun PullRequestListRow(
     row: ScopedPullRequestEntry,
+    statusActions: List<String>,
     environmentLabel: String?,
     menuExpanded: Boolean,
     onMenuExpandedChange: (Boolean) -> Unit,
@@ -689,7 +757,15 @@ private fun PullRequestListRow(
                         S5MenuOption("share", "Share…", icon = Icons.Rounded.Share),
                         S5MenuOption("copy", "Copy link", icon = Icons.Rounded.ContentCopy),
                         S5MenuOption("provider", openOnProviderLabel(entry.provider), icon = Icons.AutoMirrored.Rounded.OpenInNew),
-                    ),
+                    ) +
+                        statusActions.map { action ->
+                            S5MenuOption(
+                                action,
+                                pullRequestActionLabel(action),
+                                icon = STATUS_ACTION_ICONS[action],
+                                destructive = action == "close",
+                            )
+                        },
                 onSelect = onMenuSelect,
             )
         }

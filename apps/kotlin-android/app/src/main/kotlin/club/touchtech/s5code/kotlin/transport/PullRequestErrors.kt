@@ -64,7 +64,13 @@ fun pullRequestUnavailableMessage(reason: String?, provider: String?): String? {
 }
 
 /** The message a PR read or write failure shows, rebuilt from its tagged error where it has one. */
-fun pullRequestErrorMessage(error: Throwable): String {
+fun pullRequestErrorMessage(error: Throwable): String =
+    pullRequestErrorMessage(error, "Couldn't load this pull request.")
+
+/** As [pullRequestErrorMessage], for a write: the alert's title already names what failed. */
+fun pullRequestWriteMessage(error: Throwable): String = pullRequestErrorMessage(error, "Try again.")
+
+private fun pullRequestErrorMessage(error: Throwable, fallback: String): String {
     val failure = error as? RpcFailure
     val raw = failure?.error
     if (raw != null) {
@@ -80,7 +86,7 @@ fun pullRequestErrorMessage(error: Throwable): String {
             }
         }
     }
-    return error.message?.takeIf { it.isNotBlank() } ?: "Couldn't load this pull request."
+    return error.message?.takeIf { it.isNotBlank() } ?: fallback
 }
 
 /** `PullRequestOperationError` with `reason: "not-found"`: the PR or its project is gone. */

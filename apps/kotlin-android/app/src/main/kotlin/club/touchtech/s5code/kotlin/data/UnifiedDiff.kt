@@ -55,6 +55,7 @@ fun parseUnifiedDiff(diff: String): List<ReviewFile> {
                 deletions = deletions,
                 status = if (binary) ReviewFileStatus.Binary else status,
                 hunks = hunks.toList(),
+                oldPath = oldPath?.takeIf { it != current && it != "/dev/null" },
             )
         path = null
         oldPath = null

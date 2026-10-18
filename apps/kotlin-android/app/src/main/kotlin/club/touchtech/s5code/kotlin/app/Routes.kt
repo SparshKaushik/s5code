@@ -64,6 +64,15 @@ object Routes {
     const val PullRequests = "threads/{environmentId}/{threadId}/pull-requests"
     /** One PR page, addressed the way the server reads it (`PullRequestRef`). */
     const val PullRequest = "pull-requests/{environmentId}/{projectId}/{repository}/{number}?host={host}"
+    private const val PULL_REQUEST_BASE = "pull-requests/{environmentId}/{projectId}/{repository}/{number}"
+    const val PullRequestFiles = "$PULL_REQUEST_BASE/files?host={host}&commit={commit}"
+    const val PullRequestDiff = "$PULL_REQUEST_BASE/diff?host={host}&path={path}&commit={commit}&replacingDraftId={replacingDraftId}"
+    const val PullRequestDiscussion = "$PULL_REQUEST_BASE/discussions/{discussionId}?host={host}"
+    /** [position] is a `PullRequestReviewPosition` as JSON. */
+    const val PullRequestInlineComment =
+        "$PULL_REQUEST_BASE/inline-comment?host={host}&draftId={draftId}&path={path}&oldPath={oldPath}" +
+            "&position={position}&headSha={headSha}&code={code}"
+    const val PullRequestReview = "$PULL_REQUEST_BASE/review?host={host}&mode={mode}"
 
     const val Settings = "settings"
     const val SettingsAccount = "settings/auth"
@@ -124,6 +133,78 @@ object Routes {
         "pull-requests/${routeSegment(environmentId)}/${routeSegment(reference.projectId)}/" +
             "${routeSegment(reference.repository)}/${reference.number}" +
             (reference.host?.let { "?host=${android.net.Uri.encode(it)}" } ?: "")
+
+    /** A screen under one PR page; null query values are left out. */
+    private fun pullRequestChild(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        suffix: String,
+        vararg query: Pair<String, String?>,
+    ): String {
+        val params = (listOf("host" to reference.host) + query).filter { it.second != null }
+        return "pull-requests/${routeSegment(environmentId)}/${routeSegment(reference.projectId)}/" +
+            "${routeSegment(reference.repository)}/${reference.number}/$suffix" +
+            params.joinToString("&", prefix = if (params.isEmpty()) "" else "?") { (key, value) ->
+                "$key=${android.net.Uri.encode(value)}"
+            }
+    }
+
+    fun pullRequestFiles(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        commit: String? = null,
+    ) = pullRequestChild(environmentId, reference, "files", "commit" to commit)
+
+    fun pullRequestDiff(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        path: String? = null,
+        commit: String? = null,
+        replacingDraftId: String? = null,
+    ) = pullRequestChild(
+        environmentId,
+        reference,
+        "diff",
+        "path" to path,
+        "commit" to commit,
+        "replacingDraftId" to replacingDraftId,
+    )
+
+    fun pullRequestDiscussion(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        discussionId: String,
+    ) = pullRequestChild(environmentId, reference, "discussions/${routeSegment(discussionId)}")
+
+    fun pullRequestInlineComment(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        path: String,
+        oldPath: String?,
+        position: club.touchtech.s5code.kotlin.data.PullRequestReviewPosition,
+        headSha: String,
+        code: String,
+        draftId: String? = null,
+    ) = pullRequestChild(
+        environmentId,
+        reference,
+        "inline-comment",
+        "draftId" to draftId,
+        "path" to path,
+        "oldPath" to oldPath,
+        "position" to kotlinx.serialization.json.Json.encodeToString(
+            club.touchtech.s5code.kotlin.data.PullRequestReviewPosition.serializer(),
+            position,
+        ),
+        "headSha" to headSha,
+        "code" to code.take(2_000),
+    )
+
+    fun pullRequestReview(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        mode: String,
+    ) = pullRequestChild(environmentId, reference, "review", "mode" to mode)
 
     fun connectionDetail(environmentId: String) = "connections/$environmentId"
 

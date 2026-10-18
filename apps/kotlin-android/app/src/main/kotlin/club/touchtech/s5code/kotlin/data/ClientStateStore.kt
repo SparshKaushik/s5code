@@ -53,6 +53,10 @@ data class StoredPreferences(
     val dismissedDatabaseStorageNotices: List<String> = emptyList(),
     /** RN's `threadListFilters`: the home filters, restored on the next launch. */
     val threadListFilters: StoredThreadListFilters? = null,
+    /** RN's `pullRequestMergeMethod`: the last merge method picked, offered first next time. */
+    val pullRequestMergeMethod: String? = null,
+    /** RN's `pullRequestHideTestFiles` for the changed-files list. */
+    val pullRequestHideTestFiles: Boolean = false,
 )
 
 /** The home environment and project filters; null means "all". */
@@ -104,6 +108,8 @@ data class StoredNewTaskDraft(
     val attachments: List<StoredAttachment> = emptyList(),
     val branch: String = "",
     val workspaceMode: String = "CurrentCheckout",
+    /** A pull request URL the task's worktree checks out first ("Work on PR"). */
+    val pullRequestReference: String? = null,
     /**
      * The provider instance id, which is what a turn start routes on. Older files
      * hold a driver enum name ("Codex"); `storedProvider` reads both.

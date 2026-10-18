@@ -211,6 +211,11 @@ data class StoredQueuedThreadCreation(
     val newWorktree: Boolean,
     /** An existing worktree to open the thread in ("New thread on branch"). */
     val worktreePath: String? = null,
+    /**
+     * A pull request URL to check out (`git.preparePullRequestThread`) before
+     * the thread starts; its worktree then replaces [branch] and [newWorktree].
+     */
+    val pullRequestReference: String? = null,
 )
 
 @Serializable

@@ -77,6 +77,8 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         dismissedDatabaseStorageNotices = dismissedDatabaseStorageNotices,
         homeEnvironmentId = threadListFilters?.environmentId?.takeIf(String::isNotBlank),
         homeProjectKey = threadListFilters?.projectKey?.takeIf(String::isNotEmpty),
+        pullRequestMergeMethod = pullRequestMergeMethod?.takeIf(String::isNotBlank),
+        pullRequestHideTestFiles = pullRequestHideTestFiles,
     )
 
 /**
@@ -125,6 +127,9 @@ data class RuntimePreferences(
      */
     val homeEnvironmentId: String? = null,
     val homeProjectKey: String? = null,
+    /** The last pull request merge method picked; the merge menu offers it first. */
+    val pullRequestMergeMethod: String? = null,
+    val pullRequestHideTestFiles: Boolean = false,
 )
 
 fun RuntimePreferences.toStored(): StoredPreferences =
@@ -158,6 +163,8 @@ fun RuntimePreferences.toStored(): StoredPreferences =
         threadListFilters =
             if (homeEnvironmentId == null && homeProjectKey == null) null
             else StoredThreadListFilters(homeEnvironmentId, homeProjectKey),
+        pullRequestMergeMethod = pullRequestMergeMethod,
+        pullRequestHideTestFiles = pullRequestHideTestFiles,
     )
 
 fun ComposerAttachment.toStored(): StoredAttachment =

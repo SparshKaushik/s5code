@@ -44,6 +44,7 @@ internal object WsMethods {
     const val VcsSwitchRef = "vcs.switchRef"
     const val VcsPull = "vcs.pull"
     const val GitRunStackedAction = "git.runStackedAction"
+    const val GitPreparePullRequestThread = "git.preparePullRequestThread"
 
     const val ProjectsListEntries = "projects.listEntries"
     const val ProjectsReadFile = "projects.readFile"
@@ -58,6 +59,15 @@ internal object WsMethods {
     const val PullRequestsFilesViewed = "pullRequests.filesViewed"
     const val PullRequestsInvalidate = "pullRequests.invalidate"
     const val PullRequestsSubscribeRefreshes = "pullRequests.subscribeRefreshes"
+    const val PullRequestsRunAction = "pullRequests.runAction"
+    const val PullRequestsComment = "pullRequests.comment"
+    const val PullRequestsSubmitReview = "pullRequests.submitReview"
+    const val PullRequestsReplyToThread = "pullRequests.replyToThread"
+    const val PullRequestsSetThreadResolution = "pullRequests.setThreadResolution"
+    const val PullRequestsSetFilesViewed = "pullRequests.setFilesViewed"
+    const val PullRequestsRequestReviewers = "pullRequests.requestReviewers"
+    const val PullRequestsThreadComments = "pullRequests.threadComments"
+    const val PullRequestsGenerateReviewGuide = "pullRequests.generateReviewGuide"
 
     const val SubscribeDeviceState = "subscribeDeviceState"
     const val DeviceList = "device.list"
