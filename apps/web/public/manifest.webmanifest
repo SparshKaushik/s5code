@@ -1,5 +1,7 @@
 {
   "id": "/",
+  "name": "S5 Code",
+  "short_name": "S5 Code",
   "start_url": "/",
   "scope": "/",
   "display": "standalone",
