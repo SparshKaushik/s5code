@@ -38,6 +38,8 @@ export interface UpdatesHarnessOptions {
     MacUnsignedUpdateInstall.MacUnsignedUpdateInstallError
   >;
   readonly appPath?: string;
+  readonly backendDesiredRunning?: boolean;
+  readonly backendInstances?: ReadonlyArray<DesktopBackendPool.DesktopBackendInstance>;
   readonly env?: Record<string, string | undefined>;
   readonly platform?: NodeJS.Platform;
   readonly packageType?: string | undefined;
@@ -145,25 +147,32 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     syncAllAppearance: () => Effect.void,
   } satisfies ElectronWindow.ElectronWindow["Service"]);
 
+  let backendDesiredRunning = options.backendDesiredRunning ?? true;
   const stubBackendInstance: DesktopBackendPool.DesktopBackendInstance = {
     id: DesktopBackendPool.PRIMARY_INSTANCE_ID,
     label: Effect.succeed("Windows"),
     start: Effect.sync(() => {
+      backendDesiredRunning = true;
       installSteps.push("startBackend");
       backendStartCount += 1;
     }).pipe(Effect.andThen(options.startBackend ?? Effect.void)),
-    stop: () => options.stopBackend ?? Effect.void,
+    stop: () =>
+      Effect.sync(() => {
+        backendDesiredRunning = false;
+      }).pipe(Effect.andThen(options.stopBackend ?? Effect.void)),
     currentConfig: Effect.succeedNone,
-    snapshot: Effect.succeed({
-      desiredRunning: false,
+    snapshot: Effect.sync(() => ({
+      desiredRunning: backendDesiredRunning,
       ready: false,
       activePid: Option.none(),
       restartAttempt: 0,
       restartScheduled: false,
-    }),
+    })),
     waitForReady: () => Effect.succeed(true),
   };
-  const layerBackend = DesktopBackendPool.layerTest([stubBackendInstance]);
+  const layerBackend = DesktopBackendPool.layerTest(
+    options.backendInstances ?? [stubBackendInstance],
+  );
 
   const layerDesktopWindow = Layer.succeed(DesktopWindow.DesktopWindow, {
     createMain: Effect.die("unexpected createMain"),
@@ -191,6 +200,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
     name: Effect.succeed("S5 Code"),
     systemLocale: Effect.succeed("en-US"),
     whenReady: Effect.void,
+    requestSingleInstanceLock: Effect.succeed(true),
     quit: Effect.sync(() => {
       appQuitCount += 1;
     }),

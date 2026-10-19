@@ -67,7 +67,8 @@ for (const slow of [false, true]) {
       );
       const server = Context.get(services, HttpServer.HttpServer);
       const origin = HttpServer.formatAddress(server.address).replace(/^http/, "ws");
-      const frame = new Uint8Array([255, 216, 255, 217]);
+      const frameAt = (index: number) => new Uint8Array([255, 216, index, 255, 217]);
+      const frameCount = slow ? 65 : 1;
       yield* Queue.offer(output, { _tag: "viewport", width: 1280, height: 800 });
       yield* Queue.offer(output, {
         _tag: "control",
@@ -76,13 +77,15 @@ for (const slow of [false, true]) {
         generation: 1,
         dialog: null,
       });
-      for (let index = 0; index < (slow ? 65 : 1); index++) {
+      for (let index = 0; index < frameCount; index++) {
         yield* Queue.offer(output, {
           _tag: "frame",
-          data: frame,
+          data: frameAt(index),
           ack: Deferred.succeed(acked, undefined).pipe(Effect.asVoid),
         });
       }
+      // Text output is never held back, so its arrival means every frame was taken.
+      if (slow) yield* Queue.offer(output, { _tag: "viewport", width: 640, height: 400 });
       const received = Promise.withResolvers<void>();
       const closed = Promise.withResolvers<number>();
       const messages: unknown[] = [];
@@ -96,11 +99,14 @@ for (const slow of [false, true]) {
           socket.addEventListener("error", () => received.reject(new Error("stream failed")));
           socket.addEventListener("close", (event) => {
             closed.resolve(event.code);
-            if (!slow) received.reject(new Error(`stream closed: ${event.code}`));
+            received.reject(new Error(`stream closed: ${event.code}`));
           });
           socket.addEventListener("message", (event) => {
             if (typeof event.data === "string") {
-              messages.push(JSON.parse(event.data));
+              const message = JSON.parse(event.data);
+              messages.push(message);
+              // A slow viewer acks its first frame only after every frame was queued.
+              if (slow && message.width === 640) socket.send(JSON.stringify({ type: "ack" }));
               return;
             }
             frames.push(new Uint8Array(event.data));
@@ -108,32 +114,36 @@ for (const slow of [false, true]) {
               socket.send(JSON.stringify({ type: "reload" }));
               socket.send(JSON.stringify({ type: "ack" }));
               received.resolve();
+            } else if (frames.length === 2) {
+              received.resolve();
             }
           });
           return socket;
         }),
         (socket) => Effect.sync(() => socket.close()),
       );
+      yield* Effect.promise(() => received.promise);
+      yield* Deferred.await(acked);
       if (slow) {
-        NodeAssert.equal(yield* Effect.promise(() => closed.promise), 1013);
-        NodeAssert.equal(frames.length, 64);
+        // Only the first frame and the newest one reach a viewer that acks late.
+        NodeAssert.deepEqual(frames, [frameAt(0), frameAt(frameCount - 1)]);
+        NodeAssert.deepEqual(inputs, []);
       } else {
-        yield* Effect.promise(() => received.promise);
-        yield* Deferred.await(acked);
         NodeAssert.deepEqual(inputs, [{ type: "reload" }]);
-        NodeAssert.deepEqual(frames, [frame]);
-        socket.close();
-        yield* Effect.promise(() => closed.promise);
+        NodeAssert.deepEqual(frames, [frameAt(0)]);
       }
+      socket.close();
+      yield* Effect.promise(() => closed.promise);
       NodeAssert.deepEqual(messages, [
         { type: "viewport", width: 1280, height: 800 },
         { type: "control", canOperate: true, controller: "you", generation: 1, dialog: null },
+        ...(slow ? [{ type: "viewport", width: 640, height: 400 }] : []),
       ]);
     }).pipe(Effect.provideService(Scope.Scope, scope), Effect.timeout("10 seconds")),
   );
 }
 await Effect.runPromise(
   Console.log(
-    "Standalone Bun preview streamed frames and control, handled input and ACKs, and closed a slow viewer.",
+    "Standalone Bun preview streamed frames and control, handled input and ACKs, and sent a slow viewer only the newest frame.",
   ),
 );
