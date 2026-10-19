@@ -29,8 +29,10 @@ import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Group
 import androidx.compose.material.icons.rounded.Layers
+import androidx.compose.material.icons.rounded.Link
 import androidx.compose.material.icons.rounded.RemoveCircleOutline
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Share
 import androidx.compose.material.icons.rounded.Error
 import androidx.compose.material.icons.rounded.AddComment
 import androidx.compose.material.icons.rounded.AutoAwesome
@@ -230,6 +232,7 @@ fun PullRequestDetailScreen(
     val openReview = { mode: String -> onOpenRoute(Routes.pullRequestReview(readEnvironment, readReference, mode)) }
     val openFiles = { onOpenRoute(Routes.pullRequestFiles(readEnvironment, readReference)) }
     var overflowOpen by remember { mutableStateOf(false) }
+    val copyLink = rememberClipboardWriter()
 
     val reviewGuide = rememberReviewGuide(store, readEnvironment, readReference)
     val segments = PullRequestSegment.entries.filter { it != PullRequestSegment.Guide || reviewGuide.enabled }
@@ -283,27 +286,48 @@ fun PullRequestDetailScreen(
                     },
                 )
             }
-            if (detail != null && canPerformPullRequestAction(detail, "delete-branch")) {
+            val shareUrl = identity?.url?.takeIf { it.isNotEmpty() }
+            val canDeleteBranch = detail != null && canPerformPullRequestAction(detail, "delete-branch")
+            if (shareUrl != null || canDeleteBranch) {
                 S5OverflowMenu(
                     icon = Icons.Rounded.MoreVert,
                     label = "Pull request actions",
                     options =
-                        listOf(
-                            S5MenuOption(
-                                id = "delete-branch",
-                                label = pullRequestActionLabel("delete-branch"),
-                                icon = Icons.Rounded.DeleteOutline,
-                                supporting =
-                                    when {
-                                        runner.busy -> "Deleting…"
-                                        online -> detail.headBranch
-                                        else -> "Reconnect to delete this branch."
-                                    },
-                                enabled = runner.available("delete-branch"),
-                                destructive = true,
-                            )
-                        ),
-                    onSelect = runner::request,
+                        buildList {
+                            if (shareUrl != null) {
+                                add(S5MenuOption("copy", "Copy link", icon = Icons.Rounded.Link))
+                                add(S5MenuOption("share", "Share…", icon = Icons.Rounded.Share))
+                            }
+                            if (detail != null && canDeleteBranch) {
+                                add(
+                                    S5MenuOption(
+                                        id = "delete-branch",
+                                        label = pullRequestActionLabel("delete-branch"),
+                                        icon = Icons.Rounded.DeleteOutline,
+                                        supporting =
+                                            when {
+                                                runner.busy -> "Deleting…"
+                                                online -> detail.headBranch
+                                                else -> "Reconnect to delete this branch."
+                                            },
+                                        enabled = runner.available("delete-branch"),
+                                        destructive = true,
+                                    )
+                                )
+                            }
+                        },
+                    onSelect = { action ->
+                        when (action) {
+                            "copy" -> shareUrl?.let(copyLink)
+                            "share" ->
+                                if (shareUrl != null && identity != null &&
+                                    !sharePullRequest(context, identity.title, shareUrl)
+                                ) {
+                                    store.showError("The pull request could not be shared.")
+                                }
+                            else -> runner.request(action)
+                        }
+                    },
                     expanded = overflowOpen,
                     onExpandedChange = { overflowOpen = it },
                 )

@@ -209,6 +209,14 @@ private fun parseParagraph(source: String): ParsedParagraph {
 private const val MARKDOWN_ESCAPABLE = "!\"#$%&'()*+,-./:;<=>?@[\\]^_`{|}~"
 
 /**
+ * A drive path that has not reached whitespace yet: `C:`, `C:\Users\me`, `C:/work`.
+ * Every backslash in one is a separator, so `C:\me\.t3` keeps its `\.`; past
+ * whitespace nothing tells a path from a sentence, so `C:\x and \*this\*` still
+ * unescapes. `\z`, not `$`: Java's `$` would also match before a trailing newline.
+ */
+private val UNFINISHED_DRIVE_PATH = Regex("""(?:^|\W)[A-Za-z]:(?:[\\/]\S*)?\z""")
+
+/**
  * Index of the `]` closing the link label opened at [rest]`[0]`, or -1.
  * Escaped characters and balanced inner brackets stay in the label, so a
  * citation like `[\[id\].tsx](…)` keeps its whole name.
@@ -275,6 +283,7 @@ fun parseInline(source: String): List<MdSpan> {
         when {
             // A backslash before ASCII punctuation is a literal (CommonMark escape).
             rest.length > 1 && rest[0] == '\\' && rest[1] in MARKDOWN_ESCAPABLE -> {
+                if (UNFINISHED_DRIVE_PATH.containsMatchIn(buffer)) buffer.append('\\')
                 buffer.append(rest[1])
                 index += 2
             }

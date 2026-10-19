@@ -12,8 +12,9 @@ import org.junit.Test
  *
  * The rules that matter are about what must *not* fold. A subagent hidden behind
  * "Used 7 tools" is exactly the stall the subagent row exists to explain, and a
- * folded error is an error the user does not know about. Every run — even a
- * single call — collapses to its summary row, matching RN's `work-toggle`.
+ * folded error is an error the user does not know about. Every run of two or
+ * more collapses to its summary row, matching RN's `work-toggle`; a lone call
+ * is its own row standing in for that toggle.
  */
 class WorkGroupsTest {
 
@@ -38,13 +39,61 @@ class WorkGroupsTest {
     private fun keys(rows: List<FeedRow>) = rows.map { it.key }
 
     @Test
-    fun `a single call is its own summary row`() {
+    fun `a lone call is its own row, with no toggle to open first`() {
         val feed = listOf(message("m1"), command("t1"), message("m2"))
-        assertEquals(listOf("m1", "work-toggle:work-group:t1", "m2"), keys(presentFeed(feed, emptySet())))
-        val toggle =
-            presentFeed(feed, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single()
+        val rows = presentFeed(feed, emptySet())
+        // The call keeps the toggle's key, so the row does not jump when a
+        // second call turns it into a group.
+        assertEquals(listOf("m1", "work-toggle:work-group:t1", "m2"), keys(rows))
+        assertTrue(rows.none { it is FeedRow.WorkToggle })
+        val row = rows[1] as FeedRow.Entry
+        assertEquals("t1", row.entry.id)
         // `singleToolCallLabel`: the command itself, as RN shows it.
-        assertEquals("ls -la", toggle.summary)
+        assertEquals(FeedRow.GroupStandIn("work-group:t1", "ls -la"), row.standIn)
+        // The group's own expansion adds nothing while the call is alone.
+        assertEquals(rows, presentFeed(feed, setOf("work-group:t1")))
+    }
+
+    @Test
+    fun `a lone running call stands in with the live label`() {
+        val feed = listOf(command("t1").copy(state = ToolState.Running))
+        val rows = presentFeed(feed, emptySet(), activeWorkStartedAtMillis = 1_000)
+        assertEquals(listOf("work-toggle:work-group:t1", "working-indicator"), keys(rows))
+        assertEquals("Running ls", (rows.first() as FeedRow.Entry).standIn?.label)
+    }
+
+    @Test
+    fun `a lone thought keeps its toggle`() {
+        val feed = listOf(FeedEntry.Reasoning(id = "r1", text = "a", thought = true))
+        val rows = presentFeed(feed, emptySet())
+        assertEquals(listOf("work-toggle:work-group:r1"), keys(rows))
+        assertEquals("Thought", rows.filterIsInstance<FeedRow.WorkToggle>().single().summary)
+    }
+
+    @Test
+    fun `a second call turns the lone row back into an open group`() {
+        // Opening the stand-in opens its group too, so the group the second call
+        // creates is already expanded and the first call's details stay open.
+        val standIn = (presentFeed(listOf(command("t1")), emptySet()).single() as FeedRow.Entry).standIn!!
+        val rows = presentFeed(listOf(command("t1"), command("t2")), setOf(standIn.groupId))
+        assertEquals(listOf("work-toggle:work-group:t1", "t1", "t2"), keys(rows))
+        val toggle = rows.filterIsInstance<FeedRow.WorkToggle>().single()
+        assertEquals(standIn.groupId, toggle.groupId)
+        assertTrue(toggle.expanded)
+        assertTrue(rows.filterIsInstance<FeedRow.Entry>().all { it.standIn == null })
+    }
+
+    @Test
+    fun `a multi-kilobyte heredoc label is capped to one short line`() {
+        val heredoc = "cd /repo && python3 - <<'PY'\n" + "print('x')\n".repeat(400) + "PY"
+        val call = command("t1").copy(command = heredoc)
+        val collapsed = toolCallRowLabel(call)
+        assertTrue(collapsed.startsWith("cd /repo && python3 - <<'PY' print('x')"))
+        assertTrue(collapsed.length <= 203)
+        val standIn = (presentFeed(listOf(call), emptySet()).single() as FeedRow.Entry).standIn!!
+        assertTrue(standIn.label.startsWith("cd /repo && python3"))
+        assertTrue(standIn.label.length <= 203)
+        assertTrue(toolCallRowLabel(tool("t2").copy(detail = heredoc), expanded = true).length <= 203)
     }
 
     @Test
@@ -647,5 +696,26 @@ class TurnFoldTest {
         // 59.6s of the minute rounds to 60, which reads as the next whole minute
         // rather than "1m 60s".
         assertEquals("2m", formatDuration(119_600))
+        // The unit is chosen after rounding: 59.5s is a minute, never "60s".
+        assertEquals("10s", formatDuration(9_950))
+        assertEquals("10s", formatDuration(9_960))
+        assertEquals("22s", formatDuration(22_000))
+        assertEquals("59s", formatDuration(59_499))
+        assertEquals("1m", formatDuration(59_500))
+        assertEquals("1m", formatDuration(59_999))
+        assertEquals("1m", formatDuration(60_000))
+        assertEquals("1m 5s", formatDuration(65_000))
+        assertEquals("2m", formatDuration(119_500))
+        assertEquals("59m 59s", formatDuration(3_599_499))
+        assertEquals("1h", formatDuration(3_599_500))
+        assertEquals("1h", formatDuration(3_600_000))
+        assertEquals("1h 1s", formatDuration(3_601_000))
+        assertEquals("1h 1m", formatDuration(3_660_000))
+        assertEquals("1h 1m 1s", formatDuration(3_661_000))
+        assertEquals("1h 1m 40s", formatDuration(3_700_000))
+        assertEquals("2h", formatDuration(7_199_500))
+        assertEquals("6h 59m 50s", formatDuration(25_190_000))
+        assertEquals("25h 1m 1s", formatDuration(90_061_000))
+        assertEquals("0ms", formatDuration(-1))
     }
 }

@@ -65,6 +65,9 @@ object PushRuntime {
             )
     }
 
+    // First launch has several concurrent callers (app start, push registration,
+    // each environment connect); unlocked, they could each mint and register an id.
+    @Synchronized
     fun deviceId(context: Context): String {
         val saved = preferences(context).getString(KEY_DEVICE_ID, null)
         if (!saved.isNullOrBlank()) return saved

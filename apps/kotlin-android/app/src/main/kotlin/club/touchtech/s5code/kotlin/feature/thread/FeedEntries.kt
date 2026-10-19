@@ -150,6 +150,8 @@ fun FeedEntryRow(
      * failures, so implementations catch their own.
      */
     onRetryPreparation: suspend (runId: String) -> Unit = {},
+    /** The group summary a lone tool call shows in place of its own label; see [FeedRow.Entry.standIn]. */
+    toolLabelOverride: String? = null,
     mcpAppContent: @Composable (FeedEntry.McpApp) -> Unit = { Text("Interactive app") },
 ) {
     when (entry) {
@@ -196,6 +198,7 @@ fun FeedEntryRow(
                 fetchToolDetail,
                 resolveToolOutputImage,
                 commandOutput,
+                toolLabelOverride,
             )
 
         is FeedEntry.PlanUpdate -> PlanCard(entry, modifier)
@@ -336,6 +339,8 @@ fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: 
                 row.summary,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
             row.thought?.let { thought ->
                 Text(thought, style = MaterialTheme.typography.bodySmall,
@@ -747,6 +752,7 @@ private fun ToolRow(
     fetchToolDetail: suspend (FeedEntry.ToolCall) -> JsonObject?,
     resolveToolOutputImage: suspend (FeedEntry.ToolCall, Int) -> String?,
     commandOutput: ((FeedEntry.ToolCall) -> Flow<CommandOutputView>)?,
+    labelOverride: String?,
 ) {
     // A chevron on a row with nothing behind it is a promise the row cannot keep.
     val canExpand = toolCallCanExpand(entry)
@@ -810,9 +816,11 @@ private fun ToolRow(
                     )
                 }
                 // One line, same text RN's collapsed work row shows: the T3 tool's
-                // friendly name, the command, the detail, or the file list.
+                // friendly name, the command, the detail, or the file list. A
+                // stand-in keeps its group label open or shut, so opening it does
+                // not swap the text under the reader's finger.
                 Text(
-                    toolCallRowLabel(entry, expanded),
+                    labelOverride ?: toolCallRowLabel(entry, expanded),
                     style = S5Theme.code.codeEmphasized,
                     maxLines = if (expanded) Int.MAX_VALUE else 1,
                     overflow = TextOverflow.Ellipsis,

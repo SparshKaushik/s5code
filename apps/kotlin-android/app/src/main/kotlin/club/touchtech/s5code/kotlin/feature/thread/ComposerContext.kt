@@ -118,6 +118,8 @@ internal fun detectComposerTrigger(text: String): ComposerTrigger? {
         val commandMatch = SLASH_TOKEN.find(linePrefix)
         if (commandMatch != null) {
             val commandQuery = commandMatch.groupValues[1]
+            // A second slash makes the word a path such as `/tmp/build.sh`, not a command.
+            if (commandQuery.contains('/')) return null
             if (commandQuery.equals("model", ignoreCase = true)) {
                 return ComposerTrigger(
                     ComposerTriggerKind.SlashModel, "", lineStart, cursor,

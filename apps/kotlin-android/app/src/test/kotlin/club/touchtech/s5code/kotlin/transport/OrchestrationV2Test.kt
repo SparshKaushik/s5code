@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.transport
 
 import club.touchtech.s5code.kotlin.data.v2Presentation
+import club.touchtech.s5code.kotlin.data.formatTokens
 import club.touchtech.s5code.kotlin.data.threadDetailFrom
 import club.touchtech.s5code.kotlin.data.providerInstanceForId
 import club.touchtech.s5code.kotlin.data.parseInstant
@@ -240,5 +241,51 @@ class OrchestrationV2Test {
             providerThreads = listOf(obj("""{"id":"native","providerSessionId":"missing"}""")),
             providerSessions = listOf(obj("""{"id":"other","status":"running","capabilities":{"sessions":{"supportsProviderSwitchingViaHandoff":true}}}""")))
         assertFalse(v2Presentation(projection).canSwitchProvider)
+    }
+
+    @Test fun `an open run whose provider turn already ended does not read as generating`() {
+        val run = obj("""{"id":"run","status":"running","activeAttemptId":"attempt"}""")
+        fun turn(status: String, ordinal: Int = 1) =
+            obj("""{"id":"turn-$ordinal","runAttemptId":"attempt","ordinal":$ordinal,"status":"$status"}""")
+        val projection = V2ProjectionDto(metadata, runs = listOf(run))
+        assertFalse(v2Presentation(projection).turnEnded)
+        assertFalse(v2Presentation(projection.copy(providerTurns = listOf(turn("running")))).turnEnded)
+        assertFalse(v2Presentation(projection.copy(providerTurns = listOf(turn("pending")))).turnEnded)
+        val failed = projection.copy(providerTurns = listOf(turn("failed")))
+        assertTrue(v2Presentation(failed).turnEnded)
+        assertTrue(threadDetailFrom(EnvironmentId("env"), failed.asThreadDto(),
+            ::providerInstanceForId, parseInstant("2026-10-01T00:00:00Z")!!).turnEnded)
+        // The attempt's latest provider turn decides.
+        assertFalse(v2Presentation(projection.copy(providerTurns = listOf(turn("failed"), turn("running", 2)))).turnEnded)
+        // A settled run has nothing left to suppress.
+        val settled = failed.copy(runs = listOf(JsonObject(run + ("status" to JsonPrimitive("completed")))))
+        assertFalse(v2Presentation(settled).turnEnded)
+    }
+
+    @Test fun `compaction rows say whether context is compacting and by how much`() {
+        fun label(vararg fields: Pair<String, JsonElement>): String {
+            val compaction = JsonObject(item("compact", 1, "compaction") + fields)
+            val feed = v2Presentation(V2ProjectionDto(metadata, visibleTurnItems = listOf(row(compaction)))).feed
+            return (feed.single() as FeedEntry.Note).message
+        }
+        assertEquals("Compacting context", label("status" to JsonPrimitive("running"), "beforeTokenCount" to JsonPrimitive(899_000)))
+        assertEquals("Context compacted 899K → 19K tokens",
+            label("beforeTokenCount" to JsonPrimitive(899_000), "afterTokenCount" to JsonPrimitive(19_000)))
+        assertEquals("Context compacted",
+            label("status" to JsonPrimitive("interrupted"), "beforeTokenCount" to JsonPrimitive(899_000)))
+        // A provider summary is not the label, as on the other clients.
+        assertEquals("Context compacted", label("summary" to JsonPrimitive("Private summary")))
+    }
+
+    @Test fun `token counts format the way the usage page does`() {
+        assertEquals("999", formatTokens(999))
+        assertEquals("1K", formatTokens(1_000))
+        assertEquals("1.50K", formatTokens(1_500))
+        assertEquals("19K", formatTokens(19_000))
+        assertEquals("12.5K", formatTokens(12_500))
+        assertEquals("899K", formatTokens(899_000))
+        assertEquals("1.23M", formatTokens(1_234_567))
+        assertEquals("2B", formatTokens(2_000_000_000))
+        assertEquals("1T", formatTokens(1_000_000_000_000))
     }
 }

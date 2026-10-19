@@ -577,6 +577,7 @@ fun threadDetailFrom(
         queuedMessages = v2?.queuedRuns?.size ?: 0,
         providerNativeSubagent = v2?.providerNativeSubagent == true,
         canSteer = v2?.canSteer == true,
+        turnEnded = v2?.turnEnded == true,
         relationships = v2?.relationships.orEmpty(),
         usageLimitResetAt = v2?.usageLimitResetAt,
         limitRecoveryAutoResume = v2?.limitRecoveryAutoResume == true,

@@ -20,6 +20,8 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.JsonPrimitive
 
 /** Stable command identity reused by every retry of one queued turn. */
 data class TurnDeliveryMetadata(
@@ -69,9 +71,14 @@ internal fun duplicateCreationAcknowledgesDelivery(
     if (message.creation == null) return false
     val failure = error as? RpcFailure ?: return false
     if (failure.kind != RpcFailureKind.Fail) return false
+    val threadId = message.threadId.value.lowercase()
     val detail = failure.message.lowercase()
-    return "thread '${message.threadId.value.lowercase()}' already exists" in detail &&
-        "cannot be created twice" in detail
+    if ("thread '$threadId' already exists" in detail && "cannot be created twice" in detail) return true
+    // V2 wraps OrchestratorThreadAlreadyExistsError ("Thread <id> already exists.
+    // Use a new thread id.") as the cause of a generic thread launch failure.
+    return generateSequence(failure.error) { it["cause"] as? JsonObject }
+        .mapNotNull { (it["message"] as? JsonPrimitive)?.content?.lowercase() }
+        .any { it.startsWith("thread $threadId already exists") }
 }
 
 /**
@@ -138,10 +145,16 @@ class ThreadOutboxStore(private val context: Context) {
                 val messages = File(root, MESSAGES_DIRECTORY).apply { mkdirs() }
                 val target = File(messages, "${message.delivery.messageId}.json")
                 val temporary = File(messages, ".${message.delivery.messageId}.${UUID.randomUUID()}.tmp")
-                temporary.writeText(encodeQueuedThreadMessage(durable))
-                if (!temporary.renameTo(target)) {
-                    temporary.copyTo(target, overwrite = true)
-                    temporary.delete()
+                try {
+                    temporary.writeText(encodeQueuedThreadMessage(durable))
+                    if (!temporary.renameTo(target)) {
+                        temporary.copyTo(target, overwrite = true)
+                        temporary.delete()
+                    }
+                } catch (error: Exception) {
+                    // Each attempt names its own temp file, so a failed one would never be reused.
+                    runCatching { temporary.delete() }
+                    throw error
                 }
                 durable
             }

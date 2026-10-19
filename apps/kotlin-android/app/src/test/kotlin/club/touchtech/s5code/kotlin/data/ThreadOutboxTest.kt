@@ -11,6 +11,8 @@ import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadSettings
 import club.touchtech.s5code.kotlin.transport.RpcFailure
 import club.touchtech.s5code.kotlin.transport.RpcFailureKind
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotEquals
@@ -92,6 +94,42 @@ class ThreadOutboxTest {
 
         assertTrue(duplicateCreationAcknowledgesDelivery(pending, duplicate))
         assertFalse(duplicateCreationAcknowledgesDelivery(pending.copy(creation = null), duplicate))
+    }
+
+    @Test
+    fun `a V2 launch failure caused by an existing thread acknowledges pending creation`() {
+        fun launchFailure(threadId: String) =
+            RpcFailure(
+                kind = RpcFailureKind.Fail,
+                tag = "OrchestrationV2ThreadLaunchError",
+                message = "Failed to launch thread",
+                error =
+                    buildJsonObject {
+                        put("_tag", "OrchestrationV2ThreadLaunchError")
+                        put("message", "Failed to launch thread")
+                        put(
+                            "cause",
+                            buildJsonObject {
+                                put("name", "ThreadLaunchError")
+                                put("message", "Thread launch cmd-1 failed during create-thread.")
+                                put(
+                                    "cause",
+                                    buildJsonObject {
+                                        put("name", "OrchestratorThreadAlreadyExistsError")
+                                        put("message", "Thread $threadId already exists. Use a new thread id.")
+                                    },
+                                )
+                            },
+                        )
+                    },
+            )
+        val pending = pendingCreation()
+
+        assertTrue(duplicateCreationAcknowledgesDelivery(pending, launchFailure("pending-thread")))
+        assertFalse(duplicateCreationAcknowledgesDelivery(pending, launchFailure("another-thread")))
+        assertFalse(
+            duplicateCreationAcknowledgesDelivery(pending.copy(creation = null), launchFailure("pending-thread"))
+        )
     }
 
     @Test

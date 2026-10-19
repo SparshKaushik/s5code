@@ -387,12 +387,17 @@ fun ThreadScreen(
     // and scrolled into holds the anchor item, and collapsing it lets the list
     // keep a scroll offset the shrunk row no longer spans. Record where the
     // transcript stood on expand and put it back on collapse, as folds do.
+    //
+    // A lone call standing in for its group (`standInGroupId`) opens and closes
+    // the group with it, so a second call joining keeps both open.
     var expandedEntries by remember(threadId) { mutableStateOf(emptySet<String>()) }
-    fun toggleEntryExpand(entryId: String) {
-        toggleFold("entry:$entryId", entryId, entryId in expandedEntries) {
-            expandedEntries =
-                if (entryId in expandedEntries) expandedEntries - entryId
-                else expandedEntries + entryId
+    fun toggleEntryExpand(entryId: String, rowKey: String = entryId, standInGroupId: String? = null) {
+        val next = entryId !in expandedEntries
+        toggleFold("entry:$entryId", rowKey, !next) {
+            expandedEntries = if (next) expandedEntries + entryId else expandedEntries - entryId
+            standInGroupId?.let {
+                expandedWorkGroups = if (next) expandedWorkGroups + it else expandedWorkGroups - it
+            }
         }
     }
     // The clock the "Working for 12s" row measures from, or null when nothing is
@@ -435,6 +440,7 @@ fun ThreadScreen(
             expandedTurns,
             current.latestTurn,
             activeWorkStartedAt,
+            current.turnEnded,
             worktreeSetup,
         ) {
             val presented =
@@ -443,7 +449,10 @@ fun ThreadScreen(
                     expandedGroups = expandedWorkGroups,
                     latestTurn = current.latestTurn,
                     expandedTurns = expandedTurns,
-                    activeWorkStartedAtMillis = activeWorkStartedAt,
+                    // An open run whose provider turn ended is only settling
+                    // (subagents finishing), so the feed does not claim it is
+                    // working; stop and the composer still see the real run.
+                    activeWorkStartedAtMillis = activeWorkStartedAt.takeUnless { current.turnEnded },
                 )
             if (worktreeSetup == null) return@remember presented
             // RN anchors the card on the first user message (the prompt whose
@@ -1250,7 +1259,10 @@ fun ThreadScreen(
                                         )
                                     },
                                     expandedIds = expandedEntries,
-                                    onToggleExpand = { entry -> toggleEntryExpand(entry.id) },
+                                    onToggleExpand = { entry ->
+                                        toggleEntryExpand(entry.id, row.key, row.standIn?.groupId)
+                                    },
+                                    toolLabelOverride = row.standIn?.label,
                                     onOpenThread = { onOpenThread(environmentId, it) },
                                     onAnswerSecretRequest = { request, answer ->
                                         // The item's own threadId is the

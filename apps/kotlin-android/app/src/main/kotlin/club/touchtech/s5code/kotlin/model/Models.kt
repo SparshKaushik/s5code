@@ -900,6 +900,8 @@ data class ThreadDetail(
     val queuedRuns: List<QueuedRun> = emptyList(),
     val providerNativeSubagent: Boolean = false,
     val canSteer: Boolean = false,
+    /** The open run's provider turn already ended; the feed drops its working row. */
+    val turnEnded: Boolean = false,
     val relationships: List<ThreadRelationship> = emptyList(),
     val usageLimitResetAt: String? = null,
     val limitRecoveryAutoResume: Boolean = false,

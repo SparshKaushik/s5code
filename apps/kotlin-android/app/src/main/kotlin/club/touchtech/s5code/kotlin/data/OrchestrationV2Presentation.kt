@@ -28,6 +28,11 @@ internal data class V2Presentation(
     val queueHeld: Boolean,
     val canReorderQueue: Boolean,
     val canPromoteQueued: Boolean,
+    /**
+     * The run is still open but its provider turn already ended, so nothing is
+     * generating while the server settles it (e.g. waiting on subagents).
+     */
+    val turnEnded: Boolean = false,
 )
 
 /** V2 ordering comes from visibleTurnItems, including inherited fork history, never timestamps. */
@@ -46,6 +51,12 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     val canSteer = activeRun?.v2String("status") == "running" && activeRun.v2String("activeAttemptId") != null &&
         projection.providerTurns.any { it.v2String("runAttemptId") == activeRun.v2String("activeAttemptId") && it.v2String("status") == "running" } &&
         (turns?.v2Bool("supportsActiveSteering") == true || turns?.v2Bool("supportsSteeringByInterruptRestart") == true)
+    // `summarizeThreadRun`: the latest provider turn for the active attempt.
+    val activeTurnStatus = activeRun?.v2String("activeAttemptId")?.let { attemptId ->
+        projection.providerTurns.filter { it.v2String("runAttemptId") == attemptId }
+            .maxByOrNull { it.v2Long("ordinal") ?: 0 }?.v2String("status")
+    }
+    val turnEnded = activeTurnStatus != null && activeTurnStatus != "pending" && activeTurnStatus != "running"
     val automaticMessageIds = projection.messages.filter { (it["delegatedCompletion"] != null && it["delegatedCompletion"] != JsonNull) ||
         (it["notification"] != null && it["notification"] != JsonNull) }.mapTo(hashSetOf()) { it.v2String("id") }
     val pending = projection.runtimeRequests.filter { it.v2String("status") == "pending" &&
@@ -122,7 +133,7 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                 secretStatus = item.v2String("secretStatus") ?: "pending",
                 answerable = item.v2String("secretStatus") == "pending" && row.visibility == "local",
                 turnId = runId, atMillis = at)
-            "compaction" -> FeedEntry.Note(id, item.v2String("summary") ?: "Context compacted", runId, at, compaction = true)
+            "compaction" -> FeedEntry.Note(id, contextCompactionLabel(item), runId, at, compaction = true)
             "handoff" -> FeedEntry.Note(id, "Provider handoff → ${item.v2String("toModel") ?: item.v2String("toProviderInstanceId")}\n" +
                 item.v2String("summary").orEmpty(), runId, at)
             "fork" -> FeedEntry.Note(id, "Forked thread: ${item.v2String("targetThreadId")}", runId, at)
@@ -218,7 +229,41 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         projection.runs.any { it.v2String("status") == "queued" && it.v2Bool("queueHeld") },
         turns?.v2Bool("supportsQueuedMessages") == true,
         canSteer,
+        turnEnded,
     )
+}
+
+/** `contextCompactionLabel` in `packages/client-runtime/src/work-log/presentation.ts`. */
+internal fun contextCompactionLabel(item: JsonObject): String {
+    if (item.v2String("status") == "running") return "Compacting context"
+    val before = item.v2Long("beforeTokenCount")
+    val after = item.v2Long("afterTokenCount")
+    return if (before != null && after != null) {
+        "Context compacted ${formatTokens(before)} → ${formatTokens(after)} tokens"
+    } else {
+        "Context compacted"
+    }
+}
+
+/** `formatTokens` in `packages/shared/src/usageFormat.ts`. */
+internal fun formatTokens(value: Long): String {
+    val abs = kotlin.math.abs(value.toDouble())
+    return when {
+        abs >= 1e12 -> trimTokenScale(value / 1e12) + "T"
+        abs >= 1e9 -> trimTokenScale(value / 1e9) + "B"
+        abs >= 1e6 -> trimTokenScale(value / 1e6) + "M"
+        abs >= 1e3 -> trimTokenScale(value / 1e3) + "K"
+        else -> String.format(java.util.Locale.US, "%,d", value)
+    }
+}
+
+// BigDecimal of the exact double rounds the way JS `toFixed` does; `%.2f` can
+// round a binary near-tie the other way.
+private fun trimTokenScale(value: Double): String {
+    val abs = kotlin.math.abs(value)
+    val digits = if (abs >= 100) 0 else if (abs >= 10) 1 else 2
+    return java.math.BigDecimal(value).setScale(digits, java.math.RoundingMode.HALF_UP).toPlainString()
+        .replace(Regex("\\.0+$"), "")
 }
 
 /* ── Turn-item detail and workspace preparation ──────────────────────── */

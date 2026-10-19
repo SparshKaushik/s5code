@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.transport
 
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -28,5 +29,13 @@ class EnvironmentSessionBackoffTest {
             assertTrue(delay >= 16_000L)
             assertTrue(delay <= 16_000L + 8_000L)
         }
+    }
+
+    @Test
+    fun `a stable session's drop restarts the ladder as the first retry`() {
+        val stable = EnvironmentSession.STABLE_CONNECTION_MS
+        assertEquals(1, EnvironmentSession.nextAttempt(attempt = 3, connectedMillis = stable))
+        assertEquals(4, EnvironmentSession.nextAttempt(attempt = 3, connectedMillis = stable - 1))
+        assertEquals(4, EnvironmentSession.nextAttempt(attempt = 3, connectedMillis = null))
     }
 }

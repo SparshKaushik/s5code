@@ -74,7 +74,11 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
             items(detail.queuedRuns.size, key = { detail.queuedRuns[it].id }) { index ->
                 val run = detail.queuedRuns[index]
                 Column {
-                    Text(run.text.take(300), style = MaterialTheme.typography.bodyMedium)
+                    // Edit and Steer keep the raw text so quoted citations stay linked.
+                    val displayText = remember(run.text) {
+                        club.touchtech.s5code.kotlin.data.assistantCitationsToPlainText(run.text).take(300)
+                    }
+                    Text(displayText, style = MaterialTheme.typography.bodyMedium)
                     Row {
                         TextButton(enabled = !busy, onClick = { editing = run; editText = run.text }) { Text("Edit") }
                         TextButton(enabled = !busy, onClick = { action { store.workspace.queueAction(env, id, "queued-run.cancel", run.id) } }) { Text("Cancel") }

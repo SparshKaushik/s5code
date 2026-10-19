@@ -406,24 +406,21 @@ class EnvironmentSession(
                 return
             }
 
-            // connect() returns the millis the session stayed connected, so a
-            // socket that lived past the stability threshold reset the ladder —
-            // an hours-old connection dropping must not inherit a deep rung.
-            val connectedMillis = outcome.getOrNull()
-            attempt = if (connectedMillis != null && connectedMillis >= STABLE_CONNECTION_MS) 0
-            else attempt + 1
+            attempt = nextAttempt(attempt, outcome.getOrNull())
             _state.value =
                 _state.value.copy(
                     phase = SessionPhase.Backoff,
                     attempt = attempt,
-                    // RN renders the relay's trace id beside the status so a
-                    // reported failure can be found in relay logs.
+                    // connect() returning means a session came up, and losing a
+                    // live session (say, a socket the OS killed while suspended)
+                    // is not a failed connection. RN renders the relay's trace
+                    // id beside a real failure so it can be found in relay logs.
                     lastError =
                         failure?.let {
                             it.message +
                                 ((it as? club.touchtech.s5code.kotlin.cloud.RelayError)?.traceId
                                     ?.let { trace -> " Trace ID: $trace" } ?: "")
-                        } ?: "The connection dropped.",
+                        },
                 )
             backoff(attempt)
         }
@@ -646,7 +643,7 @@ class EnvironmentSession(
                     }
                 }
             activityJob.cancel()
-            _state.value = _state.value.copy(phase = SessionPhase.Backoff, lastError = reason.message)
+            _state.value = _state.value.copy(phase = SessionPhase.Backoff, lastError = null)
             return System.currentTimeMillis() - connectedAt
         } finally {
             configJob.cancel()
@@ -1014,6 +1011,25 @@ class EnvironmentSession(
     }
 
     /**
+     * [request] for idempotent reads. A socket that hands off mid-call reruns
+     * the read on its replacement instead of surfacing the drop, like the
+     * client-runtime's `pendingOnceSessionReplaced`. Never use it for
+     * mutations: the outbox owns their retries.
+     */
+    suspend fun <T> query(
+        method: String,
+        payload: JsonElement,
+        serializer: KSerializer<T>,
+    ): T =
+        callAcrossHandoffs<RpcConnection, T>(
+            awaitConnection = { replacing -> awaitConnection(replacing) },
+            handedOff = { live -> connection.value !== live || live.closed.isCompleted },
+        ) { live ->
+            state.value.requireRpcPermissions(method, payload)
+            live.call(method, payload, serializer)
+        }
+
+    /**
      * Issues an RPC whose contract declares no success value.
      *
      * Effect encodes a `Schema.Void` success by omitting `value` from the exit, so
@@ -1154,8 +1170,9 @@ class EnvironmentSession(
 
     val connected: Flow<Boolean> = connection.map { it != null }
 
-    private suspend fun awaitConnection(): RpcConnection {
-        connection.value?.let { return it }
+    /** [replacing] is a dead socket the caller must not be handed back before its cleanup runs. */
+    private suspend fun awaitConnection(replacing: RpcConnection? = null): RpcConnection {
+        connection.value?.takeIf { it !== replacing }?.let { return it }
         start()
         // A terminal phase means no connection is coming; waiting forever would
         // hang the outbox drain and any direct write path behind a dead token.
@@ -1170,7 +1187,7 @@ class EnvironmentSession(
             throw EnvironmentUnsupportedError(state.value.lastError ?: "Client not supported")
         }
         return withTransportTimeout(AWAIT_CONNECTION_MS, "The environment is not connected.") {
-            connection.first { it != null }!!
+            connection.first { it != null && it !== replacing }!!
         }
     }
 
@@ -1192,6 +1209,45 @@ class EnvironmentSession(
 
         /** A connection this stable resets the backoff ladder, matching RN's 30s. */
         const val STABLE_CONNECTION_MS = 30_000L
+
+        /**
+         * The failure count after an attempt; [connectedMillis] is null when it
+         * never came up. A stable session restarts the ladder, an hours-old
+         * connection must not inherit a deep rung, and its drop counts as the
+         * first retry so the row still reads "Reconnecting".
+         */
+        fun nextAttempt(attempt: Int, connectedMillis: Long?): Int =
+            if (connectedMillis != null && connectedMillis >= STABLE_CONNECTION_MS) 1
+            else attempt + 1
+
+        /**
+         * A read that keeps dying with its socket (say, one that crashes the
+         * server) must fail eventually instead of riding every reconnect.
+         */
+        const val MAX_QUERY_HANDOFFS = 3
+
+        /**
+         * Runs [call] on a connection, rerunning it on the next one when the
+         * transport closed because [handedOff] reports the socket was replaced.
+         * A transport failure on the socket that is still current is the caller's.
+         */
+        suspend fun <C : Any, T> callAcrossHandoffs(
+            awaitConnection: suspend (replacing: C?) -> C,
+            handedOff: (C) -> Boolean,
+            call: suspend (C) -> T,
+        ): T {
+            var replacing: C? = null
+            var handoffs = 0
+            while (true) {
+                val live = awaitConnection(replacing)
+                try {
+                    return call(live)
+                } catch (closed: RpcTransportClosed) {
+                    if (!handedOff(live) || ++handoffs > MAX_QUERY_HANDOFFS) throw closed
+                    replacing = live
+                }
+            }
+        }
 
         /** Foreground wakes shorter than this probe instead of restarting. */
         const val SHORT_WAKE_MS = 10_000L

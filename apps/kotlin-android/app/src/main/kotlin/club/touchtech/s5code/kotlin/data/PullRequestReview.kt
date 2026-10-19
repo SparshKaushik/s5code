@@ -243,12 +243,21 @@ const val PULL_REQUEST_DIFF_NOTICE =
 
 data class PullRequestCombinedDiff(val files: List<ReviewFile>, val notice: String?)
 
-/** `combinePullRequestDiffPages`, parsing each page's patch. */
+/**
+ * `combinePullRequestDiffPages`, parsing each page's patch. A withheld file's
+ * patch is only its header, so its line counts come from the page's
+ * `omittedFileStats` rather than reading as +0 −0.
+ */
 fun combinePullRequestDiffPages(
     pages: List<PullRequestDiffPage>,
     parse: (String) -> List<ReviewFile> = ::parseUnifiedDiff,
 ): PullRequestCombinedDiff {
-    val parsed = pages.map { parse(it.result.patch) }
+    val parsed = pages.map { page ->
+        val files = parse(page.result.patch)
+        val stats = page.result.omittedFileStats.orEmpty().associateBy { it.path }
+        if (stats.isEmpty()) files
+        else files.map { file -> stats[file.path]?.let { file.copy(additions = it.additions, deletions = it.deletions) } ?: file }
+    }
     val files = parsed.flatten()
     val unparsed = pages.indices.any { parsed[it].isEmpty() && pages[it].result.patch.isNotBlank() }
     return PullRequestCombinedDiff(

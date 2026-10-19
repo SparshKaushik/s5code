@@ -4,6 +4,7 @@ import club.touchtech.s5code.kotlin.model.DiffLine
 import club.touchtech.s5code.kotlin.model.DiffLineKind
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestActorDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestOmittedFileStatDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentDto
 import java.nio.file.Files
@@ -226,6 +227,40 @@ class PullRequestReviewTest {
         assertEquals(
             PULL_REQUEST_DIFF_NOTICE,
             combinePullRequestDiffPages(listOf(PullRequestDiffPage(null, PullRequestDiffResultDto("Binary files differ")))).notice,
+        )
+    }
+
+    private fun withheldDiff(additions: Int = 3000, deletions: Int = 1800) =
+        PullRequestDiffResultDto(
+            patch = "diff --git a/large.ts b/large.ts\n--- a/large.ts\n+++ b/large.ts\n",
+            truncated = true,
+            omittedFileStats = listOf(PullRequestOmittedFileStatDto("large.ts", additions, deletions)),
+        )
+
+    @Test
+    fun `withheld hunks keep the provider's line counts`() {
+        val combined = combinePullRequestDiffPages(listOf(PullRequestDiffPage(null, withheldDiff())))
+        val file = combined.files.single()
+        assertEquals("large.ts", file.path)
+        assertEquals(3000, file.additions)
+        assertEquals(1800, file.deletions)
+        assertTrue(file.hunks.isEmpty())
+        assertEquals(PULL_REQUEST_DIFF_NOTICE, combined.notice)
+    }
+
+    @Test
+    fun `a stats-only refresh replaces the withheld page`() {
+        val first = PullRequestDiffResultDto(patch = patch("first.ts"), nextCursor = "second")
+        val pages = retainPullRequestDiffPage(retainPullRequestDiffPage(emptyList(), null, first), "second", withheldDiff())
+        assertEquals(
+            listOf(Triple("first.ts", 1, 1), Triple("large.ts", 3000, 1800)),
+            combinePullRequestDiffPages(pages).files.map { Triple(it.path, it.additions, it.deletions) },
+        )
+        val refreshed = retainPullRequestDiffPage(pages, "second", withheldDiff(4000, 2000))
+        assertNotEquals(pages, refreshed)
+        assertEquals(
+            listOf(Triple("first.ts", 1, 1), Triple("large.ts", 4000, 2000)),
+            combinePullRequestDiffPages(refreshed).files.map { Triple(it.path, it.additions, it.deletions) },
         )
     }
 

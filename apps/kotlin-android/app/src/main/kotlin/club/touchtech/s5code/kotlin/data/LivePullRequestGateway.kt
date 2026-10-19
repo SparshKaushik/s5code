@@ -219,7 +219,7 @@ class LivePullRequestGateway(
                 pages.update { it + (pagesKey(target) to pullRequestListHead(it[pagesKey(target)], head)) }
             },
         ) { session ->
-            session.request(WsMethods.PullRequestsList, target.input.toJson(), PullRequestListResultDto.serializer())
+            session.query(WsMethods.PullRequestsList, target.input.toJson(), PullRequestListResultDto.serializer())
         }
 
     override fun list(targets: List<PullRequestListTarget>): Flow<List<PullRequestListSource>> {
@@ -242,7 +242,7 @@ class LivePullRequestGateway(
                     async {
                         runCatching {
                             val page =
-                                session.request(WsMethods.PullRequestsList, input.toJson(), PullRequestListResultDto.serializer())
+                                session.query(WsMethods.PullRequestsList, input.toJson(), PullRequestListResultDto.serializer())
                             if (page.errors.isNotEmpty()) error(page.errors.joinToString("\n") { it.message })
                             val next = appendPullRequestListPage(pages.value[pagesKey(target)] ?: held, page, input)
                             pages.update { it + (pagesKey(target) to next) }
@@ -309,7 +309,7 @@ class LivePullRequestGateway(
             val result =
                 session?.let {
                     runCatching {
-                        it.request(
+                        it.query(
                             WsMethods.PullRequestsListStats,
                             buildJsonObject { put("refs", buildJsonArray { wanted.forEach { ref -> add(ref.toJson()) } }) },
                             PullRequestListStatsResultDto.serializer(),
@@ -346,7 +346,7 @@ class LivePullRequestGateway(
             serializer = PullRequestDetailDto.serializer(),
             tick = true,
             persist = true,
-        ) { it.request(WsMethods.PullRequestsDetail, reference.toJson(), PullRequestDetailDto.serializer()) }
+        ) { it.query(WsMethods.PullRequestsDetail, reference.toJson(), PullRequestDetailDto.serializer()) }
 
     private fun activityEntry(environmentId: String, reference: PullRequestReference) =
         entry(
@@ -356,7 +356,7 @@ class LivePullRequestGateway(
             serializer = PullRequestActivityDto.serializer(),
             tick = true,
             persist = true,
-        ) { it.request(WsMethods.PullRequestsActivity, reference.toJson(), PullRequestActivityDto.serializer()) }
+        ) { it.query(WsMethods.PullRequestsActivity, reference.toJson(), PullRequestActivityDto.serializer()) }
 
     private fun stackEntry(environmentId: String, reference: PullRequestReference) =
         entry(
@@ -366,7 +366,7 @@ class LivePullRequestGateway(
             serializer = PullRequestStackDto.serializer().nullable,
             tick = true,
             persist = true,
-        ) { it.request(WsMethods.PullRequestsStack, reference.toJson(), PullRequestStackDto.serializer().nullable) }
+        ) { it.query(WsMethods.PullRequestsStack, reference.toJson(), PullRequestStackDto.serializer().nullable) }
 
     override fun detail(environmentId: String, reference: PullRequestReference) =
         detailEntry(environmentId, reference).observe()
@@ -387,7 +387,7 @@ class LivePullRequestGateway(
             persist = true,
             pollMs = LINKED_THREADS_POLL_MS,
         ) {
-            it.request(WsMethods.PullRequestsLinkedThreads, reference.toJson(), PullRequestLinkedThreadsResultDto.serializer())
+            it.query(WsMethods.PullRequestsLinkedThreads, reference.toJson(), PullRequestLinkedThreadsResultDto.serializer())
         }.observe()
 
     override fun filesViewed(environmentId: String, reference: PullRequestReference) =
@@ -402,7 +402,7 @@ class LivePullRequestGateway(
             tick = false,
             persist = true,
         ) {
-            it.request(WsMethods.PullRequestsFilesViewed, reference.toJson(), PullRequestFilesViewedResultDto.serializer())
+            it.query(WsMethods.PullRequestsFilesViewed, reference.toJson(), PullRequestFilesViewedResultDto.serializer())
         }
 
     private fun reviewerCandidatesEntry(environmentId: String, reference: PullRequestReference) =
@@ -414,7 +414,7 @@ class LivePullRequestGateway(
             tick = false,
             persist = false,
         ) {
-            it.request(WsMethods.PullRequestsReviewerCandidates, reference.toJson(), PullRequestReviewerCandidateListDto.serializer())
+            it.query(WsMethods.PullRequestsReviewerCandidates, reference.toJson(), PullRequestReviewerCandidateListDto.serializer())
         }
 
     override fun reviewerCandidates(environmentId: String, reference: PullRequestReference) =
@@ -433,7 +433,7 @@ class LivePullRequestGateway(
             tick = true,
             persist = true,
         ) {
-            it.request(WsMethods.PullRequestsReviewGuide, reference.toJson(), PullRequestReviewGuideResultDto.serializer())
+            it.query(WsMethods.PullRequestsReviewGuide, reference.toJson(), PullRequestReviewGuideResultDto.serializer())
         }
 
     override fun reviewGuide(environmentId: String, reference: PullRequestReference) =
@@ -680,7 +680,7 @@ class LivePullRequestGateway(
                     },
             )
         return try {
-            session.request(WsMethods.PullRequestsThreadComments, payload, PullRequestThreadCommentsResultDto.serializer())
+            session.query(WsMethods.PullRequestsThreadComments, payload, PullRequestThreadCommentsResultDto.serializer())
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Throwable) {

@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.feature.thread
 import club.touchtech.s5code.kotlin.model.FeedEntry
 import org.junit.Test
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 
 /**
  * `t3-context://` reference rendering, mirroring `UserMessageContent` in the RN
@@ -45,6 +46,25 @@ class ComposerContextTest {
         assertEquals(
             "Compare A and B (unavailable)",
             replaceComposerContextReferences(text, records),
+        )
+    }
+
+    @Test
+    fun `a line-leading path does not open the slash menu`() {
+        assertNull(detectComposerTrigger("/etc/hosts"))
+        assertNull(detectComposerTrigger("/tmp/build.sh"))
+        assertNull(detectComposerTrigger("first line\n/tmp/"))
+    }
+
+    @Test
+    fun `slash commands and model queries still trigger`() {
+        assertEquals(
+            ComposerTrigger(ComposerTriggerKind.SlashCommand, "rev", 0, 4),
+            detectComposerTrigger("/rev"),
+        )
+        assertEquals(
+            ComposerTrigger(ComposerTriggerKind.SlashModel, "openai/gpt", 0, 17),
+            detectComposerTrigger("/model openai/gpt"),
         )
     }
 }

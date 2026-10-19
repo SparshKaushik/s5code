@@ -434,7 +434,7 @@ class LiveWorkspaceGateway(
         repository: String,
         number: Int,
     ): PullRequestDetailDto =
-        sessionFor(environmentId).request(
+        sessionFor(environmentId).query(
             WsMethods.PullRequestsDetail,
             buildJsonObject {
                 put("projectId", projectId.value)
@@ -456,7 +456,7 @@ class LiveWorkspaceGateway(
         val numeric = query.all { it.isDigit() }
         val list =
             runCatching {
-                    session.request(
+                    session.query(
                         WsMethods.PullRequestsList,
                         buildJsonObject {
                             put("projectId", projectId.value)
@@ -476,7 +476,7 @@ class LiveWorkspaceGateway(
                 list.none { it.number.toString() == query && it.repository.equals(repository, true) }
             ) {
                 runCatching {
-                        session.request(
+                        session.query(
                             WsMethods.PullRequestsDetail,
                             buildJsonObject {
                                 put("projectId", projectId.value)
@@ -638,7 +638,7 @@ class LiveWorkspaceGateway(
     private suspend fun fetchArchivedShell(environmentId: String) {
         runCatching {
                 sessionFor(EnvironmentId(environmentId))
-                    .request(
+                    .query(
                         WsMethods.OrchestrationGetArchivedShellSnapshot,
                         JsonObject(emptyMap()),
                         ShellSnapshotDto.serializer(),
@@ -1910,7 +1910,7 @@ class LiveWorkspaceGateway(
         val storedAttachments = persistV2Attachments(environmentId, id.value, messageId, attachments)
         val session = sessionFor(environmentId)
         val contextResolved = session.state.value.capabilities.serverResolvedCommandContext
-        val projection = if (contextResolved) null else session.request("orchestration.getThreadProjection",
+        val projection = if (contextResolved) null else session.query("orchestration.getThreadProjection",
             buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
         val activeRun = projection?.runs?.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
             ?.maxByOrNull { it.v2Long("ordinal") ?: 0 }
@@ -1965,7 +1965,7 @@ class LiveWorkspaceGateway(
      * has no run.
      */
     override suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId) {
-        val projection = sessionFor(environmentId).request("orchestration.getThreadProjection",
+        val projection = sessionFor(environmentId).query("orchestration.getThreadProjection",
             buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
         val run = projection.runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
             .maxByOrNull { it.v2Long("ordinal") ?: 0 }
@@ -2215,7 +2215,7 @@ class LiveWorkspaceGateway(
         turnItemDetailCache[cacheKey]?.let { return it }
         val result =
             sessionFor(environmentId)
-                .request(
+                .query(
                     WsMethods.OrchestrationGetTurnItem,
                     buildJsonObject {
                         put("threadId", threadId.value)
@@ -2256,7 +2256,7 @@ class LiveWorkspaceGateway(
         taskId: String,
     ): List<ScheduledTaskWebhookDeliverySummaryDto> =
         sessionFor(environmentId)
-            .request(
+            .query(
                 WsMethods.ScheduledTasksListWebhookDeliveries,
                 buildJsonObject { put("id", taskId) },
                 ScheduledTaskListWebhookDeliveriesResultDto.serializer(),
@@ -2269,7 +2269,7 @@ class LiveWorkspaceGateway(
         deliveryId: String,
     ): ScheduledTaskWebhookDeliveryDto? =
         sessionFor(environmentId)
-            .request(
+            .query(
                 WsMethods.ScheduledTasksGetWebhookDelivery,
                 buildJsonObject {
                     put("id", taskId)
@@ -2291,7 +2291,7 @@ class LiveWorkspaceGateway(
                 async {
                     runCatching {
                             sessionFor(environmentId)
-                                .request(
+                                .query(
                                     WsMethods.OrchestrationSearchThreads,
                                     buildJsonObject {
                                         put("query", normalized.take(200))
@@ -2383,7 +2383,7 @@ class LiveWorkspaceGateway(
     ) {
         val session = sessionFor(environmentId)
         val currentProvider = if (session.state.value.capabilities.serverResolvedCommandContext) null
-            else session.request("orchestration.getThreadProjection", buildJsonObject { put("threadId", id.value) },
+            else session.query("orchestration.getThreadProjection", buildJsonObject { put("threadId", id.value) },
                 V2ProjectionDto.serializer()).thread.v2String("providerInstanceId")
         val modelCommand = Commands.updateMeta(
             threadId = id.value,
@@ -2496,7 +2496,7 @@ class LiveWorkspaceGateway(
         id: ThreadId,
         turnCount: Int,
     ) {
-        val projection = sessionFor(environmentId).request("orchestration.getThreadProjection",
+        val projection = sessionFor(environmentId).query("orchestration.getThreadProjection",
             buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
         val checkpoint = projection.checkpoints.firstOrNull { it.v2Long("appRunOrdinal") == turnCount.toLong() && it.v2String("status") == "ready" }
             ?: error("That checkpoint is no longer available.")
@@ -2532,7 +2532,7 @@ class LiveWorkspaceGateway(
         val cwd = path?.let { "$root/${it.trimStart('/')}" } ?: root
         val result =
             sessionFor(environmentId)
-                .request(
+                .query(
                     WsMethods.ProjectsListEntries,
                     buildJsonObject { put("cwd", cwd) },
                     ProjectListEntriesResultDto.serializer(),
@@ -2563,7 +2563,7 @@ class LiveWorkspaceGateway(
     ): SourceFile {
         val result =
             sessionFor(environmentId)
-                .request(
+                .query(
                     WsMethods.ProjectsReadFile,
                     buildJsonObject {
                         put("cwd", cwdFor(environmentId, id))
@@ -2978,7 +2978,7 @@ class LiveWorkspaceGateway(
         }
         val result =
             sessionFor(environmentId)
-                .request(
+                .query(
                     WsMethods.ReviewGetDiffPreview,
                     buildJsonObject { put("cwd", cwdFor(environmentId, id)) },
                     ReviewDiffPreviewResultDto.serializer(),
@@ -2998,7 +2998,7 @@ class LiveWorkspaceGateway(
         val cwd = cwdFor(environmentId, id)
         val status =
             sessionFor(environmentId)
-                .request(
+                .query(
                     WsMethods.VcsRefreshStatus,
                     buildJsonObject { put("cwd", cwd) },
                     VcsStatusDto.serializer(),
@@ -3055,7 +3055,7 @@ class LiveWorkspaceGateway(
     private suspend fun listRefs(environmentId: EnvironmentId, cwd: String): List<BranchRef> {
         val result =
             sessionFor(environmentId)
-                .request(
+                .query(
                     WsMethods.VcsListRefs,
                     buildJsonObject {
                         put("cwd", cwd)
@@ -3254,7 +3254,7 @@ class LiveWorkspaceGateway(
         val result =
             runCatching {
                     sessionFor(environmentId)
-                        .request(
+                        .query(
                             WsMethods.ProjectsSearchEntries,
                             buildJsonObject {
                                 put("cwd", cwdFor(environmentId, id))
@@ -3277,7 +3277,7 @@ class LiveWorkspaceGateway(
         val result =
             runCatching {
                     sessionFor(environmentId)
-                        .request(
+                        .query(
                             WsMethods.ProjectsSearchEntries,
                             buildJsonObject {
                                 put("cwd", cwd)
@@ -3324,7 +3324,7 @@ class LiveWorkspaceGateway(
             sessions.value.values.mapNotNull { connected ->
                 if (connected.session.state.value.phase != SessionPhase.Connected) return@mapNotNull null
                 runCatching {
-                        connected.session.request(
+                        connected.session.query(
                             WsMethods.ServerGetUsageSummary,
                             payload,
                             UsageSummaryDto.serializer(),
@@ -3386,7 +3386,7 @@ class LiveWorkspaceGateway(
         repository: String,
     ): SourceControlRepositoryDto =
         sessionFor(environmentId)
-            .request(
+            .query(
                 WsMethods.SourceControlLookupRepository,
                 buildJsonObject {
                     put("provider", provider)
@@ -3400,7 +3400,7 @@ class LiveWorkspaceGateway(
         partialPath: String,
     ): List<FilesystemBrowseEntryDto> =
         sessionFor(environmentId)
-            .request(
+            .query(
                 WsMethods.FilesystemBrowse,
                 buildJsonObject {
                     put("partialPath", partialPath.ifBlank { "~/" })
@@ -3413,7 +3413,7 @@ class LiveWorkspaceGateway(
         environmentId: EnvironmentId,
     ): SourceControlDiscoveryResultDto =
         sessionFor(environmentId)
-            .request(
+            .query(
                 WsMethods.ServerDiscoverSourceControl,
                 JsonObject(emptyMap()),
                 SourceControlDiscoveryResultDto.serializer(),

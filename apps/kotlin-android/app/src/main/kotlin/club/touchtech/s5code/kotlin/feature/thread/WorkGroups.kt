@@ -14,19 +14,27 @@ import club.touchtech.s5code.kotlin.model.TurnInfo
 sealed interface FeedRow {
     val key: String
 
-    data class Entry(val entry: FeedEntry) : FeedRow {
+    /**
+     * [standIn] is set on a lone call shown in place of its group's toggle, as
+     * RN's `groupStandIn`: the row takes the toggle's key and label, and opening
+     * it opens the group too, so a second call joining keeps everything open.
+     */
+    data class Entry(val entry: FeedEntry, val standIn: GroupStandIn? = null) : FeedRow {
         override val key: String
-            get() = entry.id
+            get() = standIn?.let { "work-toggle:${it.groupId}" } ?: entry.id
     }
+
+    data class GroupStandIn(val groupId: String, val label: String)
 
     /**
      * Discloses the tool calls folded away beneath it.
      *
      * [summary] is the collapsed-group label the RN client computes in
-     * `appendToolGroupRows`: "Ran 4 commands and read 2 files", or the single
-     * call's own label, or the live "Running x" line while the trailing call is
-     * in flight. It does not change when the group opens — RN keeps the summary
-     * as the expanded group's header — so there is no "Show fewer" wording here.
+     * `appendToolGroupRows`: "Ran 4 commands and read 2 files", "Thought", or
+     * the live "Running x" line while the trailing call is in flight. A lone
+     * call has no toggle; see [Entry.standIn]. It does not change when the group
+     * opens — RN keeps the summary as the expanded group's header — so there is
+     * no "Show fewer" wording here.
      */
     data class WorkToggle(
         val groupId: String,
@@ -180,8 +188,17 @@ fun presentFeed(
 
         val groupId = "work-group:${group.first().id}"
         val expanded = groupId in expandedGroups
-        // RN emits the toggle first and the rows under it only once expanded —
-        // even a single call is a summary row until it is opened.
+        val summary = workGroupSummary(group, activeWorkStartedAtMillis != null)
+        // A lone call needs no toggle: its own row stands in for it and discloses
+        // its details directly. A lone thought keeps the toggle, whose expansion
+        // already shows the text.
+        val single = group.singleOrNull()
+        if (single != null && single !is FeedEntry.Reasoning) {
+            rows += FeedRow.Entry(single, FeedRow.GroupStandIn(groupId, summary))
+            appendFooterFor(group.map { it.id })
+            continue
+        }
+        // RN emits the toggle first and the rows under it only once expanded.
         rows +=
             FeedRow.WorkToggle(
                 groupId = groupId,
@@ -189,7 +206,7 @@ fun presentFeed(
                 // `activities.length + thoughtCount` in RN's mixed run.
                 hiddenCount = group.sumOf { it.thoughtParts },
                 expanded = expanded,
-                summary = workGroupSummary(group, activeWorkStartedAtMillis != null),
+                summary = summary,
                 thought = if (!expanded && activeWorkStartedAtMillis != null && end == feed.lastIndex)
                     group.filterIsInstance<FeedEntry.Reasoning>().lastOrNull()?.let {
                         liveThoughtLine(it.extraParts.lastOrNull() ?: it.text).takeIf(String::isNotBlank)
@@ -368,15 +385,21 @@ internal fun turnFoldLabel(startedAt: Long, endedAt: Long, interrupted: Boolean)
 internal fun formatDuration(millis: Long): String {
     if (millis < 0) return "0ms"
     if (millis < 1_000) return "${maxOf(1L, millis)}ms"
-    if (millis < 10_000) return String.format(java.util.Locale.US, "%.1fs", millis / 1_000.0)
-    if (millis < 60_000) return "${Math.round(millis / 1_000.0)}s"
-    val minutes = millis / 60_000
-    val seconds = Math.round((millis % 60_000) / 1_000.0)
-    return when (seconds) {
-        0L -> "${minutes}m"
-        60L -> "${minutes + 1}m"
-        else -> "${minutes}m ${seconds}s"
+    if (millis < 10_000) {
+        val tenths = Math.round(millis / 100.0) / 10.0
+        return if (tenths >= 10) "10s" else String.format(java.util.Locale.US, "%.1fs", tenths)
     }
+    // The unit is chosen after rounding so 59.5 seconds never renders as "60s".
+    val totalSeconds = Math.round(millis / 1_000.0)
+    if (totalSeconds < 60) return "${totalSeconds}s"
+    val hours = totalSeconds / 3_600
+    val minutes = (totalSeconds % 3_600) / 60
+    val seconds = totalSeconds % 60
+    return buildList {
+        if (hours > 0) add("${hours}h")
+        if (minutes > 0) add("${minutes}m")
+        if (seconds > 0) add("${seconds}s")
+    }.joinToString(" ")
 }
 
 /**
@@ -733,7 +756,7 @@ private fun liveToolCallSummary(entry: FeedEntry.ToolCall): String {
             }
         return "$verb ${commandProgramName(command) ?: "command"}"
     }
-    return entry.detail.takeIf { it.isNotBlank() } ?: entry.name
+    return entry.detail.takeIf { it.isNotBlank() }?.let(::truncateLabel) ?: entry.name
 }
 
 /**
@@ -748,12 +771,10 @@ private fun workGroupSummary(group: List<FeedEntry>, workInFlight: Boolean): Str
     }
     if (group.size == 1) {
         val single = latest
-        return when {
-            single is FeedEntry.ToolCall && single.groupAction() != ToolGroupAction.Edit ->
-                singleToolCallLabel(single)
-            single is FeedEntry.Reasoning -> reasoningLabel(single)
-            else -> singleSummary(single)
+        if (single is FeedEntry.ToolCall && single.groupAction() != ToolGroupAction.Edit) {
+            return singleToolCallLabel(single)
         }
+        if (single is FeedEntry.Reasoning) return reasoningLabel(single)
     }
     return summarizeToolGroup(group).takeIf { it.isNotEmpty() } ?: thoughtGroupLabel(group)
 }
@@ -779,15 +800,21 @@ private fun thoughtGroupLabel(group: List<FeedEntry>): String {
     return if (count == 1) "Thought" else "Thought (×$count)"
 }
 
-/** `workEntry.label` fallback for a lone non-tool row inside a run. */
-private fun singleSummary(entry: FeedEntry): String =
-    when (entry) {
-        is FeedEntry.ToolCall -> entry.name
-        is FeedEntry.Reasoning -> reasoningLabel(entry)
-        else -> ""
-    }
-
 /* ── Row labels ────────────────────────────────────────────────────────── */
+
+/**
+ * Work-log labels render one line, but the whole string is still measured, so a
+ * multi-kilobyte heredoc would stall layout. Expanded bodies and copy keep the
+ * full text.
+ */
+private const val WORK_LOG_LABEL_MAX_LENGTH = 200
+
+/** `truncate` from `packages/shared/src/String.ts`. */
+private fun truncateLabel(value: String): String {
+    val trimmed = value.trim()
+    return if (trimmed.length <= WORK_LOG_LABEL_MAX_LENGTH) trimmed
+    else trimmed.take(WORK_LOG_LABEL_MAX_LENGTH) + "..."
+}
 
 private fun collapseWhitespace(value: String): String =
     value.replace(Regex("\\s+"), " ").trim()
@@ -830,15 +857,17 @@ fun toolCallRowLabel(entry: FeedEntry.ToolCall, expanded: Boolean = false): Stri
     entry.t3Presentation()?.let { return it.displayName }
     if (expanded && !entry.command.isNullOrBlank()) return "Command"
     val preview = toolCallPreview(entry)
-    if (expanded) return preview?.trim()?.takeIf { it.isNotEmpty() } ?: toolCallHeading(entry)
-    return preview?.let { collapseWhitespace(stripShellWrapper(it)) }
+    if (expanded) return preview?.takeIf { it.isNotBlank() }?.let(::truncateLabel) ?: toolCallHeading(entry)
+    return preview?.let { truncateLabel(collapseWhitespace(stripShellWrapper(it))) }
         ?.takeIf { it.isNotEmpty() }
         ?: toolCallHeading(entry)
 }
 
 /** `singleToolCallLabel`: the toggle's label when the run is one non-edit call. */
 private fun singleToolCallLabel(entry: FeedEntry.ToolCall): String =
-    entry.t3Presentation()?.displayName ?: entry.command?.trim() ?: entry.name
+    entry.t3Presentation()?.displayName
+        ?: entry.command?.takeIf { it.isNotBlank() }?.let(::truncateLabel)
+        ?: entry.name
 
 /**
  * `workEntryCanExpand`: something must be behind the chevron — MCP payload,

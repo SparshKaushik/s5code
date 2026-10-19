@@ -180,6 +180,19 @@ class MarkdownTest {
     }
 
     @Test
+    fun `escapes inside an unfinished Windows drive path keep their backslash`() {
+        fun text(source: String) = parseInline(source).joinToString("") { it.text }
+        val paths = """Saved to C:\Users\me\.t3\_build and (C:\.scratch) and C:/work\.config."""
+        assertEquals(paths, text(paths))
+        assertEquals("""Open C:\Users\me\file_name.ts""", text("""Open C:\Users\me\file_name.ts"""))
+        assertEquals("""Escaped C:\\Users\\me""", text("""Escaped C:\\Users\\me"""))
+        assertEquals(
+            """See C:\x and *this* and Note:*that*.""",
+            text("""See C:\x and \*this\* and Note:\*that\*."""),
+        )
+    }
+
+    @Test
     fun `unclosed markers stay literal`() {
         assertEquals("a * b", parseInline("a * b").joinToString("") { it.text })
         assertEquals("a ` b", parseInline("a ` b").joinToString("") { it.text })
