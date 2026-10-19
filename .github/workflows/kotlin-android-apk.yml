@@ -95,6 +95,10 @@ jobs:
           --tests '*UnifiedDiffTest'
           --tests '*TurnFoldTest'
           --tests '*ExpressiveLoadingAuditTest'
+          --tests '*EnvironmentSessionBackoffTest'
+          --tests '*ComposerContextTest'
+          --tests '*MarkdownTest'
+          --tests '*AssistantCitationsTest'
           --stacktrace
 
       - name: Lint Kotlin Android client
