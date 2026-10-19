@@ -221,7 +221,9 @@ class AppUpdateManager(
     }
 
     private suspend fun fetchReleases(): List<GitHubReleaseDto> = withContext(ioDispatcher) {
-        val url = "$baseUrl/repos/$repoOwner/$repoName/releases"
+        // Server releases share this repo and the default page holds only 30, which buries the
+        // latest Kotlin release after a few weeks without one; 100 is the API's maximum.
+        val url = "$baseUrl/repos/$repoOwner/$repoName/releases?per_page=100"
         val request = Request.Builder()
             .url(url)
             .header("Accept", "application/vnd.github.v3+json")
