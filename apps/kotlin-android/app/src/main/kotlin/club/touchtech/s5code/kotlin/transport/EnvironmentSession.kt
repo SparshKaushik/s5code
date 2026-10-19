@@ -1023,7 +1023,12 @@ class EnvironmentSession(
     ): T =
         callAcrossHandoffs<RpcConnection, T>(
             awaitConnection = { replacing -> awaitConnection(replacing) },
-            handedOff = { live -> connection.value !== live || live.closed.isCompleted },
+            // A stopped session (say, the environment was switched off) is not
+            // handing off; retrying would start() a socket nobody owns.
+            handedOff = { live ->
+                supervisor?.isActive == true &&
+                    (connection.value !== live || live.closed.isCompleted)
+            },
         ) { live ->
             state.value.requireRpcPermissions(method, payload)
             live.call(method, payload, serializer)

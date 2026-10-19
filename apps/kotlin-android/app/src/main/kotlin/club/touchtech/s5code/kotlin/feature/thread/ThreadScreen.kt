@@ -389,11 +389,12 @@ fun ThreadScreen(
     // transcript stood on expand and put it back on collapse, as folds do.
     //
     // A lone call standing in for its group (`standInGroupId`) opens and closes
-    // the group with it, so a second call joining keeps both open.
+    // the group with it, so a second call joining keeps both open. Its anchor is
+    // kept under the group's id, so collapsing that group later still restores it.
     var expandedEntries by remember(threadId) { mutableStateOf(emptySet<String>()) }
     fun toggleEntryExpand(entryId: String, rowKey: String = entryId, standInGroupId: String? = null) {
         val next = entryId !in expandedEntries
-        toggleFold("entry:$entryId", rowKey, !next) {
+        toggleFold(standInGroupId ?: "entry:$entryId", rowKey, !next) {
             expandedEntries = if (next) expandedEntries + entryId else expandedEntries - entryId
             standInGroupId?.let {
                 expandedWorkGroups = if (next) expandedWorkGroups + it else expandedWorkGroups - it
