@@ -475,9 +475,9 @@ export const openCodeUsageReader: ProviderUsageReader<OpenCodeSettings, OpenCode
   kind: "scan",
   provider: "opencode",
   scan: Effect.fn("openCodeUsageReader.scan")(function* ({ instances, windowStartMs }) {
-    const hostEnvironment = yield* HostProcess.Environment;
-    const roots = new Set(yield* resolveOpenCodeDataDirs(hostEnvironment));
+    const roots = new Set<string>();
     for (const instance of instances) {
+      // A remote OpenCode server keeps its history on that machine.
       if (instance.config?.serverUrl.trim()) continue;
       for (const root of yield* resolveOpenCodeDataDirs(instance.environment)) roots.add(root);
     }

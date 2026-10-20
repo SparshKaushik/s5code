@@ -5,6 +5,7 @@ import * as Schedule from "effect/Schedule";
 import * as Schema from "effect/Schema";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as DeviceHost from "./DeviceHost.ts";
+import { makeDeviceHubOperations } from "./DeviceHubOperations.ts";
 
 const tunnel = Schema.String.check(
   Schema.makeFilter((value) => {
@@ -68,7 +69,8 @@ export const hostId = (runId: string) => DeviceHostId.make(`simbox-${runId}`);
 
 /** A Simbox runner owns its tools. S5 connects to it without installing a second hub. */
 export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registration) {
-  const http = (yield* HttpClient.HttpClient).pipe(HttpClient.withScope);
+  const baseHttp = yield* HttpClient.HttpClient;
+  const http = baseHttp.pipe(HttpClient.withScope);
   const id = hostId(input.runId);
   let connection = input;
   let stopped = false;
@@ -94,12 +96,24 @@ export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registr
       },
       entryPath: "",
     },
-    run: (command, args) =>
-      Effect.succeed(
-        command === "emulator" && args.length === 1 && args[0] === "-list-avds"
-          ? { code: 0, stdout: "", stderr: "" }
-          : { code: 1, stdout: "", stderr: "Host settings are unavailable on this Simbox runner." },
-      ),
+    run: () =>
+      Effect.succeed({
+        code: 1,
+        stdout: "",
+        stderr: "Host settings are unavailable on this Simbox runner.",
+      }),
+    // Rebuilt per use: a restarted tunnel changes the hub origin and token.
+    get devices() {
+      return makeDeviceHubOperations({
+        hostId: id,
+        origin: hub.origin,
+        headers: hub.headers ?? {},
+        http: baseHttp,
+        run: ready.run,
+        // The runner's hub lists its own emulators; there is no local AVD list.
+        androidAvailable: Effect.succeed(false),
+      });
+    },
   };
   const refresh = Effect.gen(function* () {
     const now = yield* Clock.currentTimeMillis;
@@ -211,12 +225,14 @@ export const make = Effect.fn("SimboxDeviceHost.make")(function* (input: Registr
     }),
     Effect.as(ready),
   );
+  const label = `Simbox ${input.runId.slice(0, 8)}`;
   const host: DeviceHost.DeviceHost["Service"] = {
     id,
+    label,
     summary: Effect.succeed({
       id,
       kind: "simbox",
-      label: `Simbox ${input.runId.slice(0, 8)}`,
+      label,
       platforms: ["ios", "android"].map((platform) => ({
         platform: platform as "ios" | "android",
         available: !input.platform || input.platform === platform,

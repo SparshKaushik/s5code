@@ -23,7 +23,9 @@
         "name": "@effect/language-service",
         "allowedDuplicatedPackages": ["effect"],
         "namespaceImportPackages": ["@effect/platform-node", "effect"],
+        "effectFn": ["span", "inferred-span", "suggested-span"],
         "diagnosticSeverity": {
+          "effectFnOpportunity": "suggestion",
           "anyUnknownInErrorContext": "error",
           "unsafeEffectTypeAssertion": "error",
           "instanceOfSchema": "error",
@@ -60,7 +62,23 @@
         "overrides": [
           {
             "include": ["**/*.test.ts", "**/*.test.tsx"],
-            "options": { "diagnosticSeverity": { "preferSchemaOverJson": "off" } }
+            "options": {
+              "diagnosticSeverity": {
+                "preferSchemaOverJson": "off",
+                "effectFnOpportunity": "off"
+              }
+            }
+          },
+          {
+            "include": [
+              "**/*.spec.ts",
+              "**/*.spec.tsx",
+              "**/*.testkit.ts",
+              "**/*.testkit.tsx",
+              "**/{test,tests,testkit,testing,fixtures,integration}/**",
+              "packages/provider-testing/**"
+            ],
+            "options": { "diagnosticSeverity": { "effectFnOpportunity": "off" } }
           }
         ]
       }
