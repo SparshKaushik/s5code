@@ -7,7 +7,6 @@ import {
   type DeviceError,
   type DeviceHostId,
   type DeviceId,
-  DeviceBootError,
   DeviceActionUnavailableError,
   DeviceHostUnavailableError,
   DeviceNotFoundError,
@@ -865,113 +864,114 @@ export const makeWithHosts = Effect.fn("DeviceService.makeWithHosts")(function* 
         }));
       }),
     );
-  const registerSimbox: DeviceService["Service"]["registerSimbox"] = (threadId, input) =>
-    Effect.gen(function* () {
-      const consent = yield* readDeviceSettings;
-      if (!consent.enabled || !consent.agentAccessEnabled)
-        return yield* new DeviceHostUnavailableError({
-          hostId: SimboxDeviceHost.hostId(input.runId),
-          reason: "Enable device support and agent device access to attach a Simbox runner.",
-        });
-      if (input.stop) {
-        yield* removeSimbox(input.runId);
-        return [];
-      }
-      let registered = simboxHosts.get(input.runId);
-      if (!registered) {
-        registered = yield* SimboxDeviceHost.make(input).pipe(Effect.provide(simboxContext));
-        const next = registered;
-        yield* lifecycleLock.withPermit(
-          Effect.gen(function* () {
-            // Registration receipts may arrive concurrently from two threads.
-            if (simboxHosts.has(input.runId)) return;
-            simboxHosts.set(input.runId, next);
-            hosts.set(next.host.id, next.host);
-            publishedHosts.set(next.host.id, next.host);
-            const summary = yield* next.host.summary;
-            yield* publish((state) => ({ ...state, hosts: [...state.hosts, summary] }));
-            yield* Effect.gen(function* () {
-              while (simboxHosts.get(input.runId) === next) {
-                yield* Effect.sleep("15 seconds");
-                const alive = yield* next.refresh.pipe(Effect.orElseSucceed(() => true));
-                if (!alive) {
-                  // Switching device support off stops hosts too; keep those
-                  // runners so switching it back on restores them.
-                  const enabled = yield* readDeviceSettings.pipe(
-                    Effect.map((consent) => consent.enabled && consent.agentAccessEnabled),
-                    Effect.orElseSucceed(() => true),
-                  );
-                  yield* removeSimbox(input.runId, enabled);
-                  return;
-                }
-                if (configuredSimboxHosts.has(next.host.id)) {
-                  yield* lifecycleLock
-                    .withPermit(
-                      Effect.gen(function* () {
-                        const consent = yield* readDeviceSettings;
-                        if (
-                          consent.enabled &&
-                          consent.agentAccessEnabled &&
-                          simboxHosts.get(input.runId) === next &&
-                          next.ready.agentDevice
-                        )
-                          yield* configureAgent(next.host.id, next.ready.agentDevice);
-                      }),
-                    )
-                    .pipe(Effect.ignore);
-                }
+  const registerSimbox: DeviceService["Service"]["registerSimbox"] = Effect.fn(
+    "DeviceService.registerSimbox",
+  )(function* (threadId, input) {
+    const consent = yield* readDeviceSettings;
+    if (!consent.enabled || !consent.agentAccessEnabled)
+      return yield* new DeviceHostUnavailableError({
+        hostId: SimboxDeviceHost.hostId(input.runId),
+        reason: "Enable device support and agent device access to attach a Simbox runner.",
+      });
+    if (input.stop) {
+      yield* removeSimbox(input.runId);
+      return [];
+    }
+    let registered = simboxHosts.get(input.runId);
+    if (!registered) {
+      registered = yield* SimboxDeviceHost.make(input).pipe(Effect.provide(simboxContext));
+      const next = registered;
+      yield* lifecycleLock.withPermit(
+        Effect.gen(function* () {
+          // Registration receipts may arrive concurrently from two threads.
+          if (simboxHosts.has(input.runId)) return;
+          simboxHosts.set(input.runId, next);
+          hosts.set(next.host.id, next.host);
+          publishedHosts.set(next.host.id, next.host);
+          const summary = yield* next.host.summary;
+          yield* publish((state) => ({ ...state, hosts: [...state.hosts, summary] }));
+          yield* Effect.gen(function* () {
+            while (simboxHosts.get(input.runId) === next) {
+              yield* Effect.sleep("15 seconds");
+              const alive = yield* next.refresh.pipe(Effect.orElseSucceed(() => true));
+              if (!alive) {
+                // Switching device support off stops hosts too; keep those
+                // runners so switching it back on restores them.
+                const enabled = yield* readDeviceSettings.pipe(
+                  Effect.map((consent) => consent.enabled && consent.agentAccessEnabled),
+                  Effect.orElseSucceed(() => true),
+                );
+                yield* removeSimbox(input.runId, enabled);
+                return;
               }
-            }).pipe(Effect.forkIn(scope));
-          }),
-        );
-        registered = simboxHosts.get(input.runId);
-      }
-      if (!registered) return [];
-      const hostId = registered.host.id;
-      yield* registered.update(input);
-      savedRunners.set(input.runId, { threadId, registration: { ...input, stop: false } });
-      yield* persistRunners;
-      // Attaching required both consents already; the local setup wizard has
-      // nothing left to ask, and on a server that cannot run simulators it
-      // would otherwise stand between the user and this runner.
-      if (!consent.onboardingCompleted) {
-        yield* settings.updateSettings({ deviceOnboardingCompleted: true }).pipe(Effect.ignore);
-        yield* publish((state) => ({ ...state, onboardingCompleted: true }));
-      }
-      const ready = yield* readiness(registered.host.id);
-      const state = yield* refresh(ready);
-      const candidates = state.devices.filter(
-        (device) =>
-          device.hostId === hostId && (!input.platform || device.platform === input.platform),
-      );
-      const selected = input.deviceId
-        ? candidates.find((device) => device.id === input.deviceId)
-        : input.deviceName
-          ? candidates.find(
-              (device) => device.name === input.deviceName || device.id === input.deviceName,
-            )
-          : (candidates.find((device) => device.booted) ??
-            (input.autoBoot
-              ? (candidates.find((device) => device.name.startsWith("iPhone")) ?? candidates[0])
-              : undefined));
-      if (!selected) return [];
-      const existing = state.sessions.find(
-        (session) =>
-          session.threadId === threadId &&
-          session.hostId === hostId &&
-          session.deviceId === selected.id,
-      );
-      if (existing && selected.booted) return [existing];
-      return [
-        yield* open({
-          threadId,
-          hostId: registered.host.id,
-          deviceId: selected.id,
-          platform: selected.platform,
-          boot: input.autoBoot || !!input.deviceId || !!input.deviceName,
+              if (configuredSimboxHosts.has(next.host.id)) {
+                yield* lifecycleLock
+                  .withPermit(
+                    Effect.gen(function* () {
+                      const consent = yield* readDeviceSettings;
+                      if (
+                        consent.enabled &&
+                        consent.agentAccessEnabled &&
+                        simboxHosts.get(input.runId) === next &&
+                        next.ready.agentDevice
+                      )
+                        yield* configureAgent(next.host.id, next.ready.agentDevice);
+                    }),
+                  )
+                  .pipe(Effect.ignore);
+              }
+            }
+          }).pipe(Effect.forkIn(scope));
         }),
-      ];
-    });
+      );
+      registered = simboxHosts.get(input.runId);
+    }
+    if (!registered) return [];
+    const hostId = registered.host.id;
+    yield* registered.update(input);
+    savedRunners.set(input.runId, { threadId, registration: { ...input, stop: false } });
+    yield* persistRunners;
+    // Attaching required both consents already; the local setup wizard has
+    // nothing left to ask, and on a server that cannot run simulators it
+    // would otherwise stand between the user and this runner.
+    if (!consent.onboardingCompleted) {
+      yield* settings.updateSettings({ deviceOnboardingCompleted: true }).pipe(Effect.ignore);
+      yield* publish((state) => ({ ...state, onboardingCompleted: true }));
+    }
+    const ready = yield* readiness(registered.host.id);
+    const state = yield* refresh(ready);
+    const candidates = state.devices.filter(
+      (device) =>
+        device.hostId === hostId && (!input.platform || device.platform === input.platform),
+    );
+    const selected = input.deviceId
+      ? candidates.find((device) => device.id === input.deviceId)
+      : input.deviceName
+        ? candidates.find(
+            (device) => device.name === input.deviceName || device.id === input.deviceName,
+          )
+        : (candidates.find((device) => device.booted) ??
+          (input.autoBoot
+            ? (candidates.find((device) => device.name.startsWith("iPhone")) ?? candidates[0])
+            : undefined));
+    if (!selected) return [];
+    const existing = state.sessions.find(
+      (session) =>
+        session.threadId === threadId &&
+        session.hostId === hostId &&
+        session.deviceId === selected.id,
+    );
+    if (existing && selected.booted) return [existing];
+    return [
+      yield* open({
+        threadId,
+        hostId: registered.host.id,
+        deviceId: selected.id,
+        platform: selected.platform,
+        boot: input.autoBoot || !!input.deviceId || !!input.deviceName,
+      }),
+    ];
+  });
 
   restoreSimboxRunners = Effect.forEach(
     [...savedRunners.values()],

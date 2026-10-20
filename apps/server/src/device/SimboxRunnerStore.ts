@@ -46,8 +46,8 @@ export const file = Effect.fn("SimboxRunnerStore.file")(function* (location: str
       Effect.flatMap(decode),
       Effect.orElseSucceed((): ReadonlyArray<StoredRunner> => []),
     ),
-    save: (runners) =>
-      Effect.gen(function* () {
+    save: Effect.fn("SimboxRunnerStore.save")(
+      function* (runners) {
         const directory = path.dirname(location);
         yield* fs.makeDirectory(directory, { recursive: true });
         const content = yield* encode(runners);
@@ -60,7 +60,10 @@ export const file = Effect.fn("SimboxRunnerStore.file")(function* (location: str
         const staged = path.join(temporary, "runners.json");
         yield* fs.writeFileString(staged, content, { mode: 0o600 });
         yield* fs.rename(staged, location);
-      }).pipe(Effect.scoped, Effect.ignore),
+      },
+      Effect.scoped,
+      (effect) => Effect.ignore(effect),
+    ),
   };
   return store;
 });

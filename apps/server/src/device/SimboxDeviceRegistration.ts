@@ -66,47 +66,47 @@ const make = Effect.gen(function* () {
     );
   const seen = new Set<string>();
   const decode = Schema.decodeUnknownEffect(Schema.fromJsonString(Registration));
-  const observe: SimboxDeviceRegistration["Service"]["observe"] = (item) =>
-    Effect.gen(function* () {
-      for (const id of receiptsForItem(item)) {
-        const input = yield* lock
-          .withPermit(
-            Effect.gen(function* () {
-              if (seen.has(id)) return null;
-              seen.add(id);
-              if (seen.size > 4096) seen.delete(seen.values().next().value!);
-              const file = path.join(directory, `${id}.json`);
-              // The file must be a fresh CLI receipt; arbitrary output is insufficient.
-              const exists = yield* fs.exists(file);
-              if (!exists) return null;
-              const info = yield* fs.stat(file);
-              if (Number(info.size) > 16_384) return null;
-              const claimed = path.join(directory, `${id}.claimed`);
-              yield* fs.rename(file, claimed);
-              return yield* Effect.gen(function* () {
-                const input = yield* decode(yield* fs.readFileString(claimed));
-                const age = (yield* Clock.currentTimeMillis) - input.createdAt;
-                if (age < -10_000 || age > 5 * 60_000) return null;
-                return input;
-              }).pipe(Effect.ensuring(fs.remove(claimed, { force: true }).pipe(Effect.ignore)));
-            }),
-          )
-          .pipe(
-            Effect.mapError(
-              (cause) =>
-                new SimboxDeviceRegistrationError({ step: "reading the CLI receipt", cause }),
-            ),
-          );
-        if (input)
-          yield* devices.registerSimbox(item.threadId, input).pipe(
-            Effect.asVoid,
-            Effect.mapError(
-              (cause) =>
-                new SimboxDeviceRegistrationError({ step: "registering the runner", cause }),
-            ),
-          );
-      }
-    });
+  const observe: SimboxDeviceRegistration["Service"]["observe"] = Effect.fn(
+    "SimboxDeviceRegistration.observe",
+  )(function* (item) {
+    for (const id of receiptsForItem(item)) {
+      const input = yield* lock
+        .withPermit(
+          Effect.gen(function* () {
+            if (seen.has(id)) return null;
+            seen.add(id);
+            if (seen.size > 4096) seen.delete(seen.values().next().value!);
+            const file = path.join(directory, `${id}.json`);
+            // The file must be a fresh CLI receipt; arbitrary output is insufficient.
+            const exists = yield* fs.exists(file);
+            if (!exists) return null;
+            const info = yield* fs.stat(file);
+            if (Number(info.size) > 16_384) return null;
+            const claimed = path.join(directory, `${id}.claimed`);
+            yield* fs.rename(file, claimed);
+            return yield* Effect.gen(function* () {
+              const input = yield* decode(yield* fs.readFileString(claimed));
+              const age = (yield* Clock.currentTimeMillis) - input.createdAt;
+              if (age < -10_000 || age > 5 * 60_000) return null;
+              return input;
+            }).pipe(Effect.ensuring(fs.remove(claimed, { force: true }).pipe(Effect.ignore)));
+          }),
+        )
+        .pipe(
+          Effect.mapError(
+            (cause) =>
+              new SimboxDeviceRegistrationError({ step: "reading the CLI receipt", cause }),
+          ),
+        );
+      if (input)
+        yield* devices.registerSimbox(item.threadId, input).pipe(
+          Effect.asVoid,
+          Effect.mapError(
+            (cause) => new SimboxDeviceRegistrationError({ step: "registering the runner", cause }),
+          ),
+        );
+    }
+  });
   return SimboxDeviceRegistration.of({ observe });
 });
 

@@ -325,37 +325,36 @@ export const layerClientAuth = Layer.effect(
   Effect.gen(function* () {
     const config = yield* RelayConfiguration.RelayConfiguration;
     return {
-      clientBearer: (httpEffect, { credential }) =>
-        Effect.gen(function* () {
-          const token = readHttpAuthorizationCredential(credential);
-          const verified = yield* verifyRelayClientBearerToken(config, token).pipe(
-            Effect.tapError((error) =>
-              Effect.annotateCurrentSpan(
-                "relay.auth.clerk_verification_failure",
-                clerkVerificationFailureReason(error.cause),
-              ),
+      clientBearer: Effect.fn("relay.auth.client.bearer")(function* (httpEffect, { credential }) {
+        const token = readHttpAuthorizationCredential(credential);
+        const verified = yield* verifyRelayClientBearerToken(config, token).pipe(
+          Effect.tapError((error) =>
+            Effect.annotateCurrentSpan(
+              "relay.auth.clerk_verification_failure",
+              clerkVerificationFailureReason(error.cause),
             ),
-            Effect.catch(() => relayAuthInvalidError("invalid_bearer")),
-          );
-          if (!verified.sub) {
-            yield* Effect.annotateCurrentSpan({
-              "relay.auth.clerk_verification_failure": "missing_subject",
-            });
-            return yield* relayAuthInvalidError("invalid_bearer");
-          }
+          ),
+          Effect.catch(() => relayAuthInvalidError("invalid_bearer")),
+        );
+        if (!verified.sub) {
           yield* Effect.annotateCurrentSpan({
-            "relay.auth.mode": verified.mode,
-            "relay.auth.subject": verified.sub,
+            "relay.auth.clerk_verification_failure": "missing_subject",
           });
+          return yield* relayAuthInvalidError("invalid_bearer");
+        }
+        yield* Effect.annotateCurrentSpan({
+          "relay.auth.mode": verified.mode,
+          "relay.auth.subject": verified.sub,
+        });
 
-          return yield* httpEffect.pipe(
-            withSpanAttributes({ "user.id": verified.sub }),
-            Effect.provideService(RelayClientPrincipal, {
-              userId: verified.sub,
-              token,
-            }),
-          );
-        }).pipe(Effect.withSpan("relay.auth.client.bearer")),
+        return yield* httpEffect.pipe(
+          withSpanAttributes({ "user.id": verified.sub }),
+          Effect.provideService(RelayClientPrincipal, {
+            userId: verified.sub,
+            token,
+          }),
+        );
+      }),
     };
   }),
 );
@@ -365,28 +364,30 @@ export const layerEnvironmentAuth = Layer.effect(
   Effect.gen(function* () {
     const credentials = yield* EnvironmentCredentials.EnvironmentCredentials;
     return {
-      environmentBearer: (httpEffect, { credential }) =>
-        Effect.gen(function* () {
-          const token = readHttpAuthorizationCredential(credential);
-          const principal = yield* credentials.authenticate(token).pipe(
-            Effect.catchTags({
-              EnvironmentCredentialAuthenticatePersistenceError: () =>
-                relayInternalErrorResponse("persistence_failed"),
-            }),
-          );
-          if (principal._tag === "None") {
-            return yield* relayAuthInvalidError("not_authorized");
-          }
-          yield* Effect.annotateCurrentSpan({
-            "relay.auth.mode": "environment_credential",
-          });
-          return yield* httpEffect.pipe(
-            withSpanAttributes({
-              "relay.environment_id": principal.value.environmentId,
-            }),
-            Effect.provideService(RelayEnvironmentPrincipal, principal.value),
-          );
-        }).pipe(Effect.withSpan("relay.auth.environment.bearer")),
+      environmentBearer: Effect.fn("relay.auth.environment.bearer")(function* (
+        httpEffect,
+        { credential },
+      ) {
+        const token = readHttpAuthorizationCredential(credential);
+        const principal = yield* credentials.authenticate(token).pipe(
+          Effect.catchTags({
+            EnvironmentCredentialAuthenticatePersistenceError: () =>
+              relayInternalErrorResponse("persistence_failed"),
+          }),
+        );
+        if (principal._tag === "None") {
+          return yield* relayAuthInvalidError("not_authorized");
+        }
+        yield* Effect.annotateCurrentSpan({
+          "relay.auth.mode": "environment_credential",
+        });
+        return yield* httpEffect.pipe(
+          withSpanAttributes({
+            "relay.environment_id": principal.value.environmentId,
+          }),
+          Effect.provideService(RelayEnvironmentPrincipal, principal.value),
+        );
+      }),
     };
   }),
 );
@@ -396,36 +397,35 @@ export const layerDpopClientAuth = Layer.effect(
   Effect.gen(function* () {
     const relayTokens = yield* RelayTokens.RelayTokens;
     return {
-      relayDpop: (httpEffect, { credential }) =>
-        Effect.gen(function* () {
-          yield* appendRelayDpopChallengeHeader;
-          const request = yield* HttpServerRequest.HttpServerRequest;
-          if (!isDpopAuthorizationHeader(request.headers.authorization)) {
-            return yield* relayAuthInvalidError("invalid_bearer");
-          }
-          const token = readHttpAuthorizationCredential(credential);
-          const now = yield* DateTime.now;
-          const verified = yield* relayTokens.verifyDpopAccessToken({
+      relayDpop: Effect.fn("relay.auth.dpop_client")(function* (httpEffect, { credential }) {
+        yield* appendRelayDpopChallengeHeader;
+        const request = yield* HttpServerRequest.HttpServerRequest;
+        if (!isDpopAuthorizationHeader(request.headers.authorization)) {
+          return yield* relayAuthInvalidError("invalid_bearer");
+        }
+        const token = readHttpAuthorizationCredential(credential);
+        const now = yield* DateTime.now;
+        const verified = yield* relayTokens.verifyDpopAccessToken({
+          token,
+          nowEpochSeconds: Math.floor(now.epochMilliseconds / 1_000),
+        });
+        if (!verified) {
+          return yield* relayAuthInvalidError("invalid_bearer");
+        }
+        yield* Effect.annotateCurrentSpan({
+          "relay.auth.mode": "dpop",
+          "relay.auth.subject": verified.sub,
+        });
+        return yield* httpEffect.pipe(
+          withSpanAttributes({ "user.id": verified.sub }),
+          Effect.provideService(RelayClientPrincipal, {
+            userId: verified.sub,
             token,
-            nowEpochSeconds: Math.floor(now.epochMilliseconds / 1_000),
-          });
-          if (!verified) {
-            return yield* relayAuthInvalidError("invalid_bearer");
-          }
-          yield* Effect.annotateCurrentSpan({
-            "relay.auth.mode": "dpop",
-            "relay.auth.subject": verified.sub,
-          });
-          return yield* httpEffect.pipe(
-            withSpanAttributes({ "user.id": verified.sub }),
-            Effect.provideService(RelayClientPrincipal, {
-              userId: verified.sub,
-              token,
-              proofKeyThumbprint: verified.cnf.jkt,
-              dpopScopes: verified.scope,
-            }),
-          );
-        }).pipe(Effect.withSpan("relay.auth.dpop_client")),
+            proofKeyThumbprint: verified.cnf.jkt,
+            dpopScopes: verified.scope,
+          }),
+        );
+      }),
     };
   }),
 );
