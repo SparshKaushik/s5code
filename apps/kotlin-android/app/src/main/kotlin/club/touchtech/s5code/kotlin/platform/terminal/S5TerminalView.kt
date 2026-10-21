@@ -27,6 +27,8 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
 
     // Newer Android can request autofill even with importantForAutofill=no.
     // Reporting no autofill type keeps terminal input out of credential autofill.
+    // The app has no AppCompat dependency, so a plain EditText is the right base.
+    @android.annotation.SuppressLint("AppCompatCustomView")
     private val inputView =
         object : EditText(context) {
             override fun getAutofillType(): Int = View.AUTOFILL_TYPE_NONE
