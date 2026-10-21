@@ -18,8 +18,9 @@ import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptRea
 // way, so v4 entries still load; see `decodeScanCache` for v4 Codex entries.
 // v6: retain S5's gateway identity and estimated-token fields alongside speeds.
 // v8: S5's v6 rows plus upstream v7's Codex tier provenance and malformed counts.
-// Upstream v7 rows have no gateway fields and still load.
-const USAGE_SCAN_CACHE_VERSION = 8 as const;
+// v9: S5's v8 rows plus upstream v8's Codex compaction and resume counters.
+// Upstream rows have no gateway fields and still load.
+const USAGE_SCAN_CACHE_VERSION = 9 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -28,8 +29,9 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * it, dropping saved usage for deleted transcripts. Separate files keep both.
  * Legacy upstream and S5 caches are imported when this version's file is missing.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v8.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v9.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v8.json",
   "usage-scan-cache-v7.json",
   "usage-scan-cache-v6.json",
   "usage-scan-cache-v5.json",
@@ -359,15 +361,16 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer
-    // state: a zero position cannot resume. Only Codex requires new provenance
-    // state in v7. S5's v4 and v6 caches hold upstream v5 reducer state. Pi
-    // entries from before auxiliary usage support likewise keep saved totals,
-    // but live transcripts must be read again.
+    // state: a zero position cannot resume. Older Codex entries lack
+    // provenance state (upstream v7) or misread compaction and resume counters
+    // (upstream v8). S5's v4 and v6 caches hold upstream v5 reducer state and
+    // S5's v8 holds upstream v7's. Pi entries from before auxiliary usage
+    // support likewise keep saved totals, but live transcripts must be read again.
     const stateVersion =
-      root.apiProviders !== undefined && version < 8 ? Math.min(version, 5) : version;
+      root.apiProviders === undefined ? version : version >= 9 ? 8 : version >= 8 ? 7 : 5;
     const legacy =
       (format.state !== undefined &&
-        (stateVersion < 6 || (entry.p === "codex" && stateVersion < 7))) ||
+        (stateVersion < 6 || (entry.p === "codex" && stateVersion < 8))) ||
       (entry.p === "pi" && entry.pf !== 1);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.

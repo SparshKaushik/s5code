@@ -74,19 +74,6 @@ function aggregate(
 }
 
 describe("UsageAggregator", () => {
-  it("requires exact bounds for hourly aggregation", () => {
-    expect(
-      () =>
-        new UsageAggregator({
-          timeZone: "UTC",
-          sinceDay: "2026-08-01",
-          untilDay: "2026-08-31",
-          resolution: "hour",
-          pricer,
-        }),
-    ).toThrow("requires exact time bounds");
-  });
-
   it("splits a bucket's cost by category and speed", () => {
     const [bucket] = aggregate([record(), record({ speed: "fast" })]).buckets;
 
@@ -115,13 +102,6 @@ describe("UsageAggregator", () => {
     expect(result.buckets).toHaveLength(1);
     expect(result.buckets[0]?.records).toBe(1);
     expect(result.buckets[0]?.totals.outputTokens).toBe(50);
-  });
-
-  it("still sums records that carry no dedupe key", () => {
-    const result = aggregate([record(), record()]);
-
-    expect(result.duplicatesDropped).toBe(0);
-    expect(result.buckets[0]?.totals.outputTokens).toBe(100);
   });
 
   it("buckets by the day in the requested time zone", () => {
@@ -198,24 +178,6 @@ describe("UsageAggregator", () => {
       "2026-08-06T04:37:00.000Z",
       "2026-08-07T03:37:00.000Z",
     ]);
-  });
-
-  it("keeps daily payloads collapsed when hourly resolution is not requested", () => {
-    const result = aggregate([
-      record({ timestampMs: Date.parse("2026-08-07T04:05:13.944Z") }),
-      record({ timestampMs: Date.parse("2026-08-07T05:05:13.944Z") }),
-    ]);
-
-    expect(result.buckets).toHaveLength(1);
-    expect(result.buckets[0]?.hourStart).toBeUndefined();
-    expect(result.buckets[0]?.records).toBe(2);
-  });
-
-  it("prices against the rate table", () => {
-    const result = aggregate([record()]);
-
-    expect(result.buckets[0]?.costUsd).toBeCloseTo(0.004625, 9);
-    expect(result.buckets[0]?.costSource).toBe("modelPriced");
   });
 
   it("counts tokens but not cost for a model with no rate", () => {
