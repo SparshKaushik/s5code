@@ -6,6 +6,7 @@ import type {
 } from "@t3tools/provider-core/server/usage";
 import * as Schema from "effect/Schema";
 
+import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
 // v2: Codex fork-copy suppression changed what a file parses to, so v1
@@ -16,7 +17,9 @@ import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptRea
 // v5: Codex records carry their service tier. v4 rows store speed the same
 // way, so v4 entries still load; see `decodeScanCache` for v4 Codex entries.
 // v6: retain S5's gateway identity and estimated-token fields alongside speeds.
-const USAGE_SCAN_CACHE_VERSION = 6 as const;
+// v8: S5's v6 rows plus upstream v7's Codex tier provenance and malformed counts.
+// Upstream v7 rows have no gateway fields and still load.
+const USAGE_SCAN_CACHE_VERSION = 8 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -25,8 +28,13 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * it, dropping saved usage for deleted transcripts. Separate files keep both.
  * Legacy upstream and S5 caches are imported when this version's file is missing.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v6.json";
-export const LEGACY_SCAN_CACHE_FILE_NAME = "usage-scan-cache.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v8.json";
+export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v7.json",
+  "usage-scan-cache-v6.json",
+  "usage-scan-cache-v5.json",
+  "usage-scan-cache.json",
+] as const;
 
 const SPEEDS: readonly UsageSpeed[] = ["standard", "fast", "ultrafast"];
 
@@ -41,6 +49,8 @@ export interface CachedFile {
    * re-reads that segment and would otherwise double count it.
    */
   readonly tailRecords: readonly UsageRecord[];
+  /** Whole-file count, including diagnostics from the tentative tail. */
+  readonly malformedRecords: number;
   readonly position: TranscriptParsePosition;
 }
 
@@ -62,6 +72,7 @@ type SerializedRecord = readonly [
   apiProviderIndex: number,
   /** Optional trailing field keeps existing cache rows readable. */
   rateModelIndex?: number | null,
+  unresolvedServiceTierTurnId?: string,
 ];
 
 interface SerializedFile {
@@ -70,6 +81,7 @@ interface SerializedFile {
   readonly p: UsageProviderKind;
   readonly r: readonly SerializedRecord[];
   readonly t: readonly SerializedRecord[];
+  readonly mr: number;
   readonly o: number;
   readonly gl: number;
   readonly gh: number;
@@ -133,6 +145,9 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     record.rateModel === undefined
       ? null
       : intern(tables.models, tables.modelIndex, record.rateModel),
+    ...(record.unresolvedServiceTierTurnId === undefined
+      ? ([] as const)
+      : ([record.unresolvedServiceTierTurnId] as const)),
   ];
   return {
     s: entry.size,
@@ -140,6 +155,7 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     p: entry.provider,
     r: entry.records.map(serializeRecord),
     t: entry.tailRecords.map(serializeRecord),
+    mr: entry.malformedRecords,
     o: entry.position.resumeOffset,
     gl: entry.position.guardLength,
     gh: entry.position.guardHash,
@@ -261,12 +277,15 @@ export function decodeScanCache(
       const inputTokensEstimated = legacyFork ? row[10] : row[11];
       const apiProviderIndex = legacyFork ? row[11] : row[12];
       const rateModelIndex = root.apiProviders === undefined ? row[11] : row[13];
+      const unresolvedServiceTierTurnId = root.apiProviders === undefined ? row[12] : row[14];
       const speed = typeof speedIndex === "number" ? SPEEDS[speedIndex] : undefined;
 
       const model = typeof modelIndex === "number" ? models[modelIndex] : undefined;
       const rateModel = typeof rateModelIndex === "number" ? models[rateModelIndex] : undefined;
       if (
         (rateModelIndex != null && rateModel === undefined) ||
+        (unresolvedServiceTierTurnId !== undefined &&
+          typeof unresolvedServiceTierTurnId !== "string") ||
         typeof timestampMs !== "number" ||
         !Number.isFinite(timestampMs) ||
         model === undefined ||
@@ -279,6 +298,10 @@ export function decodeScanCache(
       ) {
         return null;
       }
+
+      // Unchanged and deleted transcripts may only exist in the cache, so the
+      // parser cannot remove their previously saved local placeholders.
+      if (provider === "claude" && model === CLAUDE_SYNTHETIC_MODEL) continue;
 
       records.push({
         provider,
@@ -298,6 +321,9 @@ export function decodeScanCache(
         reportedCostUsd: typeof reportedCostUsd === "number" ? reportedCostUsd : null,
         inputTokensEstimated: inputTokensEstimated === true,
         speed,
+        ...(version >= 7 && unresolvedServiceTierTurnId !== undefined
+          ? { unresolvedServiceTierTurnId }
+          : {}),
         dedupeKey: typeof dedupeKey === "string" ? dedupeKey : null,
       });
     }
@@ -312,6 +338,8 @@ export function decodeScanCache(
     const format = formats.get(entry.p);
     if (format === undefined) continue;
     if (!isRecordArray(entry.r) || !isRecordArray(entry.t)) continue;
+    const malformedRecords = entry.mr === undefined ? 0 : entry.mr;
+    if (!Number.isSafeInteger(malformedRecords) || malformedRecords < 0) continue;
     // Position fields feed byte offsets and a Buffer allocation in the reader,
     // so anything outside their real ranges must reject the entry: a bogus
     // guard length would otherwise fail every parse of the file, silently
@@ -330,13 +358,17 @@ export function decodeScanCache(
     ) {
       continue;
     }
-    // v4 records of stateful formats (Codex) predate service tiers, so they
-    // all priced as standard. Keep them, because the rollout may be gone, but
-    // make a live rollout re-parse whole: no file has size -1, and a zero
-    // position cannot resume. Pi entries from before auxiliary usage support
-    // likewise keep saved totals, but live transcripts must be read again.
+    // Keep history for deleted rollouts, but re-parse incompatible reducer
+    // state: a zero position cannot resume. Only Codex requires new provenance
+    // state in v7. S5's v4 and v6 caches hold upstream v5 reducer state. Pi
+    // entries from before auxiliary usage support likewise keep saved totals,
+    // but live transcripts must be read again.
+    const stateVersion =
+      root.apiProviders !== undefined && version < 8 ? Math.min(version, 5) : version;
     const legacy =
-      (format.state !== undefined && version < 5) || (entry.p === "pi" && entry.pf !== 1);
+      (format.state !== undefined &&
+        (stateVersion < 6 || (entry.p === "codex" && stateVersion < 7))) ||
+      (entry.p === "pi" && entry.pf !== 1);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
@@ -352,6 +384,7 @@ export function decodeScanCache(
       provider,
       records,
       tailRecords,
+      malformedRecords,
       position: legacy
         ? { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null }
         : {

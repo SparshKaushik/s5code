@@ -141,8 +141,8 @@ describe("Simbox device host", () => {
         expect(yield* remote.refresh).toBe(true);
         expect(ready.hub.origin).toBe("https://recovered.trycloudflare.com/simbox-device-hub");
         expect(ready.hub.headers?.authorization).toBe("Bearer rotated-private-token");
-        expect(ready.agentDevice.baseUrl).toBe("https://recovered.trycloudflare.com/agent-device");
-        expect(ready.agentDevice.token).toBe("rotated-private-token");
+        expect(ready.agentDevice?.baseUrl).toBe("https://recovered.trycloudflare.com/agent-device");
+        expect(ready.agentDevice?.token).toBe("rotated-private-token");
         run = { ...run, state: "closing" };
         expect(yield* remote.refresh).toBe(false);
         run = { ...run, state: "live", id: "another-run" };
