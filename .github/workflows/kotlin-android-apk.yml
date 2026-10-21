@@ -112,6 +112,20 @@ jobs:
           --tests '*ThreadLinksTest'
           --tests '*DraftModelPickTest'
           --tests '*ThreadSwipeActionsTest'
+          --tests '*ProjectRemovalTest'
+          --tests '*ScheduledTaskWebhookTest'
+          --tests '*PaceTickTest'
+          --tests '*ThreadWakeTest'
+          --tests '*ThreadUndoTest'
+          --tests '*HomeConnectionStatusTest'
+          --tests '*ThreadMenuTest'
+          --tests '*ApprovalRedirectTest'
+          --tests '*ProposedPlanTextTest'
+          --tests '*ComposerRowTest'
+          --tests '*FileLinkTargetsTest'
+          --tests '*ModelTraitsTest'
+          --tests '*InlineCodeFileLinkTest'
+          --tests '*MarkdownLinksTest'
           --stacktrace
 
       - name: Lint Kotlin Android client
