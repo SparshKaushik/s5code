@@ -99,6 +99,19 @@ jobs:
           --tests '*ComposerContextTest'
           --tests '*MarkdownTest'
           --tests '*AssistantCitationsTest'
+          --tests '*ReleaseCheckTest'
+          --tests '*NewTaskBranchCheckoutTest'
+          --tests '*ThreadTitleTest'
+          --tests '*HostFreezeNoticeTest'
+          --tests '*ChangedFileKindTest'
+          --tests '*ChangeRequestUrlTest'
+          --tests '*ReviewDiffBoundsTest'
+          --tests '*BrowserAddressTest'
+          --tests '*UsageLimitsPoolsTest'
+          --tests '*DeviceStreamBaseUrlTest'
+          --tests '*ThreadLinksTest'
+          --tests '*DraftModelPickTest'
+          --tests '*ThreadSwipeActionsTest'
           --stacktrace
 
       - name: Lint Kotlin Android client
