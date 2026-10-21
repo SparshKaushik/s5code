@@ -29,6 +29,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.automirrored.rounded.Redo
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
@@ -42,7 +43,6 @@ import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.WarningAmber
 import androidx.compose.material.icons.rounded.Build
-import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -62,6 +62,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.semantics.stateDescription
@@ -75,14 +76,12 @@ import club.touchtech.s5code.kotlin.design.component.rememberAttachmentImageMode
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5Markdown
-import club.touchtech.s5code.kotlin.design.component.S5StatusPill
 import coil3.compose.AsyncImage
 import club.touchtech.s5code.kotlin.data.CommandOutputView
 import club.touchtech.s5code.kotlin.data.SecretRequestAnswer
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
-import club.touchtech.s5code.kotlin.design.theme.S5PillShape
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentInlineCard
 import club.touchtech.s5code.kotlin.feature.review.ReviewCommentMessageSegment
@@ -123,6 +122,8 @@ fun FeedEntryRow(
     expandedIds: Set<String>? = null,
     onToggleExpand: (FeedEntry) -> Unit = {},
     onOpenThread: (String) -> Unit = {},
+    /** A `t3-thread://` link in agent text was tapped; receives the id as written. */
+    onOpenThreadLink: ((String) -> Unit)? = null,
     /**
      * Sends `secrets.answerRequest` for a pending [FeedEntry.SecretRequest];
      * throws on failure so the card can map it with `secretRequestFailureMessage`.
@@ -184,6 +185,7 @@ fun FeedEntryRow(
                 environmentId,
                 resolveTranscriptAttachment,
                 onOpenAttachment,
+                onOpenThreadLink,
             )
 
         is FeedEntry.Reasoning -> ReasoningRow(entry, expandedIds, onToggleExpand, modifier)
@@ -361,7 +363,6 @@ private fun UserBubble(
     onOpenAttachment: (SentAttachment) -> Unit,
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
-    var explainedBadge by remember(entry.id) { mutableStateOf<UserMessageIntentBadge?>(null) }
     var actionsOpen by remember(entry.id) { mutableStateOf(false) }
     val haptics = LocalHapticFeedback.current
     // `t3-context://` links resolve to their record labels (or an
@@ -461,25 +462,34 @@ private fun UserBubble(
                         val intentBadge = remember(entry.inputIntent) { userMessageIntentBadge(entry.inputIntent) }
                         Row(
                             Modifier.padding(top = S5Theme.spacing.tiny),
-                            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp),
                             verticalAlignment = Alignment.CenterVertically,
                         ) {
                             intentBadge?.let { badge ->
-                                val queued = badge.tone == UserMessageIntentTone.Queued
-                                S5StatusPill(
-                                    label = badge.label,
-                                    containerColor =
-                                        if (queued) S5Theme.status.approvalContainer
-                                        else S5Theme.status.workingContainer,
-                                    contentColor =
-                                        if (queued) S5Theme.status.onApprovalContainer
-                                        else S5Theme.status.onWorkingContainer,
-                                    modifier =
-                                        Modifier.clip(S5PillShape)
-                                            .clickable(onClickLabel = "Explain message history") {
-                                                explainedBadge = badge
-                                            }
-                                            .semantics { contentDescription = badge.accessibilityLabel },
+                                Row(
+                                    Modifier.semantics(mergeDescendants = true) {
+                                        contentDescription = badge.accessibilityLabel
+                                    },
+                                    horizontalArrangement = Arrangement.spacedBy(4.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                ) {
+                                    Icon(
+                                        Icons.AutoMirrored.Rounded.Redo,
+                                        contentDescription = null,
+                                        modifier = Modifier.size(12.dp),
+                                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                    Text(
+                                        badge.label,
+                                        style = MaterialTheme.typography.labelSmall,
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    )
+                                }
+                                Text(
+                                    "·",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    modifier = Modifier.clearAndSetSemantics {},
                                 )
                             }
                             Text(entry.timeLabel, style = MaterialTheme.typography.labelSmall)
@@ -487,14 +497,6 @@ private fun UserBubble(
                     }
                 }
             },
-        )
-    }
-    explainedBadge?.let { badge ->
-        AlertDialog(
-            onDismissRequest = { explainedBadge = null },
-            title = { Text("Message history") },
-            text = { Text(badge.explanation) },
-            confirmButton = { TextButton(onClick = { explainedBadge = null }) { Text("OK") } },
         )
     }
     S5ImageLightbox(
@@ -519,6 +521,7 @@ private fun AgentMessage(
     environmentId: String?,
     resolveTranscriptAttachment: suspend (String) -> String?,
     onOpenAttachment: (SentAttachment) -> Unit,
+    onOpenThreadLink: ((String) -> Unit)?,
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
     // No avatar and no provider label, matching the RN feed: the agent's identity
@@ -531,6 +534,7 @@ private fun AgentMessage(
             onCopyCode = onCopy,
             workspaceRoot = workspaceRoot,
             onOpenFile = onOpenFile,
+            onOpenThreadLink = onOpenThreadLink,
         )
         if (entry.attachments.isNotEmpty()) {
             Row(

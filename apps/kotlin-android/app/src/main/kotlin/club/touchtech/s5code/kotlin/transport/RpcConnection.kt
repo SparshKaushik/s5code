@@ -244,7 +244,9 @@ private constructor(
                 delay(KEEPALIVE_INTERVAL_MS)
                 if (failure != null) return@launch
                 if (!pongSeen) {
-                    fail(RpcTransportClosed("The server stopped answering keepalives."))
+                    // The socket opened, so the network path worked; a host that
+                    // goes quiet is more often overloaded or asleep than blocked.
+                    fail(RpcTransportClosed("The server stopped responding. It may be overloaded, asleep, or off the network."))
                     return@launch
                 }
                 pongSeen = false

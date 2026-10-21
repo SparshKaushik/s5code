@@ -43,7 +43,9 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
                 }
             }
         }
-        if (detail.summary.status == ThreadStatus.Waiting && !detail.providerNativeSubagent) {
+        if (detail.summary.liveStatus == ThreadStatus.Waiting && !detail.summary.blockedOnThreadWait &&
+            !detail.providerNativeSubagent
+        ) {
             TextButton(enabled = !busy, onClick = { action { store.workspace.cancelTurn(env, id) } }) { Text("Stop background work") }
         }
         if (detail.usageLimitReached) {
@@ -104,7 +106,7 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
             }
         })
     editing?.let { run -> AlertDialog(onDismissRequest = { editing = null }, title = { Text("Edit queued message") },
-        text = { OutlinedTextField(value = editText, onValueChange = { editText = it }, minLines = 3) },
+        text = { OutlinedTextField(value = editText, onValueChange = { editText = it }, minLines = 3, readOnly = busy) },
         dismissButton = { TextButton(onClick = { editing = null }) { Text("Cancel") } },
         confirmButton = { TextButton(enabled = !busy && editText.isNotBlank(), onClick = { action {
             store.workspace.queueAction(env, id, "queued-run.edit", run.id, editText)

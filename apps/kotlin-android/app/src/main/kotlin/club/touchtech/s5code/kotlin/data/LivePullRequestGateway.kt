@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.transport.EnvironmentSession
+import club.touchtech.s5code.kotlin.transport.RpcFailure
 import club.touchtech.s5code.kotlin.transport.SessionPhase
 import club.touchtech.s5code.kotlin.transport.TransportJson
 import club.touchtech.s5code.kotlin.transport.WsMethods
@@ -10,6 +11,7 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffStatDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilesViewedResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestLinkedThreadsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
@@ -404,6 +406,23 @@ class LivePullRequestGateway(
         ) {
             it.query(WsMethods.PullRequestsFilesViewed, reference.toJson(), PullRequestFilesViewedResultDto.serializer())
         }
+
+    override fun changeBreakdown(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "changeBreakdown:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestChangeBreakdownDto.serializer().nullable,
+            tick = true,
+            persist = true,
+        ) {
+            try {
+                it.query(WsMethods.PullRequestsChangeBreakdown, reference.toJson(), PullRequestChangeBreakdownDto.serializer().nullable)
+            } catch (failure: RpcFailure) {
+                // Servers from before the split don't know the method; the line just stays hidden.
+                if (failure.message.contains("Unknown request tag")) null else throw failure
+            }
+        }.observe()
 
     private fun reviewerCandidatesEntry(environmentId: String, reference: PullRequestReference) =
         entry(

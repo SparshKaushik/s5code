@@ -7,6 +7,7 @@ import android.text.InputType
 import android.text.TextWatcher
 import android.view.KeyCharacterMap
 import android.view.KeyEvent
+import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
@@ -23,7 +24,13 @@ import kotlin.math.max
  */
 internal class S5TerminalView(context: Context) : FrameLayout(context) {
     private val terminalCanvas = TerminalCanvasView(context)
-    private val inputView = EditText(context)
+
+    // Newer Android can request autofill even with importantForAutofill=no.
+    // Reporting no autofill type keeps terminal input out of credential autofill.
+    private val inputView =
+        object : EditText(context) {
+            override fun getAutofillType(): Int = View.AUTOFILL_TYPE_NONE
+        }
     private var terminalHandle = 0L
     private var replayBuffer = ""
     private var fedBuffer = ""
@@ -184,6 +191,7 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
         inputView.textSize = max(fontSizeSp, 13f)
         inputView.alpha = 0.01f
         inputView.isFocusableInTouchMode = true
+        inputView.importantForAutofill = View.IMPORTANT_FOR_AUTOFILL_NO
         inputView.imeOptions =
             EditorInfo.IME_ACTION_SEND or
                 EditorInfo.IME_FLAG_NO_EXTRACT_UI or

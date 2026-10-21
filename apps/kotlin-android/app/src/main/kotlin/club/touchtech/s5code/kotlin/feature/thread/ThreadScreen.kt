@@ -4,6 +4,8 @@ import club.touchtech.s5code.kotlin.data.forProject
 import club.touchtech.s5code.kotlin.model.ModelFavorite
 import club.touchtech.s5code.kotlin.model.HandoffEndpoint
 import club.touchtech.s5code.kotlin.model.ProviderCatalogEntry
+import club.touchtech.s5code.kotlin.model.ProviderStatus
+import club.touchtech.s5code.kotlin.model.formatProviderDriverName
 import androidx.compose.material.icons.rounded.SwapHoriz
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material.icons.rounded.Public
@@ -18,6 +20,11 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.statusBars
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
@@ -58,6 +65,8 @@ import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import club.touchtech.s5code.kotlin.data.ThreadLinkRef
+import club.touchtech.s5code.kotlin.data.resolveThreadLinkRef
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
 import club.touchtech.s5code.kotlin.data.childInputsTitle
@@ -104,6 +113,7 @@ import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
 import club.touchtech.s5code.kotlin.platform.rememberQuestionFileIntake
 import club.touchtech.s5code.kotlin.platform.rememberQuestionFilePicker
 import club.touchtech.s5code.kotlin.platform.rememberQuestionMediaPicker
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -303,14 +313,23 @@ fun ThreadScreen(
             } || current.page?.hasMore == true
         }
     val effectiveSettings = draft.settings ?: current.settings
+    val settingsAreLive =
+        syncPhase == ThreadSyncPhase.Live &&
+            environment?.state == club.touchtech.s5code.kotlin.model.ConnectionState.Connected
+    LaunchedEffect(draft.settings, current.settings, settingsAreLive) {
+        if (settingsAreLive && draft.settings != null) {
+            store.releaseMatchingThreadDraftSettings(environmentId, threadId, current.settings)
+        }
+    }
     // `pendingHandoff`: the composer's selection against the model the thread
     // last ran on. The catalog key stands in for provider config changes.
     val pendingHandoff =
-        remember(current.handoffSource, effectiveSettings.provider.instanceId, effectiveSettings.model, machineCatalog) {
+        remember(current.handoffSource, effectiveSettings.provider.instanceId, effectiveSettings.model, machineCatalog, summary.projectId) {
             store.workspace.pendingHandoff(
                 env,
                 current.handoffSource,
                 HandoffEndpoint(effectiveSettings.provider.instanceId, effectiveSettings.model),
+                projectId = summary.projectId.value,
             )
         }
     val skills by
@@ -354,7 +373,7 @@ fun ThreadScreen(
     val pullRequestRepository =
         project?.repositoryIdentity?.displayName
             ?.takeIf { environment?.capabilities?.pullRequests == true }
-    val working = summary.status == ThreadStatus.Working
+    val working = summary.liveStatus == ThreadStatus.Working || summary.blockedOnThreadWait
     var followUp by remember(threadId, preferences.followUpBehavior) { mutableStateOf(preferences.followUpBehavior) }
     val plan = remember(current.feed) { activePlan(current.feed) }
     // Long runs of tool calls fold behind a disclosure row, as they do in the RN
@@ -412,24 +431,31 @@ fun ThreadScreen(
                 sessionStartedAtMillis = current.sessionUpdatedAtMillis,
             )
         }
-    // A running turn whose newest user message is `/compact` is compacting until
-    // the transcript records the completed compaction — `isCompacting` in
-    // `use-thread-composer-state.ts`. Kotlin feed rows do not carry the run id on
-    // user messages, so the last message stands in for "the active run asked to
-    // compact": anything older belongs to a turn that already finished.
+    // `isCompacting` in `use-thread-composer-state.ts`: the active run has a
+    // compaction still in flight (automatic ones included), or its newest user
+    // message is `/compact` and no compaction has settled since. Kotlin feed rows
+    // do not carry the run id on user messages, so the last message stands in for
+    // "the active run asked to compact": anything older belongs to a turn that
+    // already finished. A compaction row without a status (V1) counts as settled.
     val isCompacting =
-        remember(current.feed, activeWorkStartedAt) {
+        remember(current.feed, activeWorkStartedAt, current.latestTurn?.turnId) {
             if (activeWorkStartedAt == null) {
                 false
             } else {
+                val activeRunId = current.latestTurn?.turnId
+                val compactionRunning = activeRunId != null && current.feed.any {
+                    it is FeedEntry.Note && it.compaction && it.turnId == activeRunId &&
+                        it.status in setOf("pending", "running", "waiting")
+                }
                 val lastUserIndex =
                     current.feed.indexOfLast { it is FeedEntry.UserMessage }
-                lastUserIndex >= 0 &&
+                compactionRunning || (lastUserIndex >= 0 &&
                     (current.feed[lastUserIndex] as FeedEntry.UserMessage)
                         .text.trim().equals("/compact", ignoreCase = true) &&
                     current.feed.drop(lastUserIndex + 1).none {
-                        it is FeedEntry.Note && it.compaction
-                    }
+                        it is FeedEntry.Note && it.compaction &&
+                            (it.status == null || it.status in setOf("completed", "failed", "interrupted", "cancelled"))
+                    })
             }
         }
     // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
@@ -607,7 +633,7 @@ fun ThreadScreen(
                 plan = plan,
                 visible =
                     collapsedFraction >= PLAN_BAR_COLLAPSE_THRESHOLD &&
-                        planBarApplies(summary.status),
+                        planBarApplies(summary.liveStatus),
             )
         },
         actions = {
@@ -645,7 +671,15 @@ fun ThreadScreen(
         },
         bottomBar = {
             // Scaffold overlays direct slot children; controls must sit above the composer.
-            Column(Modifier.fillMaxWidth()) {
+            // The slot is measured against the whole screen, so the column is capped
+            // below the top bar: the usage card yields that space and scrolls rather
+            // than pushing its close button under the header when the keyboard opens.
+            BoxWithConstraints {
+            val statusBar = with(LocalDensity.current) { WindowInsets.statusBars.getTop(this).toDp() }
+            Column(
+                Modifier.fillMaxWidth()
+                    .heightIn(max = (maxHeight - statusBar - BOTTOM_BAR_TOP_RESERVE).coerceAtLeast(0.dp))
+            ) {
             // RN's child-input banner: one line over every blocked subagent, opening the first.
             childInputs.firstOrNull()?.let { child ->
                 androidx.compose.material3.TextButton(
@@ -876,7 +910,8 @@ fun ThreadScreen(
                     },
                     onClose = { usageLimitsOpen = false },
                     modifier =
-                        Modifier.fillMaxWidth()
+                        Modifier.weight(1f, fill = false)
+                            .fillMaxWidth()
                             .padding(
                                 horizontal = S5Theme.spacing.gutter,
                                 vertical = S5Theme.spacing.tiny,
@@ -1024,6 +1059,20 @@ fun ThreadScreen(
                     }
                 },
                 working = working,
+                onResumeQueue =
+                    if (current.queueHeld) {
+                        {
+                            try {
+                                store.workspace.queueAction(env, id, "queue.resume")
+                            } catch (cancellation: CancellationException) {
+                                throw cancellation
+                            } catch (error: Exception) {
+                                store.showError(error.message ?: "The queue could not be resumed.")
+                            }
+                        }
+                    } else {
+                        null
+                    },
                 attachments = draft.attachments,
                 onAddAttachment = pickImages,
                 onAddImages = addImages,
@@ -1061,6 +1110,7 @@ fun ThreadScreen(
                 },
                 draftKey = threadId,
             )
+            }
             }
             }
         },
@@ -1212,8 +1262,8 @@ fun ThreadScreen(
                         item(key = "pending-handoff") {
                             Box(Modifier.animateItem()) {
                                 PendingHandoffDivider(
-                                    from = handoffEndpointLabel(handoff.from, machineCatalog),
-                                    to = handoffEndpointLabel(handoff.to, machineCatalog),
+                                    from = handoffEndpointLabel(handoff.from, machineCatalog, providerStatuses),
+                                    to = handoffEndpointLabel(handoff.to, machineCatalog, providerStatuses),
                                 )
                             }
                         }
@@ -1265,6 +1315,15 @@ fun ThreadScreen(
                                     },
                                     toolLabelOverride = row.standIn?.label,
                                     onOpenThread = { onOpenThread(environmentId, it) },
+                                    onOpenThreadLink = { linkedId ->
+                                        // Read at tap time: collecting every shell here would
+                                        // recompose the transcript on each list update.
+                                        val source = ThreadLinkRef(environmentId, linkedId)
+                                        val refs = (store.workspace.threads.value + store.workspace.archived.value)
+                                            .map { ThreadLinkRef(it.environmentId.value, it.id.value) }
+                                        val target = resolveThreadLinkRef(source, refs) ?: source
+                                        onOpenThread(target.environmentId, target.threadId)
+                                    },
                                     onAnswerSecretRequest = { request, answer ->
                                         // The item's own threadId is the
                                         // address: an inherited request is
@@ -1468,6 +1527,9 @@ private fun UserInputCollapsedBar(
  */
 private const val PLAN_BAR_COLLAPSE_THRESHOLD = 0.6f
 
+/** The collapsed top bar plus a gap, kept clear of the docked composer stack. */
+private val BOTTOM_BAR_TOP_RESERVE = 88.dp
+
 /**
  * What the floating pill above the composer says — the Kotlin port of
  * `FloatingWorkingStatus` in `apps/mobile/src/features/threads/
@@ -1596,12 +1658,55 @@ private fun FloatingStatusPill(
     }
 }
 
-/** A handoff side's label: the model's display name, else the instance's, else its id. */
-private fun handoffEndpointLabel(endpoint: HandoffEndpoint, catalog: List<ProviderCatalogEntry>): String {
+/**
+ * A handoff side's label: the model's display name, else the instance's, else its
+ * id. Same-model handoffs between accounts would read "GPT-5 → GPT-5", so a side
+ * whose instance needs telling apart is prefixed with its name the way the
+ * desktop tooltip formats it ("Work · GPT-5").
+ */
+private fun handoffEndpointLabel(
+    endpoint: HandoffEndpoint,
+    catalog: List<ProviderCatalogEntry>,
+    statuses: List<ProviderStatus>,
+): String {
     val entry = catalog.firstOrNull { it.instance.instanceId == endpoint.instanceId }
-    return endpoint.model?.let { model -> entry?.modelLabel(model) ?: model }
+    val label = endpoint.model?.let { model -> entry?.modelLabel(model) ?: model }
         ?: entry?.instance?.label
         ?: endpoint.instanceId
+    val status = statuses.firstOrNull { it.instanceId == endpoint.instanceId }
+    return if (status != null && showsInstanceBadge(status, statuses)) {
+        "${providerInstanceDisplayName(status)} · $label"
+    } else {
+        label
+    }
+}
+
+/**
+ * `shouldShowInstanceBadge`: an accent colour marks an instance the user styled
+ * apart; otherwise only a second instance on the same driver needs naming. The
+ * ACP registry's agent id is not on [ProviderStatus], so registry instances all
+ * count as one driver here and may be named when they need not be.
+ */
+private fun showsInstanceBadge(status: ProviderStatus, statuses: List<ProviderStatus>): Boolean {
+    if (status.accentColor?.trim()?.matches(Regex("^#[0-9a-fA-F]{6}$")) == true) return true
+    // Historical threads still need to distinguish accounts that are all disabled.
+    return statuses.count { it.driver == status.driver && (!status.enabled || it.enabled) } > 1
+}
+
+/** `resolveProviderInstanceDisplayName`: the user's name, else a non-default id humanized. */
+private fun providerInstanceDisplayName(status: ProviderStatus): String {
+    val name = status.displayName?.trim().orEmpty()
+    val kindLabel = formatProviderDriverName(status.driver)
+    if (name.isNotEmpty() && name != kindLabel) return name
+    if (status.instanceId != status.driver) {
+        val humanized = status.instanceId
+            .replace(Regex("([a-z])([A-Z])"), "$1 $2")
+            .replace(Regex("[_-]+"), " ")
+            .trim()
+            .replace(Regex("\\b\\w")) { it.value.uppercase() }
+        if (humanized.isNotEmpty()) return humanized
+    }
+    return name.ifEmpty { kindLabel }
 }
 
 /**

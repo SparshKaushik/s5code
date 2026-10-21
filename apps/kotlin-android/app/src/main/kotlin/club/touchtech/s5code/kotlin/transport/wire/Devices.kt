@@ -13,6 +13,11 @@ data class DeviceServiceStateDto(
     val supportsHostRetry: Boolean = false,
     val supportsToolInspection: Boolean = false,
     val hosts: List<DeviceHostSummaryDto> = emptyList(),
+    /**
+     * EAS cloud simulator hosts, sent apart from [hosts] so clients that only
+     * know `local | ssh` kinds keep decoding; every host is [hosts] + this.
+     */
+    val easHosts: List<DeviceHostSummaryDto> = emptyList(),
     /** disabled | idle | installing | starting | ready | failed */
     val hostStatus: String = "idle",
     val hostStatusDetail: String? = null,
@@ -26,7 +31,7 @@ data class DeviceServiceStateDto(
 @Serializable
 data class DeviceHostSummaryDto(
     val id: String = "",
-    /** local | ssh */
+    /** local | ssh | eas */
     val kind: String = "local",
     val label: String = "",
     val tools: DeviceToolVersionsDto? = null,

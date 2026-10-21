@@ -340,6 +340,18 @@ private fun EnvironmentCard(
                         }
                     }
                 }
+                val freeze =
+                    if (environment.isEnabled) hostFreezeNotice(environment.label, environment.lastEventLoopStall)
+                    else null
+                if (freeze != null) {
+                    Text(
+                        freeze.text,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = S5Theme.status.approval,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             // The switch, not the health icon, trails the row: it is the control
             // the RN client offers on the same row, and the pill already says the
@@ -404,6 +416,16 @@ fun ConnectionDetailScreen(
                             else -> health.label
                         },
                 )
+            }
+            if (environment.isEnabled) {
+                hostFreezeNotice(environment.label, environment.lastEventLoopStall)?.let { freeze ->
+                    Text(
+                        freeze.text,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = S5Theme.status.approval,
+                        modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+                    )
+                }
             }
 
             // RN's expanded row edits label and URL for direct environments;
@@ -675,20 +697,23 @@ private fun EnvironmentMaintenance(
         val canSelfUpdate =
             caps.sessionCanMaintain && caps.serverSelfUpdate != null &&
                 (caps.serverSelfUpdate != "desktop-managed" || caps.desktopAppUpdate)
-        S5RowGroup(title = "T3 Code") {
+        S5RowGroup(title = "S5 Code") {
             S5SettingsRow(
                 icon = Icons.Rounded.SystemUpdate,
                 label = "Version ${environment.serverVersion.ifBlank { "unknown" }}",
                 supporting =
                     when {
+                        // The manual instruction only follows a release the check
+                        // found; an up-to-date host has nothing to update.
+                        release != null && !canSelfUpdate ->
+                            "Version $release is available. " +
+                                if (caps.serverSelfUpdate == "desktop-managed") {
+                                    "Update the desktop app on this machine."
+                                } else {
+                                    "Update and restart S5 Code on this machine."
+                                }
                         release != null -> "Version $release is available."
                         upToDate -> "You are up to date."
-                        !canSelfUpdate ->
-                            if (caps.serverSelfUpdate == "desktop-managed") {
-                                "Update the desktop app on this machine."
-                            } else {
-                                "Update and restart T3 Code on this machine."
-                            }
                         else -> null
                     },
                 onClick = null,

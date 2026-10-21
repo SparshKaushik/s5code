@@ -47,7 +47,9 @@ fun threadSnoozable(thread: ThreadSummary): Boolean =
     // snoozed here a few seconds earlier than on RN.
     thread.status != ThreadStatus.AwaitingApproval &&
         thread.status != ThreadStatus.AwaitingInput &&
-        thread.status != ThreadStatus.Queued
+        thread.status != ThreadStatus.Queued &&
+        // The server rejects snoozing even for nonblocking questions.
+        !thread.hasPendingRuntimeRequest
 
 fun threadSwipeActions(
     thread: ThreadSummary,

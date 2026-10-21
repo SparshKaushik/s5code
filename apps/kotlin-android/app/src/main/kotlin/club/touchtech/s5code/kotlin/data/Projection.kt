@@ -45,7 +45,9 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
+import club.touchtech.s5code.kotlin.transport.blockedOnThreadWait
 import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
+import club.touchtech.s5code.kotlin.transport.pendingRequestBlocksUser
 import club.touchtech.s5code.kotlin.transport.threadPullRequestsOf
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.v2Objects
@@ -97,12 +99,20 @@ fun threadStatusOf(
     nowMillis: Long,
     subagentRequest: String? = null,
     serverSettles: Boolean = false,
+    includeSnooze: Boolean = true,
 ): ThreadStatus =
     when {
         // A blocked descendant subagent blocks its ancestors too
         // ([pendingSubagentRequestsByThread]), so the row it hides behind asks.
         shell.hasPendingApprovals || subagentRequest == SUBAGENT_REQUEST_APPROVAL -> ThreadStatus.AwaitingApproval
         shell.hasPendingUserInput || subagentRequest == SUBAGENT_REQUEST_USER_INPUT -> ThreadStatus.AwaitingInput
+        // Snooze outranks the runtime states, as the RN list partitions the snoozed
+        // shelf first: the server keeps a snooze across background wakes, so a
+        // long-running thread would otherwise pop back into the inbox on each one.
+        includeSnooze && isSnoozed(shell, nowMillis) -> ThreadStatus.Snoozed
+        // A turn whose only open work is waiting on another T3 thread is not
+        // making progress of its own, matching `resolveThreadListV2Status`.
+        shell.session?.status == "running" && shell.blockedOnThreadWait -> ThreadStatus.Waiting
         shell.session?.status == "running" -> ThreadStatus.Working
         shell.session?.status == "starting" -> ThreadStatus.Working
         shell.backgroundLiveness != null && shell.session?.status !in setOf("error", "limited") -> ThreadStatus.Waiting
@@ -110,7 +120,6 @@ fun threadStatusOf(
         // adopted yet. Without this the row looks idle for the seconds a provider
         // takes to come up, which reads as "my message was lost".
         hasQueuedTurnStart(shell, nowMillis) -> ThreadStatus.Queued
-        isSnoozed(shell, nowMillis) -> ThreadStatus.Snoozed
         isSettled(shell, nowMillis, serverSettles) -> ThreadStatus.Settled
         // Only the session's own status, matching `resolveThreadListV2Status`. A
         // stale `latestTurn.state == "error"` is history: the turn that failed is
@@ -158,25 +167,27 @@ private fun threadLastActivityAt(shell: ThreadShellDto): Long? =
  * thread stays active in the model and is only hidden until the wake time passes
  * or it raises its hand.
  *
- * Callers check the blocked and working states first, so this only has to add the
- * raised-hand rules from `threadRaisedHandWhileSnoozed`: a *fresh* failure and a
- * run that finished after the snooze are both new information the user has not
- * seen. A thread snoozed while already failed stays snoozed — that snooze was the
- * user saying "I saw it, not now".
+ * Callers check the blocked states first, so this only has to add the
+ * raised-hand rules from `threadRaisedHandWhileSnoozed`: any open request for the
+ * user — a nonblocking question included — and a *fresh* failure. Completed runs
+ * never wake it: a snoozed long-running thread keeps waking itself for background
+ * work and stays hidden until its timer. A thread snoozed while already failed
+ * stays snoozed — that snooze was the user saying "I saw it, not now".
  */
-private fun isSnoozed(shell: ThreadShellDto, nowMillis: Long): Boolean {
+internal fun isSnoozed(shell: ThreadShellDto, nowMillis: Long): Boolean {
     val until = shell.snoozedUntil?.let(::parseInstant) ?: return false
     if (until <= nowMillis) return false
-    val snoozedAt = shell.snoozedAt?.let(::parseInstant)
+    if (shell.pendingRuntimeRequest != null) return false
     val session = shell.session
     if (session?.status in setOf("error", "limited")) {
-        val erroredAt = session?.updatedAt?.let(::parseInstant)
-        if (snoozedAt == null || erroredAt == null || erroredAt > snoozedAt) return false
-    }
-    val turn = shell.latestTurn
-    if (snoozedAt != null && turn?.state == "completed") {
-        val completedAt = turn.completedAt?.let(::parseInstant)
-        if (completedAt != null && completedAt > snoozedAt) return false
+        val snoozedAt = shell.snoozedAt?.let(::parseInstant) ?: return false
+        // `failureEdgeAt`: the session timestamp also moves on metadata writes,
+        // so the failed run's own completion is the better edge when there is one.
+        val turn = shell.latestTurn
+        val failedAt =
+            turn?.completedAt?.takeIf { turn.state == "error" }?.let(::parseInstant)
+                ?: session?.updatedAt?.let(::parseInstant)
+        if (failedAt != null && failedAt > snoozedAt) return false
     }
     return true
 }
@@ -294,6 +305,12 @@ fun threadSummaryFrom(
     serverSettles: Boolean = false,
 ): ThreadSummary {
     val status = threadStatusOf(shell, nowMillis, subagentRequest, serverSettles)
+    val liveStatus =
+        if (status == ThreadStatus.Snoozed) {
+            threadStatusOf(shell, nowMillis, subagentRequest, serverSettles, includeSnooze = false)
+        } else {
+            status
+        }
     return ThreadSummary(
         id = ThreadId(shell.id),
         environmentId = environmentId,
@@ -361,6 +378,9 @@ fun threadSummaryFrom(
                 ?.startedAt
                 ?.let(::parseInstant),
         excerpt = shell.planProgress?.step ?: if (shell.backgroundLiveness != null) "Waiting for background work" else null,
+        liveStatus = liveStatus,
+        blockedOnThreadWait = liveStatus == ThreadStatus.Waiting && shell.blockedOnThreadWait,
+        hasPendingRuntimeRequest = shell.pendingRuntimeRequest != null,
         titleRegenerating = shell.titleRegeneration != null,
         lastVisitedAtMillis = parseInstant(shell.lastVisitedAt),
         latestCompletedAtMillis = parseInstant(shell.latestTurn?.completedAt),
@@ -1944,20 +1964,40 @@ fun ApprovalPolicy.toRuntimeMode(): String =
 /** A detail snapshot carries every shell field, so the row projection is reused. */
 internal fun ThreadDto.asShell(): ThreadShellDto {
     // The pending-request rule is the server's (`threadShellFromProjection`):
-    // a secret an agent waits on is user input too, so a waiting
-    // `secret_request` item synthesizes one when no real request is open.
-    val realPending = projection?.runtimeRequests?.filter {
+    // the newest open request is the thread's, a secret an agent waits on is
+    // user input too, and a waiting `secret_request` item stands in when no
+    // request is open or the open one is a question the run keeps working past.
+    val newestPending = projection?.runtimeRequests?.filter {
         it.v2String("status") == "pending" &&
             (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable"
-    }.orEmpty()
-    val liveRunIds = projection?.runs
+    }?.maxByOrNull { parseInstant(it.v2String("createdAt")) ?: Long.MIN_VALUE }
+    val liveRuns = projection?.runs
         ?.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
-        ?.mapNotNull { it.v2String("id") }?.toSet().orEmpty()
+        .orEmpty()
+    val liveRunIds = liveRuns.mapNotNull { it.v2String("id") }.toSet()
     val waitingSecret = projection?.turnItems?.any {
         it.v2String("type") == "secret_request" && it.v2String("status") == "waiting" &&
             it.v2String("nodeId") != null && it.v2String("runId") in liveRunIds
     } == true
-    val pendingSecretInput = realPending.isEmpty() && waitingSecret
+    val newestBlocking = newestPending != null &&
+        (newestPending["responseCapability"] as? JsonObject)?.v2String("type") != "message"
+    val pendingSecretInput = !newestBlocking && waitingSecret
+    val pendingRequest: JsonObject? =
+        when {
+            pendingSecretInput -> buildJsonObject {
+                put("kind", "user_input")
+                put("blocking", true)
+            }
+            newestPending != null -> buildJsonObject {
+                newestPending["id"]?.let { put("id", it) }
+                newestPending["kind"]?.let { put("kind", it) }
+                newestPending["createdAt"]?.let { put("createdAt", it) }
+                put("blocking", newestBlocking)
+            }
+            else -> null
+        }
+    // The activity run is the newest live one, as the shell's `activityRunStatus`.
+    val activityRun = liveRuns.maxByOrNull { it.v2Long("ordinal") ?: 0 }
     return ThreadShellDto(
         id = id,
         projectId = projectId,
@@ -2008,11 +2048,13 @@ internal fun ThreadDto.asShell(): ThreadShellDto {
                 .maxOrNull()
         } ?: FIELD_ABSENT,
         hasPendingApprovals = projection?.let {
-            realPending.any { it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") }
+            pendingRequest?.v2String("kind")?.let { it !in setOf("user_input", "auth_refresh", "dynamic_tool_call") } == true
         } ?: (pendingApprovalOf(activities.sortedWith(activityOrder)) != null),
         hasPendingUserInput = projection?.let {
-            pendingSecretInput || realPending.any { it.v2String("kind") == "user_input" }
+            pendingRequestBlocksUser(pendingRequest, activityRun?.v2String("status"))
         } ?: (pendingUserInputOf(activities.sortedWith(activityOrder)) != null),
+        pendingRuntimeRequest = pendingRequest,
+        blockedOnThreadWait = projection?.let { blockedOnThreadWait(activityRun, it.turnItems) } == true,
         hasActionableProposedPlan = projection?.plans?.any { it.v2String("kind") == "proposed_plan" && it.v2String("status") == "active" }
             ?: proposedPlans.any { it.implementedAt == null },
         planProgress = projection?.visibleTurnItems?.lastOrNull { it.item.v2String("type") == "todo_list" }?.item?.v2Objects("steps")?.let { steps ->

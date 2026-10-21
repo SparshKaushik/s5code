@@ -22,6 +22,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Block
 import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudOff
@@ -119,6 +120,7 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackDto
 import coil3.compose.AsyncImage
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 
@@ -247,7 +249,15 @@ fun PullRequestDetailScreen(
         refreshing = true
         scope.launch {
             try {
-                gateway.refresh(readEnvironment, readReference)
+                // Invalidating makes the host fetch current checks instead of its
+                // cached ones, and refreshes after; offline, just reread.
+                try {
+                    gateway.invalidate(readEnvironment, readReference)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (_: Exception) {
+                    gateway.refresh(readEnvironment, readReference)
+                }
             } finally {
                 refreshing = false
             }
@@ -684,7 +694,12 @@ private fun PullRequestStatusCard(
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
                     ) {
-                        Icon(toneIcon(status.tone), contentDescription = status.label, tint = status.tone.color(), modifier = Modifier.size(16.dp))
+                        Icon(
+                            if (check.status == "skipped") Icons.Rounded.Block else toneIcon(status.tone),
+                            contentDescription = status.label,
+                            tint = status.tone.color(),
+                            modifier = Modifier.size(16.dp),
+                        )
                         Column(Modifier.weight(1f)) {
                             Text(check.name, style = MaterialTheme.typography.bodySmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                             check.description?.takeIf { it.isNotBlank() }?.let {

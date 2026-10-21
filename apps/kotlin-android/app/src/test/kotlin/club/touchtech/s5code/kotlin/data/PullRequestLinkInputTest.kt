@@ -51,7 +51,16 @@ class PullRequestLinkInputTest {
             error(resolveLinkPullRequestInput("https://gitlab.com/acme/api/-/merge_requests/7", project) { false })
                 .contains("gitlab.com")
         )
-        assertTrue(error(resolveLinkPullRequestInput("12", null)).contains("full URL"))
+    }
+
+    @Test
+    fun `names the missing repository when resolving a bare number`() {
+        for (reference in listOf("12", "#12")) {
+            assertEquals(
+                "Paste the full pull request URL; this thread has no repository to resolve the number against.",
+                error(resolveLinkPullRequestInput(reference, null)),
+            )
+        }
     }
 
     @Test

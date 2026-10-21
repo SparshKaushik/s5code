@@ -193,6 +193,8 @@ data class ThreadShellDto(
      * server that predates the field, which falls back to [status].
      */
     val activityRunStatus: String? = FIELD_ABSENT,
+    /** The running turn's only open work is waiting on another T3 thread. */
+    val blockedOnThreadWait: Boolean = false,
     val pendingRuntimeRequest: JsonObject? = null,
     val pendingBackgroundTasks: List<JsonObject> = emptyList(),
     val lastError: String? = null,

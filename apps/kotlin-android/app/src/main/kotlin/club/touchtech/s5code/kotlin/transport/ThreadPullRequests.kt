@@ -26,8 +26,8 @@ data class ThreadPullRequestKey(
 /**
  * A change request named the way a thread link names one: the host below which
  * the repository is addressed, the repository path as that host writes it, and
- * the number. [authority] carries Forgejo's HTTP `host[:port]`, separate from
- * the portless repository identity.
+ * the number. [authority] carries Forgejo's HTTP `host[:port]`, and an Azure
+ * DevOps Server's explicit port, separate from the portless repository identity.
  */
 data class ChangeRequestLink(
     val host: String,
@@ -56,7 +56,7 @@ private fun isHostOf(hostname: String, apex: String, label: String? = null): Boo
     hostname == apex || hostname.endsWith(".$apex") ||
         (label != null && hostname.split(".").contains(label))
 
-private class ParsedUrl(val host: String, val authority: String, val path: String)
+private class ParsedUrl(val host: String, val authority: String, val port: Int, val path: String)
 
 private fun parseHttpUrl(targetUrl: String): ParsedUrl? {
     val uri = runCatching { java.net.URI(targetUrl.trim()) }.getOrNull() ?: return null
@@ -65,7 +65,9 @@ private fun parseHttpUrl(targetUrl: String): ParsedUrl? {
     // `host` drops the port; `authority` keeps it (minus any userinfo).
     val host = uri.host?.lowercase() ?: return null
     val authority = (uri.authority ?: "").substringAfter('@').lowercase()
-    return ParsedUrl(host, authority, uri.rawPath ?: "")
+    // Like WHATWG `URL.port`, a scheme's default port counts as none.
+    val port = uri.port.takeUnless { (scheme == "https" && it == 443) || (scheme == "http" && it == 80) } ?: -1
+    return ParsedUrl(host, authority, port, uri.rawPath ?: "")
 }
 
 private fun claim(host: String, match: MatchResult?): ChangeRequestLink? {
@@ -85,29 +87,31 @@ fun parseChangeRequestUrl(targetUrl: String): ChangeRequestLink? {
     val host = url.host
     val path = url.path
 
-    // GitHub, and any Enterprise install: /{owner}/{repo}/pull/{n}
-    if (isHostOf(host, "github.com", "github")) {
-        claim(host, Regex("^/([^/]+/[^/]+)/pull/(\\d+)(?:/|$)").find(path))?.let { return it }
+    if (host == "git.cafe" || host == "staging.git.cafe") {
+        claim(host, Regex("^/([^/]+/[^/]+)/pulls/(\\d+)(?:/|$)").find(path))?.let { return it }
+    } else {
+        // GitHub, and any Enterprise install: /{owner}/{repo}/pull/{n}
+        if (isHostOf(host, "github.com", "github")) {
+            claim(host, Regex("^/([^/]+/[^/]+)/pull/(\\d+)(?:/|$)").find(path))?.let { return it }
+        }
+        // Forgejo and Gitea use /pulls/ on arbitrary self-hosted domains.
+        Regex("^/([^/]+(?:/[^/]+)+)/pulls/(\\d+)(?:/|$)").find(path)?.let { match ->
+            val link = claim(host, match) ?: return null
+            return link.copy(authority = url.authority)
+        }
+        // GitLab, self-hosted included: /{group}/[{subgroup}/...]{repo}/-/merge_requests/{n}.
+        Regex("^/([^/]+(?:/[^/]+)+)/-/merge_requests/(\\d+)(?:/|$)").find(path)?.let { match ->
+            return claim(host, match)
+        }
+        // Bitbucket Cloud: /{workspace}/{repo}/pull-requests/{n}
+        if (isHostOf(host, "bitbucket.org", "bitbucket")) {
+            claim(host, Regex("^/([^/]+/[^/]+)/pull-requests/(\\d+)(?:/|$)").find(path))?.let { return it }
+        }
     }
-    // Forgejo and Gitea use /pulls/ on arbitrary self-hosted domains.
-    Regex("^/([^/]+(?:/[^/]+)+)/pulls/(\\d+)(?:/|$)").find(path)?.let { match ->
-        val link = claim(host, match) ?: return null
-        return link.copy(authority = url.authority)
-    }
-    // GitLab, self-hosted included: /{group}/[{subgroup}/...]{repo}/-/merge_requests/{n}.
-    Regex("^/([^/]+(?:/[^/]+)+)/-/merge_requests/(\\d+)(?:/|$)").find(path)?.let { match ->
-        return claim(host, match)
-    }
-    // Bitbucket Cloud: /{workspace}/{repo}/pull-requests/{n}
-    if (isHostOf(host, "bitbucket.org", "bitbucket")) {
-        return claim(host, Regex("^/([^/]+/[^/]+)/pull-requests/(\\d+)(?:/|$)").find(path))
-    }
-    // Azure DevOps, both the current host and the per-organisation one it
-    // replaced. `_git` stays part of the repository path, as in the remote URL.
-    if (isHostOf(host, "dev.azure.com") || host.endsWith(".visualstudio.com")) {
-        return claim(host, Regex("^/((?:[^/]+/)*_git/[^/]+)/pullrequest/(\\d+)(?:/|$)").find(path))
-    }
-    return null
+    // Azure DevOps Server can use any hostname; its `_git` pull request route
+    // identifies it. `_git` stays part of the repository path, as in the remote URL.
+    val link = claim(host, Regex("^/((?:[^/]+/)*_git/[^/]+)/pullrequest/(\\d+)(?:/|$)").find(path))
+    return if (link == null || url.port == -1) link else link.copy(authority = "$host:${url.port}")
 }
 
 /**

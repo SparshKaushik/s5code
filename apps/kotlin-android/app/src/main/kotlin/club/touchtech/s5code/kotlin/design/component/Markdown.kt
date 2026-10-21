@@ -77,22 +77,33 @@ fun S5Markdown(
     onCopyCode: ((String) -> Unit)? = null,
     workspaceRoot: String? = null,
     onOpenFile: ((String) -> Unit)? = null,
+    /** Receives a `t3-thread://` link's id as written; null leaves those links inert. */
+    onOpenThreadLink: ((String) -> Unit)? = null,
 ) {
     val blocks = remember(source) { parseMarkdown(source) }
+    val links = remember(workspaceRoot, onOpenFile, onOpenThreadLink) {
+        MarkdownLinkActions(workspaceRoot, onOpenFile, onOpenThreadLink)
+    }
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
         blocks.forEach { block ->
-            MarkdownBlock(block, textStyle, onCopyCode, workspaceRoot, onOpenFile)
+            MarkdownBlock(block, textStyle, onCopyCode, links)
         }
     }
 }
+
+/** What a tapped link may do inside one rendered document. */
+private data class MarkdownLinkActions(
+    val workspaceRoot: String? = null,
+    val onOpenFile: ((String) -> Unit)? = null,
+    val onOpenThreadLink: ((String) -> Unit)? = null,
+)
 
 @Composable
 private fun MarkdownBlock(
     block: MdBlock,
     textStyle: TextStyle,
     onCopyCode: ((String) -> Unit)?,
-    workspaceRoot: String?,
-    onOpenFile: ((String) -> Unit)?,
+    links: MarkdownLinkActions,
 ) {
     when (block) {
         is MdBlock.Heading -> {
@@ -103,11 +114,11 @@ private fun MarkdownBlock(
                     3 -> MaterialTheme.typography.titleMediumEmphasized
                     else -> MaterialTheme.typography.titleSmallEmphasized
                 }
-            MarkdownText(block.text, style)
+            MarkdownText(block.text, style, links = links)
         }
 
         is MdBlock.Paragraph ->
-            MarkdownParagraph(block.text, block.images, textStyle)
+            MarkdownParagraph(block.text, block.images, textStyle, links)
 
         is MdBlock.Quote ->
             Surface(
@@ -120,7 +131,7 @@ private fun MarkdownBlock(
                     verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
                 ) {
                     block.blocks.forEach { nested ->
-                        MarkdownBlock(nested, textStyle, onCopyCode, workspaceRoot, onOpenFile)
+                        MarkdownBlock(nested, textStyle, onCopyCode, links)
                     }
                 }
             }
@@ -169,12 +180,12 @@ private fun MarkdownBlock(
                                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                                 )
                         }
-                        MarkdownText(item.text, textStyle)
+                        MarkdownText(item.text, textStyle, links = links)
                     }
                 }
             }
 
-        is MdBlock.Table -> MarkdownTable(block, textStyle, workspaceRoot, onOpenFile)
+        is MdBlock.Table -> MarkdownTable(block, textStyle, links)
 
         MdBlock.Rule -> HorizontalDivider(Modifier.padding(vertical = S5Theme.spacing.small))
     }
@@ -185,10 +196,11 @@ private fun MarkdownParagraph(
     spans: List<MdSpan>,
     images: List<MdImage>,
     textStyle: TextStyle,
+    links: MarkdownLinkActions,
 ) {
     var preview by remember(images) { mutableStateOf<MdImage?>(null) }
     Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
-        if (spans.isNotEmpty()) MarkdownText(spans, textStyle)
+        if (spans.isNotEmpty()) MarkdownText(spans, textStyle, links = links)
         images.forEach { image ->
             Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny)) {
                 AsyncImage(
@@ -225,8 +237,7 @@ private fun MarkdownParagraph(
 private fun MarkdownTable(
     table: MdBlock.Table,
     textStyle: TextStyle,
-    workspaceRoot: String?,
-    onOpenFile: ((String) -> Unit)?,
+    links: MarkdownLinkActions,
 ) {
     val scroll = rememberScrollState()
     Surface(
@@ -241,8 +252,7 @@ private fun MarkdownTable(
                         spans = cell,
                         style = MaterialTheme.typography.labelLargeEmphasized,
                         modifier = Modifier.width(160.dp),
-                        workspaceRoot = workspaceRoot,
-                        onOpenFile = onOpenFile,
+                        links = links,
                         textAlign = textAlign(table.alignments.getOrElse(index) { MdTableAlignment.Start }),
                     )
                 }
@@ -258,8 +268,7 @@ private fun MarkdownTable(
                             spans = cell,
                             style = textStyle,
                             modifier = Modifier.width(160.dp),
-                            workspaceRoot = workspaceRoot,
-                            onOpenFile = onOpenFile,
+                            links = links,
                             textAlign = textAlign(table.alignments.getOrElse(index) { MdTableAlignment.Start }),
                         )
                     }
@@ -344,11 +353,10 @@ private fun MarkdownText(
     spans: List<MdSpan>,
     style: TextStyle,
     modifier: Modifier = Modifier,
-    workspaceRoot: String? = null,
-    onOpenFile: ((String) -> Unit)? = null,
+    links: MarkdownLinkActions = MarkdownLinkActions(),
     textAlign: TextAlign? = null,
 ) {
-    val content = spans.annotate(workspaceRoot, onOpenFile)
+    val content = spans.annotate(links)
     SelectionContainer {
         Text(
             content.text,
@@ -374,15 +382,13 @@ private data class AnnotatedMarkdown(
 
 /** Turns inline spans into annotated text plus inline Pierre file icons. */
 @Composable
-private fun List<MdSpan>.annotate(
-    workspaceRoot: String?,
-    onOpenFile: ((String) -> Unit)?,
-): AnnotatedMarkdown {
+private fun List<MdSpan>.annotate(links: MarkdownLinkActions): AnnotatedMarkdown {
+    val (workspaceRoot, onOpenFile, onOpenThreadLink) = links
     val uriHandler = LocalUriHandler.current
     val linkColor = MaterialTheme.colorScheme.primary
     val codeColor = MaterialTheme.colorScheme.tertiary
     val codeFamily = S5Theme.code.code.fontFamily
-    return remember(this, linkColor, codeColor, workspaceRoot, onOpenFile, uriHandler) {
+    return remember(this, linkColor, codeColor, links, uriHandler) {
         val icons = linkedMapOf<String, InlineTextContent>()
         val annotated = buildAnnotatedString {
             this@annotate.forEachIndexed { index, span ->
@@ -449,6 +455,22 @@ private fun List<MdSpan>.annotate(
                                         style = style.copy(color = linkColor, textDecoration = TextDecoration.Underline)
                                     ),
                                 ) { uriHandler.openUri(href) }
+                            ) { append(span.text) }
+                        } else {
+                            withStyle(style) { append(span.text) }
+                        }
+                    }
+
+                    is MarkdownLinkPresentation.Thread -> {
+                        if (onOpenThreadLink != null) {
+                            withLink(
+                                LinkAnnotation.Clickable(
+                                    tag = presentation.href,
+                                    styles =
+                                        TextLinkStyles(
+                                            style = style.copy(color = linkColor, textDecoration = TextDecoration.Underline)
+                                        ),
+                                ) { onOpenThreadLink(presentation.threadId) }
                             ) { append(span.text) }
                         } else {
                             withStyle(style) { append(span.text) }

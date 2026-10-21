@@ -64,6 +64,7 @@ import club.touchtech.s5code.kotlin.model.ComposerContextRecord
 import club.touchtech.s5code.kotlin.model.ComposerImageCandidate
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ModelFavorite
+import club.touchtech.s5code.kotlin.model.ProviderOptionValue
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.add
 import club.touchtech.s5code.kotlin.model.ProjectGrouping
@@ -180,6 +181,21 @@ val NewTaskDraft.hasContent: Boolean
  */
 fun NewTaskDraft.discarded(): NewTaskDraft =
     copy(prompt = "", attachments = emptyList(), contextRecords = emptyList(), pullRequestReference = null)
+
+/**
+ * `draftModelPickMatchesThread` in `packages/shared/src/model.ts`: same instance,
+ * model, and options, order-insensitive. Web sends `fastMode: false` for models
+ * with a fast toggle while other clients omit it, so off counts as unset.
+ */
+internal fun draftModelPickMatchesThread(pick: ThreadSettings, thread: ThreadSettings): Boolean {
+    fun canonicalOptions(settings: ThreadSettings) =
+        settings.options
+            .filterNot { it.id == "fastMode" && it.value == ProviderOptionValue.Flag(false) }
+            .sortedWith(compareBy({ it.id }, { it.value.toString() }))
+    return pick.provider.instanceId == thread.provider.instanceId &&
+        pick.model == thread.model &&
+        canonicalOptions(pick) == canonicalOptions(thread)
+}
 
 /** Per-thread composer draft: prompt text plus its pending attachments. */
 @Immutable
@@ -905,6 +921,29 @@ class AppStore(application: Application) : AndroidViewModel(application) {
             val retained = draft.copy(text = "", attachments = emptyList(), contextRecords = emptyList())
             val migrated = drafts - threadId
             if (retained.settings == null) migrated - key else migrated + (key to retained)
+        }
+
+    /**
+     * Drops a staged pick once the live thread runs it, so a model change made on
+     * another client is followed instead of being overridden by an old pick —
+     * `subscribeComposerDraftModelReconciliation` in RN. Only call with settings
+     * from a live projection: a cached one may still show the pick the user is
+     * moving away from. Run and approval modes ride on the same staged settings,
+     * so a pick that differs there is still the user's and stays.
+     */
+    fun releaseMatchingThreadDraftSettings(environmentId: String, threadId: String, live: ThreadSettings) =
+        _threadDrafts.update { drafts ->
+            val key = threadDraftKey(environmentId, threadId)
+            val draft = drafts[key] ?: return@update drafts
+            val staged = draft.settings ?: return@update drafts
+            if (!draftModelPickMatchesThread(staged, live) ||
+                staged.runtimeMode != live.runtimeMode ||
+                staged.approvalPolicy != live.approvalPolicy
+            ) {
+                return@update drafts
+            }
+            val retained = draft.copy(settings = null)
+            if (retained == ThreadDraft()) drafts - key else drafts + (key to retained)
         }
 
     fun setThreadDraftSettings(

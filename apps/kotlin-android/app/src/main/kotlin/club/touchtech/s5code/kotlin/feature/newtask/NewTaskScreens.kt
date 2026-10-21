@@ -182,7 +182,7 @@ private fun projectEmptyState(
         }
         if (error != null) {
             return ProjectEmptyState(
-                "Environment unavailable",
+                if (error.state == ConnectionState.Unsupported) "Client not supported" else "Environment unavailable",
                 error.lastError.ifBlank {
                     "The saved environment is offline. Check the URL or start the environment, then retry."
                 },
@@ -629,14 +629,18 @@ fun NewTaskDraftScreen(
                 allowWorkspaceSelection = project?.isScratch != true,
                 onToggleWorkspaceMode = {
                     store.updateDraft {
-                        it.copy(
-                            workspaceMode =
-                                if (it.workspaceMode == WorkspaceMode.CurrentCheckout) {
-                                    WorkspaceMode.NewWorktree
-                                } else {
-                                    WorkspaceMode.CurrentCheckout
-                                }
-                        )
+                        if (it.workspaceMode == WorkspaceMode.CurrentCheckout) {
+                            it.copy(workspaceMode = WorkspaceMode.NewWorktree)
+                        } else {
+                            // A base branch picked for a new worktree was never checked
+                            // out, so the checkout's own branch is what this mode runs on
+                            // (`resolveNewTaskLocalWorkspaceSelection`).
+                            it.copy(
+                                workspaceMode = WorkspaceMode.CurrentCheckout,
+                                branch = project?.branch ?: it.branch,
+                                worktreePath = null,
+                            )
+                        }
                     }
                 },
                 branch = draft.branch,
@@ -1401,11 +1405,40 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
     var query by remember { mutableStateOf("") }
     val branches = remote.valueOrNull.orEmpty()
     val filtered = remember(branches, query) { filterNewTaskBranches(branches, query) }
+    val scope = rememberCoroutineScope()
+    // The branch whose checkout is in flight. Leaving mid-switch would strand a
+    // repository change the draft never records, so back waits for it.
+    var switching by remember { mutableStateOf<String?>(null) }
+    androidx.activity.compose.BackHandler(enabled = switching != null) {}
+
+    fun select(branch: BranchRef) {
+        if (switching != null) return
+        switching = branch.name
+        scope.launch {
+            try {
+                val picked =
+                    store.workspace.checkoutNewTaskBranch(
+                        draft.environmentId,
+                        draft.projectKey,
+                        branch,
+                        newWorktree = draft.workspaceMode == WorkspaceMode.NewWorktree,
+                    )
+                store.updateDraft { it.copy(branch = picked.name, worktreePath = picked.worktreePath) }
+                onBack()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                store.showError(error.message ?: "The branch could not be checked out.")
+            } finally {
+                switching = null
+            }
+        }
+    }
 
     S5Screen(
-        title = "Base branch",
+        title = if (draft.workspaceMode == WorkspaceMode.NewWorktree) "Base branch" else "Branch",
         subtitle = if (remote is Remote.Loaded) "${branches.size} branches" else "",
-        onBack = onBack,
+        onBack = { if (switching == null) onBack() },
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             S5SearchField(
@@ -1434,20 +1467,27 @@ fun NewTaskBranchScreen(store: AppStore, onBack: () -> Unit) {
                             S5SelectableRow(
                                 label = branch.name,
                                 supporting =
-                                    listOfNotNull(
-                                            if (branch.current) "current" else null,
-                                            if (branch.remote) "remote" else "local",
-                                            branch.ageLabel.takeIf { it.isNotBlank() },
-                                        )
-                                        .joinToString(" · "),
+                                    if (switching == branch.name) {
+                                        "Switching…"
+                                    } else {
+                                        listOfNotNull(
+                                                if (branch.current) "current" else null,
+                                                if (branch.remote) "remote" else "local",
+                                                branch.ageLabel.takeIf { it.isNotBlank() },
+                                            )
+                                            .joinToString(" · ")
+                                    },
                                 selected = branch.name == draft.branch,
-                                onClick = {
-                                    store.updateDraft { it.copy(branch = branch.name) }
-                                    onBack()
-                                },
+                                onClick = { select(branch) },
                                 leading = {
                                     Icon(Icons.AutoMirrored.Rounded.CallSplit, contentDescription = null)
                                 },
+                                trailing =
+                                    if (switching == branch.name) {
+                                        { S5InlineLoading() }
+                                    } else {
+                                        null
+                                    },
                                 position = rowPosition(index, filtered.size),
                             )
                         }

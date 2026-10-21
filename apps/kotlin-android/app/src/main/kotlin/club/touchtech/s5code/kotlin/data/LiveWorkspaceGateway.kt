@@ -113,6 +113,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.UsageSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.WorktreeSetupSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsListRefsResultDto
+import club.touchtech.s5code.kotlin.transport.wire.VcsSwitchRefResultDto
 import club.touchtech.s5code.kotlin.transport.wire.VcsStatusDto
 import java.util.UUID
 import kotlinx.coroutines.CancellationException
@@ -135,6 +136,7 @@ import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.launchIn
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onCompletion
 import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -321,6 +323,17 @@ class LiveWorkspaceGateway(
 
     /** Signed project-icon URLs, keyed by environment and workspace root. */
     private val projectIconUrls = java.util.concurrent.ConcurrentHashMap<String, CachedIconUrl>()
+
+    /**
+     * The latest terminal metadata per environment, null until a snapshot
+     * arrives. A shell reopens where its session lives, which may be the
+     * project checkout rather than the thread's worktree.
+     */
+    private val terminalSummaries =
+        java.util.concurrent.ConcurrentHashMap<String, MutableStateFlow<List<TerminalSummary>?>>()
+
+    private fun terminalSummariesFor(environmentId: EnvironmentId) =
+        terminalSummaries.getOrPut(environmentId.value) { MutableStateFlow(null) }
 
     /**
      * Fetched turn-item detail, keyed `<env>/<thread>/<item>/<revision>`. A
@@ -894,6 +907,7 @@ class LiveWorkspaceGateway(
                     autoSettleOnMerge = state?.autoSettleOnMerge ?: true,
                     autoSettleAfterDays = state?.autoSettleAfterDays,
                     serverSettings = state?.serverSettings ?: ServerConfigSettingsDto(),
+                    lastEventLoopStall = state?.lastEventLoopStall,
                 )
             }
 
@@ -981,8 +995,12 @@ class LiveWorkspaceGateway(
         environmentId: EnvironmentId,
         source: club.touchtech.s5code.kotlin.model.HandoffEndpoint?,
         selection: club.touchtech.s5code.kotlin.model.HandoffEndpoint,
+        projectId: String?,
     ): PendingHandoff? {
         val session = sessions.value[environmentId.value]?.session ?: return null
+        // No preview for a selection the next send would skip.
+        if (isModelSelectionUnavailable(session.state.value.serverSettings, session.providers.value,
+                projectId, selection.instanceId, selection.model)) return null
         return resolvePendingHandoff(source, selection, session.providers.value)
     }
 
@@ -1965,6 +1983,13 @@ class LiveWorkspaceGateway(
      * has no run.
      */
     override suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId) {
+        if (sessionFor(environmentId).state.value.capabilities.threadStop) {
+            // A paginated projection can omit commands still running from earlier turns.
+            dispatch(environmentId, buildJsonObject {
+                put("type", "thread.stop"); put("commandId", Commands.newCommandId()); put("threadId", id.value)
+            })
+            return
+        }
         val projection = sessionFor(environmentId).query("orchestration.getThreadProjection",
             buildJsonObject { put("threadId", id.value) }, V2ProjectionDto.serializer())
         val run = projection.runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
@@ -2349,7 +2374,7 @@ class LiveWorkspaceGateway(
             Commands.startTurnBootstrapping(
                 threadId = resolvedThreadId,
                 projectId = projectKey,
-                title = titleFromPrompt(prompt),
+                title = deriveThreadTitleSeed(prompt, attachments),
                 text = prompt,
                 attachments = persistV2Attachments(environmentId, resolvedThreadId, messageId, attachments),
                 instanceId = settings.provider.instanceId,
@@ -3052,6 +3077,47 @@ class LiveWorkspaceGateway(
         return listRefs(environmentId, project.workspaceRoot)
     }
 
+    override suspend fun checkoutNewTaskBranch(
+        environmentId: EnvironmentId,
+        projectKey: String,
+        branch: BranchRef,
+        newWorktree: Boolean,
+    ): BranchRef {
+        val project =
+            projects.value.firstOrNull { it.environmentId == environmentId && it.id.value == projectKey }
+                ?: error("The selected project is unavailable. Reconnect and try again.")
+        val cwd = project.workspaceRoot
+        val session = sessionFor(environmentId)
+        val result =
+            club.touchtech.s5code.kotlin.data.checkoutNewTaskBranch(
+                branch = branch,
+                newWorktree = newWorktree,
+                readRefs = { query, cursor ->
+                    session.query(
+                        WsMethods.VcsListRefs,
+                        buildJsonObject {
+                            put("cwd", cwd)
+                            put("query", query)
+                            put("refKind", "local")
+                            if (cursor == null) put("refresh", true) else put("cursor", cursor)
+                        },
+                        VcsListRefsResultDto.serializer(),
+                    )
+                },
+                switchRef = { refName ->
+                    session.request(
+                        WsMethods.VcsSwitchRef,
+                        buildJsonObject {
+                            put("cwd", cwd)
+                            put("refName", refName)
+                        },
+                        VcsSwitchRefResultDto.serializer(),
+                    ).refName
+                },
+            )
+        return result.copy(worktreePath = newTaskBranchWorktreePath(newWorktree, cwd, result.worktreePath))
+    }
+
     private suspend fun listRefs(environmentId: EnvironmentId, cwd: String): List<BranchRef> {
         val result =
             sessionFor(environmentId)
@@ -3072,6 +3138,7 @@ class LiveWorkspaceGateway(
                 // The refs contract carries no commit dates, and inventing one would
                 // be a lie in a list people use to pick a base branch.
                 ageLabel = if (ref.isDefault) "default" else "",
+                worktreePath = ref.worktreePath,
             )
         }
     }
@@ -3087,7 +3154,10 @@ class LiveWorkspaceGateway(
         // there is, which is why there is no separate open call here. `cwd` is only
         // consulted on the opening path, but it is required then, so it is always
         // sent. `restartIfNotRunning` is what makes reopening a thread whose shell
-        // exited give a live prompt rather than a dead transcript.
+        // exited give a live prompt rather than a dead transcript. Once the server
+        // has answered, resubscriptions send `resume` so a reconnect cannot reopen
+        // a terminal the user closed; an unanswered first attach retries unchanged
+        // so it can still open the shell.
         val rawHistory = StringBuilder()
         var title = "Terminal"
         var cwd = ""
@@ -3095,23 +3165,44 @@ class LiveWorkspaceGateway(
         var error: String? = null
         var hasRunningSubprocess = false
         var updatedAt: String? = null
+        // Outside `flow {}` so a lifecycle restart of the collector (backgrounding
+        // the app) still resumes rather than reopening, and keeps the first location.
+        var replied = false
+        var resolvedLocation: Pair<String, String?>? = null
         return flow {
-            val location = terminalLocation(environmentId, id)
-            sessionFor(environmentId)
+            val session = sessionFor(environmentId)
+            val location =
+                resolvedLocation
+                    ?: run {
+                        // Without the metadata snapshot an existing checkout terminal would
+                        // reopen in the thread's worktree. Sessions that cannot read terminal
+                        // metadata never get one, so they use the thread default right away.
+                        if (session.state.value.allowsRpc("terminal:read")) {
+                            withTimeoutOrNull(TERMINAL_METADATA_WAIT_MS) {
+                                terminalSummariesFor(environmentId).first { it != null }
+                            }
+                        }
+                        terminalLocation(environmentId, id, terminalId)
+                    }.also { resolvedLocation = it }
+            session
                 .subscribe(
                     WsMethods.TerminalAttach,
-                    buildJsonObject {
-                        put("threadId", id.value)
-                        put("terminalId", terminalId)
-                        put("cwd", location.first)
-                        location.second?.let { put("worktreePath", it) }
-                        put("cols", cols)
-                        put("rows", rows)
-                        put("restartIfNotRunning", true)
+                    {
+                        buildJsonObject {
+                            put("threadId", id.value)
+                            put("terminalId", terminalId)
+                            put("cwd", location.first)
+                            location.second?.let { put("worktreePath", it) }
+                            put("cols", cols)
+                            put("rows", rows)
+                            put("restartIfNotRunning", true)
+                            if (replied) put("resume", true)
+                        }
                     },
                     TerminalStreamEventDto.serializer(),
                 )
                 .collect { event ->
+                    replied = true
                     when (event.type) {
                         // A snapshot replaces the buffer outright: it is the whole
                         // scrollback, so folding it onto what is already there would
@@ -3210,9 +3301,13 @@ class LiveWorkspaceGateway(
                         "remove" -> sessions.remove("${event.threadId}/${event.terminalId}")
                         else -> return@collect
                     }
-                    emit(sessions.values.toList())
+                    val list = sessions.values.toList()
+                    terminalSummariesFor(environmentId).value = list
+                    emit(list)
                 }
         }
+            // A list left from an earlier visit would pass for a fresh snapshot.
+            .onCompletion { terminalSummariesFor(environmentId).value = null }
 
     private fun TerminalSummaryDto.toModel() =
         TerminalSummary(
@@ -3227,14 +3322,20 @@ class LiveWorkspaceGateway(
         )
 
     /**
-     * Where a new shell starts, from `resolveTerminalOpenLocation` in
-     * `apps/mobile/src/features/terminal/terminalLaunchContext.ts`: the thread's
-     * worktree when it has one, otherwise the project root.
+     * Where a shell starts, from `resolveTerminalOpenLocation` in
+     * `apps/mobile/src/features/terminal/terminalLaunchContext.ts`: a known
+     * session keeps its cwd paired with its identity (a null worktree is the
+     * project checkout); otherwise the thread's worktree when it has one, else
+     * the project root.
      */
     private fun terminalLocation(
         environmentId: EnvironmentId,
         id: ThreadId,
+        terminalId: String,
     ): Pair<String, String?> {
+        terminalSummariesFor(environmentId).value
+            ?.firstOrNull { it.threadId == id.value && it.terminalId == terminalId }
+            ?.let { return it.cwd to it.worktreePath }
         val worktree =
             sessions.value[environmentId.value]
                 ?.shell
@@ -3675,7 +3776,7 @@ class LiveWorkspaceGateway(
         cols: Int,
         rows: Int,
     ) {
-        val location = terminalLocation(environmentId, id)
+        val location = terminalLocation(environmentId, id, terminalId)
         sessionFor(environmentId)
             .request(
                 WsMethods.TerminalRestart,
@@ -3755,6 +3856,12 @@ class LiveWorkspaceGateway(
          */
         const val SNAPSHOT_PREFETCH_MS = 6_000L
 
+        /**
+         * How long an attach waits for terminal metadata before opening at the
+         * thread default; a missing snapshot must not leave the terminal blank.
+         */
+        const val TERMINAL_METADATA_WAIT_MS = 5_000L
+
         fun gitActionLabel(action: String): String =
             when (action) {
                 "commit" -> "commit"
@@ -3773,15 +3880,6 @@ class LiveWorkspaceGateway(
                 "pr" -> "Creating pull request"
                 else -> "Running source control action"
             }
-
-        fun titleFromPrompt(prompt: String): String {
-            val compact = prompt.trim().replace(Regex("\\s+"), " ")
-            return when {
-                compact.isEmpty() -> "New thread"
-                compact.length <= 72 -> compact
-                else -> compact.take(69).trimEnd() + "..."
-            }
-        }
 
         fun languageOf(path: String): String =
             when (path.substringAfterLast('.', "")) {

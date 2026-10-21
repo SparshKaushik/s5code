@@ -28,6 +28,7 @@ import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AlternateEmail
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Smartphone
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.Terminal
@@ -43,6 +44,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,6 +73,7 @@ import club.touchtech.s5code.kotlin.model.ProviderSkill
 import club.touchtech.s5code.kotlin.model.RuntimeMode
 import club.touchtech.s5code.kotlin.model.SlashCommand
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import club.touchtech.s5code.kotlin.data.pastedTextShouldFold
 import club.touchtech.s5code.kotlin.data.composerPullRequestDescription
 import club.touchtech.s5code.kotlin.platform.active
@@ -176,6 +179,8 @@ fun ThreadComposer(
     sendLabel: String = "Send",
     onCancel: () -> Unit,
     working: Boolean,
+    /** Present while the thread's queue is held; an empty composer offers it in place of Send. */
+    onResumeQueue: (suspend () -> Unit)? = null,
     attachments: List<ComposerAttachment>,
     onAddAttachment: () -> Unit,
     onAddImages: (List<ComposerImageCandidate>) -> Unit,
@@ -362,6 +367,23 @@ fun ThreadComposer(
     // lives in the expanded chrome.
     val expanded = focused || attachments.isNotEmpty() || voicePresented
     val canSend = value.isNotBlank() || attachments.isNotEmpty()
+    val resumeScope = rememberCoroutineScope()
+    var resumingQueue by remember { mutableStateOf(false) }
+    val resumeAction =
+        onResumeQueue?.takeIf { !canSend && !working }?.let { resume ->
+            ResumeQueue(resumingQueue) {
+                if (!resumingQueue) {
+                    resumingQueue = true
+                    resumeScope.launch {
+                        try {
+                            resume()
+                        } finally {
+                            resumingQueue = false
+                        }
+                    }
+                }
+            }
+        }
 
     val spatial = MaterialTheme.motionScheme.fastSpatialSpec<Dp>()
     val spatialFloat = MaterialTheme.motionScheme.fastSpatialSpec<IntSize>()
@@ -520,6 +542,7 @@ fun ThreadComposer(
                             canSend = canSend,
                             onSend = onSend,
                             onCancel = onCancel,
+                            resume = resumeAction,
                         )
                     }
                 }
@@ -580,12 +603,16 @@ fun ThreadComposer(
                                     contentColor = MaterialTheme.colorScheme.onErrorContainer,
                                 )
                             }
-                            S5ComposerAction(
-                                icon = Icons.AutoMirrored.Rounded.Send,
-                                label = if (connectionState != ConnectionState.Connected) "Queue" else sendLabel,
-                                onClick = onSend,
-                                enabled = canSend,
-                            )
+                            if (resumeAction != null) {
+                                ResumeQueueAction(resumeAction)
+                            } else {
+                                S5ComposerAction(
+                                    icon = Icons.AutoMirrored.Rounded.Send,
+                                    label = if (connectionState != ConnectionState.Connected) "Queue" else sendLabel,
+                                    onClick = onSend,
+                                    enabled = canSend,
+                                )
+                            }
                         }
                     }
                 }
@@ -608,14 +635,30 @@ fun ThreadComposer(
     )
 }
 
+/** The composer's Resume queue action: [resuming] disables it until the call returns. */
+private class ResumeQueue(val resuming: Boolean, val onClick: () -> Unit)
+
+@Composable
+private fun ResumeQueueAction(resume: ResumeQueue) {
+    S5ComposerAction(
+        icon = Icons.Rounded.PlayArrow,
+        label = "Resume queue",
+        onClick = resume.onClick,
+        enabled = !resume.resuming,
+    )
+}
+
 @Composable
 private fun SendOrStop(
     working: Boolean,
     canSend: Boolean,
     onSend: () -> Unit,
     onCancel: () -> Unit,
+    resume: ResumeQueue?,
 ) {
-    if (working) {
+    if (resume != null) {
+        ResumeQueueAction(resume)
+    } else if (working) {
         S5ComposerAction(
             icon = Icons.Rounded.Stop,
             label = "Stop the agent",

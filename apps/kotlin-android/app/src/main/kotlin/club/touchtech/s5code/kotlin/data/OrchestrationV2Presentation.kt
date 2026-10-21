@@ -133,7 +133,8 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                 secretStatus = item.v2String("secretStatus") ?: "pending",
                 answerable = item.v2String("secretStatus") == "pending" && row.visibility == "local",
                 turnId = runId, atMillis = at)
-            "compaction" -> FeedEntry.Note(id, contextCompactionLabel(item), runId, at, compaction = true)
+            "compaction" ->
+                FeedEntry.Note(id, contextCompactionLabel(item), runId, at, compaction = true, status = item.v2String("status"))
             "handoff" -> FeedEntry.Note(id, "Provider handoff → ${item.v2String("toModel") ?: item.v2String("toProviderInstanceId")}\n" +
                 item.v2String("summary").orEmpty(), runId, at)
             "fork" -> FeedEntry.Note(id, "Forked thread: ${item.v2String("targetThreadId")}", runId, at)
@@ -235,7 +236,11 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
 
 /** `contextCompactionLabel` in `packages/client-runtime/src/work-log/presentation.ts`. */
 internal fun contextCompactionLabel(item: JsonObject): String {
-    if (item.v2String("status") == "running") return "Compacting context"
+    when (item.v2String("status")) {
+        "failed" -> return "Context compaction failed"
+        "cancelled", "interrupted" -> return "Context compaction stopped"
+        "pending", "running", "waiting" -> return "Compacting context"
+    }
     val before = item.v2Long("beforeTokenCount")
     val after = item.v2Long("afterTokenCount")
     return if (before != null && after != null) {

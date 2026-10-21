@@ -33,6 +33,7 @@ import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.*
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 @Composable
 fun BrowserScreen(store: AppStore, environmentId: String, threadId: String, onBack: () -> Unit) {
@@ -111,7 +112,9 @@ fun BrowserScreen(store: AppStore, environmentId: String, threadId: String, onBa
                 OutlinedTextField(value = address, onValueChange = { address = it }, singleLine = true,
                     label = { Text("Address") }, modifier = Modifier.weight(1f))
                 TextButton(enabled = hasControl && address.isNotBlank(), onClick = {
-                    command(buildJsonObject { put("type", "navigate"); put("url", browserAddress(address)) })
+                    val url = normalizePreviewUrl(address)
+                    if (url == null) error = "Could not open this address. Enter an http or https URL."
+                    else command(buildJsonObject { put("type", "navigate"); put("url", url) })
                 }) { Text("Go") }
             }
             Row(Modifier.horizontalScroll(rememberScrollState())) {
@@ -120,6 +123,17 @@ fun BrowserScreen(store: AppStore, environmentId: String, threadId: String, onBa
                 TextButton(enabled = hasControl && selected?.v2Bool("canGoForward") == true,
                     onClick = { command(buildJsonObject { put("type", "history"); put("delta", 1) }) }) { Text("Forward") }
                 TextButton(enabled = hasControl, onClick = { command(buildJsonObject { put("type", "reload") }) }) { Text("Reload") }
+                TextButton(enabled = hasControl, onClick = {
+                    val text =
+                        try {
+                            val clipboard = context.getSystemService(android.content.ClipboardManager::class.java)
+                            clipboard?.primaryClip?.takeIf { it.itemCount > 0 }?.getItemAt(0)?.coerceToText(context)?.toString()
+                        } catch (_: Exception) {
+                            error = "Could not read the clipboard"
+                            null
+                        }
+                    if (!text.isNullOrEmpty()) command(buildJsonObject { put("type", "text"); put("text", text) })
+                }) { Text("Paste") }
                 TextButton(enabled = canOperate, onClick = {
                     command(buildJsonObject { put("type", if (hasControl) "releaseControl" else "takeControl") })
                 }) { Text(if (hasControl) "Release control" else "Take control") }
@@ -197,8 +211,22 @@ fun BrowserScreen(store: AppStore, environmentId: String, threadId: String, onBa
     }
 }
 
-internal fun browserAddress(address: String): String =
-    address.trim().let { if (Regex("^[a-zA-Z][a-zA-Z0-9+.-]*:").containsMatchIn(it)) it else "https://$it" }
+private val LOOPBACK_PREFIX = Regex("^(?:localhost|127\\.0\\.0\\.1|0\\.0\\.0\\.0|\\[::1?])(?::|/|$)", RegexOption.IGNORE_CASE)
+private val URL_SCHEME_WITH_AUTHORITY = Regex("^[a-z][a-z\\d+.-]*://", RegexOption.IGNORE_CASE)
+
+/**
+ * `normalizePreviewUrl`: loopback addresses default to http, everything else
+ * without a `scheme://` to https; null for anything but an http(s) URL. Only a
+ * leading scheme counts, so `localhost:3000/?next=https://…` still opens.
+ */
+internal fun normalizePreviewUrl(address: String): String? {
+    val trimmed = address.trim()
+    if (trimmed.isEmpty()) return null
+    val candidate =
+        if (URL_SCHEME_WITH_AUTHORITY.containsMatchIn(trimmed)) trimmed
+        else "${if (LOOPBACK_PREFIX.containsMatchIn(trimmed)) "http" else "https"}://$trimmed"
+    return candidate.toHttpUrlOrNull()?.toString()
+}
 
 private class BrowserBridge(private val onMessage: (String) -> Unit) {
     @JavascriptInterface fun postMessage(message: String) = onMessage(message)

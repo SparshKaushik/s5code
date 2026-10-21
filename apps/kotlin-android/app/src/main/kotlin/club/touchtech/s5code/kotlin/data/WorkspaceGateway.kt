@@ -484,12 +484,15 @@ interface WorkspaceGateway {
 
     /**
      * The context handoff sending with [selection] would trigger on a thread
-     * whose latest run used [source], or null when the native session continues.
+     * whose latest run used [source], or null when the native session continues
+     * or the next send would skip [selection] (turned off for [projectId], or
+     * an unavailable Antigravity model).
      */
     fun pendingHandoff(
         environmentId: EnvironmentId,
         source: club.touchtech.s5code.kotlin.model.HandoffEndpoint?,
         selection: club.touchtech.s5code.kotlin.model.HandoffEndpoint,
+        projectId: String? = null,
     ): PendingHandoff? = null
 
     /* ── Scheduled-task webhooks ─────────────────────────────────────── */
@@ -683,6 +686,19 @@ interface WorkspaceGateway {
 
     /** Branches for a project that has no thread yet, used by the new-task flow. */
     suspend fun projectBranches(environmentId: EnvironmentId, projectKey: String): List<BranchRef>
+
+    /**
+     * `checkoutNewTaskBranch`: makes a branch picked for a new task usable from
+     * the project. In current-checkout mode a branch another worktree holds is
+     * reused there, and a free one is switched to in the project checkout.
+     * Returns the branch to record, its `worktreePath` set only when reused.
+     */
+    suspend fun checkoutNewTaskBranch(
+        environmentId: EnvironmentId,
+        projectKey: String,
+        branch: BranchRef,
+        newWorktree: Boolean,
+    ): BranchRef
 
     /**
      * A live terminal session: opens or reattaches, then folds output into lines.

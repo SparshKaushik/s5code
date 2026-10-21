@@ -83,6 +83,15 @@ class ThreadSwipeActionsTest {
     }
 
     @Test
+    fun `a working thread with a nonblocking question cannot be snoozed`() {
+        // The row still reads Working, but the server rejects snoozing while any
+        // request is open, so offering it would only fail.
+        val asking = thread(ThreadStatus.Working).copy(hasPendingRuntimeRequest = true)
+        assertFalse(threadSnoozable(asking))
+        assertNull(threadSwipeActions(asking, settlementSupported = true, snoozeSupported = true).start)
+    }
+
+    @Test
     fun `settle and reopen share one command so the toggle stays single-sided`() {
         assertEquals("settle", ThreadSwipeAction.Settle.command)
         assertEquals("settle", ThreadSwipeAction.Unsettle.command)

@@ -127,11 +127,17 @@ class CloudAuth(
      *
      * Returning null rather than throwing is deliberate: the caller is usually a
      * reconnect, and a signed-out device should stop reaching for the relay, not
-     * surface an error the user cannot act on.
+     * surface an error the user cannot act on. A session still loading is not a
+     * sign-out, so it fails as a transient relay error the reconnect retries
+     * instead of parking the environment as unauthorized.
      */
     suspend fun readRelayToken(): String? {
         val template = config.jwtTemplate ?: return null
-        if (_state.value !is CloudAccountState.SignedIn) return null
+        when (_state.value) {
+            is CloudAccountState.SignedIn -> Unit
+            CloudAccountState.Loading -> throw RelayError("Waiting for the S5 Connect sign-in to load.")
+            else -> return null
+        }
         return Clerk.auth
             .getToken(GetTokenOptions(template = template, skipCache = true))
             .successOrNull()

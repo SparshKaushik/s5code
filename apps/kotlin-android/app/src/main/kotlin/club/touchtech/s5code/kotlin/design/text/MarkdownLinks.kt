@@ -29,6 +29,9 @@ sealed interface MarkdownLinkPresentation {
     ) : MarkdownLinkPresentation
 
     data class Link(val href: String?) : MarkdownLinkPresentation
+
+    /** A `t3-thread://v1/<id>` link; [threadId] is the id as written. */
+    data class Thread(val href: String, val threadId: String) : MarkdownLinkPresentation
 }
 
 private val ICON_BY_NAME =
@@ -132,6 +135,9 @@ fun resolveMarkdownFileIcon(value: String): MarkdownFileIcon {
 
 fun resolveMarkdownLinkPresentation(href: String): MarkdownLinkPresentation {
     val normalized = href.trim().removeSurrounding("<", ">")
+    club.touchtech.s5code.kotlin.data.parseThreadLinkHref(normalized)?.let {
+        return MarkdownLinkPresentation.Thread(normalized, it)
+    }
     runCatching { java.net.URI(normalized) }.getOrNull()?.let { uri ->
         if (uri.scheme.equals("http", true) || uri.scheme.equals("https", true)) {
             return MarkdownLinkPresentation.External(normalized, uri.host.orEmpty())

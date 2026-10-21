@@ -97,6 +97,22 @@ class WorkGroupsTest {
     }
 
     @Test
+    fun `T3 tool labels follow the shared table`() {
+        fun t3(name: String, state: ToolState = ToolState.Succeeded) =
+            FeedEntry.ToolCall(id = name, name = "mcp__t3-code__$name", summary = "", detail = "", state = state)
+        assertEquals("Stopped watching a pull request", toolCallRowLabel(t3("unwatch_pull_request")))
+        assertEquals("Unwatching a pull request", toolCallRowLabel(t3("unwatch_pull_request", ToolState.Running)))
+        assertEquals("Started writing review guides", toolCallRowLabel(t3("write_pull_request_guides")))
+        assertEquals("Requested cancellation of a delegated task", toolCallRowLabel(t3("task_cancel")))
+        assertEquals("Previewed an HTML page", toolCallRowLabel(t3("html_preview")))
+        val watches = listOf(t3("watch_pull_request"), t3("watch_pull_request").copy(id = "w2"))
+        assertEquals(
+            "Watching 2 pull requests",
+            presentFeed(watches, emptySet()).filterIsInstance<FeedRow.WorkToggle>().single().summary,
+        )
+    }
+
+    @Test
     fun `a long run folds behind one summary toggle`() {
         val feed =
             listOf(message("m1"), command("t1"), command("t2"), command("t3"), message("m2"))

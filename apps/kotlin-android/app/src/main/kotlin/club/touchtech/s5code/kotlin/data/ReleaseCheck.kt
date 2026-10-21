@@ -11,11 +11,13 @@ import kotlinx.coroutines.withContext
  * `cliRelease.ts` + `semver.ts` from `packages/shared`: the GitHub release
  * check behind "Check for updates" on the environment detail screen.
  *
- * The check walks GitHub's releases API newest-first because a busy nightly
- * train can push the newest stable past one page, and it answers on the same
- * release channel the server is already on — a stable server is never offered
- * a nightly tag.
+ * The check reads the public release pages first and only walks GitHub's
+ * releases API newest-first when they miss the channel, and it answers on the
+ * same release channel the server is already on — a stable server is never
+ * offered a nightly tag.
  */
+
+private const val RELEASES_PAGE = "https://github.com/SparshKaushik/s5code/releases"
 
 private const val RELEASES_API =
     "https://api.github.com/repos/SparshKaushik/s5code/releases?per_page=100&page="
@@ -96,43 +98,63 @@ private fun comparePrereleaseIdentifier(left: String, right: String): Int {
     }
 }
 
-@Serializable private class ReleaseEntry(val tag_name: String = "", val draft: Boolean = false)
+@Serializable internal class ReleaseEntry(val tag_name: String = "", val draft: Boolean = false)
 
 private val releasesJson = Json { ignoreUnknownKeys = true }
+
+private val ATOM_RELEASE_TAG = Regex("<id>tag:github\\.com,2008:Repository/\\d+/([^<]+)</id>")
+
+/** Release tags from the public releases Atom feed, newest first. */
+internal fun releaseTagsFromAtom(feed: String): List<ReleaseEntry> =
+    ATOM_RELEASE_TAG.findAll(feed).map { ReleaseEntry(tag_name = it.groupValues[1]) }.toList()
 
 /**
  * The newest release on the server's channel that is newer than it, or null
  * when it is current. Throws when the release index itself cannot be read —
  * that is a different failure from "you are up to date".
  */
-suspend fun findEnvironmentUpdate(http: OkHttpClient, currentVersion: String): String? {
-    val channel = releaseChannelOf(currentVersion)
-    var page = 1
-    while (true) {
-        val body =
-            withContext(Dispatchers.IO) {
-                http.newCall(Request.Builder().url("$RELEASES_API$page").build())
-                    .execute()
-                    .use { response ->
-                        if (!response.isSuccessful) {
-                            throw ReleaseCheckError(
-                                "Could not check releases (${response.code}). Try again."
-                            )
-                        }
-                        response.body?.string().orEmpty()
+suspend fun findEnvironmentUpdate(http: OkHttpClient, currentVersion: String): String? =
+    findEnvironmentUpdate(currentVersion) { url, accept ->
+        withContext(Dispatchers.IO) {
+            http.newCall(Request.Builder().url(url).header("Accept", accept).build())
+                .execute()
+                .use { response ->
+                    if (!response.isSuccessful) {
+                        throw ReleaseCheckError("Could not check releases (${response.code}). Try again.")
                     }
-            }
-        val releases =
-            releasesJson.decodeFromString<List<ReleaseEntry>>(body)
-        val version = newestCliReleaseVersion(releases, channel)
-        if (version != null) {
-            return if (compareSemverVersions(version, currentVersion) > 0) version else null
+                    response.body?.string().orEmpty()
+                }
         }
-        if (releases.size < 100) {
-            throw ReleaseCheckError("No $channel release was found.")
+    }
+
+internal suspend fun findEnvironmentUpdate(
+    currentVersion: String,
+    fetch: suspend (url: String, accept: String) -> String,
+): String? {
+    val channel = releaseChannelOf(currentVersion)
+    // Public release pages avoid the anonymous API quota shared by devices on
+    // the same network.
+    val releases =
+        if (channel == "stable") {
+            listOf(releasesJson.decodeFromString<ReleaseEntry>(fetch("$RELEASES_PAGE/latest", "application/json")))
+        } else {
+            releaseTagsFromAtom(fetch("$RELEASES_PAGE.atom", "application/atom+xml"))
         }
+    var version = newestCliReleaseVersion(releases, channel)
+    // The feed only includes ten releases, so later nightlies can displace a
+    // published preview.
+    var page = 1
+    while (version == null) {
+        val pageReleases =
+            releasesJson.decodeFromString<List<ReleaseEntry>>(
+                fetch("$RELEASES_API$page", "application/vnd.github+json")
+            )
+        version = newestCliReleaseVersion(pageReleases, channel)
+        if (pageReleases.size < 100) break
         page += 1
     }
+    if (version == null) throw ReleaseCheckError("No $channel release was found.")
+    return if (compareSemverVersions(version, currentVersion) > 0) version else null
 }
 
 /** `newestCliReleaseVersion`: first non-draft `v<semver>` tag on the channel. */

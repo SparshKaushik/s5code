@@ -5,6 +5,9 @@ import club.touchtech.s5code.kotlin.transport.wire.LatestTurnDto
 import club.touchtech.s5code.kotlin.transport.wire.SessionDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
 import java.time.Instant
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
 import org.junit.Assert.assertEquals
 import org.junit.Test
 
@@ -33,6 +36,8 @@ class ThreadStatusTest {
         latestUserMessageAt: String? = null,
         hasPendingApprovals: Boolean = false,
         hasPendingUserInput: Boolean = false,
+        blockedOnThreadWait: Boolean = false,
+        pendingRuntimeRequest: JsonObject? = null,
     ) =
         ThreadShellDto(
             id = "t-1",
@@ -46,6 +51,8 @@ class ThreadStatusTest {
             latestUserMessageAt = latestUserMessageAt,
             hasPendingApprovals = hasPendingApprovals,
             hasPendingUserInput = hasPendingUserInput,
+            blockedOnThreadWait = blockedOnThreadWait,
+            pendingRuntimeRequest = pendingRuntimeRequest,
         )
 
     private val hoursAgo = -2 * 60 * 60 * 1000L
@@ -192,7 +199,9 @@ class ThreadStatusTest {
     }
 
     @Test
-    fun `a snoozed thread wakes when a run finishes after the snooze`() {
+    fun `a run finishing after the snooze keeps the thread snoozed`() {
+        // Long-running threads wake themselves for background work; only the
+        // timer, a request, or a fresh failure should bring them back.
         val base =
             shell(
                 latestTurn =
@@ -201,7 +210,90 @@ class ThreadStatusTest {
                 snoozedAt = at(hoursAgo),
                 latestUserMessageAt = at(hoursAgo),
             )
+        assertEquals(ThreadStatus.Snoozed, threadStatusOf(base, now))
+    }
+
+    @Test
+    fun `the failed run's completion is the failure edge, not a later session write`() {
+        val failedBeforeSnooze =
+            shell(
+                session = SessionDto(status = "error", updatedAt = at(-60_000)),
+                latestTurn = LatestTurnDto(turnId = "turn-1", state = "error", completedAt = at(weekAgo)),
+                snoozedUntil = at(60 * 60 * 1000L),
+                snoozedAt = at(hoursAgo),
+                latestUserMessageAt = at(weekAgo),
+            )
+        assertEquals(ThreadStatus.Snoozed, threadStatusOf(failedBeforeSnooze, now))
+        val failedAfterSnooze =
+            failedBeforeSnooze.copy(
+                latestTurn = LatestTurnDto(turnId = "turn-1", state = "error", completedAt = at(-60_000)),
+            )
+        assertEquals(ThreadStatus.Failed, threadStatusOf(failedAfterSnooze, now))
+    }
+
+    @Test
+    fun `a failure without any timestamp does not wake a snooze`() {
+        val base =
+            shell(
+                session = SessionDto(status = "error"),
+                snoozedUntil = at(60 * 60 * 1000L),
+                snoozedAt = at(hoursAgo),
+                latestUserMessageAt = at(weekAgo),
+            )
+        assertEquals(ThreadStatus.Snoozed, threadStatusOf(base, now))
+    }
+
+    @Test
+    fun `any pending runtime request wakes a snoozed thread`() {
+        val base =
+            shell(
+                pendingRuntimeRequest = buildJsonObject {
+                    put("kind", "user_input")
+                    put("blocking", false)
+                },
+                snoozedUntil = at(60 * 60 * 1000L),
+                snoozedAt = at(hoursAgo),
+                latestUserMessageAt = at(hoursAgo),
+            )
         assertEquals(ThreadStatus.Idle, threadStatusOf(base, now))
+    }
+
+    @Test
+    fun `a snoozed thread running background work stays on the snoozed shelf`() {
+        val running =
+            shell(
+                session = SessionDto(status = "running"),
+                snoozedUntil = at(60 * 60 * 1000L),
+                snoozedAt = at(hoursAgo),
+                latestUserMessageAt = at(hoursAgo),
+            )
+        assertEquals(ThreadStatus.Snoozed, threadStatusOf(running, now))
+        assertEquals(ThreadStatus.Working, threadStatusOf(running, now, includeSnooze = false))
+        // A question still raises its hand over the snooze.
+        assertEquals(
+            ThreadStatus.AwaitingInput,
+            threadStatusOf(running.copy(hasPendingUserInput = true), now),
+        )
+    }
+
+    @Test
+    fun `a running turn blocked on a thread wait reads as waiting`() {
+        val running = shell(session = SessionDto(status = "running"))
+        assertEquals(ThreadStatus.Working, threadStatusOf(running, now))
+        assertEquals(ThreadStatus.Waiting, threadStatusOf(running.copy(blockedOnThreadWait = true), now))
+        assertEquals(
+            ThreadStatus.AwaitingInput,
+            threadStatusOf(running.copy(blockedOnThreadWait = true, hasPendingUserInput = true), now),
+        )
+        assertEquals(
+            ThreadStatus.AwaitingApproval,
+            threadStatusOf(running.copy(blockedOnThreadWait = true, hasPendingApprovals = true), now),
+        )
+        // The flag only means something while the turn runs.
+        assertEquals(
+            ThreadStatus.Idle,
+            threadStatusOf(shell(session = SessionDto(status = "ready"), blockedOnThreadWait = true), now),
+        )
     }
 
     @Test

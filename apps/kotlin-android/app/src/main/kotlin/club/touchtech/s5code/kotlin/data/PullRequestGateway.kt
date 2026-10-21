@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestActivityDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffStatDto
@@ -101,6 +102,15 @@ interface PullRequestGateway {
         environmentId: String,
         reference: PullRequestReference,
     ): Flow<PullRequestQuery<PullRequestFilesViewedResultDto>>
+
+    /**
+     * `pullRequests.changeBreakdown`; null when the host gives no per-file
+     * counts or the server predates the method.
+     */
+    fun changeBreakdown(
+        environmentId: String,
+        reference: PullRequestReference,
+    ): Flow<PullRequestQuery<PullRequestChangeBreakdownDto?>>
 
     /** `pullRequests.reviewerCandidates`; only for hosts whose capabilities list candidates. */
     fun reviewerCandidates(

@@ -256,6 +256,21 @@ data class ServerConfigDto(
     /** Whether thread reads accept the `reasoningMessages` opt-in. */
     val reasoningMessages: Boolean = false,
     val settings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
+    /** Sent only for a few minutes after a stall long enough to notice. */
+    val lastEventLoopStall: ServerEventLoopStallDto? = null,
+)
+
+/**
+ * `ServerEventLoopStall`: a stretch where the server's event loop could not
+ * run, so it answered nothing and clients may have dropped the connection.
+ */
+@Serializable
+data class ServerEventLoopStallDto(
+    val detectedAt: String = "",
+    val durationMs: Long = 0,
+    /** One-minute load average; absent on Windows, which has none. */
+    val loadAverage: Double? = null,
+    val cpuCount: Int = 1,
 )
 
 @Serializable
@@ -444,6 +459,8 @@ data class ServerCapabilitiesDto(
     val serverBrowser: Boolean = false,
     val serverResolvedCommandContext: Boolean = false,
     val threadVisitedTracking: Boolean = false,
+    /** `thread.stop` is a public command; absent on servers that need a run id. */
+    val threadStop: Boolean = false,
     val connectionProbe: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
@@ -593,16 +610,24 @@ data class VcsRefDto(
     val current: Boolean = false,
     val isDefault: Boolean = false,
     val worktreePath: String? = null,
+    /** The tracked remote ref, e.g. `refs/remotes/origin/main`. */
+    val upstreamRef: String? = null,
 )
 
 @Serializable
 data class VcsListRefsResultDto(
     val refs: List<VcsRefDto> = emptyList(),
+    /** Absent on servers that cannot tell whether `cwd` is the repository root. */
+    val isAtRepositoryRoot: Boolean? = null,
     val isRepo: Boolean = false,
     val hasPrimaryRemote: Boolean = false,
     val nextCursor: Int? = null,
     val totalCount: Int = 0,
 )
+
+/** `vcs.switchRef`: the branch now checked out, null on a detached HEAD. */
+@Serializable
+data class VcsSwitchRefResultDto(val refName: String? = null)
 
 /* ── Project file index ──────────────────────────────────────────────── */
 

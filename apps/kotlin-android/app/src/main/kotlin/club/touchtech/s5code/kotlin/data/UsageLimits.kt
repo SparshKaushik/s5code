@@ -320,6 +320,10 @@ private fun elapsedShare(window: UsageLimitWindow, now: Long): Double? {
     return ((length - (resetsAt - now)).toDouble() / length).coerceIn(0.0, 1.0)
 }
 
+/** `paceRemainingPercent`: bars show quota remaining, so even pace tracks time remaining. */
+fun paceRemainingPercent(window: UsageLimitWindow, now: Long): Int? =
+    elapsedShare(window, now)?.let { Math.round((1 - it) * 100).toInt() }
+
 /** Usage against the clock: within five points of even spend counts on pace. */
 private fun paceOfShares(usedPercent: Double, elapsed: Double): String {
     val gap = usedPercent - elapsed * 100
@@ -333,37 +337,87 @@ private fun paceOfShares(usedPercent: Double, elapsed: Double): String {
 private fun accountSortName(account: LimitAccount): String =
     (account.displayName ?: account.email ?: account.key).lowercase()
 
+private class PoolMember(val account: LimitAccount, val window: UsageLimitWindow, val refillPercent: Double)
+
+/**
+ * `poolMember`: a session window of an account whose overall weekly quota is
+ * spent counts as empty until both clocks allow it again. Claude's per-model
+ * weekly allowances keep their reported values.
+ */
+private fun poolMember(account: LimitAccount, reported: UsageLimitWindow, now: Long): PoolMember {
+    val spentWeekly =
+        if (reported.kind != "session") null
+        else
+            account.limits.windows.firstOrNull { window ->
+                window.usedPercent >= 100 &&
+                    when (account.driver) {
+                        "claudeAgent" -> window.id == "seven_day"
+                        "codex" -> window.kind == "weekly"
+                        else -> false
+                    }
+            }
+    spentWeekly ?: return PoolMember(account, reported, reported.usedPercent)
+
+    val weeklyReset = resetMillis(spentWeekly)
+    val sessionReset = resetMillis(reported)
+    val cutoff = account.limits.checkedAtMillis?.let { maxOf(now, it) }
+    var resetsAt: Long? = null
+    var refillPercent = 0.0
+    // A stale or missing clock cannot tell us when blocked quota becomes usable.
+    if (cutoff != null && weeklyReset != null && sessionReset != null && weeklyReset > cutoff && sessionReset > cutoff) {
+        when {
+            sessionReset <= weeklyReset -> {
+                resetsAt = weeklyReset
+                refillPercent = 100.0
+            }
+            reported.usedPercent >= 100 -> {
+                resetsAt = sessionReset
+                refillPercent = 100.0
+            }
+            else -> {
+                resetsAt = weeklyReset
+                refillPercent = 100 - reported.usedPercent.coerceIn(0.0, 100.0)
+            }
+        }
+    }
+    // Suppression is not session spending, so it has no session pace clock.
+    return PoolMember(
+        account,
+        reported.copy(usedPercent = 100.0, resetsAtMillis = resetsAt, windowDurationMins = null),
+        refillPercent,
+    )
+}
+
 private fun poolWindows(accounts: List<LimitAccount>, now: Long): List<LimitPoolWindow> {
-    val byKey = LinkedHashMap<String, MutableList<Pair<LimitAccount, UsageLimitWindow>>>()
+    val byKey = LinkedHashMap<String, MutableList<PoolMember>>()
     for (account in accounts) {
-        for (window in account.limits.windows) {
-            byKey.getOrPut("${window.kind}:${window.id}") { mutableListOf() } += account to window
+        for (reported in account.limits.windows) {
+            byKey.getOrPut("${reported.kind}:${reported.id}") { mutableListOf() } += poolMember(account, reported, now)
         }
     }
     return byKey.values
         .map { members ->
-            val memberByAccount = members.associate { it.first.key to it }
-            val first = members.first().second
-            val usedPercent = members.sumOf { it.second.usedPercent } / members.size
+            val memberByAccount = members.associate { it.account.key to it.window }
+            val first = members.first().window
+            val usedPercent = members.sumOf { it.window.usedPercent } / members.size
             // Pace compares spend against the clock, judged only over members
             // that have a clock — a window with no reset would count as spend
             // with no time elapsed and skew the verdict.
             val timed =
-                members.mapNotNull { (_, window) ->
-                    elapsedShare(window, now)?.let { window.usedPercent to it }
+                members.mapNotNull { member ->
+                    elapsedShare(member.window, now)?.let { member.window.usedPercent to it }
                 }
             val timedUsed = timed.map { it.first }.average().takeIf { timed.isNotEmpty() }
             val meanElapsed =
                 if (timed.isNotEmpty()) timed.sumOf { it.second } / timed.size else null
             val resets =
                 members
-                    .mapNotNull { (account, window) ->
-                        resetMillis(window)?.let { at ->
+                    .mapNotNull { member ->
+                        resetMillis(member.window)?.let { at ->
                             LimitPoolReset(
-                                accountKey = account.key,
+                                accountKey = member.account.key,
                                 atMillis = at,
-                                restoresPercent =
-                                    Math.round(window.usedPercent / members.size).toInt(),
+                                restoresPercent = Math.round(member.refillPercent / members.size).toInt(),
                             )
                         }
                     }
@@ -372,8 +426,8 @@ private fun poolWindows(accounts: List<LimitAccount>, now: Long): List<LimitPool
                 id = first.id,
                 kind = first.kind,
                 label = first.label,
-                members = members,
-                columns = accounts.map { account -> account to memberByAccount[account.key]?.second },
+                members = members.map { it.account to it.window },
+                columns = accounts.map { account -> account to memberByAccount[account.key] },
                 usedPercent = Math.round(usedPercent).toInt(),
                 remainingPercent = 100 - Math.round(usedPercent).toInt(),
                 pace = meanElapsed?.let { paceOfShares(timedUsed ?: 0.0, it) },
@@ -396,10 +450,11 @@ fun collectLimitPools(accounts: List<LimitAccount>, now: Long): List<LimitPool> 
                 members
                     .flatMap { it.limits.windows }
                     .minByOrNull { WINDOW_KIND_ORDER[it.kind] ?: 3 }
+            // A weekly-blocked session orders by when it becomes usable, not its own reset.
             fun orderReset(account: LimitAccount): Long =
                 account.limits.windows
                     .firstOrNull { it.kind == orderWindow?.kind && it.id == orderWindow?.id }
-                    ?.let(::resetMillis)
+                    ?.let { resetMillis(poolMember(account, it, now).window) }
                     ?: Long.MAX_VALUE
             val sorted =
                 members.sortedWith(

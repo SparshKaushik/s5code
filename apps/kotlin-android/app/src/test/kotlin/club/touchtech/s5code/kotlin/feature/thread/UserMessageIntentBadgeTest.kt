@@ -7,25 +7,20 @@ import org.junit.Test
 class UserMessageIntentBadgeTest {
 
     @Test
-    fun `a plain turn start has no badge`() {
+    fun `plain and queued turns have no badge`() {
         assertNull(userMessageIntentBadge(null))
         assertNull(userMessageIntentBadge("turn_start"))
+        assertNull(userMessageIntentBadge("queued_turn"))
         assertNull(userMessageIntentBadge("something_new"))
     }
 
     @Test
-    fun `a queued message keeps its from-queue badge`() {
-        val badge = userMessageIntentBadge("queued_turn")!!
-        assertEquals("from queue", badge.label)
-        assertEquals(UserMessageIntentTone.Queued, badge.tone)
-    }
-
-    @Test
     fun `steers and promoted queue entries read as steers`() {
-        assertEquals("steer", userMessageIntentBadge("steer")!!.label)
-        assertEquals(UserMessageIntentTone.Steer, userMessageIntentBadge("steer")!!.tone)
+        val steer = userMessageIntentBadge("steer")!!
+        assertEquals("Steer", steer.label)
+        assertEquals("Steered the active turn", steer.accessibilityLabel)
         val promoted = userMessageIntentBadge("promoted_queued_to_steer")!!
-        assertEquals("queued → steer", promoted.label)
-        assertEquals(UserMessageIntentTone.Steer, promoted.tone)
+        assertEquals("Steer", promoted.label)
+        assertEquals("Originally queued, then promoted to steer the active turn", promoted.accessibilityLabel)
     }
 }

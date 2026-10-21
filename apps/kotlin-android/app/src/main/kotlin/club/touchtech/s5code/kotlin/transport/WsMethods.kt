@@ -57,6 +57,7 @@ internal object WsMethods {
     const val PullRequestsActivity = "pullRequests.activity"
     const val PullRequestsLinkedThreads = "pullRequests.linkedThreads"
     const val PullRequestsFilesViewed = "pullRequests.filesViewed"
+    const val PullRequestsChangeBreakdown = "pullRequests.changeBreakdown"
     const val PullRequestsInvalidate = "pullRequests.invalidate"
     const val PullRequestsSubscribeRefreshes = "pullRequests.subscribeRefreshes"
     const val PullRequestsRunAction = "pullRequests.runAction"

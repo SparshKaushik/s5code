@@ -27,9 +27,56 @@ internal fun ThreadShellDto.normalizedV2(): ThreadShellDto {
         session = SessionDto(id, if (live == "failed" && lastErrorClass == "usage_limit") "limited" else v2LegacySession(live), providerInstanceId = providerInstanceId,
             activeTurnId = activeRunId, lastError = lastError, updatedAt = updatedAt),
         hasPendingApprovals = pendingRuntimeRequest?.v2String("kind")?.let { it !in setOf("user_input", "auth_refresh", "dynamic_tool_call") } == true,
-        hasPendingUserInput = pendingRuntimeRequest?.v2String("kind") == "user_input",
+        hasPendingUserInput = pendingRequestBlocksUser(pendingRuntimeRequest, live),
         backgroundLiveness = if (pendingBackgroundTasks.any { it.v2String("kind") != "command" }) "monitoring" else null,
     )
+}
+
+/**
+ * Whether the shell's pending request is a question the user must answer now,
+ * following `presentThreadShell`. An async question (`blocking: false`, absent
+ * from older servers) leaves a working run Working; a waiting run has ended its
+ * provider turn and is only draining effects, so there it asks again.
+ */
+internal fun pendingRequestBlocksUser(request: JsonObject?, runStatus: String?): Boolean =
+    request?.v2String("kind") == "user_input" &&
+        ((request["blocking"] as? JsonPrimitive)?.booleanOrNull != false ||
+            runStatus !in setOf("preparing", "starting", "running"))
+
+// Plans and text streams can stay open across tool calls without executing work.
+private val EXECUTION_TURN_ITEM_TYPES =
+    setOf("command_execution", "dynamic_tool", "subagent", "file_change", "file_search", "web_search", "compaction")
+
+private fun t3McpToolNamed(toolName: String?, tool: String): Boolean =
+    toolName != null && Regex("(?:^|[_.:/ ·-])${Regex.escape(tool)}$").containsMatchIn(toolName.trim())
+
+/**
+ * `deriveBlockedOnThreadWait`: the running activity run's only open execution is
+ * T3 thread waits (`t3_thread_wait`, or `delegate_task` in wait mode), so the
+ * turn is idle until another thread finishes.
+ */
+internal fun blockedOnThreadWait(activeRun: JsonObject?, turnItems: List<JsonObject>): Boolean {
+    if (activeRun?.v2String("status") != "running") return false
+    val runId = activeRun.v2String("id")
+    var hasWait = false
+    for (item in turnItems) {
+        val type = item.v2String("type")
+        if (item.v2String("runId") != runId ||
+            type !in EXECUTION_TURN_ITEM_TYPES ||
+            item.v2String("status") !in setOf("running", "waiting") ||
+            // App-owned rows track the child, including the child a blocking delegate is waiting for.
+            (type == "subagent" && item.v2String("origin") == "app_owned")
+        ) {
+            continue
+        }
+        if (type != "dynamic_tool") return false
+        val toolName = item.v2String("toolName")
+        val waits = t3McpToolNamed(toolName, "t3_thread_wait") ||
+            (t3McpToolNamed(toolName, "delegate_task") && (item["input"] as? JsonObject)?.v2String("mode") == "wait")
+        if (!waits) return false
+        hasWait = true
+    }
+    return hasWait
 }
 
 internal fun v2LegacyState(status: String): String = when (status) {

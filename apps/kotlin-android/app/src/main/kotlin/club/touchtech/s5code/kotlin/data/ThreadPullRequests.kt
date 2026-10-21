@@ -15,6 +15,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadPullRequestLinkDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadPullRequestSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadPullRequestStackDto
+import club.touchtech.s5code.kotlin.transport.wire.ThreadPullRequestStackLayerDto
 
 /**
  * Chain and badge resolution over a thread's pull-request links, ported from
@@ -168,10 +169,21 @@ fun resolveThreadPullRequestChains(
         }.add(link)
     }
     for (members in nativeStacks.values) {
-        val order = members[0].stack!!.layers
-            .mapIndexed { index, layer -> layer.number to index }
-            .toMap()
-        members.sortBy { order[it.number] ?: 0 }
+        // Saved snapshots can lag behind newer members of the same stack.
+        val memberNumbers = members.mapTo(HashSet()) { it.number }
+        fun coverage(layers: List<ThreadPullRequestStackLayerDto>) = layers.count { it.number in memberNumbers }
+        var layers = members[0].stack!!.layers
+        var covered = coverage(layers)
+        for (member in members.drop(1)) {
+            val candidate = member.stack!!.layers
+            val candidateCovered = coverage(candidate)
+            if (candidateCovered > covered || (candidateCovered == covered && candidate.size > layers.size)) {
+                layers = candidate
+                covered = candidateCovered
+            }
+        }
+        val order = layers.mapIndexed { index, layer -> layer.number to index }.toMap()
+        members.sortBy { order[it.number] ?: layers.size }
         for (member in members) placed.add(threadPullRequestKeyOf(member))
         chains.add(ThreadPullRequestChain(kind = "native", layers = members, depths = members.indices.toList()))
     }

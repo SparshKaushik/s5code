@@ -79,6 +79,29 @@ internal fun isModelTurnedOffForProject(
         !resolveProjectProviderInstanceEnabled(settings, projectId, instanceId)
 }
 
+/**
+ * `isModelSelectionUnavailable` in `apps/mobile/src/lib/modelOptions.ts`: the
+ * next send would skip this selection, because the instance is turned off for
+ * the project or it is an Antigravity instance that cannot run the model.
+ */
+internal fun isModelSelectionUnavailable(
+    settings: ServerConfigSettingsDto,
+    providers: List<ServerProviderDto>,
+    projectId: String?,
+    instanceId: String,
+    model: String?,
+): Boolean {
+    if (isModelTurnedOffForProject(settings, providers, projectId, instanceId)) return true
+    val provider = providers.firstOrNull { it.instanceId == instanceId }
+    val driver = provider?.driver ?: settings.providerInstances[instanceId]?.v2String("driver")
+    return driver == "antigravity" &&
+        (provider == null ||
+            !provider.installed ||
+            provider.auth.status == "unauthenticated" ||
+            provider.availability == "unavailable" ||
+            provider.models.none { it.slug == model })
+}
+
 /** The catalog a composer scoped to [projectId] may offer. */
 fun List<ProviderCatalogEntry>.forProject(projectId: String?): List<ProviderCatalogEntry> =
     filter { it.enabledFor(projectId) }

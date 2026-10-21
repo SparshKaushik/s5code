@@ -3,9 +3,12 @@ package club.touchtech.s5code.kotlin.data
 import club.touchtech.s5code.kotlin.model.DiffLine
 import club.touchtech.s5code.kotlin.model.DiffLineKind
 import club.touchtech.s5code.kotlin.model.ReviewFile
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestReviewThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestThreadCommentDto
+import java.text.NumberFormat
+import java.util.Locale
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.buildJsonObject
@@ -13,29 +16,95 @@ import kotlinx.serialization.json.put
 
 /*
  * Reviewing a pull request's files, ported from
+ * `packages/shared/src/changedFileKind.ts` and
  * `apps/mobile/src/features/pull-requests/` (`pullRequestFileFilters.ts`,
  * `pullRequestDiffComments.ts`, `pullRequestReviewDrafts.ts`,
  * `pullRequestDiffPages.ts`, `PullRequestReviewSheet.tsx`).
  */
 
-/* ── Test files ──────────────────────────────────────────────────────── */
+/* ── Changed file kinds ──────────────────────────────────────────────── */
 
-private val TEST_DIRECTORY = Regex("^(?:__tests__|__snapshots__|tests?|spec|e2e)$", RegexOption.IGNORE_CASE)
-private val TEST_NAMES =
-    listOf(
-        Regex("\\.(?:test|spec)\\.", RegexOption.IGNORE_CASE),
-        Regex("\\.snap$", RegexOption.IGNORE_CASE),
-        Regex("^(?:test_.+|.+_test)\\.py$", RegexOption.IGNORE_CASE),
-        Regex("_test\\.(?:go|rs|rb|c|cc|cpp|h|hpp)$", RegexOption.IGNORE_CASE),
-        Regex("(?:Test|Tests|Spec)\\.(?:java|kt|kts|swift|cs)$"),
-        Regex("_spec\\.rb$", RegexOption.IGNORE_CASE),
+private val GENERATED_FILES =
+    setOf(
+        "bun.lock", "bun.lockb", "cargo.lock", "composer.lock", "deno.lock", "flake.lock", "gemfile.lock", "go.sum",
+        "gradle.lockfile", "mix.lock", "npm-shrinkwrap.json", "package-lock.json", "packages.lock.json", "pipfile.lock",
+        "pnpm-lock.yaml", "podfile.lock", "poetry.lock", "pubspec.lock", "uv.lock", "yarn.lock",
     )
+private val GENERATED_NAME =
+    Regex("(\\.generated\\.|\\.gen\\.|\\.g\\.dart$|\\.pb\\.go$|_pb2(_grpc)?\\.py$|\\.pb\\.(cc|h)$|\\.min\\.(js|css)$|\\.(js|css)\\.map$)")
+private val GENERATED_DIRS = setOf("__generated__", "generated")
 
-/** `isPullRequestTestFile`. */
-fun isPullRequestTestFile(path: String): Boolean {
+private val MOCK_NAME =
+    Regex("(\\.snap$|\\.(mocks?|fixtures?|stubs?|fakes?)\\.[^.]+$|^(mocks?|fixtures?|stubs?|fakes?)([-_.A-Z]|$))")
+private val MOCK_DIRS =
+    setOf("__fixtures__", "__mocks__", "__snapshots__", "fakes", "fixture", "fixtures", "mock", "mocks", "stubs", "testdata")
+
+private val TEST_NAME =
+    Regex(
+        "(\\.(test|spec|e2e)\\.[^.]+$|_(test|spec)\\.[^.]+$|^test_.+\\.py$|^conftest\\.py$|^(vitest|jest)\\.setup\\.[^.]+$)",
+        RegexOption.IGNORE_CASE,
+    )
+// Case-sensitive: `FooTest.java` is a test class, `Latest.java` is not.
+private val CLASS_TEST_NAME = Regex("(Tests?|Spec)\\.(java|kt|kts|scala|groovy|cs|php|swift|m)$")
+private val TEST_DIRS = setOf("__tests__", "__test__", "cypress", "e2e", "spec", "specs", "test", "tests")
+
+private val DOCS_NAME = Regex("\\.(md|mdx|markdown|rst|adoc|txt)$", RegexOption.IGNORE_CASE)
+// Plain-text files that tools read as config or input, not prose.
+private val NOT_DOCS_NAME = Regex("^(requirements.*|constraints.*|CMakeLists|robots|llms)\\.txt$", RegexOption.IGNORE_CASE)
+
+/** `ChangedFileKind`, in the order the change breakdown lists them. */
+enum class ChangedFileKind(val label: String) {
+    Code("Code"),
+    Tests("Tests"),
+    Mocks("Mocks"),
+    Generated("Generated"),
+    Docs("Docs"),
+}
+
+/**
+ * `classifyChangedFile`: sorts a changed file by its path alone. Lockfiles and
+ * build output count as generated, test support is kept apart from the tests
+ * themselves, and prose is its own kind.
+ */
+fun classifyChangedFile(path: String): ChangedFileKind {
     val segments = path.replace('\\', '/').split('/')
     val name = segments.last()
-    return segments.dropLast(1).any(TEST_DIRECTORY::matches) || TEST_NAMES.any { it.containsMatchIn(name) }
+    val dirs = segments.dropLast(1).map { it.lowercase() }
+    fun inDir(set: Set<String>) = dirs.any { it in set }
+    return when {
+        name.lowercase() in GENERATED_FILES || GENERATED_NAME.containsMatchIn(name) || inDir(GENERATED_DIRS) ->
+            ChangedFileKind.Generated
+        MOCK_NAME.containsMatchIn(name) || inDir(MOCK_DIRS) -> ChangedFileKind.Mocks
+        TEST_NAME.containsMatchIn(name) || CLASS_TEST_NAME.containsMatchIn(name) || inDir(TEST_DIRS) -> ChangedFileKind.Tests
+        DOCS_NAME.containsMatchIn(name) && !NOT_DOCS_NAME.containsMatchIn(name) -> ChangedFileKind.Docs
+        else -> ChangedFileKind.Code
+    }
+}
+
+/** `isPullRequestTestFile`: test support such as fixtures and snapshots is hidden along with the tests. */
+fun isPullRequestTestFile(path: String): Boolean =
+    classifyChangedFile(path).let { it == ChangedFileKind.Tests || it == ChangedFileKind.Mocks }
+
+/**
+ * `PullRequestChangeBreakdownLine`: "Code +1,234 −56 · Tests +8 −0", skipping
+ * kinds with no changed lines.
+ */
+fun pullRequestChangeBreakdownLabel(breakdown: PullRequestChangeBreakdownDto, locale: Locale = Locale.getDefault()): String {
+    val format = NumberFormat.getIntegerInstance(locale)
+    return ChangedFileKind.entries
+        .mapNotNull { kind ->
+            val count =
+                when (kind) {
+                    ChangedFileKind.Code -> breakdown.code
+                    ChangedFileKind.Tests -> breakdown.tests
+                    ChangedFileKind.Mocks -> breakdown.mocks
+                    ChangedFileKind.Generated -> breakdown.generated
+                    ChangedFileKind.Docs -> breakdown.docs
+                }
+            if (count.additions == 0 && count.deletions == 0) null
+            else "${kind.label} +${format.format(count.additions)} \u2212${format.format(count.deletions)}"
+        }
+        .joinToString(" · ")
 }
 
 /** `filterPullRequestTestFiles`: [includePath] stays even when it is a test. */

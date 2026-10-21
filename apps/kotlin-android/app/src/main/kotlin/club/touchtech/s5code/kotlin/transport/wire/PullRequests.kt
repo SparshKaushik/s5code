@@ -373,6 +373,23 @@ data class PullRequestFilesViewedResultDto(
     val truncated: Boolean = false,
 )
 
+/** `PullRequestLineCount`. */
+@Serializable
+data class PullRequestLineCountDto(val additions: Int = 0, val deletions: Int = 0)
+
+/**
+ * `PullRequestChangeBreakdown`: line counts split by what the changed files
+ * are. Servers from before the docs split send no [docs]; theirs sit in [code].
+ */
+@Serializable
+data class PullRequestChangeBreakdownDto(
+    val code: PullRequestLineCountDto = PullRequestLineCountDto(),
+    val tests: PullRequestLineCountDto = PullRequestLineCountDto(),
+    val mocks: PullRequestLineCountDto = PullRequestLineCountDto(),
+    val generated: PullRequestLineCountDto = PullRequestLineCountDto(),
+    val docs: PullRequestLineCountDto = PullRequestLineCountDto(),
+)
+
 /** `PullRequestStackHead`: a layer's revision a stack merge expects to land. */
 @Serializable
 data class PullRequestStackHeadDto(val number: Int = 0, val headSha: String = "")

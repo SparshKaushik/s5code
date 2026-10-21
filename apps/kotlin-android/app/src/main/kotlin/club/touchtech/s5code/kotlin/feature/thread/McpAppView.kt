@@ -126,9 +126,14 @@ fun McpAppView(store: AppStore, environmentId: EnvironmentId, conversationThread
                         "requestDisplayMode" -> {
                             val mode = input.v2String("mode")
                             check(mode == "inline" || mode == "fullscreen") { "Display mode unavailable." }
-                            check(mode != "fullscreen" || !awaitingUser) { "The agent is waiting for your answer." }
-                            fullscreen = mode == "fullscreen"
-                            JsonPrimitive(mode)
+                            // Full screen only follows a tap in the app, so an app cannot trap the
+                            // thread behind itself; otherwise the app keeps its current mode.
+                            if (mode == "fullscreen" && (!input.v2Bool("active") || awaitingUser)) {
+                                JsonPrimitive(if (fullscreen) "fullscreen" else "inline")
+                            } else {
+                                fullscreen = mode == "fullscreen"
+                                JsonPrimitive(mode)
+                            }
                         }
                         "downloadFile" -> {
                             val files = input["files"] as? JsonArray ?: error("No files supplied.")
@@ -239,7 +244,7 @@ private fun McpAppSurface(source: String, app: JsonObject, secret: String, fulls
             hostContext:function(){return {theme:'$theme',styles:{variables:{}},displayMode:'${if (fullscreen) "fullscreen" else "inline"}',availableDisplayModes:['inline','fullscreen'],containerDimensions:${if (fullscreen) "{width:innerWidth,height:innerHeight}" else "{width:innerWidth,maxHeight:$MCP_APP_INLINE_MAX_HEIGHT}"},platform:'mobile',deviceCapabilities:{touch:true,hover:false}};},
             callTool:function(i){return call('callTool',i);},readResource:function(i){return call('readResource',i);},
             updateModelContext:function(i){return call('updateModelContext',i);},openLink:function(url){return call('openLink',{url:url});},sendMessage:function(text){return call('sendMessage',{text:text});},
-            requestDisplayMode:function(mode){return call('requestDisplayMode',{mode:mode});},downloadFile:function(files){return call('downloadFile',{files:files.map(function(f){if(f._tag!=='embedded')return f;var s='';f.bytes.forEach(function(b){s+=String.fromCharCode(b);});return {_tag:f._tag,name:f.name,mimeType:f.mimeType,base64:btoa(s)};})});},
+            requestDisplayMode:function(mode){var u=navigator.userActivation;return call('requestDisplayMode',{mode:mode,active:!!(u&&u.isActive)&&document.activeElement===frame});},downloadFile:function(files){return call('downloadFile',{files:files.map(function(f){if(f._tag!=='embedded')return f;var s='';f.bytes.forEach(function(b){s+=String.fromCharCode(b);});return {_tag:f._tag,name:f.name,mimeType:f.mimeType,base64:btoa(s)};})});},
             onRequestTeardown:function(){post({operation:'teardown'});},onSizeChanged:function(s){if(s&&typeof s.height==='number')post({operation:'sizeChanged',input:{height:s.height}});}});
             window.__t3AppToolCall=function(item){host.toolCall({arguments:item.input,result:item.output});};
             frame.addEventListener('load',function(){loads++;if(loads>1){live=false;host.dispose();post({operation:'navigated'});}});

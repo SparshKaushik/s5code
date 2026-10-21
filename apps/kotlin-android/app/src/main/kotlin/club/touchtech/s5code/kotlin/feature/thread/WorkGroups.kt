@@ -425,6 +425,8 @@ private fun isWorkRow(entry: FeedEntry): Boolean =
 private enum class ToolGroupAction {
     LinkPr,
     UnlinkPr,
+    WatchPr,
+    UnwatchPr,
     ListPrs,
     Read,
     Edit,
@@ -445,72 +447,148 @@ private data class T3ToolPresentation(
     val action: ToolGroupAction?,
 )
 
-/** name → [action, running, completed, detail], from `T3_MCP_TOOL_LABELS`. */
-private val T3_MCP_TOOL_LABELS: Map<String, List<String>> =
-    mapOf(
-        "link_pull_request" to listOf("Link", "Linking", "Linked", "a pull request"),
-        "unlink_pull_request" to listOf("Unlink", "Unlinking", "Unlinked", "a pull request"),
-        "list_thread_pull_requests" to listOf("Check", "Checking", "Checked", "linked pull requests"),
-        "orchestrator_capabilities" to listOf("Get", "Getting", "Got", "orchestration capabilities"),
-        "delegate_task" to listOf("Delegate", "Delegating", "Delegated", "a child task"),
-        "task_status" to listOf("Get", "Getting", "Got", "delegated task status"),
-        "task_cancel" to listOf("Cancel", "Canceling", "Canceled", "delegated task"),
-        "schedule_task" to listOf("Schedule", "Scheduling", "Scheduled", "a recurring task"),
-        "list_scheduled_tasks" to listOf("List", "Listing", "Listed", "scheduled tasks"),
-        "update_scheduled_task" to listOf("Update", "Updating", "Updated", "a scheduled task"),
-        "delete_scheduled_task" to listOf("Delete", "Deleting", "Deleted", "a scheduled task"),
-        "create_threads" to listOf("Create", "Creating", "Created", "T3 threads"),
-        "t3_thread_start" to listOf("Start", "Starting", "Started", "a T3 thread"),
-        "t3_thread_list" to listOf("List", "Listing", "Listed", "T3 threads"),
-        "t3_thread_read" to listOf("Read", "Reading", "Read", "a T3 thread"),
-        "t3_thread_send" to listOf("Send", "Sending", "Sent", "to a T3 thread"),
-        "t3_thread_wait" to listOf("Wait", "Waiting", "Waited", "for a T3 thread"),
-        "t3_thread_interrupt" to listOf("Interrupt", "Interrupting", "Interrupted", "a T3 thread"),
-        "t3_worktree_handoff" to
-            listOf("Hand off", "Handing off", "Handed off", "thread to a git worktree"),
-        "t3_worktree_status" to listOf("Get", "Getting", "Got", "thread worktree status"),
-        "preview_status" to listOf("Get", "Getting", "Got", "preview browser status"),
-        "preview_open" to listOf("Open", "Opening", "Opened", "a page in the preview browser"),
-        "preview_navigate" to
-            listOf("Navigate", "Navigating", "Navigated", "the preview browser"),
-        "preview_snapshot" to
-            listOf(
-                "Take a snapshot of",
-                "Taking a snapshot of",
-                "Took a snapshot of",
-                "the preview page",
-            ),
-        "preview_click" to listOf("Click", "Clicking", "Clicked", "in the preview browser"),
-        "preview_press" to listOf("Press", "Pressing", "Pressed", "a key in the preview browser"),
-        "preview_type" to listOf("Type", "Typing", "Typed", "in the preview browser"),
-        "preview_scroll" to listOf("Scroll", "Scrolling", "Scrolled", "the preview browser"),
-        "preview_resize" to listOf("Resize", "Resizing", "Resized", "the preview browser"),
-        "preview_evaluate" to
-            listOf("Evaluate", "Evaluating", "Evaluated", "script in the preview browser"),
-        "preview_wait_for" to listOf("Wait", "Waiting", "Waited", "for the preview page"),
-        "preview_set_appearance" to
-            listOf("Set", "Setting", "Set", "preview browser appearance"),
-        "preview_recording_start" to
-            listOf("Start", "Starting", "Started", "recording the preview browser"),
-        "preview_recording_stop" to
-            listOf("Stop", "Stopping", "Stopped", "recording the preview browser"),
-        "device_list" to listOf("List", "Listing", "Listed", "simulators and emulators"),
-        "device_open" to listOf("Open", "Opening", "Opened", "a device in the Device panel"),
-        "device_screenshot" to
-            listOf(
-                "Take a screenshot of",
-                "Taking a screenshot of",
-                "Took a screenshot of",
-                "the device",
-            ),
-        "device_close" to listOf("Close", "Closing", "Closed", "a device"),
-    )
+/** A `T3_MCP_TOOLS` entry: [action, running, completed, detail] plus its icon and PR bucket. */
+private data class T3McpTool(
+    val labels: List<String>,
+    val icon: T3ToolIcon,
+    val action: ToolGroupAction?,
+)
 
-private val PR_TOOL_ACTIONS: Map<String, ToolGroupAction> =
+private fun t3Tool(
+    labels: List<String>,
+    icon: T3ToolIcon = T3ToolIcon.T3Code,
+    action: ToolGroupAction? = null,
+) = T3McpTool(labels, icon, action)
+
+/** Verbatim from `T3_MCP_TOOLS` in `packages/shared/src/t3McpToolPresentation.ts`. */
+private val T3_MCP_TOOLS: Map<String, T3McpTool> =
     mapOf(
-        "link_pull_request" to ToolGroupAction.LinkPr,
-        "unlink_pull_request" to ToolGroupAction.UnlinkPr,
-        "list_thread_pull_requests" to ToolGroupAction.ListPrs,
+        "link_pull_request" to
+            t3Tool(listOf("Link", "Linking", "Linked", "a pull request"), T3ToolIcon.PullRequest, action = ToolGroupAction.LinkPr),
+        "unlink_pull_request" to
+            t3Tool(listOf("Unlink", "Unlinking", "Unlinked", "a pull request"), T3ToolIcon.PullRequest, action = ToolGroupAction.UnlinkPr),
+        "list_thread_pull_requests" to
+            t3Tool(listOf("Check", "Checking", "Checked", "linked pull requests"), T3ToolIcon.PullRequest, action = ToolGroupAction.ListPrs),
+        "watch_pull_request" to
+            t3Tool(listOf("Watch", "Watching", "Watching", "a pull request"), T3ToolIcon.PullRequest, action = ToolGroupAction.WatchPr),
+        "unwatch_pull_request" to
+            t3Tool(listOf("Stop watching", "Unwatching", "Stopped watching", "a pull request"), T3ToolIcon.PullRequest, action = ToolGroupAction.UnwatchPr),
+        "write_pull_request_guides" to
+            t3Tool(listOf("Write", "Writing", "Started writing", "review guides"), T3ToolIcon.PullRequest),
+        "read_pull_request_guide" to
+            t3Tool(listOf("Read", "Reading", "Read", "a review guide"), T3ToolIcon.PullRequest),
+        "orchestrator_capabilities" to t3Tool(listOf("Get", "Getting", "Got", "orchestration capabilities")),
+        "delegate_task" to t3Tool(listOf("Delegate", "Delegating", "Delegated", "a child task")),
+        "task_status" to t3Tool(listOf("Get", "Getting", "Got", "delegated task status")),
+        "task_cancel" to
+            t3Tool(listOf("Cancel", "Canceling", "Requested cancellation of", "a delegated task")),
+        "schedule_task" to t3Tool(listOf("Schedule", "Scheduling", "Scheduled", "a recurring task")),
+        "list_scheduled_tasks" to t3Tool(listOf("List", "Listing", "Listed", "scheduled tasks")),
+        "update_scheduled_task" to t3Tool(listOf("Update", "Updating", "Updated", "a scheduled task")),
+        "delete_scheduled_task" to
+            t3Tool(listOf("Delete", "Deleting", "Requested deletion of", "a scheduled task")),
+        "request_secret" to t3Tool(listOf("Ask for", "Asking for", "Asked for", "a secret")),
+        "create_threads" to t3Tool(listOf("Create", "Creating", "Created", "T3 threads")),
+        "t3_thread_start" to t3Tool(listOf("Start", "Starting", "Started", "a T3 thread")),
+        "t3_thread_list" to t3Tool(listOf("List", "Listing", "Listed", "T3 threads")),
+        "t3_thread_read" to t3Tool(listOf("Read", "Reading", "Read", "a T3 thread")),
+        "t3_thread_send" to t3Tool(listOf("Send", "Sending", "Sent", "to a T3 thread")),
+        "t3_thread_wait" to t3Tool(listOf("Wait", "Waiting", "Waited", "for a T3 thread")),
+        "t3_workflow_stop" to t3Tool(listOf("Stop", "Stopping", "Requested a stop for", "a workflow")),
+        "t3_thread_interrupt" to
+            t3Tool(listOf("Interrupt", "Interrupting", "Requested an interrupt of", "a T3 thread")),
+        "t3_worktree_handoff" to
+            t3Tool(listOf("Hand off", "Handing off", "Handed off", "thread to a git worktree")),
+        "t3_worktree_status" to t3Tool(listOf("Get", "Getting", "Got", "thread worktree status")),
+        "preview_status" to
+            t3Tool(listOf("Get", "Getting", "Got", "preview browser status"), T3ToolIcon.Browser),
+        "preview_open" to
+            t3Tool(listOf("Open", "Opening", "Opened", "a page in the preview browser"), T3ToolIcon.Browser),
+        "preview_navigate" to
+            t3Tool(listOf("Navigate", "Navigating", "Navigated", "the preview browser"), T3ToolIcon.Browser),
+        "preview_dialog" to
+            t3Tool(listOf("Respond", "Responding", "Responded", "to a preview browser dialog"), T3ToolIcon.Browser),
+        "preview_snapshot" to
+            t3Tool(listOf("Take a snapshot of", "Taking a snapshot of", "Took a snapshot of", "the preview page"), T3ToolIcon.Browser),
+        "preview_click" to
+            t3Tool(listOf("Click", "Clicking", "Clicked", "in the preview browser"), T3ToolIcon.Browser),
+        "preview_press" to
+            t3Tool(listOf("Press", "Pressing", "Pressed", "a key in the preview browser"), T3ToolIcon.Browser),
+        "preview_type" to
+            t3Tool(listOf("Type", "Typing", "Typed", "in the preview browser"), T3ToolIcon.Browser),
+        "preview_hover" to
+            t3Tool(listOf("Hover", "Hovering", "Hovered", "in the preview browser"), T3ToolIcon.Browser),
+        "preview_select" to
+            t3Tool(listOf("Choose", "Choosing", "Chose", "an option in the preview browser"), T3ToolIcon.Browser),
+        "preview_drag" to
+            t3Tool(listOf("Drag", "Dragging", "Dragged", "in the preview browser"), T3ToolIcon.Browser),
+        "preview_upload" to
+            t3Tool(listOf("Upload", "Uploading", "Uploaded", "files to the preview browser"), T3ToolIcon.Browser),
+        "preview_scroll" to
+            t3Tool(listOf("Scroll", "Scrolling", "Scrolled", "the preview browser"), T3ToolIcon.Browser),
+        "preview_resize" to
+            t3Tool(listOf("Resize", "Resizing", "Resized", "the preview browser"), T3ToolIcon.Browser),
+        "preview_evaluate" to
+            t3Tool(listOf("Evaluate", "Evaluating", "Evaluated", "script in the preview browser"), T3ToolIcon.Browser),
+        "preview_wait_for" to
+            t3Tool(listOf("Wait", "Waiting", "Waited", "for the preview page"), T3ToolIcon.Browser),
+        "preview_set_appearance" to
+            t3Tool(listOf("Set", "Setting", "Set", "preview browser appearance"), T3ToolIcon.Browser),
+        "preview_recording_start" to
+            t3Tool(listOf("Start", "Starting", "Started", "recording the preview browser"), T3ToolIcon.Browser),
+        "preview_recording_stop" to
+            t3Tool(listOf("Stop", "Stopping", "Stopped", "recording the preview browser"), T3ToolIcon.Browser),
+        "device_list" to
+            t3Tool(listOf("List", "Listing", "Listed", "simulators and emulators"), T3ToolIcon.Device),
+        "device_open" to
+            t3Tool(listOf("Open", "Opening", "Opened", "a device in the Device panel"), T3ToolIcon.Device),
+        "device_screenshot" to
+            t3Tool(listOf("Take a screenshot of", "Taking a screenshot of", "Took a screenshot of", "the device"), T3ToolIcon.Device),
+        "device_close" to t3Tool(listOf("Close", "Closing", "Closed", "a device"), T3ToolIcon.Device),
+        "run_scheduled_task_now" to
+            t3Tool(listOf("Run", "Running", "Requested a run of", "a scheduled task")),
+        "t3_queue_list" to t3Tool(listOf("List", "Listing", "Listed", "queued messages")),
+        "t3_queue_read" to t3Tool(listOf("Read", "Reading", "Read", "a queued message")),
+        "t3_queue_edit" to t3Tool(listOf("Edit", "Editing", "Edited", "a queued message")),
+        "t3_queue_cancel" to
+            t3Tool(listOf("Cancel", "Canceling", "Requested cancellation of", "a queued run")),
+        "t3_queue_reorder" to t3Tool(listOf("Reorder", "Reordering", "Reordered", "a queued run")),
+        "t3_queue_promote_to_steer" to
+            t3Tool(listOf("Steer with", "Steering with", "Requested steering with", "a queued message")),
+        "t3_pending_request_list" to t3Tool(listOf("List", "Listing", "Listed", "pending questions")),
+        "t3_pending_request_read" to t3Tool(listOf("Read", "Reading", "Read", "pending questions")),
+        "t3_pending_request_respond" to
+            t3Tool(listOf("Answer", "Answering", "Answered", "pending questions")),
+        "t3_thread_configuration" to t3Tool(listOf("Read", "Reading", "Read", "thread configuration")),
+        "t3_thread_configure" to t3Tool(listOf("Set", "Setting", "Set", "thread model")),
+        "t3_thread_fork" to t3Tool(listOf("Fork", "Forking", "Requested a fork of", "this thread")),
+        "t3_thread_merge_back" to
+            t3Tool(listOf("Merge", "Merging", "Requested a merge of", "thread context")),
+        "t3_thread_search" to t3Tool(listOf("Search", "Searching", "Searched", "thread content")),
+        "t3_thread_transfers" to t3Tool(listOf("Read", "Reading", "Read", "thread transfers")),
+        "t3_thread_organize" to t3Tool(listOf("Organize", "Organizing", "Organized", "a thread")),
+        "t3_thread_update" to t3Tool(listOf("Update", "Updating", "Updated", "T3 thread metadata")),
+        "t3_worktree_list" to t3Tool(listOf("List", "Listing", "Listed", "workspace branches")),
+        "t3_preview_list" to t3Tool(listOf("List", "Listing", "Listed", "preview tabs"), T3ToolIcon.Browser),
+        "t3_preview_close" to
+            t3Tool(listOf("Close", "Closing", "Closed", "a preview tab"), T3ToolIcon.Browser),
+        "t3_environment_read" to t3Tool(listOf("Read", "Reading", "Read", "environment preferences")),
+        "t3_environment_preferences_update" to
+            t3Tool(listOf("Update", "Updating", "Updated", "environment preferences")),
+        "t3_thread_launch" to t3Tool(listOf("Launch", "Launching", "Launched", "a project thread")),
+        "t3_project_list" to t3Tool(listOf("List", "Listing", "Listed", "projects")),
+        "t3_project_read" to t3Tool(listOf("Read", "Reading", "Read", "a project")),
+        "t3_project_create" to t3Tool(listOf("Register", "Registering", "Registered", "a project")),
+        "t3_project_update" to t3Tool(listOf("Update", "Updating", "Updated", "a project")),
+        "t3_project_delete" to t3Tool(listOf("Delete", "Deleting", "Deleted", "a project")),
+        "t3_project_clone" to t3Tool(listOf("Clone", "Cloning", "Cloned", "a repository")),
+        "t3_attachment_prepare_upload" to
+            t3Tool(listOf("Prepare", "Preparing", "Prepared", "an attachment upload")),
+        "t3_attachment_discard" to
+            t3Tool(listOf("Discard", "Discarding", "Discarded", "a pending attachment")),
+        "t3_thread_send_attachments" to t3Tool(listOf("Send", "Sending", "Sent", "attachments")),
+        "html_preview" to t3Tool(listOf("Preview", "Previewing", "Previewed", "an HTML page")),
+        "html_render" to t3Tool(listOf("Render", "Rendering", "Rendered", "an HTML page")),
     )
 
 private val T3_MCP_PREFIX =
@@ -531,8 +609,8 @@ private fun t3ToolPresentation(
 ): T3ToolPresentation? {
     if (value.isNullOrEmpty()) return null
     val name = normalizeCompactToolLabel(value).replace(T3_MCP_PREFIX, "")
-    val labels = T3_MCP_TOOL_LABELS[name] ?: return null
-    val (action, running, completed, detail) = labels
+    val tool = T3_MCP_TOOLS[name] ?: return null
+    val (action, running, completed, detail) = tool.labels
     val verb =
         when (status) {
             "inProgress" -> running
@@ -542,21 +620,14 @@ private fun t3ToolPresentation(
             "stopped" -> "Stopped ${running.lowercase()}"
             else -> running
         }
-    val actionKind = PR_TOOL_ACTIONS[name]
+    val actionKind = tool.action
     val target =
         if (actionKind != null && actionKind != ToolGroupAction.ListPrs && prNumber != null) {
             "PR #$prNumber"
         } else {
             detail
         }
-    val icon =
-        when {
-            actionKind != null -> T3ToolIcon.PullRequest
-            name.startsWith("preview_") -> T3ToolIcon.Browser
-            name.startsWith("device_") -> T3ToolIcon.Device
-            else -> T3ToolIcon.T3Code
-        }
-    return T3ToolPresentation("$verb $target", icon, actionKind)
+    return T3ToolPresentation("$verb $target", tool.icon, actionKind)
 }
 
 private val TOOL_LIFECYCLE_ITEM_TYPES =
@@ -651,6 +722,10 @@ private fun toolGroupActionLabel(action: ToolGroupAction, count: Int): String =
             "Linked $count ${if (count == 1) "pull request" else "pull requests"}"
         ToolGroupAction.UnlinkPr ->
             "Unlinked $count ${if (count == 1) "pull request" else "pull requests"}"
+        ToolGroupAction.WatchPr ->
+            "Watching $count ${if (count == 1) "pull request" else "pull requests"}"
+        ToolGroupAction.UnwatchPr ->
+            "Stopped watching $count ${if (count == 1) "pull request" else "pull requests"}"
         ToolGroupAction.ListPrs ->
             if (count == 1) "Checked linked pull requests"
             else "Checked linked pull requests $count times"

@@ -345,8 +345,11 @@ fun SettingsNewThreadsScreen(store: AppStore, onBack: () -> Unit) {
                 S5RowGroup(title = "Worktrees") {
                     S5SwitchRow(
                         icon = Icons.Rounded.CallSplit,
-                        label = "Start from origin",
-                        supporting = "Base new worktrees on the remote branch.",
+                        label = "Start from remote",
+                        supporting =
+                            "Uses the latest commit of the base branch’s tracked remote branch, even if its " +
+                                "name differs. Otherwise uses the same-named branch on origin. Uses your local " +
+                                "branch if that remote branch is missing.",
                         checked = settings.newWorktreesStartFromOrigin,
                         onCheckedChange = { enabled ->
                             sync.write(

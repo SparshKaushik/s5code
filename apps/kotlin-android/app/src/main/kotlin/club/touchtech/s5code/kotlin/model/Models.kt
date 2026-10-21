@@ -100,6 +100,11 @@ data class Environment(
      */
     val serverSettings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
     val scratchWorkspaceRoot: String? = null,
+    /**
+     * The recent event-loop stall the host reported at connect, sent only for a
+     * few minutes after it; explains why the host stopped answering.
+     */
+    val lastEventLoopStall: club.touchtech.s5code.kotlin.transport.wire.ServerEventLoopStallDto? = null,
 )
 
 /**
@@ -486,6 +491,18 @@ data class ThreadSummary(
     val lastVisitedAtMillis: Long? = null,
     val latestCompletedAtMillis: Long? = null,
     val unread: Boolean = false,
+    /**
+     * [status] with snooze set aside: what the thread screen acts on, since a
+     * snoozed thread can still be running.
+     */
+    val liveStatus: ThreadStatus = status,
+    /**
+     * [liveStatus] is [ThreadStatus.Waiting] because the running turn only waits on
+     * another thread: the run is live, so Stop and steering still apply.
+     */
+    val blockedOnThreadWait: Boolean = false,
+    /** Any open runtime request, nonblocking questions included; the server refuses snoozing then. */
+    val hasPendingRuntimeRequest: Boolean = false,
 ) {
     /**
      * The Working section's ordering key, following `sortWorkingThreadsBySend`:
@@ -710,6 +727,8 @@ sealed interface FeedEntry {
          * matching `isContextCompactionActivityGroup` in the RN fold rules.
          */
         val compaction: Boolean = false,
+        /** The V2 item status (`running`, `completed`, …); null for rows that carry none. */
+        val status: String? = null,
     ) : FeedEntry
 
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
@@ -1140,7 +1159,14 @@ data class GitStatus(
     val pullRequest: PullRequestRef?,
 )
 
-data class BranchRef(val name: String, val current: Boolean, val remote: Boolean, val ageLabel: String)
+data class BranchRef(
+    val name: String,
+    val current: Boolean,
+    val remote: Boolean,
+    val ageLabel: String,
+    /** The worktree that has this branch checked out, if any. */
+    val worktreePath: String? = null,
+)
 
 /** From `TerminalSessionStatus` in `packages/contracts/src/terminal.ts`, plus closed. */
 enum class TerminalStatus {

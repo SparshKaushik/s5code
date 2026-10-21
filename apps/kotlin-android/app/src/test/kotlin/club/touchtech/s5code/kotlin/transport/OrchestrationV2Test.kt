@@ -271,10 +271,53 @@ class OrchestrationV2Test {
         assertEquals("Compacting context", label("status" to JsonPrimitive("running"), "beforeTokenCount" to JsonPrimitive(899_000)))
         assertEquals("Context compacted 899K → 19K tokens",
             label("beforeTokenCount" to JsonPrimitive(899_000), "afterTokenCount" to JsonPrimitive(19_000)))
-        assertEquals("Context compacted",
+        assertEquals("Compacting context", label("status" to JsonPrimitive("pending")))
+        assertEquals("Compacting context", label("status" to JsonPrimitive("waiting")))
+        assertEquals("Context compaction failed",
+            label("status" to JsonPrimitive("failed"), "beforeTokenCount" to JsonPrimitive(899_000)))
+        assertEquals("Context compaction stopped",
             label("status" to JsonPrimitive("interrupted"), "beforeTokenCount" to JsonPrimitive(899_000)))
+        assertEquals("Context compaction stopped", label("status" to JsonPrimitive("cancelled")))
         // A provider summary is not the label, as on the other clients.
         assertEquals("Context compacted", label("summary" to JsonPrimitive("Private summary")))
+    }
+
+    @Test fun `async questions keep a working run working`() {
+        fun shell(requestBlocking: String?, activity: String) = TransportJson.decodeFromJsonElement(ThreadShellDto.serializer(), obj("""{
+            "id":"thread","status":"running","activeRunId":"run","latestRunId":"run","activityRunStatus":"$activity",
+            "pendingRuntimeRequest":{"id":"q","kind":"user_input","createdAt":"2026-10-01T00:00:00Z"${requestBlocking?.let { ",\"blocking\":$it" }.orEmpty()}}
+        }""")).normalizedV2()
+        assertFalse(shell("false", "running").hasPendingUserInput)
+        // A waiting run has ended its provider turn, so the question asks again.
+        assertTrue(shell("false", "waiting").hasPendingUserInput)
+        assertTrue(shell("true", "running").hasPendingUserInput)
+        // Older servers omit the flag; every question was blocking then.
+        assertTrue(shell(null, "running").hasPendingUserInput)
+    }
+
+    @Test fun `detail status keeps a run with an async question working and lets a secret ask`() {
+        val run = obj("""{"id":"run","status":"running","ordinal":1}""")
+        val question = obj("""{"id":"q","kind":"user_input","status":"pending","createdAt":"2026-10-01T00:00:00Z","responseCapability":{"type":"message"}}""")
+        val projection = V2ProjectionDto(metadata, runs = listOf(run), runtimeRequests = listOf(question))
+        fun summary(value: V2ProjectionDto) = threadDetailFrom(EnvironmentId("env"), value.asThreadDto(),
+            ::providerInstanceForId, parseInstant("2026-10-01T00:00:00Z")!!).summary
+        assertNotEquals(ThreadStatus.AwaitingInput, summary(projection).status)
+        assertTrue(summary(projection).hasPendingRuntimeRequest)
+        val secret = JsonObject(item("secret", 2, "secret_request") + mapOf("status" to JsonPrimitive("waiting")))
+        assertEquals(ThreadStatus.AwaitingInput, summary(projection.copy(turnItems = listOf(secret))).status)
+    }
+
+    @Test fun `a running turn waiting only on another thread is blocked on that wait`() {
+        val run = obj("""{"id":"run","status":"running"}""")
+        fun tool(name: String, status: String = "running", input: String = "{}") =
+            obj("""{"id":"$name","runId":"run","type":"dynamic_tool","toolName":"$name","status":"$status","input":$input}""")
+        assertTrue(blockedOnThreadWait(run, listOf(tool("mcp__t3-code__t3_thread_wait"))))
+        assertTrue(blockedOnThreadWait(run, listOf(tool("t3-code.delegate_task", input = """{"mode":"wait"}"""))))
+        assertFalse(blockedOnThreadWait(run, listOf(tool("t3-code.delegate_task"))))
+        assertFalse(blockedOnThreadWait(run, listOf(tool("mcp__t3-code__t3_thread_wait"), tool("shell"))))
+        // Finished tools and other runs do not count either way.
+        assertFalse(blockedOnThreadWait(run, listOf(tool("mcp__t3-code__t3_thread_wait", status = "completed"))))
+        assertFalse(blockedOnThreadWait(obj("""{"id":"run","status":"waiting"}"""), listOf(tool("mcp__t3-code__t3_thread_wait"))))
     }
 
     @Test fun `token counts format the way the usage page does`() {

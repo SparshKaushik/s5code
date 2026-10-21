@@ -405,6 +405,11 @@ class RelayClient(
                                 "connections. On that computer, open Settings > Connections and turn S5 Connect on."
                         else -> "The relay refused the connection ($reason)."
                     }
+                "RelayEnvironmentLinkUnavailableError" -> {
+                    val stage = PROVISIONING_STAGE_PATTERN.find(body)?.groupValues?.getOrNull(1)
+                    "Relay cannot provision the managed endpoint ($reason)." +
+                        (stage?.takeIf { it.isNotBlank() }?.let { " Failed stage: $it." } ?: "")
+                }
                 "RelayEnvironmentEndpointUnavailableError" ->
                     "That machine's tunnel is not reachable right now."
                 "RelayEnvironmentEndpointTimedOutError" -> "That machine did not answer in time."
@@ -438,6 +443,7 @@ class RelayClient(
         val TAG_PATTERN = Regex("\"_tag\"\\s*:\\s*\"([^\"]+)\"")
         val TRACE_ID_PATTERN = Regex("\"traceId\"\\s*:\\s*\"([^\"]+)\"")
         val REASON_PATTERN = Regex("\"reason\"\\s*:\\s*\"([^\"]+)\"")
+        val PROVISIONING_STAGE_PATTERN = Regex("\"provisioningStage\"\\s*:\\s*\"([^\"]+)\"")
         val TRACEPARENT_TRACE_ID =
             Regex("^[\\da-f]{2}-([\\da-f]{32})-[\\da-f]{16}-[\\da-f]{2}$", RegexOption.IGNORE_CASE)
     }

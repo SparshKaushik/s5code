@@ -272,6 +272,7 @@ private fun matchesFilter(thread: ThreadSummary, filter: ThreadFilter): Boolean 
         ThreadFilter.All -> true
         ThreadFilter.Active ->
             thread.status == ThreadStatus.Working ||
+                thread.status == ThreadStatus.Waiting ||
                 thread.status == ThreadStatus.Queued ||
                 thread.status == ThreadStatus.Idle ||
                 thread.status == ThreadStatus.Failed || thread.status == ThreadStatus.Limited
@@ -355,7 +356,7 @@ fun searchMatch(
 internal fun homeListComparator(sort: ThreadSort): Comparator<ThreadSummary> {
     val base =
         compareByDescending<ThreadSummary> { it.pinned }
-            .thenBy { statusRank(it.status) }
+            .thenBy { statusRank(it) }
     return when (sort) {
         ThreadSort.Recent ->
             // Pinned block: keyed by arrangement, keyless newest-created last
@@ -400,9 +401,9 @@ private fun pinnedOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
  * a row and a stored arrangement cannot reorder them while they work.
  */
 private fun activeOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
-    val rank = statusRank(left.status).compareTo(statusRank(right.status))
+    val rank = statusRank(left).compareTo(statusRank(right))
     if (rank != 0) return rank
-    if (left.status == ThreadStatus.Working && right.status == ThreadStatus.Working) {
+    if (left.sortsAsWorking && right.sortsAsWorking) {
         return right.workingSortAtMillis.compareTo(left.workingSortAtMillis).takeIf { it != 0 }
             ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
             ?: left.environmentId.value.compareTo(right.environmentId.value)
@@ -426,8 +427,16 @@ private fun activeOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
         ?: left.environmentId.value.compareTo(right.environmentId.value)
 }
 
-private fun statusRank(status: ThreadStatus): Int =
-    when (status) {
+/**
+ * A turn waiting only on another thread is still a live run, which the RN list
+ * keeps in the working section (`isThreadWorking` reads the runtime alone), so
+ * starting and ending that wait does not move the row.
+ */
+private val ThreadSummary.sortsAsWorking: Boolean
+    get() = status == ThreadStatus.Working || blockedOnThreadWait
+
+private fun statusRank(thread: ThreadSummary): Int =
+    if (thread.sortsAsWorking) 3 else when (thread.status) {
         ThreadStatus.AwaitingApproval -> 0
         ThreadStatus.AwaitingInput -> 1
         ThreadStatus.Failed, ThreadStatus.Limited -> 2

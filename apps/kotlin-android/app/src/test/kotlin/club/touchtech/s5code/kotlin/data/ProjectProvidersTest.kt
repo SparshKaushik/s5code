@@ -52,4 +52,32 @@ class ProjectProvidersTest {
         // An instance the server no longer lists is a different error, not this one.
         assertFalse(isModelTurnedOffForProject(settings, providers, "p2", "unknown"))
     }
+
+    @Test
+    fun `a selection is unavailable when turned off or an Antigravity instance cannot run it`() {
+        val providers = TransportJson.decodeFromString(
+            kotlinx.serialization.builtins.ListSerializer(ServerProviderDto.serializer()),
+            """[
+                {"instanceId":"codex","driver":"codex","installed":true},
+                {"instanceId":"ag","driver":"antigravity","installed":true,
+                 "auth":{"status":"authenticated"},"availability":"available","models":[{"slug":"gemini"}]},
+                {"instanceId":"ag-out","driver":"antigravity","installed":true,
+                 "auth":{"status":"unauthenticated"},"models":[{"slug":"gemini"}]}
+            ]""",
+        )
+        val agSettings = TransportJson.decodeFromString(
+            ServerConfigSettingsDto.serializer(),
+            """{"providerInstances":{"ag":{"driver":"antigravity","enabled":true},
+                "ag-out":{"driver":"antigravity","enabled":true},
+                "ag-gone":{"driver":"antigravity","enabled":true}},
+                "projectSettingsOverrides":{"p1":{"providerInstances":{"codex":{"enabled":false}}}}}""",
+        )
+        assertTrue(isModelSelectionUnavailable(agSettings, providers, "p1", "codex", "gpt"))
+        assertFalse(isModelSelectionUnavailable(agSettings, providers, "p2", "codex", "gpt"))
+        assertFalse(isModelSelectionUnavailable(agSettings, providers, "p1", "ag", "gemini"))
+        assertTrue(isModelSelectionUnavailable(agSettings, providers, "p1", "ag", "other"))
+        assertTrue(isModelSelectionUnavailable(agSettings, providers, "p1", "ag-out", "gemini"))
+        // A configured Antigravity instance the server no longer lists cannot run anything.
+        assertTrue(isModelSelectionUnavailable(agSettings, providers, "p1", "ag-gone", "gemini"))
+    }
 }

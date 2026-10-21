@@ -1,6 +1,9 @@
 package club.touchtech.s5code.kotlin.feature.usage
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -24,7 +27,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -32,6 +39,7 @@ import androidx.core.graphics.toColorInt
 import club.touchtech.s5code.kotlin.data.displayLimitWindows
 import club.touchtech.s5code.kotlin.data.formatLimitDuration
 import club.touchtech.s5code.kotlin.data.formatResetLabel
+import club.touchtech.s5code.kotlin.data.paceRemainingPercent
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.LimitAccount
 import club.touchtech.s5code.kotlin.model.LimitPool
@@ -69,7 +77,7 @@ private fun accountColor(account: LimitAccount, index: Int): Color {
 }
 
 @Composable
-private fun PoolBar(window: LimitPoolWindow) {
+private fun PoolBar(window: LimitPoolWindow, now: Long) {
     // One weighted column per account, in the pool's fixed order: an account
     // without this window still takes its slot, so gaps read as gaps.
     Row(
@@ -78,12 +86,30 @@ private fun PoolBar(window: LimitPoolWindow) {
     ) {
         window.columns.forEachIndexed { index, (account, memberWindow) ->
             val remaining = memberWindow?.let { 100.0 - it.usedPercent.coerceIn(0.0, 100.0) }
+            val timeLeft = memberWindow?.let { paceRemainingPercent(it, now) }
+            val tickColor = MaterialTheme.colorScheme.onSurfaceVariant
             Box(
-                Modifier.weight(1f).fillMaxHeight().semantics {
-                    contentDescription =
-                        if (remaining == null) "${accountName(account)}: no limit reported"
-                        else "${accountName(account)}: ${remaining.toInt()}% left"
-                }
+                Modifier.weight(1f)
+                    .fillMaxHeight()
+                    .semantics {
+                        contentDescription =
+                            if (remaining == null) "${accountName(account)}: no limit reported"
+                            else
+                                "${accountName(account)}: ${remaining.toInt()}% left" +
+                                    (timeLeft?.let { ", $it% of the window left" } ?: "")
+                    }
+                    // Even pace: quota left past this mark is ahead of the clock.
+                    .drawWithContent {
+                        drawContent()
+                        if (timeLeft != null) {
+                            val tick = 2.dp.toPx()
+                            drawRect(
+                                tickColor,
+                                topLeft = Offset(size.width * timeLeft / 100f - tick / 2, 0f),
+                                size = Size(tick, size.height),
+                            )
+                        }
+                    }
             ) {
                 Box(
                     Modifier.fillMaxHeight()
@@ -161,7 +187,7 @@ private fun LimitWindowCard(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
-        PoolBar(window)
+        PoolBar(window, now)
         Row(verticalAlignment = Alignment.CenterVertically) {
             val detail =
                 listOfNotNull(
@@ -283,13 +309,22 @@ fun ComposerUsageLimitsCard(
                     )
                 }
             }
+            // The close row stays put while the limits scroll. The caller gives the
+            // card only the height left above the composer, so with the keyboard open
+            // the limits shrink instead of pushing the close row under the header.
+            val screenHeight = LocalConfiguration.current.screenHeightDp.dp
             UsageLimitsContent(
                 view = view,
                 now = now,
                 driver = driver,
                 onRedeemCredit = onRedeemCredit,
-                modifier = Modifier.padding(S5Theme.spacing.small),
+                modifier =
+                    Modifier.weight(1f, fill = false)
+                        .heightIn(max = screenHeight * 0.4f)
+                        .verticalScroll(rememberScrollState())
+                        .padding(S5Theme.spacing.small),
             )
         }
     }
 }
+

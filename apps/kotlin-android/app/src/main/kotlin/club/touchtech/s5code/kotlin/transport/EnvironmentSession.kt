@@ -10,6 +10,7 @@ import club.touchtech.s5code.kotlin.transport.wire.ProjectCloneStartResultDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigSettingsDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerConfigStreamEventDto
+import club.touchtech.s5code.kotlin.transport.wire.ServerEventLoopStallDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerInstallationDto
 import club.touchtech.s5code.kotlin.transport.wire.ServerProvidersUpdatedDto
 import kotlin.random.Random
@@ -108,6 +109,8 @@ data class SessionState(
      * read and `server.updateSettings` writes back.
      */
     val serverSettings: ServerConfigSettingsDto = ServerConfigSettingsDto(),
+    /** The host's recent stall from the latest config; never cached past it. */
+    val lastEventLoopStall: ServerEventLoopStallDto? = null,
 )
 
 /**
@@ -119,6 +122,8 @@ data class ServerCapabilities(
     val serverBrowser: Boolean = false,
     val serverResolvedCommandContext: Boolean = false,
     val threadVisitedTracking: Boolean = false,
+    /** `thread.stop` stops the thread server-side without a client-resolved run. */
+    val threadStop: Boolean = false,
     val threadSettlement: Boolean = false,
     val threadSnooze: Boolean = false,
     val threadPinning: Boolean = false,
@@ -530,6 +535,7 @@ class EnvironmentSession(
                             serverBrowser = descriptor.capabilities.serverBrowser,
                             serverResolvedCommandContext = descriptor.capabilities.serverResolvedCommandContext,
                             threadVisitedTracking = descriptor.capabilities.threadVisitedTracking,
+                            threadStop = descriptor.capabilities.threadStop,
                             threadSettlement = descriptor.capabilities.threadSettlement,
                             threadSnooze = descriptor.capabilities.threadSnooze,
                             threadPinning = descriptor.capabilities.threadPinning,
@@ -585,6 +591,7 @@ class EnvironmentSession(
                     continueThreadsAfterServerUpdate =
                         config.settings.continueThreadsAfterServerUpdate == true,
                     serverSettings = config.settings,
+                    lastEventLoopStall = config.lastEventLoopStall,
                 )
             // `canMaintainEnvironment` asks the session record, not the
             // credential store: a token minted before scopes existed would fail
@@ -722,6 +729,7 @@ class EnvironmentSession(
                                                     snapshot.settings
                                                         .continueThreadsAfterServerUpdate == true,
                                                 serverSettings = snapshot.settings,
+                                                lastEventLoopStall = snapshot.lastEventLoopStall,
                                             )
                                     }
                                 }

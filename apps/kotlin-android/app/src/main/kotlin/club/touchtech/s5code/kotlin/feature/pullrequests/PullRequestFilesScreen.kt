@@ -53,6 +53,7 @@ import club.touchtech.s5code.kotlin.data.PullRequestReference
 import club.touchtech.s5code.kotlin.data.annotatePullRequestFile
 import club.touchtech.s5code.kotlin.data.combinePullRequestDiffPages
 import club.touchtech.s5code.kotlin.data.filterPullRequestTestFiles
+import club.touchtech.s5code.kotlin.data.pullRequestChangeBreakdownLabel
 import club.touchtech.s5code.kotlin.data.pullRequestReviewKey
 import club.touchtech.s5code.kotlin.data.retainPullRequestDiffPage
 import club.touchtech.s5code.kotlin.data.reviewPosition
@@ -76,6 +77,7 @@ import club.touchtech.s5code.kotlin.feature.review.ReviewFileCard
 import club.touchtech.s5code.kotlin.model.ReviewFile
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilesViewedResultDto
 import androidx.compose.foundation.relocation.BringIntoViewRequester
 import androidx.compose.foundation.relocation.bringIntoViewRequester
@@ -223,6 +225,10 @@ fun PullRequestFilesScreen(
     val hiddenCount = combined.files.size - files.size
     val viewed = rememberPullRequestFilesViewed(store, environmentId, reference, if (commit == null) detail else null)
     val groups = remember(files) { files.groupBy { it.path.substringBeforeLast('/', "") } }
+    val breakdown by remember(environmentId, reference, commit) {
+            if (commit == null) store.pullRequests.changeBreakdown(environmentId, reference) else flowOf(PullRequestQuery())
+        }
+        .collectAsStateWithLifecycle(PullRequestQuery<PullRequestChangeBreakdownDto?>())
     var menuOpen by remember { mutableStateOf(false) }
 
     S5Screen(
@@ -259,21 +265,34 @@ fun PullRequestFilesScreen(
                     verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
                 ) {
                     item(key = "summary") {
-                        Text(
-                            buildString {
-                                append("${files.size} ${if (hiddenCount > 0) "visible" else "changed"} ")
-                                append(if (files.size == 1) "file" else "files")
-                                if (viewed.supported) append(" · ${files.count { viewed.isViewed(it.path) }} viewed")
-                                append(" · ")
-                                append(
-                                    if (hideTests) "$hiddenCount test ${if (hiddenCount == 1) "file" else "files"} hidden"
-                                    else "Test files included"
+                        Column(
+                            Modifier.padding(bottom = S5Theme.spacing.small),
+                            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
+                        ) {
+                            Text(
+                                buildString {
+                                    append("${files.size} ${if (hiddenCount > 0) "visible" else "changed"} ")
+                                    append(if (files.size == 1) "file" else "files")
+                                    if (viewed.supported) append(" · ${files.count { viewed.isViewed(it.path) }} viewed")
+                                    append(" · ")
+                                    append(
+                                        if (hideTests) "$hiddenCount test ${if (hiddenCount == 1) "file" else "files"} hidden"
+                                        else "Test files included"
+                                    )
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                            breakdown.value?.let { pullRequestChangeBreakdownLabel(it) }?.takeIf { it.isNotEmpty() }?.let {
+                                Text(
+                                    it,
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    maxLines = 2,
+                                    overflow = TextOverflow.Ellipsis,
                                 )
-                            },
-                            style = MaterialTheme.typography.bodySmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            modifier = Modifier.padding(bottom = S5Theme.spacing.small),
-                        )
+                            }
+                        }
                     }
                     if (files.isEmpty()) {
                         item(key = "empty") {

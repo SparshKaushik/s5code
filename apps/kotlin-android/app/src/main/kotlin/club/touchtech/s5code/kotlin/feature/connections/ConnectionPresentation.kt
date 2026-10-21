@@ -21,6 +21,8 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Environment
+import club.touchtech.s5code.kotlin.transport.wire.ServerEventLoopStallDto
+import kotlin.math.roundToLong
 
 /**
  * The environment glyph, matching `EnvironmentMachineSymbol` in the RN client:
@@ -131,4 +133,26 @@ fun connectionPresentation(state: ConnectionState): S5ConnectionPresentation {
                 offline = true,
             )
     }
+}
+
+data class HostFreezeNotice(val title: String, val description: String) {
+    val text get() = "$title. $description"
+}
+
+/**
+ * `hostFreezeNotice` in client-runtime: says why a host stopped answering,
+ * from the recent stall it reports on connect.
+ */
+fun hostFreezeNotice(hostLabel: String, stall: ServerEventLoopStallDto?): HostFreezeNotice? {
+    if (stall == null) return null
+    val loadAverage = stall.loadAverage
+    return HostFreezeNotice(
+        title = "$hostLabel froze for ${(stall.durationMs / 1000.0).roundToLong()}s",
+        description =
+            if (loadAverage != null && loadAverage > stall.cpuCount) {
+                "Its CPU is overloaded (load ${loadAverage.roundToLong()} on ${stall.cpuCount} cores)."
+            } else {
+                "S5 Code on $hostLabel was too busy to answer."
+            },
+    )
 }

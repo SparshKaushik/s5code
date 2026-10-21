@@ -88,20 +88,27 @@ fun changeRequestUrlFor(
         "github" -> "https://$host/$repository/pull/$number"
         "gitlab" -> "https://$host/$repository/-/merge_requests/$number"
         "gitcafe" -> "https://$host/$repository/pulls/$number"
-        "forgejo" -> {
-            val remote = httpUri(remoteUrl)
-            when {
-                !webUrl.isNullOrEmpty() -> "${webUrl.trimEnd('/')}/pulls/$number"
-                remote != null &&
-                    (remote.host.equals(host, ignoreCase = true) || remote.authorityHost().equals(host, ignoreCase = true)) ->
-                    "${remote.scheme}://${remote.authorityHost()}/$repository/pulls/$number"
-                else -> "https://$host/$repository/pulls/$number"
-            }
-        }
+        "forgejo" ->
+            if (!webUrl.isNullOrEmpty()) "${webUrl.trimEnd('/')}/pulls/$number"
+            else "${remoteWebOrigin(host, remoteUrl)}/$repository/pulls/$number"
         "bitbucket" -> "https://$host/$repository/pull-requests/$number"
-        "azure-devops" -> "https://${canonicalRepositoryKey("$host/$repository".lowercase())}/pullrequest/$number"
+        "azure-devops" -> {
+            val canonical = canonicalRepositoryKey("$host/$repository".lowercase())
+            val canonicalHost = canonical.substringBefore('/')
+            "${remoteWebOrigin(canonicalHost, remoteUrl)}/${canonical.substringAfter('/', "")}/pullrequest/$number"
+        }
         else -> null
     }
+
+/** An HTTP remote on [host] names the server's web origin; SSH remotes don't, so those assume https. */
+private fun remoteWebOrigin(host: String, remoteUrl: String?): String {
+    val remote = httpUri(remoteUrl)
+    return if (remote != null && (remote.host.equals(host, ignoreCase = true) || remote.authorityHost().equals(host, ignoreCase = true))) {
+        "${remote.scheme}://${remote.authorityHost()}"
+    } else {
+        "https://$host"
+    }
+}
 
 /** `pullRequestLinkProject`: the thread project's repository, so a bare number names one of its requests. */
 data class PullRequestLinkProject(
@@ -151,7 +158,10 @@ fun resolveLinkPullRequestInput(
         return PullRequestLinkInputResult.Link(link)
     }
     val number = parsed.toIntOrNull()?.takeIf { it >= 1 } ?: return null
-    project ?: return PullRequestLinkInputResult.Error("Paste a full URL to link a pull request from another repository.")
+    project
+        ?: return PullRequestLinkInputResult.Error(
+            "Paste the full pull request URL; this thread has no repository to resolve the number against.",
+        )
     val webUrl = project.webUrl(number)
     val webReference = webUrl?.let(::parseChangeRequestUrl)
     if (webUrl == null || webReference == null) {

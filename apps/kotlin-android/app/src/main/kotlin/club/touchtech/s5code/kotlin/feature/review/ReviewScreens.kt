@@ -92,6 +92,7 @@ import club.touchtech.s5code.kotlin.design.text.codeLanguageOfPath
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.ComposerAttachment
 import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
+import club.touchtech.s5code.kotlin.model.DiffHunk
 import club.touchtech.s5code.kotlin.model.DiffLineKind
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.ReviewFile
@@ -407,26 +408,27 @@ fun ReviewFileCard(
                     )
                 }
             } else {
-                val lines = remember(file.hunks) { file.hunks.flatMap { it.lines } }
+                val bounded = remember(file.hunks) { boundReviewHunks(file.hunks) }
+                val lines = remember(bounded) { bounded.hunks.flatMap { it.lines } }
                 val lineTexts = remember(lines) { lines.map { it.text } }
                 val highlightedLines = rememberHighlightedLines(lineTexts, language)
                 val wordRanges = remember(lines) { reviewWordDiffRanges(lines) }
                 val diffHorizontalScroll = rememberScrollState()
                 val textMeasurer = rememberTextMeasurer()
                 val codeStyle = S5Theme.code.code
-                val charWidthPx =
-                    remember(textMeasurer, codeStyle) {
-                        textMeasurer.measure("M", codeStyle).size.width
-                    }
                 val density = LocalDensity.current
-                val maxChars = remember(lines) { lines.maxOfOrNull { it.text.length } ?: 0 }
+                // One unwrapped layout of every line is the widest line's real width, so wide
+                // glyphs and tabs still scroll to the end where a character count would not.
                 val maxCodeWidthDp =
-                    remember(maxChars, charWidthPx, density) {
-                        with(density) { (maxChars * charWidthPx).toDp() }
+                    remember(lineTexts, codeStyle, density) {
+                        val widthPx =
+                            if (lineTexts.isEmpty()) 0
+                            else textMeasurer.measure(lineTexts.joinToString("\n"), codeStyle, softWrap = false).size.width
+                        with(density) { widthPx.toDp() }
                     }
                 Column(Modifier.padding(bottom = S5Theme.spacing.small)) {
                     var lineIndex = 0
-                    file.hunks.forEach { hunk ->
+                    bounded.hunks.forEach { hunk ->
                             Text(
                                 hunk.header,
                                 style = S5Theme.code.codeSmall,
@@ -544,11 +546,44 @@ fun ReviewFileCard(
                                 afterLine?.invoke(currentLineIndex)
                             }
                         }
+                    if (bounded.truncated) {
+                        S5Notice(
+                            icon = Icons.Rounded.Difference,
+                            text = "This diff is too large to show in full.",
+                            modifier = Modifier.padding(S5Theme.spacing.medium),
+                        )
+                    }
                     }
                 }
             }
         }
     }
+
+/** Rows one file draws at most, hunk headers included; bounds composition, highlighting and word matching. */
+internal const val REVIEW_MAX_FILE_ROWS = 2_000
+
+internal data class BoundedReviewHunks(val hunks: List<DiffHunk>, val truncated: Boolean)
+
+/**
+ * The first [maxRows] rows of [hunks], counting each header and line as one and
+ * cutting mid-hunk. Inline comments past the cut have no line to sit under, so
+ * they drop out with it.
+ */
+internal fun boundReviewHunks(hunks: List<DiffHunk>, maxRows: Int = REVIEW_MAX_FILE_ROWS): BoundedReviewHunks {
+    var remaining = maxRows
+    val kept = ArrayList<DiffHunk>(hunks.size)
+    for (hunk in hunks) {
+        if (remaining == 0) return BoundedReviewHunks(kept, truncated = true)
+        remaining -= 1
+        if (hunk.lines.size > remaining) {
+            kept += hunk.copy(lines = hunk.lines.take(remaining))
+            return BoundedReviewHunks(kept, truncated = true)
+        }
+        kept += hunk
+        remaining -= hunk.lines.size
+    }
+    return BoundedReviewHunks(hunks, truncated = false)
+}
 
 @Composable
 fun ReviewCommentInlineCard(comment: ReviewInlineComment) {

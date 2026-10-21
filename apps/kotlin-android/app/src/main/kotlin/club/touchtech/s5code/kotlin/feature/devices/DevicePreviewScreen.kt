@@ -53,6 +53,7 @@ import kotlinx.serialization.json.JsonObject
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.jsonPrimitive
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 
 /**
  * The thread's open devices, streamed through the environment's device hub —
@@ -492,6 +493,8 @@ private fun DeviceStream(
             deviceStreamDocument(configuration, script)
         }
 
+    val baseUrl = remember(platform, access.httpBase) { deviceStreamBaseUrl(platform, access.httpBase) }
+
     DisposableEffect(Unit) { onDispose { webViewRef(null) } }
 
     // `key(attempt)`/`key(configuration)` on RN — the stream remounts on retry
@@ -512,7 +515,7 @@ private fun DeviceStream(
                         override fun shouldOverrideUrlLoading(
                             view: WebView,
                             request: android.webkit.WebResourceRequest,
-                        ): Boolean = request.url.toString() != StreamBaseUrl
+                        ): Boolean = request.url.toString() != baseUrl
 
                         override fun onRenderProcessGone(
                             view: WebView,
@@ -544,7 +547,7 @@ private fun DeviceStream(
                     },
                     "ReactNativeWebView",
                 )
-                loadDataWithBaseURL(StreamBaseUrl, document, "text/html", "utf-8", null)
+                loadDataWithBaseURL(baseUrl, document, "text/html", "utf-8", null)
                 webViewRef(this)
             }
         },
@@ -570,8 +573,20 @@ private fun DeviceStream(
     }
 }
 
-/** The page's own origin; navigation away from it is blocked. */
+/** The page's own origin for Android targets; navigation away from it is blocked. */
 private const val StreamBaseUrl = "https://device-stream.t3.invalid/"
+
+/**
+ * `deviceStreamBaseUrl`: Android targets stream through WebCodecs, which needs
+ * a secure context. iOS targets stream an MJPEG image from the environment,
+ * which a synthetic https document blocks as mixed content on plain-http
+ * environments, so their page takes the environment's own origin.
+ */
+internal fun deviceStreamBaseUrl(platform: String, httpBase: String): String {
+    if (platform == "android") return StreamBaseUrl
+    val url = httpBase.toHttpUrlOrNull() ?: return StreamBaseUrl
+    return url.newBuilder().username("").password("").encodedPath("/").query(null).fragment(null).build().toString()
+}
 
 private fun jsonString(value: String): String =
     buildString {
