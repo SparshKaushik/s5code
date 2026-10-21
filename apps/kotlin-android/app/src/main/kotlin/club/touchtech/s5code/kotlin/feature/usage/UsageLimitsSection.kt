@@ -31,7 +31,8 @@ import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalWindowInfo
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -312,7 +313,7 @@ fun ComposerUsageLimitsCard(
             // The close row stays put while the limits scroll. The caller gives the
             // card only the height left above the composer, so with the keyboard open
             // the limits shrink instead of pushing the close row under the header.
-            val screenHeight = LocalConfiguration.current.screenHeightDp.dp
+            val screenHeight = with(LocalDensity.current) { LocalWindowInfo.current.containerSize.height.toDp() }
             UsageLimitsContent(
                 view = view,
                 now = now,
