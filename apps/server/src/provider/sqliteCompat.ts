@@ -139,4 +139,7 @@ export const DatabaseSync: any = nodeSqlite?.DatabaseSync ?? BunDatabaseSync;
 export const StatementSync: any = nodeSqlite?.StatementSync ?? StatementSyncShim;
 export const backup =
   nodeSqlite?.backup ?? ((database: BunDatabaseSync, path: string) => database.backup(path));
-export default { DatabaseSync, StatementSync, backup };
+// The packaged server aliases every `node:sqlite` import here, so each member
+// shared code reads must be re-exported. Bun has no authorizer to need these.
+export const constants: any = nodeSqlite?.constants ?? {};
+export default { DatabaseSync, StatementSync, backup, constants };

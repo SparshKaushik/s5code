@@ -1,5 +1,8 @@
+import * as NodeSqlite from "node:sqlite";
+
 import { describe, expect, it } from "@effect/vitest";
 
+import * as SqliteCompat from "./sqliteCompat.ts";
 import { StatementSyncShim } from "./sqliteCompat.ts";
 
 // Minimal stand-in for Bun's `bun:sqlite` Query. `NodeSqliteClient` calls
@@ -26,5 +29,16 @@ describe("StatementSyncShim", () => {
 
   it("degrades to no columns when the runtime exposes no column names", () => {
     expect(new StatementSyncShim({}).columns()).toEqual([]);
+  });
+});
+
+describe("sqliteCompat on Node", () => {
+  // The packaged server resolves `node:sqlite` to this module; a missing member
+  // compiles to undefined and crashes the server at startup.
+  it("exposes every node:sqlite member the SQLite client reads", () => {
+    expect(SqliteCompat.DatabaseSync).toBe(NodeSqlite.DatabaseSync);
+    expect(SqliteCompat.StatementSync).toBe(NodeSqlite.StatementSync);
+    expect(SqliteCompat.backup).toBe(NodeSqlite.backup);
+    expect(SqliteCompat.constants.SQLITE_TRANSACTION).toBe(NodeSqlite.constants.SQLITE_TRANSACTION);
   });
 });
