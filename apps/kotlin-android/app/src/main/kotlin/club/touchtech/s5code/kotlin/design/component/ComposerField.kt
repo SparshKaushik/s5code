@@ -27,6 +27,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.key.onPreviewKeyEvent
+import androidx.compose.ui.text.TextLayoutResult
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -66,6 +67,8 @@ fun S5ComposerField(
     centerContent: Boolean = singleLine,
     /** Cmd/Ctrl+Enter submits; bare Enter remains a newline. */
     onSubmitShortcut: (() -> Unit)? = null,
+    /** The laid-out draft, whose line count and widths outrun the visible line cap. */
+    onTextLayout: ((TextLayoutResult) -> Unit)? = null,
 ) {
     val source = interactionSource ?: remember { MutableInteractionSource() }
     val resolved = textStyle ?: MaterialTheme.typography.bodyLarge
@@ -104,6 +107,7 @@ fun S5ComposerField(
             },
         cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
         interactionSource = source,
+        onTextLayout = onTextLayout?.let { report -> { getResult -> getResult()?.let(report) } },
         decorator = { inner ->
             Box(contentAlignment = if (centerContent) Alignment.CenterStart else Alignment.TopStart) {
                 if (state.text.isEmpty()) {
@@ -173,6 +177,8 @@ fun S5ComposerControl(
     trailingIcon: ImageVector? = null,
     enabled: Boolean = true,
     contentDescription: String? = null,
+    /** A muted suffix after [label], e.g. the model's reasoning summary. Shrinks first. */
+    supporting: String? = null,
 ) {
     val contentColor =
         if (enabled) MaterialTheme.colorScheme.onSurfaceVariant
@@ -198,6 +204,17 @@ fun S5ComposerControl(
                     style = MaterialTheme.typography.labelLarge,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
+                    modifier = if (supporting != null) Modifier.weight(1f, fill = false) else Modifier,
+                )
+            }
+            if (supporting != null) {
+                Text(
+                    supporting,
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
                 )
             }
             if (trailingIcon != null) {

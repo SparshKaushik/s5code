@@ -16,10 +16,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Star
 import androidx.compose.material.icons.rounded.StarOutline
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -97,6 +99,12 @@ fun TaskSettingsSheet(
      * exist.
      */
     planModeEnabled: Boolean = false,
+    /**
+     * The draft the settings apply to. Prompt-controlled traits (`ultrathink`)
+     * read and write it rather than a stored option; see [traitSelectChange].
+     */
+    prompt: String = "",
+    onPromptChange: (String) -> Unit = {},
 ) {
     // The thread's own instance always has a row, even when no connected server
     // lists it: a thread bound to an instance the user removed still has to show
@@ -108,8 +116,10 @@ fun TaskSettingsSheet(
                 when (searchScope) {
                     ModelSearchScope.AllProviders -> listed
                     // A session without portable handoff stays on its instance.
-                    ModelSearchScope.ActiveProvider ->
-                        listed.filter { it.instanceId == settings.provider.instanceId }
+                    ModelSearchScope.ActiveProvider -> {
+                        val lockedEntry = catalog.firstOrNull { it.instance.instanceId == settings.provider.instanceId }
+                        catalog.filter { sharesLockedProvider(lockedEntry, settings.provider, it) }.map { it.instance }
+                    }
                 }
             if (visible.any { it.instanceId == settings.provider.instanceId }) {
                 visible
@@ -198,12 +208,25 @@ fun TaskSettingsSheet(
     val favoriteKeys =
         remember(favorites) { favorites.mapTo(mutableSetOf()) { it.instanceId to it.model } }
 
+    val traits = remember(descriptors, prompt) { promptControlledTraits(descriptors, prompt) }
+    var promptLockNotice by remember { mutableStateOf(false) }
+
     fun change(id: String, value: ProviderOptionValue) {
         // Null means the catalog moved under the sheet; dropping the tap is better
         // than persisting a value the provider would refuse on the next turn.
         applyProviderOption(descriptors, id, value)?.let {
             onSettingsChange(settings.copy(options = it))
         }
+    }
+
+    fun choose(descriptor: ProviderOptionDescriptor.Select, value: String) {
+        if (traits.ultrathinkInBodyText && descriptor.id == traits.primarySelect?.id) {
+            promptLockNotice = true
+            return
+        }
+        val change = traitSelectChange(descriptors, descriptor, prompt, value) ?: return
+        if (change.prompt != prompt) onPromptChange(change.prompt)
+        change.options?.let { onSettingsChange(settings.copy(options = it)) }
     }
 
     fun select(provider: ProviderInstance, model: String) {
@@ -269,7 +292,11 @@ fun TaskSettingsSheet(
         // The subtitle carries what is in effect, so the values a knob is set to are
         // visible before scrolling to its row.
         subtitle =
-            (listOf(settings.provider.label) + providerOptionSummaryLabels(descriptors))
+            (listOf(settings.provider.label) +
+                descriptors.flatMap { descriptor ->
+                    if (traits.controls(descriptor)) listOf("Ultrathink")
+                    else providerOptionSummaryLabels(listOf(descriptor))
+                })
                 .joinToString(" · "),
     ) {
         // weight(fill = false) keeps the list shrinkable: without it the fixed
@@ -489,6 +516,9 @@ fun TaskSettingsSheet(
             descriptors.forEach { descriptor ->
                 when (descriptor) {
                     is ProviderOptionDescriptor.Select -> {
+                        // The draft's own "ultrathink" outranks the stored effort.
+                        val selectedValue =
+                            if (traits.controls(descriptor)) "ultrathink" else descriptor.effectiveValue
                         item(key = "header_desc_${descriptor.id}", contentType = "header") {
                             S5SectionHeader(descriptor.label)
                         }
@@ -502,11 +532,9 @@ fun TaskSettingsSheet(
                                         options = descriptor.options,
                                         selected =
                                             descriptor.options.firstOrNull {
-                                                it.id == descriptor.effectiveValue
+                                                it.id == selectedValue
                                             } ?: descriptor.options.first(),
-                                        onSelect = {
-                                            change(descriptor.id, ProviderOptionValue.Text(it.id))
-                                        },
+                                        onSelect = { choose(descriptor, it.id) },
                                         label = { it.label },
                                     )
                                 }
@@ -521,13 +549,8 @@ fun TaskSettingsSheet(
                                     S5SelectableRow(
                                         label = choice.label,
                                         supporting = choice.description,
-                                        selected = choice.id == descriptor.effectiveValue,
-                                        onClick = {
-                                            change(
-                                                descriptor.id,
-                                                ProviderOptionValue.Text(choice.id),
-                                            )
-                                        },
+                                        selected = choice.id == selectedValue,
+                                        onClick = { choose(descriptor, choice.id) },
                                         position = rowPosition(index, descriptor.options.size),
                                     )
                                 }
@@ -576,6 +599,17 @@ fun TaskSettingsSheet(
                 }
             }
         }
+    }
+
+    if (promptLockNotice) {
+        AlertDialog(
+            onDismissRequest = { promptLockNotice = false },
+            title = { Text("Reasoning controlled by prompt") },
+            text = {
+                Text("Your prompt contains \"ultrathink\" in the text. Remove it to change this option.")
+            },
+            confirmButton = { TextButton(onClick = { promptLockNotice = false }) { Text("OK") } },
+        )
     }
 }
 

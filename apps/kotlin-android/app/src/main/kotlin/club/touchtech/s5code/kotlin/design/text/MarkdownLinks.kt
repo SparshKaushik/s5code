@@ -4,6 +4,8 @@ private val WINDOWS_DRIVE_PATH = Regex("^[A-Za-z]:[\\\\/]")
 private val RELATIVE_PREFIX = Regex("^(~/|\\.{1,2}/)")
 private val RELATIVE_FILE_PATH = Regex("^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+(?::\\d+){0,2}$")
 private val RELATIVE_FILE_NAME = Regex("^[A-Za-z0-9._-]+\\.[A-Za-z0-9_-]+(?::\\d+){0,2}$")
+/** `src/`, `docs/My Folder/`: a relative link ending in a slash names a directory. */
+private val RELATIVE_DIRECTORY_PATH = Regex("^(?:[A-Za-z0-9._-]+(?: +[A-Za-z0-9._-]+)*/)+$")
 private val POSITION_SUFFIX = Regex(":(\\d+)(?::(\\d+))?$")
 private val POSIX_ROOT_PREFIXES =
     listOf("/Users/", "/home/", "/tmp/", "/var/", "/etc/", "/opt/", "/mnt/", "/Volumes/", "/private/", "/root/")
@@ -154,11 +156,14 @@ fun resolveMarkdownLinkPresentation(href: String): MarkdownLinkPresentation {
             decode(pathWithQuery.substringBefore('?')) to decode(if (hashIndex >= 0) normalized.drop(hashIndex) else "")
         }
     val target = splitPosition(sourcePath.trim(), hash.trim())
-    if (target != null && looksLikeFilePath(target.pathWithPosition)) {
+    if (
+        target != null &&
+        (looksLikeFilePath(target.pathWithPosition) || RELATIVE_DIRECTORY_PATH.matches(target.pathWithPosition))
+    ) {
         return MarkdownLinkPresentation.File(
             href = normalized,
             icon = resolveMarkdownFileIcon(target.path),
-            label = fileLabel(target.pathWithPosition),
+            label = fileLinkLabel(target),
             path = target.path,
             line = target.line,
             column = target.column,
@@ -167,21 +172,48 @@ fun resolveMarkdownLinkPresentation(href: String): MarkdownLinkPresentation {
     return MarkdownLinkPresentation.Link(normalized.takeIf { it.startsWith("mailto:", true) || it.startsWith("tel:", true) })
 }
 
+/**
+ * `resolveFileLinkPath` in RN's `filePath.ts`: a `~/` link expands against the
+ * home inferred from [workspaceRoot], so `~/repo/src/a.ts` can land in the
+ * workspace. Null when the home cannot be inferred or a relative link climbs
+ * out of the workspace — never a guess.
+ */
+fun resolveFileLinkPath(workspaceRoot: String?, targetPath: String): String? {
+    if (targetPath.startsWith("~/") || targetPath.startsWith("~\\")) {
+        if (workspaceRoot.isNullOrBlank()) return null
+        // A backslash home link only means home on a Windows host.
+        if (targetPath[1] == '\\' && !isWindowsPathStyle(workspaceRoot)) return null
+        val home = inferHomeFromCwd(workspaceRoot) ?: return null
+        val windows = isWindowsPathStyle(home)
+        val rest = targetPath.drop(2)
+        return if (windows) "${home.trimEnd('/', '\\')}\\${rest.replace('/', '\\')}"
+        else "${home.trimEnd('/', '\\')}/${rest.trimStart('/')}"
+    }
+    return if (isAbsolutePath(targetPath)) targetPath else normalizeRelativePath(targetPath)
+}
+
 /** Constrains Markdown file links to this thread's project/worktree. */
 fun resolveWorkspaceRelativeFilePath(workspaceRoot: String?, targetPath: String): String? {
-    if (!isAbsolutePath(targetPath)) {
-        if (targetPath.startsWith("~/") || targetPath.startsWith("~\\")) return null
-        return normalizeRelativePath(targetPath)
-    }
+    val resolved = resolveFileLinkPath(workspaceRoot, targetPath) ?: return null
+    if (!isAbsolutePath(resolved)) return resolved
     if (workspaceRoot.isNullOrBlank()) return null
-    val target = targetPath.replace('\\', '/')
+    val target = resolved.replace('\\', '/')
     val root = workspaceRoot.replace('\\', '/').trimEnd('/')
-    val insensitive = WINDOWS_DRIVE_PATH.containsMatchIn(targetPath) || WINDOWS_DRIVE_PATH.containsMatchIn(workspaceRoot)
+    val insensitive = WINDOWS_DRIVE_PATH.containsMatchIn(resolved) || WINDOWS_DRIVE_PATH.containsMatchIn(workspaceRoot)
     val comparableTarget = if (insensitive) target.lowercase() else target
     val comparableRoot = if (insensitive) root.lowercase() else root
     if (!comparableTarget.startsWith("$comparableRoot/")) return null
     return normalizeRelativePath(target.drop(root.length + 1))
 }
+
+/** `inferHomeFromCwd` in `packages/shared/src/fileLinks.ts`. */
+private fun inferHomeFromCwd(cwd: String): String? =
+    Regex("^/Users/[^/]+").find(cwd)?.value
+        ?: Regex("^/home/[^/]+").find(cwd)?.value
+        ?: Regex("^[A-Za-z]:[\\\\/]Users[\\\\/][^\\\\/]+", RegexOption.IGNORE_CASE).find(cwd)?.value
+
+private fun isWindowsPathStyle(value: String) =
+    WINDOWS_DRIVE_PATH.containsMatchIn(value) || value.startsWith("\\\\") || Regex("[A-Za-z]:\\\\").containsMatchIn(value)
 
 private data class PositionedPath(
     val path: String,
@@ -230,11 +262,34 @@ private fun looksLikeFilePath(value: String): Boolean {
 private fun isAbsolutePath(value: String) =
     value.startsWith('/') || WINDOWS_DRIVE_PATH.containsMatchIn(value) || value.startsWith("\\\\")
 
+/** `fileLinkLabel` in `packages/shared/src/fileLinks.ts`: "main.ts · L42:C7", as desktop's chips read. */
+private fun fileLinkLabel(target: PositionedPath): String =
+    listOfNotNull(
+        target.path.replace('\\', '/').trimEnd('/').substringAfterLast('/').ifEmpty { target.path },
+        target.line?.let { line -> "L$line${target.column?.let { ":C$it" }.orEmpty()}" },
+    ).joinToString(" · ")
+
+/**
+ * `ENRICHED_INLINE_FILE_LINK_REGEX`: inline code that names a file. Chat renders
+ * such a span as the file's link, as `markdownWithInlineFileLinks` does in RN;
+ * commands, identifiers and URLs stay code.
+ */
+private val INLINE_CODE_FILE_LINK =
+    Regex(
+        """^(?!\S*://)(?:(?:\.{1,2}[\\/]|~[\\/]|/(?:Users|home|tmp|var|etc|opt|mnt|Volumes|private|root|usr|bin|sbin|lib|lib64|srv|dev|proc|sys|run|boot|media|workspace|workspaces)/|[A-Za-z]:[\\/])[^\s`]+|(?:[A-Za-z0-9._-]+[\\/])+[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+(?::\d+){0,2}|[A-Za-z0-9._-]+\.[A-Za-z0-9_-]+:\d+(?::\d+)?)$"""
+    )
+
+/** The file link an inline code span stands for, or null when it is just code. */
+fun inlineCodeFileLink(code: String): MarkdownLinkPresentation.File? =
+    code.takeIf { INLINE_CODE_FILE_LINK.matches(it) && '<' !in it && '>' !in it }
+        ?.let { resolveMarkdownLinkPresentation(it) as? MarkdownLinkPresentation.File }
+
 private fun fileLabel(value: String): String =
     value.replace('\\', '/').substringAfterLast('/').ifEmpty { value.replace('\\', '/') }
 
+// `decodeURIComponent`, not form decoding: a `+` in `c++/main.cpp` is a plus.
 private fun decode(value: String): String =
-    runCatching { java.net.URLDecoder.decode(value, Charsets.UTF_8.name()) }.getOrDefault(value)
+    runCatching { java.net.URLDecoder.decode(value.replace("+", "%2B"), Charsets.UTF_8.name()) }.getOrDefault(value)
 
 private fun String.removeWindowsFileSlash(): String =
     if (matches(Regex("^/[A-Za-z]:[\\\\/].*"))) drop(1) else this

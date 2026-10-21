@@ -42,9 +42,11 @@ import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,12 +64,16 @@ import club.touchtech.s5code.kotlin.BuildConfig
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.Routes
 import club.touchtech.s5code.kotlin.cloud.CloudAccountState
+import club.touchtech.s5code.kotlin.data.ProjectRemovalTarget
 import club.touchtech.s5code.kotlin.data.cacheSizeLabel
+import club.touchtech.s5code.kotlin.data.planProjectRemoval
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
 import club.touchtech.s5code.kotlin.design.component.S5Card
 import club.touchtech.s5code.kotlin.design.component.S5CardTone
 import club.touchtech.s5code.kotlin.design.component.S5CodeBlock
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
 import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5ListRow
 import club.touchtech.s5code.kotlin.design.component.S5Notice
@@ -84,6 +90,8 @@ import club.touchtech.s5code.kotlin.feature.home.ProjectScope
 import club.touchtech.s5code.kotlin.feature.home.buildProjectScopes
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Environment
+import club.touchtech.s5code.kotlin.model.Project
+import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.platform.notifications.AndroidLiveUpdateNotifications
 import club.touchtech.s5code.kotlin.platform.notifications.PushRegistrationStatus
 import club.touchtech.s5code.kotlin.platform.notifications.notificationsAllowed
@@ -572,12 +580,18 @@ fun SettingsNotificationsScreen(store: AppStore, onBack: () -> Unit, onOpen: (St
 /**
  * RN's `SettingsProjectOverviewRouteScreen`: the project groups the home list
  * knows about, each with a name field whose Save renames every checkout in the
- * group through `project.update` on its own environment.
+ * group through `project.update` on its own environment, and removal of one
+ * checkout or the whole group through `project.delete`.
  */
 @Composable
-fun SettingsOverviewScreen(store: AppStore, onBack: () -> Unit) {
+fun SettingsOverviewScreen(
+    store: AppStore,
+    onBack: () -> Unit,
+    confirmController: S5ConfirmDialogController,
+) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
+    val threads by store.workspace.threads.collectAsStateWithLifecycle()
     val preferences by store.preferences.collectAsStateWithLifecycle()
     val scopes =
         remember(projects, preferences.projectGrouping) {
@@ -605,7 +619,17 @@ fun SettingsOverviewScreen(store: AppStore, onBack: () -> Unit) {
                 )
             }
             scopes.forEach { scope ->
-                ProjectScopeCard(store = store, scope = scope, environments = environments)
+                // Removing a group's first member can reorder the groups; keyed
+                // slots keep a running rename or removal attached to its card.
+                key(scope.key) {
+                    ProjectScopeCard(
+                        store = store,
+                        scope = scope,
+                        environments = environments,
+                        threads = threads,
+                        confirmController = confirmController,
+                    )
+                }
             }
             Box(Modifier.padding(bottom = S5Theme.spacing.section))
         }
@@ -617,10 +641,64 @@ private fun ProjectScopeCard(
     store: AppStore,
     scope: ProjectScope,
     environments: List<Environment>,
+    threads: List<ThreadSummary>,
+    confirmController: S5ConfirmDialogController,
 ) {
     val coroutineScope = rememberCoroutineScope()
     var draft by remember(scope.key) { mutableStateOf(scope.title) }
     var saving by remember(scope.key) { mutableStateOf(false) }
+    var removing by remember(scope.key) { mutableStateOf(false) }
+    fun canOperate(member: Project) =
+        environments.firstOrNull { it.id == member.environmentId }?.capabilities?.sessionCanOperate == true
+    val canRemoveGroup = scope.projects.all(::canOperate)
+    fun remove(members: List<Project>) {
+        if (removing) return
+        val denied = members.firstOrNull { !canOperate(it) }
+        if (denied != null) {
+            val label = environments.firstOrNull { it.id == denied.environmentId }?.label ?: "this environment"
+            store.showError("This connection cannot change projects in $label.")
+            return
+        }
+        val plan =
+            planProjectRemoval(
+                members = members,
+                groupMemberCount = scope.projects.size,
+                displayName = scope.title,
+                threads = threads,
+                environmentLabel = { id -> environments.firstOrNull { it.id == id }?.label },
+            )
+        val title = if (plan.target == ProjectRemovalTarget.Checkout) "Remove checkout" else "Remove project"
+        confirmController.show(
+            S5ConfirmDialogRequest(
+                title = title,
+                message = plan.confirmationMessage,
+                confirmText = title,
+                destructive = true,
+                onConfirm = {
+                    removing = true
+                    coroutineScope.launch {
+                        try {
+                            // One at a time, stopping at the first failure, as RN does.
+                            for (member in members) {
+                                try {
+                                    store.workspace.removeProject(member.environmentId, member.id, force = true)
+                                } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                                    throw cancelled
+                                } catch (error: Exception) {
+                                    store.showError(
+                                        "Failed to remove \"${member.title}\": ${error.message ?: "An error occurred."}"
+                                    )
+                                    break
+                                }
+                            }
+                        } finally {
+                            removing = false
+                        }
+                    }
+                },
+            )
+        )
+    }
     val nextName = draft.trim()
     // RN's canSave: non-blank and different from the group's display name.
     val canSave = !saving && nextName.isNotEmpty() && nextName != scope.title
@@ -687,7 +765,36 @@ private fun ProjectScopeCard(
                         style = S5Theme.code.inlineTechnical,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                    if (scope.projects.size > 1) {
+                        TextButton(
+                            onClick = { remove(listOf(member)) },
+                            enabled = !removing && canOperate(member),
+                        ) {
+                            Text("Remove checkout", color = MaterialTheme.colorScheme.error)
+                        }
+                    }
                 }
+            }
+            Column {
+                TextButton(onClick = { remove(scope.projects) }, enabled = !removing && canRemoveGroup) {
+                    Text(
+                        when {
+                            removing -> "Removing…"
+                            scope.projects.size > 1 -> "Remove this project everywhere"
+                            else -> "Remove project"
+                        },
+                        color = MaterialTheme.colorScheme.error,
+                    )
+                }
+                Text(
+                    if (scope.projects.size > 1) {
+                        "Deletes all ${scope.projects.size} checkout entries and their threads on every machine. Files on disk are not touched."
+                    } else {
+                        "Deletes the project entry and its threads. Files on disk are not touched."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             }
         }
     }

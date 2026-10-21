@@ -42,6 +42,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -50,6 +51,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.IntSize
@@ -92,10 +95,23 @@ private val EXPANDED_RADIUS = 26.dp
  */
 private const val EXPANDED_MAX_LINES = 6
 
+/** Room for the caret when a one-line draft's width is held against the row's. */
+private val ROW_TEXT_SLACK = 2.dp
+
 /**
- * Thread composer, matching the RN client's two-state shape: a single-line pill
- * with just a send target while idle, expanding into a card with the attach
- * control, model picker, and send/stop along its bottom edge once focused.
+ * Whether the draft no longer fits the one-row composer: it wrapped where it is
+ * laid out, or its one-line width exceeds the row's text area. The width check is
+ * what lets a draft laid out in the wider card return to the row once it fits,
+ * and the slack keeps a draft right at the edge from flipping back and forth.
+ */
+internal fun draftOverflowsRow(lineCount: Int, oneLineWidth: Float, rowTextWidth: Float): Boolean =
+    lineCount > 1 || (rowTextWidth > 0f && oneLineWidth > rowTextWidth)
+
+/**
+ * Thread composer, matching the RN client's shape: one row with the attach
+ * control, the draft, the model picker, the mic, and one action, until the
+ * focused draft would wrap. Then the draft stacks above a toolbar in a card, and
+ * returns to the row once it fits again.
  *
  * There is exactly one [S5ComposerField] call site, and it keeps the same parent
  * in both states. That is load-bearing rather than tidiness: branching the layout
@@ -177,6 +193,8 @@ fun ThreadComposer(
     onValueChange: (String) -> Unit,
     onSend: () -> Unit,
     sendLabel: String = "Send",
+    /** RN's composer placeholder; open approvals swap in the decline-and-redirect hint. */
+    placeholder: String = "Ask the repo agent, or run a command…",
     onCancel: () -> Unit,
     working: Boolean,
     /** Present while the thread's queue is held; an empty composer offers it in place of Send. */
@@ -190,6 +208,8 @@ fun ThreadComposer(
     provider: ProviderInstance,
     /** Display name for the chip, resolved from the catalog — never the slug. */
     modelLabel: String,
+    /** `buildTraitsTriggerDisplay`: "High · Fast" beside the model; empty hides it. */
+    modelSummary: String = "",
     onOpenSettings: () -> Unit,
     /**
      * Whether the provider allows the plan/default mode switch, from
@@ -361,11 +381,16 @@ fun ThreadComposer(
 
     val interactionSource = remember { MutableInteractionSource() }
     val focused by interactionSource.collectIsFocusedAsState()
+    // Only the verdict is state, so a keystroke that keeps it costs no recomposition.
+    var draftOverflows by remember(draftKey) { mutableStateOf(false) }
+    var rowTextWidth by remember { mutableFloatStateOf(0f) }
+    val rowTextSlack = with(LocalDensity.current) { ROW_TEXT_SLACK.toPx() }
     // Attachments force the card open: thumbnails have nowhere to go in a pill,
     // and a paste that appeared to do nothing is worse than an expanded composer.
     // An active (or errored) dictation session does the same — its toolbar row
     // lives in the expanded chrome.
-    val expanded = focused || attachments.isNotEmpty() || voicePresented
+    val expanded =
+        (focused && value.isNotEmpty() && draftOverflows) || attachments.isNotEmpty() || voicePresented
     val canSend = value.isNotBlank() || attachments.isNotEmpty()
     val resumeScope = rememberCoroutineScope()
     var resumingQueue by remember { mutableStateOf(false) }
@@ -399,12 +424,9 @@ fun ThreadComposer(
             animationSpec = spatial,
             label = "composerPadding",
         )
-    val fieldStartPadding by
-        animateDpAsState(
-            targetValue = if (expanded) S5Theme.spacing.tiny else S5Theme.spacing.medium,
-            animationSpec = spatial,
-            label = "composerFieldPadding",
-        )
+    // Mid-animation the field is narrower than either resting layout, so a wrap
+    // seen then would flip the composer back and record a too-narrow row width.
+    val paddingSettled = surfacePadding == if (expanded) S5Theme.spacing.medium else S5Theme.spacing.tiny
 
     Column(
         modifier
@@ -498,10 +520,17 @@ fun ThreadComposer(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
                 ) {
+                    if (!expanded) {
+                        S5ComposerControl(
+                            label = null,
+                            icon = Icons.Rounded.Add,
+                            contentDescription = "Attach image",
+                            onClick = onAddAttachment,
+                        )
+                    }
                     S5ComposerField(
                         state = draftState,
-                        // RN's composer placeholder, verbatim.
-                        placeholder = "Ask the repo agent, or run a command…",
+                        placeholder = placeholder,
                         // Never single-line, even collapsed. `singleLine` is what
                         // tells the IME to replace the newline key with Done, and
                         // Android fixes that when the input session opens: a field
@@ -520,10 +549,18 @@ fun ThreadComposer(
                         onSubmitShortcut = {
                             if (canSend && dictation?.state?.active != true) onSend()
                         },
+                        onTextLayout = onTextLayout@{ layout ->
+                            if (!paddingSettled) return@onTextLayout
+                            val oneLineWidth =
+                                if (layout.lineCount == 1) layout.getLineRight(0) - layout.getLineLeft(0) else 0f
+                            draftOverflows =
+                                draftOverflowsRow(layout.lineCount, oneLineWidth, rowTextWidth - rowTextSlack)
+                        },
                         modifier =
                             Modifier.weight(1f)
                                 .heightIn(min = 40.dp)
-                                .padding(start = fieldStartPadding)
+                                .padding(start = S5Theme.spacing.tiny)
+                                .onSizeChanged { if (!expanded && paddingSettled) rowTextWidth = it.width.toFloat() }
                                 .composerPastedTextReceiver(
                                     shouldFold = { text ->
                                         pastedTextShouldFold(text, canAttachPastedText())
@@ -532,14 +569,35 @@ fun ThreadComposer(
                                 )
                                 .composerImageReceiver(onAddImages),
                     )
-                    // Collapsed keeps the mic and one action in the pill. If a
-                    // turn is active that action remains Stop; focusing expands
-                    // the composer and exposes a separate Send action beside it.
+                    // The row keeps the model picker, shrunk to the provider avatar
+                    // once there is a draft so the text keeps the width, and one
+                    // action: Stop or Resume only while the draft is empty.
                     if (!expanded) {
+                        S5ComposerControl(
+                            label = modelLabel.takeIf { value.isEmpty() },
+                            leading = { S5ProviderAvatar(provider, size = 20.dp) },
+                            onClick = onOpenSettings,
+                            contentDescription =
+                                listOf("Model and reasoning settings", modelLabel, modelSummary)
+                                    .filter(String::isNotEmpty)
+                                    .joinToString(", "),
+                            modifier = Modifier.widthIn(max = 140.dp),
+                        )
+                        if (devicePreviewCount > 0) {
+                            S5ComposerControl(
+                                label = null,
+                                icon = Icons.Rounded.Smartphone,
+                                contentDescription =
+                                    if (devicePreviewCount == 1) "View device"
+                                    else "View $devicePreviewCount devices",
+                                onClick = onOpenDevicePreview,
+                            )
+                        }
                         DictationMicControl(dictation)
                         SendOrStop(
                             working = working,
                             canSend = canSend,
+                            sendLabel = if (connectionState != ConnectionState.Connected) "Queue" else sendLabel,
                             onSend = onSend,
                             onCancel = onCancel,
                             resume = resumeAction,
@@ -566,11 +624,15 @@ fun ThreadComposer(
                             )
                             S5ComposerControl(
                                 label = modelLabel,
+                                supporting = modelSummary.ifEmpty { null },
                                 leading = { S5ProviderAvatar(provider, size = 20.dp) },
                                 trailingIcon = Icons.Rounded.ExpandMore,
                                 onClick = onOpenSettings,
-                                contentDescription = "Model and settings",
-                                modifier = Modifier.widthIn(max = 180.dp),
+                                contentDescription =
+                                    listOf("Model and reasoning settings", modelLabel, modelSummary)
+                                        .filter(String::isNotEmpty)
+                                        .joinToString(", "),
+                                modifier = Modifier.widthIn(max = if (modelSummary.isEmpty()) 180.dp else 260.dp),
                             )
                             Box(Modifier.weight(1f))
                             if (devicePreviewCount > 0) {
@@ -652,13 +714,14 @@ private fun ResumeQueueAction(resume: ResumeQueue) {
 private fun SendOrStop(
     working: Boolean,
     canSend: Boolean,
+    sendLabel: String,
     onSend: () -> Unit,
     onCancel: () -> Unit,
     resume: ResumeQueue?,
 ) {
     if (resume != null) {
         ResumeQueueAction(resume)
-    } else if (working) {
+    } else if (working && !canSend) {
         S5ComposerAction(
             icon = Icons.Rounded.Stop,
             label = "Stop the agent",
@@ -669,7 +732,7 @@ private fun SendOrStop(
     } else {
         S5ComposerAction(
             icon = Icons.AutoMirrored.Rounded.Send,
-            label = "Send message",
+            label = sendLabel,
             onClick = onSend,
             enabled = canSend,
         )

@@ -46,10 +46,22 @@ fun ProviderAccountsScreen(store: AppStore, onBack: () -> Unit) {
             item { EnvironmentChoices(targets, env?.id) { selected = it } }
             if (env == null) item { Text("Select a connected environment.") }
             failure?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
-            if (env != null && providers.isEmpty()) item { Text("Configure a provider with in-app sign-in in web or desktop Settings.") }
-            providers.forEach { provider -> item(key = provider.v2String("instanceId")) {
-                ProviderAccountCard(store, env!!.id, provider)
-            } }
+            // Sign-in writes need `providers:manage`; a narrower session sees why instead of failing rows.
+            if (env != null && !env.capabilities.sessionCanManageProviders) item {
+                Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    Text("Limited permissions", style = MaterialTheme.typography.bodyLarge)
+                    Text(
+                        "This session can view ${env.label}'s providers but can't change their settings.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            } else {
+                if (env != null && providers.isEmpty()) item { Text("Configure a provider with in-app sign-in in web or desktop Settings.") }
+                providers.forEach { provider -> item(key = provider.v2String("instanceId")) {
+                    ProviderAccountCard(store, env!!.id, provider)
+                } }
+            }
         }
     }
 }

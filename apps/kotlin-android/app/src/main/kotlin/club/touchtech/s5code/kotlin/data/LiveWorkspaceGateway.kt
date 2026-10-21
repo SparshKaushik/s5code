@@ -865,6 +865,7 @@ class LiveWorkspaceGateway(
                             sessionAllowsSourceControlWrite =
                                 state?.allowsRpc("source-control:write") == true,
                             sessionAllowsOperate = state?.allowsRpc("orchestration:operate") == true,
+                            sessionAllowsFilesystemWrite = state?.allowsRpc("filesystem:write") == true,
                             sessionPermissions = state?.permissions ?: state?.scopes,
                             sessionExpiresAt = state?.sessionExpiresAt,
                             serverSelfUpdate = state?.capabilities?.serverSelfUpdate,
@@ -930,7 +931,7 @@ class LiveWorkspaceGateway(
             shells.forEach { raw ->
                 val shell = raw.normalizedV2()
                 if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
-                val summary = threadSummaryFrom(id, shell, ::instanceFor, now, subagentRequests[shell.id], serverSettles(id))
+                val summary = threadSummaryFrom(id, shell, ::instanceFor, now, subagentRequests[shell.id], serverSettles(id), visitTracking(id))
                 if (isArchived(shell)) archivedThreads += summary else active += summary
             }
         }
@@ -941,7 +942,7 @@ class LiveWorkspaceGateway(
             snapshot.threads.forEach { raw ->
                 val shell = raw.normalizedV2()
                 if (shell.lineage?.v2String("relationshipToParent") == "subagent") return@forEach
-                val summary = threadSummaryFrom(id, shell, ::instanceFor, now, serverSettles = serverSettles(id))
+                val summary = threadSummaryFrom(id, shell, ::instanceFor, now, serverSettles = serverSettles(id), visitTracking = visitTracking(id))
                 if (archivedThreads.none {
                         it.environmentId == summary.environmentId && it.id == summary.id
                     }
@@ -1010,6 +1011,9 @@ class LiveWorkspaceGateway(
      */
     private fun serverSettles(environmentId: EnvironmentId): Boolean =
         sessions.value[environmentId.value]?.session?.state?.value?.capabilities?.threadAutoSettlement == true
+
+    private fun visitTracking(environmentId: EnvironmentId): Boolean =
+        sessions.value[environmentId.value]?.session?.state?.value?.capabilities?.threadVisitedTracking == true
 
     /**
      * [projectScoped] is the server's settings when it advertises
@@ -1080,6 +1084,7 @@ class LiveWorkspaceGateway(
                             .associate { it.slug to optionDescriptorsFrom(it.capabilities) }
                             .filterValues { it.isNotEmpty() },
                     interactionModeToggle = first.showInteractionModeToggle != false,
+                    continuationGroupKey = first.continuation?.groupKey?.takeIf { it.isNotBlank() },
                     enabled = enabled,
                     projectEnabled = projectEnabled,
                 )
@@ -1546,13 +1551,14 @@ class LiveWorkspaceGateway(
         retry: Boolean,
     ): Boolean = sessionFor(environmentId).projectCloneAction(projectId.value, retry)
 
-    override suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId) {
+    override suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId, force: Boolean) {
         dispatch(
             environmentId,
             buildJsonObject {
                 put("type", "project.delete")
                 put("commandId", Commands.newCommandId())
                 put("projectId", projectId.value)
+                if (force) put("force", true)
             },
         )
     }
@@ -1664,6 +1670,7 @@ class LiveWorkspaceGateway(
                                 ::instanceFor,
                                 clock.value,
                                 serverSettles = serverSettles(environmentId),
+                                visitTracking = visitTracking(environmentId),
                             ).copy(syncPhase = ThreadSyncPhase.Syncing),
                         )) {
                         sync.value = ThreadSyncPhase.Syncing
@@ -1749,7 +1756,7 @@ class LiveWorkspaceGateway(
                 val page = club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto(
                     beforeCursor = cursor, hasMore = hasMore, snapshotSequence = sequence,
                 )
-                target.value = threadDetailFrom(environmentId, thread, ::instanceFor, clock.value, page, loadingOlder, serverSettles(environmentId))
+                target.value = threadDetailFrom(environmentId, thread, ::instanceFor, clock.value, page, loadingOlder, serverSettles(environmentId), visitTracking(environmentId))
                     .copy(syncPhase = sync.value)
                 // Expanded history stays in memory, as on RN; repeatedly caching
                 // an entire paged transcript defeats the bounded snapshot path.
@@ -1804,7 +1811,7 @@ class LiveWorkspaceGateway(
             clock.collect { now -> lock.withLock {
                 publishedThread?.let { thread -> target.update { detail ->
                     detail?.copy(summary = threadSummaryFrom(environmentId, thread.asShell(), ::instanceFor, now,
-                        serverSettles = serverSettles(environmentId)))
+                        serverSettles = serverSettles(environmentId), visitTracking = visitTracking(environmentId)))
                 } }
             } }
         }
@@ -2283,7 +2290,12 @@ class LiveWorkspaceGateway(
         sessionFor(environmentId)
             .query(
                 WsMethods.ScheduledTasksListWebhookDeliveries,
-                buildJsonObject { put("id", taskId) },
+                // Outcomes decode as strings here, so the server may send rows
+                // whose outcome this build has never heard of.
+                buildJsonObject {
+                    put("id", taskId)
+                    put("acceptAnyOutcome", true)
+                },
                 ScheduledTaskListWebhookDeliveriesResultDto.serializer(),
             )
             .deliveries
@@ -2299,6 +2311,7 @@ class LiveWorkspaceGateway(
                 buildJsonObject {
                     put("id", taskId)
                     put("deliveryId", deliveryId)
+                    put("acceptAnyOutcome", true)
                 },
                 ScheduledTaskGetWebhookDeliveryResultDto.serializer(),
             )
@@ -3075,6 +3088,23 @@ class LiveWorkspaceGateway(
                 it.environmentId == environmentId && it.id.value == projectKey
             } ?: return emptyList()
         return listRefs(environmentId, project.workspaceRoot)
+    }
+
+    override suspend fun projectIsGitRepo(environmentId: EnvironmentId, projectKey: String): Boolean {
+        val project =
+            projects.value.firstOrNull { it.environmentId == environmentId && it.id.value == projectKey }
+                ?: error("The selected project is unavailable.")
+        return sessionFor(environmentId)
+            .query(
+                WsMethods.VcsListRefs,
+                buildJsonObject {
+                    put("cwd", project.workspaceRoot)
+                    put("refKind", "local")
+                    put("limit", 1)
+                },
+                VcsListRefsResultDto.serializer(),
+            )
+            .isRepo
     }
 
     override suspend fun checkoutNewTaskBranch(

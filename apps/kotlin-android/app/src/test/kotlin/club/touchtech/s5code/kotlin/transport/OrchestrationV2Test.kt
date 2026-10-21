@@ -117,9 +117,9 @@ class OrchestrationV2Test {
         val approval = JsonObject(item("approval", 1, "approval_request") + mapOf(
             "requestId" to JsonPrimitive("request"), "requestKind" to JsonPrimitive("command"), "prompt" to JsonPrimitive("Run shell?")))
         val projection = V2ProjectionDto(metadata, runtimeRequests = listOf(request), turnItems = listOf(approval), visibleTurnItems = listOf(row(approval)))
-        assertEquals("request", v2Presentation(projection).approval?.id)
+        assertEquals("request", v2Presentation(projection).approvals.firstOrNull()?.id)
         val resolved = applyV2Event(projection, event("runtime-request.updated", JsonObject(request + ("status" to JsonPrimitive("resolved")))), false, null)
-        assertNull(v2Presentation(resolved).approval)
+        assertTrue(v2Presentation(resolved).approvals.isEmpty())
         assertEquals(1, resolved.visibleTurnItems.size)
     }
 

@@ -38,7 +38,8 @@ object Routes {
     const val ThreadDevices = "threads/{environmentId}/{threadId}/devices"
     const val ThreadBrowser = "threads/{environmentId}/{threadId}/browser"
     const val ThreadRewind = "threads/{environmentId}/{threadId}/rewind"
-    const val ThreadFiles = "threads/{environmentId}/{threadId}/files"
+    /** [dir] opens the tree with that workspace directory revealed (a transcript directory link). */
+    const val ThreadFiles = "threads/{environmentId}/{threadId}/files?dir={dir}"
     // File viewers carry the path as a query parameter so a deep link (or a
     // notification) can open one file directly rather than a tree.
     const val ThreadFile = "threads/{environmentId}/{threadId}/files/source?path={path}"
@@ -284,7 +285,15 @@ object Routes {
 
     /** The same type-sensitive destination used by the workspace file tree. */
     fun threadFilePreview(environmentId: String, threadId: String, path: String) =
-        threadChild(environmentId, threadId, "${fileRouteSuffix(path)}?path=${android.net.Uri.encode(path)}")
+        threadChild(environmentId, threadId, fileLinkSuffix(path))
+
+    /**
+     * Where a workspace link opens: a path ending in `/` names a directory and
+     * reveals it in the tree; anything else opens the file's viewer.
+     */
+    fun fileLinkSuffix(path: String): String =
+        if (path.endsWith('/')) "files?dir=${android.net.Uri.encode(path.trimEnd('/'))}"
+        else "${fileRouteSuffix(path)}?path=${android.net.Uri.encode(path)}"
 
     /**
      * The viewer a workspace file opens in, following `defaultViewMode` in

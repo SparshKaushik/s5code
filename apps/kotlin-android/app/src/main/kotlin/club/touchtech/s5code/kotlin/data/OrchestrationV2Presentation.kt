@@ -14,7 +14,8 @@ import kotlinx.serialization.json.*
 
 internal data class V2Presentation(
     val feed: List<FeedEntry>,
-    val approval: PendingApproval?,
+    /** Open approvals, oldest first; the first is the gate the screen shows. */
+    val approvals: List<PendingApproval>,
     val userInput: PendingUserInput?,
     val queuedRuns: List<QueuedRun>,
     val providerNativeSubagent: Boolean,
@@ -66,10 +67,10 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     val items = projection.visibleTurnItems.sortedBy { it.position }.filter {
         it.visibility != "local" || show(it.item)
     }
-    val approvalItem = pending.asSequence().filter { it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") }
+    val approvalItems = pending.asSequence().filter { it.v2String("kind") !in setOf("user_input", "auth_refresh", "dynamic_tool_call") }
         .mapNotNull { request -> projection.turnItems.firstOrNull {
             it.v2String("requestId") == request.v2String("id") && it.v2String("type") == "approval_request"
-        } }.firstOrNull()
+        } }.toList()
     val questionItem = pending.asSequence().filter { it.v2String("kind") == "user_input" }
         .mapNotNull { request -> projection.turnItems.firstOrNull {
             it.v2String("requestId") == request.v2String("id") && it.v2String("type") == "user_input_request"
@@ -117,7 +118,7 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                     else -> PlanStepState.Pending
                 })
             }, runId, at)
-            "proposed_plan" -> FeedEntry.AgentMessage(id, item.v2String("markdown").orEmpty(), "Plan",
+            "proposed_plan" -> FeedEntry.ProposedPlan(id, item.v2String("markdown").orEmpty(),
                 item.v2Bool("streaming"), turnId = runId, atMillis = at, endedAtMillis = end)
             "subagent" -> FeedEntry.Subagent(id, title ?: "Subagent", item.v2String("prompt").orEmpty(),
                 state in setOf("pending", "running", "waiting"), runId, at,
@@ -196,7 +197,7 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     }.toMap()
     return V2Presentation(
         groupConsecutiveThoughts(feed.flatMap { entry -> listOfNotNull(entry, appEntries[entry.id]) }),
-        approvalItem?.let { PendingApproval(it.v2String("requestId")!!, it.v2String("title") ?: "Approval required",
+        approvalItems.map { PendingApproval(it.v2String("requestId")!!, it.v2String("title") ?: "Approval required",
             it.v2String("prompt").orEmpty(), null, approvalKindOf(it), it.v2String("appName"),
             it.v2String("requestKind"), approvalOptionsOf(it)) },
         questionItem?.let { item -> userInputOf(item)?.copy(id = item.v2String("requestId")!!,

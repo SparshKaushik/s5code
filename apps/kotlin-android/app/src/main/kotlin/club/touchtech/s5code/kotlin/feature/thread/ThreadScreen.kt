@@ -12,6 +12,9 @@ import androidx.compose.material.icons.rounded.Public
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
+import androidx.compose.ui.draw.clip
+import club.touchtech.s5code.kotlin.design.component.S5BottomSheet
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +37,9 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.ArrowDownward
 import androidx.compose.material.icons.rounded.Bolt
+import androidx.compose.material.icons.rounded.CheckCircle
+import androidx.compose.material.icons.rounded.Groups
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.BrokenImage
 import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material.icons.rounded.Folder
@@ -56,6 +62,7 @@ import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
@@ -107,6 +114,7 @@ import club.touchtech.s5code.kotlin.model.EnvironmentId
 import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.ThreadId
 import club.touchtech.s5code.kotlin.model.ThreadStatus
+import club.touchtech.s5code.kotlin.model.ThreadSummary
 import club.touchtech.s5code.kotlin.model.ThreadSyncPhase
 import club.touchtech.s5code.kotlin.platform.rememberComposerImageIntake
 import club.touchtech.s5code.kotlin.platform.rememberComposerImagePicker
@@ -114,6 +122,11 @@ import club.touchtech.s5code.kotlin.platform.rememberQuestionFileIntake
 import club.touchtech.s5code.kotlin.platform.rememberQuestionFilePicker
 import club.touchtech.s5code.kotlin.platform.rememberQuestionMediaPicker
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.async
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.jsonPrimitive
+import kotlinx.serialization.json.put
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
@@ -176,6 +189,10 @@ fun ThreadScreen(
     val copy = rememberClipboardWriter()
 
     var settingsOpen by remember(threadId) { mutableStateOf(false) }
+    var backgroundWorkOpen by remember(threadId) { mutableStateOf(false) }
+    // One status action at a time, released when the command settles: an accepted
+    // Stop can leave tasks running, so a retry must stay possible.
+    var statusActionPending by remember(threadId) { mutableStateOf(false) }
     var following by remember(threadId) { mutableStateOf(true) }
     // The questionnaire owns the composer slot while a user-input request is
     // open, matching the RN client: expanded it is the full card, collapsed it
@@ -250,12 +267,18 @@ fun ThreadScreen(
     var lastVisitSentAt by remember(env, id) { mutableStateOf(0L) }
     var lastVisitWatermark by remember(env, id) { mutableStateOf(0L) }
     LaunchedEffect(env, id, summary.updatedAtMillis, summary.lastVisitedAtMillis,
-        summary.latestCompletedAtMillis, environment?.capabilities?.threadVisitedTracking, syncPhase) {
+        summary.latestCompletedAtMillis, summary.wokeAtMillis, environment?.capabilities?.threadVisitedTracking, syncPhase) {
         if (environment?.capabilities?.threadVisitedTracking != true || syncPhase != ThreadSyncPhase.Live) return@LaunchedEffect
-        val watermark = summary.updatedAtMillis
+        // A scheduled wake can happen without a newer server update, so the wake
+        // itself is the watermark when it is the latest thing to have happened.
+        val wokeAt = summary.wokeAtMillis
+        val wakeIsLatest = wokeAt != null && wokeAt >= summary.updatedAtMillis
+        val watermark = maxOf(summary.updatedAtMillis, wokeAt ?: 0)
         if (watermark <= 0 || watermark <= (summary.lastVisitedAtMillis ?: 0) || watermark <= lastVisitWatermark) return@LaunchedEffect
         val unseenCompletion = (summary.latestCompletedAtMillis ?: 0) > (summary.lastVisitedAtMillis ?: 0)
-        if (!unseenCompletion) kotlinx.coroutines.delay((10_000 - (System.currentTimeMillis() - lastVisitSentAt)).coerceAtLeast(0))
+        // Like a completion, a wake the user is looking at must not wait out the
+        // throttle: leaving within it would cancel the visit and keep Woke on the row.
+        if (!unseenCompletion && !wakeIsLatest) kotlinx.coroutines.delay((10_000 - (System.currentTimeMillis() - lastVisitSentAt)).coerceAtLeast(0))
         try {
             store.workspace.visitThread(env, id, watermark)
             lastVisitWatermark = watermark
@@ -460,6 +483,24 @@ fun ThreadScreen(
         }
     // A compacting turn cannot take steering input, so follow-ups queue meanwhile.
     val canSteer = current.canSteer && !isCompacting
+    // A message sent over open approvals declines them and redirects the agent,
+    // as RN's `declineBeforeDispatch`; an open questionnaire owns the composer
+    // instead. The redirect steers the waiting turn rather than queuing behind it.
+    val redirectsApprovals = current.approvals.isNotEmpty() && current.userInput == null
+    val followUpMode = if (redirectsApprovals) "steer" else followUp
+    val latestApprovals by rememberUpdatedState(current.approvals)
+    var redirecting by remember(threadId) { mutableStateOf(false) }
+    // The approval card's answer in flight. A redirect would decline the same
+    // request and race it, so it waits, as RN's `respondingApprovalId` does.
+    var respondingApprovalId by remember(threadId) { mutableStateOf<String?>(null) }
+    // Each turn's checkpoint totals, for the "+12 −3" on its work row. A
+    // checkpoint that changed nothing has nothing to review.
+    val turnDiffStats =
+        remember(current.checkpoints) {
+            current.checkpoints
+                .filter { it.turnId != null && it.filesChanged > 0 }
+                .associate { it.turnId!! to TurnDiffStat(it.filesChanged, it.additions, it.deletions) }
+        }
     val rows =
         remember(
             current.feed,
@@ -469,6 +510,7 @@ fun ThreadScreen(
             activeWorkStartedAt,
             current.turnEnded,
             worktreeSetup,
+            turnDiffStats,
         ) {
             val presented =
                 presentFeed(
@@ -480,6 +522,7 @@ fun ThreadScreen(
                     // (subagents finishing), so the feed does not claim it is
                     // working; stop and the composer still see the real run.
                     activeWorkStartedAtMillis = activeWorkStartedAt.takeUnless { current.turnEnded },
+                    turnDiffStats = turnDiffStats,
                 )
             if (worktreeSetup == null) return@remember presented
             // RN anchors the card on the first user message (the prompt whose
@@ -924,7 +967,15 @@ fun ThreadScreen(
                 Text("Provider-managed subagent · ${summary.status}", modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodySmall)
             } else ThreadComposer(
-                sendLabel = if (working) { if (canSteer && followUp == "steer") "Steer" else "Queue" } else "Send",
+                sendLabel =
+                    if (working || redirectsApprovals) {
+                        if (canSteer && followUpMode == "steer") "Steer" else "Queue"
+                    } else {
+                        "Send"
+                    },
+                placeholder =
+                    if (current.approval != null) "Send a message to decline and redirect the agent"
+                    else "Ask the repo agent, or run a command…",
                 value = draft.text,
                 commands =
                     remember(effectiveSettings.provider, workspaceRoot) {
@@ -1008,6 +1059,10 @@ fun ThreadScreen(
                 onOpenDevicePreview = { onOpen("devices") },
                 onValueChange = { store.setThreadDraft(environmentId, threadId, it) },
                 onSend = {
+                    // A redirect is still declining; a second tap would decline
+                    // and send twice.
+                    if (redirecting) return@ThreadComposer
+                    val sentDraft = draft
                     val text = draft.text
                     val images = draft.attachments
                     val contextRecords = draft.contextRecords
@@ -1022,8 +1077,32 @@ fun ThreadScreen(
                         usageLimitsOpen = true
                         return@ThreadComposer
                     }
+                    val declined = if (redirectsApprovals) current.approvals else emptyList()
+                    if (declined.isNotEmpty() && respondingApprovalId != null) return@ThreadComposer
+                    val steers = (working || declined.isNotEmpty()) && canSteer && followUpMode == "steer"
+                    if (declined.isNotEmpty()) redirecting = true
                     scope.launch {
                         try {
+                            if (declined.isNotEmpty()) {
+                                val failure =
+                                    declinePendingApprovals(declined) { approvalId ->
+                                        store.workspace.respondToApproval(env, id, approvalId, "decline")
+                                    }
+                                if (failure != null) {
+                                    store.showError(failure.message ?: "The approval could not be declined.")
+                                    return@launch
+                                }
+                                if (
+                                    !redirectStillSendable(
+                                        sent = sentDraft,
+                                        current = store.threadDraft(environmentId, threadId),
+                                        declined = declined,
+                                        pending = latestApprovals,
+                                    )
+                                ) {
+                                    return@launch
+                                }
+                            }
                             store.enqueueThreadMessage(
                                 environmentId = environmentId,
                                 threadId = threadId,
@@ -1038,17 +1117,21 @@ fun ThreadScreen(
                                 dispatchMode =
                                     when {
                                         isGoalCommand(text, images.isNotEmpty()) -> "queue"
-                                        working && canSteer && followUp == "steer" -> "steer"
+                                        steers -> "steer"
                                         else -> "queue"
                                     },
                             )
                             following = true
+                        } catch (cancellation: CancellationException) {
+                            throw cancellation
                         } catch (error: Exception) {
                             store.workspace.setThreadComposerError(
                                 "$environmentId:$threadId",
                                 error.message
                                     ?: "The message could not be saved to the outbox.",
                             )
+                        } finally {
+                            if (declined.isNotEmpty()) redirecting = false
                         }
                     }
                 },
@@ -1091,6 +1174,12 @@ fun ThreadScreen(
                         }
                         ?.modelLabel(effectiveSettings.model)
                         ?: effectiveSettings.model,
+                modelSummary =
+                    remember(machineCatalog, effectiveSettings, draft.text) {
+                        club.touchtech.s5code.kotlin.feature.settings.composerTraitsSummary(
+                            machineCatalog, effectiveSettings, draft.text,
+                        )
+                    },
                 onOpenSettings = { settingsOpen = true },
                 // RN gates the Build/Plan control on the planModeEnabled
                 // preference in addition to what the provider advertises.
@@ -1138,14 +1227,88 @@ fun ThreadScreen(
                     activeWorkStartedAt != null ->
                         FloatingStatus.Working(activeWorkStartedAt)
                     else -> {
-                        // RN's order: leftover background work first, then a
-                        // native /goal as the idle-thread status.
+                        // RN's order: leftover background work first, then the
+                        // thread's lifecycle, then a native /goal as the
+                        // idle-thread status.
                         pendingBackgroundWork(current.pendingBackgroundTasks)
                             ?.let { FloatingStatus.Waiting(it.title, it.waiting) }
+                            ?: lifecycleFloatingStatus(
+                                summary,
+                                snoozeSupported = environment?.capabilities?.threadSnooze == true,
+                                settlementSupported = environment?.capabilities?.threadSettlement == true,
+                            )
                             ?: current.summary.goal?.let {
                                 FloatingStatus.Goal(providerGoalPillLabel(it, working = false))
                             }
                     }
+                }
+            fun runStatusAction(block: suspend () -> Unit) {
+                if (statusActionPending) return
+                statusActionPending = true
+                scope.launch {
+                    try {
+                        block()
+                    } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                        throw cancelled
+                    } catch (error: Exception) {
+                        store.showError(error.message ?: "Could not update thread.")
+                    } finally {
+                        statusActionPending = false
+                    }
+                }
+            }
+            val canOperate = environment?.capabilities?.sessionAllowsOperate == true
+            val floatingAction: FloatingStatusAction? =
+                when (val status = floatingStatus) {
+                    // A provider-managed subagent has no run of its own to stop.
+                    is FloatingStatus.Waiting ->
+                        if (current.providerNativeSubagent) null
+                        else FloatingStatusAction(
+                            label = if (statusActionPending) "Stopping…" else "Stop",
+                            description = "Stop background work",
+                            enabled = canOperate && !statusActionPending,
+                        ) { runStatusAction { store.workspace.cancelTurn(env, id) } }
+                    is FloatingStatus.Lifecycle ->
+                        when (status.state) {
+                            ThreadLifecycle.Snoozed ->
+                                FloatingStatusAction(
+                                    label = if (statusActionPending) "Waking…" else "Wake now",
+                                    description = "Wake now",
+                                    enabled = canOperate && !statusActionPending,
+                                ) {
+                                    runStatusAction {
+                                        // A usage-limit recovery owns its snooze;
+                                        // clearing the thread snooze would leave
+                                        // the recovery to re-snooze it.
+                                        val runId = current.latestTurn?.turnId
+                                        val resetAt = current.usageLimitResetAt
+                                        if (current.limitRecoverySnoozed && runId != null && resetAt != null) {
+                                            store.workspace.updateLimitRecovery(env, id, runId, resetAt, snooze = false)
+                                        } else {
+                                            store.workspace.setSnoozed(env, id, false)
+                                        }
+                                    }
+                                }
+                            ThreadLifecycle.Settled ->
+                                FloatingStatusAction(
+                                    label = if (statusActionPending) "Un-settling…" else "Un-settle",
+                                    description = "Un-settle",
+                                    enabled = canOperate && !statusActionPending,
+                                ) { runStatusAction { store.workspace.setSettled(env, id, false) } }
+                            ThreadLifecycle.Woke ->
+                                FloatingStatusAction(
+                                    label = if (statusActionPending) "Dismissing…" else "Dismiss",
+                                    description = "Dismiss",
+                                    enabled = canOperate && !statusActionPending,
+                                ) {
+                                    runStatusAction {
+                                        store.workspace.visitThread(
+                                            env, id, summary.wokeAtMillis ?: System.currentTimeMillis(),
+                                        )
+                                    }
+                                }
+                        }
+                    else -> null
                 }
             val showJump = !following && rows.isNotEmpty()
             Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -1157,7 +1320,17 @@ fun ThreadScreen(
                         floatingStatus?.let { status ->
                             FloatingStatusPill(
                                 status = status,
-                                onReconnect = { store.retryEnvironment(env) },
+                                onClick =
+                                    when (status) {
+                                        is FloatingStatus.Connection -> {
+                                            { store.retryEnvironment(env) }
+                                        }
+                                        is FloatingStatus.Waiting -> {
+                                            { backgroundWorkOpen = true }
+                                        }
+                                        else -> null
+                                    },
+                                action = floatingAction,
                             )
                         }
                     }
@@ -1227,13 +1400,12 @@ fun ThreadScreen(
                     current.approval?.let { approval ->
                         item(key = "approval-${approval.id}") {
                             Box(Modifier.animateItem()) {
-                                var submitting by remember(approval.id) { mutableStateOf(false) }
                                 ApprovalCard(
                                     approval = approval,
-                                    submitting = submitting,
+                                    submitting = respondingApprovalId == approval.id || redirecting,
                                     onDecision = { decision ->
-                                        if (!submitting) {
-                                            submitting = true
+                                        if (respondingApprovalId == null && !redirecting) {
+                                            respondingApprovalId = approval.id
                                             scope.launch {
                                                 try {
                                                     store.workspace.respondToApproval(
@@ -1242,12 +1414,14 @@ fun ThreadScreen(
                                                         approval.id,
                                                         decision,
                                                     )
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
                                                 } catch (error: Exception) {
                                                     store.showError(
                                                         error.message ?: "The approval response could not be sent."
                                                     )
                                                 } finally {
-                                                    submitting = false
+                                                    respondingApprovalId = null
                                                 }
                                             }
                                         }
@@ -1291,7 +1465,11 @@ fun ThreadScreen(
                                     onCopy = copy,
                                     workspaceRoot = workspaceRoot,
                                     onOpenFile = { path ->
-                                        onOpen("${club.touchtech.s5code.kotlin.app.Routes.fileRouteSuffix(path)}?path=${android.net.Uri.encode(path)}")
+                                        scope.launch {
+                                            club.touchtech.s5code.kotlin.data.transcriptFileLinkSuffix(
+                                                store.workspace, env, workspaceRoot, path,
+                                            )?.let(onOpen)
+                                        }
                                     },
                                     environmentId = environmentId,
                                     resolveTranscriptAttachment = { attachmentId ->
@@ -1314,6 +1492,28 @@ fun ThreadScreen(
                                         toggleEntryExpand(entry.id, row.key, row.standIn?.groupId)
                                     },
                                     toolLabelOverride = row.standIn?.label,
+                                    diffStat = row.diffStat,
+                                    onOpenTurnDiff = { onOpen("review") },
+                                    onSavePlan =
+                                        workspaceRoot
+                                            ?.takeIf { environment?.capabilities?.sessionAllowsFilesystemWrite == true }
+                                            ?.let { root ->
+                                                { relativePath: String, contents: String ->
+                                                    // The screen's scope, not the card's: scrolling the
+                                                    // card out of the list must not cancel the write.
+                                                    scope.async {
+                                                        store.workspace.environmentRequest(
+                                                            env,
+                                                            "projects.writeFile",
+                                                            buildJsonObject {
+                                                                put("cwd", root)
+                                                                put("relativePath", relativePath)
+                                                                put("contents", contents)
+                                                            },
+                                                        )["relativePath"]?.jsonPrimitive?.contentOrNull ?: relativePath
+                                                    }.await()
+                                                }
+                                            },
                                     onOpenThread = { onOpenThread(environmentId, it) },
                                     onOpenThreadLink = { linkedId ->
                                         // Read at tap time: collecting every shell here would
@@ -1379,6 +1579,7 @@ fun ThreadScreen(
                                         }
                                     },
                                     modifier = Modifier.fillMaxWidth(),
+                                    onOpenTurnDiff = { onOpen("review") },
                                 )
                             is FeedRow.Working -> WorkingRow(row, Modifier.fillMaxWidth())
                             is FeedRow.TurnFold ->
@@ -1392,6 +1593,7 @@ fun ThreadScreen(
                                         }
                                     },
                                     modifier = Modifier.fillMaxWidth(),
+                                    onOpenTurnDiff = { onOpen("review") },
                                 )
                             is FeedRow.WorktreeSetup -> setupCard?.invoke()
                             }
@@ -1436,6 +1638,16 @@ fun ThreadScreen(
         }
     }
 
+    if (backgroundWorkOpen) {
+        BackgroundWorkSheet(
+            items = pendingBackgroundWorkItems(current.pendingBackgroundTasks),
+            onDismiss = { backgroundWorkOpen = false },
+            onOpenThread = { childThreadId ->
+                backgroundWorkOpen = false
+                onOpenThread(environmentId, childThreadId)
+            },
+        )
+    }
     if (settingsOpen) {
         TaskSettingsSheet(
             settings = effectiveSettings,
@@ -1459,6 +1671,8 @@ fun ThreadScreen(
             catalogRefreshing = env.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(env) },
             planModeEnabled = preferences.planModeEnabled,
+            prompt = draft.text,
+            onPromptChange = { store.setThreadDraft(environmentId, threadId, it) },
         )
     }
 }
@@ -1560,6 +1774,88 @@ private sealed interface FloatingStatus {
     data class Waiting(override val label: String, val waiting: Boolean) : FloatingStatus
     /** A native /goal on an idle thread: paused, blocked, complete, or set. */
     data class Goal(override val label: String) : FloatingStatus
+    /** An idle thread that is snoozed, settled, or freshly woken, with its way back out. */
+    data class Lifecycle(val state: ThreadLifecycle, override val label: String) : FloatingStatus
+}
+
+private enum class ThreadLifecycle { Snoozed, Settled, Woke }
+
+/** The pill's trailing command: Stop, Wake now, Un-settle, or Dismiss. */
+private class FloatingStatusAction(
+    val label: String,
+    val description: String,
+    val enabled: Boolean,
+    val onClick: () -> Unit,
+)
+
+/**
+ * The lifecycle the idle pill reports, following `ThreadDetailScreen`'s
+ * lifecycle status. Each state is gated on the capability its action writes,
+ * since a command the server does not know kills the socket. A wake counts
+ * only while nothing has happened since — a run that finished after it means
+ * the user already watched the thread come back.
+ */
+private fun lifecycleFloatingStatus(
+    summary: ThreadSummary,
+    snoozeSupported: Boolean,
+    settlementSupported: Boolean,
+): FloatingStatus.Lifecycle? {
+    val wokeAt = summary.wokeAtMillis
+    return when {
+        snoozeSupported && summary.status == ThreadStatus.Snoozed ->
+            FloatingStatus.Lifecycle(
+                ThreadLifecycle.Snoozed,
+                summary.snoozedUntilLabel?.let { "Snoozed until $it" } ?: "Snoozed",
+            )
+        settlementSupported && summary.status == ThreadStatus.Settled ->
+            FloatingStatus.Lifecycle(ThreadLifecycle.Settled, "Settled")
+        snoozeSupported && wokeAt != null && (summary.latestCompletedAtMillis ?: Long.MIN_VALUE) < wokeAt ->
+            FloatingStatus.Lifecycle(ThreadLifecycle.Woke, "Woke from snooze")
+        else -> null
+    }
+}
+
+/**
+ * What a settled turn left running, one row per task, from the background pill.
+ * A subagent with its own thread opens it; the rest are facts.
+ */
+@Composable
+private fun BackgroundWorkSheet(
+    items: List<PendingBackgroundWorkItem>,
+    onDismiss: () -> Unit,
+    onOpenThread: (String) -> Unit,
+) {
+    S5BottomSheet(onDismiss = onDismiss, title = "Background work") {
+        if (items.isEmpty()) {
+            Text(
+                "Nothing running in the background.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.fillMaxWidth().padding(S5Theme.spacing.gutter),
+            )
+        } else {
+            Column(
+                Modifier.padding(horizontal = S5Theme.spacing.gutter, vertical = S5Theme.spacing.small),
+                verticalArrangement = Arrangement.spacedBy(2.dp),
+            ) {
+                items.forEachIndexed { index, item ->
+                    val childThreadId = item.childThreadId
+                    club.touchtech.s5code.kotlin.design.component.S5SettingsRow(
+                        icon =
+                            when (item.kind) {
+                                "subagent" -> Icons.Rounded.Groups
+                                "monitor" -> Icons.Rounded.Schedule
+                                else -> Icons.Rounded.Terminal
+                            },
+                        label = item.label,
+                        supporting = item.kindLabel,
+                        onClick = childThreadId?.let { { onOpenThread(it) } },
+                        position = club.touchtech.s5code.kotlin.design.component.rowPosition(index, items.size),
+                    )
+                }
+            }
+        }
+    }
 }
 
 /**
@@ -1571,12 +1867,14 @@ private sealed interface FloatingStatus {
 @Composable
 private fun FloatingStatusPill(
     status: FloatingStatus,
-    onReconnect: () -> Unit,
+    /** Reconnect for a dead connection, the work list for background work. */
+    onClick: (() -> Unit)?,
+    action: FloatingStatusAction?,
     modifier: Modifier = Modifier,
 ) {
     Surface(
-        onClick = onReconnect,
-        enabled = status is FloatingStatus.Connection,
+        onClick = onClick ?: {},
+        enabled = onClick != null,
         shape = androidx.compose.foundation.shape.CircleShape,
         color = MaterialTheme.colorScheme.surfaceContainerHighest,
         contentColor = MaterialTheme.colorScheme.onSurface,
@@ -1626,6 +1924,14 @@ private fun FloatingStatusPill(
                         modifier = Modifier.size(13.dp),
                         tint = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
+                status is FloatingStatus.Lifecycle ->
+                    Icon(
+                        if (status.state == ThreadLifecycle.Settled) Icons.Rounded.CheckCircle
+                        else Icons.Rounded.Schedule,
+                        contentDescription = null,
+                        modifier = Modifier.size(13.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
             }
             if (status is FloatingStatus.Working) {
                 var nowMillis by
@@ -1651,7 +1957,30 @@ private fun FloatingStatusPill(
                     style = MaterialTheme.typography.labelLargeEmphasized,
                     maxLines = 1,
                     overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.widthIn(max = 260.dp),
+                    modifier = Modifier.widthIn(max = 220.dp),
+                )
+            }
+            if (action != null) {
+                Box(
+                    Modifier.size(width = 1.dp, height = 16.dp)
+                        .background(MaterialTheme.colorScheme.outlineVariant),
+                )
+                Text(
+                    action.label,
+                    style = MaterialTheme.typography.labelLargeEmphasized,
+                    color =
+                        if (action.enabled) MaterialTheme.colorScheme.primary
+                        else MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    modifier =
+                        Modifier.clip(androidx.compose.foundation.shape.CircleShape)
+                            .clickable(
+                                enabled = action.enabled,
+                                onClickLabel = action.description,
+                                role = androidx.compose.ui.semantics.Role.Button,
+                                onClick = action.onClick,
+                            )
+                            .padding(horizontal = S5Theme.spacing.small, vertical = S5Theme.spacing.tiny),
                 )
             }
         }

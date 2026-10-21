@@ -154,6 +154,8 @@ data class EnvironmentCapabilities(
     val sessionAllowsSourceControlWrite: Boolean = false,
     /** As [sessionAllowsSourceControlWrite], for `orchestration:operate`. */
     val sessionAllowsOperate: Boolean = false,
+    /** As [sessionAllowsSourceControlWrite], for `filesystem:write` (`projects.writeFile`). */
+    val sessionAllowsFilesystemWrite: Boolean = false,
     val sessionPermissions: List<String>? = null,
     val sessionExpiresAt: String? = null,
     /**
@@ -503,6 +505,13 @@ data class ThreadSummary(
     val blockedOnThreadWait: Boolean = false,
     /** Any open runtime request, nonblocking questions included; the server refuses snoozing then. */
     val hasPendingRuntimeRequest: Boolean = false,
+    /**
+     * When a snooze ended (timer or raised hand) that the user has not visited
+     * since: the row's dismissible Woke marker. Null on shelved rows.
+     */
+    val wokeAtMillis: Long? = null,
+    /** The raw `snoozedUntil`, kept so Undo can restore a snooze a settle or unpin cleared. */
+    val snoozedUntil: String? = null,
 ) {
     /**
      * The Working section's ordering key, following `sortWorkingThreadsBySend`:
@@ -574,6 +583,20 @@ sealed interface FeedEntry {
         val timeLabel: String,
         val streaming: Boolean = false,
         val attachments: List<ComposerAttachment> = emptyList(),
+        override val turnId: String? = null,
+        override val atMillis: Long = 0,
+        override val endedAtMillis: Long = atMillis,
+    ) : FeedEntry
+
+    /**
+     * A `proposed_plan` item: the plan the agent wrote in plan mode. Its own entry
+     * rather than an agent message because it is prominent work, not an answer —
+     * a settled turn's fold keeps it visible and never treats it as the reply.
+     */
+    data class ProposedPlan(
+        override val id: String,
+        val markdown: String,
+        val streaming: Boolean = false,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
         override val endedAtMillis: Long = atMillis,
@@ -911,8 +934,14 @@ data class HandoffEndpoint(val instanceId: String, val model: String?)
 data class ThreadDetail(
     val summary: ThreadSummary,
     val feed: List<FeedEntry>,
+    /** The oldest open approval: the one gate the screen shows. */
     val approval: PendingApproval?,
     val userInput: PendingUserInput?,
+    /**
+     * Every open approval, oldest first. A message sent over the gate declines
+     * all of them, since any one left pending would still block the redirect.
+     */
+    val approvals: List<PendingApproval> = listOfNotNull(approval),
     /** Active worktree root when present; project root is supplied by the screen otherwise. */
     val workspaceRoot: String? = null,
     val queuedMessages: Int = 0,
@@ -1001,6 +1030,8 @@ data class PendingBackgroundTask(
     val kind: String,
     val description: String? = null,
     val taskId: String? = null,
+    /** The thread a delegated subagent runs in, so the work list can open it. */
+    val childThreadId: String? = null,
 )
 
 data class PendingChildInput(val threadId: String, val title: String, val approval: Boolean)
@@ -1042,6 +1073,10 @@ data class Checkpoint(
     val timeLabel: String,
     val filesChanged: Int,
     val current: Boolean = false,
+    /** The run this checkpoint closed; its diffstat shows on that turn's work row. */
+    val turnId: String? = null,
+    val additions: Int = 0,
+    val deletions: Int = 0,
 )
 
 /**
@@ -1311,6 +1346,12 @@ sealed interface ProviderOptionDescriptor {
         override val description: String? = null,
         val options: List<ProviderOptionChoice> = emptyList(),
         val currentValue: String? = null,
+        /**
+         * Choices the provider reads from the prompt rather than from a stored
+         * option (Claude's `ultrathink`). Picking one edits the draft instead;
+         * see `traitSelectChange`.
+         */
+        val promptInjectedValues: List<String> = emptyList(),
     ) : ProviderOptionDescriptor {
         /**
          * The value in effect: the stored one, else the advertised default. Falling
@@ -1457,6 +1498,12 @@ data class ProviderCatalogEntry(
      * `resolveProviderInteractionMode` in the RN client.
      */
     val interactionModeToggle: Boolean = true,
+    /**
+     * `continuation.groupKey`: accounts on the same driver sharing it continue
+     * one native session, so a thread locked to its provider may still move
+     * between them.
+     */
+    val continuationGroupKey: String? = null,
     /** Machine-wide switch; a project's own switch in [projectEnabled] overrides it. */
     val enabled: Boolean = true,
     /** Explicit per-project switches by project id (`projectProviderInstanceOverrides`). */

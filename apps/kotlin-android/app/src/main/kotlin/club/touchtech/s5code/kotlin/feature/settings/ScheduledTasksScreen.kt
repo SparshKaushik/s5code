@@ -17,6 +17,18 @@ import club.touchtech.s5code.kotlin.data.providerOptionSelections
 import club.touchtech.s5code.kotlin.data.relativeLabel
 import club.touchtech.s5code.kotlin.data.rememberRetryableRemote
 import club.touchtech.s5code.kotlin.data.Remote
+import club.touchtech.s5code.kotlin.data.MAX_WEBHOOK_FILTERS
+import club.touchtech.s5code.kotlin.data.WEBHOOK_FILTER_OPS
+import club.touchtech.s5code.kotlin.data.WebhookFilterDraft
+import club.touchtech.s5code.kotlin.data.WebhookFilterParse
+import club.touchtech.s5code.kotlin.data.emptyWebhookFilterDraft
+import club.touchtech.s5code.kotlin.data.parseWebhookFilterDrafts
+import club.touchtech.s5code.kotlin.data.webhookDedupeDraft
+import club.touchtech.s5code.kotlin.data.webhookDedupeError
+import club.touchtech.s5code.kotlin.data.webhookDedupeJson
+import club.touchtech.s5code.kotlin.data.webhookDeliveryLabel
+import club.touchtech.s5code.kotlin.data.webhookFilterDrafts
+import club.touchtech.s5code.kotlin.data.webhookFilterDraftsChanged
 import club.touchtech.s5code.kotlin.data.toRuntimeMode
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
@@ -217,18 +229,6 @@ private fun webhookAddress(webhook: JsonObject, httpBaseUrl: String?): WebhookAd
     )
 }
 
-/** `DELIVERY_OUTCOME_LABELS` in the web settings; an unknown outcome keeps its raw name. */
-private fun deliveryOutcomeLabel(outcome: String): String =
-    when (outcome) {
-        "accepted" -> "Ran"
-        "dispatch_failed" -> "Run failed"
-        "rejected_signature" -> "Bad signature"
-        "disabled" -> "Task paused"
-        "rate_limited" -> "Rate limited"
-        "expired" -> "Too old"
-        else -> outcome
-    }
-
 /** Recent webhook deliveries for one task — web's `WebhookDeliveriesDialog`. */
 @Composable
 private fun WebhookDeliveriesDialog(
@@ -262,7 +262,7 @@ private fun WebhookDeliveriesDialog(
                             } else {
                                 item {
                                     Text(
-                                        "${deliveryOutcomeLabel(delivery.outcome)} · ${delivery.method} · " +
+                                        "${webhookDeliveryLabel(delivery.outcome, delivery.pendingWindow)} · ${delivery.method} · " +
                                             relativeLabel(delivery.receivedAt, System.currentTimeMillis()) +
                                             (if (delivery.signatureVerified) " · Signature verified" else ""),
                                         style = MaterialTheme.typography.bodyMedium,
@@ -343,7 +343,7 @@ private fun WebhookDeliveriesDialog(
                                         modifier = Modifier.fillMaxWidth(),
                                     ) {
                                         Text(
-                                            "${deliveryOutcomeLabel(delivery.outcome)} · ${delivery.method} · " +
+                                            "${webhookDeliveryLabel(delivery.outcome, delivery.pendingWindow)} · ${delivery.method} · " +
                                                 relativeLabel(delivery.receivedAt, System.currentTimeMillis()) +
                                                 if (delivery.missingFields.isNotEmpty()) {
                                                     " · ${delivery.missingFields.size} empty placeholder" +
@@ -388,6 +388,9 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
                 .orEmpty(),
         )
     }
+    val savedFilters = remember { webhookFilterDrafts(schedule?.get("filters") as? JsonArray) }
+    var filters by remember { mutableStateOf(savedFilters) }
+    var dedupe by remember { mutableStateOf(webhookDedupeDraft(schedule?.get("dedupe") as? JsonObject)) }
     var weekdays by remember { mutableStateOf((schedule?.get("weekdays") as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }?.toSet() ?: (0..6).toSet()) }
     var projectId by remember { mutableStateOf(existing?.v2String("projectId") ?: projects.firstOrNull()?.id?.value.orEmpty()) }
     var projectMenu by remember { mutableStateOf(false) }
@@ -437,8 +440,8 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
             } }
             item { OutlinedTextField(bound, { bound = it }, label = { Text("Existing thread ID (optional)") }) }
             // Webhook schedules are created on desktop/web; this editor keeps the
-            // trigger read-only (signature included, sent back unchanged on save)
-            // and only exposes the delivery-age limit it writes.
+            // signature read-only (sent back unchanged on save) and edits the age
+            // limit, event filters and dedupe keys.
             if (isWebhook) {
                 item { Text(scheduleLabel(schedule)) }
                 item {
@@ -476,6 +479,42 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
                         singleLine = true,
                     )
                 }
+                item {
+                    WebhookFilterRows(filters = filters, enabled = !busy, onChange = { filters = it })
+                }
+                item {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedTextField(
+                            value = dedupe.replayKey,
+                            onValueChange = { dedupe = dedupe.copy(replayKey = it) },
+                            label = { Text("Replay key template") },
+                            placeholder = { Text("{{headers.delivery-id}}") },
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = dedupe.coalesceKey,
+                            onValueChange = { dedupe = dedupe.copy(coalesceKey = it) },
+                            label = { Text("Coalesce key template") },
+                            placeholder = { Text("{{body.id}}") },
+                            singleLine = true,
+                        )
+                        OutlinedTextField(
+                            value = dedupe.coalesceWindowSeconds,
+                            onValueChange = { dedupe = dedupe.copy(coalesceWindowSeconds = it) },
+                            label = { Text("Coalesce window (seconds, 10–3600)") },
+                            placeholder = { Text("120") },
+                            singleLine = true,
+                            keyboardOptions =
+                                androidx.compose.foundation.text.KeyboardOptions(
+                                    keyboardType = androidx.compose.ui.text.input.KeyboardType.Number,
+                                ),
+                        )
+                        Text(
+                            "Replay keys suppress repeats for 7 days. Coalescing runs the latest payload when the window from the first delivery closes. Empty keys run normally.",
+                            style = MaterialTheme.typography.bodySmall,
+                        )
+                    }
+                }
             } else {
                 item { TextButton(onClick = { daily = !daily }) { Text(if (daily) "Fixed local time" else "Interval") } }
                 item { if (daily) OutlinedTextField(time, { time = it }, label = { Text("Time (HH:MM)") })
@@ -492,7 +531,16 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
             item { TextButton(onClick = { modelOpen = true }) { Text("${settings.provider.label} · ${settings.model}") } }
             failure?.let { item { Text(it, color = MaterialTheme.colorScheme.error) } }
         } }, dismissButton = { TextButton(onClick = onClose) { Text("Cancel") } },
-        confirmButton = { TextButton(enabled = valid && !busy, onClick = { scope.launch {
+        confirmButton = { TextButton(enabled = valid && !busy, onClick = save@{
+            val parsedFilters = if (isWebhook) parseWebhookFilterDrafts(filters) else null
+            val webhookError =
+                if (!isWebhook) null
+                else (parsedFilters as? WebhookFilterParse.Invalid)?.error ?: webhookDedupeError(dedupe)
+            if (webhookError != null) {
+                failure = webhookError
+                return@save
+            }
+            scope.launch {
             busy = true
             try {
                 val payload = buildJsonObject {
@@ -511,6 +559,14 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
                                 "maxDeliveryAgeMinutes",
                                 maxAge.trim().toIntOrNull()?.let(::JsonPrimitive) ?: JsonNull,
                             )
+                            put("dedupe", webhookDedupeJson(dedupe))
+                            // Only edited filters are sent; the server keeps the stored ones otherwise.
+                            val parsed = parsedFilters as? WebhookFilterParse.Filters
+                            if (parsed != null && webhookFilterDraftsChanged(savedFilters, filters)) {
+                                put("filters", parsed.filters)
+                            } else {
+                                remove("filters")
+                            }
                         }))
                     } else {
                         putJsonObject("schedule") {
@@ -539,7 +595,73 @@ private fun ScheduledTaskEditor(store: AppStore, env: Environment, existing: Jso
             finally { busy = false }
         } }) { Text("Save") } })
     if (modelOpen) TaskSettingsSheet(settings = settings, onDismiss = { modelOpen = false },
+        prompt = prompt, onPromptChange = { prompt = it },
         onSettingsChange = { settings = it }, catalog = catalog, modelsFor = { provider ->
             catalog.firstOrNull { it.instance.instanceId == provider.instanceId }?.models.orEmpty()
         })
+}
+
+/** RN's `WebhookFilterRows`: each row a path, a test and (unless "exists") a value. */
+@Composable
+private fun WebhookFilterRows(
+    filters: List<WebhookFilterDraft>,
+    enabled: Boolean,
+    onChange: (List<WebhookFilterDraft>) -> Unit,
+) {
+    fun update(index: Int, transform: (WebhookFilterDraft) -> WebhookFilterDraft) =
+        onChange(filters.mapIndexed { at, filter -> if (at == index) transform(filter) else filter })
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        filters.forEachIndexed { index, filter ->
+            key(filter.id) {
+                var opMenu by remember { mutableStateOf(false) }
+                Row(verticalAlignment = androidx.compose.ui.Alignment.CenterVertically) {
+                    Text("Filter ${index + 1}", style = MaterialTheme.typography.labelMedium, modifier = Modifier.weight(1f))
+                    // By id, so a removed row's identity never passes to the row after it.
+                    TextButton(enabled = enabled, onClick = { onChange(filters.filterNot { it.id == filter.id }) }) {
+                        Text("Remove", color = MaterialTheme.colorScheme.error)
+                    }
+                }
+                OutlinedTextField(
+                    value = filter.path,
+                    onValueChange = { path -> update(index) { it.copy(path = path) } },
+                    label = { Text("Path") },
+                    placeholder = { Text("body.action") },
+                    singleLine = true,
+                    enabled = enabled,
+                )
+                Box {
+                    TextButton(enabled = enabled, onClick = { opMenu = true }) {
+                        Text("Test: " + (WEBHOOK_FILTER_OPS.firstOrNull { it.first == filter.op }?.second ?: filter.op))
+                    }
+                    DropdownMenu(opMenu, { opMenu = false }) {
+                        WEBHOOK_FILTER_OPS.forEach { (op, label) ->
+                            DropdownMenuItem(text = { Text(label) }, onClick = {
+                                update(index) { it.copy(op = op) }
+                                opMenu = false
+                            })
+                        }
+                    }
+                }
+                if (filter.op != "exists") {
+                    OutlinedTextField(
+                        value = filter.value,
+                        onValueChange = { value -> update(index) { it.copy(value = value) } },
+                        label = { Text(if (filter.op == "in") "Values, comma-separated" else "Value") },
+                        placeholder = { Text(if (filter.op == "in") "opened, reopened" else "opened") },
+                        singleLine = true,
+                        enabled = enabled,
+                    )
+                }
+            }
+        }
+        if (filters.size < MAX_WEBHOOK_FILTERS) {
+            TextButton(enabled = enabled, onClick = { onChange(filters + emptyWebhookFilterDraft()) }) { Text("Add filter") }
+        }
+        if (filters.isNotEmpty()) {
+            Text(
+                "Runs only when every filter matches. Other requests are logged as filtered. Separate “is one of” values with commas; a value can't contain a comma.",
+                style = MaterialTheme.typography.bodySmall,
+            )
+        }
+    }
 }

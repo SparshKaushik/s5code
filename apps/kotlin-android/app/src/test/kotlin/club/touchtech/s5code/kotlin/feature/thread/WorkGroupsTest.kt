@@ -541,10 +541,9 @@ class TurnFoldTest {
     }
 
     @Test
-    fun `the first assistant message stays visible beside the answer`() {
-        // RN's `firstAssistantMessageIdByTurn`/`terminalAssistantMessageIdByTurn`:
-        // a turn that spoke twice reads as its opening line, the fold, and the
-        // answer it ended on.
+    fun `progress notes fold while the final answer stays visible`() {
+        // RN's `terminalAssistantMessageIdByRun`: only the answer a settled turn
+        // ended on stays out; what it said along the way is work like its tools.
         val feed =
             listOf(
                 prompt("u1"),
@@ -553,9 +552,74 @@ class TurnFoldTest {
                 answer("a2", "turn-1"),
             )
         assertEquals(
-            listOf("u1", "a1", "turn-fold:turn-1:header", "a2"),
+            listOf("u1", "turn-fold:turn-1:header", "a2"),
             keys(presentFeed(feed, emptySet(), settled("turn-1"))),
         )
+    }
+
+    @Test
+    fun `progress folds even when a turn ran no tools`() {
+        val feed = listOf(prompt("u1"), answer("a1", "turn-1"), answer("a2", "turn-1"))
+        assertEquals(
+            listOf("u1", "turn-fold:turn-1:header", "a2"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
+    }
+
+    @Test
+    fun `a proposed plan stays outside the fold and is never the answer`() {
+        val feed =
+            listOf(
+                prompt("u1"),
+                tool("t1", "turn-1"),
+                FeedEntry.ProposedPlan(id = "p1", markdown = "# Plan", turnId = "turn-1"),
+                answer("a1", "turn-1"),
+            )
+        assertEquals(
+            listOf("u1", "turn-fold:turn-1:header", "p1", "a1"),
+            keys(presentFeed(feed, emptySet(), settled("turn-1"))),
+        )
+    }
+
+    @Test
+    fun `a turn's diffstat rides its fold header`() {
+        val stat = TurnDiffStat(files = 2, additions = 12, deletions = 3)
+        val feed = listOf(prompt("u1"), tool("t1", "turn-1"), tool("t2", "turn-1"), answer("a1", "turn-1"))
+        val rows = presentFeed(feed, emptySet(), settled("turn-1"), setOf("turn-1"), turnDiffStats = mapOf("turn-1" to stat))
+        assertEquals(listOf(stat), rows.mapNotNull { (it as? FeedRow.TurnFold)?.diffStat })
+        assertEquals(
+            listOf(stat),
+            rows.mapNotNull {
+                when (it) {
+                    is FeedRow.TurnFold -> it.diffStat
+                    is FeedRow.WorkToggle -> it.diffStat
+                    is FeedRow.Entry -> it.diffStat
+                    else -> null
+                }
+            },
+        )
+    }
+
+    @Test
+    fun `without a fold the diffstat goes on the turn's first work toggle`() {
+        val stat = TurnDiffStat(files = 1, additions = 1, deletions = 0)
+        val feed = listOf(prompt("u1"), tool("t1", "turn-1"), tool("t2", "turn-1"), answer("a1", "turn-1"))
+        // The open turn never folds, so the toggle is the work row.
+        val rows = presentFeed(feed, emptySet(), TurnInfo("turn-1", "running", 0, null), turnDiffStats = mapOf("turn-1" to stat))
+        assertEquals(stat, rows.filterIsInstance<FeedRow.WorkToggle>().single().diffStat)
+        assertEquals(null, rows.filterIsInstance<FeedRow.Entry>().firstNotNullOfOrNull { it.diffStat })
+    }
+
+    @Test
+    fun `a turn with no work row shows its diffstat on its answer, and none without one`() {
+        val stat = TurnDiffStat(files = 1, additions = 4, deletions = 4)
+        val answered = listOf(prompt("u1"), answer("a1", "turn-1"))
+        val rows = presentFeed(answered, emptySet(), settled("turn-1"), turnDiffStats = mapOf("turn-1" to stat))
+        assertEquals(stat, (rows.last() as FeedRow.Entry).diffStat)
+
+        val unanswered = listOf(prompt("u1"), tool("t1", "turn-1"), tool("t2", "turn-1"))
+        val bare = presentFeed(unanswered, emptySet(), settled("turn-1"), turnDiffStats = mapOf("turn-1" to stat))
+        assertTrue(bare.none { it is FeedRow.TurnFold && it.diffStat != null })
     }
 
     @Test
@@ -605,12 +669,12 @@ class TurnFoldTest {
 
     @Test
     fun `the fold header sits above the first hidden row`() {
-        // RN anchors the fold on `firstHiddenEntry.id`, so a visible opening
-        // assistant message renders above it.
+        // RN anchors the fold on `firstHiddenEntry.id`, so a visible answered
+        // question renders above it.
         val feed =
             listOf(
                 prompt("u1"),
-                answer("a1", "turn-1"),
+                FeedEntry.QuestionAnswer(id = "q1", summary = "User input submitted", preview = "ok", turnId = "turn-1"),
                 tool("t1", "turn-1"),
                 answer("a2", "turn-1"),
             )

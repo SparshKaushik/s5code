@@ -12,7 +12,7 @@ class MarkdownLinksTest {
         assertEquals("src/main/App.kt", relative.path)
         assertEquals(42, relative.line)
         assertEquals(7, relative.column)
-        assertEquals("App.kt:42:7", relative.label)
+        assertEquals("App.kt · L42:C7", relative.label)
         assertEquals(MarkdownFileIcon.Default, relative.icon)
 
         val absolute = resolveMarkdownLinkPresentation("/home/dev/repo/README.md#L9") as MarkdownLinkPresentation.File
@@ -53,5 +53,34 @@ class MarkdownLinksTest {
         assertNull(resolveWorkspaceRelativeFilePath("/repo", "../other/main.kt"))
         assertNull(resolveWorkspaceRelativeFilePath(null, "/repo/main.kt"))
         assertTrue(resolveWorkspaceRelativeFilePath("/repo", "src/main.kt")!!.isNotBlank())
+    }
+
+    @Test
+    fun `expands home links against the workspace home`() {
+        assertEquals("/home/maria/.agents/AGENTS.md", resolveFileLinkPath("/home/maria/project", "~/.agents/AGENTS.md"))
+        assertEquals("/Users/maria/notes.md", resolveFileLinkPath("/Users/maria/project", "~/notes.md"))
+        assertEquals(
+            "C:\\Users\\maria\\.agents\\AGENTS.md",
+            resolveFileLinkPath("C:\\Users\\maria\\project", "~\\.agents\\AGENTS.md"),
+        )
+        // An unknown home never becomes a workspace path.
+        assertNull(resolveFileLinkPath("/repo", "~/notes.md"))
+        assertNull(resolveFileLinkPath(null, "~/notes.md"))
+        assertNull(resolveFileLinkPath("/repo", "../notes.md"))
+    }
+
+    @Test
+    fun `home links inside the workspace resolve to workspace paths`() {
+        assertEquals("src/main.ts", resolveWorkspaceRelativeFilePath("/home/maria/project", "~/project/src/main.ts"))
+        assertNull(resolveWorkspaceRelativeFilePath("/home/maria/project", "~/.agents/AGENTS.md"))
+    }
+
+    @Test
+    fun `relative directory links are workspace links`() {
+        assertEquals("src/", (resolveMarkdownLinkPresentation("src/") as MarkdownLinkPresentation.File).path)
+        assertEquals(
+            "docs/My Folder/",
+            (resolveMarkdownLinkPresentation("docs/My Folder/") as MarkdownLinkPresentation.File).path,
+        )
     }
 }

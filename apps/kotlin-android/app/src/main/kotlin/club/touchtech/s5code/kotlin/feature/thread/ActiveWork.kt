@@ -154,6 +154,34 @@ internal fun pendingBackgroundWork(tasks: List<PendingBackgroundTask>): PendingB
     )
 }
 
+/** One row of the background work sheet: `PendingBackgroundWorkItem`. */
+internal data class PendingBackgroundWorkItem(
+    val key: String,
+    /** subagent | command | monitor | background_task */
+    val kind: String,
+    val label: String,
+    /** "Subagent", "Command", … — RN's `KIND_LABELS`. */
+    val kindLabel: String,
+    /** Set for a subagent with its own thread; the row opens it. */
+    val childThreadId: String?,
+)
+
+/** The sheet's rows, in the same kind order as the pill's summary. */
+internal fun pendingBackgroundWorkItems(tasks: List<PendingBackgroundTask>): List<PendingBackgroundWorkItem> =
+    tasks
+        .mapIndexed { index, task ->
+            val kind = backgroundKind(task.kind)
+            PendingBackgroundWorkItem(
+                key = task.taskId ?: "task-$index",
+                kind = task.kind,
+                label = task.description?.trim().orEmpty().ifEmpty { kind.singular },
+                kindLabel = kind.singular.replaceFirstChar { it.uppercase() },
+                childThreadId = task.childThreadId?.takeIf { task.kind == "subagent" },
+            ) to kind.order
+        }
+        .sortedBy { it.second }
+        .map { it.first }
+
 /* ── Native provider goals ───────────────────────────────────────────── */
 
 private val PROVIDER_GOAL_TITLES: Map<String, String> =

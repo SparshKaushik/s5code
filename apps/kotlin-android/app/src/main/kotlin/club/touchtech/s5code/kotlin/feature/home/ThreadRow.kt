@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.feature.home
 import androidx.compose.animation.core.Animatable
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -15,6 +16,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.MergeType
 import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.NotificationsActive
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Icon
@@ -74,6 +76,8 @@ fun ThreadRow(
     /** Visible field that satisfied Home search, highlighted inline below the title. */
     searchMatch: SearchMatch? = null,
     searchQuery: String = "",
+    /** Acknowledges the row's Woke marker; absent where the marker cannot be cleared. */
+    onDismissWoke: (() -> Unit)? = null,
     trailing: @Composable (() -> Unit)? = null,
 ) {
     val status = statusPresentation(thread.status)
@@ -164,7 +168,11 @@ fun ThreadRow(
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
-                    if (thread.unread && thread.status in setOf(ThreadStatus.Idle, ThreadStatus.Settled)) {
+                    // A wake outranks Done, as in the RN row: the thread came
+                    // back for attention, which is news a finished run is not.
+                    if (thread.wokeAtMillis != null && thread.status == ThreadStatus.Idle) {
+                        WokeMarker(onDismissWoke)
+                    } else if (thread.unread && thread.status in setOf(ThreadStatus.Idle, ThreadStatus.Settled)) {
                         Text("Done", style = MaterialTheme.typography.labelSmall, color = S5Theme.status.settled)
                     }
                 }
@@ -206,24 +214,66 @@ fun ThreadRow(
 }
 
 /**
- * Only a visible working row ticks, once per second. This keeps the Home card
+ * Only a visible row ticks, and only when its label would change: every second
+ * in the first minute, then on minute boundaries. This keeps the Home card
  * honest without rebuilding every thread projection or running a process-wide
  * high-frequency clock while Home is not composed.
+ *
+ * Working counts from the active turn's start. Waiting counts from the run's
+ * completion, as `thread-list-v2-items.tsx` does: background work holds the
+ * thread, and how long it has been waiting is the useful number. A run blocked
+ * on another thread has not completed, so it gets no count.
  */
 @Composable
 private fun rememberLiveElapsedLabel(thread: ThreadSummary): String? {
     val startedAt =
-        thread.activeTurnStartedAtMillis?.takeIf { thread.status == ThreadStatus.Working }
-            ?: return thread.elapsedLabel
+        when (thread.status) {
+            ThreadStatus.Working -> thread.activeTurnStartedAtMillis
+            ThreadStatus.Waiting -> thread.latestCompletedAtMillis ?: return null
+            else -> null
+        } ?: return thread.elapsedLabel
     var nowMillis by remember(startedAt) { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(startedAt) {
         while (true) {
-            val elapsed = System.currentTimeMillis() - startedAt
-            kotlinx.coroutines.delay((1_000 - elapsed.mod(1_000L)).coerceAtLeast(1L))
+            val elapsed = (System.currentTimeMillis() - startedAt).coerceAtLeast(0)
+            val unit = if (elapsed < 60_000) 1_000L else 60_000L
+            kotlinx.coroutines.delay((unit - elapsed.mod(unit)).coerceAtLeast(1L))
             nowMillis = System.currentTimeMillis()
         }
     }
     return elapsedLabel(startedAt, nowMillis)
+}
+
+/**
+ * The thread woke from a snooze and the user has not looked since. Tapping it
+ * acknowledges the wake without opening the thread, like RN's Woke button.
+ */
+@Composable
+private fun WokeMarker(onDismiss: (() -> Unit)?) {
+    Row(
+        modifier =
+            Modifier.clip(S5PillShape)
+                .then(
+                    if (onDismiss != null) {
+                        Modifier.clickable(
+                            onClickLabel = "Dismiss Woke notification",
+                            onClick = onDismiss,
+                        )
+                    } else {
+                        Modifier
+                    }
+                ),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Icon(
+            Icons.Rounded.NotificationsActive,
+            contentDescription = null,
+            modifier = Modifier.size(12.dp),
+            tint = S5Theme.status.approval,
+        )
+        Text("Woke", style = MaterialTheme.typography.labelSmall, color = S5Theme.status.approval)
+    }
 }
 
 /**

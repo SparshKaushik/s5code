@@ -43,11 +43,6 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
                 }
             }
         }
-        if (detail.summary.liveStatus == ThreadStatus.Waiting && !detail.summary.blockedOnThreadWait &&
-            !detail.providerNativeSubagent
-        ) {
-            TextButton(enabled = !busy, onClick = { action { store.workspace.cancelTurn(env, id) } }) { Text("Stop background work") }
-        }
         if (detail.usageLimitReached) {
             val resetAt = detail.usageLimitResetAt
             val runId = detail.latestTurn?.turnId

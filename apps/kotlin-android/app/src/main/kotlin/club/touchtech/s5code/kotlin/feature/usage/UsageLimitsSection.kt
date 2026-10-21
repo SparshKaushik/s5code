@@ -28,6 +28,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.drawscope.clipRect
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -77,18 +79,28 @@ private fun accountColor(account: LimitAccount, index: Int): Color {
     return Color(palette[(account.key.hashCode() + index).mod(palette.size)])
 }
 
+private val PACE_GAP_HALF_WIDTH = 3.dp
+
+/**
+ * Where the even-pace tick goes in a bar [width] wide, kept [halfGap] inside
+ * either end so the tick and its gap stay on the bar at 0% and 100%. Null when
+ * the bar is too narrow to hold a gap at all.
+ */
+internal fun paceTickX(width: Float, timeLeftPercent: Int, halfGap: Float): Float? {
+    if (width < halfGap * 2) return null
+    return (width * timeLeftPercent / 100f).coerceIn(halfGap, width - halfGap)
+}
+
 @Composable
 private fun PoolBar(window: LimitPoolWindow, now: Long) {
     // One weighted column per account, in the pool's fixed order: an account
     // without this window still takes its slot, so gaps read as gaps.
-    Row(
-        Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))
-            .background(MaterialTheme.colorScheme.surfaceContainerHighest),
-    ) {
+    Row(Modifier.fillMaxWidth().height(8.dp).clip(RoundedCornerShape(4.dp))) {
         window.columns.forEachIndexed { index, (account, memberWindow) ->
             val remaining = memberWindow?.let { 100.0 - it.usedPercent.coerceIn(0.0, 100.0) }
             val timeLeft = memberWindow?.let { paceRemainingPercent(it, now) }
-            val tickColor = MaterialTheme.colorScheme.onSurfaceVariant
+            val tickColor = MaterialTheme.colorScheme.onSurface
+            val trackColor = MaterialTheme.colorScheme.surfaceContainerHighest
             Box(
                 Modifier.weight(1f)
                     .fillMaxHeight()
@@ -99,18 +111,28 @@ private fun PoolBar(window: LimitPoolWindow, now: Long) {
                                 "${accountName(account)}: ${remaining.toInt()}% left" +
                                     (timeLeft?.let { ", $it% of the window left" } ?: "")
                     }
-                    // Even pace: quota left past this mark is ahead of the clock.
+                    // Even pace: quota left past this mark is ahead of the clock. The
+                    // tick sits in a see-through gap cut from the track and fill,
+                    // so it reads against either side without changing their shape.
                     .drawWithContent {
-                        drawContent()
-                        if (timeLeft != null) {
+                        val gap = PACE_GAP_HALF_WIDTH.toPx()
+                        val tickX = timeLeft?.let { paceTickX(size.width, it, gap) }
+                        if (tickX == null) {
+                            drawContent()
+                        } else {
+                            clipRect(right = tickX - gap) { this@drawWithContent.drawContent() }
+                            clipRect(left = tickX + gap) { this@drawWithContent.drawContent() }
                             val tick = 2.dp.toPx()
-                            drawRect(
+                            val inset = 1.dp.toPx()
+                            drawRoundRect(
                                 tickColor,
-                                topLeft = Offset(size.width * timeLeft / 100f - tick / 2, 0f),
-                                size = Size(tick, size.height),
+                                topLeft = Offset(tickX - tick / 2, inset),
+                                size = Size(tick, size.height - inset * 2),
+                                cornerRadius = CornerRadius(tick / 2),
                             )
                         }
                     }
+                    .background(trackColor)
             ) {
                 Box(
                     Modifier.fillMaxHeight()

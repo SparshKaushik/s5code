@@ -53,10 +53,15 @@ data class ScheduledTaskWebhookDeliverySummaryDto(
     val method: String = "",
     val contentType: String? = null,
     val bodyBytes: Long = 0,
-    /** accepted | dispatch_failed | rejected_signature | disabled | rate_limited | expired */
+    /**
+     * accepted | dispatch_failed | duplicate | coalesced | filtered |
+     * rejected_signature | disabled | rate_limited | expired
+     */
     val outcome: String = "",
     /** True only when a configured signature matched; false also means "none configured". */
     val signatureVerified: Boolean = false,
+    /** An accepted delivery that opened a coalesce window rather than running at once. */
+    val pendingWindow: Boolean = false,
     /** Template placeholders that had no value in this request and rendered empty. */
     val missingFields: List<String> = emptyList(),
     val error: String? = null,
@@ -73,6 +78,7 @@ data class ScheduledTaskWebhookDeliveryDto(
     val bodyBytes: Long = 0,
     val outcome: String = "",
     val signatureVerified: Boolean = false,
+    val pendingWindow: Boolean = false,
     val missingFields: List<String> = emptyList(),
     val error: String? = null,
     val query: String = "",

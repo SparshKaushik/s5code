@@ -48,6 +48,9 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -237,6 +240,17 @@ private fun ThreadsHome(
     var searchLoading by remember { mutableStateOf(false) }
     // The row the Custom… snooze sheet was opened for; it snoozes on confirm.
     var customSnoozeFor by remember { mutableStateOf<ThreadSummary?>(null) }
+    // One Undo at a time, like RN's ThreadUndoNotice: settle, snooze, and unpin
+    // move a row out from under the thumb, so each offers the way back for 5s.
+    var undoNotice by remember { mutableStateOf<ThreadUndoNotice?>(null) }
+    // RN's `claim.isCurrent()`: a slow action whose thread has since been acted on
+    // again must not offer an undo that replays stale state.
+    val undoClaims = remember { mutableMapOf<Pair<EnvironmentId, ThreadId>, Int>() }
+    LaunchedEffect(undoNotice) {
+        val shown = undoNotice ?: return@LaunchedEffect
+        delay(5_000)
+        if (undoNotice === shown) undoNotice = null
+    }
 
     LaunchedEffect(hardwareShortcut?.id) {
         when (hardwareShortcut?.shortcut) {
@@ -339,6 +353,74 @@ private fun ThreadsHome(
         }
     }
 
+    /**
+     * The Undo [action] earns once it succeeds, planned from [thread] as it was
+     * before. Null for actions that are their own undo or have none.
+     */
+    fun undoFor(thread: ThreadSummary, action: String): ThreadUndoNotice? {
+        val undo =
+            when {
+                action == "settle" && thread.status != ThreadStatus.Settled -> ThreadUndoAction.Settled
+                action.startsWith("snooze:") ||
+                    (action == "snooze" && thread.status != ThreadStatus.Snoozed) -> ThreadUndoAction.Snoozed
+                action == "pin" && thread.pinned -> ThreadUndoAction.Unpinned
+                else -> return null
+            }
+        return ThreadUndoNotice(undo, thread.environmentId, thread.id, planThreadUndo(undo, thread))
+    }
+
+    /**
+     * A lifecycle or placement action on a thread supersedes its pending Undo:
+     * restoring the older state on top of the newer one would fight what the
+     * user just did. Title and read-state actions leave it alone.
+     */
+    /** Returns the action's claim on the thread's undo; null for non-lifecycle actions. */
+    fun supersedeUndo(thread: ThreadSummary, action: String): Int? {
+        val lifecycle =
+            action.startsWith("snooze") ||
+                action in setOf("settle", "unsnooze", "pin", "archive", "delete", "move-up", "move-down")
+        if (!lifecycle) return null
+        val claim = undoClaims.merge(thread.environmentId to thread.id, 1, Int::plus)
+        val pending = undoNotice
+        if (pending != null && pending.environmentId == thread.environmentId && pending.threadId == thread.id) undoNotice = null
+        return claim
+    }
+
+    fun runUndo(notice: ThreadUndoNotice) {
+        if (undoNotice !== notice) return
+        undoNotice = null
+        val pinReorder =
+            environments.firstOrNull { it.id == notice.environmentId }?.capabilities?.threadPinReorder == true
+        scope.launch {
+            try {
+                executeThreadUndo(notice.plan, System::currentTimeMillis) { step ->
+                    when (step) {
+                        ThreadUndoStep.Unsettle -> store.workspace.setSettled(notice.environmentId, notice.threadId, false)
+                        ThreadUndoStep.Unsnooze -> store.workspace.setSnoozed(notice.environmentId, notice.threadId, false)
+                        is ThreadUndoStep.Pin -> {
+                            store.workspace.setPinned(notice.environmentId, notice.threadId, true)
+                            // The pin write takes no key here, so the old place
+                            // comes back with a reorder where the server has one.
+                            if (pinReorder && step.orderKey != null) {
+                                store.workspace.reorderThreads(
+                                    notice.environmentId,
+                                    ReorderSection.Pinned,
+                                    listOf(notice.threadId to step.orderKey),
+                                )
+                            }
+                        }
+                        is ThreadUndoStep.Snooze ->
+                            store.workspace.setSnoozed(notice.environmentId, notice.threadId, true, step.untilIso)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportError(error.message ?: "The thread action could not be undone.")
+            }
+        }
+    }
+
     fun launchThreadAction(thread: ThreadSummary, action: String) {
         if (action == "new-thread-on-branch") {
             // Straight to the draft, prefilled like RN's NewTaskSheet params:
@@ -355,6 +437,8 @@ private fun ThreadsHome(
             onResumeDraft()
             return
         }
+        val claim = supersedeUndo(thread, action)
+        val undo = undoFor(thread, action)
         scope.launch {
             try {
                 val (moveUp, moveDown) =
@@ -375,6 +459,7 @@ private fun ThreadsHome(
                     moveSection =
                         if (thread.pinned) ReorderSection.Pinned else ReorderSection.Active,
                 )
+                if (undo != null && undoClaims[thread.environmentId to thread.id] == claim) undoNotice = undo
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
@@ -486,28 +571,11 @@ private fun ThreadsHome(
     // Switched-off environments have no session and no threads, so they count
     // toward neither "unreachable" nor the wait.
     val enabledEnvironments = remember(environments) { environments.filter { it.isEnabled } }
-    // The header line mirrors `workspaceConnectionStatusLabel` in
-    // apps/mobile/src/features/home/workspace-connection-status.ts: offline
-    // first, then reconnecting, then sync state. It debounces the same 800ms
-    // so a reconnect blip does not flash text under the title.
+    // The header line under the title. It debounces the same 800ms as RN so a
+    // reconnect blip does not flash text under the title.
     val rawConnectionStatus =
-        remember(environments, enabledEnvironments, paired, sessionRestored) {
-            val connecting =
-                enabledEnvironments.filter {
-                    it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Connecting ||
-                        it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Recovering
-                }
-            when {
-                enabledEnvironments.any {
-                    it.state == club.touchtech.s5code.kotlin.model.ConnectionState.Offline
-                } -> "You are offline"
-                connecting.size == 1 -> "Reconnecting to ${connecting.single().label}…"
-                connecting.size > 1 -> "Reconnecting ${connecting.size} environments"
-                environments.isEmpty() && sessionRestored && !paired -> "No environments"
-                enabledEnvironments.none { it.snapshotLoaded } &&
-                    enabledEnvironments.isNotEmpty() -> "Loading threads…"
-                else -> null
-            }
+        remember(environments, paired, sessionRestored) {
+            homeConnectionStatus(environments, paired, sessionRestored)
         }
     var connectionStatus by remember { mutableStateOf<String?>(null) }
     LaunchedEffect(rawConnectionStatus) {
@@ -653,6 +721,23 @@ private fun ThreadsHome(
                 horizontalAlignment = Alignment.End,
                 verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
             ) {
+                undoNotice?.let { notice ->
+                    Snackbar(
+                        modifier = Modifier.widthIn(max = 360.dp),
+                        action = {
+                            TextButton(onClick = { runUndo(notice) }) { Text("Undo") }
+                        },
+                        dismissAction = {
+                            S5IconButton(
+                                icon = Icons.Rounded.Close,
+                                label = "Dismiss",
+                                onClick = { if (undoNotice === notice) undoNotice = null },
+                            )
+                        },
+                    ) {
+                        Text("${notice.action.label} thread")
+                    }
+                }
                 AnimatedVisibility(wait != null && items.isNotEmpty()) {
                     wait?.let { notice ->
                         S5WaitPill(
@@ -970,6 +1055,25 @@ private fun ThreadsHome(
                                                     threadKey,
                                                 )
                                             },
+                                            onDismissWoke =
+                                                item.thread.wokeAtMillis?.let { wokeAt ->
+                                                    {
+                                                        // The wake's own timestamp, not now: a
+                                                        // later wake must still surface.
+                                                        scope.launch {
+                                                            try {
+                                                                store.workspace.visitThread(
+                                                                    item.thread.environmentId,
+                                                                    item.thread.id,
+                                                                    wokeAt,
+                                                                )
+                                                            } catch (cancelled: CancellationException) {
+                                                                throw cancelled
+                                                            } catch (_: Exception) {
+                                                            }
+                                                        }
+                                                    }
+                                                },
                                             trailing = {
                                                 val titleRegenerationSupported =
                                                     environment
@@ -1067,12 +1171,14 @@ private fun ThreadsHome(
             onSnooze = { untilIso ->
                 val target = thread
                 customSnoozeFor = null
+                supersedeUndo(target, "snooze")
                 scope.launch {
                     runCatching {
                             store.workspace.setSnoozed(
                                 target.environmentId, target.id, true, untilIso,
                             )
                         }
+                        .onSuccess { undoNotice = undoFor(target, "snooze:$untilIso") }
                         .onFailure { store.showError(it.message ?: "Snooze failed.") }
                 }
             },
@@ -1176,10 +1282,8 @@ internal fun threadMenuOptions(
                         icon = Icons.Rounded.Bedtime,
                     )
                 )
-            !settlementSupported ->
-                add(
-                    S5MenuOption(id = "archive", label = "Archive", icon = Icons.Rounded.Archive)
-                )
+            // Pre-settlement servers get no lifecycle items, only Archive below.
+            !settlementSupported -> Unit
             thread.status == ThreadStatus.Settled ->
                 add(
                     S5MenuOption(
@@ -1264,6 +1368,9 @@ internal fun threadMenuOptions(
                 )
             )
         }
+        // Every row variant keeps Archive next to Delete, as RN's menus do: it is
+        // the reversible way to take a thread off the list for good.
+        add(S5MenuOption(id = "archive", label = "Archive", icon = Icons.Rounded.Archive))
         add(
             S5MenuOption(
                 id = "delete",

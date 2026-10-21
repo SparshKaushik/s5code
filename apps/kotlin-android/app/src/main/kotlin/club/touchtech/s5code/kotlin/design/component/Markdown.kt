@@ -58,6 +58,7 @@ import club.touchtech.s5code.kotlin.design.text.MdSpan
 import club.touchtech.s5code.kotlin.design.text.MarkdownLinkPresentation
 import club.touchtech.s5code.kotlin.design.text.MdTableAlignment
 import club.touchtech.s5code.kotlin.design.text.codeLanguageOf
+import club.touchtech.s5code.kotlin.design.text.inlineCodeFileLink
 import club.touchtech.s5code.kotlin.design.text.parseMarkdown
 import club.touchtech.s5code.kotlin.design.text.resolveMarkdownLinkPresentation
 import club.touchtech.s5code.kotlin.design.text.resolveWorkspaceRelativeFilePath
@@ -400,10 +401,17 @@ private fun List<MdSpan>.annotate(links: MarkdownLinkActions): AnnotatedMarkdown
                         color = if (span.code) codeColor else Color.Unspecified,
                         textDecoration = if (span.strike) TextDecoration.LineThrough else null,
                     )
-                val presentation = span.link?.let(::resolveMarkdownLinkPresentation)
+                val presentation =
+                    span.link?.let(::resolveMarkdownLinkPresentation)
+                        ?: span.text.takeIf { span.code }?.let(::inlineCodeFileLink)
                 when (presentation) {
                     is MarkdownLinkPresentation.File -> {
-                        val path = resolveWorkspaceRelativeFilePath(workspaceRoot, presentation.path)
+                        // A trailing slash survives normalization so the opener
+                        // knows the link names a directory, not a file.
+                        val path =
+                            resolveWorkspaceRelativeFilePath(workspaceRoot, presentation.path)?.let {
+                                if (presentation.path.endsWith('/') || presentation.path.endsWith('\\')) "$it/" else it
+                            }
                         if (path != null && onOpenFile != null) {
                             val iconId = "file-icon-$index"
                             icons[iconId] =
@@ -421,6 +429,9 @@ private fun List<MdSpan>.annotate(links: MarkdownLinkActions): AnnotatedMarkdown
                                                 style.copy(
                                                     color = linkColor,
                                                     fontWeight = FontWeight.SemiBold,
+                                                    // The chip shows the file's label, not
+                                                    // the code it was written as.
+                                                    fontFamily = null,
                                                 )
                                         ),
                                 ) { onOpenFile(path) }

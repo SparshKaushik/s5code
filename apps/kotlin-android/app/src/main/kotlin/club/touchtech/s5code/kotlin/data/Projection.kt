@@ -303,6 +303,8 @@ fun threadSummaryFrom(
     nowMillis: Long,
     subagentRequest: String? = null,
     serverSettles: Boolean = false,
+    /** The `threadVisitedTracking` capability; the Woke marker needs it to clear. */
+    visitTracking: Boolean = false,
 ): ThreadSummary {
     val status = threadStatusOf(shell, nowMillis, subagentRequest, serverSettles)
     val liveStatus =
@@ -387,6 +389,11 @@ fun threadSummaryFrom(
         unread = shell.lastVisitedAt != null && parseInstant(shell.latestTurn?.completedAt)?.let {
             it > (parseInstant(shell.lastVisitedAt) ?: Long.MIN_VALUE)
         } == true,
+        // Snoozed and settled rows are on their shelves, where RN never marks a wake.
+        wokeAtMillis =
+            if (status == ThreadStatus.Snoozed || status == ThreadStatus.Settled) null
+            else unacknowledgedWokeAtMillis(shell, nowMillis, visitTracking, subagentRequest),
+        snoozedUntil = shell.snoozedUntil,
     )
 }
 
@@ -433,6 +440,7 @@ fun threadDetailFrom(
     page: ThreadDetailPageDto? = null,
     loadingOlder: Boolean = false,
     serverSettles: Boolean = false,
+    visitTracking: Boolean = false,
 ): ThreadDetail {
     val sortedActivities = thread.activities.sortedWith(activityOrder)
     val summary =
@@ -442,6 +450,7 @@ fun threadDetailFrom(
             driverFor,
             nowMillis,
             serverSettles = serverSettles,
+            visitTracking = visitTracking,
         )
 
     // A folded user-input record supersedes the server's synthetic user message
@@ -591,7 +600,8 @@ fun threadDetailFrom(
     return ThreadDetail(
         summary = summary,
         feed = v2?.feed ?: feed,
-        approval = if (v2 != null) v2.approval else pendingApprovalOf(sortedActivities),
+        approval = if (v2 != null) v2.approvals.firstOrNull() else pendingApprovalOf(sortedActivities),
+        approvals = if (v2 != null) v2.approvals else pendingApprovalsOf(sortedActivities),
         userInput = if (v2 != null) v2.userInput else pendingUserInputOf(sortedActivities),
         queuedRuns = v2?.queuedRuns.orEmpty(),
         queuedMessages = v2?.queuedRuns?.size ?: 0,
@@ -613,6 +623,7 @@ fun threadDetailFrom(
                     kind = task.v2String("kind") ?: "background_task",
                     description = task.v2String("description"),
                     taskId = task.v2String("taskId"),
+                    childThreadId = task.v2String("childThreadId")?.takeIf { task.v2String("kind") == "subagent" },
                 )
             },
         pullRequests =
@@ -651,6 +662,9 @@ fun threadDetailFrom(
                         timeLabel = timeLabel(checkpoint.completedAt),
                         filesChanged = checkpoint.files.size,
                         current = index == 0,
+                        turnId = checkpoint.turnId.takeIf { it.isNotEmpty() },
+                        additions = checkpoint.files.sumOf { it.additions },
+                        deletions = checkpoint.files.sumOf { it.deletions },
                     )
                 },
         settings =
@@ -724,6 +738,7 @@ fun optionDescriptorsFrom(capabilities: ModelCapabilitiesDto?): List<ProviderOpt
                                 )
                         },
                     currentValue = descriptor.currentValue?.contentOrNull?.takeIf { it.isNotBlank() },
+                    promptInjectedValues = descriptor.promptInjectedValues,
                 )
                     // A select with nothing to select is not a control.
                     .takeIf { it.options.isNotEmpty() }
@@ -1745,7 +1760,11 @@ private fun planStepsOf(payload: JsonObject?): List<PlanStep>? {
  * Only the oldest open request is returned: the UI shows one gate at a time, and
  * answering out of order is not something a provider expects.
  */
-fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApproval? {
+fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApproval? =
+    pendingApprovalsOf(sortedActivities).firstOrNull()
+
+/** Every open approval, oldest first; see [pendingApprovalOf]. */
+fun pendingApprovalsOf(sortedActivities: List<ThreadActivityDto>): List<PendingApproval> {
     val open = linkedMapOf<String, PendingApproval>()
     val createdAtById = mutableMapOf<String, String>()
     // Request ids are unique. A terminal event stays final even when provider
@@ -1790,7 +1809,7 @@ fun pendingApprovalOf(sortedActivities: List<ThreadActivityDto>): PendingApprova
                 }
         }
     }
-    return open.entries.minByOrNull { createdAtById[it.key].orEmpty() }?.value
+    return open.entries.sortedBy { createdAtById[it.key].orEmpty() }.map { it.value }
 }
 
 /**
@@ -2152,7 +2171,7 @@ fun timeLabel(value: String?): String {
         .format(java.time.Instant.ofEpochMilli(millis))
 }
 
-/** Elapsed time on a running turn: "12s", "4m 20s". */
+/** Elapsed time on a running turn: "12s", "4m", "1h 5m". */
 fun elapsedLabel(startedAt: String, nowMillis: Long): String? {
     val started = parseInstant(startedAt) ?: return null
     return elapsedLabel(started, nowMillis)
@@ -2160,8 +2179,15 @@ fun elapsedLabel(startedAt: String, nowMillis: Long): String? {
 
 /** Elapsed label when the projection already retained the parsed start time. */
 fun elapsedLabel(startedAtMillis: Long, nowMillis: Long): String {
+    // `formatWorkingDurationLabel`: seconds only in the first minute, then the
+    // coarsest unit that still moves, so a long run's label stays short.
     val seconds = ((nowMillis - startedAtMillis) / 1000).coerceAtLeast(0)
-    return if (seconds < 60) "${seconds}s" else "${seconds / 60}m ${seconds % 60}s"
+    val minutes = seconds / 60
+    return when {
+        seconds < 60 -> "${seconds}s"
+        minutes < 60 -> "${minutes}m"
+        else -> "${minutes / 60}h ${minutes % 60}m"
+    }
 }
 
 private fun JsonObject.string(key: String): String? =

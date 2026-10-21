@@ -19,7 +19,12 @@ sealed interface FeedRow {
      * RN's `groupStandIn`: the row takes the toggle's key and label, and opening
      * it opens the group too, so a second call joining keeps everything open.
      */
-    data class Entry(val entry: FeedEntry, val standIn: GroupStandIn? = null) : FeedRow {
+    data class Entry(
+        val entry: FeedEntry,
+        val standIn: GroupStandIn? = null,
+        /** A turn with no work row of its own shows its diffstat on its answer. */
+        val diffStat: TurnDiffStat? = null,
+    ) : FeedRow {
         override val key: String
             get() = standIn?.let { "work-toggle:${it.groupId}" } ?: entry.id
     }
@@ -42,6 +47,9 @@ sealed interface FeedRow {
         val expanded: Boolean,
         val summary: String,
         val thought: String? = null,
+        /** The turn the group's rows belong to. */
+        val turnId: String? = null,
+        val diffStat: TurnDiffStat? = null,
     ) : FeedRow {
         override val key: String
             get() = "work-toggle:$groupId"
@@ -56,6 +64,7 @@ sealed interface FeedRow {
         val label: String,
         val expanded: Boolean,
         val placement: Placement = Placement.Header,
+        val diffStat: TurnDiffStat? = null,
     ) : FeedRow {
         enum class Placement { Header, Footer }
 
@@ -96,6 +105,17 @@ sealed interface FeedRow {
 }
 
 /**
+ * A finished turn's checkpoint totals: RN's `TurnDiffStat`, the "+12 −3" a turn's
+ * work row carries and opens the review from.
+ */
+data class TurnDiffStat(val files: Int, val additions: Int, val deletions: Int) {
+    val accessibilityLabel: String
+        get() =
+            "Review $files file${if (files == 1) "" else "s"} changed, " +
+                "$additions additions, $deletions deletions"
+}
+
+/**
  * Folds runs of adjacent work rows, mirroring `appendPresentedFeedEntry` in the RN
  * client and `MessagesTimeline.logic.ts` on the desktop/web side.
  *
@@ -125,6 +145,8 @@ fun presentFeed(
     latestTurn: TurnInfo? = null,
     expandedTurns: Set<String> = emptySet(),
     activeWorkStartedAtMillis: Long? = null,
+    /** Checkpoint totals by turn id; see [attachTurnDiffStats]. */
+    turnDiffStats: Map<String, TurnDiffStat> = emptyMap(),
 ): List<FeedRow> {
     val folds = turnFolds(feed, latestTurn)
     val hidden =
@@ -211,6 +233,7 @@ fun presentFeed(
                     group.filterIsInstance<FeedEntry.Reasoning>().lastOrNull()?.let {
                         liveThoughtLine(it.extraParts.lastOrNull() ?: it.text).takeIf(String::isNotBlank)
                     } else null,
+                turnId = group.first().turnId,
             )
         if (expanded) {
             group.forEach { rows += FeedRow.Entry(it) }
@@ -220,7 +243,60 @@ fun presentFeed(
         appendFooterFor(group.map { it.id })
     }
     if (activeWorkStartedAtMillis != null) rows += FeedRow.Working(activeWorkStartedAtMillis)
-    return rows
+    return attachTurnDiffStats(rows, feed, turnDiffStats)
+}
+
+/**
+ * Puts each turn's diffstat on one row, as `deriveThreadFeedPresentation` does: the
+ * turn's fold header when it has one, else its first work toggle, else its answer.
+ * A turn with no assistant answer shows none — RN keys the checkpoint to the
+ * answer, and a stat floating under a prompt would read as the user's change.
+ */
+internal fun attachTurnDiffStats(
+    rows: List<FeedRow>,
+    feed: List<FeedEntry>,
+    stats: Map<String, TurnDiffStat>,
+): List<FeedRow> {
+    if (stats.isEmpty()) return rows
+    val answerIdByTurn = mutableMapOf<String, String>()
+    feed.forEach { entry ->
+        val turnId = entry.turnId
+        if (entry is FeedEntry.AgentMessage && turnId != null && turnId in stats) {
+            answerIdByTurn[turnId] = entry.id
+        }
+    }
+    if (answerIdByTurn.isEmpty()) return rows
+    val target = mutableMapOf<String, Int>()
+    rows.forEachIndexed { index, row ->
+        if (
+            row is FeedRow.TurnFold && row.placement == FeedRow.TurnFold.Placement.Header &&
+                row.turnId in answerIdByTurn
+        ) {
+            target[row.turnId] = index
+        }
+    }
+    rows.forEachIndexed { index, row ->
+        val turnId = (row as? FeedRow.WorkToggle)?.turnId ?: return@forEachIndexed
+        if (turnId in answerIdByTurn) target.putIfAbsent(turnId, index)
+    }
+    rows.forEachIndexed { index, row ->
+        val entry = (row as? FeedRow.Entry)?.entry ?: return@forEachIndexed
+        val turnId = entry.turnId ?: return@forEachIndexed
+        if (answerIdByTurn[turnId] == entry.id) target.putIfAbsent(turnId, index)
+    }
+    if (target.isEmpty()) return rows
+    return rows.toMutableList().apply {
+        target.forEach { (turnId, index) ->
+            val stat = stats.getValue(turnId)
+            this[index] =
+                when (val row = this[index]) {
+                    is FeedRow.TurnFold -> row.copy(diffStat = stat)
+                    is FeedRow.WorkToggle -> row.copy(diffStat = stat)
+                    is FeedRow.Entry -> row.copy(diffStat = stat)
+                    else -> row
+                }
+        }
+    }
 }
 
 /**
@@ -266,11 +342,9 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
         entry.promptTurnId?.let { promptIndexByTurn.putIfAbsent(it, index) }
     }
 
-    // The first and last assistant message of a turn stay visible on either side
-    // of the fold, matching `firstAssistantMessageIdByTurn` /
-    // `terminalAssistantMessageIdByTurn`: a multi-answer turn reads as its
-    // opening line, the fold, and the answer it ended on.
-    val firstAssistantIdByTurn = mutableMapOf<String, String>()
+    // Only the answer a turn ended on stays outside the fold, matching
+    // `terminalAssistantMessageIdByRun`: progress notes the agent wrote along the
+    // way are settled work like its tool calls.
     val terminalAssistantIdByTurn = mutableMapOf<String, String>()
 
     // Grouped in feed order, so "first row" and "last answer" are positional rather
@@ -299,7 +373,6 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
         }
         groups.getValue(turnId) += entry
         if (entry is FeedEntry.AgentMessage) {
-            firstAssistantIdByTurn.putIfAbsent(turnId, entry.id)
             terminalAssistantIdByTurn[turnId] = entry.id
         }
     }
@@ -308,14 +381,14 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
     groups.forEach { (turnId, entries) ->
         if (turnId == openTurnId) return@forEach
         if (entries.any { it is FeedEntry.AgentMessage && it.streaming }) return@forEach
-        // User-input records never hide — `isUserInputActivityGroup` in RN —
-        // and the first assistant message stays for the same reason the last does.
+        // Answered questions and proposed plans never hide — RN keeps
+        // `questionAnswer` and prominent activities outside the fold.
         val hidden =
             entries
                 .filter {
-                    it.id != firstAssistantIdByTurn[turnId] &&
-                        it.id != terminalAssistantIdByTurn[turnId] &&
+                    it.id != terminalAssistantIdByTurn[turnId] &&
                         it !is FeedEntry.QuestionAnswer && it !is FeedEntry.McpApp &&
+                        it !is FeedEntry.ProposedPlan &&
                         !(it is FeedEntry.Subagent && it.active)
                 }
                 .map { it.id }

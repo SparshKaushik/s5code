@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.pullrequests
 
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -17,6 +18,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -466,7 +468,7 @@ fun PullRequestListScreen(
                         ) {
                             if (errors.isNotEmpty()) {
                                 item(key = "errors") {
-                                    S5Notice(icon = Icons.Rounded.CloudOff, text = errors.joinToString("\n"))
+                                    PullRequestListErrors(messages = errors, resetKey = targets)
                                 }
                             } else if (allOffline) {
                                 item(key = "offline") {
@@ -865,6 +867,37 @@ private fun PullRequestRowMeta(row: ScopedPullRequestEntry, conflict: String?) {
         if (hasStats) {
             Text("+${entry.additions}", style = S5Theme.code.code, color = S5Theme.status.added)
             Text("−${entry.deletions}", style = S5Theme.code.code, color = S5Theme.status.removed)
+        }
+    }
+}
+
+/**
+ * RN's `PullRequestListErrors`: one failing repository per line would push the
+ * list itself off screen, so rows that did load keep the space and the errors
+ * collapse to a count that expands on tap. A new target set starts collapsed.
+ */
+@Composable
+private fun PullRequestListErrors(messages: List<String>, resetKey: Any) {
+    var expanded by remember(resetKey) { mutableStateOf(false) }
+    val title = "${messages.size} ${if (messages.size == 1) "error" else "errors"} loading pull requests"
+    Column {
+        S5Notice(
+            icon = Icons.Rounded.CloudOff,
+            text = title,
+            modifier =
+                Modifier.clickable(
+                    onClickLabel = if (expanded) "Hide details" else "Show details",
+                ) { expanded = !expanded },
+        )
+        if (expanded) {
+            SelectionContainer {
+                Text(
+                    messages.joinToString("\n"),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = S5Theme.spacing.medium, vertical = S5Theme.spacing.small),
+                )
+            }
         }
     }
 }

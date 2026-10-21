@@ -58,6 +58,8 @@ import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.transport.v2String
 import club.touchtech.s5code.kotlin.transport.wire.ServerStorageCleanupDto
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import kotlinx.coroutines.launch
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonObject
@@ -629,43 +631,51 @@ private fun resolvedWorktreeRules(
 private const val DATABASE_COMPACTION_RECOMMENDED_BYTES = 1024.0 * 1024.0 * 1024.0
 
 /**
- * `DatabaseStorageNotice`: suggests the offline compaction command for a
- * database that still holds at least 1 GiB of freed pages. Dismissal is
- * remembered per environment on this device.
+ * `DatabaseStorageNotice`: one notice listing every machine whose database
+ * still holds at least 1 GiB of freed pages, largest first, each row copying
+ * that machine's offline compaction command. Dismissal is remembered per
+ * environment on this device and covers every machine the notice listed.
  */
 @Composable
-private fun DatabaseStorageNotice(store: AppStore, target: Environment) {
+private fun DatabaseStorageNotice(store: AppStore, targets: List<Environment>) {
     val preferences by store.preferences.collectAsStateWithLifecycle()
-    val status by
-        remember(target.id) { store.workspace.databaseStorage(target.id) }
-            .collectAsStateWithLifecycle(initialValue = null)
-    val copy = rememberClipboardWriter()
-    val current = status ?: return
-    if (target.id.value in preferences.dismissedDatabaseStorageNotices) return
-    if (current.incrementalVacuumEnabled || current.reclaimableBytes < DATABASE_COMPACTION_RECOMMENDED_BYTES) return
-    val gib = "%.1f".format(java.util.Locale.ROOT, current.reclaimableBytes / DATABASE_COMPACTION_RECOMMENDED_BYTES)
-    S5RowGroup(title = "Reclaim $gib GiB on ${target.label}") {
-        Column(
-            Modifier.padding(vertical = S5Theme.spacing.small),
-            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
-        ) {
-            Text(
-                "Old history is cleaned up automatically, but this database still holds the freed space. " +
-                    "Run this command on ${target.label} to return it to disk; it pauses and restarts the " +
-                    "background service. Quit the desktop app first if it hosts this environment.",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            androidx.compose.foundation.text.selection.SelectionContainer {
-                Text(current.compactCommand, style = S5Theme.code.code)
+    val ids = targets.map { it.id }
+    val statuses by
+        remember(ids) {
+            if (ids.isEmpty()) {
+                kotlinx.coroutines.flow.flowOf(emptyList())
+            } else {
+                kotlinx.coroutines.flow.combine(
+                    // A machine that never answers must not hold back the others.
+                    ids.map { id -> store.workspace.databaseStorage(id).onStart { emit(null) }.map { status -> id to status } }
+                ) { it.toList() }
             }
+        }.collectAsStateWithLifecycle(initialValue = emptyList())
+    val copy = rememberClipboardWriter()
+    val visible =
+        statuses
+            .mapNotNull { (id, status) ->
+                val target = targets.firstOrNull { it.id == id } ?: return@mapNotNull null
+                status?.takeIf { shouldRecommendDatabaseCompaction(it) }?.let { target to it }
+            }
+            .filterNot { (target, _) -> target.id.value in preferences.dismissedDatabaseStorageNotices }
+            .sortedByDescending { (_, status) -> status.reclaimableBytes }
+    if (visible.isEmpty()) return
+    S5RowGroup(title = "Reclaim database space") {
+        visible.forEachIndexed { index, (target, status) ->
+            S5SettingsRow(
+                icon = Icons.Rounded.ContentCopy,
+                label = target.label,
+                supporting = status.compactCommand,
+                value =
+                    "%.1f GiB".format(
+                        java.util.Locale.ROOT,
+                        status.reclaimableBytes / DATABASE_COMPACTION_RECOMMENDED_BYTES,
+                    ),
+                onClick = { copy(status.compactCommand) },
+                position = rowPosition(index, visible.size + 1),
+            )
         }
-        S5SettingsRow(
-            icon = Icons.Rounded.ContentCopy,
-            label = "Copy command",
-            onClick = { copy(current.compactCommand) },
-            position = rowPosition(0, 2),
-        )
         S5SettingsRow(
             icon = Icons.Rounded.Close,
             label = "Dismiss",
@@ -673,14 +683,28 @@ private fun DatabaseStorageNotice(store: AppStore, target: Environment) {
                 store.updatePreferences { prefs ->
                     prefs.copy(
                         dismissedDatabaseStorageNotices =
-                            (prefs.dismissedDatabaseStorageNotices + target.id.value).distinct()
+                            (prefs.dismissedDatabaseStorageNotices + visible.map { it.first.id.value }).distinct()
                     )
                 }
             },
-            position = rowPosition(1, 2),
+            position = rowPosition(visible.size, visible.size + 1),
+        )
+        Text(
+            "Old history is cleaned up automatically, but these databases still hold the freed space. " +
+                "Run the command on each machine to return it to disk; it pauses and restarts the " +
+                "background service. Quit the desktop app first if it hosts the environment.",
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            modifier = Modifier.padding(vertical = S5Theme.spacing.small),
         )
     }
 }
+
+/** `shouldRecommendDatabaseCompaction` from contracts. */
+private fun shouldRecommendDatabaseCompaction(
+    status: club.touchtech.s5code.kotlin.transport.wire.DatabaseStorageStatusDto,
+): Boolean =
+    !status.incrementalVacuumEnabled && status.reclaimableBytes >= DATABASE_COMPACTION_RECOMMENDED_BYTES
 
 /**
  * RN's `SettingsEnvironmentMaintenanceRouteScreen` plus the worktree/storage
@@ -703,11 +727,7 @@ fun SettingsMaintenanceScreen(store: AppStore, onBack: () -> Unit) {
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
-            for (target in sync.targets) {
-                if (target.capabilities.databaseStorage) {
-                    androidx.compose.runtime.key(target.id) { DatabaseStorageNotice(store, target) }
-                }
-            }
+            DatabaseStorageNotice(store, sync.targets.filter { it.capabilities.databaseStorage })
             if (settings == null) {
                 NoConnectedEnvironment()
             } else {

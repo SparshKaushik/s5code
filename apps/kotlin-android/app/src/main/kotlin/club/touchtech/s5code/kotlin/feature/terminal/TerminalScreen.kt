@@ -606,8 +606,9 @@ private data class TerminalToolbarAction(
 )
 
 /**
- * The RN toolbar order verbatim: esc, the host's modifier pair (cmd+ctrl on a
- * mac, ctrl+alt elsewhere), tab, paste, clear, arrows, then ~ | / -.
+ * The RN toolbar order verbatim: arrows first, so they are visible without
+ * scrolling the row, then esc, the host's modifier pair (cmd+ctrl on a mac, ctrl+alt elsewhere), tab,
+ * paste, clear, then ~ | / -.
  */
 private fun terminalToolbarActions(hostPlatform: HostPlatform): List<TerminalToolbarAction> {
     val modifiers =
@@ -623,15 +624,15 @@ private fun terminalToolbarActions(hostPlatform: HostPlatform): List<TerminalToo
             )
         }
     return buildList {
+        add(TerminalToolbarAction(TerminalToolbarKind.Send, "↑", "[A"))
+        add(TerminalToolbarAction(TerminalToolbarKind.Send, "↓", "[B"))
+        add(TerminalToolbarAction(TerminalToolbarKind.Send, "←", "[D"))
+        add(TerminalToolbarAction(TerminalToolbarKind.Send, "→", "[C"))
         add(TerminalToolbarAction(TerminalToolbarKind.Send, "esc", ""))
         addAll(modifiers)
         add(TerminalToolbarAction(TerminalToolbarKind.Send, "tab", "\t"))
         add(TerminalToolbarAction(TerminalToolbarKind.Paste, "paste"))
         add(TerminalToolbarAction(TerminalToolbarKind.Clear, "clear"))
-        add(TerminalToolbarAction(TerminalToolbarKind.Send, "↑", "[A"))
-        add(TerminalToolbarAction(TerminalToolbarKind.Send, "↓", "[B"))
-        add(TerminalToolbarAction(TerminalToolbarKind.Send, "←", "[D"))
-        add(TerminalToolbarAction(TerminalToolbarKind.Send, "→", "[C"))
         add(TerminalToolbarAction(TerminalToolbarKind.Send, "~", "~"))
         add(TerminalToolbarAction(TerminalToolbarKind.Send, "|", "|"))
         add(TerminalToolbarAction(TerminalToolbarKind.Send, "/", "/"))

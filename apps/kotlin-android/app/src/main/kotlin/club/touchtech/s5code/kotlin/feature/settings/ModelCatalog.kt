@@ -16,6 +16,25 @@ enum class ModelSearchScope {
     ActiveProvider,
 }
 
+/**
+ * Whether a thread locked to [locked] may still pick [candidate], from
+ * `matchesLockedProvider` in `apps/mobile/src/lib/modelOptions.ts`: another
+ * account on the same driver continues the native session when both share its
+ * continuation group, or when the driver declares no groups at all — except
+ * Antigravity, whose accounts never share history.
+ */
+fun sharesLockedProvider(
+    lockedEntry: ProviderCatalogEntry?,
+    locked: ProviderInstance,
+    candidate: ProviderCatalogEntry,
+): Boolean {
+    if (candidate.instance.instanceId == locked.instanceId) return true
+    if (lockedEntry == null || candidate.instance.driver != lockedEntry.instance.driver) return false
+    val groupKey = lockedEntry.continuationGroupKey
+    return if (groupKey != null) candidate.continuationGroupKey == groupKey
+    else candidate.instance.driver != "antigravity"
+}
+
 /** Models from one provider instance, as the picker renders them. */
 data class ModelGroup(val instance: ProviderInstance, val models: List<String>)
 
@@ -66,7 +85,8 @@ fun modelSearchResults(
     val searchable =
         when (scope) {
             ModelSearchScope.AllProviders -> catalog
-            ModelSearchScope.ActiveProvider -> listOfNotNull(selectedEntry)
+            ModelSearchScope.ActiveProvider ->
+                catalog.filter { sharesLockedProvider(selectedEntry, selected, it) }
         }
     return searchable
         .sortedBy { if (it.instance.instanceId == selected.instanceId) 0 else 1 }

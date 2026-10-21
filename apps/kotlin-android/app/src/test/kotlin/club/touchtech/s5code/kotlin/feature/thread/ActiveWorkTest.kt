@@ -83,4 +83,19 @@ class ActiveWorkTest {
     fun `a clock that jumps backwards does not produce a negative duration`() {
         assertEquals("Working for 1ms", workingLabel(9_000, 1_000))
     }
+
+    @Test
+    fun `background work rows put agents first and only subagents open a thread`() {
+        val items =
+            pendingBackgroundWorkItems(
+                listOf(
+                    club.touchtech.s5code.kotlin.model.PendingBackgroundTask("command", " dev server ", "dev", "ignored"),
+                    club.touchtech.s5code.kotlin.model.PendingBackgroundTask("subagent", "Review src", "sub", "child-1"),
+                    club.touchtech.s5code.kotlin.model.PendingBackgroundTask("monitor", null, "watch"),
+                )
+            )
+        assertEquals(listOf("Review src", "dev server", "monitor"), items.map { it.label })
+        assertEquals(listOf("Subagent", "Command", "Monitor"), items.map { it.kindLabel })
+        assertEquals(listOf("child-1", null, null), items.map { it.childThreadId })
+    }
 }

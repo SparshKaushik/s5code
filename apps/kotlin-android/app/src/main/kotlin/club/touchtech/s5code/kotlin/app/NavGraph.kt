@@ -469,13 +469,25 @@ fun S5NavGraph(
                 onBack = navController::popBackStack,
             )
         }
-        composable(Routes.ThreadFiles, arguments = listOf(environmentArg, threadArg)) { entry ->
+        composable(
+            Routes.ThreadFiles,
+            arguments =
+                listOf(
+                    environmentArg,
+                    threadArg,
+                    navArgument("dir") {
+                        type = NavType.StringType
+                        defaultValue = ""
+                    },
+                ),
+        ) { entry ->
             val environmentId = entry.arguments?.getString("environmentId").orEmpty()
             val threadId = entry.arguments?.getString("threadId").orEmpty()
             FilesTreeScreen(
                 store = store,
                 environmentId = environmentId,
                 threadId = threadId,
+                revealDirectory = entry.arguments?.getString("dir").orEmpty(),
                 onBack = navController::popBackStack,
                 onOpenFile = { suffix ->
                     navController.navigate(Routes.threadChild(environmentId, threadId, suffix))
@@ -927,7 +939,11 @@ fun S5NavGraph(
             )
         }
         composable(Routes.SettingsOverview) {
-            SettingsOverviewScreen(store = store, onBack = navController::popBackStack)
+            SettingsOverviewScreen(
+                store = store,
+                onBack = navController::popBackStack,
+                confirmController = confirmController,
+            )
         }
         composable(Routes.SettingsNewThreads) {
             SettingsNewThreadsScreen(store = store, onBack = navController::popBackStack)

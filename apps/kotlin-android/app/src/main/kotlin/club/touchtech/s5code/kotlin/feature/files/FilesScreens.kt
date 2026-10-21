@@ -110,6 +110,8 @@ fun FilesTreeScreen(
     threadId: String,
     onBack: () -> Unit,
     onOpenFile: (String) -> Unit,
+    /** A workspace-relative directory to open expanded, with its ancestors. */
+    revealDirectory: String = "",
 ) {
     val env = remember(environmentId) { EnvironmentId(environmentId) }
     val id = remember(threadId) { ThreadId(threadId) }
@@ -118,7 +120,9 @@ fun FilesTreeScreen(
     val (state, retry) =
         rememberRetryableRemote(environmentId, threadId) { store.workspace.files(env, id) }
     val root = state.value
-    var expanded by remember(environmentId, threadId) { mutableStateOf(setOf("")) }
+    var expanded by remember(environmentId, threadId, revealDirectory) {
+        mutableStateOf(setOf("") + directoryAndAncestors(revealDirectory))
+    }
     var query by remember(environmentId, threadId) { mutableStateOf("") }
 
     S5Screen(
@@ -222,6 +226,12 @@ fun FilesTreeScreen(
             }
         }
     }
+}
+
+/** `a/b/c` → `a`, `a/b`, `a/b/c`: the tree rows that must be open to show `c`. */
+internal fun directoryAndAncestors(path: String): Set<String> {
+    val segments = path.split('/').filter(String::isNotEmpty)
+    return segments.indices.mapTo(linkedSetOf()) { segments.take(it + 1).joinToString("/") }
 }
 
 internal data class TreeRow(val node: FileNode, val depth: Int, val expanded: Boolean)

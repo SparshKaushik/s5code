@@ -688,6 +688,12 @@ interface WorkspaceGateway {
     suspend fun projectBranches(environmentId: EnvironmentId, projectKey: String): List<BranchRef>
 
     /**
+     * Whether the project's root is a repository, from `vcs.listRefs`. A folder
+     * that is not has no branches or worktrees, so a new task runs in place.
+     */
+    suspend fun projectIsGitRepo(environmentId: EnvironmentId, projectKey: String): Boolean
+
+    /**
      * `checkoutNewTaskBranch`: makes a branch picked for a new task usable from
      * the project. In current-checkout mode a branch another worktree holds is
      * reused there, and a free one is switched to in the project checkout.
@@ -836,8 +842,11 @@ interface WorkspaceGateway {
         retry: Boolean,
     ): Boolean
 
-    /** `project.delete` — removes the project a failed clone was for. */
-    suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId)
+    /**
+     * `project.delete`. A failed clone's project has no threads; Settings →
+     * Project overview passes [force] so the server deletes the threads too.
+     */
+    suspend fun removeProject(environmentId: EnvironmentId, projectId: ProjectId, force: Boolean = false)
 
     /** `project.update` — the Settings → Overview rename writes only `title`. */
     suspend fun renameProject(environmentId: EnvironmentId, projectId: ProjectId, title: String)

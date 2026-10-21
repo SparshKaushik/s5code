@@ -22,6 +22,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -29,6 +30,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.automirrored.rounded.InsertDriveFile
+import androidx.compose.material.icons.automirrored.rounded.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.rounded.Redo
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
@@ -154,6 +156,11 @@ fun FeedEntryRow(
     /** The group summary a lone tool call shows in place of its own label; see [FeedRow.Entry.standIn]. */
     toolLabelOverride: String? = null,
     mcpAppContent: @Composable (FeedEntry.McpApp) -> Unit = { Text("Interactive app") },
+    /** The turn's diffstat when its answer is the row carrying it; see [attachTurnDiffStats]. */
+    diffStat: TurnDiffStat? = null,
+    onOpenTurnDiff: () -> Unit = {},
+    /** Saves a proposed plan into the workspace; see [ProposedPlanCard]. */
+    onSavePlan: (suspend (relativePath: String, contents: String) -> String)? = null,
 ) {
     when (entry) {
         is FeedEntry.McpApp -> mcpAppContent(entry)
@@ -186,6 +193,19 @@ fun FeedEntryRow(
                 resolveTranscriptAttachment,
                 onOpenAttachment,
                 onOpenThreadLink,
+                diffStat,
+                onOpenTurnDiff,
+            )
+
+        is FeedEntry.ProposedPlan ->
+            ProposedPlanCard(
+                entry,
+                onCopy,
+                modifier,
+                workspaceRoot,
+                onOpenFile,
+                onOpenThreadLink,
+                onSavePlan,
             )
 
         is FeedEntry.Reasoning -> ReasoningRow(entry, expandedIds, onToggleExpand, modifier)
@@ -279,7 +299,12 @@ fun WorkingRow(row: FeedRow.Working, modifier: Modifier = Modifier) {
  * The footer names the action instead of repeating the duration.
  */
 @Composable
-fun TurnFoldRow(row: FeedRow.TurnFold, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+fun TurnFoldRow(
+    row: FeedRow.TurnFold,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    onOpenTurnDiff: () -> Unit = {},
+) {
     val footer = row.placement == FeedRow.TurnFold.Placement.Footer
     Column(modifier.fillMaxWidth()) {
         // The divider sits between turns. On the footer it would draw a second line
@@ -287,8 +312,9 @@ fun TurnFoldRow(row: FeedRow.TurnFold, onToggle: () -> Unit, modifier: Modifier 
         if (!footer) {
             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f))
         }
+        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
         Row(
-            Modifier.fillMaxWidth()
+            Modifier.weight(1f)
                 .clip(MaterialTheme.shapes.small)
                 .clickable(onClick = onToggle)
                 .semantics { stateDescription = if (row.expanded) "Expanded" else "Collapsed" }
@@ -300,6 +326,9 @@ fun TurnFoldRow(row: FeedRow.TurnFold, onToggle: () -> Unit, modifier: Modifier 
                 row.text,
                 style = MaterialTheme.typography.labelMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f, fill = false),
             )
             Icon(
                 if (row.expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
@@ -308,8 +337,50 @@ fun TurnFoldRow(row: FeedRow.TurnFold, onToggle: () -> Unit, modifier: Modifier 
                 tint = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         }
+        row.diffStat?.let { TurnDiffStatButton(it, onOpenTurnDiff) }
+        }
     }
 }
+
+/**
+ * A turn's "+12 −3", opening the review. RN's `TurnDiffStat`: a separate target
+ * beside the row's own disclosure, so reading the totals never toggles the fold.
+ */
+@Composable
+internal fun TurnDiffStatButton(stat: TurnDiffStat, onOpen: () -> Unit, modifier: Modifier = Modifier) {
+    val label = stat.accessibilityLabel
+    Row(
+        modifier
+            .heightIn(min = 44.dp)
+            .clip(MaterialTheme.shapes.small)
+            .clickable(onClick = onOpen)
+            .semantics(mergeDescendants = true) { contentDescription = label }
+            .padding(horizontal = S5Theme.spacing.small),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+    ) {
+        Text(
+            "+${formatDiffCount(stat.additions)}",
+            style = S5Theme.code.inlineTechnical,
+            color = S5Theme.status.added,
+        )
+        Text(
+            "−${formatDiffCount(stat.deletions)}",
+            style = S5Theme.code.inlineTechnical,
+            color = S5Theme.status.removed,
+        )
+        Icon(
+            Icons.AutoMirrored.Rounded.KeyboardArrowRight,
+            contentDescription = null,
+            modifier = Modifier.size(14.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/** `formatDiffCount`: grouped digits, as `Intl.NumberFormat` renders them. */
+internal fun formatDiffCount(count: Int): String =
+    java.text.NumberFormat.getIntegerInstance().format(count)
 
 /**
  * Discloses the work rows folded above it.
@@ -319,10 +390,16 @@ fun TurnFoldRow(row: FeedRow.TurnFold, onToggle: () -> Unit, modifier: Modifier 
  * of tool row.
  */
 @Composable
-fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: Modifier = Modifier) {
+fun WorkGroupToggleRow(
+    row: FeedRow.WorkToggle,
+    onToggle: () -> Unit,
+    modifier: Modifier = Modifier,
+    onOpenTurnDiff: () -> Unit = {},
+) {
+    Row(modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
     Row(
-        modifier
-            .fillMaxWidth()
+        Modifier
+            .weight(1f)
             .clip(MaterialTheme.shapes.small)
             .clickable(onClick = onToggle)
             .semantics { this.stateDescription = if (row.expanded) "Expanded" else "Collapsed" }
@@ -350,6 +427,8 @@ fun WorkGroupToggleRow(row: FeedRow.WorkToggle, onToggle: () -> Unit, modifier: 
                     maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
         }
+    }
+    row.diffStat?.let { TurnDiffStatButton(it, onOpenTurnDiff) }
     }
 }
 
@@ -522,6 +601,8 @@ private fun AgentMessage(
     resolveTranscriptAttachment: suspend (String) -> String?,
     onOpenAttachment: (SentAttachment) -> Unit,
     onOpenThreadLink: ((String) -> Unit)?,
+    diffStat: TurnDiffStat?,
+    onOpenTurnDiff: () -> Unit,
 ) {
     var previewAttachment by remember(entry.id) { mutableStateOf<ComposerAttachment?>(null) }
     // No avatar and no provider label, matching the RN feed: the agent's identity
@@ -557,6 +638,7 @@ private fun AgentMessage(
         if (entry.streaming) {
             S5InlineLoading(Modifier.padding(top = S5Theme.spacing.tiny).size(18.dp))
         } else {
+            diffStat?.let { TurnDiffStatButton(it, onOpenTurnDiff) }
             Row(
                 Modifier.padding(top = S5Theme.spacing.tiny),
                 verticalAlignment = Alignment.CenterVertically,

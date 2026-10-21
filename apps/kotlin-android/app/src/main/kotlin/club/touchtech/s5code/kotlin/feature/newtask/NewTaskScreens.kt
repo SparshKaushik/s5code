@@ -495,6 +495,28 @@ fun NewTaskDraftScreen(
     LaunchedEffect(project?.isScratch) {
         if (project?.isScratch == true) store.updateDraft { it.copy(workspaceMode = WorkspaceMode.CurrentCheckout, branch = "", worktreePath = null) }
     }
+    // `resolveNewTaskWorkspaceSelection`: a folder that is not a repository has
+    // no branches or worktrees, so the task runs in the current checkout. Null
+    // until the server answers (or when it cannot), which keeps the choice open.
+    var isGitRepo by remember(project?.environmentId, project?.id) { mutableStateOf<Boolean?>(null) }
+    LaunchedEffect(project?.environmentId, project?.id) {
+        val selected = project ?: return@LaunchedEffect
+        isGitRepo =
+            try {
+                store.workspace.projectIsGitRepo(selected.environmentId, selected.id.value)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                null
+            }
+    }
+    // Keyed on the mode too: a later restore or pull-request pick that asks for a
+    // worktree would otherwise stick with the toggle hidden.
+    LaunchedEffect(isGitRepo, draft.workspaceMode) {
+        if (isGitRepo == false) {
+            store.updateDraft { it.copy(workspaceMode = WorkspaceMode.CurrentCheckout, branch = "", worktreePath = null) }
+        }
+    }
     val environment = remember(environments, draft) { environments.firstOrNull { it.id == draft.environmentId } }
     // RN's composerWorkspaceCwd: the worktree when one is chosen, else the
     // project's root — `@`, `$`, `/`, and `#` all resolve against it.
@@ -626,7 +648,7 @@ fun NewTaskDraftScreen(
                     }
                 },
                 workspaceMode = draft.workspaceMode,
-                allowWorkspaceSelection = project?.isScratch != true,
+                allowWorkspaceSelection = project?.isScratch != true && isGitRepo != false,
                 onToggleWorkspaceMode = {
                     store.updateDraft {
                         if (it.workspaceMode == WorkspaceMode.CurrentCheckout) {
@@ -653,6 +675,12 @@ fun NewTaskDraftScreen(
                         }
                         ?.modelLabel(draft.settings.model)
                         ?: draft.settings.model,
+                modelSummary =
+                    remember(machineCatalog, draft.settings, draft.prompt) {
+                        club.touchtech.s5code.kotlin.feature.settings.composerTraitsSummary(
+                            machineCatalog, draft.settings, draft.prompt,
+                        )
+                    },
                 onOpenSettings = { settingsOpen = true },
                 creating = creating,
                 canStart = canStart,
@@ -896,6 +924,8 @@ fun NewTaskDraftScreen(
             catalogRefreshing = draft.environmentId.value in catalogRefreshing,
             onRefreshCatalog = { store.refreshProviderCatalog(draft.environmentId) },
             planModeEnabled = preferences.planModeEnabled,
+            prompt = draft.prompt,
+            onPromptChange = { prompt -> store.updateDraft { it.copy(prompt = prompt) } },
         )
     }
 }
@@ -984,6 +1014,8 @@ private fun NewTaskComposerDock(
     provider: ProviderInstance,
     /** Display name for the chip, resolved from the catalog — never the slug. */
     modelLabel: String,
+    /** `buildTraitsTriggerDisplay`: "High · Fast" beside the model; empty hides it. */
+    modelSummary: String = "",
     onOpenSettings: () -> Unit,
     creating: Boolean,
     canStart: Boolean,
@@ -1259,11 +1291,15 @@ private fun NewTaskComposerDock(
                     // composers with different toolbars for the same job.
                     S5ComposerControl(
                         label = modelLabel,
+                        supporting = modelSummary.ifEmpty { null },
                         leading = { S5ProviderAvatar(provider, size = 20.dp) },
                         trailingIcon = Icons.Rounded.ExpandMore,
                         onClick = onOpenSettings,
-                        contentDescription = "Model and settings",
-                        modifier = Modifier.widthIn(max = 180.dp),
+                        contentDescription =
+                            listOf("Model and reasoning settings", modelLabel, modelSummary)
+                                .filter(String::isNotEmpty)
+                                .joinToString(", "),
+                        modifier = Modifier.widthIn(max = if (modelSummary.isEmpty()) 180.dp else 260.dp),
                     )
                     Box(Modifier.weight(1f))
                     DictationMicControl(dictation)

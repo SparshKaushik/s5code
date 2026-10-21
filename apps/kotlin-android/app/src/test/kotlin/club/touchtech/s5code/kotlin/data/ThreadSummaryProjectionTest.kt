@@ -58,7 +58,16 @@ class ThreadSummaryProjectionTest {
             )
 
         assertEquals(java.time.Instant.parse("2026-08-30T12:00:00Z").toEpochMilli(), summary.activeTurnStartedAtMillis)
-        assertEquals("1m 2s", summary.elapsedLabel)
+        assertEquals("1m", summary.elapsedLabel)
+    }
+
+    @Test
+    fun `elapsed labels drop seconds after a minute and grow hours after an hour`() {
+        assertEquals("59s", elapsedLabel(0L, 59_999L))
+        assertEquals("1m", elapsedLabel(0L, 60_000L))
+        assertEquals("59m", elapsedLabel(0L, 3_599_000L))
+        assertEquals("1h 5m", elapsedLabel(0L, 3_900_000L))
+        assertEquals("0s", elapsedLabel(10_000L, 0L))
     }
 
     @Test

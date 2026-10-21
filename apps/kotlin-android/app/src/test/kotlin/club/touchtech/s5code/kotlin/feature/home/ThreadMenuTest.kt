@@ -93,7 +93,16 @@ class ThreadMenuTest {
         val menu = options(thread = settledThread)
         val settle = menu.single { it.id == "settle" }
         assertEquals("Un-settle", settle.label)
-        assertTrue(menu.none { it.id == "archive" })
+    }
+
+    @Test
+    fun `every row variant offers archive just before delete`() {
+        listOf(ThreadStatus.Idle, ThreadStatus.Settled, ThreadStatus.Snoozed, ThreadStatus.Working).forEach { status ->
+            val ids = options(thread = thread.copy(status = status)).map { it.id }
+            assertEquals(listOf("archive", "delete"), ids.takeLast(2))
+            assertEquals(1, ids.count { it == "archive" })
+        }
+        assertEquals(1, options(settlement = false).count { it.id == "archive" })
     }
 
     @Test
