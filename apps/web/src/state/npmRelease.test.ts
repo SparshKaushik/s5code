@@ -59,6 +59,7 @@ describe("npmReleasePublishedAtom", () => {
     expect(AsyncResult.getOrElse(result, () => true)).toBe(false);
   });
 
+  // regression: #18709 update-everything skipped npm-installed servers
   it("leaves a failed first check unknown, which callers read as unpublished", async () => {
     fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
 

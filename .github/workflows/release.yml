@@ -248,7 +248,7 @@ jobs:
         run: vp run typecheck
 
   # Keep tests on their own runners, using the same package split and server
-  # shards as CI, so the release check job does not spend its budget on tests.
+  # shards as CI (test, test_web, test_server in ci.yml). Keep the two in sync.
   test:
     name: Release tests
     needs: [preflight]
@@ -276,12 +276,35 @@ jobs:
       - name: Install browser secret helper build libraries
         run: sudo apt-get update && sudo apt-get install -y libsecret-1-dev pkg-config build-essential
 
-      # The web package's browser project runs React tests in headless Chromium.
+      - name: Test
+        run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' --filter '!@t3tools/web' test
+
+  # Web browser tests time out when they share a runner with the other package
+  # suites: Chromium gets too little CPU and diff workers miss their 10s start budget.
+  test_web:
+    name: Release web tests
+    needs: [preflight]
+    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.preflight.outputs.ref }}
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+
       - name: Install Chromium for web browser tests
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
 
       - name: Test
-        run: vp run --parallel --concurrency-limit 4 --filter '!t3' --filter '!@t3tools/monorepo' test
+        run: vp run --filter @t3tools/web test
 
   test_server:
     name: Release server tests ${{ matrix.shard }}
@@ -561,8 +584,8 @@ jobs:
     name: Publish GitHub Release
     # Quality and the split test jobs gate publishing the same way upstream's
     # publish job does; the desktop jobs are the fork's arm64-only set.
-    needs: [preflight, quality, test, test_server, mobile, server, desktop_mac_arm64]
-    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.quality.result == 'success' && needs.test.result == 'success' && needs.test_server.result == 'success' && needs.mobile.result == 'success' && needs.server.result == 'success' && needs.desktop_mac_arm64.result == 'success' }}
+    needs: [preflight, quality, test, test_web, test_server, mobile, server, desktop_mac_arm64]
+    if: ${{ !failure() && !cancelled() && needs.preflight.result == 'success' && needs.quality.result == 'success' && needs.test.result == 'success' && needs.test_web.result == 'success' && needs.test_server.result == 'success' && needs.mobile.result == 'success' && needs.server.result == 'success' && needs.desktop_mac_arm64.result == 'success' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     permissions:
