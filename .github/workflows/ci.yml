@@ -378,7 +378,7 @@ jobs:
       # The file preview suite renders large documents against short waits. On
       # 4-vCPU GitHub runners it starves beside other files, so it runs alone.
       - name: Test
-        run: vp run --filter @t3tools/web test -- --exclude src/components/files/AttachmentFilePreview.browser.test.tsx
+        run: vp run --filter @t3tools/web test --exclude src/components/files/AttachmentFilePreview.browser.test.tsx
 
       - name: Test file previews
         working-directory: apps/web
