@@ -937,10 +937,11 @@ describe("UsageService", () => {
         );
         yield* Effect.gen(function* () {
           const service = yield* UsageService.make;
-          const window = {
+          const window: UsageSummaryInput = {
             timeZone: "UTC",
             sinceDay: UsageDay.make("2026-08-01"),
             untilDay: UsageDay.make("2026-08-01"),
+            modelAliases: [],
           };
           const muse = (summary: UsageSummary) =>
             summary.buckets.filter((bucket) => bucket.provider === "muse");
