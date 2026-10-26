@@ -1023,7 +1023,7 @@ export const make = Effect.gen(function* () {
       nowMs: now.epochMilliseconds,
     });
     if (isApnsDeliveryJobVerificationError(payload)) {
-      return yield* Effect.fail(payload);
+      return yield* payload;
     }
     yield* Effect.annotateCurrentSpan({
       "relay.mobile.device_id": payload.target.deviceId,
