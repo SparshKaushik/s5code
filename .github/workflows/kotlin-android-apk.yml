@@ -126,6 +126,19 @@ jobs:
           --tests '*ModelTraitsTest'
           --tests '*InlineCodeFileLinkTest'
           --tests '*MarkdownLinksTest'
+          --tests '*PaletteSearchTest'
+          --tests '*InboxReturnTrackerTest'
+          --tests '*ThreadMessageJumpTest'
+          --tests '*SettingsSearchTest'
+          --tests '*ProjectClonesTest'
+          --tests '*MarkdownMediaTest'
+          --tests '*MarkdownHtmlTest'
+          --tests '*QuestionFileIntakeTest'
+          --tests '*TurnItemDetailTest'
+          --tests '*HomeListTest'
+          --tests '*TerminalOutputTest'
+          --tests '*ClientStateMappingTest'
+          --tests '*HighlightedTextTest'
           --stacktrace
 
       - name: Lint Kotlin Android client

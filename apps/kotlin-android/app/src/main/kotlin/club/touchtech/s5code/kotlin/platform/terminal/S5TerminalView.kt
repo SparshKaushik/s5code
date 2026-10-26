@@ -13,6 +13,9 @@ import android.view.inputmethod.EditorInfo
 import android.view.inputmethod.InputMethodManager
 import android.widget.EditText
 import android.widget.FrameLayout
+import club.touchtech.s5code.kotlin.data.TerminalOutputCursor
+import club.touchtech.s5code.kotlin.data.TerminalOutputUpdate
+import club.touchtech.s5code.kotlin.data.readTerminalOutputUpdate
 import kotlin.math.max
 
 /**
@@ -35,7 +38,11 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
         }
     private var terminalHandle = 0L
     private var replayBuffer = ""
-    private var fedBuffer = ""
+    private var replayResetVersion = 0
+    private var replayEnd = 0L
+    // Null until the current Ghostty instance has been fed anything; a fresh
+    // instance replays the retained history once, then only appends.
+    private var fed: TerminalOutputCursor? = null
     private var cols = 0
     private var rows = 0
     private var clearingInput = false
@@ -104,9 +111,11 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
         addView(inputView, LayoutParams(1, 1))
     }
 
-    fun setReplayBuffer(value: String) {
-        if (replayBuffer == value) return
+    fun setReplayBuffer(value: String, resetVersion: Int, end: Long) {
+        if (replayResetVersion == resetVersion && replayEnd == end && replayBuffer.length == value.length) return
         replayBuffer = value
+        replayResetVersion = resetVersion
+        replayEnd = end
         feedPendingBuffer()
     }
 
@@ -298,7 +307,7 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
                 currentTheme.cursor,
                 currentTheme.palette,
             )
-        fedBuffer = ""
+        fed = null
     }
 
     private fun recreateTerminal() {
@@ -309,15 +318,29 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
     private fun destroyTerminal() {
         if (terminalHandle != 0L) GhosttyBridge.nativeDestroy(terminalHandle)
         terminalHandle = 0L
-        fedBuffer = ""
+        fed = null
         terminalCanvas.resetSelectionState()
     }
 
+    /**
+     * Appends output past what this instance was fed (RN's
+     * `createTerminalOutputWriter`). Only a reset recreates the terminal and
+     * replays history, so a full scrollback costs one chunk per chunk.
+     */
     private fun feedPendingBuffer() {
-        if (terminalHandle == 0L || replayBuffer == fedBuffer) return
-        if (!replayBuffer.startsWith(fedBuffer)) recreateTerminal()
         if (terminalHandle == 0L) return
-        val suffix = replayBuffer.substring(fedBuffer.length)
+        val (update, cursor) = readTerminalOutputUpdate(replayBuffer, replayResetVersion, replayEnd, fed)
+        val suffix =
+            when (update) {
+                TerminalOutputUpdate.None -> return
+                is TerminalOutputUpdate.Append -> update.data
+                is TerminalOutputUpdate.Reset -> {
+                    // A fresh instance has nothing to clear.
+                    if (fed != null) recreateTerminal()
+                    if (terminalHandle == 0L) return
+                    update.data
+                }
+            }
         if (suffix.isNotEmpty()) {
             emitResponse(GhosttyBridge.nativeFeed(terminalHandle, suffix.toByteArray(Charsets.UTF_8)))
             if (terminalCanvas.hasActiveSelection()) {
@@ -325,7 +348,7 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
                 terminalCanvas.resetSelectionState()
             }
         }
-        fedBuffer = replayBuffer
+        fed = cursor
         renderSnapshot()
     }
 

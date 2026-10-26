@@ -3,6 +3,7 @@ package club.touchtech.s5code.kotlin.feature.thread
 import club.touchtech.s5code.kotlin.model.PendingBackgroundTask
 import club.touchtech.s5code.kotlin.model.ProviderGoal
 import club.touchtech.s5code.kotlin.model.TurnInfo
+import club.touchtech.s5code.kotlin.transport.backgroundTaskHolds
 
 /**
  * Whether the thread's most recent turn is finished, ported from
@@ -100,7 +101,7 @@ private fun backgroundKind(kind: String): BackgroundKind =
 /**
  * The floating "Waiting on …" presentation, ported from
  * `presentPendingBackgroundWork` in `packages/client-runtime/src/state/
- * threadExecution.ts`. A command does not hold completion, so "Running" is for
+ * threadExecution.ts`. Unawaited commands and monitors do not hold completion, so "Running" is for
  * loose work and "Waiting on" for work the turn is blocked behind — and
  * [waiting] is what picks the pill's icon: the bolt only while the work can
  * still wake the agent, a terminal glyph for commands it left running.
@@ -114,7 +115,7 @@ internal data class PendingBackgroundWork(
 
 internal fun pendingBackgroundWork(tasks: List<PendingBackgroundTask>): PendingBackgroundWork? {
     if (tasks.isEmpty()) return null
-    val waiting = tasks.any { it.kind != "command" }
+    val waiting = tasks.any { backgroundTaskHolds(it.kind, it.awaited) }
     val items =
         tasks
             .map { task ->

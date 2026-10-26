@@ -44,6 +44,17 @@ class PullRequestRulesTest {
     }
 
     @Test
+    fun `keeps the requested environment while it is still connecting`() {
+        assertNull(
+            pullRequestFallbackEnvironment(
+                "laptop", "t3", "pingdotgg/t3code", "github.com", projects,
+                connectedEnvironmentIds = setOf("server"),
+                pendingEnvironmentIds = setOf("laptop"),
+            )
+        )
+    }
+
+    @Test
     fun `derives the host from the original project when the route has none`() {
         assertEquals(PullRequestEnvironmentTarget("server", "t3-copy"), fallback(setOf("server"), host = null))
     }

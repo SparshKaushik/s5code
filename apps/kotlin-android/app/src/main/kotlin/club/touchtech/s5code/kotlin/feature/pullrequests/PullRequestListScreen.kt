@@ -22,6 +22,7 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
+import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Cancel
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.CloudOff
@@ -71,6 +72,7 @@ import club.touchtech.s5code.kotlin.data.openOnProviderLabel
 import club.touchtech.s5code.kotlin.data.pullRequestChecksStateTone
 import club.touchtech.s5code.kotlin.data.pullRequestConflict
 import club.touchtech.s5code.kotlin.data.pullRequestLabelColor
+import club.touchtech.s5code.kotlin.data.pullRequestLabelColors
 import club.touchtech.s5code.kotlin.data.pullRequestListFilterCount
 import club.touchtech.s5code.kotlin.data.pullRequestListInput
 import club.touchtech.s5code.kotlin.data.pullRequestListReviewStatus
@@ -250,6 +252,9 @@ fun PullRequestListScreen(
         row.entry.labels.forEach { facetLabels += it.name }
     }
 
+    val labelColors = remember(merged) { pullRequestLabelColors(merged.entries.flatMap { it.entry.labels }) }
+    var filterSearch by remember { mutableStateOf<String?>(null) }
+
     var pageLoading by remember(targets) { mutableStateOf(false) }
     var pageError by remember(targets) { mutableStateOf<String?>(null) }
     var refreshing by remember(targets) { mutableStateOf(false) }
@@ -282,7 +287,7 @@ fun PullRequestListScreen(
     fun requestStatusAction(environmentId: String, row: ScopedPullRequestEntry, action: String) {
         val entry = row.entry
         val reference = entry.reference()
-        val label = pullRequestActionLabel(action)
+        val label = pullRequestActionLabel(action, entry.provider)
         confirmController.show(
             S5ConfirmDialogRequest(
                 title = "$label?",
@@ -410,6 +415,7 @@ fun PullRequestListScreen(
                 labels = facetLabels.take(MAX_FACET_OPTIONS),
                 onEnvironment = gateway::setListEnvironment,
                 onControls = ::update,
+                onSearch = { filterSearch = it },
                 onDraftChange = { next ->
                     val change = applyPullRequestDraftFilterChange(query, controls.filters, next)
                     query = change.query
@@ -453,6 +459,13 @@ fun PullRequestListScreen(
                                 if (available.isEmpty() || allOffline) onConnections() else refresh()
                             },
                         )
+                        // Filters can hide every loaded row; the host may still have matches past them.
+                        if (hasMore && !allOffline && errors.isEmpty()) {
+                            Box(Modifier.fillMaxSize().padding(S5Theme.spacing.large), contentAlignment = Alignment.BottomCenter) {
+                                if (pageLoading) S5InlineLoading()
+                                else S5Button(text = "Load more", onClick = { loadMore(true) }, style = S5ButtonStyle.Tonal)
+                            }
+                        }
                     }
                     else ->
                         LazyColumn(
@@ -509,7 +522,7 @@ fun PullRequestListScreen(
                                     },
                                 )
                             }
-                            if (pageLoading || pageError != null) {
+                            if (pageLoading || pageError != null || hasMore) {
                                 item(key = "footer") {
                                     Box(Modifier.fillMaxWidth().padding(S5Theme.spacing.large), contentAlignment = Alignment.Center) {
                                         val message = pageError
@@ -522,8 +535,11 @@ fun PullRequestListScreen(
                                                 )
                                                 S5Button(text = "Try again", onClick = { loadMore(true) }, style = S5ButtonStyle.Text)
                                             }
-                                        } else {
+                                        } else if (pageLoading) {
                                             S5InlineLoading()
+                                        } else {
+                                            // A filtered page can be too short to scroll, which leaves nothing to reach the end of.
+                                            S5Button(text = "Load more", onClick = { loadMore(true) }, style = S5ButtonStyle.Text)
                                         }
                                     }
                                 }
@@ -532,6 +548,32 @@ fun PullRequestListScreen(
                 }
             }
         }
+    }
+    filterSearch?.let { kind ->
+        val selectedLabels = controls.filters.labels.orEmpty().flatten()
+        PullRequestFilterSearchSheet(
+            gateway = gateway,
+            kind = kind,
+            environmentIds = targets.map { it.environmentId }.distinct(),
+            projectId = controls.projectId,
+            suggestions = if (kind == "labels") facetLabels.toList() else facetAuthors.toList(),
+            selected = if (kind == "labels") selectedLabels else listOfNotNull(controls.filters.author?.takeIf(String::isNotEmpty)),
+            labelColors = labelColors,
+            onChoose = { value ->
+                if (kind == "authors") {
+                    val picked = controls.filters.author.equals(value, ignoreCase = true)
+                    update(controls.copy(filters = controls.filters.copy(author = if (picked) null else value)))
+                    filterSearch = null
+                } else {
+                    val picked = selectedLabels.any { it.equals(value, ignoreCase = true) }
+                    val next =
+                        if (picked) selectedLabels.filterNot { it.equals(value, ignoreCase = true) }
+                        else (selectedLabels + value).take(MAX_LABEL_FILTERS)
+                    update(controls.copy(filters = controls.filters.copy(labels = next.map { listOf(it) }.ifEmpty { null })))
+                }
+            },
+            onDismiss = { filterSearch = null },
+        )
     }
 }
 
@@ -547,6 +589,8 @@ private fun PullRequestFilterRow(
     labels: List<String>,
     onEnvironment: (String?) -> Unit,
     onControls: (PullRequestListControls) -> Unit,
+    /** Opens the host search for labels | authors. */
+    onSearch: (String) -> Unit,
     onDraftChange: (club.touchtech.s5code.kotlin.data.PullRequestListFilters) -> Unit,
 ) {
     val filters = controls.filters
@@ -661,7 +705,7 @@ private fun PullRequestFilterRow(
             onSelect = { onControls(controls.copy(involvement = it)) },
         )
         val selectedLabels = filters.labels.orEmpty().flatten()
-        if (labels.isNotEmpty() || selectedLabels.isNotEmpty()) {
+        run {
             S5FilterMenu(
                 label =
                     when (selectedLabels.size) {
@@ -671,7 +715,10 @@ private fun PullRequestFilterRow(
                     },
                 active = selectedLabels.isNotEmpty(),
                 options =
-                    listOf(S5MenuOption("label:", "All labels", selected = selectedLabels.isEmpty())) +
+                    listOf(
+                        S5MenuOption("search", "Search labels…", icon = Icons.Rounded.Search),
+                        S5MenuOption("label:", "All labels", selected = selectedLabels.isEmpty()),
+                    ) +
                         // Stable order, so a pick does not move rows under the finger while the menu stays open.
                         (labels + selectedLabels).distinct().map { name ->
                             S5MenuOption(
@@ -683,6 +730,7 @@ private fun PullRequestFilterRow(
                             )
                         },
                 onSelect = { id ->
+                    if (id == "search") return@S5FilterMenu onSearch("labels")
                     val name = id.removePrefix("label:")
                     // Each menu pick is its own group: every picked label must match.
                     val next =
@@ -695,7 +743,7 @@ private fun PullRequestFilterRow(
                 },
             )
         }
-        if (authors.isNotEmpty() || !filters.author.isNullOrEmpty()) {
+        run {
             S5FilterMenu(
                 label =
                     when {
@@ -706,11 +754,13 @@ private fun PullRequestFilterRow(
                 active = !filters.author.isNullOrEmpty(),
                 options =
                     listOf(
+                        S5MenuOption("search", "Search authors…", icon = Icons.Rounded.Search),
                         S5MenuOption("author:", "All authors", selected = filters.author.isNullOrEmpty()),
                         S5MenuOption("author:@me", "Me", selected = filters.author.equals("@me", true)),
                     ) +
                         authors.map { login -> S5MenuOption("author:$login", login, selected = filters.author == login) },
                 onSelect = { id ->
+                    if (id == "search") return@S5FilterMenu onSearch("authors")
                     onControls(controls.copy(filters = filters.copy(author = id.removePrefix("author:").ifEmpty { null })))
                 },
             )
@@ -794,7 +844,7 @@ private fun PullRequestListRow(
                         statusActions.map { action ->
                             S5MenuOption(
                                 action,
-                                if (action == "request-review") "Request review" else pullRequestActionLabel(action),
+                                if (action == "request-review") "Request review" else pullRequestActionLabel(action, entry.provider),
                                 icon = STATUS_ACTION_ICONS[action],
                                 destructive = action == "close",
                             )

@@ -400,7 +400,10 @@ data class PullRequestEnvironmentTarget(val environmentId: String, val projectId
 
 /**
  * `pullRequestFallbackEnvironment`: while the PR's own environment is offline,
- * a connected environment with a project on the same repository reads it.
+ * a connected environment with a project on the same repository reads it. An
+ * environment still connecting or reconnecting ([pendingEnvironmentIds]) keeps
+ * the requested target until it explicitly fails, even before its projects
+ * hydrate.
  */
 fun pullRequestFallbackEnvironment(
     environmentId: String,
@@ -409,8 +412,9 @@ fun pullRequestFallbackEnvironment(
     host: String?,
     projects: List<PullRequestProjectIdentity>,
     connectedEnvironmentIds: Set<String>,
+    pendingEnvironmentIds: Set<String> = emptySet(),
 ): PullRequestEnvironmentTarget? {
-    if (environmentId in connectedEnvironmentIds) return null
+    if (environmentId in connectedEnvironmentIds || environmentId in pendingEnvironmentIds) return null
     val own = projects.firstOrNull { it.environmentId == environmentId && it.projectId == projectId }
     val resolvedHost = host ?: own?.canonicalKey?.substringBefore('/') ?: return null
     val key = "$resolvedHost/$repository".lowercase()
@@ -437,6 +441,16 @@ fun pullRequestProviderLabel(provider: String?): String =
     }
 
 fun openOnProviderLabel(provider: String?) = "Open on ${pullRequestProviderLabel(provider)}"
+
+/** `ChangeRequestTerminology` from each source-control definition. */
+data class ChangeRequestTerms(val shortLabel: String, val singular: String, val plural: String) {
+    val title: String get() = singular.replaceFirstChar(Char::uppercase)
+}
+
+/** GitLab calls them merge requests; every other host Kotlin reads says pull request. */
+fun changeRequestTerms(provider: String?): ChangeRequestTerms =
+    if (provider == "gitlab") ChangeRequestTerms("MR", "merge request", "merge requests")
+    else ChangeRequestTerms("PR", "pull request", "pull requests")
 
 /** GitHub serves a PR's checks at `/checks`; other hosts land on the PR. */
 fun pullRequestChecksUrl(provider: String, url: String) =

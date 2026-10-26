@@ -18,6 +18,8 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Article
+import androidx.compose.material.icons.automirrored.rounded.Chat
+import androidx.compose.material.icons.rounded.BarChart
 import androidx.compose.material.icons.automirrored.rounded.Sort
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.Archive
@@ -79,6 +81,8 @@ import club.touchtech.s5code.kotlin.design.component.S5BottomTabs
 import club.touchtech.s5code.kotlin.design.component.S5Tab
 import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestListScreen
 import club.touchtech.s5code.kotlin.feature.pullrequests.pullRequestEnvironments
+import club.touchtech.s5code.kotlin.feature.settings.SettingsScreen
+import club.touchtech.s5code.kotlin.feature.usage.UsageScreen
 import club.touchtech.s5code.kotlin.data.ReorderSection
 import club.touchtech.s5code.kotlin.data.cacheSizeLabel
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
@@ -138,7 +142,6 @@ fun HomeScreen(
     onOpenThread: (String, String) -> Unit,
     onNewTask: () -> Unit,
     onResumeDraft: () -> Unit,
-    onSettings: () -> Unit,
     onConnections: () -> Unit,
     onArchive: () -> Unit,
     confirmController: S5ConfirmDialogController,
@@ -146,26 +149,36 @@ fun HomeScreen(
     onEscape: () -> Unit = {},
     onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit = { _, _ -> },
     onRequestPullRequestReview: (environmentId: String, reference: PullRequestReference) -> Unit = onOpenPullRequest,
+    /** Opens a settings page from the Settings tab. */
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val known by store.pullRequests.knownEnvironments.collectAsStateWithLifecycle()
     val home by store.home.collectAsStateWithLifecycle()
     // The tab exists only where some environment can list pull requests.
     val pullRequestsAvailable = remember(environments, known) { pullRequestEnvironments(environments, known).isNotEmpty() }
-    val tab = if (pullRequestsAvailable) home.tab else HomeTab.Threads
+    val tab = if (pullRequestsAvailable || home.tab != HomeTab.PullRequests) home.tab else HomeTab.Threads
+    // RN's Android workspace navigation (T3WorkspaceNavigationModule `tabTitle`):
+    // Settings and Usage are tabs rather than pushed pages, and the new-task
+    // FAB lives on Chats alone.
     val bottomBar: @Composable () -> Unit = {
-        if (pullRequestsAvailable) {
-            S5BottomTabs(
-                tabs =
-                    listOf(
-                        S5Tab(HomeTab.Threads, "Threads", Icons.Rounded.Inbox),
-                        S5Tab(HomeTab.PullRequests, "Pull requests", Icons.AutoMirrored.Rounded.CallMerge),
-                    ),
-                selected = tab,
-                onSelect = { selected -> store.updateHome { it.copy(tab = selected) } },
-            )
-        }
+        S5BottomTabs(
+            tabs =
+                listOfNotNull(
+                    S5Tab(HomeTab.Threads, "Chats", Icons.AutoMirrored.Rounded.Chat),
+                    S5Tab(HomeTab.PullRequests, "Pulls", Icons.AutoMirrored.Rounded.CallMerge)
+                        .takeIf { pullRequestsAvailable },
+                    S5Tab(HomeTab.Usage, "Usage", Icons.Rounded.BarChart),
+                    S5Tab(HomeTab.Settings, "Settings", Icons.Rounded.Settings),
+                ),
+            selected = tab,
+            onSelect = { selected -> store.updateHome { it.copy(tab = selected) } },
+        )
     }
+    val openSettingsTab = { store.updateHome { it.copy(tab = HomeTab.Settings) } }
+    // Back from another tab returns to Chats before it leaves the app, as the
+    // Android bottom-navigation guidance has it.
+    BackHandler(enabled = tab != HomeTab.Threads) { store.updateHome { it.copy(tab = HomeTab.Threads) } }
     when (tab) {
         HomeTab.Threads ->
             ThreadsHome(
@@ -173,7 +186,6 @@ fun HomeScreen(
                 onOpenThread = onOpenThread,
                 onNewTask = onNewTask,
                 onResumeDraft = onResumeDraft,
-                onSettings = onSettings,
                 onConnections = onConnections,
                 onArchive = onArchive,
                 confirmController = confirmController,
@@ -186,11 +198,13 @@ fun HomeScreen(
                 store = store,
                 onOpenPullRequest = onOpenPullRequest,
                 onRequestReview = onRequestPullRequestReview,
-                onSettings = onSettings,
+                onSettings = openSettingsTab,
                 onConnections = onConnections,
                 confirmController = confirmController,
                 bottomBar = bottomBar,
             )
+        HomeTab.Usage -> UsageScreen(store = store, onBack = null, bottomBar = bottomBar)
+        HomeTab.Settings -> SettingsScreen(store = store, onBack = null, onOpen = onOpenRoute, bottomBar = bottomBar)
     }
 }
 
@@ -206,7 +220,6 @@ private fun ThreadsHome(
      * made the draft feel lost in the first place.
      */
     onResumeDraft: () -> Unit,
-    onSettings: () -> Unit,
     onConnections: () -> Unit,
     onArchive: () -> Unit,
     confirmController: S5ConfirmDialogController,
@@ -236,7 +249,9 @@ private fun ThreadsHome(
     var sortMenuOpen by remember { mutableStateOf(false) }
     var rowMenuFor by remember { mutableStateOf<String?>(null) }
     var submittingRequestKey by remember { mutableStateOf<String?>(null) }
-    var searchMatches by remember { mutableStateOf(emptyList<ThreadSearchMatch>()) }
+    // The matches with the query they answer: `visibleThreadSearch` keeps them
+    // while the query refines or widens theirs, so rows do not blink per keystroke.
+    var searchResult by remember { mutableStateOf<Pair<String, List<ThreadSearchMatch>>?>(null) }
     var searchLoading by remember { mutableStateOf(false) }
     // The row the Custom… snooze sheet was opened for; it snoozes on confirm.
     var customSnoozeFor by remember { mutableStateOf<ThreadSummary?>(null) }
@@ -294,24 +309,63 @@ private fun ThreadsHome(
         }
 
     LaunchedEffect(home.query, searchEnvironmentIds) {
-        val query = home.query.trim()
-        if (query.length < 2 || searchEnvironmentIds.isEmpty()) {
-            searchMatches = emptyList()
+        val query = home.query.trim().take(200).trim()
+        // The server needs a word of three or more letters; shorter queries
+        // would always come back empty (`useThreadSearch`).
+        if (club.touchtech.s5code.kotlin.data.messageSearchTokens(query).long.isEmpty() || searchEnvironmentIds.isEmpty()) {
+            searchResult = null
             searchLoading = false
             return@LaunchedEffect
         }
         searchLoading = true
         delay(SEARCH_DEBOUNCE_MILLIS)
         try {
-            searchMatches = store.workspace.searchThreads(searchEnvironmentIds, query)
+            searchResult = query to store.workspace.searchThreads(searchEnvironmentIds, query)
         } catch (cancelled: CancellationException) {
             throw cancelled
         } catch (error: Exception) {
-            searchMatches = emptyList()
+            searchResult = null
             store.showError(error.message ?: "Message search could not be completed.")
         } finally {
             searchLoading = false
         }
+    }
+    val searchMatches = remember(searchResult, home.query) { visibleSearchMatches(home.query, searchResult) }
+
+    val inbox by store.inbox.collectAsStateWithLifecycle()
+    val workingShelf =
+        remember(inbox, preferences.workingShelfEnabled, preferences.workingThreadsExpanded) {
+            if (!preferences.workingShelfEnabled) null
+            else WorkingShelf(
+                expanded = preferences.workingThreadsExpanded,
+                isWorking = inbox::isWorking,
+                returnedAt = inbox::returnedAt,
+            )
+        }
+
+    /**
+     * Opens a home row. A row listed for a message match opens at that message;
+     * a pick from a search sends its open with the query, as RN's palette does,
+     * so the server's frecency learns which thread the query meant.
+     */
+    fun openThreadRow(thread: ThreadSummary, searchMessageId: String?) {
+        if (searchMessageId != null) {
+            club.touchtech.s5code.kotlin.feature.thread.ThreadMessageJumps.request(
+                club.touchtech.s5code.kotlin.feature.thread.threadJumpKey(thread.environmentId.value, thread.id.value),
+                searchMessageId,
+            )
+        }
+        val picked = club.touchtech.s5code.kotlin.data.pickedQuery(home.query)
+        if (picked.isNotEmpty()) {
+            club.touchtech.s5code.kotlin.data.ThreadOpens.claim(thread.environmentId.value, thread.id.value, System.currentTimeMillis())
+            store.sendThreadOpen(
+                thread.environmentId,
+                thread.id,
+                thread.updatedAtMillis.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                searchQuery = picked,
+            )
+        }
+        onOpenThread(thread.environmentId.value, thread.id.value)
     }
 
     fun reportError(message: String) = store.showError(message)
@@ -480,6 +534,7 @@ private fun ThreadsHome(
             newTaskDraft,
             pendingRequests,
             searchMatches,
+            workingShelf,
         ) {
             homeListItems(
                 threads = threads,
@@ -492,6 +547,7 @@ private fun ThreadsHome(
                 newTask = newTaskDraft,
                 pendingRequests = pendingRequests,
                 serverSearchMatches = searchMatches,
+                workingShelf = workingShelf,
             )
         }
     val counts = remember(threads) { homeFilterCounts(threads) }
@@ -516,7 +572,7 @@ private fun ThreadsHome(
      * make it quadratic in recompositions instead of once in data.
      */
     val moveAvailability =
-        remember(threads, environments, preferences.threadSort, preferences.projectGrouping) {
+        remember(threads, environments, preferences.threadSort, preferences.projectGrouping, preferences.workingShelfEnabled) {
             val result = mutableMapOf<String, Pair<Boolean, Boolean>>()
             val reorderablePin =
                 environments
@@ -526,7 +582,9 @@ private fun ThreadsHome(
                 environments
                     .filter { it.capabilities.threadActiveReorder }
                     .mapTo(mutableSetOf()) { it.id.value }
-            for (section in listOf(true, false)) {
+            // With the Working shelf on, the inbox is ordered by return time, so
+            // only pinned threads can move (RN's `moveAvailability`).
+            for (section in if (preferences.workingShelfEnabled) listOf(true) else listOf(true, false)) {
                 val reorderable = if (section) reorderablePin else reorderableActive
                 val sectionThreads =
                     threads.filter {
@@ -711,7 +769,6 @@ private fun ThreadsHome(
                 },
             )
             S5IconButton(icon = Icons.Rounded.Hub, label = "Connections", onClick = onConnections)
-            S5IconButton(icon = Icons.Rounded.Settings, label = "Settings", onClick = onSettings)
         },
         floatingActionButton = {
             // The pill sits above the FAB rather than over the list: it describes the
@@ -914,12 +971,18 @@ private fun ThreadsHome(
                                 ShelfHeaderRow(
                                     item = item,
                                     onToggle = {
-                                        store.updateHome { state ->
-                                            when (item.kind) {
-                                                ShelfKind.Snoozed ->
-                                                    state.copy(snoozedExpanded = !state.snoozedExpanded)
-                                                ShelfKind.Settled ->
-                                                    state.copy(settledExpanded = !state.settledExpanded)
+                                        if (item.kind == ShelfKind.Working) {
+                                            store.updatePreferences {
+                                                it.copy(workingThreadsExpanded = !it.workingThreadsExpanded)
+                                            }
+                                        } else {
+                                            store.updateHome { state ->
+                                                when (item.kind) {
+                                                    ShelfKind.Snoozed ->
+                                                        state.copy(snoozedExpanded = !state.snoozedExpanded)
+                                                    else ->
+                                                        state.copy(settledExpanded = !state.settledExpanded)
+                                                }
                                             }
                                         }
                                     },
@@ -1049,12 +1112,7 @@ private fun ThreadsHome(
                                             searchMatch = item.searchMatch,
                                             searchQuery = home.query,
                                             resolveProjectIconUrl = store.workspace::projectIconUrl,
-                                            onClick = {
-                                                onOpenThread(
-                                                    item.thread.environmentId.value,
-                                                    threadKey,
-                                                )
-                                            },
+                                            onClick = { openThreadRow(item.thread, item.searchMessageId) },
                                             onDismissWoke =
                                                 item.thread.wokeAtMillis?.let { wokeAt ->
                                                     {
@@ -1536,7 +1594,8 @@ private fun QueuedRow(item: HomeListItem.Queued, resolveProjectIconUrl: suspend 
  * before the real ones replace them.
  */
 private const val HOME_SKELETON_ROWS = 6
-private const val SEARCH_DEBOUNCE_MILLIS = 250L
+// RN's THREAD_SEARCH_DEBOUNCE_MS.
+private const val SEARCH_DEBOUNCE_MILLIS = 120L
 
 @Composable
 private fun HomeUpdateNotice(

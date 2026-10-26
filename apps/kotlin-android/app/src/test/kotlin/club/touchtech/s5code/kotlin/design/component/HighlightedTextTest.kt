@@ -39,4 +39,11 @@ class HighlightedTextTest {
         assertEquals(1, result.spanStyles.size)
         assertEquals(0 until result.length, result.spanStyles.single().start until result.spanStyles.single().end)
     }
+
+    @Test
+    fun `a letter that lengthens when lowercased does not shift the match`() {
+        val result = highlightedText("İstanbul trip", "TRIP", Color.Gray, Color.Black)
+        assertEquals("İstanbul trip", result.text)
+        assertEquals(listOf(9 until 13), result.spanStyles.filter { it.item.fontWeight != null }.map { it.start until it.end })
+    }
 }

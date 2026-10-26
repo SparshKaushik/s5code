@@ -100,6 +100,10 @@ import kotlinx.coroutines.flow.onEach
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import club.touchtech.s5code.kotlin.feature.home.InboxReturnTracker
+import club.touchtech.s5code.kotlin.feature.home.homeInboxReturns
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
@@ -130,7 +134,8 @@ data class HomeUiState(
 )
 
 /** Home's two lists; Pull requests shows only where an environment supports it. */
-enum class HomeTab { Threads, PullRequests }
+/** RN's Android workspace navigation: Chats, Pulls, Usage, Settings. */
+enum class HomeTab { Threads, PullRequests, Usage, Settings }
 
 /** New-task draft, shared across the whole new-task flow. */
 @Immutable
@@ -346,6 +351,28 @@ class AppStore(application: Application) : AndroidViewModel(application) {
     }
 
     val pushRuntime = PushRuntime.state
+
+    /**
+     * The Working shelf's grace hold. It sees every shell change, not just those
+     * while Home is composed, as RN's always-mounted list does; otherwise a
+     * thread that stopped while a thread was open flashes on the shelf on return.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    val inbox: StateFlow<InboxReturnTracker.Observation> =
+        combine(workspace.threads, preferences.map { it.workingShelfEnabled }.distinctUntilChanged()) { threads, enabled ->
+            threads.takeIf { enabled }
+        }
+            .transformLatest { threads ->
+                var observation = homeInboxReturns.observe(threads, System.currentTimeMillis())
+                emit(observation)
+                while (true) {
+                    val deadline = observation.nextDeadlineMillis ?: break
+                    delay((deadline - System.currentTimeMillis()).coerceAtLeast(0))
+                    observation = homeInboxReturns.observe(threads, System.currentTimeMillis())
+                    emit(observation)
+                }
+            }
+            .stateIn(viewModelScope, SharingStarted.Eagerly, InboxReturnTracker.Observation(emptyMap(), emptyMap(), null))
 
     private val _home = MutableStateFlow(HomeUiState())
     val home: StateFlow<HomeUiState> = _home.asStateFlow()
@@ -1779,6 +1806,22 @@ class AppStore(application: Application) : AndroidViewModel(application) {
 
     fun dismissActionProgress() {
         _actionProgress.value = null
+    }
+
+    /**
+     * Sends a thread open, which feeds search ranking. It runs on the store's scope
+     * so leaving the screen mid-dispatch does not drop an open that was already claimed.
+     */
+    fun sendThreadOpen(environmentId: EnvironmentId, threadId: ThreadId, watermark: Long, searchQuery: String? = null) {
+        viewModelScope.launch {
+            try {
+                workspace.visitThread(environmentId, threadId, watermark, opened = true, searchQuery = searchQuery)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                // Ranking data only; the open itself goes ahead.
+            }
+        }
     }
 
     fun showError(message: String) {

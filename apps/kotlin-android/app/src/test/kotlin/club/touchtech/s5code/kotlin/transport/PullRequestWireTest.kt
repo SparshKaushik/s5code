@@ -51,6 +51,30 @@ class PullRequestWireTest {
     }
 
     @Test
+    fun `prefers the setup step the server names for the host`() {
+        assertEquals(
+            "Sign in with `glab auth login --hostname git.example.com`.",
+            pullRequestErrorMessage(
+                failure(
+                    "PullRequestUnavailableError",
+                    "",
+                    "reason" to "cli-unauthenticated",
+                    "provider" to "gitlab",
+                    "requirement" to "Sign in with `glab auth login --hostname git.example.com`.",
+                )
+            ),
+        )
+        assertEquals(
+            "Install the tool.",
+            pullRequestUnavailableMessage("cli-missing", null, requirement = "Install the tool."),
+        )
+        assertEquals(
+            "Change requests cannot be browsed for this project's host yet.",
+            pullRequestUnavailableMessage("provider-unsupported", "github", requirement = "Ignored."),
+        )
+    }
+
+    @Test
     fun `names the failed operation and its detail`() {
         assertEquals(
             "Pull request operation detail failed: rate limited",

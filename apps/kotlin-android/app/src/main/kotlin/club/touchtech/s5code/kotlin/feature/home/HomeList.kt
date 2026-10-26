@@ -4,6 +4,11 @@ import club.touchtech.s5code.kotlin.app.HomeUiState
 import club.touchtech.s5code.kotlin.app.NewTaskDraft
 import club.touchtech.s5code.kotlin.app.ThreadDraft
 import club.touchtech.s5code.kotlin.data.HomePendingRequest
+import club.touchtech.s5code.kotlin.data.foldSearchQuery
+import club.touchtech.s5code.kotlin.data.rankMessageMatches
+import club.touchtech.s5code.kotlin.data.rankSearchItems
+import club.touchtech.s5code.kotlin.data.scoreThreadSearch
+import club.touchtech.s5code.kotlin.data.threadSearchSubject
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.HomeListItem
 import club.touchtech.s5code.kotlin.model.Project
@@ -55,6 +60,9 @@ fun homeListItems(
     pendingRequests: List<HomePendingRequest> = emptyList(),
     /** Message-body matches returned by `orchestration.searchThreads`. */
     serverSearchMatches: List<ThreadSearchMatch> = emptyList(),
+    /** The Working shelf, or null while the user has it off. */
+    workingShelf: WorkingShelf? = null,
+    nowMillis: Long = System.currentTimeMillis(),
 ): List<HomeListItem> {
     val projectsById = projects.associateBy { it.environmentId.value to it.id.value }
     val environmentLabels = environments.associate { it.id.value to it.label }
@@ -67,23 +75,24 @@ fun homeListItems(
     // but filters nothing, as RN does.
     val projectRefs = homeProjectFilterScope(projects, state, grouping)
         ?.projects?.mapTo(mutableSetOf()) { it.environmentId.value to it.id.value }
-    val visible =
-        threads
-            .asSequence()
-            .filter { thread -> state.environmentId == null || thread.environmentId == state.environmentId }
-            .filter { thread ->
-                projectRefs == null || (thread.environmentId.value to thread.projectId.value) in projectRefs
-            }
-            .filter { thread -> matchesFilter(thread, state.filter) }
-            .filter { thread ->
-                matchesQuery(thread, state.query, projectsById, environmentLabels) ||
-                    serverMatchByThread.containsKey(thread.environmentId.value to thread.id.value)
-            }
-            .toList()
+    val listed =
+        threads.filter { thread ->
+            (state.environmentId == null || thread.environmentId == state.environmentId) &&
+                (projectRefs == null || (thread.environmentId.value to thread.projectId.value) in projectRefs) &&
+                matchesFilter(thread, state.filter)
+        }
+    val query = foldSearchQuery(state.query)
+    val search = if (query.isEmpty()) null else rankHomeSearch(listed, query, serverSearchMatches, nowMillis)
+    val visible = search?.let { it.ranked + it.contentOnly } ?: listed
 
     val snoozed = visible.filter { it.status == ThreadStatus.Snoozed }
     val settled = visible.filter { it.status == ThreadStatus.Settled }
-    val active = visible - snoozed.toSet() - settled.toSet()
+    val unshelved = visible - snoozed.toSet() - settled.toSet()
+    // Pinned threads stay in the pinned block, as in RN's partition.
+    val working =
+        if (workingShelf == null) emptyList()
+        else unshelved.filter { !it.pinned && workingShelf.isWorking(it) }
+    val active = unshelved - working.toSet()
 
     // A search reveals what the shelves hide. Searching is asking for a specific
     // thread, and answering "no matches" while the match sits behind a collapsed
@@ -94,11 +103,8 @@ fun homeListItems(
     // Picking a filter that *is* a shelf does the same, for a blunter reason: with
     // the Settled filter on and the shelf collapsed, the whole screen was one
     // collapsed header.
-    val searching = state.query.isNotBlank()
-    val snoozedExpanded =
-        state.snoozedExpanded || searching || state.filter == ThreadFilter.Snoozed
-    val settledExpanded =
-        state.settledExpanded || searching || state.filter == ThreadFilter.Settled
+    val snoozedExpanded = state.snoozedExpanded || state.filter == ThreadFilter.Snoozed
+    val settledExpanded = state.settledExpanded || state.filter == ThreadFilter.Settled
 
     val items = mutableListOf<HomeListItem>()
 
@@ -138,27 +144,37 @@ fun homeListItems(
                         )
                 thread.status == ThreadStatus.Queued ->
                     items += HomeListItem.Queued(thread, project)
-                else ->
+                else -> {
+                    // Only rows listed for their messages show the message and open at it.
+                    val messageMatch =
+                        serverMatchByThread[thread.environmentId.value to thread.id.value]
+                            ?.takeIf { search?.contentOnlyKeys?.contains(thread.environmentId.value to thread.id.value) == true }
                     items +=
                         HomeListItem.Thread(
                             thread = thread,
                             project = project,
                             environmentLabel = environmentLabel,
                             searchMatch =
-                                searchMatch(thread, state.query, project, environmentLabel)
-                                    ?: serverMatchByThread[
-                                        thread.environmentId.value to thread.id.value
-                                    ]?.let { match ->
-                                        SearchMatch(match.source, match.snippet)
-                                    },
+                                messageMatch?.let { SearchMatch(it.source, it.snippet) }
+                                    ?: searchMatch(thread, state.query, project, environmentLabel),
+                            searchMessageId = messageMatch?.messageId,
                             draftPreview =
                                 draftPreview(
                                     drafts["${thread.environmentId.value}/${thread.id.value}"]
                                         ?: drafts[thread.id.value]
                                 ),
                         )
+                }
             }
         }
+    }
+
+    if (search != null) {
+        // Searching lists every match by rank across shelves, as the RN list and
+        // the palette do, then threads listed for their messages in rank order.
+        // Searching is asking for a specific thread, so no shelf hides a match.
+        emitThreads(visible)
+        return items
     }
 
     // Flat keeps no sections; every other mode groups by the same logical
@@ -193,8 +209,33 @@ fun homeListItems(
         )
         .forEach { (label, groupThreads) ->
             if (label.isNotEmpty()) items += HomeListItem.Section(label)
-            emitThreads(groupThreads.sortedWith(homeListComparator(sort)))
+            // With the Working shelf on, the inbox is ordered by when each thread
+            // came back (`sortInboxThreadsByReturn`), so the arrangement is set aside.
+            val comparator =
+                if (workingShelf != null && sort == ThreadSort.Recent) inboxComparator(workingShelf)
+                else homeListComparator(sort)
+            emitThreads(groupThreads.sortedWith(comparator))
         }
+
+    if (working.isNotEmpty() && workingShelf != null) {
+        items +=
+            HomeListItem.ShelfHeader(
+                label = "Working",
+                count = working.size,
+                expanded = workingShelf.expanded,
+                kind = ShelfKind.Working,
+            )
+        // `sortWorkingThreadsBySend`: the thread the user last sent work to first.
+        if (workingShelf.expanded) {
+            emitThreads(
+                working.sortedWith(
+                    compareByDescending<ThreadSummary> { it.workingSortAtMillis }
+                        .thenBy { it.id.value }
+                        .thenBy { it.environmentId.value }
+                )
+            )
+        }
+    }
 
     if (snoozed.isNotEmpty()) {
         items +=
@@ -283,35 +324,85 @@ private fun matchesFilter(thread: ThreadSummary, filter: ThreadFilter): Boolean 
         ThreadFilter.Settled -> thread.status == ThreadStatus.Settled
     }
 
-private fun matchesQuery(
-    thread: ThreadSummary,
+/** The Working shelf's state for [homeListItems]: on, with the grace-held working set. */
+class WorkingShelf(
+    val expanded: Boolean,
+    val isWorking: (ThreadSummary) -> Boolean = ::isThreadWorking,
+    val returnedAt: (ThreadSummary) -> Long? = { null },
+)
+
+internal class HomeSearch(
+    /** Threads whose own fields match, best first. */
+    val ranked: List<ThreadSummary>,
+    /** Threads listed only for a message match, in the server matches' rank order. */
+    val contentOnly: List<ThreadSummary>,
+    val contentOnlyKeys: Set<Pair<String, String>>,
+)
+
+/**
+ * `buildThreadListV2Items` while searching: the palette's ranking (whole words
+ * and prefixes, then use, with a typo fallback), without picks since a list
+ * filter cannot explain them. Only listed threads are ranked: a hidden exact
+ * match must not turn typos off. Message matches rank as
+ * `useThreadListSearchMatches` ranks them.
+ */
+internal fun rankHomeSearch(
+    listed: List<ThreadSummary>,
     query: String,
-    projects: Map<Pair<String, String>, Project>,
-    environmentLabels: Map<String, String>,
-): Boolean {
-    val needle = query.trim().lowercase()
-    if (needle.isEmpty()) return true
-    val project = projects[thread.environmentId.value to thread.projectId.value]
-    val haystack =
-        buildString {
-                append(thread.title)
-                append(' ')
-                append(thread.branch.orEmpty())
-                append(' ')
-                append(thread.excerpt.orEmpty())
-                append(' ')
-                append(thread.model)
-                append(' ')
-                append(thread.provider.label)
-                append(' ')
-                append(project?.title.orEmpty())
-                append(' ')
-                append(project?.repository.orEmpty())
-                append(' ')
-                append(environmentLabels[thread.environmentId.value].orEmpty())
-            }
-            .lowercase()
-    return needle.split(' ').filter(String::isNotEmpty).all(haystack::contains)
+    serverMatches: List<ThreadSearchMatch>,
+    nowMillis: Long,
+): HomeSearch {
+    val subjects = listed.associateWith { threadSearchSubject(it) }
+    val ranked =
+        rankSearchItems(listed) { thread, typos ->
+            scoreThreadSearch(query, subjects.getValue(thread), nowMillis, typos = typos, picks = false)
+        }.map { it.item }
+    val matched = ranked.toSet()
+    val byKey = listed.associateBy { it.environmentId.value to it.id.value }
+    val contentOnly =
+        rankMessageMatches(
+                matches = serverMatches,
+                quality = { it.quality },
+                hits = { it.hits },
+                messageCreatedAt = { it.messageCreatedAt },
+                subjectOf = { match -> byKey[match.environmentId.value to match.threadId.value]?.let(subjects::get) },
+                normalizedQuery = query,
+                now = nowMillis,
+                picks = false,
+            )
+            .mapNotNull { byKey[it.environmentId.value to it.threadId.value] }
+            .filter { it !in matched }
+            .distinct()
+    return HomeSearch(
+        ranked = ranked,
+        contentOnly = contentOnly,
+        contentOnlyKeys = contentOnly.mapTo(HashSet()) { it.environmentId.value to it.id.value },
+    )
+}
+
+/**
+ * The inbox order with the Working shelf on: pinned block as arranged, then
+ * attention ranks, then newest return first, where a return is the latest of
+ * creation, un-settling, the latest run's request and completion, and the
+ * moment the thread left the Working shelf (`sortInboxThreadsByReturn`).
+ */
+internal fun inboxComparator(shelf: WorkingShelf): Comparator<ThreadSummary> {
+    fun returnAt(thread: ThreadSummary) =
+        maxOf(
+            thread.createdAtMillis,
+            thread.unsettledAtMillis,
+            thread.latestRunRequestedAtMillis ?: 0,
+            thread.latestCompletedAtMillis ?: 0,
+            shelf.returnedAt(thread) ?: 0,
+        )
+    return compareByDescending<ThreadSummary> { it.pinned }
+        .thenComparator { left, right ->
+            if (left.pinned) return@thenComparator pinnedOrderCompare(left, right)
+            statusRank(left).compareTo(statusRank(right)).takeIf { it != 0 }
+                ?: returnAt(right).compareTo(returnAt(left)).takeIf { it != 0 }
+                ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+                ?: left.environmentId.value.compareTo(right.environmentId.value)
+        }
 }
 
 /**
@@ -447,3 +538,19 @@ private fun statusRank(thread: ThreadSummary): Int =
         ThreadStatus.Snoozed -> 6
         ThreadStatus.Settled -> 7
     }
+
+/**
+ * `visibleThreadSearch`: the last settled server search stays shown while the
+ * query refines or widens its query, so rows do not blink out and back on
+ * every keystroke. Results for an unrelated query clear.
+ */
+internal fun visibleSearchMatches(query: String, settled: Pair<String, List<ThreadSearchMatch>>?): List<ThreadSearchMatch> {
+    if (settled == null) return emptyList()
+    val current = foldSearchQuery(query.trim())
+    val before = foldSearchQuery(settled.first)
+    return if (current.isNotEmpty() && before.isNotEmpty() && (current.startsWith(before) || before.startsWith(current))) {
+        settled.second
+    } else {
+        emptyList()
+    }
+}

@@ -409,6 +409,38 @@ data class GitPreparePullRequestThreadResultDto(
     val isOnPullRequestHead: Boolean = true,
 )
 
+/** `PullRequestChecks`: the `pullRequests.checks` answer, a head's checks without the rest of the detail. */
+@Serializable
+data class PullRequestChecksDto(
+    val observedAt: Double? = null,
+    val state: String = "open",
+    val checks: List<PullRequestCheckDto> = emptyList(),
+)
+
+/** `PullRequestLabelCandidate`: a repository label and whether this PR carries it. */
+@Serializable
+data class PullRequestLabelCandidateDto(
+    val name: String = "",
+    val color: String? = null,
+    val description: String? = null,
+    val isApplied: Boolean = false,
+)
+
+/** `PullRequestLabelCandidateList`. */
+@Serializable
+data class PullRequestLabelCandidateListDto(
+    val candidates: List<PullRequestLabelCandidateDto> = emptyList(),
+    val truncated: Boolean = false,
+)
+
+/** `PullRequestFilterOptions`: label and author values the host found for a list filter search. */
+@Serializable
+data class PullRequestFilterOptionsDto(
+    val labels: List<PullRequestLabelDto> = emptyList(),
+    val authors: List<PullRequestActorDto> = emptyList(),
+    val truncated: Boolean = false,
+)
+
 /** `PullRequestReviewerCandidate`: someone who can be asked to review. [kind]: user | team. */
 @Serializable
 data class PullRequestReviewerCandidateDto(

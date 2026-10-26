@@ -29,6 +29,10 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.Modifier
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.app.AppStore
@@ -36,6 +40,7 @@ import club.touchtech.s5code.kotlin.app.Routes
 import club.touchtech.s5code.kotlin.cloud.CloudAccountState
 import club.touchtech.s5code.kotlin.design.component.S5RowGroup
 import club.touchtech.s5code.kotlin.design.component.S5Screen
+import club.touchtech.s5code.kotlin.design.component.S5SearchField
 import club.touchtech.s5code.kotlin.design.component.S5SettingsRow
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rowPosition
@@ -48,172 +53,133 @@ import club.touchtech.s5code.kotlin.model.ConnectionState
  * notifications, and the server-settings pages — reached from here.
  */
 @Composable
-fun SettingsScreen(store: AppStore, onBack: () -> Unit, onOpen: (String) -> Unit) {
+fun SettingsScreen(
+    store: AppStore,
+    /** Null as a Home tab, where the screen is a root with the tab bar instead. */
+    onBack: (() -> Unit)?,
+    onOpen: (String) -> Unit,
+    bottomBar: @Composable () -> Unit = {},
+) {
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val account by store.cloud.state.collectAsStateWithLifecycle()
     val hasConnected = environments.any { it.state == ConnectionState.Connected }
+    var query by rememberSaveable { mutableStateOf("") }
 
     S5Screen(
         title = "Settings",
         prominence = S5TopBarProminence.Hero,
         onBack = onBack,
+        bottomBar = bottomBar,
     ) { padding ->
         Column(
             Modifier.fillMaxSize().padding(padding).verticalScroll(rememberScrollState()),
             verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
         ) {
-            S5RowGroup(title = "Account") {
-                val accountLabel =
-                    when (val current = account) {
-                        CloudAccountState.Unconfigured -> "Not available"
-                        CloudAccountState.Loading -> "Checking"
-                        is CloudAccountState.SignedIn -> current.label
-                        is CloudAccountState.SignedOut -> "Sign in"
-                    }
-                S5SettingsRow(
-                    icon = Icons.Rounded.Person,
-                    label = "S5 account",
-                    value = accountLabel,
-                    onClick = { onOpen(Routes.SettingsAccount) },
-                    position = rowPosition(0, 2),
+            val accountLabel =
+                when (val current = account) {
+                    CloudAccountState.Unconfigured -> "Not available"
+                    CloudAccountState.Loading -> "Checking"
+                    is CloudAccountState.SignedIn -> current.label
+                    is CloudAccountState.SignedOut -> "Sign in"
+                }
+            val sections =
+                listOf(
+                    SettingsSearchSection(
+                        "Account",
+                        listOf(
+                            SettingsLink("account", "S5 account", Icons.Rounded.Person, Routes.SettingsAccount, accountLabel),
+                            SettingsLink("provider-accounts", "Provider accounts", Icons.Rounded.Key, "settings/provider-accounts"),
+                        ),
+                    ),
+                    SettingsSearchSection(
+                        "App",
+                        listOf(
+                            SettingsLink("environments", "Environments", Icons.Rounded.Hub, Routes.SettingsEnvironments, "${environments.size}"),
+                            SettingsLink("threads", "Thread behavior", Icons.Rounded.Forum, Routes.SettingsThreads),
+                            SettingsLink("follow-ups", "Follow-ups", Icons.AutoMirrored.Rounded.ReplyAll, Routes.SettingsFollowUps),
+                            SettingsLink("notifications", "Notifications", Icons.Rounded.Notifications, Routes.SettingsNotifications),
+                            SettingsLink("scheduled-tasks", "Scheduled tasks", Icons.Rounded.Schedule, "settings/scheduled-tasks"),
+                            SettingsLink("appearance", "Appearance", Icons.Rounded.Palette, Routes.SettingsAppearance),
+                        ),
+                    ),
+                    SettingsSearchSection(
+                        "App settings",
+                        listOfNotNull(
+                            SettingsLink("organization", "Organization", Icons.Rounded.Workspaces, Routes.SettingsProjectGrouping),
+                            // RN shows Overview only once a project group exists to show it
+                            // for; a device with no connected environment has no checkouts.
+                            SettingsLink("overview", "Overview", Icons.Rounded.Workspaces, Routes.SettingsOverview)
+                                .takeIf { hasConnected },
+                            SettingsLink("usage", "Usage limits", Icons.Rounded.Analytics, Routes.Usage),
+                            SettingsLink("archive", "Archived threads", Icons.Rounded.Archive, Routes.Archive),
+                        ),
+                    ),
+                    // RN's Server settings section exists only once a server can
+                    // answer `server.updateSettings`; the four pages share that gate.
+                    SettingsSearchSection(
+                        "Server settings",
+                        if (!hasConnected) emptyList()
+                        else listOf(
+                            SettingsLink("new-threads", "New threads", Icons.Rounded.AddComment, Routes.SettingsNewThreads),
+                            SettingsLink("source-control", "Source control", Icons.Rounded.AccountTree, Routes.SettingsSourceControl),
+                            SettingsLink("agent-behavior", "Agent behavior", Icons.Rounded.Psychology, Routes.SettingsAgentBehavior),
+                            SettingsLink("maintenance", "Maintenance", Icons.Rounded.Build, Routes.SettingsMaintenance),
+                        ),
+                    ),
+                    SettingsSearchSection(
+                        "About S5 Code",
+                        listOf(
+                            SettingsLink("client-storage", "Client storage", Icons.Rounded.Storage, Routes.SettingsClientStorage),
+                            SettingsLink("diagnostics", "Diagnostics", Icons.Rounded.BugReport, Routes.SettingsDiagnostics),
+                        ),
+                    ),
                 )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Key,
-                    label = "Provider accounts",
-                    onClick = { onOpen("settings/provider-accounts") },
-                    position = rowPosition(1, 2),
-                )
-            }
-            Text(
-                "S5 Code works locally without signing in. Cloud features are optional.",
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            val visible = filterSettingsSections(sections, query, SettingsLink::id, SettingsLink::label)
+
+            S5SearchField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = "Search settings",
                 modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
             )
-
-            S5RowGroup(title = "App") {
-                val rows = 6
-                var position = 0
-                S5SettingsRow(
-                    icon = Icons.Rounded.Hub,
-                    label = "Environments",
-                    value = "${environments.size}",
-                    onClick = { onOpen(Routes.SettingsEnvironments) },
-                    position = rowPosition(position++, rows),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Forum,
-                    label = "Thread behavior",
-                    onClick = { onOpen(Routes.SettingsThreads) },
-                    position = rowPosition(position++, rows),
-                )
-                S5SettingsRow(
-                    icon = Icons.AutoMirrored.Rounded.ReplyAll,
-                    label = "Follow-ups",
-                    onClick = { onOpen(Routes.SettingsFollowUps) },
-                    position = rowPosition(position++, rows),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Notifications,
-                    label = "Notifications",
-                    onClick = { onOpen(Routes.SettingsNotifications) },
-                    position = rowPosition(position++, rows),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Schedule,
-                    label = "Scheduled tasks",
-                    onClick = { onOpen("settings/scheduled-tasks") },
-                    position = rowPosition(position++, rows),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Palette,
-                    label = "Appearance",
-                    onClick = { onOpen(Routes.SettingsAppearance) },
-                    position = rowPosition(position++, rows),
+            if (visible.isEmpty()) {
+                Text(
+                    "No settings match \u201c${query.trim()}\u201d.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter, vertical = S5Theme.spacing.large),
                 )
             }
-
-            S5RowGroup(title = "App settings") {
-                val rows = if (hasConnected) 4 else 3
-                var position = 0
-                S5SettingsRow(
-                    icon = Icons.Rounded.Workspaces,
-                    label = "Organization",
-                    onClick = { onOpen(Routes.SettingsProjectGrouping) },
-                    position = rowPosition(position++, rows),
-                )
-                // RN shows Overview only once a project group exists to show it
-                // for; a device with no connected environment has no checkouts.
-                if (hasConnected) {
-                    S5SettingsRow(
-                        icon = Icons.Rounded.Workspaces,
-                        label = "Overview",
-                        onClick = { onOpen(Routes.SettingsOverview) },
-                        position = rowPosition(position++, rows),
+            visible.forEach { section ->
+                S5RowGroup(title = section.title) {
+                    section.rows.forEachIndexed { index, row ->
+                        S5SettingsRow(
+                            icon = row.icon,
+                            label = row.label,
+                            value = row.value,
+                            onClick = { onOpen(row.route) },
+                            position = rowPosition(index, section.rows.size),
+                        )
+                    }
+                }
+                if (section.title == "Account" && query.isBlank()) {
+                    Text(
+                        "S5 Code works locally without signing in. Cloud features are optional.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
                     )
                 }
-                S5SettingsRow(
-                    icon = Icons.Rounded.Analytics,
-                    label = "Usage limits",
-                    onClick = { onOpen(Routes.Usage) },
-                    position = rowPosition(position++, rows),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.Archive,
-                    label = "Archived threads",
-                    onClick = { onOpen(Routes.Archive) },
-                    position = rowPosition(position++, rows),
-                )
-            }
-
-            // RN's Server settings section exists only once a server can
-            // answer `server.updateSettings`; the four pages share that gate.
-            if (hasConnected) {
-                S5RowGroup(title = "Server settings") {
-                    val rows = 4
-                    var position = 0
-                    S5SettingsRow(
-                        icon = Icons.Rounded.AddComment,
-                        label = "New threads",
-                        onClick = { onOpen(Routes.SettingsNewThreads) },
-                        position = rowPosition(position++, rows),
-                    )
-                    S5SettingsRow(
-                        icon = Icons.Rounded.AccountTree,
-                        label = "Source control",
-                        onClick = { onOpen(Routes.SettingsSourceControl) },
-                        position = rowPosition(position++, rows),
-                    )
-                    S5SettingsRow(
-                        icon = Icons.Rounded.Psychology,
-                        label = "Agent behavior",
-                        onClick = { onOpen(Routes.SettingsAgentBehavior) },
-                        position = rowPosition(position++, rows),
-                    )
-                    S5SettingsRow(
-                        icon = Icons.Rounded.Build,
-                        label = "Maintenance",
-                        onClick = { onOpen(Routes.SettingsMaintenance) },
-                        position = rowPosition(position++, rows),
-                    )
-                }
-            }
-
-            S5RowGroup(title = "About T3 Code") {
-                S5SettingsRow(
-                    icon = Icons.Rounded.Storage,
-                    label = "Client storage",
-                    onClick = { onOpen(Routes.SettingsClientStorage) },
-                    position = rowPosition(0, 2),
-                )
-                S5SettingsRow(
-                    icon = Icons.Rounded.BugReport,
-                    label = "Diagnostics",
-                    onClick = { onOpen(Routes.SettingsDiagnostics) },
-                    position = rowPosition(1, 2),
-                )
             }
             Box(Modifier.padding(bottom = S5Theme.spacing.section))
         }
     }
 }
+
+private data class SettingsLink(
+    val id: String,
+    val label: String,
+    val icon: ImageVector,
+    val route: String,
+    val value: String? = null,
+)

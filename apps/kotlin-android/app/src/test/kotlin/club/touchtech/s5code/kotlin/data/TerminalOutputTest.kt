@@ -50,4 +50,23 @@ class TerminalOutputTest {
         assertEquals(1 to 1, terminalGridSize(2f, 2f, 10f, 20f))
         assertEquals(1_000 to 500, terminalGridSize(100_000f, 100_000f, 1f, 1f))
     }
+
+    @Test
+    fun `output past the cursor appends even after the front was trimmed`() {
+        val first = readTerminalOutputUpdate("abc", resetVersion = 1, end = 3, cursor = null)
+        assertEquals(TerminalOutputUpdate.Reset("abc"), first.first)
+        // The scrollback dropped "ab" and gained "de": only "de" is new.
+        val trimmed = readTerminalOutputUpdate("cde", resetVersion = 1, end = 5, cursor = first.second)
+        assertEquals(TerminalOutputUpdate.Append("de"), trimmed.first)
+        assertEquals(TerminalOutputCursor(1, 5), trimmed.second)
+        assertEquals(TerminalOutputUpdate.None, readTerminalOutputUpdate("cde", 1, 5, trimmed.second).first)
+    }
+
+    @Test
+    fun `a reset or a cursor outside the retained tail replays history`() {
+        val cursor = TerminalOutputCursor(1, 5)
+        assertEquals(TerminalOutputUpdate.Reset("xy"), readTerminalOutputUpdate("xy", 2, 2, cursor).first)
+        // Fell behind by more than the retained tail: the gap cannot be appended.
+        assertEquals(TerminalOutputUpdate.Reset("hij"), readTerminalOutputUpdate("hij", 1, 10, cursor).first)
+    }
 }

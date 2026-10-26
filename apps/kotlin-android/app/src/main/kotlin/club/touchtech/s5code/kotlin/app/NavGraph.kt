@@ -1,5 +1,8 @@
 package club.touchtech.s5code.kotlin.app
 
+import androidx.compose.runtime.CompositionLocalProvider
+import club.touchtech.s5code.kotlin.design.component.LocalMarkdownLinkOpener
+import club.touchtech.s5code.kotlin.feature.pullrequests.rememberPullRequestLinkOpener
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.Explore
 import androidx.compose.runtime.Composable
@@ -160,6 +163,8 @@ fun S5NavGraph(
             )
     val transitions = s5NavTransitions()
 
+    // Change request links in Markdown open their PR page in the app, as on web.
+    CompositionLocalProvider(LocalMarkdownLinkOpener provides rememberPullRequestLinkOpener(store, navController)) {
     NavHost(
         navController = navController,
         startDestination = startDestination,
@@ -169,13 +174,24 @@ fun S5NavGraph(
         popExitTransition = transitions.popExit,
     ) {
         composable(Routes.WorkspaceEmpty) {
-            S5EmptyState(
-                icon = Icons.Rounded.Explore,
-                title = "Pick a thread",
-                detail = "Select a thread on the left, or start a new task.",
-                actionLabel = "New task",
-                onAction = { navController.navigate(Routes.NewTask) },
-            )
+            // RN's WorkspaceEmptyDetail: the Pulls tab's list holds pull requests,
+            // so its empty detail asks for one and offers no new task.
+            val pullRequests = store.home.collectAsStateWithLifecycle().value.tab == HomeTab.PullRequests
+            if (pullRequests) {
+                S5EmptyState(
+                    icon = Icons.Rounded.Explore,
+                    title = "Select a pull request",
+                    detail = "Choose a pull request from the sidebar to review it.",
+                )
+            } else {
+                S5EmptyState(
+                    icon = Icons.Rounded.Explore,
+                    title = "Pick a thread",
+                    detail = "Select a thread on the left, or start a new task.",
+                    actionLabel = "New task",
+                    onAction = { navController.navigate(Routes.NewTask) },
+                )
+            }
         }
 
         composable(Routes.Bootstrap) {
@@ -243,7 +259,7 @@ fun S5NavGraph(
                 // Straight to the draft: it already has a project, and sending the
                 // user back through the picker is what made a saved draft feel gone.
                 onResumeDraft = { navController.navigate(Routes.NewTaskDraft) },
-                onSettings = { navController.navigate(Routes.Settings) },
+                onOpenRoute = { route -> navController.navigate(route) },
                 onConnections = { navController.navigate(Routes.Connections) },
                 onArchive = { navController.navigate(Routes.Archive) },
                 confirmController = confirmController,
@@ -441,6 +457,7 @@ fun S5NavGraph(
                 onOpenThread = { envId, nextThreadId ->
                     navController.navigate(Routes.thread(envId, nextThreadId))
                 },
+                onOpenRoute = { route -> navController.navigate(route) },
             )
         }
         composable(Routes.ThreadDevices, arguments = listOf(environmentArg, threadArg)) { entry ->
@@ -854,6 +871,27 @@ fun S5NavGraph(
                 onBack = navController::popBackStack,
             )
         }
+        composable(Routes.PullRequestLabels, arguments = pullRequestArgs) { entry ->
+            club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestLabelsScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                onBack = navController::popBackStack,
+            )
+        }
+        composable(
+            Routes.PullRequestEdit,
+            arguments = pullRequestArgs + optionalStringArg("field") + optionalStringArg("commentId"),
+        ) { entry ->
+            club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestEditScreen(
+                store = store,
+                environmentId = entry.arguments?.getString("environmentId").orEmpty(),
+                reference = pullRequestReference(entry.arguments),
+                field = entry.arguments?.getString("field") ?: "title",
+                commentId = entry.arguments?.getString("commentId")?.takeIf(String::isNotEmpty),
+                onBack = navController::popBackStack,
+            )
+        }
         composable(
             Routes.PullRequestGuideStop,
             arguments =
@@ -1004,6 +1042,7 @@ fun S5NavGraph(
                 },
             )
         }
+    }
     }
 }
 

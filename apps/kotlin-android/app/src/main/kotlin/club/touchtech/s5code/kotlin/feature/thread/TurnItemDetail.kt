@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.feature.thread
 
 import club.touchtech.s5code.kotlin.data.isSummarizedValue
+import club.touchtech.s5code.kotlin.data.toolOutputImageBlocks
 import club.touchtech.s5code.kotlin.data.toolOutputImageCount
 import club.touchtech.s5code.kotlin.transport.v2Bool
 import club.touchtech.s5code.kotlin.transport.v2Long
@@ -25,21 +26,22 @@ import kotlinx.serialization.json.contentOrNull
 
 private const val MAX_TEXT_BLOCK_DEPTH = 4
 
-private fun isRenderableImageBlock(value: JsonObject): Boolean =
-    toolOutputImageCount(JsonArray(listOf(value))) > 0
-
-private fun textFromBlocks(value: JsonElement?, depth: Int): String? {
+/**
+ * [imageBlocks] are the blocks served as previews, compared by identity: equal
+ * blocks past the preview limit still read "[image]".
+ */
+private fun textFromBlocks(value: JsonElement?, depth: Int, imageBlocks: Set<JsonObject>): String? {
     if (value == null || value == JsonNull || depth > MAX_TEXT_BLOCK_DEPTH) return null
     if (value is JsonPrimitive) return if (value.isString) value.content else null
     if (value is JsonArray) {
-        val parts = value.map { textFromBlocks(it, depth + 1) }
+        val parts = value.map { textFromBlocks(it, depth + 1, imageBlocks) }
         return if (parts.all { it != null }) parts.filter { it?.isNotEmpty() == true }.joinToString("\n") else null
     }
     if (value !is JsonObject) return null
     when (value.v2String("type")) {
         "text" -> return value.v2String("text")
         // Images clients can show render on their own (see turnItemDetailImageCount).
-        "image" -> return if (isRenderableImageBlock(value)) "" else "[image]"
+        "image" -> return if (value in imageBlocks) "" else "[image]"
         "resource_link" -> return value.v2String("uri")
         "resource" -> {
             val resource = value["resource"] as? JsonObject
@@ -53,9 +55,9 @@ private fun textFromBlocks(value: JsonElement?, depth: Int): String? {
     // MCP results and provider tool results wrap their text in `content`.
     // `structuredContent` usually repeats it as data, so it only shows when the
     // text is empty.
-    if (keys.size == 1 && keys.first() == "content") return textFromBlocks(value["content"], depth + 1)
+    if (keys.size == 1 && keys.first() == "content") return textFromBlocks(value["content"], depth + 1, imageBlocks)
     if (keys.size == 2 && "content" in keys && "structuredContent" in keys) {
-        return textFromBlocks(value["content"], depth + 1)?.takeIf { it.isNotBlank() }
+        return textFromBlocks(value["content"], depth + 1, imageBlocks)?.takeIf { it.isNotBlank() }
     }
     return null
 }
@@ -86,7 +88,9 @@ private fun formatToolValue(value: JsonElement?, hasImagePreview: Boolean = fals
     // Claude Read returns one structured image, which the file preview already
     // shows; lists may contain other images and keep their placeholders.
     if (hasImagePreview && value is JsonObject && value.v2String("type") == "image") return null
-    val text = textFromBlocks(value, 0)
+    val imageBlocks = java.util.Collections.newSetFromMap(java.util.IdentityHashMap<JsonObject, Boolean>())
+        .apply { addAll(toolOutputImageBlocks(value)) }
+    val text = textFromBlocks(value, 0, imageBlocks)
     if (text != null) return if (text.isNotBlank()) prettyJsonText(text) else null
     val json =
         if (value is JsonPrimitive) value.contentOrNull

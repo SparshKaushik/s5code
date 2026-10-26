@@ -104,7 +104,7 @@ fun PullRequestStatusMenu(pr: PullRequestDetailDto, runner: PullRequestActionRun
         label = "Pull request status",
         options =
             actions.map {
-                S5MenuOption(it, pullRequestActionLabel(it), statusActionIcon(it), destructive = it == "close")
+                S5MenuOption(it, pullRequestActionLabel(it, pr.provider), statusActionIcon(it), destructive = it == "close")
             },
         onSelect = runner::request,
         expanded = expanded,

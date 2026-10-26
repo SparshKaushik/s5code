@@ -23,6 +23,8 @@ data class ProjectCloneSnapshotDto(
     val detail: String? = null,
     /** Human readable reason when phase is failed. */
     val error: String? = null,
+    /** Git has gone quiet past the server's stall window; absent on older servers. */
+    val stalled: Boolean = false,
 )
 
 /** `ProjectCloneActionResult` for `projectClone.cancel`/`retry`. */

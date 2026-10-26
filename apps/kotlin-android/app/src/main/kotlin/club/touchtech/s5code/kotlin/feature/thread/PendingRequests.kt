@@ -2,6 +2,7 @@ package club.touchtech.s5code.kotlin.feature.thread
 
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -44,6 +45,9 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.stateDescription
+import androidx.compose.ui.text.style.TextDecoration
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.design.component.S5Markdown
@@ -118,6 +122,32 @@ fun ApprovalCard(
         if (approval.command != null) {
             S5CodeBlock(lines = listOf(approval.command), language = "bash")
         }
+        approval.reason?.let { reason ->
+            Text(reason, style = MaterialTheme.typography.bodySmall, color = S5Theme.status.onApprovalContainer)
+        }
+        approval.fullAccessOverride?.let { override ->
+            var explanationOpen by remember(approval.id) { mutableStateOf(false) }
+            Column(
+                Modifier
+                    .clip(MaterialTheme.shapes.small)
+                    .clickable { explanationOpen = !explanationOpen }
+                    .semantics { stateDescription = if (explanationOpen) "Expanded" else "Collapsed" },
+            ) {
+                Text(
+                    FULL_ACCESS_OVERRIDE_QUESTION,
+                    style = MaterialTheme.typography.labelMedium,
+                    textDecoration = TextDecoration.Underline,
+                )
+                if (explanationOpen) {
+                    Text(
+                        fullAccessOverrideExplanation(override),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = S5Theme.spacing.tiny),
+                    )
+                }
+            }
+        }
         // A provider caution, such as a prompt-injection warning on an "allow"
         // option, belongs next to the actions that carry it.
         options.firstNotNullOfOrNull { it.warning }?.let { warning ->
@@ -160,6 +190,20 @@ fun ApprovalCard(
         }
     }
 }
+
+/** `FULL_ACCESS_OVERRIDE_QUESTION` in `packages/client-runtime/src/state/threadRequests.ts`. */
+internal const val FULL_ACCESS_OVERRIDE_QUESTION = "Why am I being asked this?"
+
+/** `fullAccessOverrideExplanation`: why a full-access thread still asked. */
+internal fun fullAccessOverrideExplanation(override: String): String =
+    if (override == "ask_rule") {
+        "Full access skips approvals, but an ask rule in the agent's own settings matches this action, " +
+            "so it still asks. Remove or narrow that rule to stop these prompts."
+    } else {
+        "Full access skips approvals, but the agent still stops for a few safety checks of its own that " +
+            "no setting can skip, such as a delete whose path it can't verify. S5 Code can't turn these off, " +
+            "so check the request and approve it if it's what you expect."
+    }
 
 /**
  * Buttons for a request that arrived without provider options. These are the

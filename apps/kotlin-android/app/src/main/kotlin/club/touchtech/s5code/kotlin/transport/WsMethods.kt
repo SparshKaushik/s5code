@@ -71,6 +71,13 @@ internal object WsMethods {
     const val PullRequestsReviewGuide = "pullRequests.reviewGuide"
     const val PullRequestsGenerateReviewGuide = "pullRequests.generateReviewGuide"
     const val PullRequestsReviewerCandidates = "pullRequests.reviewerCandidates"
+    const val PullRequestsFilterOptions = "pullRequests.filterOptions"
+    const val PullRequestsChecks = "pullRequests.checks"
+    const val PullRequestsUpdate = "pullRequests.update"
+    const val PullRequestsUpdateComment = "pullRequests.updateComment"
+    const val PullRequestsSetReaction = "pullRequests.setReaction"
+    const val PullRequestsLabelCandidates = "pullRequests.labelCandidates"
+    const val PullRequestsSetLabels = "pullRequests.setLabels"
 
     const val SubscribeDeviceState = "subscribeDeviceState"
     const val DeviceList = "device.list"

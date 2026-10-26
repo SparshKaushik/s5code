@@ -296,7 +296,17 @@ interface WorkspaceGateway {
 
     suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId)
 
-    suspend fun visitThread(environmentId: EnvironmentId, id: ThreadId, visitedAtMillis: Long) = Unit
+    /**
+     * Moves the read watermark. [opened] marks the user opening the thread, which
+     * also feeds search ranking; [searchQuery] is the search that picked it.
+     */
+    suspend fun visitThread(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        visitedAtMillis: Long,
+        opened: Boolean = false,
+        searchQuery: String? = null,
+    ) = Unit
     suspend fun markThreadUnread(environmentId: EnvironmentId, id: ThreadId) = Unit
     suspend fun updateLimitRecovery(environmentId: EnvironmentId, id: ThreadId, runId: String,
         resetAt: String, autoResume: Boolean? = null, snooze: Boolean? = null) = Unit
@@ -321,13 +331,15 @@ interface WorkspaceGateway {
     /**
      * Answers an open approval request. [decision] is one of the strings the
      * provider advertised on the request (see `PendingApproval.options`),
-     * echoed untouched — each adapter maps its own vocabulary.
+     * echoed untouched — each adapter maps its own vocabulary. [feedback] rides a
+     * decline to the requesting agent when the request `supportsFeedback`.
      */
     suspend fun respondToApproval(
         environmentId: EnvironmentId,
         id: ThreadId,
         approvalId: String,
         decision: String,
+        feedback: String? = null,
     )
 
     suspend fun respondToInput(

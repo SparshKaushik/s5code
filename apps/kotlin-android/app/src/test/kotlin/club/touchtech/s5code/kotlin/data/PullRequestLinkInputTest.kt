@@ -16,6 +16,31 @@ class PullRequestLinkInputTest {
     private fun error(result: PullRequestLinkInputResult?) = (result as PullRequestLinkInputResult.Error).message
 
     @Test
+    fun `canonicalizes both GitCafe routes`() {
+        for (host in listOf("git.cafe", "staging.git.cafe")) {
+            for (repository in listOf("web", "pull", "pulls")) {
+                for (route in listOf("pull", "pulls")) {
+                    val url = "https://$host/acme/$repository/$route/42"
+                    assertEquals(url, parsePullRequestReference(url))
+                    assertEquals(
+                        ResolvedPullRequestLink(host, "acme/$repository", 42, "https://$host/acme/$repository/pulls/42"),
+                        link(resolveLinkPullRequestInput(url, null)),
+                    )
+                }
+            }
+        }
+        // Only GitCafe's own hosts claim `/pull/` canonicalization.
+        assertEquals(
+            "https://github.com/acme/web/pull/7",
+            canonicalizeGitCafePullRequestUrl("https://github.com/acme/web/pull/7"),
+        )
+        assertEquals(
+            "https://git.cafe/acme/web/pulls/42",
+            canonicalizeGitCafePullRequestUrl("https://git.cafe/Acme/web/pull/42/files?w=1#diff"),
+        )
+    }
+
+    @Test
     fun `links supported host URLs without a thread project`() {
         for ((url, host) in
             listOf(

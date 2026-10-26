@@ -28,9 +28,20 @@ internal fun ThreadShellDto.normalizedV2(): ThreadShellDto {
             activeTurnId = activeRunId, lastError = lastError, updatedAt = updatedAt),
         hasPendingApprovals = pendingRuntimeRequest?.v2String("kind")?.let { it !in setOf("user_input", "auth_refresh", "dynamic_tool_call") } == true,
         hasPendingUserInput = pendingRequestBlocksUser(pendingRuntimeRequest, live),
-        backgroundLiveness = if (pendingBackgroundTasks.any { it.v2String("kind") != "command" }) "monitoring" else null,
+        backgroundLiveness = if (backgroundWorkHoldsCompletion(pendingBackgroundTasks)) "monitoring" else null,
     )
 }
+
+/**
+ * `backgroundWorkHoldsCompletion` in `packages/shared/src/orchestrationV2PendingBackgroundWork.ts`:
+ * commands and monitors are as often a dev server or its watchdog as a wait, so
+ * they hold the thread at Working only when the agent marks them `awaited`.
+ */
+internal fun backgroundWorkHoldsCompletion(tasks: List<JsonObject>): Boolean =
+    tasks.any { backgroundTaskHolds(it.v2String("kind"), it.v2Bool("awaited")) }
+
+internal fun backgroundTaskHolds(kind: String?, awaited: Boolean): Boolean =
+    awaited || kind == "subagent" || kind == "background_task"
 
 /**
  * Whether the shell's pending request is a question the user must answer now,
@@ -144,12 +155,14 @@ private fun V2ProjectionDto.pullRequestWatchTasks(): List<JsonObject> {
             put("taskId", "pull-request-watch:${threadPullRequestKeyOf(link)}")
             put("kind", "monitor")
             put("description", "Watching pull request #${link.number}")
+            put("awaited", true)
         }
     }
 }
 
 /**
- * Commands left running do not hold completion; subagents and monitors do.
+ * Every background task left running once the turn settled; which of them hold
+ * completion is [backgroundWorkHoldsCompletion].
  *
  * [includePullRequestWatches] adds the thread's server-side PR watches as
  * monitor tasks — the "Waiting on" pill wants them. Callers that pick a run to
@@ -158,9 +171,12 @@ private fun V2ProjectionDto.pullRequestWatchTasks(): List<JsonObject> {
  */
 internal fun V2ProjectionDto.pendingBackgroundWork(
     includePullRequestWatches: Boolean = true,
+    skipSilentRuns: Boolean = false,
 ): List<JsonObject> {
-    if (runs.any { it.v2String("status") in setOf("preparing", "starting", "running") }) return emptyList()
-    val latest = runs.filterNot { it.v2String("status") == "queued" && it.v2Bool("queueHeld") }.maxByOrNull { it.v2Long("ordinal") ?: 0 }
+    // Only the shell reads past silent idle compactions; an open thread sees every run.
+    val statusRuns = if (skipSilentRuns) statusRuns() else runs
+    if (statusRuns.any { it.v2String("status") in setOf("preparing", "starting", "running") }) return emptyList()
+    val latest = statusRuns.filterNot { it.v2String("status") == "queued" && it.v2Bool("queueHeld") }.maxByOrNull { it.v2Long("ordinal") ?: 0 }
     // A thread that never ran waits on nothing else, but a watch started on it still wakes it.
     if (latest == null) return if (includePullRequestWatches) pullRequestWatchTasks() else emptyList()
     if (latest.v2String("status") !in setOf("completed", "cancelled", "failed", "interrupted", "waiting")) return emptyList()
@@ -171,31 +187,121 @@ internal fun V2ProjectionDto.pendingBackgroundWork(
             task.v2String("taskId")?.let { tasks.putIfAbsent(it, task) }
         }
     }
-    val rolledBack = runs.filter { it.v2String("status") == "rolled_back" }.mapTo(hashSetOf()) { it.v2String("id") }
-    turnItems.filter { it.v2String("type") in setOf("command_execution", "dynamic_tool", "subagent") &&
-        it.v2String("status") in setOf("pending", "running", "waiting") && it.v2String("runId") !in rolledBack &&
-        !(it.v2String("type") == "dynamic_tool" && (it["input"] as? JsonObject)?.v2Bool("persistent") == true) }
+    pendingBackgroundTurnItems()
         .forEach { item ->
             val id = (item["nativeItemRef"] as? JsonObject)?.v2String("nativeId") ?: item.v2String("id") ?: return@forEach
             tasks.putIfAbsent(id, buildJsonObject {
                 put("taskId", id)
-                put("kind", when (item.v2String("type")) { "command_execution" -> "command"; "subagent" -> "subagent"; else -> "background_task" })
+                put("kind", when (item.v2String("type")) {
+                    // Grok and Claude monitors are command executions flagged `monitor`.
+                    "command_execution" -> if (item.v2Bool("monitor")) "monitor" else "command"
+                    "subagent" -> "subagent"
+                    else -> "background_task"
+                })
                 put("description", item.v2String("title") ?: item.v2String("prompt") ?: item.v2String("toolName"))
                 item.v2String("childThreadId")?.let { put("childThreadId", it) }
             })
         }
+    // The watch row always wins, so it stays awaited even when the provider reports the same id.
     if (includePullRequestWatches) pullRequestWatchTasks().forEach { task ->
-        task.v2String("taskId")?.let { tasks.putIfAbsent(it, task) }
+        task.v2String("taskId")?.let { tasks[it] = task }
     }
     return tasks.values.toList()
 }
 
-/** Adapt the control plane for existing Kotlin screens; the V2 projection remains authoritative. */
-internal fun V2ProjectionDto.asThreadDto(): ThreadDto {
+private val ACTIVE_WORK_STATUSES = setOf("pending", "running", "waiting")
+
+/**
+ * `pendingBackgroundTurnItems`: the background items Stop ends, without the
+ * pending list's settled-run gate. Persistent dynamic tools and rolled-back
+ * runs never count.
+ */
+internal fun V2ProjectionDto.pendingBackgroundTurnItems(): List<JsonObject> {
+    val rolledBack = runs.filter { it.v2String("status") == "rolled_back" }.mapTo(hashSetOf()) { it.v2String("id") }
+    return turnItems.filter { it.v2String("type") in setOf("command_execution", "dynamic_tool", "subagent") &&
+        it.v2String("status") in ACTIVE_WORK_STATUSES &&
+        (it.v2String("runId") == null || it.v2String("runId") !in rolledBack) &&
+        !(it.v2String("type") == "dynamic_tool" && (it["input"] as? JsonObject)?.v2Bool("persistent") == true) }
+}
+
+/**
+ * `settleTurnItems` in `packages/client-runtime/src/state/threads.ts`: only a
+ * copy still marked active takes the server's settled item, so an event applied
+ * during the lookup wins, and inherited rows stay with the thread that owns them.
+ * Returns this projection unchanged when nothing settled.
+ */
+internal fun V2ProjectionDto.settleTurnItems(settled: Map<String, JsonObject>): V2ProjectionDto {
+    if (settled.isEmpty()) return this
+    val threadId = thread.v2String("id")
+    var changed = false
+    fun settle(item: JsonObject, id: String?): JsonObject {
+        val server = settled[id] ?: return item
+        if (item.v2String("status") !in ACTIVE_WORK_STATUSES) return item
+        changed = true
+        return server
+    }
+    val items = turnItems.map { settle(it, it.v2String("id")) }
+    val rows = visibleTurnItems.map { row ->
+        if (row.sourceThreadId != threadId) row
+        else settle(row.item, row.sourceItemId).let { if (it === row.item) row else row.copy(item = it) }
+    }
+    return if (changed) copy(turnItems = items, visibleTurnItems = rows) else this
+}
+
+/** `IDLE_COMPACTION_TEXT`: the prompt that only asks the provider to compact. */
+private const val COMPACTION_COMMAND_TEXT = "/compact"
+
+/**
+ * `isCompactionCommandMessage` in `packages/contracts/src/orchestrationV2.ts`:
+ * a bare `/compact` from the user's side, so its turn is the compaction itself.
+ * Accepts a conversation message (`role`) or a `user_message` turn item.
+ */
+internal fun isCompactionCommandMessage(message: JsonObject): Boolean =
+    (message.v2String("role") == "user" || message.v2String("type") == "user_message") &&
+        message.v2String("text")?.trim()?.lowercase() == COMPACTION_COMMAND_TEXT &&
+        message.v2Objects("attachments").isEmpty()
+
+/**
+ * `idleCompactionOf`: why S5 Code sent this `/compact` on its own
+ * (`beforeCacheExpires` or `onReturn`), or null for one someone asked for.
+ * Servers before `idleCompaction` marked their own as agent-created.
+ */
+internal fun idleCompactionOf(message: JsonObject): String? {
+    if (!isCompactionCommandMessage(message)) return null
+    message.v2String("idleCompaction")?.let { return it }
+    return if (message.v2String("createdBy") == "agent" && message.v2String("creationSource") == "server") {
+        "beforeCacheExpires"
+    } else null
+}
+
+/**
+ * `isSilentRunForShell` in the server's `ProjectionStore.ts`: S5 Code's own idle
+ * compactions stay out of the thread's status unless they fail, so an open
+ * thread does not flip to Working (or shift its sort) while one runs in the
+ * background.
+ */
+internal fun V2ProjectionDto.isSilentRun(run: JsonObject): Boolean {
+    if (run.v2String("status") == "failed") return false
+    val userMessageId = run.v2String("userMessageId") ?: return false
+    if (messages.none { it.v2String("id") == userMessageId && idleCompactionOf(it) != null }) return false
+    val runId = run.v2String("id")
+    return turnItems.none { it.v2String("runId") == runId && it.v2String("type") == "compaction" && it.v2String("status") == "failed" }
+}
+
+/** The runs a thread's status reads from: every run except silent idle compactions. */
+internal fun V2ProjectionDto.statusRuns(): List<JsonObject> = runs.filterNot { isSilentRun(it) }
+
+/**
+ * Adapt the control plane for existing Kotlin screens; the V2 projection remains authoritative.
+ * The open thread reads every run, as RN's `deriveThreadRuntime` does, so S5 Code's own idle
+ * compaction can be watched and stopped; [skipSilentRuns] is the shell's view (`isSilentRunForShell`).
+ */
+internal fun V2ProjectionDto.asThreadDto(skipSilentRuns: Boolean = false): ThreadDto {
     val metadata = TransportJson.decodeFromJsonElement(ThreadDto.serializer(), thread)
-    val active = runs.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
+    val statusRuns = if (skipSilentRuns) statusRuns() else runs
+    val active = statusRuns.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
         .maxByOrNull { it.v2Long("ordinal") ?: 0 }
-    val latest = active ?: runs.filter { it.v2String("status") !in setOf("queued", "cancelled", "rolled_back") }
+    val latest = active ?: statusRuns.filter { it.v2String("status") !in setOf("queued", "cancelled", "rolled_back") }
         .maxByOrNull { it.v2Long("ordinal") ?: 0 }
     val provider = thread.v2String("providerInstanceId")
     val session = providerSessions.lastOrNull { it.v2String("providerInstanceId") == provider }
@@ -283,7 +389,7 @@ internal fun applyV2Event(
         "thread.pinned", "thread.unpinned", "thread.pin-reordered", "thread.active-reordered",
         "thread.metadata-updated", "thread.pull-request-synced", "thread.runtime-mode-updated",
         "thread.interaction-mode-updated", "thread.model-selection-updated", "thread.provider-switched",
-        "thread.visited", "thread.marked-unread" -> base.copy(thread = payload)
+        "thread.visited", "thread.marked-unread", "thread.guest-share-updated" -> base.copy(thread = payload)
         "thread.pull-request-link-updated" -> base.copy(thread = projection.thread.withPullRequestLinkUpdate(payload))
         "run.created", "run.updated" -> base.copy(runs = base.runs.v2Upsert(payload))
         "run.background-work-cancelled" -> base.copy(runs = base.runs.map { run ->

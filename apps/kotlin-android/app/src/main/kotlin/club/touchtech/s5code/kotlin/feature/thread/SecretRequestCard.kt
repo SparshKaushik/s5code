@@ -30,7 +30,7 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.data.SECRET_REQUEST_DEFAULT_PLACEHOLDER
-import club.touchtech.s5code.kotlin.data.SECRET_REQUEST_PRIVACY_NOTE
+import club.touchtech.s5code.kotlin.data.secretRequestPrivacyNote
 import club.touchtech.s5code.kotlin.data.SecretRequestAnswer
 import club.touchtech.s5code.kotlin.data.SecretRequestDisplay
 import club.touchtech.s5code.kotlin.data.secretRequestDisplay
@@ -223,7 +223,7 @@ private fun PendingSecretRequestCard(
                     tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
                 Text(
-                    SECRET_REQUEST_PRIVACY_NOTE,
+                    secretRequestPrivacyNote(entry),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     modifier = Modifier.weight(1f),

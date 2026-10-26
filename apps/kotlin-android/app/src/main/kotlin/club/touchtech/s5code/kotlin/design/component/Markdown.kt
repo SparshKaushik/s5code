@@ -29,6 +29,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -52,13 +53,16 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil3.compose.AsyncImage
+import club.touchtech.s5code.kotlin.design.text.MarkdownEmbed
 import club.touchtech.s5code.kotlin.design.text.MdBlock
 import club.touchtech.s5code.kotlin.design.text.MdImage
 import club.touchtech.s5code.kotlin.design.text.MdSpan
 import club.touchtech.s5code.kotlin.design.text.MarkdownLinkPresentation
 import club.touchtech.s5code.kotlin.design.text.MdTableAlignment
+import club.touchtech.s5code.kotlin.design.text.classifyMarkdownEmbed
 import club.touchtech.s5code.kotlin.design.text.codeLanguageOf
 import club.touchtech.s5code.kotlin.design.text.inlineCodeFileLink
+import club.touchtech.s5code.kotlin.design.text.markdownWithHtml
 import club.touchtech.s5code.kotlin.design.text.parseMarkdown
 import club.touchtech.s5code.kotlin.design.text.resolveMarkdownLinkPresentation
 import club.touchtech.s5code.kotlin.design.text.resolveWorkspaceRelativeFilePath
@@ -80,8 +84,13 @@ fun S5Markdown(
     onOpenFile: ((String) -> Unit)? = null,
     /** Receives a `t3-thread://` link's id as written; null leaves those links inert. */
     onOpenThreadLink: ((String) -> Unit)? = null,
+    /**
+     * Renders HTML tags as Markdown, as forges write them into pull request
+     * bodies and comments. Off for agent text, where a bare `<Component>` is prose.
+     */
+    html: Boolean = false,
 ) {
-    val blocks = remember(source) { parseMarkdown(source) }
+    val blocks = remember(source, html) { parseMarkdown(if (html) markdownWithHtml(source) else source) }
     val links = remember(workspaceRoot, onOpenFile, onOpenThreadLink) {
         MarkdownLinkActions(workspaceRoot, onOpenFile, onOpenThreadLink)
     }
@@ -200,30 +209,46 @@ private fun MarkdownParagraph(
     links: MarkdownLinkActions,
 ) {
     var preview by remember(images) { mutableStateOf<MdImage?>(null) }
+    val uriHandler = LocalUriHandler.current
+    val embeds = remember(images, links.workspaceRoot) { images.map { classifyMarkdownEmbed(it.source, links.workspaceRoot) } }
     Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
         if (spans.isNotEmpty()) MarkdownText(spans, textStyle, links = links)
-        images.forEach { image ->
-            Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny)) {
-                AsyncImage(
-                    model = image.source,
-                    contentDescription = image.alt.ifBlank { null },
-                    contentScale = ContentScale.Fit,
-                    modifier =
-                        Modifier.fillMaxWidth()
-                            .clickable { preview = image },
-                )
-                if (image.alt.isNotBlank()) {
-                    Text(
-                        image.alt,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
+        images.forEachIndexed { index, image ->
+            when (val embed = embeds[index]) {
+                is MarkdownEmbed.Image ->
+                    Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny)) {
+                        AsyncImage(
+                            model = embed.uri,
+                            contentDescription = image.alt.ifBlank { null },
+                            contentScale = ContentScale.Fit,
+                            modifier =
+                                Modifier.fillMaxWidth()
+                                    .clickable { preview = image },
+                        )
+                        if (image.alt.isNotBlank()) {
+                            Text(
+                                image.alt,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    }
+                is MarkdownEmbed.Audio -> MarkdownAudioEmbed(embed.uri, image.alt.ifBlank { embed.name })
+                is MarkdownEmbed.Document ->
+                    MarkdownFileEmbed(image.alt.ifBlank { embed.name }, path = null) { uriHandler.openUri(embed.uri) }
+                // The file viewer shows images and plays audio itself, so a shared
+                // file opens there rather than as a device path Coil cannot read.
+                is MarkdownEmbed.WorkspaceFile -> {
+                    val open = links.onOpenFile
+                    if (open != null) MarkdownFileEmbed(image.alt.ifBlank { embed.name }, embed.path) { open(embed.path) }
+                    else MarkdownUnavailableEmbed(image.alt)
                 }
+                MarkdownEmbed.Unavailable -> MarkdownUnavailableEmbed(image.alt)
             }
         }
     }
     S5ImageLightbox(
-        model = preview?.source,
+        model = preview?.let { (classifyMarkdownEmbed(it.source, null) as? MarkdownEmbed.Image)?.uri },
         contentDescription = preview?.alt,
         imageKey = preview?.source,
         onDismiss = { preview = null },
@@ -381,15 +406,23 @@ private data class AnnotatedMarkdown(
     val inlineContent: Map<String, InlineTextContent>,
 )
 
+/**
+ * Opens a web link in the app when it can, returning false to leave it to the
+ * browser: a change request link opens its PR page, as `openPullRequestLink`
+ * does on web. Provided once at the navigation root.
+ */
+val LocalMarkdownLinkOpener = staticCompositionLocalOf<((String) -> Boolean)?> { null }
+
 /** Turns inline spans into annotated text plus inline Pierre file icons. */
 @Composable
 private fun List<MdSpan>.annotate(links: MarkdownLinkActions): AnnotatedMarkdown {
     val (workspaceRoot, onOpenFile, onOpenThreadLink) = links
     val uriHandler = LocalUriHandler.current
+    val linkOpener = LocalMarkdownLinkOpener.current
     val linkColor = MaterialTheme.colorScheme.primary
     val codeColor = MaterialTheme.colorScheme.tertiary
     val codeFamily = S5Theme.code.code.fontFamily
-    return remember(this, linkColor, codeColor, links, uriHandler) {
+    return remember(this, linkColor, codeColor, links, uriHandler, linkOpener) {
         val icons = linkedMapOf<String, InlineTextContent>()
         val annotated = buildAnnotatedString {
             this@annotate.forEachIndexed { index, span ->
@@ -452,7 +485,7 @@ private fun List<MdSpan>.annotate(links: MarkdownLinkActions): AnnotatedMarkdown
                                 TextLinkStyles(
                                     style = style.copy(color = linkColor, textDecoration = TextDecoration.Underline)
                                 ),
-                            ) { uriHandler.openUri(presentation.href) }
+                            ) { if (linkOpener?.invoke(presentation.href) != true) uriHandler.openUri(presentation.href) }
                         ) { append(span.text) }
                     }
 

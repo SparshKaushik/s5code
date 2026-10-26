@@ -4,6 +4,7 @@ import club.touchtech.s5code.kotlin.model.FeedEntry
 import club.touchtech.s5code.kotlin.model.ToolState
 import club.touchtech.s5code.kotlin.model.TurnInfo
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -745,6 +746,28 @@ class TurnFoldTest {
         // Without it the screen is indistinguishable from an idle thread.
         val rows = presentFeed(emptyList(), emptySet(), null, emptySet(), activeWorkStartedAtMillis = 500)
         assertEquals(listOf("working-indicator"), keys(rows))
+    }
+
+    @Test
+    fun `a bare compact turn's compaction row stands in for the working row`() {
+        val compacting = FeedEntry.Note("c1", "Compacting context", "turn-1", 1_000, compaction = true,
+            status = "running", compactionCommand = true)
+        val running = TurnInfo("turn-1", "running", 1_000, null)
+        assertTrue(presentFeed(listOf(compacting), emptySet(), running, emptySet(), activeWorkStartedAtMillis = 1_000)
+            .none { it is FeedRow.Working })
+        // A compaction the provider started mid-turn leaves the turn working.
+        val automatic = compacting.copy(compactionCommand = false)
+        assertTrue(presentFeed(listOf(automatic), emptySet(), running, emptySet(), activeWorkStartedAtMillis = 1_000)
+            .last() is FeedRow.Working)
+    }
+
+    @Test
+    fun `a compaction row stays visible when its turn folds`() {
+        val compaction = FeedEntry.Note("c1", "Context compacted", "turn-1", 1_500, compaction = true, status = "completed")
+        val feed = listOf(prompt("u1", 0), tool("t1", "turn-1", 1_000), compaction, answer("a1", "turn-1", 2_000))
+        val fold = turnFolds(feed, settled("turn-1")).values.single()
+        assertTrue("t1" in fold.hiddenIds)
+        assertFalse("c1" in fold.hiddenIds)
     }
 
     @Test

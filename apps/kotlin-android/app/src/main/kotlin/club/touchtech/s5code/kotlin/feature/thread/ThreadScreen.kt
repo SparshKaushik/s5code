@@ -57,6 +57,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableStateMapOf
@@ -129,6 +130,7 @@ import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 /**
@@ -150,9 +152,17 @@ fun ThreadScreen(
     onOpen: (String) -> Unit,
     /** "Work locally" replaces this thread with a new one — a full navigate, not a subroute. */
     onOpenThread: (environmentId: String, threadId: String) -> Unit = { _, _ -> },
+    /** Navigates to a top-level route, such as an automation row's scheduled tasks. */
+    onOpenRoute: (String) -> Unit = {},
 ) {
     val id = remember(threadId) { ThreadId(threadId) }
     val env = remember(environmentId) { EnvironmentId(environmentId) }
+    // Showing the thread is the open that feeds search ranking, whether or not
+    // its shell has arrived; the first visit the server hears carries it
+    // (`createThreadVisitTracker`). A Home search pick already sent it.
+    var openPending by remember(environmentId, threadId) {
+        mutableStateOf(club.touchtech.s5code.kotlin.data.ThreadOpens.claim(environmentId, threadId, System.currentTimeMillis()))
+    }
     val context = androidx.compose.ui.platform.LocalContext.current
     // Subscribing is what starts this thread's stream, so it is keyed by both ids:
     // thread ids are only unique within one environment.
@@ -274,6 +284,14 @@ fun ThreadScreen(
         val wokeAt = summary.wokeAtMillis
         val wakeIsLatest = wokeAt != null && wokeAt >= summary.updatedAtMillis
         val watermark = maxOf(summary.updatedAtMillis, wokeAt ?: 0)
+        if (openPending && watermark > 0) {
+            openPending = false
+            // Sent outside this effect, which restarts on every streamed update.
+            store.sendThreadOpen(env, id, watermark)
+            lastVisitWatermark = watermark
+            lastVisitSentAt = System.currentTimeMillis()
+            return@LaunchedEffect
+        }
         if (watermark <= 0 || watermark <= (summary.lastVisitedAtMillis ?: 0) || watermark <= lastVisitWatermark) return@LaunchedEffect
         val unseenCompletion = (summary.latestCompletedAtMillis ?: 0) > (summary.lastVisitedAtMillis ?: 0)
         // Like a completion, a wake the user is looking at must not wait out the
@@ -454,6 +472,22 @@ fun ThreadScreen(
                 sessionStartedAtMillis = current.sessionUpdatedAtMillis,
             )
         }
+    // Automation rows lead with their task's title, as RN's `scheduledTasksLive`
+    // query. Read once, and only when the transcript has one to name.
+    val hasAutomationRows = current.feed.any { it is FeedEntry.UserMessage && it.scheduledTaskId != null }
+    var scheduledTaskTitles by remember(environmentId) { mutableStateOf(emptyMap<String, String>()) }
+    LaunchedEffect(environmentId, hasAutomationRows) {
+        if (!hasAutomationRows || scheduledTaskTitles.isNotEmpty()) return@LaunchedEffect
+        try {
+            val payload = store.workspace.environmentStream(env, "scheduledTasks.subscribe").first()
+            scheduledTaskTitles = club.touchtech.s5code.kotlin.data.scheduledTaskRows(payload).mapNotNull { task ->
+                val taskId = task["id"]?.jsonPrimitive?.contentOrNull
+                val title = task["title"]?.jsonPrimitive?.contentOrNull
+                if (taskId != null && !title.isNullOrBlank()) taskId to title else null
+            }.toMap()
+        } catch (cancelled: CancellationException) { throw cancelled }
+        catch (_: Exception) { /* Rows fall back to the prompt's first line. */ }
+    }
     // `isCompacting` in `use-thread-composer-state.ts`: the active run has a
     // compaction still in flight (automatic ones included), or its newest user
     // message is `/compact` and no compaction has settled since. Kotlin feed rows
@@ -634,6 +668,23 @@ fun ThreadScreen(
     LaunchedEffect(rows.size, following) {
         if (following && rows.isNotEmpty()) listState.animateScrollToItem(0)
     }
+    // A Home search match opens the thread at that message (RN's threadMessageJump).
+    ThreadMessageJumpEffect(
+        threadKey = threadJumpKey(environmentId, threadId),
+        feed = current.feed,
+        rows = rows,
+        expandedTurns = expandedTurns,
+        hasMoreHistory = current.page?.let { it.hasMore && it.beforeCursor != null } == true,
+        loadingHistory = current.page?.loadingOlder == true,
+        loadEarlier = { store.workspace.loadOlderTurns(env, id) },
+        unfoldTurn = { turnId -> expandedTurns = expandedTurns + turnId },
+        scrollToRow = { rowIndex ->
+            following = false
+            // Reversed list: the approval gate and pending handoff sit below the rows.
+            val leading = listOfNotNull(current.approval, pendingHandoff).size
+            listState.scrollToItem(leading + rows.lastIndex - rowIndex)
+        },
+    )
 
     // The single wait indicator for this screen. A transcript with rows already drawn
     // gets the pill; an empty one gets the whole screen, matching how the RN client
@@ -961,6 +1012,13 @@ fun ThreadScreen(
                             ),
                 )
             }
+            key(current.latestTurn?.turnId) {
+                ChatGptUsageLimitNotice(
+                    lastErrorCode = current.lastErrorCode,
+                    onCopy = copy,
+                    modifier = Modifier.padding(horizontal = 12.dp).padding(bottom = 8.dp),
+                )
+            }
             V2ThreadControls(store, env, id, current, working, followUp, canSteer = canSteer,
                 onFollowUp = { followUp = it }, onOpenThread = { onOpenThread(environmentId, it) })
             if (current.providerNativeSubagent) {
@@ -974,8 +1032,11 @@ fun ThreadScreen(
                         "Send"
                     },
                 placeholder =
-                    if (current.approval != null) "Send a message to decline and redirect the agent"
-                    else "Ask the repo agent, or run a command…",
+                    when {
+                        current.approval?.supportsFeedback == true -> "Send feedback to decline this request"
+                        current.approval != null -> "Send a message to decline and redirect the agent"
+                        else -> "Ask anything"
+                    },
                 value = draft.text,
                 commands =
                     remember(effectiveSettings.provider, workspaceRoot) {
@@ -1079,6 +1140,35 @@ fun ThreadScreen(
                     }
                     val declined = if (redirectsApprovals) current.approvals else emptyList()
                     if (declined.isNotEmpty() && respondingApprovalId != null) return@ThreadComposer
+                    // RN's `sendApprovalFeedback`: a request that takes feedback gets the
+                    // message as its decline reason, delivered to the requesting agent,
+                    // and nothing is queued for this thread.
+                    val feedbackTarget = approvalFeedbackTarget(declined)
+                    if (feedbackTarget != null) {
+                        if (images.isNotEmpty() || contextRecords.isNotEmpty()) {
+                            store.showError("Send approval feedback without attachments or added context.")
+                            return@ThreadComposer
+                        }
+                        val feedback = text.trim()
+                        if (feedback.isEmpty()) return@ThreadComposer
+                        redirecting = true
+                        scope.launch {
+                            try {
+                                store.workspace.respondToApproval(env, id, feedbackTarget.id, "decline", feedback)
+                                // A draft edited during the reply is not what was sent; it stays.
+                                if (store.threadDraft(environmentId, threadId) == sentDraft) {
+                                    store.clearThreadDraftContent(environmentId, threadId)
+                                }
+                            } catch (cancellation: CancellationException) {
+                                throw cancellation
+                            } catch (error: Exception) {
+                                store.showError(error.message ?: "The feedback could not be sent.")
+                            } finally {
+                                redirecting = false
+                            }
+                        }
+                        return@ThreadComposer
+                    }
                     val steers = (working || declined.isNotEmpty()) && canSteer && followUpMode == "steer"
                     if (declined.isNotEmpty()) redirecting = true
                     scope.launch {
@@ -1515,6 +1605,14 @@ fun ThreadScreen(
                                                 }
                                             },
                                     onOpenThread = { onOpenThread(environmentId, it) },
+                                    senderThreadTitle = { senderId ->
+                                        // Read at composition, as the thread links below: collecting
+                                        // every shell here would recompose the transcript on each update.
+                                        (store.workspace.threads.value + store.workspace.archived.value)
+                                            .firstOrNull { it.environmentId.value == environmentId && it.id.value == senderId }?.title
+                                    },
+                                    scheduledTaskTitles = scheduledTaskTitles,
+                                    onOpenAutomation = { onOpenRoute("settings/scheduled-tasks") },
                                     onOpenThreadLink = { linkedId ->
                                         // Read at tap time: collecting every shell here would
                                         // recompose the transcript on each list update.
@@ -1614,7 +1712,13 @@ fun ThreadScreen(
                                         else "Load earlier turns",
                                     onClick = {
                                         scope.launch {
-                                            store.workspace.loadOlderTurns(env, id)
+                                            try {
+                                                store.workspace.loadOlderTurns(env, id)
+                                            } catch (error: CancellationException) {
+                                                throw error
+                                            } catch (error: Exception) {
+                                                store.showError(error.message ?: "Could not load earlier turns.")
+                                            }
                                         }
                                     },
                                     emphasis = S5ActionEmphasis.Secondary,

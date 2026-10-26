@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.data
 
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLabelDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListResultDto
 import kotlinx.serialization.Serializable
@@ -529,6 +530,45 @@ fun pullRequestLabelColor(color: String?): Long? {
     val hex = color?.removePrefix("#") ?: return null
     if (!Regex("^[\\da-fA-F]{6}$").matches(hex)) return null
     return 0xFF000000 or hex.toLong(16)
+}
+
+/** `pullRequestLabelColors`: each label's color by lowercased name; the first usable color a name carries wins. */
+fun pullRequestLabelColors(labels: List<PullRequestLabelDto>): Map<String, Long> {
+    val colors = HashMap<String, Long>()
+    for (label in labels) {
+        val color = pullRequestLabelColor(label.color) ?: continue
+        colors.putIfAbsent(label.name.lowercase(), color)
+    }
+    return colors
+}
+
+private const val FILTER_CHOICE_LIMIT = 100
+
+/**
+ * `pullRequestFilterChoices`: a filter picker's rows. What is picked stays in
+ * view, then the loaded rows' values that match, then the host's answers, each
+ * once. The host matched its own way (an author's display name, say), so its
+ * answers are not narrowed again here.
+ */
+fun pullRequestFilterChoices(
+    selected: List<String>,
+    suggestions: List<String>,
+    hosted: List<String>,
+    query: String,
+): List<String> {
+    val needle = query.trim().lowercase()
+    val seen = HashSet<String>()
+    val rows = ArrayList<String>()
+    fun add(value: String) {
+        if (seen.add(value.lowercase())) rows += value
+    }
+    val loaded = suggestions.filter { it.lowercase().contains(needle) }
+    selected.forEach(::add)
+    // Loaded matches alone could fill the list, so the host's answers get room after the first half.
+    loaded.take(FILTER_CHOICE_LIMIT / 2).forEach(::add)
+    hosted.forEach(::add)
+    loaded.drop(FILTER_CHOICE_LIMIT / 2).forEach(::add)
+    return rows.take(FILTER_CHOICE_LIMIT)
 }
 
 /** Filter count for the Filters menu badge (RN `PullRequestListFilters`). */

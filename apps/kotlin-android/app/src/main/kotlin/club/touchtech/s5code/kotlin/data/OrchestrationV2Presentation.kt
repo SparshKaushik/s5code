@@ -2,6 +2,8 @@ package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.model.*
 import club.touchtech.s5code.kotlin.transport.TransportJson
+import club.touchtech.s5code.kotlin.transport.idleCompactionOf
+import club.touchtech.s5code.kotlin.transport.isCompactionCommandMessage
 import club.touchtech.s5code.kotlin.transport.isVisible
 import club.touchtech.s5code.kotlin.transport.visibilityPredicate
 import club.touchtech.s5code.kotlin.transport.latestRootFailure
@@ -34,6 +36,10 @@ internal data class V2Presentation(
      * generating while the server settles it (e.g. waiting on subagents).
      */
     val turnEnded: Boolean = false,
+    /** `canSendNow` in `threadWorkflows.ts`: no active run on a live thread. */
+    val canSendNow: Boolean = false,
+    /** `threadErrorSummary`'s `lastErrorCode`: the current root failure's code. */
+    val lastErrorCode: String? = null,
 )
 
 /** V2 ordering comes from visibleTurnItems, including inherited fork history, never timestamps. */
@@ -76,6 +82,15 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             it.v2String("requestId") == request.v2String("id") && it.v2String("type") == "user_input_request"
         } }.firstOrNull()
     val retryablePreparationRuns = workspacePreparationRetryRunIds(projection)
+    val compactionLabels = compactionLabelsByItem(items.map { it.item }, requests)
+    // `deriveThreadFeedPresentation`: once the provider reports a compaction, its
+    // row stands in for the bare `/compact` prompt and the "compact before
+    // continuing?" answer that asked for it.
+    val compactionItemRuns = items.filter { it.item.v2String("type") == "compaction" }
+        .mapNotNullTo(hashSetOf()) { it.item.v2String("runId") }
+    val compactionCommandRuns = items.filter { it.item.v2String("type") == "user_message" && isCompactionCommandMessage(it.item) }
+        .mapNotNullTo(hashSetOf()) { it.item.v2String("runId") }
+    val activeRunId = activeRun?.v2String("id")
     val feed = items.mapNotNull { row ->
         val item = row.item
         // Workspace setup is client bookkeeping; preparation failures have
@@ -98,16 +113,26 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         when (type) {
             "user_message" -> {
                 if (runs[runId]?.v2String("status") in setOf("queued", "preparing")) null
+                else if (isCompactionCommandMessage(item)) {
+                    if (runId in compactionItemRuns) null
+                    else {
+                        val active = runId != null && runId == activeRunId
+                        FeedEntry.Note(id, compactionCommandLabel(active, idleCompactionOf(item)), runId, at,
+                            compaction = true, status = if (active) "running" else "completed", compactionCommand = true)
+                    }
+                }
                 else userMessagePresentation(item).let { message ->
                     FeedEntry.UserMessage(id, message.text, timeLabel(item.v2String("startedAt")),
                         attachments, contextRecordLabels(item["context"]), atMillis = at,
                         attribution = message.attribution, promptTurnId = runId,
-                        inputIntent = item.v2String("inputIntent"))
+                        inputIntent = item.v2String("inputIntent"), messageId = item.v2String("messageId"),
+                        senderThreadId = item.v2String("senderThreadId"), scheduledTaskId = message.scheduledTaskId)
                 }
             }
             "assistant_message" -> if (item.v2String("text").isNullOrBlank() && attachments.isEmpty()) null
                 else FeedEntry.AgentMessage(id, item.v2String("text").orEmpty(), timeLabel(item.v2String("startedAt")),
-                    item.v2Bool("streaming"), attachments = attachments, turnId = runId, atMillis = at, endedAtMillis = end)
+                    item.v2Bool("streaming"), attachments = attachments, turnId = runId, atMillis = at, endedAtMillis = end,
+                    messageId = item.v2String("messageId"))
             "reasoning" -> item.v2String("text")?.takeIf { it.isNotBlank() }?.let {
                 FeedEntry.Reasoning(id, it, thought = true, turnId = runId, atMillis = at, endedAtMillis = end)
             }
@@ -133,9 +158,11 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                 placeholder = item.v2String("placeholder"),
                 secretStatus = item.v2String("secretStatus") ?: "pending",
                 answerable = item.v2String("secretStatus") == "pending" && row.visibility == "local",
-                turnId = runId, atMillis = at)
-            "compaction" ->
-                FeedEntry.Note(id, contextCompactionLabel(item), runId, at, compaction = true, status = item.v2String("status"))
+                turnId = runId, atMillis = at, delivery = item.v2String("delivery"))
+            "compaction" -> FeedEntry.Note(id,
+                compactionRowLabel(item, compactionLabels[item.v2String("id")], active = runId != null && runId == activeRunId),
+                runId, at, compaction = true, status = item.v2String("status"),
+                compactionCommand = runId != null && runId in compactionCommandRuns)
             "handoff" -> FeedEntry.Note(id, "Provider handoff → ${item.v2String("toModel") ?: item.v2String("toProviderInstanceId")}\n" +
                 item.v2String("summary").orEmpty(), runId, at)
             "fork" -> FeedEntry.Note(id, "Forked thread: ${item.v2String("targetThreadId")}", runId, at)
@@ -145,7 +172,8 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             "system_notice", "run_interrupt_request", "run_interrupt_result" ->
                 FeedEntry.Note(id, item.v2String("message") ?: title.orEmpty(), runId, at)
             "checkpoint" -> null
-            "user_input_request" -> {
+            "user_input_request" -> if (runId in compactionItemRuns &&
+                resumeCompactionAge(item, requests[item.v2String("requestId")]) != null) null else {
                 val request = requests[item.v2String("requestId")]
                 val answers = request?.get("answers") as? JsonObject
                 FeedEntry.QuestionAnswer(id,
@@ -199,7 +227,11 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         groupConsecutiveThoughts(feed.flatMap { entry -> listOfNotNull(entry, appEntries[entry.id]) }),
         approvalItems.map { PendingApproval(it.v2String("requestId")!!, it.v2String("title") ?: "Approval required",
             it.v2String("prompt").orEmpty(), null, approvalKindOf(it), it.v2String("appName"),
-            it.v2String("requestKind"), approvalOptionsOf(it)) },
+            it.v2String("requestKind"), approvalOptionsOf(it),
+            reason = it.v2String("reason")?.takeIf(String::isNotBlank),
+            fullAccessOverride = it.v2String("fullAccessOverride"),
+            supportsFeedback = (requests[it.v2String("requestId")]?.get("responseCapability") as? JsonObject)
+                ?.let { capability -> capability.v2String("type") == "live" && capability.v2Bool("supportsFeedback") } == true) },
         questionItem?.let { item -> userInputOf(item)?.copy(id = item.v2String("requestId")!!,
             dismissible = (requests[item.v2String("requestId")]?.get("responseCapability") as? JsonObject)?.v2String("type") == "message") },
         projection.runs.filter { it.v2String("status") == "queued" && it.v2String("userMessageId") !in automaticMessageIds }
@@ -232,7 +264,90 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         turns?.v2Bool("supportsQueuedMessages") == true,
         canSteer,
         turnEnded,
+        canSendNow = activeRun == null && projection.thread.v2String("archivedAt") == null &&
+            projection.thread.v2String("deletedAt") == null,
+        lastErrorCode = failure?.v2String("code"),
     )
+}
+
+/** `IDLE_COMPACTING_LABELS` in `packages/client-runtime/src/userMessage.ts`. */
+internal fun idleCompactingLabel(reason: String): String =
+    if (reason == "onReturn") "Compacting after being idle…" else "Compacting before the cache expires…"
+
+/** `IDLE_COMPACTION_TITLES`: leads the finished compaction's token counts. */
+internal fun idleCompactionTitle(reason: String): String =
+    if (reason == "onReturn") "Context compacted after being idle" else "Context automatically compacted before cache expiry"
+
+internal data class CompactionLabels(val title: String, val compacting: String)
+
+/** The stand-in row for a bare `/compact` turn, as RN's compaction-command divider. */
+internal fun compactionCommandLabel(active: Boolean, reason: String?): String = when {
+    !active -> "Context compaction"
+    reason == null -> "Compacting context"
+    else -> idleCompactingLabel(reason)
+}
+
+/**
+ * The compaction row in RN's `renderFeedEntry`: a failure keeps its reason, a
+ * live one says why S5 Code started it, and a finished one leads with that why.
+ */
+internal fun compactionRowLabel(item: JsonObject, labels: CompactionLabels?, active: Boolean): String {
+    val label = contextCompactionLabel(item)
+    val status = item.v2String("status")
+    val failure = item.v2String("summary")?.trim()?.takeIf { status == "failed" && it.isNotEmpty() }
+    return when {
+        failure != null -> "$label · $failure"
+        active && status == "running" && labels != null -> labels.compacting
+        labels != null && label.startsWith("Context compacted") -> labels.title + label.removePrefix("Context compacted")
+        else -> label
+    }
+}
+
+private const val RESUME_COMPACTION_ANSWER = "Compact and continue"
+private val RESUME_COMPACTION_QUESTION =
+    Regex("""^This session is (\d+h \d+m|\d+m) old and uses \d{1,3}(?:,\d{3})* tokens\. Compact it before continuing\?$""")
+
+/**
+ * `claudeResumeCompactionAge` in `packages/shared/src/claudeCompaction.ts`: the
+ * session age from an answered resume question whose answer was to compact.
+ * Answers are keyed by question id, and the id may itself be the question text.
+ */
+internal fun resumeCompactionAge(item: JsonObject, request: JsonObject?): String? {
+    val answers = request?.get("answers") as? JsonObject ?: return null
+    val textById = item.v2Objects("questions").mapNotNull { q -> q.v2String("id")?.let { it to q.v2String("question") } }.toMap()
+    for ((questionId, answer) in answers) {
+        val age = RESUME_COMPACTION_QUESTION.find(textById[questionId] ?: questionId)?.groupValues?.get(1) ?: continue
+        val chosen = (answer as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.contentOrNull }
+            ?: listOfNotNull((answer as? JsonPrimitive)?.contentOrNull)
+        if (RESUME_COMPACTION_ANSWER in chosen) return age
+    }
+    return null
+}
+
+/**
+ * `threadFeedCompactionLabels` in mobile `threadActivity.ts`, keyed by compaction
+ * item: an idle `/compact` names its reason for every compaction in its run; a
+ * resume question names the idle time for only the next compaction after it.
+ */
+internal fun compactionLabelsByItem(items: List<JsonObject>, requests: Map<String?, JsonObject>): Map<String, CompactionLabels> {
+    val byRun = mutableMapOf<String, CompactionLabels>()
+    val byItem = mutableMapOf<String, CompactionLabels>()
+    val resumeAge = mutableMapOf<String, String>()
+    for (item in items) {
+        val runId = item.v2String("runId") ?: continue
+        when (item.v2String("type")) {
+            "user_message" -> idleCompactionOf(item)?.let { byRun[runId] = CompactionLabels(idleCompactionTitle(it), idleCompactingLabel(it)) }
+            "user_input_request" -> resumeCompactionAge(item, requests[item.v2String("requestId")])?.let { resumeAge[runId] = it }
+            "compaction" -> {
+                val age = resumeAge.remove(runId)
+                val labels = byRun[runId]
+                    ?: age?.let { CompactionLabels("Context compacted after $it idle", "Compacting after $it idle…") }
+                val itemId = item.v2String("id")
+                if (labels != null && itemId != null) byItem[itemId] = labels
+            }
+        }
+    }
+    return byItem
 }
 
 /** `contextCompactionLabel` in `packages/client-runtime/src/work-log/presentation.ts`. */
@@ -349,13 +464,20 @@ internal const val MAX_TOOL_OUTPUT_IMAGES = 8
  * request. Accepts both the MCP `{ data, mimeType }` shape and the Anthropic
  * `{ source: { media_type } }` shape Claude stores.
  */
-internal fun toolOutputImageCount(output: JsonElement?): Int {
+internal fun toolOutputImageCount(output: JsonElement?): Int = toolOutputImageBlocks(output).size
+
+/**
+ * `toolOutputImageBlocks`: the image blocks the server serves as
+ * `tool-output-image` positions, at most [MAX_TOOL_OUTPUT_IMAGES]. Detail text
+ * marks every other image block "[image]" so none disappears silently.
+ */
+internal fun toolOutputImageBlocks(output: JsonElement?): List<JsonObject> {
     val blocks = when (output) {
         is JsonArray -> output
         is JsonObject -> output["content"] as? JsonArray ?: listOf(output)
-        else -> return 0
+        else -> return emptyList()
     }
-    var count = 0
+    val images = mutableListOf<JsonObject>()
     for (block in blocks) {
         val record = block as? JsonObject ?: continue
         if (record.v2String("type") != "image") continue
@@ -364,9 +486,9 @@ internal fun toolOutputImageCount(output: JsonElement?): Int {
         val mimeType = (source?.v2String("media_type") ?: record.v2String("mimeType"))
             ?.lowercase() ?: continue
         if (mimeType in ComposerAttachmentLimits.SUPPORTED_IMAGE_MIME_TYPES) {
-            count += 1
-            if (count >= MAX_TOOL_OUTPUT_IMAGES) break
+            images += record
+            if (images.size >= MAX_TOOL_OUTPUT_IMAGES) break
         }
     }
-    return count
+    return images
 }

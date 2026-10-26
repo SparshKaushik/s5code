@@ -16,7 +16,7 @@ import org.junit.Test
 
 /** Ports of the mobile `pullRequestActions`, `pullRequestStack` and `pullRequestAgentTasks` tests. */
 class PullRequestActionsTest {
-    private val allActions = PULL_REQUEST_ACTION_LABELS.keys.toList()
+    private val allActions = PULL_REQUEST_ACTIONS
 
     private fun detail(
         state: String = "open",

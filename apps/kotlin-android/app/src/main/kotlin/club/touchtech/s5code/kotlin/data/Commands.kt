@@ -237,13 +237,14 @@ object Commands {
             put("number", number)
         }
 
-    fun respondToApproval(threadId: String, requestId: String, decision: String): JsonObject =
+    fun respondToApproval(threadId: String, requestId: String, decision: String, feedback: String? = null): JsonObject =
         buildJsonObject {
             put("type", "runtime-request.respond")
             put("commandId", newCommandId())
             put("threadId", threadId)
             put("requestId", requestId)
             put("decision", decision)
+            feedback?.let { put("feedback", it) }
             put("createdAt", now())
         }
 

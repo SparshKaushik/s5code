@@ -69,6 +69,8 @@ import club.touchtech.s5code.kotlin.transport.asThreadDto
 import club.touchtech.s5code.kotlin.transport.mergeV2History
 import club.touchtech.s5code.kotlin.transport.normalizedV2
 import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
+import club.touchtech.s5code.kotlin.transport.pendingBackgroundTurnItems
+import club.touchtech.s5code.kotlin.transport.settleTurnItems
 import club.touchtech.s5code.kotlin.transport.pullRequestLinks
 import club.touchtech.s5code.kotlin.transport.visibleThreadPullRequests
 import club.touchtech.s5code.kotlin.transport.v2String
@@ -120,6 +122,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -303,6 +306,8 @@ class LiveWorkspaceGateway(
      * closure, so a page fetch shares its snapshot state and apply lock.
      */
     private val detailOlderLoaders = mutableMapOf<String, suspend () -> Boolean>()
+    /** Per open thread: re-reads background items Stop ended, see [cancelTurn]. */
+    private val detailPendingWorkReconcilers = mutableMapOf<String, suspend () -> Unit>()
     /** Threads subscribed solely because their shell says Home needs an actionable gate. */
     private val homePendingDetailKeys = mutableSetOf<String>()
     /** Explicit thread screens own subscriptions independently from Home's temporary interest. */
@@ -1687,6 +1692,7 @@ class LiveWorkspaceGateway(
     private fun dropDetailSubscription(key: String) {
         detailJobs.remove(key)?.cancel()
         detailOlderLoaders.remove(key)
+        detailPendingWorkReconcilers.remove(key)
         details.remove(key)
         detailSyncPhases.remove(key)
         worktreeSetups.remove(key)
@@ -1789,9 +1795,46 @@ class LiveWorkspaceGateway(
                 }
                 true
             } finally {
-                lock.withLock {
-                    if (epoch == readEpoch) { loadingOlder = false; publishDetail() }
+                // A cancelled page must still release the flag, or the button stays disabled.
+                withContext(NonCancellable) {
+                    lock.withLock {
+                        if (epoch == readEpoch) { loadingOlder = false; publishDetail() }
+                    }
                 }
+            }
+        }
+        // `reconcilePendingWork` in client-runtime: a stopped command or subagent
+        // can settle without a live event reaching this subscription, which would
+        // leave its row (and the thread) Working until the next snapshot.
+        detailPendingWorkReconcilers[key] = reconcile@{
+            val pending = lock.withLock { projection?.pendingBackgroundTurnItems() }.orEmpty()
+                .mapNotNull { it.v2String("id") }.distinct()
+            if (pending.isEmpty()) return@reconcile
+            val settled = pending.chunked(4).flatMap { batch ->
+                coroutineScope {
+                    batch.map { itemId ->
+                        async {
+                            try {
+                                withTimeoutOrNull(10_000) {
+                                    val item = session.query(
+                                        WsMethods.OrchestrationGetTurnItem,
+                                        buildJsonObject { put("threadId", id.value); put("itemId", itemId) },
+                                        JsonObject.serializer(),
+                                    )["item"] as? JsonObject
+                                    item?.takeIf { it.v2String("status") !in setOf("pending", "running", "waiting") }
+                                        ?.let { itemId to it }
+                                }
+                            } catch (cancelled: CancellationException) { throw cancelled }
+                            catch (_: Exception) { null }
+                        }
+                    }.awaitAll().filterNotNull()
+                }
+            }.toMap()
+            if (settled.isEmpty()) return@reconcile
+            lock.withLock {
+                val current = projection ?: return@withLock
+                val next = current.settleTurnItems(settled)
+                if (next !== current) { projection = next; publishDetail(persist = true) }
             }
         }
         val setupFlow = worktreeSetups.getOrPut(key) { MutableStateFlow(null) }
@@ -1897,6 +1940,7 @@ class LiveWorkspaceGateway(
             clockJob.cancel()
             persistence.close()
             detailOlderLoaders.remove(key)
+            detailPendingWorkReconcilers.remove(key)
         }
     }
 
@@ -1990,6 +2034,20 @@ class LiveWorkspaceGateway(
      * has no run.
      */
     override suspend fun cancelTurn(environmentId: EnvironmentId, id: ThreadId) {
+        try {
+            stopThread(environmentId, id)
+        } finally {
+            // Detached and regardless of the outcome, as RN's interrupt does.
+            detailPendingWorkReconcilers["${environmentId.value}/${id.value}"]?.let { reconcile ->
+                scope.launch {
+                    try { reconcile() } catch (cancelled: CancellationException) { throw cancelled }
+                    catch (_: Exception) { /* The next snapshot settles the rows instead. */ }
+                }
+            }
+        }
+    }
+
+    private suspend fun stopThread(environmentId: EnvironmentId, id: ThreadId) {
         if (sessionFor(environmentId).state.value.capabilities.threadStop) {
             // A paginated projection can omit commands still running from earlier turns.
             dispatch(environmentId, buildJsonObject {
@@ -2024,11 +2082,20 @@ class LiveWorkspaceGateway(
         }
     }
 
-    override suspend fun visitThread(environmentId: EnvironmentId, id: ThreadId, visitedAtMillis: Long) {
+    override suspend fun visitThread(
+        environmentId: EnvironmentId,
+        id: ThreadId,
+        visitedAtMillis: Long,
+        opened: Boolean,
+        searchQuery: String?,
+    ) {
         if (!sessionFor(environmentId).state.value.capabilities.threadVisitedTracking) return
         dispatch(environmentId, buildJsonObject {
             put("type", "thread.visit"); put("commandId", Commands.newCommandId()); put("threadId", id.value)
             put("visitedAt", java.time.Instant.ofEpochMilli(visitedAtMillis).toString())
+            // An open counts toward search frecency; older servers ignore both fields.
+            if (opened) put("opened", true)
+            searchQuery?.takeIf(String::isNotEmpty)?.let { put("searchQuery", it.take(200)) }
         })
     }
 
@@ -2080,6 +2147,7 @@ class LiveWorkspaceGateway(
         id: ThreadId,
         approvalId: String,
         decision: String,
+        feedback: String?,
     ) {
         dispatch(
             environmentId,
@@ -2087,6 +2155,7 @@ class LiveWorkspaceGateway(
                 threadId = id.value,
                 requestId = approvalId,
                 decision = decision,
+                feedback = feedback,
             ),
         )
     }
@@ -2322,8 +2391,11 @@ class LiveWorkspaceGateway(
         query: String,
         limitPerEnvironment: Int,
     ): List<ThreadSearchMatch> {
-        val normalized = query.trim()
-        if (normalized.length < 2) return emptyList()
+        // A pasted wall of text searches by its start rather than failing the
+        // request, and the server needs a word of three or more letters
+        // (`useThreadSearch` in apps/mobile/src/state/queries.ts).
+        val normalized = query.trim().take(200).trim()
+        if (messageSearchTokens(normalized).long.isEmpty()) return emptyList()
         return supervisorScope {
             environmentIds.map { environmentId ->
                 async {
@@ -2332,7 +2404,7 @@ class LiveWorkspaceGateway(
                                 .query(
                                     WsMethods.OrchestrationSearchThreads,
                                     buildJsonObject {
-                                        put("query", normalized.take(200))
+                                        put("query", normalized)
                                         put("limit", limitPerEnvironment.coerceIn(1, 50))
                                     },
                                     SearchThreadsResultDto.serializer(),
@@ -2351,6 +2423,9 @@ class LiveWorkspaceGateway(
                                             },
                                         snippet = match.snippet,
                                         messageCreatedAt = match.messageCreatedAt,
+                                        quality = match.quality,
+                                        hits = match.hits,
+                                        messageId = match.messageId,
                                     )
                                 }
                         }
@@ -3189,6 +3264,9 @@ class LiveWorkspaceGateway(
         // a terminal the user closed; an unanswered first attach retries unchanged
         // so it can still open the shell.
         val rawHistory = StringBuilder()
+        var outputResetVersion = 0
+        var outputEnd = 0L
+        var untrimmed = 0
         var title = "Terminal"
         var cwd = ""
         var status = TerminalStatus.Starting
@@ -3242,6 +3320,9 @@ class LiveWorkspaceGateway(
                             val snapshot = event.snapshot ?: return@collect
                             rawHistory.clear()
                             rawHistory.append(snapshot.history)
+                            outputResetVersion++
+                            outputEnd = rawHistory.length.toLong()
+                            untrimmed = 0
                             title = snapshot.label.ifBlank { "Terminal" }
                             cwd = snapshot.cwd
                             status = terminalStatusOf(snapshot.status)
@@ -3252,15 +3333,24 @@ class LiveWorkspaceGateway(
                         "output" -> {
                             val data = event.data.orEmpty()
                             rawHistory.append(data)
+                            outputEnd += data.length
+                            untrimmed += data.length
                             // The retained tail, from DEFAULT_MAX_TERMINAL_BUFFER_BYTES
                             // in the RN client: old scrollback is dropped rather than
                             // letting a long-running build grow the buffer without bound.
-                            rawHistory.trimToUtf8Tail(MAX_TERMINAL_BUFFER_BYTES)
+                            // Batched by the slack so a full scrollback is not walked per chunk.
+                            if (untrimmed >= TERMINAL_TRIM_SLACK_CHARS) {
+                                rawHistory.trimToUtf8Tail(MAX_TERMINAL_BUFFER_BYTES)
+                                untrimmed = 0
+                            }
                             if (status == TerminalStatus.Closed) status = TerminalStatus.Running
                             error = null
                         }
                         "cleared" -> {
                             rawHistory.clear()
+                            outputResetVersion++
+                            outputEnd = 0
+                            untrimmed = 0
                             error = null
                         }
                         "exited" -> {
@@ -3294,6 +3384,8 @@ class LiveWorkspaceGateway(
                             error = error,
                             hasRunningSubprocess = hasRunningSubprocess,
                             updatedAt = updatedAt,
+                            outputResetVersion = outputResetVersion,
+                            outputEnd = outputEnd,
                         )
                     )
                 }

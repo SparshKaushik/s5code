@@ -27,6 +27,14 @@ internal suspend fun declinePendingApprovals(
 }
 
 /**
+ * `sendApprovalFeedback`'s target: feedback belongs to the displayed (first)
+ * request, which may be a native child's tool call, and only when it takes
+ * decline feedback. Null means the send declines and redirects instead.
+ */
+internal fun approvalFeedbackTarget(declined: List<PendingApproval>): PendingApproval? =
+    declined.firstOrNull()?.takeIf { it.supportsFeedback }
+
+/**
  * Whether the redirect may still go out once its declines settle. A draft edited
  * or pasted into during the wait is no longer what the user sent, and an approval
  * that arrived meanwhile would block the redirect; either way the draft stays so

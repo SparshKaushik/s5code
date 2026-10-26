@@ -25,6 +25,8 @@ private val CHANGE_REQUEST_REFERENCES =
         Regex("^https://github\\.com/[^/\\s]+/[^/\\s]+/pull/(\\d+)(?:[/?#].*)?$", RegexOption.IGNORE_CASE),
         Regex("^https://[^/\\s]*gitlab[^/\\s]*/.+/-/merge_requests/(\\d+)(?:[/?#].*)?$", RegexOption.IGNORE_CASE),
         Regex("^https?://[^/\\s]+/(?:[^/\\s]+/)+[^/\\s]+/pulls/(\\d+)(?:[/?#].*)?$", RegexOption.IGNORE_CASE),
+        // GitCafe's own hosts also serve `/pull/<n>`, which only they may claim.
+        Regex("^https://(?:staging\\.)?git\\.cafe/[^/\\s]+/[^/\\s]+/pull/(\\d+)(?:[/?#].*)?$", RegexOption.IGNORE_CASE),
         Regex(
             "^https://(?:dev\\.azure\\.com/[^/\\s]+/[^/\\s]+|[^/\\s]+\\.visualstudio\\.com/[^/\\s]+)" +
                 "/_git/[^/\\s]+/pullrequest/(\\d+)(?:[/?#].*)?$",
@@ -141,6 +143,17 @@ sealed interface PullRequestLinkInputResult {
     data class Error(val message: String) : PullRequestLinkInputResult
 }
 
+/**
+ * `canonicalizePullRequestUrl` in the GitCafe definition: both `/pull/<n>` and
+ * `/pulls/<n>` links on GitCafe's hosts are stored as the canonical
+ * `/pulls/<n>` page, so one request never lands under two URLs. Anything else
+ * passes through untouched.
+ */
+fun canonicalizeGitCafePullRequestUrl(value: String): String {
+    val link = parseChangeRequestUrl(value)?.takeIf { it.host == "git.cafe" || it.host == "staging.git.cafe" } ?: return value
+    return changeRequestUrlFor("gitcafe", link.host, link.repository, link.number) ?: value
+}
+
 /** `resolveLinkPullRequestInput`; null when the input names no pull request at all. */
 fun resolveLinkPullRequestInput(
     reference: String,
@@ -151,7 +164,7 @@ fun resolveLinkPullRequestInput(
     val parsed = if (parseChangeRequestUrl(trimmed) != null) trimmed else parsePullRequestReference(reference)
     parsed ?: return null
     parseChangeRequestUrl(parsed)?.let { url ->
-        val link = ResolvedPullRequestLink(url.host, url.repository, url.number, parsed)
+        val link = ResolvedPullRequestLink(url.host, url.repository, url.number, canonicalizeGitCafePullRequestUrl(parsed))
         if (!hasProject(link)) {
             return PullRequestLinkInputResult.Error("No project in this environment can read ${url.host}/${url.repository}.")
         }

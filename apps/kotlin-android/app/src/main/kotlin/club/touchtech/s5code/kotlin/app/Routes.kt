@@ -77,6 +77,8 @@ object Routes {
             "&position={position}&headSha={headSha}&code={code}"
     const val PullRequestReview = "$PULL_REQUEST_BASE/review?host={host}&mode={mode}"
     const val PullRequestReviewers = "$PULL_REQUEST_BASE/reviewers?host={host}"
+    const val PullRequestLabels = "$PULL_REQUEST_BASE/labels?host={host}"
+    const val PullRequestEdit = "$PULL_REQUEST_BASE/edit?host={host}&field={field}&commentId={commentId}"
     /** One guide stop; the guide's identity lets the screen notice a rewrite. */
     const val PullRequestGuideStop =
         "$PULL_REQUEST_BASE/guide/{position}?host={host}&guideHeadSha={guideHeadSha}&guideGeneratedAt={guideGeneratedAt}"
@@ -217,6 +219,17 @@ object Routes {
 
     fun pullRequestReviewers(environmentId: String, reference: club.touchtech.s5code.kotlin.data.PullRequestReference) =
         pullRequestChild(environmentId, reference, "reviewers")
+
+    fun pullRequestLabels(environmentId: String, reference: club.touchtech.s5code.kotlin.data.PullRequestReference) =
+        pullRequestChild(environmentId, reference, "labels")
+
+    /** [field]: title | body | comment; a comment edit names [commentId]. */
+    fun pullRequestEdit(
+        environmentId: String,
+        reference: club.touchtech.s5code.kotlin.data.PullRequestReference,
+        field: String,
+        commentId: String? = null,
+    ) = pullRequestChild(environmentId, reference, "edit", "field" to field, "commentId" to commentId)
 
     fun pullRequestGuideStop(
         environmentId: String,

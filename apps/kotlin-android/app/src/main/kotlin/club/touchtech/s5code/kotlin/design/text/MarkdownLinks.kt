@@ -149,11 +149,15 @@ fun resolveMarkdownLinkPresentation(href: String): MarkdownLinkPresentation {
     val (sourcePath, hash) =
         if (normalized.startsWith("file:", ignoreCase = true)) {
             val uri = runCatching { java.net.URI(normalized) }.getOrNull()
-            decode(uri?.path.orEmpty().removeWindowsFileSlash()) to uri?.fragment?.let { "#$it" }.orEmpty()
+            val path = decodeMarkdownPath(uri?.path.orEmpty().removeWindowsFileSlash())
+            // `file://server/share/x` names a UNC path; dropping the authority would
+            // turn it into a local `/share/x` that could land inside the project.
+            val authority = uri?.authority?.takeIf { it.isNotEmpty() && !it.equals("localhost", ignoreCase = true) }
+            (if (authority != null) "\\\\$authority${path.replace('/', '\\')}" else path) to uri?.fragment?.let { "#$it" }.orEmpty()
         } else {
             val hashIndex = normalized.indexOf('#')
             val pathWithQuery = if (hashIndex >= 0) normalized.take(hashIndex) else normalized
-            decode(pathWithQuery.substringBefore('?')) to decode(if (hashIndex >= 0) normalized.drop(hashIndex) else "")
+            decodeMarkdownPath(pathWithQuery.substringBefore('?')) to decodeMarkdownPath(if (hashIndex >= 0) normalized.drop(hashIndex) else "")
         }
     val target = splitPosition(sourcePath.trim(), hash.trim())
     if (
@@ -192,7 +196,20 @@ fun resolveFileLinkPath(workspaceRoot: String?, targetPath: String): String? {
     return if (isAbsolutePath(targetPath)) targetPath else normalizeRelativePath(targetPath)
 }
 
-/** Constrains Markdown file links to this thread's project/worktree. */
+/**
+ * `isNetworkPath` in `packages/shared/src/path.ts`: Windows treats `/` and `\`
+ * alike, so any two leading separators name a UNC or device path. Touching one
+ * makes a Windows server sign in to that host with the user's NTLM
+ * credentials, so agent-authored paths must not reach one.
+ */
+fun isNetworkPath(value: String): Boolean = NETWORK_PATH.containsMatchIn(value)
+
+private val NETWORK_PATH = Regex("^[\\\\/]{2}")
+
+/**
+ * Constrains Markdown file links to this thread's project/worktree. A network
+ * path resolves only inside a project that itself lives on that share.
+ */
 fun resolveWorkspaceRelativeFilePath(workspaceRoot: String?, targetPath: String): String? {
     val resolved = resolveFileLinkPath(workspaceRoot, targetPath) ?: return null
     if (!isAbsolutePath(resolved)) return resolved
@@ -248,7 +265,7 @@ private fun normalizeRelativePath(value: String): String? {
 }
 
 private fun looksLikeFilePath(value: String): Boolean {
-    if (WINDOWS_DRIVE_PATH.containsMatchIn(value) || value.startsWith("\\\\")) return true
+    if (WINDOWS_DRIVE_PATH.containsMatchIn(value) || isNetworkPath(value)) return true
     if (RELATIVE_PREFIX.containsMatchIn(value)) return true
     if (value.startsWith('/')) {
         if (POSIX_ROOT_PREFIXES.any(value::startsWith)) return true
@@ -260,7 +277,7 @@ private fun looksLikeFilePath(value: String): Boolean {
 }
 
 private fun isAbsolutePath(value: String) =
-    value.startsWith('/') || WINDOWS_DRIVE_PATH.containsMatchIn(value) || value.startsWith("\\\\")
+    value.startsWith('/') || WINDOWS_DRIVE_PATH.containsMatchIn(value) || isNetworkPath(value)
 
 /** `fileLinkLabel` in `packages/shared/src/fileLinks.ts`: "main.ts · L42:C7", as desktop's chips read. */
 private fun fileLinkLabel(target: PositionedPath): String =
@@ -288,8 +305,8 @@ private fun fileLabel(value: String): String =
     value.replace('\\', '/').substringAfterLast('/').ifEmpty { value.replace('\\', '/') }
 
 // `decodeURIComponent`, not form decoding: a `+` in `c++/main.cpp` is a plus.
-private fun decode(value: String): String =
+internal fun decodeMarkdownPath(value: String): String =
     runCatching { java.net.URLDecoder.decode(value.replace("+", "%2B"), Charsets.UTF_8.name()) }.getOrDefault(value)
 
-private fun String.removeWindowsFileSlash(): String =
+internal fun String.removeWindowsFileSlash(): String =
     if (matches(Regex("^/[A-Za-z]:[\\\\/].*"))) drop(1) else this

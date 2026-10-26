@@ -434,7 +434,7 @@ class EnvironmentHttpError(
                         // A spent one-time token is by far the most common cause
                         // here, and the fix (mint a new one) is not obvious from
                         // a bare 401.
-                        "That pairing token was rejected. It may have already been used — mint a fresh one.",
+                        "That pairing token was rejected. It may have already been used. Mint a fresh one.",
                     )
                 404 ->
                     EnvironmentHttpError(

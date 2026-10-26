@@ -38,7 +38,6 @@ import androidx.compose.ui.unit.dp
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
 import club.touchtech.s5code.kotlin.design.theme.S5PillShape
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
-import java.util.Locale
 
 /**
  * Full-screen empty state. Iconic hero shape + emphasized headline + one
@@ -272,12 +271,11 @@ fun highlightedText(
 ): AnnotatedString {
     val needle = query.trim()
     if (needle.isEmpty()) return AnnotatedString(text)
-    val haystack = text.lowercase(Locale.ROOT)
-    val foldedNeedle = needle.lowercase(Locale.ROOT)
+    // Per-char matching keeps offsets valid; lowercasing "İ" would lengthen the text.
     return buildAnnotatedString {
         var cursor = 0
         while (cursor < text.length) {
-            val index = haystack.indexOf(foldedNeedle, startIndex = cursor)
+            val index = text.indexOf(needle, startIndex = cursor, ignoreCase = true)
             if (index < 0) {
                 withStyle(SpanStyle(color = normalColor)) { append(text.substring(cursor)) }
                 break
@@ -288,9 +286,9 @@ fun highlightedText(
                 }
             }
             withStyle(SpanStyle(color = highlightColor, fontWeight = FontWeight.Bold)) {
-                append(text.substring(index, index + foldedNeedle.length))
+                append(text.substring(index, index + needle.length))
             }
-            cursor = index + foldedNeedle.length
+            cursor = index + needle.length
         }
     }
 }

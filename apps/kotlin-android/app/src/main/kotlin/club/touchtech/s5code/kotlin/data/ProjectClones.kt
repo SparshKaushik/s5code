@@ -14,4 +14,5 @@ fun ProjectCloneSnapshotDto.toModel(): ProjectClone =
         percent = percent?.coerceIn(0, 100),
         detail = detail,
         error = error,
+        stalled = stalled,
     )

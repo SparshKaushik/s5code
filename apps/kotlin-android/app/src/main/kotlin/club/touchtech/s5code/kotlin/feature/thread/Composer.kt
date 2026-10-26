@@ -194,7 +194,7 @@ fun ThreadComposer(
     onSend: () -> Unit,
     sendLabel: String = "Send",
     /** RN's composer placeholder; open approvals swap in the decline-and-redirect hint. */
-    placeholder: String = "Ask the repo agent, or run a command…",
+    placeholder: String = "Ask anything",
     onCancel: () -> Unit,
     working: Boolean,
     /** Present while the thread's queue is held; an empty composer offers it in place of Send. */
@@ -569,12 +569,12 @@ fun ThreadComposer(
                                 )
                                 .composerImageReceiver(onAddImages),
                     )
-                    // The row keeps the model picker, shrunk to the provider avatar
-                    // once there is a draft so the text keeps the width, and one
-                    // action: Stop or Resume only while the draft is empty.
+                    // The row keeps the model picker as the provider avatar alone, so
+                    // the draft keeps the width (RN's `iconOnly={!isExpanded}`), and
+                    // one action: Stop or Resume only while the draft is empty.
                     if (!expanded) {
                         S5ComposerControl(
-                            label = modelLabel.takeIf { value.isEmpty() },
+                            label = null,
                             leading = { S5ProviderAvatar(provider, size = 20.dp) },
                             onClick = onOpenSettings,
                             contentDescription =

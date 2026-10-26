@@ -1251,7 +1251,7 @@ private fun NewTaskComposerDock(
 
                 S5ComposerField(
                     state = promptState,
-                    placeholder = "Ask anything…",
+                    placeholder = "Ask anything",
                     maxLines = 6,
                     // Same freeze as the thread composer: a keystroke cannot
                     // invalidate a transcript mid-flight.

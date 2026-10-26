@@ -60,6 +60,8 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         threadSort = ThreadSort.entries.byNameOr(threadSort, ThreadSort.Recent),
         snoozedThreadsExpanded = snoozedThreadsExpanded,
         settledThreadsExpanded = settledThreadsExpanded,
+        workingShelfEnabled = workingShelfEnabled,
+        workingThreadsExpanded = workingThreadsExpanded,
         textScale = textScale,
         codeScale = codeScale,
         wrapCode = wrapCode,
@@ -72,7 +74,7 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         notifyFailures = notifyFailures,
         liveUpdatesEnabled = liveUpdatesEnabled,
         planModeEnabled = planModeEnabled,
-        followUpBehavior = if (followUpBehavior == "steer") "steer" else "queue",
+        followUpBehavior = if (followUpBehavior == "queue") "queue" else "steer",
         legacyThreadListEnabled = legacyThreadListEnabled,
         dismissedDatabaseStorageNotices = dismissedDatabaseStorageNotices,
         homeEnvironmentId = threadListFilters?.environmentId?.takeIf(String::isNotBlank),
@@ -86,7 +88,8 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
  * and its tests do not need a `ViewModel`.
  */
 data class RuntimePreferences(
-    val followUpBehavior: String = "queue",
+    /** RN's DEFAULT_FOLLOW_UP_BEHAVIOR is "steer": a follow-up redirects the running turn. */
+    val followUpBehavior: String = "steer",
     val themeMode: S5ThemeMode = S5ThemeMode.System,
     val colorTheme: S5ColorTheme = S5ColorTheme.Default,
     /** Legacy favorites, retained locally until the connected environment migrates them. */
@@ -104,6 +107,12 @@ data class RuntimePreferences(
      */
     val snoozedThreadsExpanded: Boolean = false,
     val settledThreadsExpanded: Boolean = false,
+    /**
+     * RN's Beta "Working section", on by default since 3de45c6254: busy threads
+     * fold into a collapsed Working shelf and return to the inbox when they stop.
+     */
+    val workingShelfEnabled: Boolean = true,
+    val workingThreadsExpanded: Boolean = false,
     val textScale: Float = 1f,
     val codeScale: Float = 1f,
     val wrapCode: Boolean = false,
@@ -146,6 +155,8 @@ fun RuntimePreferences.toStored(): StoredPreferences =
         threadSort = threadSort.name,
         snoozedThreadsExpanded = snoozedThreadsExpanded,
         settledThreadsExpanded = settledThreadsExpanded,
+        workingShelfEnabled = workingShelfEnabled,
+        workingThreadsExpanded = workingThreadsExpanded,
         textScale = textScale,
         codeScale = codeScale,
         wrapCode = wrapCode,

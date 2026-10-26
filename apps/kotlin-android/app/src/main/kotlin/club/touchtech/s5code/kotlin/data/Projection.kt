@@ -45,7 +45,12 @@ import club.touchtech.s5code.kotlin.transport.wire.ThreadDetailPageDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadShellDto
+import club.touchtech.s5code.kotlin.transport.backgroundWorkHoldsCompletion
 import club.touchtech.s5code.kotlin.transport.blockedOnThreadWait
+import club.touchtech.s5code.kotlin.transport.idleCompactionOf
+import club.touchtech.s5code.kotlin.transport.asThreadDto
+import club.touchtech.s5code.kotlin.transport.statusRuns
+import club.touchtech.s5code.kotlin.transport.v2Bool
 import club.touchtech.s5code.kotlin.transport.pendingBackgroundWork
 import club.touchtech.s5code.kotlin.transport.pendingRequestBlocksUser
 import club.touchtech.s5code.kotlin.transport.threadPullRequestsOf
@@ -62,6 +67,7 @@ import kotlinx.serialization.json.add
 import kotlinx.serialization.json.booleanOrNull
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
+import kotlinx.serialization.json.doubleOrNull
 import kotlinx.serialization.json.longOrNull
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonObject
@@ -394,7 +400,29 @@ fun threadSummaryFrom(
             if (status == ThreadStatus.Snoozed || status == ThreadStatus.Settled) null
             else unacknowledgedWokeAtMillis(shell, nowMillis, visitTracking, subagentRequest),
         snoozedUntil = shell.snoozedUntil,
+        branchPullRequest = shell.branchPullRequest,
+        opens = threadOpenStatsOf(shell.opens),
     )
+}
+
+/**
+ * The shell's `opens`, or null when absent or unreadable: open stats only rank
+ * search results, so a bad value must not cost the thread its row.
+ */
+fun threadOpenStatsOf(value: JsonElement?): club.touchtech.s5code.kotlin.model.ThreadOpenStats? {
+    val opens = value as? JsonObject ?: return null
+    val openedAt = (opens["openedAt"] as? JsonPrimitive)?.doubleOrNull ?: return null
+    val score = (opens["score"] as? JsonPrimitive)?.doubleOrNull ?: return null
+    if (!openedAt.isFinite() || !score.isFinite() || score < 0) return null
+    val picks =
+        (opens["picks"] as? JsonArray)?.mapNotNull { pick ->
+            val entry = pick as? JsonObject ?: return@mapNotNull null
+            val query = (entry["query"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+            val at = (entry["at"] as? JsonPrimitive)?.doubleOrNull
+            if (query == null || at == null || !at.isFinite()) null
+            else club.touchtech.s5code.kotlin.model.ThreadOpenPick(query, at.toLong())
+        } ?: return null
+    return club.touchtech.s5code.kotlin.model.ThreadOpenStats(openedAt.toLong(), score, picks)
 }
 
 /**
@@ -617,6 +645,8 @@ fun threadDetailFrom(
         queueHeld = v2?.queueHeld == true,
         canReorderQueue = v2?.canReorderQueue == true,
         canPromoteQueued = v2?.canPromoteQueued == true,
+        canSendNow = v2?.canSendNow == true,
+        lastErrorCode = v2?.lastErrorCode,
         pendingBackgroundTasks =
             thread.projection?.pendingBackgroundWork().orEmpty().map { task ->
                 PendingBackgroundTask(
@@ -624,6 +654,7 @@ fun threadDetailFrom(
                     description = task.v2String("description"),
                     taskId = task.v2String("taskId"),
                     childThreadId = task.v2String("childThreadId")?.takeIf { task.v2String("kind") == "subagent" },
+                    awaited = task.v2Bool("awaited"),
                 )
             },
         pullRequests =
@@ -1435,7 +1466,7 @@ internal fun feedEntryFor(activity: ThreadActivityDto): FeedEntry? {
             val detail = payload?.string("detail")?.takeIf { it != activity.summary }
             val message =
                 if (detail.isNullOrBlank()) activity.summary
-                else "${activity.summary} — $detail"
+                else "${activity.summary}: $detail"
             if (activity.tone == "error") {
                 FeedEntry.ErrorEntry(activity.id, message, turnId, at)
             } else {
@@ -1982,6 +2013,8 @@ fun ApprovalPolicy.toRuntimeMode(): String =
 
 /** A detail snapshot carries every shell field, so the row projection is reused. */
 internal fun ThreadDto.asShell(): ThreadShellDto {
+    // A silent idle compaction leaves the shell's status idle, as `isSilentRunForShell` does.
+    val shellStatus = projection?.asThreadDto(skipSilentRuns = true)
     // The pending-request rule is the server's (`threadShellFromProjection`):
     // the newest open request is the thread's, a secret an agent waits on is
     // user input too, and a waiting `secret_request` item stands in when no
@@ -1990,7 +2023,8 @@ internal fun ThreadDto.asShell(): ThreadShellDto {
         it.v2String("status") == "pending" &&
             (it["responseCapability"] as? JsonObject)?.v2String("type") != "not_resumable"
     }?.maxByOrNull { parseInstant(it.v2String("createdAt")) ?: Long.MIN_VALUE }
-    val liveRuns = projection?.runs
+    // A silent idle compaction leaves the shell idle, as `isSilentRunForShell` does.
+    val liveRuns = projection?.statusRuns()
         ?.filter { it.v2String("status") in setOf("preparing", "starting", "running", "waiting") }
         .orEmpty()
     val liveRunIds = liveRuns.mapNotNull { it.v2String("id") }.toSet()
@@ -2026,7 +2060,7 @@ internal fun ThreadDto.asShell(): ThreadShellDto {
         interactionMode = interactionMode,
         branch = branch,
         worktreePath = worktreePath,
-        latestTurn = latestTurn,
+        latestTurn = if (shellStatus != null) shellStatus.latestTurn else latestTurn,
         createdAt = createdAt,
         updatedAt = updatedAt,
         archivedAt = archivedAt,
@@ -2052,10 +2086,12 @@ internal fun ThreadDto.asShell(): ThreadShellDto {
                 }.getOrNull()
             },
         lastVisitedAt = projection?.thread?.v2String("lastVisitedAt"),
+        opens = projection?.thread?.get("opens"),
         titleRegeneration = titleRegeneration,
-        session = session,
+        session = shellStatus?.session ?: session,
         autoSettleDisabledAt = autoSettleDisabledAt,
-        latestUserMessageAt = projection?.messages?.lastOrNull { it.v2String("role") == "user" }?.v2String("createdAt")
+        // The server leaves S5 Code's own idle `/compact` out, so it never re-sorts the thread.
+        latestUserMessageAt = projection?.messages?.lastOrNull { it.v2String("role") == "user" && idleCompactionOf(it) == null }?.v2String("createdAt")
             ?: messages.lastOrNull { it.role == "user" }?.createdAt,
         // Only V2 conversations carry `createdBy`; a V1 thread leaves the
         // FIELD_ABSENT sentinel so the Working sort falls back to the run's
@@ -2083,7 +2119,7 @@ internal fun ThreadDto.asShell(): ThreadShellDto {
             )
         },
         latestRunRequestedAt = latestTurn?.requestedAt,
-        backgroundLiveness = if (projection?.pendingBackgroundWork()?.any { it.v2String("kind") != "command" } == true) "monitoring" else null,
+        backgroundLiveness = if (projection?.pendingBackgroundWork(skipSilentRuns = true)?.let(::backgroundWorkHoldsCompletion) == true) "monitoring" else null,
     )
 }
 

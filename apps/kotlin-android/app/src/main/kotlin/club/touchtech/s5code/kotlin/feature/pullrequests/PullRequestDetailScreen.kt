@@ -5,8 +5,6 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.ExperimentalLayoutApi
-import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
@@ -18,7 +16,6 @@ import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.CallSplit
 import androidx.compose.material.icons.automirrored.rounded.OpenInNew
@@ -39,6 +36,8 @@ import androidx.compose.material.icons.rounded.AddComment
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.DeleteOutline
+import androidx.compose.material.icons.rounded.Description
+import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.MoreVert
 import androidx.compose.material.icons.rounded.PersonAdd
 import androidx.compose.material.icons.rounded.RateReview
@@ -47,6 +46,7 @@ import club.touchtech.s5code.kotlin.app.Routes
 import club.touchtech.s5code.kotlin.data.PullRequestAgentTask
 import club.touchtech.s5code.kotlin.data.allowedUpdateMethods
 import club.touchtech.s5code.kotlin.data.canPerformPullRequestAction
+import club.touchtech.s5code.kotlin.data.changeRequestTerms
 import club.touchtech.s5code.kotlin.data.pullRequestActionLabel
 import club.touchtech.s5code.kotlin.data.pullRequestBranchTitle
 import club.touchtech.s5code.kotlin.data.pullRequestReviewKey
@@ -92,7 +92,6 @@ import club.touchtech.s5code.kotlin.data.pullRequestChecksSummary
 import club.touchtech.s5code.kotlin.data.pullRequestChecksUrl
 import club.touchtech.s5code.kotlin.data.pullRequestConflict
 import club.touchtech.s5code.kotlin.data.pullRequestFallbackEnvironment
-import club.touchtech.s5code.kotlin.data.pullRequestLabelColor
 import club.touchtech.s5code.kotlin.data.pullRequestReviewSummary
 import club.touchtech.s5code.kotlin.data.pullRequestStatus
 import club.touchtech.s5code.kotlin.data.relativeLabel
@@ -184,9 +183,17 @@ fun PullRequestDetailScreen(
     val environments by store.workspace.environments.collectAsStateWithLifecycle()
     val projects by store.workspace.projects.collectAsStateWithLifecycle()
     val connectedIds =
-        remember(environments) { environments.filter { it.state == ConnectionState.Connected }.mapTo(HashSet()) { it.id.value } }
+        remember(environments) {
+            environments.filter { it.isEnabled && it.state == ConnectionState.Connected }.mapTo(HashSet()) { it.id.value }
+        }
+    val pendingIds =
+        remember(environments) {
+            environments
+                .filter { it.isEnabled && (it.state == ConnectionState.Connecting || it.state == ConnectionState.Recovering) }
+                .mapTo(HashSet()) { it.id.value }
+        }
     val fallback =
-        remember(environmentId, reference, projects, connectedIds) {
+        remember(environmentId, reference, projects, connectedIds, pendingIds) {
             pullRequestFallbackEnvironment(
                 environmentId = environmentId,
                 projectId = reference.projectId,
@@ -197,6 +204,7 @@ fun PullRequestDetailScreen(
                         PullRequestProjectIdentity(it.environmentId.value, it.id.value, it.repositoryIdentity?.canonicalKey)
                     },
                 connectedEnvironmentIds = connectedIds,
+                pendingEnvironmentIds = pendingIds,
             )
         }
     val readEnvironment = fallback?.environmentId ?: environmentId
@@ -208,7 +216,15 @@ fun PullRequestDetailScreen(
         .collectAsStateWithLifecycle(PullRequestQuery())
     val activityQuery by remember(readEnvironment, readReference) { gateway.activity(readEnvironment, readReference) }
         .collectAsStateWithLifecycle(PullRequestQuery())
-    val detail = detailQuery.value
+    val detail =
+        rememberPullRequestLiveChecks(
+            gateway,
+            readEnvironment,
+            readReference,
+            detailQuery.value,
+            supported = environment?.capabilities?.pullRequestChecks == true,
+            connected = online,
+        )
     val stackSupported = environment?.capabilities?.threadPullRequests == true && detail?.capabilities?.stacks == true
     val stackQuery by remember(readEnvironment, readReference, stackSupported) {
             if (stackSupported) gateway.stack(readEnvironment, readReference) else flowOf(PullRequestQuery())
@@ -216,6 +232,7 @@ fun PullRequestDetailScreen(
         .collectAsStateWithLifecycle(PullRequestQuery())
     val summary = remember(readEnvironment, readReference, detail) { gateway.summary(readEnvironment, readReference) }
     val identity = detail?.identity() ?: summary?.identity()
+    val terms = changeRequestTerms(identity?.provider)
     val permissions = rememberPullRequestPermissions(store, readEnvironment, detail)
     val runner = rememberPullRequestActionRunner(store, readEnvironment, readReference, detail, permissions, confirmController)
     val agent =
@@ -233,6 +250,17 @@ fun PullRequestDetailScreen(
         )
     val openReview = { mode: String -> onOpenRoute(Routes.pullRequestReview(readEnvironment, readReference, mode)) }
     val openFiles = { onOpenRoute(Routes.pullRequestFiles(readEnvironment, readReference)) }
+    val commentActions =
+        PullRequestCommentActions(
+            permissions = permissions,
+            onReact = { subjectId, content, reacted ->
+                gateway.setReaction(readEnvironment, readReference, subjectId, content, reacted)
+            },
+            onEdit = { commentId, _ ->
+                onOpenRoute(Routes.pullRequestEdit(readEnvironment, readReference, "comment", commentId))
+            },
+            onError = store::showError,
+        )
     var overflowOpen by remember { mutableStateOf(false) }
     val copyLink = rememberClipboardWriter()
 
@@ -292,18 +320,22 @@ fun PullRequestDetailScreen(
                     icon = Icons.AutoMirrored.Rounded.OpenInNew,
                     label = openOnProviderLabel(identity.provider),
                     onClick = {
-                        if (!openPullRequestUrl(context, url)) store.showError("The pull request could not be opened.")
+                        if (!openPullRequestUrl(context, url)) store.showError("The ${terms.singular} could not be opened.")
                     },
                 )
             }
             val shareUrl = identity?.url?.takeIf { it.isNotEmpty() }
             val canDeleteBranch = detail != null && canPerformPullRequestAction(detail, "delete-branch")
-            if (shareUrl != null || canDeleteBranch) {
+            if (shareUrl != null || canDeleteBranch || permissions.canEditChangeRequest) {
                 S5OverflowMenu(
                     icon = Icons.Rounded.MoreVert,
-                    label = "Pull request actions",
+                    label = "${terms.title} actions",
                     options =
                         buildList {
+                            if (permissions.canEditChangeRequest) {
+                                add(S5MenuOption("edit-title", "Edit title", icon = Icons.Rounded.Edit))
+                                add(S5MenuOption("edit-body", "Edit description", icon = Icons.Rounded.Description))
+                            }
                             if (shareUrl != null) {
                                 add(S5MenuOption("copy", "Copy link", icon = Icons.Rounded.Link))
                                 add(S5MenuOption("share", "Share…", icon = Icons.Rounded.Share))
@@ -328,12 +360,14 @@ fun PullRequestDetailScreen(
                         },
                     onSelect = { action ->
                         when (action) {
+                            "edit-title" -> onOpenRoute(Routes.pullRequestEdit(readEnvironment, readReference, "title"))
+                            "edit-body" -> onOpenRoute(Routes.pullRequestEdit(readEnvironment, readReference, "body"))
                             "copy" -> shareUrl?.let(copyLink)
                             "share" ->
                                 if (shareUrl != null && identity != null &&
                                     !sharePullRequest(context, identity.title, shareUrl)
                                 ) {
-                                    store.showError("The pull request could not be shared.")
+                                    store.showError("The ${terms.singular} could not be shared.")
                                 }
                             else -> runner.request(action)
                         }
@@ -348,7 +382,7 @@ fun PullRequestDetailScreen(
             when {
                 identity == null && detailQuery.error != null ->
                     S5ErrorState(
-                        title = "Couldn't load this pull request",
+                        title = "Couldn't load this ${terms.singular}",
                         detail = detailQuery.error.orEmpty(),
                         onRetry = ::refresh,
                         modifier = Modifier.padding(S5Theme.spacing.gutter),
@@ -357,9 +391,9 @@ fun PullRequestDetailScreen(
                     S5EmptyState(
                         icon = Icons.Rounded.CloudOff,
                         title = "Environment offline",
-                        detail = "Reconnect to load this pull request. It isn't saved on this device yet.",
+                        detail = "Reconnect to load this ${terms.singular}. It isn't saved on this device yet.",
                     )
-                identity == null -> S5LoadingState("Loading pull request")
+                identity == null -> S5LoadingState("Loading ${terms.singular}")
                 else ->
                     S5PullToRefreshBox(isRefreshing = refreshing, onRefresh = ::refresh, modifier = Modifier.fillMaxSize()) {
                         LazyColumn(
@@ -432,10 +466,26 @@ fun PullRequestDetailScreen(
                                                 )
                                             }
                                         }
-                                        if (detail.labels.isNotEmpty()) {
-                                            item(key = "labels") { PullRequestLabels(detail) }
+                                        if (detail.labels.isNotEmpty() || permissions.canManageLabels) {
+                                            item(key = "labels") {
+                                                PullRequestLabelsRow(detail.labels, editable = permissions.canManageLabels) {
+                                                    onOpenRoute(Routes.pullRequestLabels(readEnvironment, readReference))
+                                                }
+                                            }
                                         }
                                         item(key = "description") { PullRequestDescription(detail.body) }
+                                        // The PR's own reactions are where its description's reactions live.
+                                        val reactions = activityQuery.value?.reactions.orEmpty()
+                                        if (activityQuery.hasValue && (reactions.isNotEmpty() || permissions.canReact)) {
+                                            item(key = "reactions") {
+                                                PullRequestReactionPills(
+                                                    reactions = reactions,
+                                                    canReact = permissions.canReact,
+                                                    onToggle = { content, reacted -> commentActions.onReact(null, content, reacted) },
+                                                    onFailure = { store.showError("Couldn't save the reaction. Try again in a moment.") },
+                                                )
+                                            }
+                                        }
                                     }
                                 PullRequestSegment.Guide ->
                                     pullRequestGuideItems(reviewGuide) { position, guide ->
@@ -462,6 +512,7 @@ fun PullRequestDetailScreen(
                                         onOpenCommit = { oid ->
                                             onOpenRoute(Routes.pullRequestDiff(readEnvironment, readReference, commit = oid))
                                         },
+                                        commentActions = commentActions,
                                     )
                             }
                         }
@@ -850,29 +901,6 @@ private fun ReviewerLine(actor: PullRequestActorDto?, verdict: String) {
     }
 }
 
-@OptIn(ExperimentalLayoutApi::class)
-@Composable
-private fun PullRequestLabels(detail: PullRequestDetailDto) {
-    FlowRow(horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small), verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
-        detail.labels.forEach { label ->
-            Row(
-                Modifier.clip(MaterialTheme.shapes.small)
-                    .background(MaterialTheme.colorScheme.surfaceContainerHigh)
-                    .padding(horizontal = S5Theme.spacing.small, vertical = S5Theme.spacing.tiny),
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
-            ) {
-                Box(
-                    Modifier.size(8.dp)
-                        .clip(CircleShape)
-                        .background(pullRequestLabelColor(label.color)?.let { Color(it) } ?: MaterialTheme.colorScheme.outline)
-                )
-                Text(label.name, style = MaterialTheme.typography.labelMedium)
-            }
-        }
-    }
-}
-
 /**
  * Markdown that clips at [collapsedHeight] behind "Show more" when it runs
  * longer. The body measures unbounded inside the clip, so the toggle appears
@@ -892,6 +920,7 @@ fun CollapsibleMarkdown(source: String, collapsedHeight: Dp, modifier: Modifier 
         ) {
             S5Markdown(
                 source = source,
+                html = true,
                 modifier = Modifier.wrapContentHeight(align = Alignment.Top, unbounded = true).onSizeChanged { fullHeight = it.height },
             )
         }

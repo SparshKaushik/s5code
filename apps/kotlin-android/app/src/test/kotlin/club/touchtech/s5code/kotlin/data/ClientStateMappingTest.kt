@@ -102,6 +102,22 @@ class ClientStateMappingTest {
     }
 
     @Test
+    fun `follow-ups steer unless queue was chosen`() {
+        assertEquals("steer", StoredPreferences().toRuntime().followUpBehavior)
+        assertEquals("steer", StoredPreferences(followUpBehavior = "mystery").toRuntime().followUpBehavior)
+        assertEquals("queue", StoredPreferences(followUpBehavior = "queue").toRuntime().followUpBehavior)
+    }
+
+    @Test
+    fun `the working shelf is on and collapsed by default and round-trips`() {
+        val fresh = StoredPreferences().toRuntime()
+        assertEquals(true, fresh.workingShelfEnabled)
+        assertEquals(false, fresh.workingThreadsExpanded)
+        val changed = RuntimePreferences(workingShelfEnabled = false, workingThreadsExpanded = true)
+        assertEquals(changed, changed.toStored().toRuntime())
+    }
+
+    @Test
     fun `pull request merge method and test-file filter round-trip`() {
         val fresh = StoredPreferences().toRuntime()
         assertEquals(null, fresh.pullRequestMergeMethod)

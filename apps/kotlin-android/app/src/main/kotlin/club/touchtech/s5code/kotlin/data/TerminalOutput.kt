@@ -46,6 +46,54 @@ fun StringBuilder.trimToUtf8Tail(maxBytes: Int) {
 }
 
 /**
+ * How far past the cap history may grow before it is trimmed. Trimming walks
+ * the retained tail, so doing it per chunk once scrollback is full would cost
+ * 512 KB of work for every few bytes of output.
+ */
+const val TERMINAL_TRIM_SLACK_CHARS = 16 * 1024
+
+/**
+ * Where a terminal view's feed stands: `TerminalOutputCursor` in client-runtime
+ * state/terminalOutput.ts. [offset] counts characters appended since the reset
+ * numbered [resetVersion].
+ */
+data class TerminalOutputCursor(val resetVersion: Int, val offset: Long)
+
+sealed interface TerminalOutputUpdate {
+    data object None : TerminalOutputUpdate
+
+    /** Recreate the terminal and replay [data], the whole retained history. */
+    data class Reset(val data: String) : TerminalOutputUpdate
+
+    data class Append(val data: String) : TerminalOutputUpdate
+}
+
+/**
+ * `readTerminalOutputUpdate`: what a view fed up to [cursor] must do to show
+ * [buffer], which ends at offset [end] of reset [resetVersion]. Output past the
+ * cursor appends, so a full scrollback trimming its front does not replay
+ * history into the terminal; only a reset, or a cursor that fell out of the
+ * retained tail, does.
+ */
+fun readTerminalOutputUpdate(
+    buffer: String,
+    resetVersion: Int,
+    end: Long,
+    cursor: TerminalOutputCursor?,
+): Pair<TerminalOutputUpdate, TerminalOutputCursor> {
+    val next = TerminalOutputCursor(resetVersion, end)
+    val start = end - buffer.length
+    val update =
+        when {
+            cursor == null || cursor.resetVersion != resetVersion || cursor.offset !in start..end ->
+                TerminalOutputUpdate.Reset(buffer)
+            cursor.offset == end -> TerminalOutputUpdate.None
+            else -> TerminalOutputUpdate.Append(buffer.substring((cursor.offset - start).toInt()))
+        }
+    return update to next
+}
+
+/**
  * Wire status to model. Unknown values read as an error rather than a plausible
  * default: the contract's statuses are closed, so a new one means this build does
  * not understand the session and should not claim it is running.

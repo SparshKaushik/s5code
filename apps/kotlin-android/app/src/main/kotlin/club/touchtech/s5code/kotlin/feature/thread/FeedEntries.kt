@@ -37,6 +37,7 @@ import androidx.compose.material.icons.rounded.Check
 import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
+import androidx.compose.material.icons.rounded.Schedule
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Image
@@ -161,6 +162,11 @@ fun FeedEntryRow(
     onOpenTurnDiff: () -> Unit = {},
     /** Saves a proposed plan into the workspace; see [ProposedPlanCard]. */
     onSavePlan: (suspend (relativePath: String, contents: String) -> String)? = null,
+    /** The title of the thread an Agent message came from; see [FoldedUserMessageRow]. */
+    senderThreadTitle: (String) -> String? = { null },
+    /** Automation titles by scheduled task id, once loaded. */
+    scheduledTaskTitles: Map<String, String> = emptyMap(),
+    onOpenAutomation: () -> Unit = {},
 ) {
     when (entry) {
         is FeedEntry.McpApp -> mcpAppContent(entry)
@@ -180,7 +186,24 @@ fun FeedEntryRow(
             }
 
         is FeedEntry.UserMessage ->
-            UserBubble(entry, onCopy, modifier, environmentId, resolveTranscriptAttachment, onOpenAttachment)
+            if (foldsUserMessage(entry)) {
+                var localExpanded by remember(entry.id) { mutableStateOf(false) }
+                val senderTitle = remember(entry.senderThreadId) { entry.senderThreadId?.let(senderThreadTitle) }
+                FoldedUserMessageRow(
+                    entry,
+                    expanded = if (expandedIds != null) entry.id in expandedIds else localExpanded,
+                    onToggle = { if (expandedIds != null) onToggleExpand(entry) else localExpanded = !localExpanded },
+                    senderTitle = senderTitle,
+                    taskTitle = entry.scheduledTaskId?.let(scheduledTaskTitles::get),
+                    onOpenThread = onOpenThread,
+                    onOpenAutomation = onOpenAutomation,
+                    modifier = modifier,
+                ) {
+                    UserBubble(entry, onCopy, Modifier, environmentId, resolveTranscriptAttachment, onOpenAttachment)
+                }
+            } else {
+                UserBubble(entry, onCopy, modifier, environmentId, resolveTranscriptAttachment, onOpenAttachment)
+            }
 
         is FeedEntry.AgentMessage ->
             AgentMessage(
@@ -1339,11 +1362,18 @@ private fun NoteRow(entry: FeedEntry.Note, modifier: Modifier) {
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
     ) {
+        val failed = entry.compaction && entry.status == "failed"
+        // A static mark, not a spinner: no continuously repainting animation in the feed.
+        val inProgress = entry.compaction && entry.status in setOf("pending", "running", "waiting")
         Icon(
-            Icons.Rounded.Check,
+            when {
+                failed -> Icons.Rounded.ErrorOutline
+                inProgress -> Icons.Rounded.Schedule
+                else -> Icons.Rounded.Check
+            },
             contentDescription = null,
             modifier = Modifier.size(16.dp),
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+            tint = if (failed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
         )
         Text(
             entry.message,

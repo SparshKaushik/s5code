@@ -40,6 +40,7 @@ import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.data.PullRequestQuery
 import club.touchtech.s5code.kotlin.data.PullRequestReference
 import club.touchtech.s5code.kotlin.data.PullRequestReviewerRequest
+import club.touchtech.s5code.kotlin.data.changeRequestTerms
 import club.touchtech.s5code.kotlin.data.filterReviewerCandidates
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
@@ -71,6 +72,7 @@ fun PullRequestReviewersScreen(
     val scope = rememberCoroutineScope()
     val detailQuery = rememberPullRequestDetail(store, environmentId, reference)
     val pr = detailQuery.value
+    val terms = changeRequestTerms(pr?.provider)
     val allowed = rememberPullRequestPermissions(store, environmentId, pr).canRequestReviewers
     val listCandidates = pr?.capabilities?.reviewers?.listCandidates == true
     val result by remember(environmentId, reference, listCandidates) {
@@ -110,11 +112,11 @@ fun PullRequestReviewersScreen(
             pr == null && detailQuery.error != null ->
                 S5EmptyState(
                     icon = Icons.Rounded.Group,
-                    title = "Couldn't load this pull request",
+                    title = "Couldn't load this ${terms.singular}",
                     detail = detailQuery.error.orEmpty(),
                     modifier = Modifier.padding(padding),
                 )
-            pr == null -> S5LoadingState("Loading pull request", Modifier.padding(padding))
+            pr == null -> S5LoadingState("Loading ${terms.singular}", Modifier.padding(padding))
             listCandidates ->
                 Column(Modifier.fillMaxSize().padding(padding).imePadding()) {
                     Column(
@@ -123,7 +125,7 @@ fun PullRequestReviewersScreen(
                     ) {
                         MutedText("Tap someone to request a review. Tap a requested reviewer to remove the request.")
                         S5SearchField(value = query, onValueChange = { query = it }, placeholder = "Search reviewers")
-                        if (!allowed) MutedText("Requesting reviews requires write access and an open pull request.")
+                        if (!allowed) MutedText("Requesting reviews requires write access and an open ${terms.singular}.")
                         error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
                     }
                     Box(Modifier.weight(1f)) {
@@ -195,7 +197,7 @@ fun PullRequestReviewersScreen(
                         onClick = { update(query.trim(), "user", isRequested = true) },
                         modifier = Modifier.fillMaxWidth(),
                     )
-                    if (!allowed) MutedText("Requesting reviews requires write access and an open pull request.")
+                    if (!allowed) MutedText("Requesting reviews requires write access and an open ${terms.singular}.")
                     error?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = MaterialTheme.colorScheme.error) }
                 }
         }

@@ -220,7 +220,7 @@ fun SettingsThreadsScreen(store: AppStore, onBack: () -> Unit) {
                 S5RowGroup(title = "Usage limits") {
                     S5SwitchRow(
                         icon = Icons.Rounded.PlayArrow,
-                        label = "Auto-resume limited threads",
+                        label = "Resume after usage limits",
                         checked = settings.autoResumeLimitedThreads,
                         onCheckedChange = { enabled ->
                             writeTo(
@@ -232,7 +232,7 @@ fun SettingsThreadsScreen(store: AppStore, onBack: () -> Unit) {
                     )
                     S5SwitchRow(
                         icon = Icons.Rounded.Bedtime,
-                        label = "Snooze limited threads",
+                        label = "Snooze until limits reset",
                         checked = settings.snoozeLimitedThreads,
                         onCheckedChange = { enabled ->
                             writeTo(
@@ -380,6 +380,27 @@ fun SettingsThreadsScreen(store: AppStore, onBack: () -> Unit) {
                         )
                     }
                 }
+            }
+
+            // RN's BetaSettingsSection plus its footnote.
+            Column(verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
+                S5RowGroup(title = "Beta") {
+                    S5SwitchRow(
+                        icon = Icons.Rounded.Bolt,
+                        label = "Working section",
+                        checked = preferences.workingShelfEnabled,
+                        onCheckedChange = { enabled ->
+                            store.updatePreferences { it.copy(workingShelfEnabled = enabled) }
+                        },
+                        position = rowPosition(0, 1),
+                    )
+                }
+                Text(
+                    "Fold working and monitoring threads into a Working section. They return to the top of the list when they need you. While this is on, active threads are ordered by time and cannot be moved.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(horizontal = S5Theme.spacing.gutter),
+                )
             }
 
             // RN's LegacySettingsSection plus its footnote.

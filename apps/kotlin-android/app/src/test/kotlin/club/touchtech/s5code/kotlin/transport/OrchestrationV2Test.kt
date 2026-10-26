@@ -2,6 +2,8 @@ package club.touchtech.s5code.kotlin.transport
 
 import club.touchtech.s5code.kotlin.data.v2Presentation
 import club.touchtech.s5code.kotlin.data.formatTokens
+import club.touchtech.s5code.kotlin.data.asShell
+import club.touchtech.s5code.kotlin.data.resumeCompactionAge
 import club.touchtech.s5code.kotlin.data.threadDetailFrom
 import club.touchtech.s5code.kotlin.data.providerInstanceForId
 import club.touchtech.s5code.kotlin.data.parseInstant
@@ -330,5 +332,119 @@ class OrchestrationV2Test {
         assertEquals("1.23M", formatTokens(1_234_567))
         assertEquals("2B", formatTokens(2_000_000_000))
         assertEquals("1T", formatTokens(1_000_000_000_000))
+    }
+
+    @Test fun `background work holds completion only when awaited, a subagent, or a background task`() {
+        assertTrue(backgroundTaskHolds("subagent", awaited = false))
+        assertTrue(backgroundTaskHolds("background_task", awaited = false))
+        assertTrue(backgroundTaskHolds("monitor", awaited = true))
+        assertFalse(backgroundTaskHolds("monitor", awaited = false))
+        assertFalse(backgroundTaskHolds("command", awaited = false))
+        val run = obj("""{"id":"run","ordinal":1,"status":"completed"}""")
+        val monitor = JsonObject(item("watch", 2, "command_execution") + mapOf(
+            "status" to JsonPrimitive("running"), "monitor" to JsonPrimitive(true)))
+        val projection = V2ProjectionDto(metadata, runs = listOf(run), turnItems = listOf(monitor))
+        val tasks = projection.pendingBackgroundWork()
+        assertEquals(listOf("monitor"), tasks.map { it.v2String("kind") })
+        assertFalse(backgroundWorkHoldsCompletion(tasks))
+    }
+
+    private val idleCompact = obj("""{"id":"compact-message","role":"user","text":"/compact","attachments":[],
+        "idleCompaction":"onReturn","createdAt":"2026-10-01T00:05:00Z","updatedAt":"2026-10-01T00:05:00Z"}""")
+
+    @Test fun `idle compactions stay out of the shell's status and sort unless they fail`() {
+        val earlier = obj("""{"id":"m1","role":"user","text":"Hi","createdBy":"user","createdAt":"2026-10-01T00:00:00Z","updatedAt":"2026-10-01T00:00:00Z"}""")
+        val done = obj("""{"id":"run-1","ordinal":1,"status":"completed","userMessageId":"m1"}""")
+        val compacting = obj("""{"id":"run-2","ordinal":2,"status":"running","userMessageId":"compact-message"}""")
+        val projection = V2ProjectionDto(metadata, runs = listOf(done, compacting), messages = listOf(earlier, idleCompact))
+        assertTrue(projection.isSilentRun(compacting))
+        val thread = projection.asThreadDto()
+        // The open thread sees S5 Code's own compaction and can stop it; the shell stays quiet.
+        assertEquals("run-2", thread.latestTurn?.turnId)
+        assertEquals("running", thread.session?.status)
+        val shell = thread.asShell()
+        assertEquals("run-1", shell.latestTurn?.turnId)
+        assertEquals("2026-10-01T00:00:00Z", shell.latestUserMessageAt)
+        val failed = JsonObject(compacting + ("status" to JsonPrimitive("failed")))
+        assertFalse(projection.copy(runs = listOf(done, failed)).isSilentRun(failed))
+        // A legacy server marked its own `/compact` as agent-created.
+        assertEquals("beforeCacheExpires", idleCompactionOf(obj("""{"role":"user","text":" /COMPACT ","createdBy":"agent","creationSource":"server"}""")))
+        assertNull(idleCompactionOf(obj("""{"role":"user","text":"/compact","createdBy":"user"}""")))
+        assertFalse(isCompactionCommandMessage(obj("""{"role":"user","text":"/compact","attachments":[{"id":"a"}]}""")))
+    }
+
+    @Test fun `a bare compact turn reads as one compaction row`() {
+        val run = obj("""{"id":"run","ordinal":1,"status":"running"}""")
+        val prompt = JsonObject(item("prompt", 1, "user_message") + mapOf("text" to JsonPrimitive("/compact"),
+            "idleCompaction" to JsonPrimitive("beforeCacheExpires")))
+        val waiting = V2ProjectionDto(metadata, runs = listOf(run), visibleTurnItems = listOf(row(prompt, 0)))
+        val standIn = v2Presentation(waiting).feed.single() as FeedEntry.Note
+        assertEquals("Compacting before the cache expires…", standIn.message)
+        assertTrue(standIn.compactionCommand && standIn.status == "running")
+        val compaction = JsonObject(item("compaction", 2, "compaction") + mapOf("beforeTokenCount" to JsonPrimitive(300_000),
+            "afterTokenCount" to JsonPrimitive(40_000)))
+        val finished = waiting.copy(runs = listOf(JsonObject(run + ("status" to JsonPrimitive("completed")))),
+            visibleTurnItems = listOf(row(prompt, 0), row(compaction, 1)))
+        val note = v2Presentation(finished).feed.single() as FeedEntry.Note
+        assertEquals("Context automatically compacted before cache expiry 300K → 40K tokens", note.message)
+        assertTrue(note.compactionCommand)
+        val failed = JsonObject(compaction + mapOf("status" to JsonPrimitive("failed"), "summary" to JsonPrimitive("Prompt too long")))
+        assertEquals("Context compaction failed · Prompt too long",
+            (v2Presentation(finished.copy(visibleTurnItems = listOf(row(prompt, 0), row(failed, 1)))).feed.single() as FeedEntry.Note).message)
+    }
+
+    @Test fun `an answered resume question folds into the compaction it asked for`() {
+        val question = "This session is 2h 5m old and uses 412,000 tokens. Compact it before continuing?"
+        val ask = JsonObject(item("ask", 1, "user_input_request") + mapOf("requestId" to JsonPrimitive("request"),
+            "questions" to JsonArray(listOf(buildJsonObject { put("id", "q"); put("question", question) }))))
+        val request = obj("""{"id":"request","kind":"user_input","status":"resolved","answers":{"q":["Compact and continue"]}}""")
+        val compaction = item("compaction", 2, "compaction")
+        val projection = V2ProjectionDto(metadata, runtimeRequests = listOf(request),
+            visibleTurnItems = listOf(row(ask, 0), row(compaction, 1)))
+        val note = v2Presentation(projection).feed.single() as FeedEntry.Note
+        assertEquals("Context compacted after 2h 5m idle", note.message)
+        // The answer names only the next compaction in its run.
+        val later = item("later", 3, "compaction")
+        val both = v2Presentation(projection.copy(visibleTurnItems = listOf(row(ask, 0), row(compaction, 1), row(later, 2))))
+            .feed.filterIsInstance<FeedEntry.Note>()
+        assertEquals(listOf("Context compacted after 2h 5m idle", "Context compacted"), both.map { it.message })
+        assertEquals("2h 5m", resumeCompactionAge(ask, request))
+        val declined = obj("""{"id":"request","kind":"user_input","status":"resolved","answers":{"q":"Don't ask again"}}""")
+        assertNull(resumeCompactionAge(ask, declined))
+    }
+
+    @Test fun `stop settles only still active local copies of background items`() {
+        val command = JsonObject(item("server", 1, "command_execution") + ("status" to JsonPrimitive("running")))
+        val inherited = V2VisibleItemDto(1, "inherited", "parent", "server", command)
+        val projection = V2ProjectionDto(metadata, turnItems = listOf(command),
+            visibleTurnItems = listOf(row(command, 0), inherited))
+        assertEquals(listOf("server"), projection.pendingBackgroundTurnItems().map { it.v2String("id") })
+        val settled = JsonObject(command + ("status" to JsonPrimitive("interrupted")))
+        val next = projection.settleTurnItems(mapOf("server" to settled))
+        assertEquals("interrupted", next.turnItems.single().v2String("status"))
+        assertEquals(listOf("interrupted", "running"), next.visibleTurnItems.map { it.item.v2String("status") })
+        // An event that already ended the item wins over the lookup.
+        val completed = next.copy(turnItems = listOf(JsonObject(command + ("status" to JsonPrimitive("completed")))))
+        assertSame(completed, completed.settleTurnItems(mapOf("server" to settled)))
+    }
+
+    @Test fun `guest share updates replace the thread payload`() {
+        val shared = JsonObject(metadata + ("guestShare" to obj("""{"enabled":true}""")))
+        val updated = applyV2Event(V2ProjectionDto(metadata), event("thread.guest-share-updated", shared), false, null)
+        assertEquals(shared, updated.thread)
+    }
+
+    @Test fun `approvals carry their reason and whether feedback reaches the agent`() {
+        val run = obj("""{"id":"run","ordinal":1,"status":"waiting"}""")
+        val request = obj("""{"id":"request","kind":"command","status":"pending","createdAt":"2026-10-01T00:00:00Z",
+            "responseCapability":{"type":"live","supportsFeedback":true}}""")
+        val approval = JsonObject(item("approval", 1, "approval_request") + mapOf("requestId" to JsonPrimitive("request"),
+            "reason" to JsonPrimitive("Needs network"), "status" to JsonPrimitive("waiting")))
+        val projection = V2ProjectionDto(metadata, runs = listOf(run), runtimeRequests = listOf(request), turnItems = listOf(approval))
+        val presented = v2Presentation(projection)
+        assertEquals("Needs network", presented.approvals.single().reason)
+        assertTrue(presented.approvals.single().supportsFeedback)
+        assertFalse(presented.canSendNow)
+        assertTrue(v2Presentation(V2ProjectionDto(metadata)).canSendNow)
     }
 }

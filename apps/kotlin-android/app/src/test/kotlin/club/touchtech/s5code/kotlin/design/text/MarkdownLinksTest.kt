@@ -83,4 +83,20 @@ class MarkdownLinksTest {
             (resolveMarkdownLinkPresentation("docs/My Folder/") as MarkdownLinkPresentation.File).path,
         )
     }
+
+    @Test
+    fun `links a network path only inside the project's share`() {
+        val share = resolveMarkdownLinkPresentation("file://server/share/workspace-image.svg") as MarkdownLinkPresentation.File
+        assertEquals("\\\\server\\share\\workspace-image.svg", share.path)
+        assertEquals("workspace-image.svg", resolveWorkspaceRelativeFilePath("\\\\server\\share", share.path))
+        // Opening these sent the Windows user's NTLM credentials to attacker.test.
+        for (href in listOf("file://attacker.test/s/x.ts", "\\\\attacker.test\\s\\x.ts", "/\\attacker.test\\s\\x.ts", "//attacker.test/s/x.ts")) {
+            val path = (resolveMarkdownLinkPresentation(href) as MarkdownLinkPresentation.File).path
+            assertNull(href, resolveWorkspaceRelativeFilePath("\\\\server\\share", path))
+            assertNull(href, resolveWorkspaceRelativeFilePath("/repo", path))
+        }
+        assertNull(resolveWorkspaceRelativeFilePath("\\\\server\\share", "\\\\server\\other\\x.ts"))
+        assertEquals("/repo/a.ts", (resolveMarkdownLinkPresentation("file://localhost/repo/a.ts") as MarkdownLinkPresentation.File).path)
+        assertTrue(isNetworkPath("/\\h\\x") && isNetworkPath("//h/x") && !isNetworkPath("/h/x"))
+    }
 }

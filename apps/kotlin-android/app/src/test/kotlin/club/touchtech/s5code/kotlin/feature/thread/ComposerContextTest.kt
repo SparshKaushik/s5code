@@ -67,4 +67,16 @@ class ComposerContextTest {
             detectComposerTrigger("/model openai/gpt"),
         )
     }
+
+    @Test
+    fun `typing a price does not open the skill menu`() {
+        listOf(
+            "It costs $5", "budget $9.99", "only $.99", "about €20", "raise $10k", "$1,000",
+            "£2e6", "raise $10k.", "is it $5?", "(about $9.99)",
+        ).forEach { text -> assertNull(text, detectComposerTrigger(text)) }
+        listOf("$", "$1password", "$2fa").forEach { text ->
+            assertEquals(text, ComposerTriggerKind.Skill, detectComposerTrigger(text)?.kind)
+            assertEquals(text, text.substring(1), detectComposerTrigger(text)?.query)
+        }
+    }
 }

@@ -242,7 +242,11 @@ fun presentFeed(
         // it, and the turn trigger closes the whole turn.
         appendFooterFor(group.map { it.id })
     }
-    if (activeWorkStartedAtMillis != null) rows += FeedRow.Working(activeWorkStartedAtMillis)
+    // A bare `/compact` turn's compaction row is its live activity row already.
+    val compactionCommandRun = latestTurn?.turnId?.let { runId ->
+        feed.any { it is FeedEntry.Note && it.compactionCommand && it.turnId == runId }
+    } == true
+    if (activeWorkStartedAtMillis != null && !compactionCommandRun) rows += FeedRow.Working(activeWorkStartedAtMillis)
     return attachTurnDiffStats(rows, feed, turnDiffStats)
 }
 
@@ -389,6 +393,8 @@ fun turnFolds(feed: List<FeedEntry>, latestTurn: TurnInfo?): Map<String, TurnFol
                     it.id != terminalAssistantIdByTurn[turnId] &&
                         it !is FeedEntry.QuestionAnswer && it !is FeedEntry.McpApp &&
                         it !is FeedEntry.ProposedPlan &&
+                        // Compaction rows never fold away (`deriveThreadFeedRunFolds`).
+                        !(it is FeedEntry.Note && it.compaction) &&
                         !(it is FeedEntry.Subagent && it.active)
                 }
                 .map { it.id }
@@ -568,6 +574,7 @@ private val T3_MCP_TOOLS: Map<String, T3McpTool> =
         "t3_thread_send" to t3Tool(listOf("Send", "Sending", "Sent", "to a T3 thread")),
         "t3_thread_wait" to t3Tool(listOf("Wait", "Waiting", "Waited", "for a T3 thread")),
         "t3_workflow_stop" to t3Tool(listOf("Stop", "Stopping", "Requested a stop for", "a workflow")),
+        "t3_background_wait" to t3Tool(listOf("Update", "Updating", "Updated", "background waits")),
         "t3_thread_interrupt" to
             t3Tool(listOf("Interrupt", "Interrupting", "Requested an interrupt of", "a T3 thread")),
         "t3_worktree_handoff" to

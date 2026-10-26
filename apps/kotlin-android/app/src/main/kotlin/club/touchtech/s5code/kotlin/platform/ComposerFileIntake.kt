@@ -158,9 +158,7 @@ internal fun materializeQuestionFiles(
             error = "'$name' is not a supported image type. Attach GIF, JPEG, PNG, or WebP images."
             continue
         }
-        val maxBytes =
-            if (isImage) ComposerAttachmentLimits.MAX_IMAGE_BYTES
-            else checkNotNull(maxFileBytes)
+        val maxBytes = questionFileMaxBytes(isImage, maxFileBytes)
         val target =
             File(
                 directory,
@@ -183,14 +181,26 @@ internal fun materializeQuestionFiles(
                         mimeType = mimeType,
                         sizeBytes = copied,
                         localPath = target.absolutePath,
-                        kind =
-                            if (isImage) QuestionAttachmentKind.Image
-                            else QuestionAttachmentKind.File,
+                        kind = questionFileKind(isImage, copied),
                     )
         }
     }
     return StagedQuestionFiles(files, error)
 }
+
+/**
+ * The copy ceiling for one picked question file. An image may exceed the 10 MB
+ * image cap when the server takes files, because [questionFileKind] then sends
+ * it as a file (mobile `pickComposerFiles`, 140de68f25).
+ */
+internal fun questionFileMaxBytes(isImage: Boolean, maxFileBytes: Long?): Long =
+    if (isImage) maxOf(ComposerAttachmentLimits.MAX_IMAGE_BYTES, maxFileBytes ?: 0L)
+    else checkNotNull(maxFileBytes)
+
+/** Images over the provider's image cap go up as `type: "file"`; the agent still gets the original. */
+internal fun questionFileKind(isImage: Boolean, sizeBytes: Long): QuestionAttachmentKind =
+    if (isImage && sizeBytes <= ComposerAttachmentLimits.MAX_IMAGE_BYTES) QuestionAttachmentKind.Image
+    else QuestionAttachmentKind.File
 
 /** Streams at most `maxBytes + 1` bytes into [target]; the extra byte is how "too large" is detected. */
 private fun copyBounded(

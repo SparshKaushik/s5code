@@ -149,6 +149,7 @@ internal fun detectComposerTrigger(text: String): ComposerTrigger? {
     }
     val first = token.firstOrNull()
     if (first != null && first.category == CharCategory.CURRENCY_SYMBOL) {
+        if (isCurrencyAmountQuery(token.substring(1))) return null
         return ComposerTrigger(
             ComposerTriggerKind.Skill,
             token.substring(1),
@@ -159,6 +160,15 @@ internal fun detectComposerTrigger(text: String): ComposerTrigger? {
     if (!token.startsWith("@")) return null
     return ComposerTrigger(ComposerTriggerKind.Path, token.substring(1), tokenStart, cursor)
 }
+
+private val CURRENCY_AMOUNT = Regex("""^\.?[0-9][0-9,._]*(?:[kKmMbBtT]|[eE][0-9]+)?[.,;:!?)]*$""")
+
+/**
+ * `isCurrencyAmountQuery` in `packages/shared/src/composerTrigger.ts`: `$5`,
+ * `€9.99` and `$10k` are money, not skills, including the punctuation prose
+ * puts after one (`$10k.`, `($5)`).
+ */
+internal fun isCurrencyAmountQuery(query: String): Boolean = CURRENCY_AMOUNT.matches(query)
 
 /** `replaceTextRange`: splice [replacement] over the trigger's range. */
 internal fun replaceComposerTextRange(

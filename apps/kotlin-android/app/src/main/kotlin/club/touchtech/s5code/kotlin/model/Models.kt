@@ -512,6 +512,10 @@ data class ThreadSummary(
     val wokeAtMillis: Long? = null,
     /** The raw `snoozedUntil`, kept so Undo can restore a snooze a settle or unpin cleared. */
     val snoozedUntil: String? = null,
+    /** The pull request discovered from the branch; search matches it by number and link. */
+    val branchPullRequest: club.touchtech.s5code.kotlin.transport.wire.ThreadLinkedPullRequestDto? = null,
+    /** The shell's `opens`, which search ranks by; null when absent or unreadable. */
+    val opens: ThreadOpenStats? = null,
 ) {
     /**
      * The Working section's ordering key, following `sortWorkingThreadsBySend`:
@@ -572,6 +576,12 @@ sealed interface FeedEntry {
         val promptTurnId: String? = null,
         /** The item's `inputIntent`; a steer joins a run rather than starting one. */
         val inputIntent: String? = null,
+        /** The V2 item's `messageId` ([id] is the item's); a search match opens here. */
+        val messageId: String? = null,
+        /** The thread whose agent sent it; an Agent row names it and offers "Open thread". */
+        val senderThreadId: String? = null,
+        /** The automation that sent it; an Automation row shows its title and links to it. */
+        val scheduledTaskId: String? = null,
     ) : FeedEntry
 
     /** Display slice of one `ComposerContextRecord`. */
@@ -586,6 +596,8 @@ sealed interface FeedEntry {
         override val turnId: String? = null,
         override val atMillis: Long = 0,
         override val endedAtMillis: Long = atMillis,
+        /** The V2 item's `messageId` ([id] is the item's); a search match opens here. */
+        val messageId: String? = null,
     ) : FeedEntry
 
     /**
@@ -745,13 +757,19 @@ sealed interface FeedEntry {
         override val turnId: String? = null,
         override val atMillis: Long = 0,
         /**
-         * True for `context-compaction` rows. A lone compaction stays visible —
-         * it only folds away inside a turn that already hides other work —
-         * matching `isContextCompactionActivityGroup` in the RN fold rules.
+         * True for `context-compaction` rows. They never fold away, matching
+         * `isContextCompactionActivityGroup` in the RN fold rules.
          */
         val compaction: Boolean = false,
         /** The V2 item status (`running`, `completed`, …); null for rows that carry none. */
         val status: String? = null,
+        /**
+         * The compaction row of a bare `/compact` turn, standing in for the prompt
+         * (and, before the provider reports it, for the compaction too), so the
+         * turn reads as the compaction itself and the live Working row stays away
+         * (`isCompactionCommandFeedEntry` in RN).
+         */
+        val compactionCommand: Boolean = false,
     ) : FeedEntry
 
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
@@ -789,6 +807,8 @@ sealed interface FeedEntry {
         val answerable: Boolean,
         override val turnId: String? = null,
         override val atMillis: Long = 0,
+        /** `delivery`: "file" writes the value to a private file the agent's commands can read. */
+        val delivery: String? = null,
     ) : FeedEntry
 
     data class ErrorEntry(
@@ -839,6 +859,18 @@ data class PendingApproval(
      * back to the generic set.
      */
     val options: List<ApprovalOption> = emptyList(),
+    /** The provider's own reason for asking, shown under the request. */
+    val reason: String? = null,
+    /**
+     * Why a full-access thread still asked: `ask_rule` (the agent's own ask rule)
+     * or `provider_check` (a check the provider enforces even when bypassed).
+     */
+    val fullAccessOverride: String? = null,
+    /**
+     * A live request that takes decline feedback: a message typed while it is
+     * open goes to the requesting agent instead of being queued for the parent.
+     */
+    val supportsFeedback: Boolean = false,
 )
 
 /**
@@ -974,6 +1006,13 @@ data class ThreadDetail(
     val branchPullRequest: ThreadLinkedPullRequest? = null,
     val canReorderQueue: Boolean = false,
     val canPromoteQueued: Boolean = false,
+    /**
+     * `canSendNow`: no run is active, so a held queued message can be sent on its
+     * own (`queued-run.start`) instead of steering.
+     */
+    val canSendNow: Boolean = false,
+    /** The current root failure's provider code, such as a ChatGPT usage-limit code. */
+    val lastErrorCode: String? = null,
     /** Whether the live detail stream has reached its completion marker. */
     val syncPhase: ThreadSyncPhase = ThreadSyncPhase.Live,
     val checkpoints: List<Checkpoint> = emptyList(),
@@ -1032,6 +1071,8 @@ data class PendingBackgroundTask(
     val taskId: String? = null,
     /** The thread a delegated subagent runs in, so the work list can open it. */
     val childThreadId: String? = null,
+    /** The agent waits on this command or monitor, so it holds the thread at Working. */
+    val awaited: Boolean = false,
 )
 
 data class PendingChildInput(val threadId: String, val title: String, val approval: Boolean)
@@ -1228,6 +1269,10 @@ data class TerminalSession(
     /** A foreground process is attached under the shell, per `activity` events. */
     val hasRunningSubprocess: Boolean = false,
     val updatedAt: String? = null,
+    /** Bumped when history is replaced (snapshot, restart, clear); see `readTerminalOutputUpdate`. */
+    val outputResetVersion: Int = 0,
+    /** Characters appended since that reset; [buffer] is the retained tail ending here. */
+    val outputEnd: Long = buffer.length.toLong(),
 )
 
 /**
@@ -1739,6 +1784,8 @@ data class ProjectClone(
     val detail: String?,
     /** Human readable reason when phase is failed. */
     val error: String?,
+    /** Git has gone quiet; the last [detail] speed would be a lie. */
+    val stalled: Boolean = false,
 )
 
 /** `projectCloneStageLabel`. */
@@ -1764,7 +1811,9 @@ fun projectCloneProgressSummary(clone: ProjectClone): String =
     listOfNotNull(
         projectCloneStageLabel(clone.stage),
         clone.percent?.let { "$it%" },
-        clone.detail?.takeIf { it.isNotEmpty() },
+        // `projectCloneProgressSummary`: the detail carries git's last transfer
+        // speed, which a stall makes a lie.
+        if (clone.stalled) "Stalled" else clone.detail?.takeIf { it.isNotEmpty() },
     ).joinToString(" · ")
 
 /**
@@ -1876,6 +1925,11 @@ sealed interface HomeListItem {
          * rest of the list.
          */
         val draftPreview: String? = null,
+        /**
+         * Set on rows listed only for a message match: opening the row opens
+         * the thread at that message (`contentOnlyThreadKeys` in RN).
+         */
+        val searchMessageId: String? = null,
     ) : HomeListItem {
         override val key: String = "thread:${thread.environmentId.value}:${thread.id.value}"
     }
@@ -1930,7 +1984,26 @@ data class ThreadSearchMatch(
     val source: SearchMatchSource,
     val snippet: String,
     val messageCreatedAt: String?,
+    /** 1 whole words, 0.8 word starts, 0.3 inside words (+ phrase bonus). Older servers omit it. */
+    val quality: Double? = null,
+    /** How many of the thread's newest messages match. Older servers omit it. */
+    val hits: Int? = null,
+    /** The message the snippet is from, so a tap opens the thread there. Older servers omit it. */
+    val messageId: String? = null,
 )
+
+/**
+ * `OrchestrationV2ThreadOpens`: the server's open history for search ranking.
+ * [score] is an open count that halves every two weeks as of [openedAtMillis];
+ * [picks] are folded search queries that picked the thread, newest first.
+ */
+data class ThreadOpenStats(
+    val openedAtMillis: Long,
+    val score: Double,
+    val picks: List<ThreadOpenPick> = emptyList(),
+)
+
+data class ThreadOpenPick(val query: String, val atMillis: Long)
 
 enum class SearchMatchSource(val label: String) {
     Title("Title"),
@@ -1946,6 +2019,7 @@ enum class SearchMatchSource(val label: String) {
 }
 
 enum class ShelfKind {
+    Working,
     Snoozed,
     Settled,
 }

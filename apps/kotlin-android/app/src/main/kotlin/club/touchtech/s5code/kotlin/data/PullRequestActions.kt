@@ -26,23 +26,30 @@ val PULL_REQUEST_MERGE_METHOD_TITLES: Map<String, String> =
 
 fun mergeMethodTitle(method: String): String = PULL_REQUEST_MERGE_METHOD_TITLES[method] ?: method
 
-/** `PR_ACTION_LABELS`. */
-val PULL_REQUEST_ACTION_LABELS: Map<String, String> =
-    mapOf(
-        "merge" to "Merge pull request",
-        "ready" to "Mark ready for review",
-        "draft" to "Convert to draft",
-        "close" to "Close pull request",
-        "reopen" to "Reopen pull request",
-        "update-branch" to "Update branch",
-        "enable-auto-merge" to "Enable auto-merge",
-        "disable-auto-merge" to "Disable auto-merge",
-        "revert" to "Create revert pull request",
-        "delete-branch" to "Delete branch",
-        "approve-workflows" to "Approve workflows",
+val PULL_REQUEST_ACTIONS: List<String> =
+    listOf(
+        "merge", "ready", "draft", "close", "reopen", "update-branch", "enable-auto-merge",
+        "disable-auto-merge", "revert", "delete-branch", "approve-workflows",
     )
 
-fun pullRequestActionLabel(action: String): String = PULL_REQUEST_ACTION_LABELS[action] ?: action
+/** `pullRequestActionLabel`, worded for the host (GitLab says merge request). */
+fun pullRequestActionLabel(action: String, provider: String? = null): String {
+    val singular = changeRequestTerms(provider).singular
+    return when (action) {
+        "merge" -> "Merge $singular"
+        "ready" -> "Mark ready for review"
+        "draft" -> "Convert to draft"
+        "close" -> "Close $singular"
+        "reopen" -> "Reopen $singular"
+        "update-branch" -> "Update branch"
+        "enable-auto-merge" -> "Enable auto-merge"
+        "disable-auto-merge" -> "Disable auto-merge"
+        "revert" -> "Create revert $singular"
+        "delete-branch" -> "Delete branch"
+        "approve-workflows" -> "Approve workflows"
+        else -> action
+    }
+}
 
 private fun PullRequestDetailDto.mergeCapable(method: String): Boolean =
     when (method) {
@@ -84,18 +91,20 @@ fun canPerformPullRequestAction(pr: PullRequestDetailDto, action: String): Boole
 const val MERGE_CONFLICT_REASON = "Resolve the branch conflicts before merging."
 
 /** `mergeUnavailableReason`; null when a merge may be offered. */
-fun mergeUnavailableReason(pr: PullRequestDetailDto, connectionAllowsWrites: Boolean): String? =
-    when {
-        pr.state == "merged" -> "This pull request has been merged."
-        pr.state == "closed" -> "Reopen this pull request before merging."
+fun mergeUnavailableReason(pr: PullRequestDetailDto, connectionAllowsWrites: Boolean): String? {
+    val singular = changeRequestTerms(pr.provider).singular
+    return when {
+        pr.state == "merged" -> "This $singular has been merged."
+        pr.state == "closed" -> "Reopen this $singular before merging."
         !connectionAllowsWrites -> "This environment connection is read-only."
         "merge" !in pr.capabilities.actions -> "This provider does not support merging here."
-        "merge" !in pr.viewerPermissions.actions -> "Your account cannot merge this pull request."
+        "merge" !in pr.viewerPermissions.actions -> "Your account cannot merge this $singular."
         pr.isDraft -> "Mark this draft ready for review before merging."
         pr.mergeability == "conflicting" -> MERGE_CONFLICT_REASON
         pr.allowedMergeMethods().isEmpty() -> "This repository has no available merge methods."
         else -> null
     }
+}
 
 /** `mergeSummary`: the overview's Merge row value. */
 fun mergeSummary(pr: PullRequestDetailDto, connectionAllowsWrites: Boolean): String {
@@ -137,7 +146,19 @@ data class PullRequestPermissions(
     val canComment: Boolean = false,
     val canRequestReviewers: Boolean = false,
     val verdicts: List<String> = emptyList(),
-)
+    /** Edit the PR's title and description. */
+    val canEditChangeRequest: Boolean = false,
+    /** React to the PR and its comments. */
+    val canReact: Boolean = false,
+    /** Add and remove labels. */
+    val canManageLabels: Boolean = false,
+    /** The PR [canEditComment] judges comments against; null before the detail loads. */
+    private val editingSubject: PullRequestDetailDto? = null,
+) {
+    /** `canEditComment` from `usePullRequestPermissions`. */
+    fun canEditComment(kind: String, authorLogin: String?, canEdit: Boolean?): Boolean =
+        canWrite && editingSubject != null && canEditPullRequestComment(editingSubject, kind, authorLogin, canEdit)
+}
 
 fun pullRequestPermissions(
     pr: PullRequestDetailDto?,
@@ -166,6 +187,10 @@ fun pullRequestPermissions(
         canRequestReviewers =
             granted && open && pr?.capabilities?.reviewers?.request == true && pr.viewerPermissions.requestReviewers,
         verdicts = verdicts,
+        canEditChangeRequest = granted && pr != null && canEditPullRequestChangeRequest(pr),
+        canReact = granted && pr?.capabilities?.reactions == true,
+        canManageLabels = granted && pr != null && canManagePullRequestLabels(pr),
+        editingSubject = pr,
     )
 }
 
@@ -337,18 +362,20 @@ fun pullRequestListRowActions(state: String, isDraft: Boolean): List<String> =
     }
 
 /** Confirmation copy for the status menu's writes; null runs without asking. */
-fun pullRequestActionConfirmation(action: String, pr: PullRequestDetailDto): Pair<String, String>? =
-    when (action) {
-        "close" -> "Close pull request" to "Close this pull request without merging its changes?"
-        "revert" -> "Create revert pull request" to "Open a new pull request that reverses these changes?"
+fun pullRequestActionConfirmation(action: String, pr: PullRequestDetailDto): Pair<String, String>? {
+    val singular = changeRequestTerms(pr.provider).singular
+    return when (action) {
+        "close" -> pullRequestActionLabel(action, pr.provider) to "Close this $singular without merging its changes?"
+        "revert" -> pullRequestActionLabel(action, pr.provider) to "Open a new $singular that reverses these changes?"
         "approve-workflows" ->
-            "Approve workflows" to "Allow this pull request's workflows to run? Review the workflow changes first."
+            "Approve workflows" to "Allow this $singular's workflows to run? Review the workflow changes first."
         "delete-branch" ->
             "Delete branch" to
                 "Delete ${pr.headBranch} from ${pr.headRepositoryNameWithOwner ?: pr.repository}? " +
                 "Local branches and worktrees are not changed."
         else -> null
     }
+}
 
 /* ── Agent tasks ─────────────────────────────────────────────────────── */
 

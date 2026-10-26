@@ -127,6 +127,13 @@ fun PullRequestDiscussionScreen(
     val comments = remember(thread, extra) { mergeDiscussionComments(thread?.comments.orEmpty(), extra) }
     val canReply = permissions.canReply && thread != null
     val now = remember(comments) { System.currentTimeMillis() }
+    val commentActions =
+        PullRequestCommentActions(
+            permissions = permissions,
+            onReact = { subjectId, content, reacted -> gateway.setReaction(environmentId, reference, subjectId, content, reacted) },
+            onEdit = { commentId, _ -> onOpenRoute(Routes.pullRequestEdit(environmentId, reference, "comment", commentId)) },
+            onError = store::showError,
+        )
 
     S5Screen(
         title = "Discussion",
@@ -211,7 +218,18 @@ fun PullRequestDiscussionScreen(
                         )
                         MutedText(relativeLabel(comment.createdAt, now))
                     }
-                    S5Markdown(source = comment.body)
+                    S5Markdown(source = comment.body, html = true)
+                    PullRequestCommentFooter(
+                        commentId = comment.id,
+                        kind = "review-comment",
+                        authorLogin = comment.author?.login,
+                        canEdit = comment.canEdit,
+                        reactions = comment.reactions.orEmpty(),
+                        actions = commentActions,
+                        // The edit screen reads bodies from the cached activity; a reply
+                        // loaded page by page is not in it.
+                        editable = thread?.comments?.any { it.id == comment.id } == true,
+                    )
                 }
             }
             if (nextCursor != null) {

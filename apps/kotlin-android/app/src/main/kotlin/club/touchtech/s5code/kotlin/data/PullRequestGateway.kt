@@ -2,6 +2,9 @@ package club.touchtech.s5code.kotlin.data
 
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestActivityDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChecksDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilterOptionsDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLabelCandidateListDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffStatDto
@@ -120,6 +123,36 @@ interface PullRequestGateway {
 
     suspend fun refreshReviewerCandidates(environmentId: String, reference: PullRequestReference)
 
+    /**
+     * `pullRequests.checks`: only the head's checks, for servers with the
+     * `pullRequestChecks` capability. Null value: the host reports no checks.
+     */
+    fun checks(environmentId: String, reference: PullRequestReference): Flow<PullRequestQuery<PullRequestChecksDto?>>
+
+    /** Rereads [checks]; the PR page calls this on its live-checks poll. */
+    suspend fun refreshChecks(environmentId: String, reference: PullRequestReference)
+
+    /** `pullRequests.labelCandidates`; only for hosts whose capabilities include labels. */
+    fun labelCandidates(
+        environmentId: String,
+        reference: PullRequestReference,
+    ): Flow<PullRequestQuery<PullRequestLabelCandidateListDto>>
+
+    suspend fun refreshLabelCandidates(environmentId: String, reference: PullRequestReference)
+
+    /**
+     * `pullRequests.filterOptions`: label or author values the host finds for
+     * [query] across the listed repositories ([kind]: labels | authors). Answers
+     * are reused for five minutes, as upstream's query family does.
+     */
+    suspend fun filterOptions(
+        environmentId: String,
+        kind: String,
+        projectIds: List<String>,
+        host: String?,
+        query: String?,
+    ): PullRequestFilterOptionsDto
+
     /** `pullRequests.reviewGuide`; only for servers with `reviewGuidesEnabled`. */
     fun reviewGuide(environmentId: String, reference: PullRequestReference): Flow<PullRequestQuery<PullRequestReviewGuideResultDto>>
 
@@ -224,6 +257,33 @@ interface PullRequestGateway {
         reviewers: List<PullRequestReviewerRequest>,
         requested: Boolean,
     )
+
+    /** `pullRequests.update`: a new title and/or description. Detail refetches after. */
+    suspend fun update(environmentId: String, reference: PullRequestReference, title: String? = null, body: String? = null)
+
+    /** `pullRequests.updateComment` ([kind]: issue-comment | review-comment). Activity refetches after. */
+    suspend fun updateComment(
+        environmentId: String,
+        reference: PullRequestReference,
+        commentId: String,
+        kind: String,
+        body: String,
+    )
+
+    /**
+     * `pullRequests.setReaction` on the PR itself, or on the comment [subjectId]
+     * names. Activity refetches after.
+     */
+    suspend fun setReaction(
+        environmentId: String,
+        reference: PullRequestReference,
+        subjectId: String?,
+        content: String,
+        reacted: Boolean,
+    )
+
+    /** `pullRequests.setLabels`; patches the cached candidates and the detail's labels. */
+    suspend fun setLabels(environmentId: String, reference: PullRequestReference, labels: List<String>, applied: Boolean)
 
     /** `pullRequests.invalidate`: drops the server's host cache, then refetches the PR page. */
     suspend fun invalidate(environmentId: String, reference: PullRequestReference?)

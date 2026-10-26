@@ -12,6 +12,10 @@ import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDiffStatDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestChangeBreakdownDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestChecksDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilterOptionsDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLabelCandidateListDto
+import club.touchtech.s5code.kotlin.transport.wire.PullRequestLabelDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestFilesViewedResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestLinkedThreadsResultDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestListEntryDto
@@ -443,6 +447,76 @@ class LivePullRequestGateway(
         fetch(reviewerCandidatesEntry(environmentId, reference), force = true)
     }
 
+    private fun checksEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "checks:${reference.cacheKey}",
+            ttlMs = CHECKS_TTL_MS,
+            serializer = PullRequestChecksDto.serializer().nullable,
+            tick = true,
+            // Polled every 45-60 s while on screen; the detail's own checks cover a cold start.
+            persist = false,
+        ) { it.query(WsMethods.PullRequestsChecks, reference.toJson(), PullRequestChecksDto.serializer().nullable) }
+
+    override fun checks(environmentId: String, reference: PullRequestReference) =
+        checksEntry(environmentId, reference).observe()
+
+    override suspend fun refreshChecks(environmentId: String, reference: PullRequestReference) {
+        fetch(checksEntry(environmentId, reference), force = true)
+    }
+
+    private fun labelCandidatesEntry(environmentId: String, reference: PullRequestReference) =
+        entry(
+            environmentId,
+            "labelCandidates:${reference.cacheKey}",
+            ttlMs = READ_TTL_MS,
+            serializer = PullRequestLabelCandidateListDto.serializer(),
+            tick = false,
+            persist = false,
+        ) {
+            it.query(WsMethods.PullRequestsLabelCandidates, reference.toJson(), PullRequestLabelCandidateListDto.serializer())
+        }
+
+    override fun labelCandidates(environmentId: String, reference: PullRequestReference) =
+        labelCandidatesEntry(environmentId, reference).observe()
+
+    override suspend fun refreshLabelCandidates(environmentId: String, reference: PullRequestReference) {
+        fetch(labelCandidatesEntry(environmentId, reference), force = true)
+    }
+
+    private val filterOptionAnswers = ConcurrentHashMap<String, Pair<Long, PullRequestFilterOptionsDto>>()
+
+    override suspend fun filterOptions(
+        environmentId: String,
+        kind: String,
+        projectIds: List<String>,
+        host: String?,
+        query: String?,
+    ): PullRequestFilterOptionsDto {
+        val payload =
+            buildJsonObject {
+                put("kind", kind)
+                if (projectIds.size == 1) put("projectId", projectIds.single())
+                else if (projectIds.isNotEmpty()) putJsonArray("projectIds") { projectIds.take(MAX_FILTER_PROJECTS).forEach { add(it) } }
+                host?.takeIf(String::isNotBlank)?.let { put("host", it) }
+                query?.trim()?.takeIf(String::isNotEmpty)?.let { put("query", it.take(MAX_FILTER_QUERY)) }
+            }
+        val key = "$environmentId\u0000$payload"
+        filterOptionAnswers[key]?.let { (at, value) -> if (clock() - at < FILTER_OPTIONS_TTL_MS) return value }
+        val session = readySession(environmentId) ?: throw IllegalStateException("Reconnect to search this filter.")
+        val result =
+            try {
+                session.query(WsMethods.PullRequestsFilterOptions, payload, PullRequestFilterOptionsDto.serializer())
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Throwable) {
+                throw IllegalStateException(pullRequestErrorMessage(error), error)
+            }
+        if (filterOptionAnswers.size > MAX_FILTER_ANSWERS) filterOptionAnswers.clear()
+        filterOptionAnswers[key] = clock() to result
+        return result
+    }
+
     private fun reviewGuideEntry(environmentId: String, reference: PullRequestReference) =
         entry(
             environmentId,
@@ -806,6 +880,113 @@ class LivePullRequestGateway(
         if (selected.size < reviewers.size) refetch(detail, activity)
     }
 
+    override suspend fun update(environmentId: String, reference: PullRequestReference, title: String?, body: String?) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            title?.let { put("title", it) }
+                            body?.let { put("body", it) }
+                        },
+                )
+            session.execute(WsMethods.PullRequestsUpdate, payload)
+        }
+        refetch(detailEntry(environmentId, reference))
+    }
+
+    override suspend fun updateComment(
+        environmentId: String,
+        reference: PullRequestReference,
+        commentId: String,
+        kind: String,
+        body: String,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            put("commentId", commentId)
+                            put("kind", kind)
+                            put("body", body)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsUpdateComment, payload)
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun setReaction(
+        environmentId: String,
+        reference: PullRequestReference,
+        subjectId: String?,
+        content: String,
+        reacted: Boolean,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            subjectId?.let { put("subjectId", it) }
+                            put("content", content)
+                            put("reacted", reacted)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsSetReaction, payload)
+        }
+        refetch(activityEntry(environmentId, reference))
+    }
+
+    override suspend fun setLabels(
+        environmentId: String,
+        reference: PullRequestReference,
+        labels: List<String>,
+        applied: Boolean,
+    ) {
+        write(environmentId) { session ->
+            val payload =
+                JsonObject(
+                    reference.toJson() +
+                        buildJsonObject {
+                            putJsonArray("labels") { labels.forEach { add(it) } }
+                            put("applied", applied)
+                        },
+                )
+            session.execute(WsMethods.PullRequestsSetLabels, payload)
+        }
+        // The `setLabels` onSuccess patch: no reread, the host's label list is slow to settle.
+        val names = labels.toSet()
+        val candidatesEntry = labelCandidatesEntry(environmentId, reference)
+        val candidates = candidatesEntry.state.value.value?.candidates.orEmpty()
+        candidatesEntry.state.update { query ->
+            query.copy(
+                value =
+                    query.value?.let { value ->
+                        value.copy(candidates = value.candidates.map { if (it.name in names) it.copy(isApplied = applied) else it })
+                    },
+            )
+        }
+        detailEntry(environmentId, reference).state.update { query ->
+            query.copy(
+                value =
+                    query.value?.let { value ->
+                        val next =
+                            if (applied) {
+                                value.labels +
+                                    labels.filter { name -> value.labels.none { it.name == name } }.map { name ->
+                                        PullRequestLabelDto(name, candidates.firstOrNull { it.name == name }?.color)
+                                    }
+                            } else {
+                                value.labels.filter { it.name !in names }
+                            }
+                        value.copy(labels = next)
+                    },
+            )
+        }
+    }
+
     override suspend fun invalidate(environmentId: String, reference: PullRequestReference?) {
         write(environmentId) { session ->
             session.execute(
@@ -951,6 +1132,11 @@ class LivePullRequestGateway(
         const val READ_TTL_MS = 60_000L
         const val FILES_VIEWED_TTL_MS = 15_000L
         const val LINKED_THREADS_POLL_MS = 10_000L
+        const val CHECKS_TTL_MS = 45_000L
+        const val FILTER_OPTIONS_TTL_MS = 5 * 60_000L
+        const val MAX_FILTER_ANSWERS = 64
+        const val MAX_FILTER_PROJECTS = 100
+        const val MAX_FILTER_QUERY = 100
         const val IDLE_TTL_MS = 5 * 60_000L
         const val MAX_STATS_REFS = 500
         const val MAX_STATS = 2_000

@@ -5,6 +5,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.Folder
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
@@ -37,10 +38,14 @@ fun S5ProjectIcon(
     modifier: Modifier = Modifier,
     size: Dp = 16.dp,
 ) {
-    val identity = project?.let { "${it.environmentId.value}:${it.workspaceRoot}:${it.faviconPath}" }
+    // The server's managed "No project" folder carries a chat-bubble icon
+    // (`message-square-dashed`, RN's `resolveProjectIconSymbol`); its folder
+    // has no favicon worth fetching.
+    val chat = project?.isScratch == true
+    val identity = project?.takeUnless { chat }?.let { "${it.environmentId.value}:${it.workspaceRoot}:${it.faviconPath}" }
     val url by
         produceState<String?>(initialValue = ProjectFaviconMemoryCache.url(identity), identity) {
-            value = project?.let { runCatching { resolveUrl(it) }.getOrNull() }
+            value = project?.takeUnless { chat }?.let { runCatching { resolveUrl(it) }.getOrNull() }
             ProjectFaviconMemoryCache.rememberUrl(identity, value)
         }
     var failed by remember(identity, url) { mutableStateOf(false) }
@@ -48,6 +53,13 @@ fun S5ProjectIcon(
 
     Box(modifier.size(size), contentAlignment = Alignment.Center) {
         when {
+            chat ->
+                Icon(
+                    Icons.AutoMirrored.Rounded.Chat,
+                    contentDescription = null,
+                    modifier = Modifier.size(size),
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
             cachedBitmap != null ->
                 Image(
                     bitmap = cachedBitmap.asImageBitmap(),

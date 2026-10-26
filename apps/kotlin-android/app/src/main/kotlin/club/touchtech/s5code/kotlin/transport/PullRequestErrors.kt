@@ -7,8 +7,10 @@ import kotlinx.serialization.json.JsonPrimitive
  * The text `PullRequestUnavailableError.message` and
  * `PullRequestOperationError.message` build in
  * `packages/contracts/src/pullRequest.ts`. Those getters run on the client, so
- * the wire carries only `reason`/`provider`/`operation`/`detail` and the words
- * have to be rebuilt here.
+ * the wire carries only `reason`/`provider`/`requirement`/`operation`/`detail`
+ * and the words have to be rebuilt here. Current servers name the host's setup
+ * step in `requirement`; the per-provider table below only covers older servers
+ * that predate it.
  */
 
 private class ProviderRequirement(val missing: String, val unauthenticated: String)
@@ -50,14 +52,14 @@ private val PROVIDER_REQUIREMENT =
             ),
     )
 
-/** `PullRequestUnavailableError.message`. */
-fun pullRequestUnavailableMessage(reason: String?, provider: String?): String? {
-    val requirement = provider?.let(PROVIDER_REQUIREMENT::get)
+/** `PullRequestUnavailableError.message`; [requirement] is the server's own setup step for the host. */
+fun pullRequestUnavailableMessage(reason: String?, provider: String?, requirement: String? = null): String? {
+    val legacy = provider?.let(PROVIDER_REQUIREMENT::get)
     return when (reason) {
         "cli-missing" ->
-            requirement?.missing ?: "The tool this host is read through is not installed or set up."
+            requirement ?: legacy?.missing ?: "The tool this host is read through is not installed or set up."
         "cli-unauthenticated" ->
-            requirement?.unauthenticated ?: "This host has no working credentials."
+            requirement ?: legacy?.unauthenticated ?: "This host has no working credentials."
         "provider-unsupported" -> "Change requests cannot be browsed for this project's host yet."
         else -> null
     }
@@ -76,7 +78,7 @@ private fun pullRequestErrorMessage(error: Throwable, fallback: String): String 
     if (raw != null) {
         when (failure.tag) {
             "PullRequestUnavailableError" ->
-                pullRequestUnavailableMessage(raw.string("reason"), raw.string("provider"))
+                pullRequestUnavailableMessage(raw.string("reason"), raw.string("provider"), raw.string("requirement"))
                     ?.let { return it }
             "PullRequestOperationError" -> {
                 val detail = raw.string("detail")

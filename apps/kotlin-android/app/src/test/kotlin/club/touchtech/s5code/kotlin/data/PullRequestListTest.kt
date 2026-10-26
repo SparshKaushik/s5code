@@ -288,4 +288,32 @@ class PullRequestListTest {
         val elsewhere = DEFAULT_PR_LIST_CONTROLS.copy(projectId = "scratch", projectEnvironmentId = "env-b")
         assertSame(elsewhere, withoutScratchProjectScope(elsewhere, scopes))
     }
+
+    @Test
+    fun `filter picks stay first, then loaded matches, then the host's answers, each once`() {
+        assertEquals(
+            listOf("needs-review", "bug", "Bugfix", "bug-report"),
+            pullRequestFilterChoices(
+                selected = listOf("needs-review"),
+                suggestions = listOf("bug", "feature", "Bugfix"),
+                hosted = listOf("BUG", "bug-report"),
+                query = " bug",
+            ),
+        )
+        val many = (1..120).map { "label-$it" }
+        val rows = pullRequestFilterChoices(emptyList(), many, listOf("hosted"), "")
+        assertEquals(100, rows.size)
+        // The host's answers get room after the first half of the loaded matches.
+        assertEquals("hosted", rows[50])
+    }
+
+    @Test
+    fun `label colors key by lowercased name and keep the first usable one`() {
+        assertEquals(
+            mapOf("bug" to 0xFFD73A4A),
+            pullRequestLabelColors(
+                listOf(PullRequestLabelDto("Bug", "nope"), PullRequestLabelDto("bug", "d73a4a"), PullRequestLabelDto("BUG", "000000"))
+            ),
+        )
+    }
 }

@@ -46,6 +46,19 @@ class HandoffTest {
     }
 
     @Test
+    fun `a starting handoff run is already the source so the footer does not repeat it`() {
+        val item = V2VisibleItemDto(sourceThreadId = "t", sourceItemId = "i", item = JsonObject(emptyMap()))
+        val completed = obj("""{"id":"a","status":"completed","startedAt":"x","modelSelection":{"instanceId":"codex","model":"gpt"}}""")
+        fun starting(handoff: String?) = obj(
+            """{"id":"b","status":"starting","startedAt":null,"contextHandoffId":${handoff?.let { "\"$it\"" } ?: "null"},"modelSelection":{"instanceId":"claudeAgent","model":"opus"}}""",
+        )
+        fun source(run: JsonObject) =
+            handoffSourceOf(V2ProjectionDto(thread = JsonObject(emptyMap()), runs = listOf(completed, run), visibleTurnItems = listOf(item)))
+        assertEquals(HandoffEndpoint("claudeAgent", "opus"), source(starting("handoff-1")))
+        assertEquals(HandoffEndpoint("codex", "gpt"), source(starting(null)))
+    }
+
+    @Test
     fun `same instance hands off only when the provider needs a new thread for a model change`() {
         assertNull(pending(HandoffEndpoint("codex", "a"), HandoffEndpoint("codex", "b")))
         assertNull(pending(HandoffEndpoint("claudeAgent", "a"), HandoffEndpoint("claudeAgent", "a")))

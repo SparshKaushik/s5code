@@ -17,8 +17,17 @@ import kotlinx.serialization.json.putJsonObject
  * hands the secret to the server, which keeps it under a one-use SecretRef.
  */
 
-/** Shown under the field: the one promise the card makes about the value. */
-const val SECRET_REQUEST_PRIVACY_NOTE = "Stored securely, never shown to the agent"
+/**
+ * `secretRequestPrivacyNote`, shown under the field: the one promise the card
+ * makes about the value. A `file` request lets the agent's commands read the
+ * value, so its card must not promise more.
+ */
+fun secretRequestPrivacyNote(entry: FeedEntry.SecretRequest): String =
+    if (entry.delivery == "file") {
+        "Kept out of chat, in a private file this agent's commands can read for 24 hours"
+    } else {
+        "Stored securely, never shown to the agent"
+    }
 
 const val SECRET_REQUEST_DEFAULT_PLACEHOLDER = "Paste the secret"
 

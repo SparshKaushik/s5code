@@ -122,7 +122,7 @@ class PullRequestActionRunner internal constructor(
             S5ConfirmDialogRequest(
                 title = title,
                 message = message,
-                confirmText = title.ifEmpty { pullRequestActionLabel(action) },
+                confirmText = title.ifEmpty { pullRequestActionLabel(action, current.provider) },
                 destructive = action == "close" || action == "delete-branch",
                 onConfirm = { perform(action) },
             )

@@ -49,12 +49,20 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
             Text(if (resetAt != null) "Usage limit reached · resets ${club.touchtech.s5code.kotlin.data.absoluteLabel(resetAt)}"
                 else "Usage limit reached. The provider did not report a reset time; retry when the limit is available.", style = MaterialTheme.typography.bodySmall)
             if (resetAt != null && runId != null) {
+            // Snooze stops making sense at the reset, which can pass without any redraw
+            // (RN's `UsageLimitRecoveryCard` waits on the clock for the same reason).
+            val resetAtMillis = club.touchtech.s5code.kotlin.data.parseInstant(resetAt) ?: 0
+            var beforeReset by remember(resetAtMillis) { mutableStateOf(resetAtMillis > System.currentTimeMillis()) }
+            LaunchedEffect(resetAtMillis) {
+                val remaining = resetAtMillis - System.currentTimeMillis()
+                if (remaining > 0) kotlinx.coroutines.delay(remaining)
+                beforeReset = false
+            }
             Row {
                 TextButton(enabled = !busy, onClick = { action {
                     store.workspace.updateLimitRecovery(env, id, runId, resetAt, autoResume = !detail.limitRecoveryAutoResume)
                 } }) { Text(if (detail.limitRecoveryAutoResume) "Disable auto-resume" else "Resume after reset") }
-                TextButton(enabled = !busy && (detail.limitRecoverySnoozed ||
-                    (club.touchtech.s5code.kotlin.data.parseInstant(resetAt) ?: 0) > System.currentTimeMillis()),
+                TextButton(enabled = !busy && (detail.limitRecoverySnoozed || beforeReset),
                     onClick = { action { store.workspace.updateLimitRecovery(env, id, runId, resetAt, snooze = !detail.limitRecoverySnoozed) } }) {
                     Text(if (detail.limitRecoverySnoozed) "Wake now" else "Snooze until reset")
                 }
@@ -86,7 +94,12 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
                             store.workspace.queueAction(env, id, "queued-run.reorder", run.id, beforeRunId = detail.queuedRuns.getOrNull(index + 2)?.id)
                         } }) { Text("Move down") }
                     }
-                    if (detail.canPromoteQueued) TextButton(enabled = !busy, onClick = { action {
+                    // A stopped thread has nothing to steer, so the held message is sent on
+                    // its own instead (RN's `canSendNow`).
+                    if (detail.canSendNow) TextButton(enabled = !busy, onClick = { action {
+                        store.workspace.queueAction(env, id, "queued-run.start", run.id)
+                    } }) { Text("Send now") }
+                    else if (detail.canPromoteQueued) TextButton(enabled = !busy, onClick = { action {
                         store.workspace.queueAction(env, id, "queued-message.promote-to-steer", run.id, targetRunId = detail.latestTurn?.turnId)
                     } }) { Text("Steer now") }
                     HorizontalDivider()

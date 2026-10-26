@@ -88,7 +88,8 @@ fun parseChangeRequestUrl(targetUrl: String): ChangeRequestLink? {
     val path = url.path
 
     if (host == "git.cafe" || host == "staging.git.cafe") {
-        claim(host, Regex("^/([^/]+/[^/]+)/pulls/(\\d+)(?:/|$)").find(path))?.let { return it }
+        // GitCafe serves pull requests at `/pull/<n>` and redirects the older `/pulls/<n>` there.
+        claim(host, Regex("^/([^/]+/[^/]+)/pulls?/(\\d+)(?:/|$)").find(path))?.let { return it }
     } else {
         // GitHub, and any Enterprise install: /{owner}/{repo}/pull/{n}
         if (isHostOf(host, "github.com", "github")) {

@@ -80,6 +80,7 @@ fun LazyListScope.pullRequestActivityItems(
     error: String?,
     onOpenDiscussion: (threadId: String) -> Unit,
     onOpenCommit: (oid: String) -> Unit,
+    commentActions: PullRequestCommentActions? = null,
 ) {
     if (activity == null) {
         item(key = "activity-state") {
@@ -112,7 +113,7 @@ fun LazyListScope.pullRequestActivityItems(
     }
     items(timeline.events, key = { it.key }) { event ->
         when (event) {
-            is PullRequestTimelineEvent.Comment -> TimelineComment(event.comment)
+            is PullRequestTimelineEvent.Comment -> TimelineComment(event.comment, commentActions)
             is PullRequestTimelineEvent.Discussion ->
                 TimelineDiscussion(event.thread, onClick = { onOpenDiscussion(event.thread.id) })
             is PullRequestTimelineEvent.Commit -> TimelineCommit(event.commit, onClick = { onOpenCommit(event.commit.oid) })
@@ -195,7 +196,7 @@ private fun EventHeader(actor: PullRequestActorDto?, action: String, date: Strin
 }
 
 @Composable
-private fun TimelineComment(comment: PullRequestCommentDto) {
+private fun TimelineComment(comment: PullRequestCommentDto, actions: PullRequestCommentActions?) {
     val approved = comment.reviewState?.uppercase() == "APPROVED"
     val changes = comment.reviewState?.uppercase()?.replace("-", "_") == "CHANGES_REQUESTED"
     TimelineEvent(
@@ -215,6 +216,16 @@ private fun TimelineComment(comment: PullRequestCommentDto) {
             ) {
                 CollapsibleMarkdown(comment.body, COMMENT_COLLAPSED_HEIGHT.dp)
             }
+        }
+        actions?.let {
+            PullRequestCommentFooter(
+                commentId = comment.id,
+                kind = comment.kind,
+                authorLogin = comment.author?.login,
+                canEdit = comment.canEdit,
+                reactions = comment.reactions.orEmpty(),
+                actions = it,
+            )
         }
     }
 }

@@ -517,7 +517,7 @@ fun TerminalScreen(
                         view.onInput = ::writeModifiedInput
                         view.fontSizeSp = fontSize
                         view.setTheme(terminalTheme)
-                        session?.let { view.setReplayBuffer(it.buffer) }
+                        session?.let { view.setReplayBuffer(it.buffer, it.outputResetVersion, it.outputEnd) }
                     },
                     onRelease = { it.release() },
                     modifier = Modifier.fillMaxSize(),

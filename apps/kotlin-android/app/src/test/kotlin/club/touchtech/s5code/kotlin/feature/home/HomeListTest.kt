@@ -142,7 +142,7 @@ class HomeListTest {
     }
 
     @Test
-    fun `search matches title branch project and provider`() {
+    fun `search matches title and branch`() {
         assertTrue(
             items(HomeUiState(query = "kotlin")).filterIsInstance<HomeListItem.Thread>().isNotEmpty()
         )
@@ -269,11 +269,93 @@ class HomeListTest {
         assertEquals(SearchMatchSource.Branch, branchResult.searchMatch?.source)
         assertEquals("perf/home-stream", branchResult.searchMatch?.text)
 
-        val projectResult =
-            items(HomeUiState(query = "marketing-site"), ProjectGrouping.Flat)
+        // RN's home ranks without the project title: the project filter already
+        // scopes the list, and a project word would match every thread in it.
+        assertTrue(items(HomeUiState(query = "playground"), ProjectGrouping.Flat).isEmpty())
+    }
+
+    @Test
+    fun `search lists matches flat by rank without shelves`() {
+        val result = items(HomeUiState(query = "fcm"), ProjectGrouping.Separate)
+        assertTrue(result.none { it is HomeListItem.ShelfHeader || it is HomeListItem.Section })
+        // The settled "Make the FCM migration idempotent" is listed although its
+        // shelf is collapsed.
+        assertEquals(
+            setOf("Normalize escaped FCM private keys", "Make the FCM migration idempotent"),
+            result.filterIsInstance<HomeListItem.Thread>().map { it.thread.title }.toSet(),
+        )
+    }
+
+    @Test
+    fun `a message-only match opens at its message`() {
+        val target = threads.first { it.id.value == "thr-working" }
+        val local = threads.first { it.title.startsWith("Normalize") }
+        val result =
+            homeListItems(
+                    threads = threads,
+                    projects = projects,
+                    environments = environments,
+                    state = HomeUiState(query = "normalize"),
+                    grouping = ProjectGrouping.Flat,
+                    sort = ThreadSort.Recent,
+                    serverSearchMatches =
+                        listOf(target, local).map {
+                            ThreadSearchMatch(
+                                environmentId = it.environmentId,
+                                threadId = it.id,
+                                projectId = it.projectId,
+                                source = SearchMatchSource.UserMessage,
+                                snippet = "normalize the payload",
+                                messageCreatedAt = null,
+                                quality = 1.0,
+                                hits = 1,
+                                messageId = "msg-${it.id.value}",
+                            )
+                        },
+                )
                 .filterIsInstance<HomeListItem.Thread>()
-                .first()
-        assertEquals(SearchMatchSource.Project, projectResult.searchMatch?.source)
+        // Field matches rank first; message-only threads follow.
+        assertEquals(listOf(local.id, target.id), result.map { it.thread.id })
+        assertEquals(null, result[0].searchMessageId)
+        assertEquals("msg-thr-working", result[1].searchMessageId)
+    }
+
+    @Test
+    fun `the working shelf folds busy threads until expanded`() {
+        val working = threads.first { it.status == ThreadStatus.Working }
+        fun list(expanded: Boolean) =
+            homeListItems(
+                threads = threads,
+                projects = projects,
+                environments = environments,
+                state = HomeUiState(),
+                grouping = ProjectGrouping.Flat,
+                sort = ThreadSort.Recent,
+                workingShelf = WorkingShelf(expanded),
+            )
+        val collapsed = list(expanded = false)
+        val header = collapsed.filterIsInstance<HomeListItem.ShelfHeader>().first { it.kind == ShelfKind.Working }
+        assertEquals(1, header.count)
+        assertTrue(collapsed.filterIsInstance<HomeListItem.Thread>().none { it.thread.id == working.id })
+        assertTrue(list(expanded = true).filterIsInstance<HomeListItem.Thread>().any { it.thread.id == working.id })
+    }
+
+    @Test
+    fun `settled search results stay while the query refines or widens`() {
+        val match =
+            ThreadSearchMatch(
+                environmentId = threads[0].environmentId,
+                threadId = threads[0].id,
+                projectId = threads[0].projectId,
+                source = SearchMatchSource.UserMessage,
+                snippet = "websocket",
+                messageCreatedAt = null,
+            )
+        val settled = "websock" to listOf(match)
+        assertEquals(listOf(match), visibleSearchMatches("websocke", settled))
+        assertEquals(listOf(match), visibleSearchMatches("webso", settled))
+        assertTrue(visibleSearchMatches("billing", settled).isEmpty())
+        assertTrue(visibleSearchMatches("webso", null).isEmpty())
     }
 
     @Test

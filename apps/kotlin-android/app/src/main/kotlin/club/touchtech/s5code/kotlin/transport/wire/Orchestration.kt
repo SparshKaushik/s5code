@@ -205,6 +205,12 @@ data class ThreadShellDto(
     val historyOrigin: String? = null,
     val usageLimitResetAt: String? = null,
     val limitRecovery: JsonObject? = null,
+    /**
+     * `OrchestrationV2ThreadOpens` for search ranking. Kept raw: like the
+     * contract's lenient decode, a shape this build cannot read becomes null
+     * rather than failing the whole shell (`threadOpenStatsOf`).
+     */
+    val opens: JsonElement? = null,
 )
 
 /**
@@ -504,6 +510,12 @@ data class ThreadSearchMatchDto(
     val source: String,
     val snippet: String = "",
     val messageCreatedAt: String? = null,
+    /** Match quality (1 whole words, 0.8 word starts, 0.3 inside words); older servers omit it. */
+    val quality: Double? = null,
+    /** How many of the thread's newest messages match; older servers omit it. */
+    val hits: Int? = null,
+    /** The message the snippet is from; older servers omit it. */
+    val messageId: String? = null,
 )
 
 @Serializable

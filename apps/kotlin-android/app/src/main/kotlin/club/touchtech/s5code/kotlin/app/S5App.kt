@@ -286,7 +286,7 @@ private fun AdaptiveWorkspace(
                     },
                     onNewTask = { navController.navigate(Routes.NewTask) },
                     onResumeDraft = { navController.navigate(Routes.NewTaskDraft) },
-                    onSettings = { navController.navigate(Routes.Settings) },
+                    onOpenRoute = { route -> navController.navigate(route) },
                     onConnections = { navController.navigate(Routes.Connections) },
                     onArchive = { navController.navigate(Routes.Archive) },
                     confirmController = confirmController,

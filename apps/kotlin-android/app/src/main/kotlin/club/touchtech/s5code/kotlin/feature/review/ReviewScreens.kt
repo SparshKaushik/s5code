@@ -401,7 +401,7 @@ fun ReviewFileCard(
                         icon = Icons.Rounded.Difference,
                         text =
                             if (file.status == ReviewFileStatus.Binary) {
-                                "Binary file — no textual diff available."
+                                "Binary file. No textual diff available."
                             } else {
                                 unavailableText
                             },

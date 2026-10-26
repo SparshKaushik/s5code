@@ -10,7 +10,7 @@ import kotlinx.serialization.json.Json
 /** Persisted preferences. Non-secret, so plain storage rather than the Keystore. */
 @Serializable
 data class StoredPreferences(
-    val followUpBehavior: String = "queue",
+    val followUpBehavior: String = "steer",
     val themeMode: String = "System",
     /**
      * The old dynamic-color switch. Only read to seed [colorTheme] for files
@@ -28,6 +28,10 @@ data class StoredPreferences(
     val threadSort: String = "Recent",
     val snoozedThreadsExpanded: Boolean = false,
     val settledThreadsExpanded: Boolean = false,
+    /** RN's `workingShelfEnabled`: on unless the user turned it off. */
+    val workingShelfEnabled: Boolean = true,
+    /** RN's `threadListWorkingShelfExpanded`. */
+    val workingThreadsExpanded: Boolean = false,
     val textScale: Float = 1f,
     val codeScale: Float = 1f,
     val wrapCode: Boolean = false,

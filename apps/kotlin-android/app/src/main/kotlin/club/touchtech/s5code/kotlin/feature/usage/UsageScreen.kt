@@ -66,7 +66,12 @@ private enum class UsageTab(val label: String) {
 
 /** Live subscription limits alongside transcript usage and provider/model breakdowns. */
 @Composable
-fun UsageScreen(store: AppStore, onBack: () -> Unit) {
+fun UsageScreen(
+    store: AppStore,
+    /** Null as a Home tab, where the screen is a root with the tab bar instead. */
+    onBack: (() -> Unit)?,
+    bottomBar: @Composable () -> Unit = {},
+) {
     var tab by rememberSaveable { mutableStateOf(UsageTab.Limits) }
     var window by rememberSaveable { mutableStateOf(UsageWindow.Month) }
     var mode by rememberSaveable { mutableStateOf(UsageMode.Cost) }
@@ -120,6 +125,7 @@ fun UsageScreen(store: AppStore, onBack: () -> Unit) {
             } else remote.valueOrNull?.environments?.joinToString(" · ").orEmpty(),
         prominence = S5TopBarProminence.Hero,
         onBack = onBack,
+        bottomBar = bottomBar,
     ) { padding ->
         Column(Modifier.fillMaxSize().padding(padding)) {
             Box(

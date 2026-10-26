@@ -132,4 +132,22 @@ class ThreadSummaryProjectionTest {
         assertEquals(42, summary.pullRequest?.number)
         assertEquals("#42", summary.pullRequest?.title)
     }
+
+    @Test
+    fun `server open stats decode leniently`() {
+        val json = kotlinx.serialization.json.Json
+        val stats =
+            threadOpenStatsOf(
+                json.parseToJsonElement(
+                    """{"openedAt":1000,"score":2.5,"picks":[{"query":"rel","at":900},{"query":3,"at":1}]}"""
+                )
+            )
+        assertEquals(1000L, stats?.openedAtMillis)
+        assertEquals(2.5, stats?.score ?: 0.0, 0.0)
+        // A malformed pick is dropped, not the whole record.
+        assertEquals(listOf("rel"), stats?.picks?.map { it.query })
+        assertNull(threadOpenStatsOf(json.parseToJsonElement("""{"openedAt":1000,"score":-1,"picks":[]}""")))
+        assertNull(threadOpenStatsOf(json.parseToJsonElement(""""opens"""")))
+        assertNull(threadOpenStatsOf(null))
+    }
 }
