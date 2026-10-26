@@ -139,6 +139,9 @@ jobs:
           --tests '*TerminalOutputTest'
           --tests '*ClientStateMappingTest'
           --tests '*HighlightedTextTest'
+          --tests '*QueuedEditExitTest'
+          --tests '*PlaybackInterruptionsTest'
+          --tests '*AwaitCreatedProjectTest'
           --stacktrace
 
       - name: Lint Kotlin Android client

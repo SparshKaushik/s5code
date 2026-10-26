@@ -22,12 +22,31 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
     var editing by remember(id) { mutableStateOf<QueuedRun?>(null) }
     var editText by remember(id) { mutableStateOf("") }
     var busy by remember(id) { mutableStateOf(false) }
+    // The edited run started or was cancelled elsewhere; a save in flight settles it instead.
+    val editedRunQueued = editing?.let { run -> detail.queuedRuns.any { it.id == run.id } } ?: true
+    LaunchedEffect(editing, editedRunQueued, busy) {
+        val run = editing ?: return@LaunchedEffect
+        if (editedRunQueued || busy) return@LaunchedEffect
+        editing = null
+        val draft = store.threadDraft(env.value, id.value)
+        val exit = queuedEditExit(run.text, editText, draft.text.isBlank() && draft.attachments.isEmpty())
+        if (exit == QueuedEditExit.Kept) store.setThreadDraft(env.value, id.value, editText)
+        if (exit != QueuedEditExit.Clean) store.workspace.setThreadComposerError(
+            "${env.value}:${id.value}",
+            if (exit == QueuedEditExit.Kept) "That message already started. Your edit is back in the composer."
+            else "That message already started, so the edit was discarded.",
+        )
+    }
+    val queuedRunIds by rememberUpdatedState(detail.queuedRuns.map { it.id })
     fun action(block: suspend () -> Unit) {
         if (busy) return
         busy = true
         scope.launch {
             try { block() } catch (cancelled: kotlinx.coroutines.CancellationException) { throw cancelled }
-            catch (error: Exception) { store.showError(error.message ?: "Operation failed.") }
+            catch (error: Exception) {
+                // A save that lost its run to a start is reported by the edit's exit.
+                if (editing?.id?.let { it !in queuedRunIds } != true) store.showError(error.message ?: "Operation failed.")
+            }
             finally { busy = false }
         }
     }
@@ -121,3 +140,17 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
             editing = null
         } }) { Text("Save") } }) }
 }
+
+internal enum class QueuedEditExit { Clean, Kept, Discarded }
+
+/**
+ * RN `resolveQueuedEditExit`: an unchanged edit just closes; a changed one moves
+ * into the thread's composer when that is empty, else it is dropped so it never
+ * overwrites other work. A cleared edit has nothing to put back.
+ */
+internal fun queuedEditExit(originalText: String, editText: String, threadDraftEmpty: Boolean): QueuedEditExit =
+    when {
+        editText == originalText -> QueuedEditExit.Clean
+        editText.isNotBlank() && threadDraftEmpty -> QueuedEditExit.Kept
+        else -> QueuedEditExit.Discarded
+    }

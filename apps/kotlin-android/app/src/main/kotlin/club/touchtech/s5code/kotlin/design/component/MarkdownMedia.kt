@@ -28,24 +28,61 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 
 private enum class AudioState { Idle, Preparing, Playing, Paused, Failed }
 
 /**
+ * Counts interruptions so a play request made before one cannot start playback
+ * after it, as `useMediaVideoPlayback.createPlayRequest` does on mobile.
+ */
+internal class PlaybackInterruptions {
+    private var count = 0
+
+    fun interrupt() {
+        count += 1
+    }
+
+    /** True while nothing has interrupted since this request was made. */
+    fun request(): () -> Boolean {
+        val requestedAt = count
+        return { requestedAt == count }
+    }
+}
+
+/**
  * Inline audio for a Markdown embed, as `ThreadInlineFilePreview` plays one on
  * mobile. The player is created on the first tap and released with the
  * paragraph, so a transcript full of clips holds no decoders while scrolling.
+ * Leaving the screen or the app pauses it.
  */
 @Composable
 internal fun MarkdownAudioEmbed(uri: String, name: String) {
     var state by remember(uri) { mutableStateOf(AudioState.Idle) }
     val player = remember(uri) { arrayOfNulls<MediaPlayer>(1) }
+    val interruptions = remember(uri) { PlaybackInterruptions() }
+    val lifecycle = LocalLifecycleOwner.current.lifecycle
     DisposableEffect(uri) {
         onDispose {
             player[0]?.release()
             player[0] = null
         }
+    }
+    DisposableEffect(lifecycle, uri) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) {
+                interruptions.interrupt()
+                if (state == AudioState.Playing) {
+                    player[0]?.pause()
+                    state = AudioState.Paused
+                }
+            }
+        }
+        lifecycle.addObserver(observer)
+        onDispose { lifecycle.removeObserver(observer) }
     }
     fun toggle() {
         val current = player[0]
@@ -62,6 +99,7 @@ internal fun MarkdownAudioEmbed(uri: String, name: String) {
             AudioState.Idle, AudioState.Failed -> {
                 current?.release()
                 state = AudioState.Preparing
+                val playIfUninterrupted = interruptions.request()
                 player[0] =
                     MediaPlayer().apply {
                         setAudioAttributes(
@@ -71,8 +109,13 @@ internal fun MarkdownAudioEmbed(uri: String, name: String) {
                                 .build()
                         )
                         setOnPreparedListener {
-                            it.start()
-                            state = AudioState.Playing
+                            // Coming back must not revive a clip interrupted while it loaded.
+                            if (playIfUninterrupted()) {
+                                it.start()
+                                state = AudioState.Playing
+                            } else {
+                                state = AudioState.Paused
+                            }
                         }
                         setOnCompletionListener {
                             it.seekTo(0)

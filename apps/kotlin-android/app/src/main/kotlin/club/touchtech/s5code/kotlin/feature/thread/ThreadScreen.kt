@@ -1200,16 +1200,9 @@ fun ThreadScreen(
                                 attachments = images,
                                 settings = effectiveSettings,
                                 contextRecords = contextRecords,
-                                // A /goal command changes the provider's goal;
-                                // the server rejects it as a steer, so it always
-                                // queues as its own turn rather than riding the
-                                // user's steer preference.
-                                dispatchMode =
-                                    when {
-                                        isGoalCommand(text, images.isNotEmpty()) -> "queue"
-                                        steers -> "steer"
-                                        else -> "queue"
-                                    },
+                                // The server turns a steered /goal into its own
+                                // turn and stops goal work for it; a queued one waits.
+                                dispatchMode = if (steers) "steer" else "queue",
                             )
                             following = true
                         } catch (cancellation: CancellationException) {

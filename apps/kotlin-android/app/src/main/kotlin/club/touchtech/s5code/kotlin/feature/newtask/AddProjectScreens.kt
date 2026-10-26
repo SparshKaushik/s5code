@@ -71,7 +71,10 @@ import club.touchtech.s5code.kotlin.feature.connections.environmentIcon
 import club.touchtech.s5code.kotlin.model.ConnectionState
 import club.touchtech.s5code.kotlin.model.Environment
 import club.touchtech.s5code.kotlin.model.EnvironmentId
+import club.touchtech.s5code.kotlin.model.Project
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -213,6 +216,29 @@ private fun EmptyEnvironmentState(onAddEnvironment: () -> Unit) {
         onAction = onAddEnvironment,
     )
 }
+
+internal const val PROJECT_ARRIVAL_TIMEOUT_MS = 15_000L
+
+internal const val PROJECT_NOT_ARRIVED_MESSAGE =
+    "The project was created but has not reached this device yet. " +
+        "It will appear in the project list once the connection catches up."
+
+/**
+ * A successful create can precede its project in the client store, and the
+ * draft resolves its project from the store: opening it early falls back to
+ * the project picker. False when the project has not arrived in time.
+ */
+internal suspend fun awaitCreatedProject(
+    projects: Flow<List<Project>>,
+    environmentId: EnvironmentId,
+    projectId: String,
+    timeoutMillis: Long = PROJECT_ARRIVAL_TIMEOUT_MS,
+): Boolean =
+    withTimeoutOrNull(timeoutMillis) {
+        projects.first { list ->
+            list.any { it.environmentId == environmentId && it.id.value == projectId }
+        }
+    } != null
 
 /* ── Source chooser ──────────────────────────────────────────────────── */
 
@@ -719,17 +745,20 @@ fun AddProjectLocalFolderScreen(
         }
         submitting = true
         scope.launch {
-            val outcome =
-                runCatching {
-                    store.workspace.createProject(env.environment.id, path)
-                }
-            submitting = false
-            outcome.fold(
-                onSuccess = { projectId ->
+            try {
+                val projectId = store.workspace.createProject(env.environment.id, path)
+                if (awaitCreatedProject(store.workspace.projects, env.environment.id, projectId.value)) {
                     onCreated(env.environment.id.value, projectId.value)
-                },
-                onFailure = { cause -> error = cause.message ?: "An error occurred." },
-            )
+                } else {
+                    error = PROJECT_NOT_ARRIVED_MESSAGE
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (cause: Exception) {
+                error = cause.message ?: "An error occurred."
+            } finally {
+                submitting = false
+            }
         }
     }
 
@@ -860,73 +889,46 @@ fun AddProjectDestinationScreen(
         }
         submitting = true
         scope.launch {
-            if (env.environment.capabilities.projectCloneTracking) {
-                // The server creates the project and clones in the background;
-                // the draft shows progress and holds Start until files land.
-                val outcome =
-                    runCatching {
-                        store.workspace.startTrackedProjectClone(
-                            env.environment.id, url, path,
-                        )
-                    }
-                outcome.fold(
-                    onSuccess = { (projectId, _) ->
-                        // The draft resolves its project from the store, so it
-                        // must not open before the create event has arrived (it
-                        // would fall back to the project picker and lose the
-                        // clone controls). The clone keeps running either way.
-                        val arrivedOk =
-                            withTimeoutOrNull(15_000) {
-                                store.workspace.projects.first { list ->
-                                    list.any {
-                                        it.environmentId == env.environment.id &&
-                                            it.id.value == projectId.value
-                                    }
-                                }
-                            } != null
-                        submitting = false
-                        if (!arrivedOk) {
-                            error =
-                                "The project was created but has not reached this device yet. " +
-                                    "It will appear in the project list once the connection catches up."
-                        } else {
-                            onCreated(env.environment.id.value, projectId.value, true)
-                        }
-                    },
-                    onFailure = { cause ->
-                        submitting = false
-                        error = cause.message ?: "An error occurred."
-                    },
-                )
-                return@launch
-            }
-            val outcome =
-                runCatching {
-                    val (projectId, cwd) =
-                        store.workspace.cloneProject(env.environment.id, url, path)
-                    // RN's createProject checks for an existing project at the
-                    // clone's landing directory, which is not always the path
-                    // that was asked for.
-                    val existing =
-                        projects.firstOrNull {
-                            it.environmentId == env.environment.id &&
-                                normalizeProjectPathForComparison(it.workspaceRoot) ==
-                                    normalizeProjectPathForComparison(cwd)
-                        }
-                    projectId to existing
-                }
-            submitting = false
-            outcome.fold(
-                onSuccess = { (projectId, existing) ->
-                    if (existing != null) {
-                        existingProjectTitle = existing.title
-                        existingProjectTarget = env.environment.id.value to existing.id.value
+            try {
+                if (env.environment.capabilities.projectCloneTracking) {
+                    // The server creates the project and clones in the background;
+                    // the draft shows progress and holds Start until files land.
+                    val (projectId, _) =
+                        store.workspace.startTrackedProjectClone(env.environment.id, url, path)
+                    // Losing the draft here would also lose the clone controls.
+                    // The clone keeps running either way.
+                    if (awaitCreatedProject(store.workspace.projects, env.environment.id, projectId.value)) {
+                        onCreated(env.environment.id.value, projectId.value, true)
                     } else {
-                        onCreated(env.environment.id.value, projectId.value, false)
+                        error = PROJECT_NOT_ARRIVED_MESSAGE
                     }
-                },
-                onFailure = { cause -> error = cause.message ?: "An error occurred." },
-            )
+                    return@launch
+                }
+                val (projectId, cwd) = store.workspace.cloneProject(env.environment.id, url, path)
+                // RN's createProject checks for an existing project at the
+                // clone's landing directory, which is not always the path
+                // that was asked for.
+                val existing =
+                    projects.firstOrNull {
+                        it.environmentId == env.environment.id &&
+                            normalizeProjectPathForComparison(it.workspaceRoot) ==
+                                normalizeProjectPathForComparison(cwd)
+                    }
+                if (existing != null) {
+                    existingProjectTitle = existing.title
+                    existingProjectTarget = env.environment.id.value to existing.id.value
+                } else if (awaitCreatedProject(store.workspace.projects, env.environment.id, projectId.value)) {
+                    onCreated(env.environment.id.value, projectId.value, false)
+                } else {
+                    error = PROJECT_NOT_ARRIVED_MESSAGE
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (cause: Exception) {
+                error = cause.message ?: "An error occurred."
+            } finally {
+                submitting = false
+            }
         }
     }
 

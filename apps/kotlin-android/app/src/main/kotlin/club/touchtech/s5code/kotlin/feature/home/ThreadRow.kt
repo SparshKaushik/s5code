@@ -21,7 +21,6 @@ import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Sync
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -204,7 +203,7 @@ fun ThreadRow(
                     SearchMatchLine(searchMatch, searchQuery)
                 }
                 if (draftPreview != null) DraftLine(draftPreview)
-                ThreadMetaRow(thread, project, environmentLabel)
+                ThreadMetaRow(thread, environmentLabel)
             }
             if (trailing != null) {
                 Box(Modifier.padding(start = S5Theme.spacing.tiny)) { trailing() }
@@ -368,48 +367,23 @@ private fun DraftLine(preview: String) {
     }
 }
 
-/** Branch, project, environment, diffstat, and PR state in one dense line. */
+/**
+ * Environment, diffstat, and PR state in one dense line. No branch or project
+ * title, matching the RN row: the leading icon already names the project, and
+ * the branch is detail the thread itself shows.
+ */
 @Composable
-private fun ThreadMetaRow(thread: ThreadSummary, project: Project?, environmentLabel: String?) {
+private fun ThreadMetaRow(thread: ThreadSummary, environmentLabel: String?) {
     val meta = S5Theme.code.inlineTechnical
     Row(
         Modifier.fillMaxWidth().padding(top = S5Theme.spacing.tiny),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
     ) {
-        if (thread.branch != null) {
-            Surface(
-                modifier = Modifier.weight(1f, fill = false),
-                shape = S5PillShape,
-                color = MaterialTheme.colorScheme.surfaceContainerHigh,
-                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
-            ) {
-                Row(
-                    Modifier.padding(
-                        horizontal = S5Theme.spacing.small,
-                        vertical = S5Theme.spacing.tiny,
-                    ),
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.tiny),
-                ) {
-                    Icon(
-                        Icons.AutoMirrored.Rounded.CallSplit,
-                        contentDescription = "Branch",
-                        modifier = Modifier.size(12.dp),
-                    )
-                    Text(
-                        thread.branch,
-                        style = meta,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
-                }
-            }
-        }
-        val label = listOfNotNull(project?.title, environmentLabel).joinToString(" · ")
-        if (label.isNotEmpty()) {
+        if (environmentLabel != null) {
             Text(
-                label,
+                environmentLabel,
+                modifier = Modifier.weight(1f, fill = false),
                 style = MaterialTheme.typography.labelSmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 maxLines = 1,
@@ -440,7 +414,7 @@ private fun ThreadMetaRow(thread: ThreadSummary, project: Project?, environmentL
             )
         }
         // The agent, last and quiet. It matters when scanning for "which of these did
-        // Claude run", and never more than the branch or the project.
+        // Claude run", and never more than the project.
         S5ProviderMark(
             provider = thread.provider,
             contentDescription = thread.provider.label,
