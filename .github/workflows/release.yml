@@ -311,8 +311,14 @@ jobs:
       - name: Install Chromium for web browser tests
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
 
+      # The file preview suite renders large documents against short waits. On
+      # 4-vCPU GitHub runners it starves beside other files, so it runs alone.
       - name: Test
-        run: vp run --filter @t3tools/web test
+        run: vp run --filter @t3tools/web test -- --exclude src/components/files/AttachmentFilePreview.browser.test.tsx
+
+      - name: Test file previews
+        working-directory: apps/web
+        run: vp test run --project browser src/components/files/AttachmentFilePreview.browser.test.tsx
 
   test_server:
     name: Release server tests ${{ matrix.shard }}
