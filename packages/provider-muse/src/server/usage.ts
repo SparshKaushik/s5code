@@ -79,8 +79,10 @@ function parseRecord(parsed: unknown): readonly UsageRecord[] {
       provider: "muse",
       timestampMs: Math.trunc(entry.recorded_at / 1_000),
       model: typeof event.model === "string" ? event.model : event.model.model_id,
+      apiProvider: "",
       sessionId: entry.stream.id,
       totals,
+      inputTokensEstimated: false,
       reportedCostUsd: null,
       speed: "standard",
       // Runtime envelopes can be copied into another session. The source record
