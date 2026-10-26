@@ -125,7 +125,7 @@ function decodeOrInitial<T, E>(
   }
 }
 
-function writeLocalStorageValue<T, E>(
+export function writeLocalStorageValue<T, E>(
   key: string,
   value: T | ((val: T) => T),
   initialValue: T,
