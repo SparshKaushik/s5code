@@ -1,16 +1,7 @@
 /**
- * Apply pending relay Postgres migrations to the Neon database.
- *
- * The migrations under `../migrations/postgres` use Alchemy's snapshot format
- * (`{timestamp}_name/{migration.sql, snapshot.json}`), so they are applied
- * directly with `pg` (not drizzle-kit). Each migration runs in a transaction
- * together with bookkeeping in `relay_migrations`, so a partially-failed
- * migration cannot leave the schema half-applied.
- *
- * `DATABASE_URL` (the Neon pooled or direct connection string) is read from the
- * environment. Run out-of-band, or from CI before the deploy:
- *
- *   vp run --filter t3code-relay migrate
+ * Applies pending relay Postgres migrations (Alchemy snapshot format) with
+ * `pg`, each in a transaction with its `relay_migrations` bookkeeping. Reads
+ * `DATABASE_URL`. Run with `vp run --filter t3code-relay migrate`.
  */
 import * as NodeModule from "node:module";
 import * as NodeCrypto from "node:crypto";

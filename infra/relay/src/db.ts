@@ -39,13 +39,7 @@ export class RelayTransactions extends Context.Service<
  * run them for a Neon origin.
  */
 
-/**
- * Parse a Postgres connection URL (for example a Neon pooled connection
- * string) into the origin `Cloudflare.Hyperdrive` connects to. Hyperdrive
- * provides its own pooled connection into Cloudflare's edge, so the Worker
- * talks to Neon through the Hyperdrive binding rather than over the public
- * internet.
- */
+/** Parses a Postgres URL into the origin Hyperdrive uses to pool Worker connections. */
 function parsePostgresUrl(rawUrl: string): PublicOrigin {
   const url = new URL(rawUrl);
   return {

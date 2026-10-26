@@ -20,6 +20,9 @@ jobs:
   # side instead of one after another. The `Check` job at the end of this file
   # passes only when every other job does.
   lint:
+    permissions:
+      contents: read
+      id-token: write
     name: Lint
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -271,6 +274,9 @@ jobs:
   # dependency layers. The concurrency limit stays at the default 4 so peak load
   # per runner is unchanged.
   test:
+    permissions:
+      contents: read
+      id-token: write
     name: Test
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -343,6 +349,9 @@ jobs:
   # started last and ran alone for about 40s after everything else finished.
   # release.yml mirrors this test, test_web, and test_server split.
   test_web:
+    permissions:
+      contents: read
+      id-token: write
     name: Test Web
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -366,8 +375,14 @@ jobs:
       - name: Install Chromium for web browser tests
         run: node apps/web/node_modules/playwright/cli.js install --with-deps --only-shell chromium
 
+      # The file preview suite renders large documents against short waits. On
+      # 4-vCPU GitHub runners it starves beside other files, so it runs alone.
       - name: Test
-        run: vp run --filter @t3tools/web test
+        run: vp run --filter @t3tools/web test --exclude src/components/files/AttachmentFilePreview.browser.test.tsx
+
+      - name: Test file previews
+        working-directory: apps/web
+        run: vp test run --project browser src/components/files/AttachmentFilePreview.browser.test.tsx
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of
@@ -376,6 +391,9 @@ jobs:
   # about 1.5 cores busy, so 4 vCPU runners lose nothing against 8. The shards
   # split files by recorded duration (apps/server/src/testUtils/weightedShardSequencer.ts).
   test_server:
+    permissions:
+      contents: read
+      id-token: write
     name: Test Server ${{ matrix.shard }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -409,7 +427,18 @@ jobs:
         env:
           T3CODE_TRANSFER_BUDGET_REPORT_PATH: ${{ runner.temp }}/t3code-transfer-budget.md
           T3CODE_TRANSFER_BUDGET_RESULT_PATH: ${{ runner.temp }}/thread-transfer-result.json
-        run: vp run --filter t3 test --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+        run: >-
+          vp run test:cached -- --shard ${{ matrix.shard }}/${{ strategy.job-total }}
+          --uncached apps/server/integration/transferBudgetV2.integration.test.ts
+          --verify-hits 1 --report "${{ runner.temp }}/test-cache-${{ matrix.shard }}.json" apps/server
+
+      - name: Upload test cache measurements
+        if: always() && steps.changes.outputs.test_server != 'false'
+        uses: actions/upload-artifact@v7
+        with:
+          name: test-cache-${{ matrix.shard }}
+          path: ${{ runner.temp }}/test-cache-${{ matrix.shard }}.json
+          if-no-files-found: error
 
       # integration/transferBudgetV2.integration.test.ts writes the report; exactly one shard
       # produces these files. Gating the upload on their presence keeps a
@@ -598,6 +627,9 @@ jobs:
         run: vp run lint:mobile
 
   release_smoke:
+    permissions:
+      contents: read
+      id-token: write
     name: Release Smoke
     runs-on: ubuntu-24.04
     timeout-minutes: 15

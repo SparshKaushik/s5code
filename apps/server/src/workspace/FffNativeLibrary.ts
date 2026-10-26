@@ -1,31 +1,7 @@
 /**
- * FffNativeLibrary — make `libfff_c` loadable from a compiled server binary.
- *
- * Every file listing in every client (`projects.listEntries`), every composer
- * path search, and every content search goes through `WorkspaceSearchIndex`,
- * which is a `FileFinder` from `@ff-labs/fff-node`, which dlopens `libfff_c`.
- * `fff-node` finds that library by resolving its own platform package out of
- * `node_modules`, relative to its own `import.meta.url`.
- *
- * Inside a `bun build --compile` binary both of those are gone. The module's
- * `import.meta.url` is `file:///$bunfs/root/...`, so there is no `node_modules`
- * above it to resolve from, and the host machine has no reason to have one.
- * `findBinary()` returns null, the index fails to create, and the user sees an
- * empty file tree on every client with the real reason only in the server log.
- *
- * Embedding the `.so` as a bun asset is necessary but not sufficient: bun's
- * virtual filesystem is not a real filesystem, and `dlopen("/$bunfs/root/...")`
- * fails with ENOENT because the dynamic loader is the kernel's, not bun's. So the
- * library has to be materialised on disk once, and `fff-node` has to be told
- * where. The patch in `patches/@ff-labs__fff-node@0.11.0.patch` gives
- * `findBinary()` an explicit `T3CODE_FFF_NATIVE_LIB_PATH` override for exactly
- * this, checked before every other heuristic.
- *
- * A no-op in every other way of running the server (`npx t3`, the desktop app, a
- * dev checkout): those all have a real `node_modules`, where `fff-node`'s own
- * resolution is correct.
- *
- * @module workspace/FffNativeLibrary
+ * fff-node finds `libfff_c` through `node_modules`, which a `bun build --compile`
+ * binary lacks, and the kernel cannot dlopen from `/$bunfs`. Extract the embedded
+ * library to disk and point fff-node at it via the patched override env var.
  */
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -115,12 +91,8 @@ export const extractFffNativeLibrary = Effect.fn("extractFffNativeLibrary")(func
 });
 
 /**
- * Extracts the embedded library, if there is one, and points `fff-node` at it.
- *
- * Failure is logged and swallowed. A server that cannot write its cache should
- * still serve threads, terminals, and git; it just cannot serve the file tree,
- * which is the same outcome as not having tried and not worth refusing to boot
- * over.
+ * Extracts the embedded library, if any, and points fff-node at it. Failures are
+ * logged and swallowed: losing the file tree is no reason to refuse to boot.
  */
 export const ensureFffNativeLibrary = Effect.fn("ensureFffNativeLibrary")(function* (input: {
   readonly baseDir: string;

@@ -21,61 +21,10 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
 
 /**
- * Build a precompiled, standalone server binary for headless deployments.
- *
- * The server is Bun-first (server.ts gates on `typeof Bun` to pick
- * BunHttpServer / BunServices / BunPtyAdapter, and persistence uses bun:sqlite),
- * so Bun's compile API produces a single self-contained executable with the
- * runtime embedded — no Node, pnpm, `vp`, or `node_modules` needed on the host.
- *
- * We compile the already-bundled `apps/server/dist/bin.mjs` (`vp pack` with
- * `onlyBundle: false` inlines every importable dependency).
- *
- * Two flags are load-bearing, both verified empirically against bun 1.3.13:
- *
- *   `--splitting` is required, not an optimization. Without it the bundler
- *   flattens `Sqlite.ts`'s runtime-gated `import("../NodeSqliteClient.ts")`
- *   into the entry chunk, which hoists its top-level `import "node:sqlite"` to
- *   the top of the program. Bun does not implement `node:sqlite`, so the binary
- *   dies at startup with `No such built-in module: node:sqlite` before the
- *   `process.versions.bun` check can ever pick `bun:sqlite`. With `--splitting`
- *   the Node driver stays in its own lazily-loaded chunk and is never touched.
- *
- *   `--bytecode` cannot be combined with `--splitting` (bun fails with
- *   "Failed to generate bytecode"), so it is deliberately not used.
- *
- * The fff native library IS embedded, as a bun asset. It has to be: every file
- * listing and path search dlopens `libfff_c`, and `@ff-labs/fff-node` locates it
- * by resolving its own platform package out of `node_modules` relative to its own
- * `import.meta.url` — which inside a compiled binary is `/$bunfs/root/...`, with
- * no `node_modules` above it and none on the host. Without the asset the server
- * boots, serves threads and terminals, and shows an empty file tree on every
- * client, with the reason only in its log. See
- * apps/server/src/workspace/FffNativeLibrary.ts for the extraction at startup.
- *
- * Cursor's platform package is embedded as an archive too. Its executables and
- * tree-sitter bindings must be extracted before importing the SDK; virtual
- * assets cannot be spawned or dlopened. The standalone-only resolver override
- * points the SDK at that cache without changing its provider behavior.
- * Playwright is embedded as a package archive as well: its dynamic require
- * escapes Bun's module graph, and its runtime reads files beside package.json.
- * The browser loader restores that layout on first use.
- *
- * The web client is NOT embedded. Bun's `--asset` flag (the only way to embed a
- * directory tree at a stable path) ships in Bun 1.4; on 1.3.x it is silently
- * ignored as an unknown flag, producing a binary that looks correct and serves
- * nothing. This binary therefore runs API + WebSocket only: connect to it from
- * app.s5code.touchtech.club, the desktop app, or mobile.
- *
- * Only the Linux server targets are configured here (the scenario this fills):
- *   - bun-linux-x64
- *   - bun-linux-arm64
- *
- * Usage:
- *   node scripts/build-server-binary.ts --arch x64 --output-dir release
+ * Builds a standalone Bun server binary for Linux x64/arm64 from `apps/server/dist/bin.mjs`.
+ * It embeds libfff_c, Cursor's platform package, and Playwright as assets, but not the web client.
+ * Usage: node scripts/build-server-binary.ts --arch x64 --output-dir release
  */
-
-const ServerBinaryArch = Schema.Literals(["x64", "arm64"]);
 
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
@@ -199,20 +148,9 @@ const runCommand = Effect.fn("runCommand")(function* (
 });
 
 /**
- * Absolute path of the `libfff_c` shared library for one build target.
- *
- * Resolved from the install location rather than with `require.resolve`:
- * `@ff-labs/fff-node`'s exports map has no `./package.json` entry and no CJS
- * main, so neither `require.resolve` nor `import.meta.resolve` can name the
- * package directory. Its own optional platform dependencies resolve normally
- * once we are standing in it.
- *
- * The *target's* library, not the host's: release CI cross-compiles, and an
- * arm64 binary carrying an x64 `.so` fails at dlopen with a message about file
- * format that points nowhere near the real cause.
- *
- * A failure here fails the build. A binary missing the library looks healthy and
- * has no file tree, which is the silent degradation this embed exists to end.
+ * Resolves the target's `libfff_c` from the install location: fff-node's exports
+ * name neither package.json nor CJS main. Cross-compiled binaries need the target's
+ * library, and a missing one fails the build rather than shipping an empty file tree.
  */
 const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
   repoRoot: string,
@@ -402,14 +340,9 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     { verbose: options.verbose },
   );
 
-  // --splitting is required (see the module comment): it keeps the Node SQLite
-  // driver in a lazily-loaded chunk so its top-level `node:sqlite` import is
-  // never hoisted into the entry, which would kill the binary at startup.
-  // --bytecode is intentionally absent: bun cannot generate bytecode with
-  // --splitting. The two --define values are what let the running binary
-  // recognize itself as a self-updating release artifact.
-  // The compile API keeps the CLI's splitting behavior and allows a loader
-  // plugin scoped to Cursor's flattened entry. No installed package is edited.
+  // --splitting keeps `node:sqlite` in a lazy chunk; hoisted, it kills Bun at startup.
+  // --bytecode cannot combine with splitting. The defines mark a self-updating
+  // release; the loader plugin is scoped to Cursor's flattened entry.
   const compileScript = `
     import { dirname } from "node:path";
     ${patchStandaloneCursorSdk.toString()}
@@ -457,15 +390,8 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     });
   }
 
-  // Prove the --define values actually landed. Bun only rewrites literal
-  // `process.env.<NAME>` member expressions, so a refactor that reads them
-  // indirectly would compile fine and produce a binary that can never
-  // recognize itself as updatable.
-  //
-  // The assertion is that the variable *names* are gone: a successful inline
-  // replaces them with their values, leaving no trace. Searching for the values
-  // instead would be useless, since bun's own runtime already contains strings
-  // like "bun-linux-x64".
+  // Bun inlines only literal `process.env.<NAME>` reads. Assert the names are gone;
+  // searching for values is useless because Bun's runtime contains strings like them.
   const compiled = yield* fs.readFile(outfile);
   // The asset is only useful if it is actually in there. Bun names embedded
   // files `libfff_c-<hash>.so`, and the un-hashed stem survives in the manifest,

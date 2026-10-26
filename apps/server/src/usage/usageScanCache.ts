@@ -9,18 +9,10 @@ import * as Schema from "effect/Schema";
 import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
-// v2: Codex fork-copy suppression changed what a file parses to, so v1
-// entries would keep serving double-counted records forever.
-// v3: entries carry the parse position and reducer state so a grown file
-// re-parses only its appended bytes instead of starting over.
-// v4: records carry Claude fast mode, which v3 rows never captured.
-// v5: Codex records carry their service tier. v4 rows store speed the same
-// way, so v4 entries still load; see `decodeScanCache` for v4 Codex entries.
-// v6: retain S5's gateway identity and estimated-token fields alongside speeds.
-// v8: S5's v6 rows plus upstream v7's Codex tier provenance and malformed counts.
-// v9: S5's v8 rows plus upstream v8's Codex compaction and resume counters.
+// S5 cache versions: v6 adds gateway identity and estimated-token fields; v8,
+// v9 and v10 carry upstream v7, v8 and v9 reducer state respectively.
 // Upstream rows have no gateway fields and still load.
-const USAGE_SCAN_CACHE_VERSION = 9 as const;
+const USAGE_SCAN_CACHE_VERSION = 10 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -29,8 +21,9 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * it, dropping saved usage for deleted transcripts. Separate files keep both.
  * Legacy upstream and S5 caches are imported when this version's file is missing.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v9.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v10.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v9.json",
   "usage-scan-cache-v8.json",
   "usage-scan-cache-v7.json",
   "usage-scan-cache-v6.json",
@@ -45,11 +38,7 @@ export interface CachedFile {
   readonly mtimeMs: number;
   readonly provider: UsageProviderKind;
   readonly records: readonly UsageRecord[];
-  /**
-   * Records from a trailing segment the writer had not newline-terminated at
-   * parse time. Kept apart from `records` because an incremental parse
-   * re-reads that segment and would otherwise double count it.
-   */
+  /** Unterminated tail records stay separate because incremental parsing rereads them. */
   readonly tailRecords: readonly UsageRecord[];
   /** Whole-file count, including diagnostics from the tentative tail. */
   readonly malformedRecords: number;
@@ -179,11 +168,7 @@ export function encodeScanCache(cache: ScanCache): SerializedCache {
   };
 }
 
-/**
- * Entries are replaced, never mutated, when their file changes, so an entry's JSON is memoised by
- * identity. The intern tables only grow, so a memoised entry's indexes stay valid; a pruned entry
- * can leave an unused string behind until the next process start.
- */
+/** Memoizes immutable entries by identity; growing intern tables preserve indexes, retaining unused strings until restart. */
 export function makeScanCacheWriter(): (
   cache: ScanCache,
   extra: Readonly<Record<string, unknown>>,
@@ -252,9 +237,7 @@ export function decodeScanCache(
   // distinguishes the layouts, so saved history survives either upgrade path.
   const legacyFork = version === 4 && root.apiProviders !== undefined;
 
-  // Any corrupt row disqualifies the whole entry. Keeping the survivors
-  // under the original (size, mtime) would read as a valid warm hit and the
-  // file would never be re-parsed, silently losing the dropped rows' usage.
+  // Reject entire corrupt entries; partial survivors would appear warm and hide usage until the file changes.
   const decodeRecords = (
     rows: readonly unknown[],
     provider: UsageProviderKind,
@@ -360,17 +343,24 @@ export function decodeScanCache(
     ) {
       continue;
     }
-    // Keep history for deleted rollouts, but re-parse incompatible reducer
-    // state: a zero position cannot resume. Older Codex entries lack
-    // provenance state (upstream v7) or misread compaction and resume counters
-    // (upstream v8). S5's v4 and v6 caches hold upstream v5 reducer state and
-    // S5's v8 holds upstream v7's. Pi entries from before auxiliary usage
-    // support likewise keep saved totals, but live transcripts must be read again.
+    // Keep history for deleted rollouts, but re-parse incompatible reducer state.
+    // S5 v4/v6, v8, v9 and v10 hold upstream v5, v7, v8 and v9 state. Pi entries
+    // from before auxiliary usage support must re-read live transcripts too.
     const stateVersion =
-      root.apiProviders === undefined ? version : version >= 9 ? 8 : version >= 8 ? 7 : 5;
+      root.apiProviders === undefined
+        ? version
+        : version >= 10
+          ? 9
+          : version >= 9
+            ? 8
+            : version >= 8
+              ? 7
+              : 5;
     const legacy =
       (format.state !== undefined &&
-        (stateVersion < 6 || (entry.p === "codex" && stateVersion < 8))) ||
+        (stateVersion < 6 ||
+          (entry.p === "codex" &&
+            (stateVersion < 8 || (stateVersion < 9 && malformedRecords > 0))))) ||
       (entry.p === "pi" && entry.pf !== 1);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
@@ -427,10 +417,7 @@ export function pruneScanCache(cache: ScanCache, retentionCutoffMs: number): num
   return removed;
 }
 
-/**
- * Callers stitching an incremental parse together pass one `seen` set across the line and tail
- * record batches so the whole file stays deduplicated as a unit; the set is mutated in place.
- */
+/** Mutates seen; share it across incremental line/tail batches to deduplicate the whole file. */
 export function dedupeWithinFile(
   records: readonly UsageRecord[],
   seen: Set<string> = new Set(),

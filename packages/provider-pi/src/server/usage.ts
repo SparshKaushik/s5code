@@ -30,17 +30,8 @@ export function initialPiScanState(): PiScanState {
 }
 
 /**
- * Feeds one line of a pi session log into `state`, returning a record when the
- * line was an assistant message with usage.
- *
- * pi's token fields are disjoint (`input + cacheRead + cacheWrite + output`
- * reconciles with its own `totalTokens`), so unlike Codex there is nothing to
- * subtract out. `reasoning` is a subset of `output`.
- *
- * pi also computes a cost per message, but only when it has rates for the
- * model; gateways it has no pricing for report a zero cost object next to real
- * tokens. A zero total is therefore read as "pi did not price this" and left to
- * our own pricing, which at worst agrees.
+ * Parses one pi session line. pi token fields are disjoint and `reasoning` is a
+ * subset of `output`. A zero cost total means pi lacked rates, so our pricing estimates it.
  */
 export function parsePiLine(line: string, state: PiScanState): UsageRecord | null {
   let parsed: unknown;
@@ -109,12 +100,8 @@ function parsePiRecord(parsed: unknown, state: PiScanState): UsageRecord | null 
   let uncachedInputTokens = reportedInputTokens;
   let cachedInputTokens = reportedCachedInputTokens;
   if (inputTokensEstimated) {
-    // Kiro exposes context utilisation, not billed input/cache metrics. Its pi
-    // adapter turns that percentage into `usage.input`, so treating every turn
-    // as fresh input multiplies a long agent loop's apparent cost. Simulate a
-    // conservative rolling-prefix cache: only the unchanged prefix of a
-    // non-shrinking context is cached. A smaller context means compaction,
-    // branch/reset, or a model switch and is treated as entirely fresh.
+    // Kiro reports context utilisation as `usage.input`. Simulate a rolling-prefix
+    // cache: a non-shrinking context reuses its prior prefix; a smaller one is fresh.
     const previousContextTokens = state.kiroContextTokensByModel[model] ?? 0;
     cachedInputTokens = reportedInputTokens >= previousContextTokens ? previousContextTokens : 0;
     uncachedInputTokens = reportedInputTokens - cachedInputTokens;

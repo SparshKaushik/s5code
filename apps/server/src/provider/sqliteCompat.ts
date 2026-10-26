@@ -1,14 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off -- SQLite's native backup API runs outside an Effect environment.
-/**
- * Cross-runtime SQLite compatibility layer for Node.js and Bun.
- *
- * Node.js 22+ provides `DatabaseSync` via `node:sqlite`.
- * Bun provides `Database` via `bun:sqlite` and does not implement `node:sqlite`.
- *
- * This shim exports `DatabaseSync` compatible with both runtimes.
- *
- * @module provider/sqliteCompat
- */
+/** `DatabaseSync` for Node (`node:sqlite`) and Bun (`bun:sqlite`), which lacks `node:sqlite`. */
 
 import * as NodeFSP from "node:fs/promises";
 
@@ -35,11 +26,8 @@ export class StatementSyncShim {
   }
 
   /**
-   * Mirrors `node:sqlite`'s `StatementSync.columns()`. The Effect SQL client
-   * uses the length to decide between `.all()` (row-returning) and `.run()`
-   * (writes), so an absent method breaks every statement on Bun. Bun exposes
-   * the result column names as `Query.columnNames`; the richer per-column
-   * metadata Node reports is not available, so those fields are null.
+   * Effect SQL uses `columns().length` to choose `.all()` over `.run()`. Bun only
+   * exposes names via `Query.columnNames`, so the other metadata fields are null.
    */
   columns(): ReadonlyArray<{
     column: string;

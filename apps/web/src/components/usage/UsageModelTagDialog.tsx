@@ -1,13 +1,6 @@
 /**
- * Maps a model name we could not price onto a real catalog entry.
- *
- * Gateways report names no catalog knows (`cline-free/glm-5.2`) or names
- * several catalogs price differently (`claude-opus-5` is served by eleven
- * providers at three prices). Rather than guess, those rows report as unpriced
- * and this is how a user says what they actually are. The tag is stored in
- * client settings, so tagging once covers every environment.
- *
- * @module UsageModelTagDialog
+ * Maps an unpriced model name onto a catalog entry instead of guessing. Tags
+ * live in client settings, so one tag covers every environment.
  */
 import { useDeferredValue, useState } from "react";
 

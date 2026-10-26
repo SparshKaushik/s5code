@@ -14,16 +14,9 @@ import { BOOT_SERVICE_UNIT_ENV } from "./bootService.ts";
 import { serverBinaryAssetName, type ServerBinaryIdentity } from "./binaryRuntime.ts";
 
 /**
- * Self-update for the precompiled single-file server binary.
- *
- * The binary has no npm tree to install into, so the launcher-backed
- * pinned-runtime flow does not apply. Instead we download the release asset for
- * this exact version and target, prove it runs and reports the version we asked
- * for, then atomically replace the running executable and restart.
- *
- * The swap is a same-directory `rename`, which is atomic on POSIX and legal
- * while the old image is still executing (the running process keeps its open
- * inode; only the directory entry moves).
+ * Self-update for the standalone server binary: download this version and target,
+ * verify that it reports the requested version, then atomically rename it over the
+ * running executable and restart.
  */
 
 const DOWNLOAD_TIMEOUT = Duration.minutes(10);
@@ -76,16 +69,9 @@ export function serverBinaryDownloadUrl(input: {
 }
 
 /**
- * Restart strategy for the replacement image. Under systemd we exit and let
- * `Restart=always` start the new binary, which keeps the service manager as
- * the single owner of the process; the self-exec path cannot be used there
- * because the default `KillMode=control-group` would kill the detached
- * replacement along with the exiting unit. Unsupervised, the binary spawns
- * its replacement detached and exits.
- *
- * Detection: the launcher-installed unit sets `T3_BOOT_SERVICE_UNIT`, and
- * systemd sets `INVOCATION_ID` for every unit invocation, which also covers
- * hand-written units that never went through `t3 service install`.
+ * systemd owns restarts, and `KillMode=control-group` would kill a detached
+ * replacement, so supervised binaries exit for `Restart=always`. Detection uses
+ * `T3_BOOT_SERVICE_UNIT` or systemd's `INVOCATION_ID`.
  */
 export function resolveRestartMethod(
   env: Readonly<Record<string, string | undefined>>,
@@ -218,12 +204,8 @@ export const prepareServerBinaryUpdate = Effect.fn("cloud.binary_update.prepare"
 );
 
 /**
- * Hands off to the replacement image. Under systemd this just exits non-zero so
- * the unit's `Restart=always` starts the new binary; unsupervised it spawns the
- * replacement detached first.
- *
- * The caller runs this after acknowledging the RPC, so it is expected to end
- * this process.
+ * Hands off to the replacement after the RPC is acknowledged: exit for systemd,
+ * or spawn the replacement detached first when unsupervised.
  */
 export const restartIntoServerBinary = Effect.fn("cloud.binary_update.restart")(function* (input: {
   readonly plan: ServerBinaryUpdatePlan;

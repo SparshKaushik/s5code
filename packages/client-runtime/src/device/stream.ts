@@ -1,5 +1,4 @@
 // @effect-diagnostics globalFetch:off globalTimers:off - This browser and WebView transport runs without an Effect runtime.
-/* oxlint-disable unicorn/prefer-add-event-listener -- Each client owns its sockets and their handlers. */
 
 import {
   createDuoControl,
@@ -975,11 +974,9 @@ export function createDeviceStreamClient(
         connection.addEventListener("icegatheringstatechange", changed);
       });
       if (!isCurrent()) return;
-      // serve-sim takes the offer's candidates as the whole set; none trickle
-      // later. A simulator in the cloud needs a reflexive or relay candidate,
-      // which STUN and TURN can take longer than the deadline to produce: an
-      // offer cut short without one is retried with a longer deadline, up to
-      // a bound, after which it goes as gathered rather than never.
+      // serve-sim takes all candidates in the offer; later candidates never trickle.
+      // Cloud simulators need a reflexive or relay candidate, so retry incomplete offers with
+      // longer deadlines up to the bound, then send what was gathered.
       const sdp = connection.localDescription?.sdp ?? "";
       if (
         !gathered &&
@@ -1175,11 +1172,8 @@ export function createDeviceStreamClient(
     ws.onmessage = (event) => {
       if (stopped || socket !== ws) return;
       if (typeof event.data === "string") {
-        // The encoder restarts at a new size when the device rotates; the
-        // next keyframe carries a fresh SPS, so the decoder is rebuilt from it.
-        // serve-emu sends that keyframe unprompted. Asking for one here would
-        // restart the encoder again, which announces another session, so the
-        // decoder would be torn down before every keyframe and never paint.
+        // Rotation restarts the encoder; serve-emu sends a fresh SPS keyframe unprompted.
+        // Requesting one would restart it again and tear down the decoder before every keyframe.
         if (isVideoSessionMessage(event.data)) {
           closeDecoder();
           configuring = false;
