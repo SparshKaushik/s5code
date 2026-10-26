@@ -62,6 +62,7 @@ export const RelayHyperdrive = Effect.gen(function* () {
     caching: {
       disabled: true,
     },
-    originConnectionLimit: 40,
+    // Cloudflare accepts 5-20 origin connections on this account's plan.
+    originConnectionLimit: 20,
   });
 });
