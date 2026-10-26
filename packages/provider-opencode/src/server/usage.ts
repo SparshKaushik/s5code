@@ -30,12 +30,8 @@ function text(value: unknown): string {
 }
 
 /**
- * Kiro reports the full prompt context as `tokens.input` with no cache split,
- * unlike every other provider behind OpenCode. A rolling-prefix estimator
- * treats the previous request's context as the cached prefix for the next one,
- * which is what the upstream pi parser does for the same quirk. The map is
- * keyed per session and model so a context reset in one session does not
- * leak into another's estimate.
+ * Kiro reports full prompt context as `tokens.input` with no cache split. Like
+ * the pi parser, treat the previous context per session and model as cached prefix.
  */
 type KiroContextMap = Map<string, number>;
 
@@ -116,8 +112,7 @@ function parseOpenCodeMessage(
     sessionId,
     totals,
     inputTokensEstimated,
-    // OpenCode writes zero for models without a known rate, including paid
-    // subscription models. Let the shared price table estimate those records.
+    // OpenCode uses zero for unknown rates, including paid subscriptions; let shared pricing estimate.
     reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null,
     speed: "standard",
     dedupeKey: id ? `opencode:${id}` : null,
@@ -158,13 +153,9 @@ const entryInfo = Effect.fn("entryInfo")(function* (path: string) {
   return yield* fileSystem.stat(path);
 });
 
-/**
- * Stats run in the libuv thread pool, so a few at a time cut the walk's wall
- * time without lengthening any event-loop turn.
- */
 const LEGACY_STAT_CONCURRENCY = 4;
 
-/** Entries stat'd before any is processed, so one huge directory is not held in memory at once. */
+// Batch stats so huge directories do not stay in memory.
 const LEGACY_STAT_BATCH = 256;
 
 export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
@@ -227,8 +218,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
     files.push(file);
     yield* Effect.gen(function* () {
       const sql = yield* SqlClient.SqlClient;
-      // A busy live provider should fail this source promptly rather than
-      // stalling the server while SQLite waits for its writer.
+      // Fail promptly on live-writer locks instead of stalling the server.
       yield* sql.unsafe("PRAGMA busy_timeout = 100");
       const tables = new Set(
         (yield* sql.unsafe<{ readonly name: unknown }>(
@@ -277,10 +267,8 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
               ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
             }),
           );
-        // SqlClient materializes each result with StatementSync.all(), and the
-        // window can exclude most rows. Each statement covers MESSAGE_PAGE_SIZE
-        // rowids, however few match, and rows appended mid-scan are left out.
-        // Untraced, as a large history runs thousands of them.
+        // StatementSync.all materializes results; page by rowid and exclude mid-scan appends.
+        // Omit tracing because large histories require thousands of statements.
         if (!columns.has("seq")) {
           for (let after = firstRowId - 1; after < lastRowId; after += MESSAGE_PAGE_SIZE) {
             const rows = yield* sql
@@ -379,9 +367,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
       for (let start = 0; start < names.length; start += LEGACY_STAT_BATCH) {
         const batch = names.slice(start, start + LEGACY_STAT_BATCH);
         const entries = batch.map((name) => path.join(directory, name));
-        // `stat` follows symlinks and `readLink` fails, expensively, for
-        // everything else. Stat a batch, then ask whether an entry is a symlink
-        // only where the answer changes the result.
+        // stat follows symlinks; avoid expensive readLink failures unless link identity matters.
         const infos = yield* Effect.forEach(
           entries,
           (entry) =>
@@ -407,8 +393,7 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
             if (!(yield* isSymbolicLink(entry))) directories.push(entry);
           } else if (info?.type === "File" && name.endsWith(".json")) {
             const id = name.slice(0, -5);
-            // A message cannot be created after its file was last written, so a
-            // file untouched since the window opened holds nothing in range.
+            // Messages cannot postdate file mtime; older files hold no in-window usage.
             const skip =
               seen.has(`opencode:${id}`) ||
               Option.exists(info.mtime, (mtime) => mtime.getTime() < sinceMs);

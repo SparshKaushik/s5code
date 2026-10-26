@@ -1,12 +1,6 @@
 /**
- * Editing the user's model tags.
- *
- * A tag says "this model name is really that catalog entry". The awkward part
- * is identity: an untagged row stands for one transcript name, but a tagged row
- * is a merge of every name pointed at one catalog entry, so editing it has to
- * move all of them together or the row would split in half.
- *
- * @module usageTags
+ * Edits model tags. A tagged row merges every name pointed at one catalog
+ * entry, so edits move all of them together or the row would split.
  */
 import type { UsageCatalogModelId, UsageModelAlias, UsageProviderKind } from "@t3tools/contracts";
 

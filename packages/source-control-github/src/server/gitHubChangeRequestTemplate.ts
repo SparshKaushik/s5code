@@ -129,12 +129,9 @@ export const detect = Effect.fn("gitHubChangeRequestTemplate.detect")(function* 
   executeGit: ExecuteGit,
 ) {
   return yield* Effect.gen(function* () {
-    // Worktree paths can be replaced between validation and open. Read regular blobs from the
-    // committed base tree so repository-controlled symlinks and path races never reach the host filesystem.
-    // Split file and directory pathspecs into separate ls-tree calls: a
-    // directory pathspec that is a leading-path prefix of a file pathspec
-    // (docs/PULL_REQUEST_TEMPLATE vs docs/PULL_REQUEST_TEMPLATE.md) can shadow
-    // the file on some git versions.
+    // Read regular blobs from the committed base tree so symlinks and path races never reach the host.
+    // Separate file and directory ls-tree calls: on some git versions a directory
+    // pathspec prefix (docs/PULL_REQUEST_TEMPLATE) shadows the matching .md file.
     const listTreeEntries = (paths: ReadonlyArray<string>) =>
       executeGit({
         operation: "gitHubChangeRequestTemplate.listTemplates",

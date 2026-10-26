@@ -1,21 +1,7 @@
 /**
- * The models.dev catalog, projected into rates.
- *
- * LiteLLM's table is a flat namespace, which is fine for Claude Code and Codex
- * because each speaks to one vendor. pi speaks to gateways, and gateways report
- * names LiteLLM has never heard of (`cline-pass/deepseek-v4-flash`) or resells
- * of names it prices as first-party. models.dev is provider-scoped, so those
- * resolve exactly.
- *
- * The important restraint here is refusing to guess. `claude-opus-5` is served
- * by eleven providers at three different prices; picking one and presenting the
- * result as fact would be worse than admitting we do not know. Those stay
- * unpriced until a user tags them, which is what {@link resolveCatalogModel} is
- * for.
- *
- * Pure. Fetching and caching the document lives in `UsageService`.
- *
- * @module usageModelCatalog
+ * The models.dev catalog projected into provider-scoped rates for gateway
+ * models LiteLLM cannot name. Ambiguous models stay unpriced rather than
+ * guessed; users tag them instead. Pure: fetching lives in `UsageService`.
  */
 import type { ModelRate } from "./usagePricing.ts";
 
@@ -58,15 +44,8 @@ function trimmedString(value: unknown): string | null {
 }
 
 /**
- * Projects the models.dev document into a catalog.
- *
- * Entries without both an input and an output rate are dropped, matching the
- * LiteLLM parser: a half-priced model under-reports silently, which is worse
- * than reporting it as unpriced.
- *
- * Tiered rates (`tiers`, `context_over_200k`) are deliberately ignored in favour
- * of the base tier. Transcripts do not record which tier served a request, so
- * anything else would be a guess dressed up as precision.
+ * Drops entries without both input and output rates, like the LiteLLM parser.
+ * Tiered rates are ignored: transcripts do not record which tier served a request.
  */
 export function parseModelCatalog(document: unknown): ModelCatalog {
   if (typeof document !== "object" || document === null) return EMPTY_CATALOG;
@@ -139,19 +118,9 @@ function ratesAgree(a: ModelRate, b: ModelRate): boolean {
 }
 
 /**
- * Resolves a transcript's `(apiProvider, model)` pair to a rate, or `null` when
- * the answer is genuinely unknown.
- *
- * Tried in order:
- *
- * 1. The api provider's own catalog entry. pi reports gateway ids without
- *    separators (`clinepass`) where models.dev hyphenates (`cline-pass`), so
- *    both sides are compared with separators stripped.
- * 2. The model key on its own, when every provider serving it agrees on price.
- *    This is what makes `cline-pass/deepseek-v4-flash` (one provider) and the
- *    long tail of single-source models resolve without ceremony.
- *
- * Anything else is ambiguous or absent and stays unpriced.
+ * Resolves `(apiProvider, model)` via the provider's own entry (separators
+ * stripped, as pi reports `clinepass` for `cline-pass`), then the bare model
+ * key when every provider agrees on price. Anything else stays unpriced.
  */
 export function resolveModelRate(
   catalog: ModelCatalog,
@@ -194,16 +163,8 @@ export interface CatalogSearchResult {
 }
 
 /**
- * Substring search over the catalog, for the tag picker.
- *
- * The catalog is a few thousand entries and megabytes on the wire, so it stays
- * on the server and the client asks questions of it instead.
- *
- * Ranking matters more than it looks. Searching "opus" matches well over a
- * hundred entries, most of them resellers republishing the same model under a
- * longer key. Whichever provider happens to sort first in the catalog is not a
- * useful answer, so every match is scored and the canonical, shortest-keyed
- * ones lead.
+ * Server-side catalog search for the tag picker. Matches are scored so the
+ * canonical, shortest-keyed entries lead the many reseller copies.
  */
 export function searchCatalog(
   catalog: ModelCatalog,

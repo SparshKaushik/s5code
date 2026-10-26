@@ -19,6 +19,7 @@ import * as Deferred from "effect/Deferred";
 import * as Fiber from "effect/Fiber";
 import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as PubSub from "effect/PubSub";
 import * as Queue from "effect/Queue";
 import * as Ref from "effect/Ref";
 import * as Schema from "effect/Schema";
@@ -1073,16 +1074,24 @@ describe("automatic Simbox device attachment", () => {
                   emulators: [],
                 })
             : undefined;
-        const attached = (f: { service: DeviceService.DeviceService["Service"] }) =>
-          Effect.gen(function* () {
-            for (let i = 0; i < 500; i++) {
-              const state = yield* f.service.state;
-              if (state.hosts.some((h) => h.id === hostId) && state.sessions.length > 0)
-                return true;
-              yield* Effect.yieldNow;
-            }
-            return false;
-          });
+        type Service = DeviceService.DeviceService["Service"];
+        type State = Effect.Success<Service["state"]>;
+        // Subscribe before reading so no publish is missed. Publishes precede the
+        // state ref's commit, so callers assert on the returned state.
+        const until = (service: Service, done: (state: State) => boolean) =>
+          Effect.scoped(
+            Effect.gen(function* () {
+              const changes = yield* service.subscribe;
+              let state = yield* service.state;
+              while (!done(state)) state = yield* PubSub.take(changes);
+              return state;
+            }),
+          );
+        const attached = (f: { service: Service }) =>
+          until(
+            f.service,
+            (state) => state.hosts.some((h) => h.id === hostId) && state.sessions.length > 0,
+          );
 
         const first = yield* fixture(Effect.void, undefined, false, undefined, false, undefined, {
           respond,
@@ -1106,18 +1115,16 @@ describe("automatic Simbox device attachment", () => {
             initialSettings: { enableDeviceSupport: true, enableAgentDeviceAccess: true },
           },
         );
-        expect(yield* attached(restarted)).toBe(true);
-        expect((yield* restarted.service.state).sessions[0]?.threadId).toBe(threadId);
+        expect((yield* attached(restarted)).sessions[0]?.threadId).toBe(threadId);
 
         // Switching device support off detaches it but keeps it for later.
         yield* restarted.service.configure({ enabled: false });
         yield* TestClock.adjust("15 seconds");
-        for (let i = 0; i < 100; i++) yield* Effect.yieldNow;
-        expect((yield* restarted.service.state).hosts.some((h) => h.id === hostId)).toBe(false);
+        yield* until(restarted.service, (state) => !state.hosts.some((h) => h.id === hostId));
         expect(yield* store.load).toHaveLength(1);
 
         yield* restarted.service.configure({ enabled: true });
-        expect(yield* attached(restarted)).toBe(true);
+        yield* attached(restarted);
 
         // An explicit stop forgets it for good.
         yield* restarted.service.registerSimbox(threadId, { ...input, stop: true });
@@ -1311,7 +1318,6 @@ it.effect("reconciles SSH host settings without publishing no-op changes", () =>
         HttpClient.HttpClient,
         HttpClient.make(() => Effect.die("Unexpected HTTP request")),
       ),
-      // `ssh -G` resolves the target to a non-local address.
       Effect.provideService(
         ChildProcessSpawner.ChildProcessSpawner,
         ChildProcessSpawner.make(() =>

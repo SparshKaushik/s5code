@@ -1,20 +1,7 @@
 /**
- * `t3 migrate-data` - one-time migration of an existing T3 Code data directory
- * into the S5 Code home (`.s5code`).
- *
- * S5 Code rebranded the app bundle and the on-disk home directory: the storage
- * root moved from `~/.t3` to `~/.s5code` (see `os-jank.ts` / `DesktopStatePaths.ts`).
- * Existing installs keep their data under `~/.t3`. This command copies that data
- * (the SQLite database, its WAL/SHM siblings, plus `secrets` and `settings.json`)
- * into `~/.s5code`. It does NOT apply migrations itself: the S5 server runs its
- * migration set automatically on the next startup (`MigrationsLive` in
- * `persistence/Migrations.ts`), so the copied database lands at the S5 schema
- * version after the first `t3 serve` / `t3 start`.
- *
- * Safety:
- * - Refuses to overwrite a non-empty target unless `--force` is passed.
- * - Copies the SQLite file plus its `-wal`/`-shm` siblings so a clean shutdown
- *   history survives intact.
+ * `t3 migrate-data` copies an existing `~/.t3` home (database with WAL/SHM,
+ * `secrets`, `settings.json`) into `~/.s5code`. The next server start applies
+ * S5 migrations. Refuses to overwrite a non-empty target without `--force`.
  */
 import * as Console from "effect/Console";
 import * as Effect from "effect/Effect";

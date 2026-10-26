@@ -1,17 +1,7 @@
 /**
- * Usage reporting contract.
- *
- * Each environment scans native session files and databases — the provider
- * CLIs' own transcripts plus OpenCode's `opencode.db`, Cursor's dashboard API,
- * and pi's session files — including work driven outside T3 Code, so usage
- * stays complete for turns that were never orchestrated here. This mirrors
- * the approach `ccusage` takes. Source status describes gaps in local
- * coverage.
- *
- * Environments return pre-aggregated `(day, hourStart?, provider, model, sourcePath?)`
- * buckets. Raw transcript records never cross the wire.
- *
- * @module usage
+ * Usage reporting contract. Environments scan native provider transcripts and
+ * databases, including work driven outside S5 Code, like `ccusage`, and return
+ * pre-aggregated buckets. Raw transcript records never cross the wire.
  */
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
@@ -23,20 +13,12 @@ import {
   TrimmedString,
 } from "./baseSchemas.ts";
 
-/**
- * Bumped whenever the shape of {@link UsageSummary} changes incompatibly.
- * Adding providers or other array-element variants is additive: unknown entries
- * are skipped on decode and do not require a version bump.
- */
+/** Bump for incompatible UsageSummary changes; skipped unknown array variants need no bump. */
 export const USAGE_CONTRACT_VERSION = 9 as const;
 
 /**
- * Oldest {@link UsageSummary} version a current client will still merge.
- *
- * v4-v6 buckets (Claude/Codex and the upstream provider additions) still
- * decode because `apiProvider` has a decoding default, so mixed-version
- * environments keep those totals instead of treating the older server as
- * stale.
+ * Oldest {@link UsageSummary} version a current client still merges. v4-v6
+ * buckets decode because `apiProvider` has a decoding default.
  */
 export const USAGE_MERGE_COMPATIBLE_SINCE = 4 as const;
 
@@ -48,6 +30,7 @@ export const UsageProviderKind = Schema.Literals([
   "opencode",
   "antigravity",
   "pi",
+  "muse",
 ]);
 export type UsageProviderKind = typeof UsageProviderKind.Type;
 
@@ -63,13 +46,8 @@ export const UsageCatalogModelId = TrimmedNonEmptyString.check(
 export type UsageCatalogModelId = typeof UsageCatalogModelId.Type;
 
 /**
- * A user's answer to "what is this model, really?".
- *
- * Routers and gateways report names that no catalog knows (`cline-free/glm-5.2`)
- * or names several catalogs price differently (`claude-opus-5` costs three
- * different amounts across the eleven providers that serve it). Those stay
- * unpriced rather than guessed, and this is how a user resolves one. Tagged
- * records are priced at the target's rates and consolidate into its row.
+ * Maps a gateway model name no catalog knows, or that catalogs price
+ * differently, to a catalog entry. Tagged records use the target's rates and row.
  */
 export const UsageModelAlias = Schema.Struct({
   provider: UsageProviderKind,
@@ -103,14 +81,9 @@ export const UsageResolution = Schema.Literals(["day", "hour"]);
 export type UsageResolution = typeof UsageResolution.Type;
 
 /**
- * Why a bucket's cost is what it is.
- *
- * - `providerReported` - the transcript carried an explicit cost figure.
- * - `modelPriced` - we matched the model against a rate table or custom price override.
- * - `userTagged` - the model was unknown until the user mapped it to a catalog
- *   entry, and is priced at that entry's rates.
- * - `unpriced` - tokens are known, rates are not. Counted in totals, excluded
- *   from cost. These are the rows worth tagging.
+ * Cost source: `providerReported` from the transcript, `modelPriced` from a rate
+ * table or override, `userTagged` via a tag, or `unpriced` (tokens counted,
+ * cost excluded; worth tagging).
  */
 export const UsageCostSource = Schema.Literals([
   "providerReported",
@@ -120,12 +93,7 @@ export const UsageCostSource = Schema.Literals([
 ]);
 export type UsageCostSource = typeof UsageCostSource.Type;
 
-/**
- * `cachedInputTokens` and `cacheCreationTokens` are disjoint from
- * `uncachedInputTokens`; summing all three gives total input. `reasoningTokens`
- * is a *subset* of `outputTokens` (Codex reports it that way, and Anthropic
- * folds thinking into output), so it must never be added on top.
- */
+/** Sum uncached input, cache reads, and cache writes for input totals; reasoning is already included in output. */
 export const UsageTokenTotals = Schema.Struct({
   uncachedInputTokens: NonNegativeInt,
   cachedInputTokens: NonNegativeInt,
@@ -149,11 +117,9 @@ export const UsageBucket = Schema.Struct({
   provider: UsageProviderKind,
   model: TrimmedNonEmptyString,
   /**
-   * The upstream API provider, when the usage source names one. pi and other
-   * gateway-driven providers reuse model names across resellers, so this is
-   * what separates `claude-opus-5` sold by a reseller from the same name
-   * served by Anthropic. Empty for providers that speak to a single vendor.
-   * Optional at the wire level so pre-fork (upstream) buckets still decode.
+   * Upstream API provider when the source names one; separates reseller and
+   * first-party models with the same name. Empty for single-vendor providers and
+   * optional on the wire so upstream buckets still decode.
    */
   apiProvider: Schema.String.pipe(Schema.withDecodingDefault(Effect.succeed(""))),
   /** Source directory, so overlapping multi-home environments merge once per source. */
@@ -176,12 +142,8 @@ export const UsageBucket = Schema.Struct({
   speedPremiumUsd: Schema.optional(Schema.Number),
   costSource: UsageCostSource,
   /**
-   * The catalog entry this cell was priced against, as `<providerId>/<modelKey>`,
-   * or `null` when no catalog was involved (provider-reported, LiteLLM-priced,
-   * or unpriced).
-   *
-   * Present so the UI can show which model we assumed and let the user correct
-   * it, rather than presenting a guess as fact.
+   * Catalog entry this cell was priced against (`<providerId>/<modelKey>`), or
+   * `null` without a catalog, so the UI can show the assumption and allow correction.
    */
   pricedAs: Schema.NullOr(UsageCatalogModelId).pipe(
     Schema.withDecodingDefault(Effect.succeed(null)),
@@ -194,26 +156,14 @@ export const UsageBucket = Schema.Struct({
 export type UsageBucket = typeof UsageBucket.Type;
 
 /**
- * Identifies the physical transcript directory or remote account a source read
- * from.
- *
- * Two environments on the same machine (worktree servers, for example) resolve
- * the same provider home and would otherwise double count. The client drops
- * duplicate fingerprints before merging.
+ * Physical transcript directory or remote account a source read. Clients drop
+ * duplicate fingerprints so same-machine environments do not double count.
  */
 export const UsageSourceFingerprint = Schema.Struct({
   hostId: TrimmedNonEmptyString,
   provider: UsageProviderKind,
   resolvedHomePath: TrimmedNonEmptyString,
-  /**
-   * Filesystem identity of a transcript directory, as `device:inode`. Empty
-   * for remote account sources.
-   *
-   * Hostname and path alone are not enough for local sources: every Mac in a
-   * fleet resolves
-   * `/Users/<user>/.claude`, so two machines that happen to share a hostname
-   * would look like one source and have their usage silently dropped.
-   */
+  /** Transcript directory device:inode distinguishes machines sharing a hostname and home path. */
   volumeId: Schema.String,
 });
 export type UsageSourceFingerprint = typeof UsageSourceFingerprint.Type;
@@ -227,19 +177,11 @@ export const UsageSource = Schema.Struct({
   scannedFiles: NonNegativeInt,
   skippedFiles: NonNegativeInt,
   malformedRecords: NonNegativeInt,
-  /**
-   * Buckets also carry per-bucket session counts, but a session spans days and
-   * models, so summing those overcounts; this is the figure clients should
-   * total.
-   */
+  /** Total this count; bucket counts double-count sessions spanning days or models. */
   distinctSessions: NonNegativeInt,
   message: Schema.NullOr(TrimmedNonEmptyString),
   action: Schema.optionalKey(Schema.Literal("enableCursorKeychain")),
-  /**
-   * Present when this source answered from its cache while a slow refresh (an
-   * account API, for example) runs. Repeat the request with `awaitRefresh` to
-   * get the refreshed source.
-   */
+  /** Cached response during refresh; repeat with awaitRefresh for fresh data. */
   refreshing: Schema.optionalKey(Schema.Literal(true)),
 });
 export type UsageSource = typeof UsageSource.Type;
@@ -258,10 +200,7 @@ export type UsagePricing = typeof UsagePricing.Type;
 export const UsageSummaryInput = Schema.Struct({
   sinceDay: UsageDay,
   untilDay: UsageDay,
-  /**
-   * IANA zone the client wants days bucketed in. An offset would be wrong for
-   * any window that crosses a DST boundary.
-   */
+  /** IANA bucketing zone; offsets fail across DST boundaries. */
   timeZone: TrimmedNonEmptyString,
   /**
    * The client's model tags. Pricing runs server-side (the catalog is megabytes

@@ -27,16 +27,10 @@ import type {
 } from "@t3tools/contracts";
 import { isProjectFaviconPath } from "@t3tools/shared/projectFavicon";
 
-// fff-node stays external to the CLI bundle because it dlopens a native
-// library. A static `import` of an external package is a hard error inside a
-// Node single-executable (only built-ins resolve there), so load it through
-// `require`, which reads from the real filesystem in every runtime.
-//
-// The `bun build --compile` server binary is the exception: nothing outside the
-// binary exists there, so `require` cannot see the package at all. The
-// runtime-gated `import()` is what the bun bundler traces to inline fff-node (and
-// its ffi-rs binding) into the binary; the native library itself is still
-// extracted to disk by workspace/FffNativeLibrary.ts.
+// fff-node dlopens a native library and stays external: a static import fails
+// in a Node single-executable, so load it via `require`. Under `bun build
+// --compile`, the runtime-gated `import()` lets bun inline it instead; the
+// native library is still extracted by workspace/FffNativeLibrary.ts.
 const requireForFff = NodeModule.createRequire(import.meta.url);
 const loadFffNode = async (): Promise<typeof import("@ff-labs/fff-node")> => {
   return typeof Bun === "undefined"
@@ -267,11 +261,7 @@ function mapContentMatchRanges(
   }));
 }
 
-/**
- * Whole-word filtering happens after the grep rather than by wrapping the pattern in boundary
- * regex: consuming boundaries such as `(?:^|\W)` swallow the separator between adjacent matches
- * and widen the reported ranges, and `\b` cannot match punctuation-edged queries at all.
- */
+// Post-filter whole words: consuming boundary regexes swallow adjacent separators and widen ranges; \b misses punctuation edges.
 function isWholeWordRange(
   line: string,
   range: { readonly start: number; readonly end: number },
@@ -322,9 +312,7 @@ const createFinder = Effect.fn("WorkspaceSearchIndex.createFinder")(function* (
       FileFinder.create({
         basePath: cwd,
         disableMmapCache: true,
-        // Content indexing costs scan CPU and memory, so only the on-demand
-        // content-search index pays for it; path-only consumers (file tree,
-        // composer path search, file picker) keep the lightweight index.
+        // Content indexing costs CPU/memory; path-only consumers use the lightweight index.
         disableContentIndexing: variant !== "content",
         aiMode: false,
         enableFsRootScanning: true,
@@ -509,8 +497,7 @@ export const make = Effect.fn("WorkspaceSearchIndex.make")(function* (
   )(function* (input) {
     const { searchQuery, regexMode } = buildContentSearchQuery(input);
     const deadline = performance.now() + CONTENT_SEARCH_TIME_BUDGET_MS;
-    // Grep cursors advance by file, so whole-word post-filtering needs enough
-    // raw candidates from the current file before moving to the next one.
+    // Grep cursors advance per file; whole-word filtering needs enough raw candidates before advancing.
     const rawPageSize = input.wholeWord
       ? Math.max(input.limit, CONTENT_SEARCH_MAX_MATCHES_PER_FILE)
       : input.limit;
@@ -574,9 +561,7 @@ function parseWorkspaceSearchIndexKey(key: string): {
   };
 }
 
-/**
- * @public Service construction is part of the canonical Effect module API.
- */
+/** @public */
 export const layer = (key: string) => {
   const { cwd, variant } = parseWorkspaceSearchIndexKey(key);
   return Layer.effect(WorkspaceSearchIndex, make(cwd, variant));

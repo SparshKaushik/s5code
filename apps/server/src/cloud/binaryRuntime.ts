@@ -2,13 +2,8 @@ import * as Context from "effect/Context";
 import * as Option from "effect/Option";
 
 /**
- * Identity of a precompiled single-file server binary (`bun build --compile`,
- * see scripts/build-server-binary.ts).
- *
- * Two values are inlined at compile time with `--define` so a running binary can
- * recognize itself and find its own replacement on GitHub Releases. They are
- * absent in every other way of running the server (`npx t3`, the desktop app,
- * a dev checkout), which is how the binary update path stays opt-in.
+ * Standalone server binary identity. Compile-time `--define` values let a binary
+ * find its replacement; they are absent elsewhere, keeping binary updates opt-in.
  */
 export interface ServerBinaryIdentity {
   /** Release-asset platform suffix this binary was compiled for, e.g. "linux-x64". */
@@ -75,11 +70,8 @@ export function resolveServerBinaryIdentity(input: {
 }
 
 /**
- * These two reads must stay written as literal `process.env.<NAME>` member
- * expressions at module scope. That is the only form `bun build --define`
- * rewrites: passing `process.env` around and reading a property off it leaves
- * the lookup dynamic, so the build-time values would silently never apply and
- * every binary would resolve to no identity.
+ * Keep these literal module-scope `process.env.<NAME>` reads: `bun build --define`
+ * rewrites only that form, so dynamic lookups would silently lose the identity.
  */
 const BUILD_TARGET = process.env.T3CODE_SERVER_BINARY_TARGET;
 const BUILD_REPO = process.env.T3CODE_SERVER_BINARY_REPO;
