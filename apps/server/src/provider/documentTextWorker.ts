@@ -369,7 +369,9 @@ function* rtf(source: string): Generator<string, void> {
           // Per-byte decoding only supports single-byte Windows code pages.
           if (value !== 874 && (value < 1250 || value > 1258))
             throw new Error("Unsupported RTF code page");
-          state.decoder = new TextDecoder(`windows-${value}`, { fatal: true });
+          // S5's Bun types list encodings without the windows-125x code pages.
+          const encoding = `windows-${value}` as ConstructorParameters<typeof TextDecoder>[0];
+          state.decoder = new TextDecoder(encoding, { fatal: true });
         } else if (control === "uc") {
           if (!Number.isSafeInteger(value) || value < 0)
             throw new Error("Invalid RTF fallback count");

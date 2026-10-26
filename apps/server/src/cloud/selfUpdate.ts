@@ -288,8 +288,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         const plan = yield* prepareServerBinaryUpdate({
           identity: binaryIdentity.value,
           targetVersion,
-          reportProgress: (stage) =>
-            reportProgress(stage).pipe(Effect.catchCause(() => Effect.void)),
+          reportProgress: (stage) => reportProgress(stage).pipe(Effect.ignoreCause()),
         }).pipe(
           Effect.provideService(FileSystem.FileSystem, fs),
           Effect.provideService(Path.Path, path),
