@@ -123,8 +123,8 @@ export const make = Effect.fn("BunPtyAdapter.make")(function* () {
     return yield* Effect.die(new BunPtyUnsupportedPlatformError({ platform }));
   }
   return PtyAdapter.PtyAdapter.of({
-    spawn: (input) =>
-      Effect.try({
+    spawn: Effect.fn("BunPtyAdapter.spawn")(function (input) {
+      return Effect.try({
         try: () => {
           let processHandle: BunPtyProcess | null = null;
           const command = [input.shell, ...(input.args ?? [])];
@@ -148,7 +148,8 @@ export const make = Effect.fn("BunPtyAdapter.make")(function* () {
             shell: input.shell,
             cause,
           }),
-      }),
+      });
+    }),
   });
 });
 
