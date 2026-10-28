@@ -41,8 +41,7 @@ needed on the host.
 
 > The binary serves the **API and WebSocket only** — the web client is not
 > bundled into it. Connect from [app.s5code.touchtech.club](https://app.s5code.touchtech.club), the desktop
-> app, or mobile. (Embedding a directory tree in a compiled binary needs Bun's
-> `--asset`, which ships in Bun 1.4; on the pinned 1.3.x it is silently ignored.)
+> app, or mobile.
 
 ### 0a. Download and run
 

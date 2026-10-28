@@ -306,6 +306,28 @@ it.effect("fails a read-only transaction whose reader stops, then starts a new r
   ),
 );
 
+it.effect("stops starting readers after one dies before opening the database", () =>
+  Effect.sync(() => {
+    failingWorkers.message = "No such built-in module: node:sqlite";
+  }).pipe(
+    Effect.andThen(
+      withReaderClient((sql) =>
+        Effect.gen(function* () {
+          const startedBefore = startedWorkers.length;
+          assert.equal(yield* countEntries(sql).pipe(SqliteClient.readOnly), 1);
+          assert.equal(yield* countEntries(sql).pipe(SqliteClient.readOnly), 1);
+          assert.equal(startedWorkers.length, startedBefore + 1);
+        }),
+      ),
+    ),
+    Effect.ensuring(
+      Effect.sync(() => {
+        failingWorkers.message = undefined;
+      }),
+    ),
+  ),
+);
+
 const withFileClient = <A, E>(
   setup: (
     sql: SqlClient.SqlClient,

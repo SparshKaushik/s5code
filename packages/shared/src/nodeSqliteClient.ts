@@ -475,11 +475,12 @@ const makeReader = Effect.fnUntraced(function* (options: SqliteClientConfig) {
       }),
       (startup): Effect.Effect<Connection | undefined> =>
         // A late ready event must not hand out a worker retired by another acquire timeout.
-        unavailable || current !== reader
+        // A worker that dies during startup has already cleared `current`; it still turns readers off.
+        unavailable
           ? // @effect-diagnostics-next-line effectSucceedWithVoid:off - The connection result distinguishes undefined from void.
             Effect.succeed(undefined)
           : Option.isSome(startup) && startup.value.type === "ready"
-            ? Effect.succeed(reader.connection)
+            ? Effect.succeed(current === reader ? reader.connection : undefined)
             : turnOff(
                 reader,
                 Option.isSome(startup) && startup.value.type === "unavailable"
