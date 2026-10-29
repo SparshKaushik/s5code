@@ -1723,7 +1723,7 @@ describe("locating a device id across hosts", () => {
           [thisMachine.id, listingHost(thisMachine, ["Pixel_10"])],
           [macMini.id, listingHost(macMini, ["MAC-UDID", "Pixel_10"])],
         ]),
-      ).pipe(Effect.provide(NodeCrypto.layer), Effect.provide(FetchHttpClient.layer));
+      ).pipe(Effect.provide(Layer.mergeAll(NodeCrypto.layer, FetchHttpClient.layer)));
       yield* service.list;
       return yield* test(service);
     }).pipe(Effect.provide(ServerSettings.layerTest({ enableDeviceSupport: true })), Effect.scoped);
