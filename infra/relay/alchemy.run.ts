@@ -9,7 +9,7 @@ import * as Layer from "effect/Layer";
 
 import { PublishClientConfig, tokenDigest } from "./src/clientConfig.ts";
 import * as RelayDb from "./src/db.ts";
-import { MobileSourceMapsUploadCredentials, RelayObservability } from "./src/observability.ts";
+import { RelayObservability } from "./src/observability.ts";
 import { isPreviewStage } from "./src/previewStages.ts";
 import { PreviewTunnelSweep, PreviewTunnelSweepProvider } from "./src/previewTunnelSweep.ts";
 import { ManagedEndpointZone, RelayApiZone, RelayDeploymentConfig } from "./src/zone.ts";
@@ -32,7 +32,6 @@ export default Alchemy.Stack(
     const managedEndpointZone = yield* ManagedEndpointZone.pipe(Effect.orDie);
     const relayApiZone = yield* RelayApiZone.pipe(Effect.orDie);
     const observability = yield* RelayObservability;
-    const mobileSourceMapsUploadCredentials = yield* MobileSourceMapsUploadCredentials;
     const api = yield* RelayWorker.Api;
     if (isPreviewStage(stage)) {
       const { managedEndpointZoneName } = yield* RelayDeploymentConfig;
@@ -70,9 +69,6 @@ export default Alchemy.Stack(
       clientTracingToken: observability.clientIngestToken.token,
       mobileLogsDataset: observability.mobileLogs.name,
       mobileMetricsDataset: observability.mobileMetrics.name,
-      mobileSourceMapsBucket: observability.mobileSourceMaps.bucketName,
-      // The MOBILE_SOURCEMAPS_R2 secret for GitHub Actions and EAS Build.
-      mobileSourceMapsUploadCredentials,
     };
   }).pipe(Effect.provide(RelayWorker.layer)),
 );

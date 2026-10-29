@@ -212,6 +212,10 @@ atos -arch arm64 -o T3Code.app.dSYM/Contents/Resources/DWARF/T3Code -l 0x1000000
   $(printf '0x%x' $((0x100000000 + 19476)))
 ```
 
+The S5 relay creates no source maps bucket or upload token: its deploy token has no R2 access and
+the S5 mobile workflow uploads no maps, so S5 mobile crash stacks stay minified. The rest of this
+section describes upstream's setup.
+
 Maps are keyed by the bundle that crashed: `<platform>/ota/<updateId>.map` for OTA updates and
 `<platform>/build/<easBuildId>.map` for the bundle embedded in a store build. The production
 mobile workflow uploads OTA maps after `eas update`, and the `eas-build-on-success` hook in

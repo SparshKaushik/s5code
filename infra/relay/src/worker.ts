@@ -228,7 +228,6 @@ export const layer = Api.make(
         period: MobileTelemetry.MOBILE_TELEMETRY_RATE_LIMIT.periodSeconds,
       },
     });
-    const mobileSourceMaps = yield* Cloudflare.R2.ReadBucket(observability.mobileSourceMaps);
     const mobileTelemetryToken = yield* observability.mobileTelemetryIngestToken.token;
     const mobileTracesUrl = yield* observability.traces.otelTracesEndpoint;
     const mobileTracesDataset = yield* observability.traces.name;
@@ -386,25 +385,9 @@ export const layer = Api.make(
     // `fetch` rebuilds its layers per request; the source map cache must outlive one.
     const mobileSourceMapLookups = yield* MobileTelemetry.SourceMaps.pipe(
       Effect.provide(MobileTelemetry.layerSourceMaps),
+      // S5 uploads no OTA source maps, so mobile stacks stay unsymbolicated.
       Effect.provideService(MobileTelemetry.SourceMapObjects, {
-        get: (key) =>
-          mobileSourceMaps.get(key).pipe(
-            Effect.map((object) =>
-              object === null
-                ? undefined
-                : {
-                    size: object.size,
-                    text: object.text().pipe(
-                      Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-                      Effect.mapError(
-                        (cause) => new MobileTelemetry.SourceMapObjectError({ key, cause }),
-                      ),
-                    ),
-                  },
-            ),
-            Effect.provideService(Alchemy.RuntimeContext, alchemyRuntimeContext),
-            Effect.mapError((cause) => new MobileTelemetry.SourceMapObjectError({ key, cause })),
-          ),
+        get: () => Effect.succeed(undefined),
       }),
     );
     const layerMobileTelemetry = MobileTelemetry.layer.pipe(
@@ -577,7 +560,6 @@ export const layer = Api.make(
         Layer.provideMerge(Cloudflare.Tunnel.ReadWriteTunnelBinding),
         Layer.provideMerge(Cloudflare.DNS.ReadWriteDnsHttp),
         Layer.provideMerge(Cloudflare.Workers.RateLimitBinding),
-        Layer.provideMerge(Cloudflare.R2.ReadBucketBinding),
         Layer.provideMerge(HookInboxObject.layer),
         // Disable the duplicate runtime span; ours applies route/header/token redaction and rejects sender traceparent.
         Layer.provideMerge(
