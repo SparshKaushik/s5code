@@ -31,6 +31,7 @@ import * as References from "effect/References";
 import * as Schema from "effect/Schema";
 // oxlint-disable-next-line t3code/no-raw-mcp-registration -- the eval calls the device tools McpHttpServer registered and registers none.
 import { McpSchema, McpServer } from "effect/ai";
+import { FetchHttpClient } from "effect/http";
 
 import * as ServerConfig from "../../apps/server/src/config.ts";
 import * as AgentDeviceShim from "../../apps/server/src/device/AgentDeviceShim.ts";
@@ -790,6 +791,8 @@ export const makeDeviceTools = Effect.fn("evaluateMcpToolUse.makeDeviceTools")(f
       ),
       Layer.provideMerge(config),
       Layer.provideMerge(files),
+      // S5's DeviceService reaches Simbox runners over HTTP; no eval world has one.
+      Layer.provideMerge(FetchHttpClient.layer),
     ),
   );
   type Entry = Parameters<McpServer.McpServer["Service"]["addTool"]>[0];
