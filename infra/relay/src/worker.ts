@@ -387,7 +387,7 @@ export const layer = Api.make(
       Effect.provide(MobileTelemetry.layerSourceMaps),
       // S5 uploads no OTA source maps, so mobile stacks stay unsymbolicated.
       Effect.provideService(MobileTelemetry.SourceMapObjects, {
-        get: () => Effect.succeed(undefined),
+        get: () => Effect.undefined,
       }),
     );
     const layerMobileTelemetry = MobileTelemetry.layer.pipe(
