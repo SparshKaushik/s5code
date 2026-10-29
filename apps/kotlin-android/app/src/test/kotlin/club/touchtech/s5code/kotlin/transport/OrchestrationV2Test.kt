@@ -232,7 +232,6 @@ class OrchestrationV2Test {
         val running = projection.copy(providerTurns = listOf(obj("""{"id":"turn","runAttemptId":"attempt","status":"running"}""")))
         assertTrue(v2Presentation(running).canSteer)
         assertTrue(v2Presentation(running).canPromoteQueued)
-        assertTrue(v2Presentation(running).canReorderQueue)
         val waiting = running.copy(runs = listOf(JsonObject(run + ("status" to JsonPrimitive("waiting")))))
         assertFalse(v2Presentation(waiting).canSteer)
     }
@@ -347,6 +346,21 @@ class OrchestrationV2Test {
         val tasks = projection.pendingBackgroundWork()
         assertEquals(listOf("monitor"), tasks.map { it.v2String("kind") })
         assertFalse(backgroundWorkHoldsCompletion(tasks))
+    }
+
+    @Test fun `a merged pull request's watch no longer holds a settled run`() {
+        val run = obj("""{"id":"run","ordinal":1,"status":"completed"}""")
+        fun link(number: Int, state: String?): JsonObject {
+            val snapshot = state?.let { "{\"state\":\"$it\"}" } ?: "null"
+            return obj("""{"host":"github.com","repository":"acme/app","number":$number,"source":"agent",
+                "url":"https://github.com/acme/app/pull/$number","watch":{},"snapshot":$snapshot}""")
+        }
+        val projection = V2ProjectionDto(JsonObject(metadata + ("pullRequests" to JsonArray(
+            listOf(link(1, null), link(4, "merged"), link(5, "closed"))))), runs = listOf(run))
+        assertEquals(
+            listOf("pull-request-watch:github.com/acme/app#1", "pull-request-watch:github.com/acme/app#5"),
+            projection.pendingBackgroundWork().map { it.v2String("taskId") },
+        )
     }
 
     private val idleCompact = obj("""{"id":"compact-message","role":"user","text":"/compact","attachments":[],

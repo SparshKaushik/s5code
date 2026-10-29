@@ -28,6 +28,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.listSaver
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -528,6 +529,31 @@ fun AddProjectRepositoryScreen(
 /* ── Browse-path input ───────────────────────────────────────────────── */
 
 /**
+ * Each host keeps the path last typed or browsed for it and shows its own
+ * default until then, so switching hosts and back loses nothing. With no host
+ * (one dropping out briefly) the field keeps the last path typed anywhere.
+ */
+internal data class BrowsePathInputs(val byHost: Map<String, String> = emptyMap(), val last: String) {
+    fun pathFor(hostId: String?, seed: String): String = if (hostId == null) last else byHost[hostId] ?: seed
+
+    fun commit(hostId: String?, path: String): BrowsePathInputs =
+        BrowsePathInputs(if (hostId == null) byHost else byHost + (hostId to path), path)
+
+    companion object {
+        val Saver =
+            listSaver<BrowsePathInputs, String>(
+                save = { listOf(it.last) + it.byHost.flatMap { (host, path) -> listOf(host, path) } },
+                restore = { saved ->
+                    BrowsePathInputs(
+                        byHost = saved.drop(1).chunked(2).filter { it.size == 2 }.associate { it[0] to it[1] },
+                        last = saved.first(),
+                    )
+                },
+            )
+    }
+}
+
+/**
  * `useBrowsePathInput`: the path field and the folder list are one model — the
  * input seeds the browse directory, a committed row rewrites the input. The
  * commit only happens after the server lists the destination, so a dead folder
@@ -548,26 +574,24 @@ private fun rememberBrowsePathController(
 ): BrowsePathController {
     val baseDirectory = environment?.environment?.addProjectBaseDirectory.orEmpty()
     val caseSensitive = !isWindowsPlatform(environment?.environment?.platformOs.orEmpty())
-    var pathInput by
-        rememberSaveable(environment?.environment?.id?.value) {
-            mutableStateOf(
-                getCloneDestinationPath(
-                    ensureBrowseDirectoryPath(baseDirectory.trim()).ifBlank { "~/" },
-                    pinnedDirectoryName,
-                )
-            )
-        }
+    val hostId = environment?.environment?.id?.value
+    val seedPath =
+        getCloneDestinationPath(ensureBrowseDirectoryPath(baseDirectory.trim()).ifBlank { "~/" }, pinnedDirectoryName)
+    var paths by rememberSaveable(stateSaver = BrowsePathInputs.Saver) { mutableStateOf(BrowsePathInputs(last = seedPath)) }
+    val pathInput = paths.pathFor(hostId, seedPath)
+    // The host whose browse is in flight; a host dropping out does not inherit its spinner.
+    var navigatingHost by remember { mutableStateOf<String?>(null) }
     var navigating by remember { mutableStateOf(false) }
     var generation by remember { mutableStateOf(0) }
     val scope = rememberCoroutineScope()
 
     return BrowsePathController(
-        isNavigating = navigating,
+        isNavigating = navigating && navigatingHost == hostId,
         pathInput = pathInput,
         setPathInput = { value ->
             generation += 1
             navigating = false
-            pathInput = value
+            paths = paths.commit(hostId, value)
         },
         navigateTo = { browseDirectoryPath, selectedDirectoryName ->
             val selectedDirectoryPath =
@@ -586,10 +610,11 @@ private fun rememberBrowsePathController(
                 }
             val myGeneration = ++generation
             navigating = true
+            navigatingHost = hostId
             scope.launch {
                 runCatching { browse(selectedDirectoryPath) }
                 if (generation == myGeneration) {
-                    pathInput = nextInput
+                    paths = paths.commit(hostId, nextInput)
                     navigating = false
                 }
             }

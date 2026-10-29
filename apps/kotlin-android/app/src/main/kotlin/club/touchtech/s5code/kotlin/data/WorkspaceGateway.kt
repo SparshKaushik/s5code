@@ -325,7 +325,7 @@ interface WorkspaceGateway {
         kotlinx.coroutines.flow.flowOf(kotlinx.serialization.json.JsonObject(emptyMap()))
 
     suspend fun queueAction(environmentId: EnvironmentId, id: ThreadId, type: String,
-        runId: String? = null, text: String? = null, beforeRunId: String? = null,
+        runId: String? = null, text: String? = null,
         targetRunId: String? = null) = Unit
 
     /**
@@ -977,15 +977,6 @@ interface WorkspaceGateway {
         environmentId: EnvironmentId,
         id: ThreadId,
         terminalId: String,
-    )
-
-    /** Starts a fresh shell in the same workspace and keeps the terminal id. */
-    suspend fun terminalRestart(
-        environmentId: EnvironmentId,
-        id: ThreadId,
-        terminalId: String,
-        cols: Int,
-        rows: Int,
     )
 
     /** Ends the session and its shell. The scrollback is kept unless asked otherwise. */

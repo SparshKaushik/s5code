@@ -643,7 +643,6 @@ fun threadDetailFrom(
         limitRecoverySnoozed = v2?.limitRecoverySnoozed == true,
         canSwitchProvider = v2?.canSwitchProvider == true,
         queueHeld = v2?.queueHeld == true,
-        canReorderQueue = v2?.canReorderQueue == true,
         canPromoteQueued = v2?.canPromoteQueued == true,
         canSendNow = v2?.canSendNow == true,
         lastErrorCode = v2?.lastErrorCode,

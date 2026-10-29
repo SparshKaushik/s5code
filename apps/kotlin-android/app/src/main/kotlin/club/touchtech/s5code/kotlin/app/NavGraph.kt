@@ -52,6 +52,7 @@ import club.touchtech.s5code.kotlin.feature.newtask.NewTaskBranchScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskDraftScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskEnvironmentScreen
 import club.touchtech.s5code.kotlin.feature.newtask.NewTaskProjectScreen
+import club.touchtech.s5code.kotlin.feature.newtask.openNewTask
 import club.touchtech.s5code.kotlin.feature.onboarding.BootstrapScreen
 import club.touchtech.s5code.kotlin.feature.onboarding.ConnectSignInScreen
 import club.touchtech.s5code.kotlin.feature.onboarding.OnboardingScreen
@@ -189,7 +190,7 @@ fun S5NavGraph(
                     title = "Pick a thread",
                     detail = "Select a thread on the left, or start a new task.",
                     actionLabel = "New task",
-                    onAction = { navController.navigate(Routes.NewTask) },
+                    onAction = { navController.openNewTask(store) },
                 )
             }
         }
@@ -255,7 +256,7 @@ fun S5NavGraph(
                 onOpenThread = { environmentId, threadId ->
                     navController.navigate(Routes.thread(environmentId, threadId))
                 },
-                onNewTask = { navController.navigate(Routes.NewTask) },
+                onNewTask = { navController.openNewTask(store) },
                 // Straight to the draft: it already has a project, and sending the
                 // user back through the picker is what made a saved draft feel gone.
                 onResumeDraft = { navController.navigate(Routes.NewTaskDraft) },
@@ -306,7 +307,13 @@ fun S5NavGraph(
             NewTaskProjectScreen(
                 store = store,
                 onBack = navController::popBackStack,
-                onProjectChosen = { navController.navigate(Routes.NewTaskDraft) },
+                // A draft opened straight from New task sits under the picker;
+                // replacing it keeps the flow two screens deep.
+                onProjectChosen = {
+                    navController.navigate(Routes.NewTaskDraft) {
+                        popUpTo(Routes.NewTaskDraft) { inclusive = true }
+                    }
+                },
                 onAddProject = { navController.navigate(Routes.AddProjectSource) },
                 onAddEnvironment = { navController.navigate(Routes.ConnectionsNew) },
             )
@@ -318,7 +325,11 @@ fun S5NavGraph(
                 // The project name in the hero is a way back to the picker, and
                 // popping rather than pushing keeps the flow two screens deep no
                 // matter how many times you change your mind.
-                onProject = navController::popBackStack,
+                onProject = {
+                    if (!navController.popBackStack(Routes.NewTask, inclusive = false)) {
+                        navController.navigate(Routes.NewTask)
+                    }
+                },
                 onEnvironment = { navController.navigate(Routes.NewTaskEnvironment) },
                 onBranch = { navController.navigate(Routes.NewTaskBranch) },
                 onCreated = { environmentId, threadId ->
@@ -433,13 +444,16 @@ fun S5NavGraph(
             // Recorded for launcher shortcuts. Keyed on the title too, because the
             // shell that carries titles arrives after navigation and the first
             // record of a thread often has none.
-            val title =
+            val summary =
                 store.workspace.threads.collectAsStateWithLifecycle().value
                     .firstOrNull { it.environmentId.value == environmentId && it.id.value == threadId }
-                    ?.title
-                    .orEmpty()
+            val title = summary?.title.orEmpty()
             LaunchedEffect(environmentId, threadId, title) {
                 store.recordRecentThread(environmentId, threadId, title)
+            }
+            val projectId = summary?.projectId?.value
+            LaunchedEffect(environmentId, projectId) {
+                projectId?.let { store.rememberThreadProject(environmentId, it) }
             }
             ThreadScreen(
                 store = store,
@@ -683,7 +697,6 @@ fun S5NavGraph(
                         }
                     }
                 },
-                confirmController = confirmController,
             )
         }
         composable(Routes.Git, arguments = listOf(environmentArg, threadArg)) { entry ->

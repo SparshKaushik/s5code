@@ -189,6 +189,17 @@ class PromptLinksTest {
     }
 
     @Test
+    fun `matches a checkout of the repository's GitCafe mirror`() {
+        val repository = PromptLinkRepository("pingdotgg", "t3code")
+        val gitlab = project("gitlab", identity("gitlab.com/pingdotgg/t3code"))
+        val gitcafe = project("gitcafe", identity("git.cafe/pingdotgg/t3code"))
+        val staging = project("staging", identity("staging.git.cafe/pingdotgg/t3code"))
+        assertEquals("gitcafe", findPromptLinkProject(listOf(gitlab, gitcafe, staging), repository)?.title)
+        assertEquals("staging", findPromptLinkProject(listOf(gitlab, staging), repository)?.title)
+        assertNull(findPromptLinkProject(listOf(gitlab), repository))
+    }
+
+    @Test
     fun `finds the most recently updated thread linked to the pull request`() {
         val threads =
             listOf(

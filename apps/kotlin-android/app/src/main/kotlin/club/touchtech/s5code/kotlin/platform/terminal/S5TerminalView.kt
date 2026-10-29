@@ -15,6 +15,7 @@ import android.widget.EditText
 import android.widget.FrameLayout
 import club.touchtech.s5code.kotlin.data.TerminalOutputCursor
 import club.touchtech.s5code.kotlin.data.TerminalOutputUpdate
+import club.touchtech.s5code.kotlin.data.drawnTerminalGrid
 import club.touchtech.s5code.kotlin.data.readTerminalOutputUpdate
 import kotlin.math.max
 
@@ -45,11 +46,26 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
     private var fed: TerminalOutputCursor? = null
     private var cols = 0
     private var rows = 0
+    private var measuredCols = 0
+    private var measuredRows = 0
     private var clearingInput = false
     private var released = false
 
     var onInput: (String) -> Unit = {}
     var onResize: (Int, Int) -> Unit = { _, _ -> }
+
+    /**
+     * The PTY grid shared by every attached client, or null before the server
+     * reports one. Ghostty draws it clamped to this view's fit, so wrapping and
+     * the cursor match the PTY; [onResize] still reports the view's own fit.
+     * Set it before [setReplayBuffer] so a snapshot is fed at its own grid.
+     */
+    var sharedGrid: Pair<Int, Int>? = null
+        set(value) {
+            if (field == value) return
+            field = value
+            applyGrid()
+        }
 
     var fontSizeSp: Float = DEFAULT_FONT_SIZE_SP
         set(value) {
@@ -276,6 +292,17 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
             (terminalCanvas.usableWidth() / terminalCanvas.cellWidthPx).toInt().coerceIn(2, 400)
         val nextRows =
             (terminalCanvas.usableHeight() / terminalCanvas.cellHeightPx).toInt().coerceIn(2, 200)
+        if (nextCols != measuredCols || nextRows != measuredRows) {
+            measuredCols = nextCols
+            measuredRows = nextRows
+            onResize(measuredCols, measuredRows)
+        }
+        applyGrid()
+    }
+
+    private fun applyGrid() {
+        if (measuredCols <= 0 || measuredRows <= 0 || released) return
+        val (nextCols, nextRows) = drawnTerminalGrid(measuredCols to measuredRows, sharedGrid)
         if (nextCols == cols && nextRows == rows && terminalHandle != 0L) return
         cols = nextCols
         rows = nextRows
@@ -289,7 +316,6 @@ internal class S5TerminalView(context: Context) : FrameLayout(context) {
                 terminalCanvas.cellHeightPx.toInt(),
             )
         )
-        onResize(cols, rows)
         feedPendingBuffer()
         renderSnapshot()
     }

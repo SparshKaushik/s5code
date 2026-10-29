@@ -120,6 +120,23 @@ class PullRequestRulesTest {
     }
 
     @Test
+    fun `keeps bot review verdicts when bot comments are hidden`() {
+        val result =
+            filterPullRequestActivity(
+                activity.copy(
+                    comments =
+                        listOf(
+                            comment("approved", bot, "APPROVED"),
+                            comment("changes", bot, "changes-requested"),
+                            comment("commented", bot, "COMMENTED"),
+                        )
+                ),
+                PullRequestActivityFilter(),
+            )
+        assertEquals(listOf("approved", "changes"), result.activity.comments.map { it.id })
+    }
+
+    @Test
     fun `provides a commits-only view and a comments-only view`() {
         val commits = filterPullRequestActivity(activity, PullRequestActivityFilter(kind = PullRequestActivityKind.Commits)).activity
         assertTrue(commits.comments.isEmpty())

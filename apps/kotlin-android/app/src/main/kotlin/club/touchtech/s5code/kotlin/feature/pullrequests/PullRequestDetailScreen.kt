@@ -235,6 +235,10 @@ fun PullRequestDetailScreen(
     val terms = changeRequestTerms(identity?.provider)
     val permissions = rememberPullRequestPermissions(store, readEnvironment, detail)
     val runner = rememberPullRequestActionRunner(store, readEnvironment, readReference, detail, permissions, confirmController)
+    val maintainerEdits =
+        rememberPullRequestMaintainerEdits(
+            store, readEnvironment, readReference, detail, permissions.canEditMaintainerEdits, confirmController,
+        )
     val agent =
         rememberPullRequestAgent(store, readEnvironment, readReference, detail, confirmController, onOpenThread, onOpenNewTask)
     val drafts by store.reviewDrafts.drafts.collectAsStateWithLifecycle()
@@ -326,7 +330,7 @@ fun PullRequestDetailScreen(
             }
             val shareUrl = identity?.url?.takeIf { it.isNotEmpty() }
             val canDeleteBranch = detail != null && canPerformPullRequestAction(detail, "delete-branch")
-            if (shareUrl != null || canDeleteBranch || permissions.canEditChangeRequest) {
+            if (shareUrl != null || canDeleteBranch || permissions.canEditChangeRequest || maintainerEdits.visible) {
                 S5OverflowMenu(
                     icon = Icons.Rounded.MoreVert,
                     label = "${terms.title} actions",
@@ -335,6 +339,18 @@ fun PullRequestDetailScreen(
                             if (permissions.canEditChangeRequest) {
                                 add(S5MenuOption("edit-title", "Edit title", icon = Icons.Rounded.Edit))
                                 add(S5MenuOption("edit-body", "Edit description", icon = Icons.Rounded.Description))
+                            }
+                            if (maintainerEdits.visible) {
+                                add(
+                                    S5MenuOption(
+                                        id = "maintainer-edits",
+                                        label = "Allow edits from maintainers",
+                                        icon = Icons.Rounded.Edit,
+                                        supporting = maintainerEdits.subtitle,
+                                        selected = maintainerEdits.value,
+                                        enabled = !maintainerEdits.saving,
+                                    )
+                                )
                             }
                             if (shareUrl != null) {
                                 add(S5MenuOption("copy", "Copy link", icon = Icons.Rounded.Link))
@@ -362,6 +378,7 @@ fun PullRequestDetailScreen(
                         when (action) {
                             "edit-title" -> onOpenRoute(Routes.pullRequestEdit(readEnvironment, readReference, "title"))
                             "edit-body" -> onOpenRoute(Routes.pullRequestEdit(readEnvironment, readReference, "body"))
+                            "maintainer-edits" -> maintainerEdits.toggle()
                             "copy" -> shareUrl?.let(copyLink)
                             "share" ->
                                 if (shareUrl != null && identity != null &&

@@ -27,18 +27,19 @@ class ChildInputsTest {
     }
 
     @Test
-    fun `a blocked subagent stamps every ancestor, approval outranking a question`() {
+    fun `a subagent's approval stamps every ancestor but its question flags none`() {
         val threads =
             listOf(
                 shell("root"),
                 shell("mid", parent = "root"),
                 shell("asks", parent = "mid", request = "user_input"),
-                shell("approves", parent = "root", request = "command_approval"),
+                shell("approves", parent = "mid", request = "command_approval"),
             )
         assertEquals(
-            mapOf("mid" to SUBAGENT_REQUEST_USER_INPUT, "root" to SUBAGENT_REQUEST_APPROVAL),
+            mapOf("mid" to SUBAGENT_REQUEST_APPROVAL, "root" to SUBAGENT_REQUEST_APPROVAL),
             pendingSubagentRequestsByThread(threads),
         )
+        assertEquals(emptyMap<String, String>(), pendingSubagentRequestsByThread(threads.dropLast(1)))
     }
 
     @Test
@@ -53,10 +54,10 @@ class ChildInputsTest {
     fun `a lineage cycle stops the walk`() {
         val threads =
             listOf(
-                shell("a", parent = "b", request = "user_input"),
+                shell("a", parent = "b", request = "command_approval"),
                 shell("b", parent = "a"),
             )
-        assertEquals(mapOf("b" to SUBAGENT_REQUEST_USER_INPUT), pendingSubagentRequestsByThread(threads))
+        assertEquals(mapOf("b" to SUBAGENT_REQUEST_APPROVAL), pendingSubagentRequestsByThread(threads))
     }
 
     @Test

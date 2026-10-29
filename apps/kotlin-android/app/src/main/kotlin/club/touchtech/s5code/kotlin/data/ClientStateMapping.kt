@@ -81,6 +81,9 @@ fun StoredPreferences.toRuntime(): RuntimePreferences =
         homeProjectKey = threadListFilters?.projectKey?.takeIf(String::isNotEmpty),
         pullRequestMergeMethod = pullRequestMergeMethod?.takeIf(String::isNotBlank),
         pullRequestHideTestFiles = pullRequestHideTestFiles,
+        useLastProjectForNewThreads = useLastProjectForNewThreads,
+        lastThreadProject =
+            lastThreadProject?.takeIf { it.environmentId.isNotBlank() && it.projectId.isNotBlank() },
     )
 
 /**
@@ -139,6 +142,9 @@ data class RuntimePreferences(
     /** The last pull request merge method picked; the merge menu offers it first. */
     val pullRequestMergeMethod: String? = null,
     val pullRequestHideTestFiles: Boolean = false,
+    /** New task starts in the current thread's project, else [lastThreadProject], skipping the picker. */
+    val useLastProjectForNewThreads: Boolean = true,
+    val lastThreadProject: ThreadProjectRef? = null,
 )
 
 fun RuntimePreferences.toStored(): StoredPreferences =
@@ -176,6 +182,8 @@ fun RuntimePreferences.toStored(): StoredPreferences =
             else StoredThreadListFilters(homeEnvironmentId, homeProjectKey),
         pullRequestMergeMethod = pullRequestMergeMethod,
         pullRequestHideTestFiles = pullRequestHideTestFiles,
+        useLastProjectForNewThreads = useLastProjectForNewThreads,
+        lastThreadProject = lastThreadProject,
     )
 
 fun ComposerAttachment.toStored(): StoredAttachment =

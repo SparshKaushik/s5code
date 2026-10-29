@@ -316,4 +316,16 @@ class PullRequestListTest {
             ),
         )
     }
+
+    @Test
+    fun `a row's cached diff stat goes stale only when its updatedAt moves`() {
+        val seen = HashMap<String, String>()
+        assertEquals(emptyList<String>(), movedPullRequestStatKeys(seen, listOf(entry(1), entry(2))))
+        assertEquals(emptyList<String>(), movedPullRequestStatKeys(seen, listOf(entry(1), entry(2))))
+        assertEquals(
+            listOf("project:org/repo:1"),
+            movedPullRequestStatKeys(seen, listOf(entry(1) { copy(updatedAt = "2026-10-20T00:00:00Z") }, entry(2))),
+        )
+        assertEquals("2026-10-20T00:00:00Z", seen["project:org/repo:1"])
+    }
 }

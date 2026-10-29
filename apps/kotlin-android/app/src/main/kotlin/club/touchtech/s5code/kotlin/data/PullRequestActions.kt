@@ -148,6 +148,8 @@ data class PullRequestPermissions(
     val verdicts: List<String> = emptyList(),
     /** Edit the PR's title and description. */
     val canEditChangeRequest: Boolean = false,
+    /** Allow or stop maintainer pushes to the PR's head branch. */
+    val canEditMaintainerEdits: Boolean = false,
     /** React to the PR and its comments. */
     val canReact: Boolean = false,
     /** Add and remove labels. */
@@ -188,6 +190,7 @@ fun pullRequestPermissions(
             granted && open && pr?.capabilities?.reviewers?.request == true && pr.viewerPermissions.requestReviewers,
         verdicts = verdicts,
         canEditChangeRequest = granted && pr != null && canEditPullRequestChangeRequest(pr),
+        canEditMaintainerEdits = granted && pr != null && canEditPullRequestMaintainerEdits(pr),
         canReact = granted && pr?.capabilities?.reactions == true,
         canManageLabels = granted && pr != null && canManagePullRequestLabels(pr),
         editingSubject = pr,

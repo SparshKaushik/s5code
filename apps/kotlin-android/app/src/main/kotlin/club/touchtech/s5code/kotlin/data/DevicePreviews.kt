@@ -14,7 +14,7 @@ import club.touchtech.s5code.kotlin.transport.wire.DeviceServiceStateDto
 fun DeviceServiceStateDto.toSnapshot(): DeviceServiceSnapshot =
     DeviceServiceSnapshot(
         hosts =
-            (hosts + easHosts).map { host ->
+            (hosts + easHosts + simlockHosts).map { host ->
                 DeviceHost(
                     id = host.id,
                     label = host.label,

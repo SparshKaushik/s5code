@@ -475,7 +475,11 @@ private fun ThreadsHome(
         }
     }
 
-    fun launchThreadAction(thread: ThreadSummary, action: String) {
+    fun launchThreadAction(thread: ThreadSummary, picked: String) {
+        val action = resolveSnoozeMenuAction(picked) ?: run {
+            store.showError("That snooze time has passed. Choose another time.")
+            return
+        }
         if (action == "new-thread-on-branch") {
             // Straight to the draft, prefilled like RN's NewTaskSheet params:
             // same environment, same project, the thread's branch/worktree.
@@ -1169,6 +1173,18 @@ private fun ThreadsHome(
                                                                 environment
                                                                     ?.capabilities
                                                                     ?.threadAutoSettleOptOut == true,
+                                                            // Only the open menu shows them, and they resolve against now.
+                                                            snoozePresets =
+                                                                if (rowMenuFor == threadKey) {
+                                                                    resolveSnoozePresets(
+                                                                        presets =
+                                                                            parseSnoozePresetSettings(
+                                                                                environment?.serverSettings?.snoozePresets
+                                                                            ),
+                                                                    )
+                                                                } else {
+                                                                    emptyList()
+                                                                },
                                                             canMoveUp = canMoveUp,
                                                             canMoveDown = canMoveDown,
                                                             visitedTrackingSupported = environment?.capabilities?.threadVisitedTracking == true,
@@ -1363,7 +1379,7 @@ internal fun threadMenuOptions(
                             children =
                                 snoozePresets.map { preset ->
                                     S5MenuOption(
-                                        id = "snooze:${preset.snoozedUntilIso}",
+                                        id = snoozeMenuAction(preset),
                                         label = preset.label,
                                         supporting = preset.whenLabel,
                                     )

@@ -145,12 +145,15 @@ internal fun JsonObject.withPullRequestLinkUpdate(update: JsonObject): JsonObjec
 /**
  * `pull-request-watch:<host>/<repo>#<n>` monitor rows for links the server is
  * watching: a watch wakes the agent, so the thread stays working between
- * wakes instead of returning to the inbox. Tombstoned stack members are
- * excluded, matching `pullRequestWatchTasks` in
+ * wakes instead of returning to the inbox. Tombstoned stack members and merged
+ * PRs are excluded, matching `pullRequestWatchTasks` in
  * `packages/shared/src/orchestrationV2PendingBackgroundWork.ts`.
  */
 private fun V2ProjectionDto.pullRequestWatchTasks(): List<JsonObject> {
-    return pullRequestLinks().filter { it.source != "stack-dismissed" && it.watch != null }.map { link ->
+    // The watch reactor ends a merged PR's watch without waking the agent, so it holds nothing.
+    return pullRequestLinks().filter {
+        it.source != "stack-dismissed" && it.watch != null && it.snapshot?.state != "merged"
+    }.map { link ->
         buildJsonObject {
             put("taskId", "pull-request-watch:${threadPullRequestKeyOf(link)}")
             put("kind", "monitor")

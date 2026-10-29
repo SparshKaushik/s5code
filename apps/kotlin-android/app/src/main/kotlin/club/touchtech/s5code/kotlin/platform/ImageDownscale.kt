@@ -4,8 +4,10 @@ import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Matrix
 import androidx.exifinterface.media.ExifInterface
+import club.touchtech.s5code.kotlin.data.MAX_BYTE_LIMIT_SHRINKS
 import club.touchtech.s5code.kotlin.data.downscalableImageMimeType
 import club.touchtech.s5code.kotlin.data.fitImageAttachmentSize
+import club.touchtech.s5code.kotlin.data.shrinkImageToByteLimit
 import java.io.File
 
 private const val PHOTO_JPEG_QUALITY = 85
@@ -51,36 +53,45 @@ internal fun fitCachedImage(file: File, mimeType: String): Long? {
                 }
                 .getOrDefault(ExifInterface.ORIENTATION_NORMAL)
         val transform = exifOrientationTransform(orientation)
-        val (width, height) = fitImageAttachmentSize(bounds.outWidth, bounds.outHeight) ?: return null
+        var (width, height) = fitImageAttachmentSize(bounds.outWidth, bounds.outHeight) ?: return null
         var sample = 1
         while (bounds.outWidth / (sample * 2) >= width && bounds.outHeight / (sample * 2) >= height) sample *= 2
         val decoded =
             BitmapFactory.decodeFile(file.path, BitmapFactory.Options().apply { inSampleSize = sample })
                 ?: return null
-        val scaled =
-            if (decoded.width == width && decoded.height == height && transform == ExifTransform.Identity) {
-                decoded
-            } else {
-                val matrix =
-                    Matrix().apply {
-                        setScale(width.toFloat() / decoded.width, height.toFloat() / decoded.height)
-                        if (transform.degrees != 0f) postRotate(transform.degrees)
-                        if (transform.mirror) postScale(-1f, 1f)
-                    }
-                Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
-            }
         try {
-            val encoded =
-                temp.outputStream().use { output ->
-                    scaled.compress(
-                        if (format == "image/png") Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,
-                        PHOTO_JPEG_QUALITY,
-                        output,
-                    )
+            for (shrinks in 0..MAX_BYTE_LIMIT_SHRINKS) {
+                val scaled =
+                    if (decoded.width == width && decoded.height == height && transform == ExifTransform.Identity) {
+                        decoded
+                    } else {
+                        val matrix =
+                            Matrix().apply {
+                                setScale(width.toFloat() / decoded.width, height.toFloat() / decoded.height)
+                                if (transform.degrees != 0f) postRotate(transform.degrees)
+                                if (transform.mirror) postScale(-1f, 1f)
+                            }
+                        Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+                    }
+                try {
+                    val encoded =
+                        temp.outputStream().use { output ->
+                            scaled.compress(
+                                if (format == "image/png") Bitmap.CompressFormat.PNG else Bitmap.CompressFormat.JPEG,
+                                PHOTO_JPEG_QUALITY,
+                                output,
+                            )
+                        }
+                    if (!encoded || temp.length() <= 0L) return null
+                } finally {
+                    if (scaled !== decoded) scaled.recycle()
                 }
-            if (!encoded || temp.length() <= 0L) return null
+                if (shrinks == MAX_BYTE_LIMIT_SHRINKS) break
+                val smaller = shrinkImageToByteLimit(width, height, temp.length()) ?: break
+                width = smaller.first
+                height = smaller.second
+            }
         } finally {
-            if (scaled !== decoded) scaled.recycle()
             decoded.recycle()
         }
         if (!temp.renameTo(file)) {

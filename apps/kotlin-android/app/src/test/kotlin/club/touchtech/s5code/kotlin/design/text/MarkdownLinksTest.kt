@@ -99,4 +99,13 @@ class MarkdownLinksTest {
         assertEquals("/repo/a.ts", (resolveMarkdownLinkPresentation("file://localhost/repo/a.ts") as MarkdownLinkPresentation.File).path)
         assertTrue(isNetworkPath("/\\h\\x") && isNetworkPath("//h/x") && !isNetworkPath("/h/x"))
     }
+
+    @Test
+    fun `relative links with non-ASCII names open as files`() {
+        fun path(href: String) = (resolveMarkdownLinkPresentation(href) as? MarkdownLinkPresentation.File)?.path
+        assertEquals("pastexam/線性代數/exam_易志偉.pdf", path("pastexam/線性代數/exam_易志偉.pdf"))
+        assertEquals("Résumé final.pdf", path("Résumé%20final.pdf"))
+        assertEquals("資料.備份", path("資料.備份"))
+        assertEquals("docs/My Folder/", path("docs/My%20Folder/"))
+    }
 }

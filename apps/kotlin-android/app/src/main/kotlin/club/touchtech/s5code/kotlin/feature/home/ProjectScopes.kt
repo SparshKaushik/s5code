@@ -177,9 +177,28 @@ fun resolveScratchProjectScopeKey(key: String?, projects: List<Project>, groupin
     return if (scratchKey) SCRATCH_PROJECT_SCOPE_KEY else key
 }
 
-/** `getProjectScopeSelectionTarget`: the member on the draft's environment wins. */
-fun projectScopeSelectionTarget(scope: ProjectScope, environmentId: String?): Project =
-    scope.projects.firstOrNull { it.environmentId.value == environmentId } ?: scope.representative
+/**
+ * `getProjectScopeSelectionTarget`: the member on the draft's environment, then
+ * the representative, then the rest; a connected member wins over a
+ * disconnected one.
+ */
+fun projectScopeSelectionTarget(
+    scope: ProjectScope,
+    environmentId: String?,
+    connectedEnvironmentIds: Set<String> = emptySet(),
+): Project {
+    val ordered =
+        scope.projects.sortedBy {
+            when {
+                it.environmentId.value == environmentId -> 0
+                it == scope.representative -> 1
+                else -> 2
+            }
+        }
+    return ordered.firstOrNull { it.environmentId.value in connectedEnvironmentIds }
+        ?: ordered.firstOrNull()
+        ?: scope.representative
+}
 
 private fun projectSortTimestamp(project: Project, order: ThreadSort): Long =
     if (order == ThreadSort.Created) {

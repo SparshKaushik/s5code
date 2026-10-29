@@ -1,6 +1,7 @@
 package club.touchtech.s5code.kotlin.design.text
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /** Mirrors mobile's `markdownHtml.test.ts`. */
@@ -61,5 +62,15 @@ class MarkdownHtmlTest {
     @Test
     fun `parentheses in a destination are encoded`() {
         assertEquals("[x](<https://example.com/a%28b%29>)", markdownWithHtml("<a href=\"https://example.com/a(b)\">x</a>"))
+    }
+
+    @Test
+    fun `an unclosed fence in an HTML block stays code through the end`() {
+        // Odd, so the last fence is left open.
+        val fences = List(40_001) { "```x y" }.joinToString("\n")
+        val result = markdownWithHtml("<details>\n<img src=\"before.png\">\n$fences\n<img src=\"after.png\">\n</details>")
+        assertTrue(result.contains("![](<before.png>)"))
+        assertTrue(!result.contains("<details>"))
+        assertTrue(result.endsWith("<img src=\"after.png\">\n</details>"))
     }
 }

@@ -125,3 +125,19 @@ fun terminalGridSize(
     val rows = (heightPx / lineHeightPx).toInt().coerceIn(1, 500)
     return cols to rows
 }
+
+/**
+ * `nextGrid` in client-runtime `terminalSession.ts`: the shared PTY grid as
+ * `cols to rows`. A frame without both edges (an older server) keeps the grid.
+ */
+fun nextTerminalGrid(current: Pair<Int, Int>?, cols: Int?, rows: Int?): Pair<Int, Int>? =
+    if (cols == null || rows == null || cols <= 0 || rows <= 0) current else cols to rows
+
+/**
+ * The grid a view draws: the shared PTY grid, clamped to the view's own fit. The
+ * server's grid lags a local resize, and a read-only observer never shapes it,
+ * so wrapping and the cursor match the PTY without spilling past the view.
+ */
+fun drawnTerminalGrid(measured: Pair<Int, Int>, shared: Pair<Int, Int>?): Pair<Int, Int> =
+    if (shared == null) measured
+    else minOf(shared.first, measured.first) to minOf(shared.second, measured.second)

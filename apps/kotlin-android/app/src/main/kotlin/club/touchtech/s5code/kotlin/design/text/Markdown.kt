@@ -56,6 +56,18 @@ data class MdSpan(
     val link: String? = null,
 )
 
+private val LEADING_FRONTMATTER =
+    Regex("""^\uFEFF?---[ \t]*(?:\r\n|\r|\n)(?:[\s\S]*?(?:\r\n|\r|\n))?(?:---|\.\.\.)[ \t]*(?=\r\n|\r|\n|\z)""")
+private val NOT_LINE_BREAK = Regex("[^\r\n]")
+
+/**
+ * `maskMarkdownFrontmatter`: blanks a leading YAML frontmatter block so a file
+ * preview skips it instead of drawing rules around its keys. Line breaks stay,
+ * so source offsets stay valid.
+ */
+fun maskMarkdownFrontmatter(markdown: String): String =
+    LEADING_FRONTMATTER.replace(markdown) { NOT_LINE_BREAK.replace(it.value, " ") }
+
 /** Parses [source] into blocks. Never throws: unknown syntax degrades to text. */
 fun parseMarkdown(source: String): List<MdBlock> {
     val lines = renderCodexInlineDirectivesAsMarkdown(source.replace("\r\n", "\n")).split('\n')
@@ -278,29 +290,35 @@ fun parseInline(source: String): List<MdSpan> {
         }
     }
 
+    // Offsets into [source], not a `substring` per character: that copy made long paragraphs quadratic.
+    fun at(prefix: String) = source.startsWith(prefix, index)
+    fun later(marker: String, from: Int) = source.indexOf(marker, from) >= 0
+    // Past the last `]` no label can close, so each `[` there skips the scan.
+    val lastLabelClose = source.lastIndexOf(']')
+
     while (index < source.length) {
-        val rest = source.substring(index)
         when {
             // A backslash before ASCII punctuation is a literal (CommonMark escape).
-            rest.length > 1 && rest[0] == '\\' && rest[1] in MARKDOWN_ESCAPABLE -> {
+            index + 1 < source.length && source[index] == '\\' && source[index + 1] in MARKDOWN_ESCAPABLE -> {
                 if (UNFINISHED_DRIVE_PATH.containsMatchIn(buffer)) buffer.append('\\')
-                buffer.append(rest[1])
+                buffer.append(source[index + 1])
                 index += 2
             }
 
-            rest.startsWith("`") -> {
-                val end = rest.indexOf('`', startIndex = 1)
-                if (end <= 0) {
+            at("`") -> {
+                val end = source.indexOf('`', startIndex = index + 1)
+                if (end < 0) {
                     buffer.append('`')
                     index++
                 } else {
                     flush()
-                    spans += MdSpan(rest.substring(1, end), code = true, bold = bold, italic = italic)
-                    index += end + 1
+                    spans += MdSpan(source.substring(index + 1, end), code = true, bold = bold, italic = italic)
+                    index = end + 1
                 }
             }
 
-            rest.startsWith("[") -> {
+            at("[") && index < lastLabelClose -> {
+                val rest = source.substring(index)
                 val closeText = linkLabelEnd(rest)
                 val destination =
                     if (closeText > 0 && rest.getOrNull(closeText + 1) == '(') linkDestination(rest, closeText + 1)
@@ -317,9 +335,9 @@ fun parseInline(source: String): List<MdSpan> {
                 }
             }
 
-            rest.startsWith("**") || rest.startsWith("__") -> {
-                val marker = rest.take(2)
-                if (!bold && !rest.drop(2).contains(marker)) {
+            at("**") || at("__") -> {
+                val marker = source.substring(index, index + 2)
+                if (!bold && !later(marker, index + 2)) {
                     buffer.append(marker)
                     index += 2
                 } else {
@@ -329,8 +347,8 @@ fun parseInline(source: String): List<MdSpan> {
                 }
             }
 
-            rest.startsWith("~~") -> {
-                if (!strike && !rest.drop(2).contains("~~")) {
+            at("~~") -> {
+                if (!strike && !later("~~", index + 2)) {
                     buffer.append("~~")
                     index += 2
                 } else {
@@ -340,9 +358,9 @@ fun parseInline(source: String): List<MdSpan> {
                 }
             }
 
-            (rest.startsWith("*") || rest.startsWith("_")) && !rest.startsWith("**") -> {
-                val marker = rest.first()
-                if (!italic && !rest.drop(1).contains(marker)) {
+            (at("*") || at("_")) && !at("**") -> {
+                val marker = source[index]
+                if (!italic && source.indexOf(marker, index + 1) < 0) {
                     buffer.append(marker)
                     index++
                 } else {

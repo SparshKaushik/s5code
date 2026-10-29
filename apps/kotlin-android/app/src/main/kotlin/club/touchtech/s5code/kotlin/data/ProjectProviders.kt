@@ -14,7 +14,7 @@ import kotlinx.serialization.json.booleanOrNull
  */
 
 /** Matches the `enabled` decoding default of each driver's settings schema. */
-private val DEFAULT_DISABLED_PROVIDER_DRIVERS = setOf("cursor", "grok", "muse", "pi", "opencode", "antigravity")
+private val DEFAULT_DISABLED_PROVIDER_DRIVERS = setOf("cursor", "grok", "fx", "muse", "pi", "opencode", "antigravity")
 
 /** Built-in instances that run without any configuration entry. */
 private val DEFAULT_ENABLED_DEFAULT_INSTANCES = setOf("codex", "claudeAgent")

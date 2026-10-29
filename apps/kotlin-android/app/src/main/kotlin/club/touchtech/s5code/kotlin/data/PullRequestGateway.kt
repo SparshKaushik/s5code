@@ -258,8 +258,14 @@ interface PullRequestGateway {
         requested: Boolean,
     )
 
-    /** `pullRequests.update`: a new title and/or description. Detail refetches after. */
-    suspend fun update(environmentId: String, reference: PullRequestReference, title: String? = null, body: String? = null)
+    /** `pullRequests.update`: a new title, description and/or maintainer access. Detail refetches after. */
+    suspend fun update(
+        environmentId: String,
+        reference: PullRequestReference,
+        title: String? = null,
+        body: String? = null,
+        maintainerCanModify: Boolean? = null,
+    )
 
     /** `pullRequests.updateComment` ([kind]: issue-comment | review-comment). Activity refetches after. */
     suspend fun updateComment(

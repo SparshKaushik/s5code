@@ -57,3 +57,14 @@ internal fun unacknowledgedWokeAtMillis(
     val lastVisitedAt = parseInstant(shell.lastVisitedAt)
     return wokeAt.takeIf { lastVisitedAt == null || lastVisitedAt < wokeAt }
 }
+
+/** The earliest `snoozedUntil` strictly after [nowMillis], following `nextSnoozeWakeAfter`. */
+internal fun nextSnoozeWakeAfter(snoozedUntil: Sequence<String?>, nowMillis: Long): Long? =
+    snoozedUntil.mapNotNull { parseInstant(it) }.filter { it > nowMillis }.minOrNull()
+
+/**
+ * The home clock ticks each minute and also the moment a snooze expires, so a
+ * woken thread re-partitions on time instead of up to a minute late.
+ */
+internal fun clockTickDelayMillis(nowMillis: Long, nextWakeMillis: Long?): Long =
+    nextWakeMillis?.let { (it - nowMillis).coerceIn(0, 60_000) } ?: 60_000

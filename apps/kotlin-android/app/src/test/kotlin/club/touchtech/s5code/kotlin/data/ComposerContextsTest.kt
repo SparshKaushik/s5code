@@ -156,4 +156,25 @@ class ComposerContextsTest {
         )
         assertEquals("open · Fix #3", composerPullRequestDescription(results[0], "ACME/app"))
     }
+
+    @Test
+    fun `text queries put the thread's matching linked pull requests first`() {
+        val searched = listOf(pullRequest(7, "2026-03-01T00:00:00Z"), pullRequest(3, "2026-02-01T00:00:00Z"))
+        val linkedFound = pullRequest(3).copy(title = "Fix #3 (stale)")
+        val linkedElsewhere = pullRequest(42).copy(repository = "acme/lib", title = "Fix login", headBranch = "fix-login")
+        val linkedOther = pullRequest(99).copy(title = "Docs", headBranch = "docs")
+        val result =
+            withLinkedComposerPullRequestsFirst(
+                matches = searched,
+                linked = listOf(linkedFound, linkedElsewhere, linkedOther),
+                query = "fix",
+                limit = 20,
+            )
+        // The search's own row stands in for a linked one it found; unmatched links stay out.
+        assertEquals(listOf(3, 42, 7), result.map { it.number })
+        assertEquals("Fix #3", result.first().title)
+        assertEquals(listOf(3), withLinkedComposerPullRequestsFirst(searched, listOf(linkedFound), "fix", 1).map { it.number })
+        // With the search unavailable, linked matches still show.
+        assertEquals(listOf(42), withLinkedComposerPullRequestsFirst(emptyList(), listOf(linkedElsewhere), "login", 20).map { it.number })
+    }
 }

@@ -74,7 +74,8 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import club.touchtech.s5code.kotlin.data.ThreadLinkRef
-import club.touchtech.s5code.kotlin.data.resolveThreadLinkRef
+import club.touchtech.s5code.kotlin.data.parseThreadLink
+import club.touchtech.s5code.kotlin.data.resolveThreadLink
 import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.ThreadDraft
 import club.touchtech.s5code.kotlin.data.childInputsTitle
@@ -474,7 +475,8 @@ fun ThreadScreen(
         }
     // Automation rows lead with their task's title, as RN's `scheduledTasksLive`
     // query. Read once, and only when the transcript has one to name.
-    val hasAutomationRows = current.feed.any { it is FeedEntry.UserMessage && it.scheduledTaskId != null }
+    val hasAutomationRows = current.feed.any { it is FeedEntry.UserMessage && it.scheduledTaskId != null } ||
+        current.queuedRuns.any { it.scheduledTaskId != null }
     var scheduledTaskTitles by remember(environmentId) { mutableStateOf(emptyMap<String, String>()) }
     LaunchedEffect(environmentId, hasAutomationRows) {
         if (!hasAutomationRows || scheduledTaskTitles.isNotEmpty()) return@LaunchedEffect
@@ -1020,7 +1022,12 @@ fun ThreadScreen(
                 )
             }
             V2ThreadControls(store, env, id, current, working, followUp, canSteer = canSteer,
-                onFollowUp = { followUp = it }, onOpenThread = { onOpenThread(environmentId, it) })
+                onFollowUp = { followUp = it }, onOpenThread = { onOpenThread(environmentId, it) },
+                scheduledTaskTitles = scheduledTaskTitles,
+                senderThreadTitle = { senderId ->
+                    (store.workspace.threads.value + store.workspace.archived.value)
+                        .firstOrNull { it.environmentId.value == environmentId && it.id.value == senderId }?.title
+                })
             if (current.providerNativeSubagent) {
                 Text("Provider-managed subagent · ${summary.status}", modifier = Modifier.padding(16.dp),
                     style = MaterialTheme.typography.bodySmall)
@@ -1255,7 +1262,7 @@ fun ThreadScreen(
                         .firstOrNull {
                             it.instance.instanceId == effectiveSettings.provider.instanceId
                         }
-                        ?.modelLabel(effectiveSettings.model)
+                        ?.modelShortLabel(effectiveSettings.model)
                         ?: effectiveSettings.model,
                 modelSummary =
                     remember(machineCatalog, effectiveSettings, draft.text) {
@@ -1606,14 +1613,17 @@ fun ThreadScreen(
                                     },
                                     scheduledTaskTitles = scheduledTaskTitles,
                                     onOpenAutomation = { onOpenRoute("settings/scheduled-tasks") },
-                                    onOpenThreadLink = { linkedId ->
+                                    onOpenThreadLink = { href ->
                                         // Read at tap time: collecting every shell here would
                                         // recompose the transcript on each list update.
-                                        val source = ThreadLinkRef(environmentId, linkedId)
-                                        val refs = (store.workspace.threads.value + store.workspace.archived.value)
-                                            .map { ThreadLinkRef(it.environmentId.value, it.id.value) }
-                                        val target = resolveThreadLinkRef(source, refs) ?: source
-                                        onOpenThread(target.environmentId, target.threadId)
+                                        parseThreadLink(href)?.let { link ->
+                                            val refs = (store.workspace.threads.value + store.workspace.archived.value)
+                                                .map { ThreadLinkRef(it.environmentId.value, it.id.value) }
+                                            val target =
+                                                resolveThreadLink(link, environmentId, refs)
+                                                    ?: ThreadLinkRef(link.environmentId ?: environmentId, link.threadId)
+                                            onOpenThread(target.environmentId, target.threadId)
+                                        }
                                     },
                                     onAnswerSecretRequest = { request, answer ->
                                         // The item's own threadId is the
@@ -2096,7 +2106,7 @@ private fun handoffEndpointLabel(
     statuses: List<ProviderStatus>,
 ): String {
     val entry = catalog.firstOrNull { it.instance.instanceId == endpoint.instanceId }
-    val label = endpoint.model?.let { model -> entry?.modelLabel(model) ?: model }
+    val label = endpoint.model?.let { model -> entry?.modelShortLabel(model) ?: model }
         ?: entry?.instance?.label
         ?: endpoint.instanceId
     val status = statuses.firstOrNull { it.instanceId == endpoint.instanceId }

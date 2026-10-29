@@ -109,6 +109,7 @@ data class PullRequestReviewCapabilitiesDto(
 data class PullRequestEditCapabilitiesDto(
     val changeRequest: Boolean = false,
     val comment: Boolean = false,
+    val maintainerEdits: Boolean? = null,
 )
 
 @Serializable
@@ -150,6 +151,7 @@ data class PullRequestViewerPermissionsDto(
     val updateMethods: List<String>? = null,
     val labels: Boolean? = null,
     val editChangeRequest: Boolean? = null,
+    val maintainerEdits: Boolean? = null,
 )
 
 @Serializable
@@ -282,6 +284,7 @@ data class PullRequestDetailDto(
     val autoMergeEnabled: Boolean? = null,
     val autoMergeMethod: String? = null,
     val workflowApprovalsRequired: Int? = null,
+    val maintainerCanModify: Boolean? = null,
 )
 
 /** `PullRequestActivity`: the timeline a PR page's Activity segment draws. */

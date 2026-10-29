@@ -2,10 +2,14 @@ package club.touchtech.s5code.kotlin.data
 
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.getValue
 import androidx.compose.runtime.State
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import club.touchtech.s5code.kotlin.transport.SessionConnects
 import kotlinx.coroutines.CancellationException
 
 /**
@@ -35,19 +39,8 @@ sealed interface Remote<out T> {
  * the request alive.
  */
 @Composable
-fun <T> rememberRemote(vararg keys: Any?, load: suspend () -> T): State<Remote<T>> {
-    return produceState<Remote<T>>(Remote.Loading, keys = keys) {
-        value = Remote.Loading
-        value =
-            try {
-                Remote.Loaded(load())
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (cause: Throwable) {
-                Remote.Failed(cause.message ?: "That read failed.")
-            }
-    }
-}
+fun <T> rememberRemote(vararg keys: Any?, load: suspend () -> T): State<Remote<T>> =
+    rememberRetryableRemote(*keys, load = load).first
 
 /**
  * Same as [rememberRemote] but hands back a retry action. Used where a failed
@@ -72,5 +65,10 @@ fun <T> rememberRetryableRemote(
                     Remote.Failed(cause.message ?: "That read failed.")
                 }
         }
+    // Reads fail at once while their environment is unreachable; a connect anywhere re-runs a failed one.
+    val connects by SessionConnects.count.collectAsState()
+    LaunchedEffect(connects) {
+        if ((state.value as? Remote.Failed)?.retryable == true) attempt.intValue += 1
+    }
     return state to { attempt.intValue += 1 }
 }

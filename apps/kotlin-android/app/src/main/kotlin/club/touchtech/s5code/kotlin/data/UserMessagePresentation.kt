@@ -14,11 +14,14 @@ private val LEGACY_AUTOMATION_PREFIX = Regex("^\\[Triggered by schedule task: [^
 private val LEGACY_AUTOMATION_MESSAGE_ID = Regex("^scheduled-task-message:(.+):\\d+:(?:scheduled|manual)$")
 
 /** `resolveUserMessagePresentation` in `packages/client-runtime/src/userMessage.ts`. */
-internal fun userMessagePresentation(item: JsonObject): UserMessagePresentation {
+internal fun userMessagePresentation(
+    item: JsonObject,
+    /** A turn item names its message `messageId`; a conversation message is its own `id`. */
+    messageId: String? = item.v2String("messageId"),
+): UserMessagePresentation {
     val text = item.v2String("text").orEmpty()
     item.v2String("scheduledTaskId")?.let { return UserMessagePresentation(text, "Automation", it) }
     val prefix = LEGACY_AUTOMATION_PREFIX.find(text)
-    val messageId = item.v2String("messageId")
     val legacyTaskId = if (prefix != null) messageId?.let { LEGACY_AUTOMATION_MESSAGE_ID.find(it)?.groupValues?.get(1) } else null
     if (prefix != null && (item.v2String("createdBy") == "agent" ||
             messageId?.startsWith("scheduled-task-message:") == true)) {

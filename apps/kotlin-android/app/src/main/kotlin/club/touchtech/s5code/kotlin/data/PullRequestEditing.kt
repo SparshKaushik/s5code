@@ -21,6 +21,31 @@ fun canEditPullRequestChangeRequest(detail: PullRequestDetailDto): Boolean {
     return sameLogin(detail.viewer, detail.author?.login) || "merge" in detail.viewerPermissions.actions
 }
 
+/** `canEditPullRequestMaintainerEdits`: open GitHub PRs whose author may toggle maintainer pushes. */
+fun canEditPullRequestMaintainerEdits(detail: PullRequestDetailDto): Boolean =
+    detail.state == "open" &&
+        detail.capabilities.edit?.maintainerEdits == true &&
+        detail.viewerPermissions.maintainerEdits == true &&
+        detail.maintainerCanModify != null
+
+/** A maintainer-edits toggle not yet confirmed by a host reading, keyed by PR url. */
+data class MaintainerEditsChoice(val key: String, val observedAt: Double?, val value: Boolean)
+
+/**
+ * `maintainerEditsChoiceInForce`: a saved choice ends at the first host reading
+ * delivered after the save. The save refetches, so that reading started after the write.
+ */
+fun maintainerEditsChoiceInForce(
+    choice: MaintainerEditsChoice?,
+    key: String,
+    observedAt: Double?,
+    saving: Boolean,
+): MaintainerEditsChoice? {
+    if (choice == null || choice.key != key) return null
+    if (saving) return if (choice.observedAt == observedAt) choice else choice.copy(observedAt = observedAt)
+    return if (observedAt != null && choice.observedAt == observedAt) choice else null
+}
+
 /**
  * `canEditPullRequestComment`. Review summaries cannot be rewritten through
  * comment mutations, so only issue and review comments qualify.

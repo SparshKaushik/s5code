@@ -82,7 +82,7 @@ fun S5Markdown(
     onCopyCode: ((String) -> Unit)? = null,
     workspaceRoot: String? = null,
     onOpenFile: ((String) -> Unit)? = null,
-    /** Receives a `t3-thread://` link's id as written; null leaves those links inert. */
+    /** Receives a `t3-thread://` link's href; null leaves those links inert. */
     onOpenThreadLink: ((String) -> Unit)? = null,
     /**
      * Renders HTML tags as Markdown, as forges write them into pull request
@@ -514,7 +514,7 @@ private fun List<MdSpan>.annotate(links: MarkdownLinkActions): AnnotatedMarkdown
                                         TextLinkStyles(
                                             style = style.copy(color = linkColor, textDecoration = TextDecoration.Underline)
                                         ),
-                                ) { onOpenThreadLink(presentation.threadId) }
+                                ) { onOpenThreadLink(presentation.href) }
                             ) { append(span.text) }
                         } else {
                             withStyle(style) { append(span.text) }

@@ -65,6 +65,7 @@ import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.platform.QrScannerPreview
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.launch
 
 /**
@@ -478,7 +479,9 @@ fun PairUrlScreen(
                                     // The credential is one-time, so the exchange writes
                                     // the token before returning; there is nothing to
                                     // retry with this code if it fails.
-                                    val outcome = runCatching { store.pairing.pair(target) }
+                                    val outcome =
+                                        runCatching { store.pairing.pair(target) }
+                                            .onFailure { if (it is CancellationException) throw it }
                                     pairing = false
                                     outcome.fold(
                                         onSuccess = { onPaired() },

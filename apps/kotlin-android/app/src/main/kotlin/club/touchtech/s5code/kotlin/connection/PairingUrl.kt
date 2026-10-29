@@ -1,5 +1,7 @@
 package club.touchtech.s5code.kotlin.connection
 
+import club.touchtech.s5code.kotlin.data.SavedEnvironment
+
 /**
  * Pairing URL parsing, matching `resolveRemotePairingTarget` in
  * `packages/shared/src/remote.ts` exactly. Getting this wrong is not a cosmetic
@@ -47,6 +49,25 @@ enum class PairingUrlError(val message: String) {
 }
 
 private val SUPPORTED_SCHEMES = setOf("http", "https", "ws", "wss")
+
+/**
+ * `assertKnownAddress`: the server reports its own environment id, so a pairing
+ * link from an address a saved environment does not have would otherwise repoint
+ * that environment at whoever answered. Null when pairing may go ahead.
+ */
+fun pairingAddressConflict(
+    saved: List<SavedEnvironment>,
+    environmentId: String,
+    httpBaseUrl: String,
+): String? {
+    val existing = saved.firstOrNull { it.environmentId == environmentId } ?: return null
+    // An S5 Connect row has no URL to change, so a direct link to the same machine is not a conflict.
+    if (existing.kind == club.touchtech.s5code.kotlin.data.SavedEnvironmentKind.Cloud) return null
+    fun address(url: String) = url.trim().trimEnd('/').lowercase()
+    if (address(existing.httpBaseUrl) == address(httpBaseUrl)) return null
+    return "That address claims to be ${existing.label}, which is already saved. " +
+        "Change its URL from that environment's settings instead."
+}
 
 /** Parses a pasted or scanned pairing URL. */
 fun parsePairingUrl(input: String): PairingUrlResult {

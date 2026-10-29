@@ -38,6 +38,7 @@ import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.ErrorOutline
 import androidx.compose.material.icons.rounded.Schedule
+import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.ExpandLess
 import androidx.compose.material.icons.rounded.ExpandMore
 import androidx.compose.material.icons.rounded.Image
@@ -125,7 +126,7 @@ fun FeedEntryRow(
     expandedIds: Set<String>? = null,
     onToggleExpand: (FeedEntry) -> Unit = {},
     onOpenThread: (String) -> Unit = {},
-    /** A `t3-thread://` link in agent text was tapped; receives the id as written. */
+    /** A `t3-thread://` link in agent text was tapped; receives its href. */
     onOpenThreadLink: ((String) -> Unit)? = null,
     /**
      * Sends `secrets.answerRequest` for a pending [FeedEntry.SecretRequest];
@@ -1369,6 +1370,7 @@ private fun NoteRow(entry: FeedEntry.Note, modifier: Modifier) {
             when {
                 failed -> Icons.Rounded.ErrorOutline
                 inProgress -> Icons.Rounded.Schedule
+                entry.stopped -> Icons.Rounded.Stop
                 else -> Icons.Rounded.Check
             },
             contentDescription = null,

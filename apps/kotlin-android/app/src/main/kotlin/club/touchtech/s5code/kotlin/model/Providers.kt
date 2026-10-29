@@ -45,6 +45,8 @@ private val DRIVER_DISPLAY_NAMES =
         "claude" to "Claude",
         "cursor" to "Cursor",
         "grok" to "Grok",
+        // Brands itself lowercase like pi.
+        "fx" to "fx",
         "muse" to "Muse Code",
         "opencode" to "OpenCode",
         "antigravity" to "Antigravity",

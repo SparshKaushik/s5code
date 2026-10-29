@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.rounded.Cloud
 import androidx.compose.material.icons.rounded.Code
 import androidx.compose.material.icons.rounded.Delete
+import androidx.compose.material.icons.rounded.EditNote
 import androidx.compose.material.icons.rounded.Difference
 import androidx.compose.material.icons.rounded.Image
 import androidx.compose.material.icons.automirrored.rounded.Login
@@ -372,6 +373,18 @@ fun SettingsProjectGroupingScreen(store: AppStore, onBack: () -> Unit) {
                         position = rowPosition(index, options.size),
                     )
                 }
+            }
+            // RN's NewThreadSettingsSection.
+            S5RowGroup(title = "New threads") {
+                S5SwitchRow(
+                    icon = Icons.Rounded.EditNote,
+                    label = "Use last project",
+                    supporting = "Start new threads in the last project you used on this device.",
+                    checked = preferences.useLastProjectForNewThreads,
+                    onCheckedChange = { enabled ->
+                        store.updatePreferences { it.copy(useLastProjectForNewThreads = enabled) }
+                    },
+                )
             }
         }
     }

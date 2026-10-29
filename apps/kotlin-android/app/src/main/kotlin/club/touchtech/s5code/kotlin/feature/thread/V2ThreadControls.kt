@@ -15,7 +15,9 @@ import kotlinx.serialization.json.*
 internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId, detail: ThreadDetail,
     working: Boolean, followUp: String, onFollowUp: (String) -> Unit, onOpenThread: (String) -> Unit,
     /** [ThreadDetail.canSteer] unless the turn is compacting, which queues follow-ups instead. */
-    canSteer: Boolean = detail.canSteer) {
+    canSteer: Boolean = detail.canSteer,
+    scheduledTaskTitles: Map<String, String> = emptyMap(),
+    senderThreadTitle: (String) -> String? = { null }) {
     val scope = rememberCoroutineScope()
     var queueOpen by remember(id) { mutableStateOf(false) }
     var agentsOpen by remember(id) { mutableStateOf(false) }
@@ -98,29 +100,27 @@ internal fun V2ThreadControls(store: AppStore, env: EnvironmentId, id: ThreadId,
             items(detail.queuedRuns.size, key = { detail.queuedRuns[it].id }) { index ->
                 val run = detail.queuedRuns[index]
                 Column {
-                    // Edit and Steer keep the raw text so quoted citations stay linked.
+                    val sender = club.touchtech.s5code.kotlin.data.queuedRunSenderLabel(run,
+                        run.scheduledTaskId?.let(scheduledTaskTitles::get), run.senderThreadId?.let(senderThreadTitle))
+                    sender?.let { Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant) }
+                    // Edit and Send now keep the raw text so quoted citations stay linked.
                     val displayText = remember(run.text) {
                         club.touchtech.s5code.kotlin.data.assistantCitationsToPlainText(run.text).take(300)
                     }
                     Text(displayText, style = MaterialTheme.typography.bodyMedium)
                     Row {
-                        TextButton(enabled = !busy, onClick = { editing = run; editText = run.text }) { Text("Edit") }
-                        TextButton(enabled = !busy, onClick = { action { store.workspace.queueAction(env, id, "queued-run.cancel", run.id) } }) { Text("Cancel") }
-                        if (index > 0 && detail.canReorderQueue) TextButton(enabled = !busy, onClick = { action {
-                            store.workspace.queueAction(env, id, "queued-run.reorder", run.id, beforeRunId = detail.queuedRuns[index - 1].id)
-                        } }) { Text("Move up") }
-                        if (index < detail.queuedRuns.lastIndex && detail.canReorderQueue) TextButton(enabled = !busy, onClick = { action {
-                            store.workspace.queueAction(env, id, "queued-run.reorder", run.id, beforeRunId = detail.queuedRuns.getOrNull(index + 2)?.id)
-                        } }) { Text("Move down") }
+                        // A stopped thread has nothing to steer, so the message starts its own
+                        // run (RN's `canSendNow`); otherwise it joins the active one.
+                        if (detail.canSendNow || detail.canPromoteQueued) TextButton(enabled = !busy, onClick = { action {
+                            if (detail.canSendNow) store.workspace.queueAction(env, id, "queued-run.start", run.id)
+                            else store.workspace.queueAction(env, id, "queued-message.promote-to-steer", run.id,
+                                targetRunId = detail.latestTurn?.turnId)
+                        } }) { Text("Send now") }
+                        // A guest's message keeps the guest's words.
+                        if (run.guestName == null) TextButton(enabled = !busy, onClick = { editing = run; editText = run.text }) { Text("Edit") }
+                        TextButton(enabled = !busy, onClick = { action { store.workspace.queueAction(env, id, "queued-run.cancel", run.id) } }) { Text("Remove") }
                     }
-                    // A stopped thread has nothing to steer, so the held message is sent on
-                    // its own instead (RN's `canSendNow`).
-                    if (detail.canSendNow) TextButton(enabled = !busy, onClick = { action {
-                        store.workspace.queueAction(env, id, "queued-run.start", run.id)
-                    } }) { Text("Send now") }
-                    else if (detail.canPromoteQueued) TextButton(enabled = !busy, onClick = { action {
-                        store.workspace.queueAction(env, id, "queued-message.promote-to-steer", run.id, targetRunId = detail.latestTurn?.turnId)
-                    } }) { Text("Steer now") }
                     HorizontalDivider()
                 }
             }

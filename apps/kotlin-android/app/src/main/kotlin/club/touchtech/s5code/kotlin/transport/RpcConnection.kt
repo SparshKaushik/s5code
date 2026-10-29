@@ -88,6 +88,11 @@ private constructor(
     /** Completes when the socket dies, for whatever reason. */
     val closed = CompletableDeferred<RpcTransportClosed>()
 
+    private val inboundFrameCount = AtomicLong(0)
+
+    /** Frames received so far; a count that stops moving marks a socket the OS killed silently. */
+    val inboundFrames: Long get() = inboundFrameCount.get()
+
     /**
      * A unary call. Cancelling the caller sends `Interrupt` so the server drops
      * the work instead of finishing a request nobody is waiting for.
@@ -168,6 +173,7 @@ private constructor(
     }
 
     private fun onFrame(text: String) {
+        inboundFrameCount.incrementAndGet()
         val envelopes = runCatching { parseRpcFrame(text) }.getOrElse { cause ->
             fail(RpcTransportClosed("The server sent a frame this build cannot parse: ${cause.message}"))
             return

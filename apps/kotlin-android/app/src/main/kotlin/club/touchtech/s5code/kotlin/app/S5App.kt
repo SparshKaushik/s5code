@@ -36,6 +36,7 @@ import club.touchtech.s5code.kotlin.data.transitionIncomingSharePresentation
 import club.touchtech.s5code.kotlin.design.component.rememberS5ConfirmDialogController
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.feature.home.HomeScreen
+import club.touchtech.s5code.kotlin.feature.newtask.openNewTask
 import club.touchtech.s5code.kotlin.platform.publishShortcuts
 
 /**
@@ -156,7 +157,7 @@ fun S5App(
         // persistent, so no navigation is needed there.
         LaunchedEffect(hardwareShortcut?.id) {
             when (hardwareShortcut?.shortcut) {
-                S5HardwareShortcut.NewTask -> navController.navigate(Routes.NewTask)
+                S5HardwareShortcut.NewTask -> navController.openNewTask(store)
                 S5HardwareShortcut.FocusSearch -> {
                     if (!expanded && currentEntry?.destination?.route != Routes.Home) {
                         navController.navigate(Routes.Home) { launchSingleTop = true }
@@ -284,7 +285,7 @@ private fun AdaptiveWorkspace(
                             popUpTo(Routes.Home)
                         }
                     },
-                    onNewTask = { navController.navigate(Routes.NewTask) },
+                    onNewTask = { navController.openNewTask(store) },
                     onResumeDraft = { navController.navigate(Routes.NewTaskDraft) },
                     onOpenRoute = { route -> navController.navigate(route) },
                     onConnections = { navController.navigate(Routes.Connections) },

@@ -61,7 +61,15 @@ data class StoredPreferences(
     val pullRequestMergeMethod: String? = null,
     /** RN's `pullRequestHideTestFiles` for the changed-files list. */
     val pullRequestHideTestFiles: Boolean = false,
+    /** RN's `useLastProjectForNewThreads`: on unless the user turned it off. */
+    val useLastProjectForNewThreads: Boolean = true,
+    /** RN's `lastThreadProject`: the last non-scratch project opened or picked here. */
+    val lastThreadProject: ThreadProjectRef? = null,
 )
+
+/** A project in one environment; project ids are only unique within an environment. */
+@Serializable
+data class ThreadProjectRef(val environmentId: String, val projectId: String)
 
 /** The home environment and project filters; null means "all". */
 @Serializable

@@ -26,8 +26,9 @@ class ProviderInstanceTest {
     }
 
     @Test
-    fun `pi keeps its lowercase brand`() {
+    fun `pi and fx keep their lowercase brands`() {
         assertEquals("pi", formatProviderDriverName("pi"))
+        assertEquals("fx", formatProviderDriverName("fx"))
     }
 
     @Test

@@ -17,7 +17,6 @@ import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Keyboard
 import androidx.compose.material.icons.rounded.KeyboardHide
 import androidx.compose.material.icons.rounded.MoreVert
-import androidx.compose.material.icons.rounded.Refresh
 import androidx.compose.material.icons.rounded.Terminal
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.SmallFloatingActionButton
@@ -44,8 +43,6 @@ import club.touchtech.s5code.kotlin.data.DEFAULT_TERMINAL_ID
 import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
 import club.touchtech.s5code.kotlin.design.component.S5Button
 import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
-import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
-import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
 import club.touchtech.s5code.kotlin.design.component.S5EmptyState
 import club.touchtech.s5code.kotlin.design.component.S5ErrorState
 import club.touchtech.s5code.kotlin.design.component.S5IconButton
@@ -89,7 +86,6 @@ fun TerminalScreen(
     onSwitchTerminal: (String) -> Unit,
     /** Fallback when no live session remains after an exit. */
     onExitToThread: () -> Unit,
-    confirmController: S5ConfirmDialogController,
 ) {
     val env = remember(environmentId) { EnvironmentId(environmentId) }
     val id = remember(threadId) { ThreadId(threadId) }
@@ -218,22 +214,6 @@ fun TerminalScreen(
         }
     }
 
-    fun restart() {
-        val size = grid ?: return
-        scope.launch {
-            runCatching {
-                    store.workspace.terminalRestart(
-                        env,
-                        id,
-                        activeTerminalId,
-                        size.first,
-                        size.second,
-                    )
-                }
-                .onFailure { reportFailure("The terminal could not be restarted.", it) }
-        }
-    }
-
     fun clear() {
         pendingModifier = null
         scope.launch {
@@ -350,14 +330,6 @@ fun TerminalScreen(
                         ),
                     )
                     add(S5MenuOption("copy-all", "Copy all", Icons.Rounded.ContentCopy))
-                    add(
-                        S5MenuOption(
-                            "restart",
-                            "Restart",
-                            Icons.Rounded.Refresh,
-                            destructive = true,
-                        ),
-                    )
                 }
             S5OverflowMenu(
                 icon = Icons.Rounded.MoreVert,
@@ -384,16 +356,6 @@ fun TerminalScreen(
                             val output = nativeView?.copyAllText().orEmpty()
                             if (output.isNotEmpty()) copyToClipboard(output)
                         }
-                        action == "restart" ->
-                            confirmController.show(
-                                S5ConfirmDialogRequest(
-                                    title = "Restart terminal?",
-                                    message = "The running shell and any foreground command will be stopped.",
-                                    confirmText = "Restart",
-                                    destructive = true,
-                                    onConfirm = ::restart,
-                                )
-                            )
                     }
                 },
             )
@@ -517,7 +479,10 @@ fun TerminalScreen(
                         view.onInput = ::writeModifiedInput
                         view.fontSizeSp = fontSize
                         view.setTheme(terminalTheme)
-                        session?.let { view.setReplayBuffer(it.buffer, it.outputResetVersion, it.outputEnd) }
+                        session?.let {
+                            view.sharedGrid = it.grid
+                            view.setReplayBuffer(it.buffer, it.outputResetVersion, it.outputEnd)
+                        }
                     },
                     onRelease = { it.release() },
                     modifier = Modifier.fillMaxSize(),

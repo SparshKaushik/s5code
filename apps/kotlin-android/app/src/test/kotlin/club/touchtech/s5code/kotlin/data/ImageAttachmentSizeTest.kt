@@ -28,4 +28,13 @@ class ImageAttachmentSizeTest {
         assertNull(downscalableImageMimeType("image/gif"))
         assertNull(downscalableImageMimeType("image/webp"))
     }
+
+    @Test
+    fun `an encode over the byte limit shrinks by the square root with headroom`() {
+        val limit = 10L * 1024 * 1024
+        assertNull(shrinkImageToByteLimit(2000, 1500, limit))
+        // Four times the limit halves each edge, then 10% more.
+        assertEquals(900 to 675, shrinkImageToByteLimit(2000, 1500, limit * 4))
+        assertNull(shrinkImageToByteLimit(1, 1, limit * 4))
+    }
 }

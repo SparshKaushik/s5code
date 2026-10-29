@@ -43,6 +43,31 @@ class PullRequestEditingTest {
     }
 
     @Test
+    fun `maintainer edits need an open PR, the host capability, the viewer grant and a reported value`() {
+        val editable =
+            detail(
+                edit = PullRequestEditCapabilitiesDto(maintainerEdits = true),
+                permissions = PullRequestViewerPermissionsDto(maintainerEdits = true),
+            ).copy(state = "open", maintainerCanModify = false)
+        assertTrue(canEditPullRequestMaintainerEdits(editable))
+        assertFalse(canEditPullRequestMaintainerEdits(editable.copy(state = "merged")))
+        assertFalse(canEditPullRequestMaintainerEdits(editable.copy(maintainerCanModify = null)))
+        assertFalse(canEditPullRequestMaintainerEdits(editable.copy(viewerPermissions = PullRequestViewerPermissionsDto())))
+        assertFalse(canEditPullRequestMaintainerEdits(editable.copy(capabilities = PullRequestCapabilitiesDto())))
+    }
+
+    @Test
+    fun `a maintainer edits choice lasts until the first reading after its save`() {
+        val choice = MaintainerEditsChoice("pr", observedAt = 1.0, value = true)
+        assertNull(maintainerEditsChoiceInForce(choice, "other", 1.0, saving = true))
+        // While saving, a reading that lands follows the choice instead of ending it.
+        assertEquals(choice.copy(observedAt = 2.0), maintainerEditsChoiceInForce(choice, "pr", 2.0, saving = true))
+        assertSame(choice, maintainerEditsChoiceInForce(choice, "pr", 1.0, saving = false))
+        assertNull(maintainerEditsChoiceInForce(choice, "pr", 3.0, saving = false))
+        assertNull(maintainerEditsChoiceInForce(choice.copy(observedAt = null), "pr", null, saving = false))
+    }
+
+    @Test
     fun `only issue and review comments are editable, by their author unless the host answers`() {
         val pr = detail()
         assertTrue(canEditPullRequestComment(pr, "issue-comment", "OCTOCAT ", null))

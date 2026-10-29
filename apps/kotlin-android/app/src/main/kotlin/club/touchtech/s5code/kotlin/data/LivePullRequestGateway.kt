@@ -161,6 +161,7 @@ class LivePullRequestGateway(
     private val watchers = ConcurrentHashMap<String, Job>()
     private val statsFlows = ConcurrentHashMap<String, MutableStateFlow<Map<String, PullRequestDiffStatDto>>>()
     private val statsRequested = ConcurrentHashMap.newKeySet<String>()
+    private val statsUpdatedAt = ConcurrentHashMap<String, MutableMap<String, String>>()
 
     private val listState = MutableStateFlow(PullRequestListState())
     override val listControls: StateFlow<Map<String, PullRequestListControls>> =
@@ -222,6 +223,7 @@ class LivePullRequestGateway(
             tick = true,
             persist = true,
             onValue = { head ->
+                dropMovedStats(target.environmentId, head.entries)
                 pages.update { it + (pagesKey(target) to pullRequestListHead(it[pagesKey(target)], head)) }
             },
         ) { session ->
@@ -250,6 +252,7 @@ class LivePullRequestGateway(
                             val page =
                                 session.query(WsMethods.PullRequestsList, input.toJson(), PullRequestListResultDto.serializer())
                             if (page.errors.isNotEmpty()) error(page.errors.joinToString("\n") { it.message })
+                            dropMovedStats(target.environmentId, page.entries)
                             val next = appendPullRequestListPage(pages.value[pagesKey(target)] ?: held, page, input)
                             pages.update { it + (pagesKey(target) to next) }
                             val cursors = input.cursors
@@ -298,6 +301,15 @@ class LivePullRequestGateway(
                 }
             }
         }
+
+    /** A row whose `updatedAt` moved loses its counts, so the visible rows ask for them again. */
+    private fun dropMovedStats(environmentId: String, listed: List<PullRequestListEntryDto>) {
+        val seen = statsUpdatedAt.getOrPut(environmentId) { HashMap() }
+        val moved = synchronized(seen) { movedPullRequestStatKeys(seen, listed) }
+        if (moved.isEmpty()) return
+        moved.forEach { statsRequested.remove("$environmentId\u0000$it") }
+        statsFlow(environmentId).update { held -> held - moved.toSet() }
+    }
 
     override fun stats(environmentId: String): StateFlow<Map<String, PullRequestDiffStatDto>> =
         statsFlow(environmentId).asStateFlow()
@@ -880,7 +892,13 @@ class LivePullRequestGateway(
         if (selected.size < reviewers.size) refetch(detail, activity)
     }
 
-    override suspend fun update(environmentId: String, reference: PullRequestReference, title: String?, body: String?) {
+    override suspend fun update(
+        environmentId: String,
+        reference: PullRequestReference,
+        title: String?,
+        body: String?,
+        maintainerCanModify: Boolean?,
+    ) {
         write(environmentId) { session ->
             val payload =
                 JsonObject(
@@ -888,6 +906,7 @@ class LivePullRequestGateway(
                         buildJsonObject {
                             title?.let { put("title", it) }
                             body?.let { put("body", it) }
+                            maintainerCanModify?.let { put("maintainerCanModify", it) }
                         },
                 )
             session.execute(WsMethods.PullRequestsUpdate, payload)

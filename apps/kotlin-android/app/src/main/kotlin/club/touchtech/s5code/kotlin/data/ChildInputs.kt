@@ -36,14 +36,16 @@ internal fun subagentRequestOf(thread: ThreadShellDto): String? {
 
 /**
  * `pendingSubagentRequestsByThread`: stamps every ancestor up a blocked
- * subagent's chain with its request, so the top-level row a user sees asks for
- * them. An approval outranks a question; a lineage cycle stops the walk.
+ * subagent's chain with its approval, so the top-level row a user sees asks for
+ * it. A lineage cycle stops the walk.
  */
 internal fun pendingSubagentRequestsByThread(threads: List<ThreadShellDto>): Map<String, String> {
     val requests = mutableMapOf<String, String>()
     var byId: Map<String, ThreadShellDto>? = null
     for (child in threads) {
         val request = subagentRequestOf(child) ?: continue
+        // The coordinator answers its subagents' questions; only approvals need the user.
+        if (request == SUBAGENT_REQUEST_USER_INPUT) continue
         val index = byId ?: threads.associateBy { it.id }.also { byId = it }
         val seen = hashSetOf(child.id)
         var current: ThreadShellDto? = child

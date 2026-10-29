@@ -29,10 +29,12 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.transformLatest
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withTimeout
@@ -45,6 +47,28 @@ import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.put
 import kotlinx.serialization.json.putJsonArray
 import okhttp3.OkHttpClient
+
+/** Counts connects across every session, so reads that failed while unreachable can re-run. */
+object SessionConnects {
+    private val counter = MutableStateFlow(0)
+    val count: StateFlow<Int> = counter.asStateFlow()
+
+    fun connected() {
+        counter.update { it + 1 }
+    }
+}
+
+/**
+ * A read made while a retry recovers from a failure, or while offline, fails at
+ * once with that failure: a retry can take minutes, and a screen with nothing to
+ * show should stop loading (`createEnvironmentQueryAtomFamily` in client-runtime).
+ */
+internal fun SessionState.unreachableQueryError(): String? =
+    when (phase) {
+        SessionPhase.Offline -> lastError ?: "The device is offline."
+        SessionPhase.Connecting, SessionPhase.Backoff -> lastError
+        else -> null
+    }
 
 /** What the UI needs to know about one environment's connection. */
 enum class SessionPhase {
@@ -303,12 +327,12 @@ class EnvironmentSession(
     /**
      * React to Android returning from the background.
      *
-     * Mirrors the RN client's probe-then-decide policy: a blip under
-     * [SHORT_WAKE_MS] is checked with a lightweight probe (the socket's own
-     * keepalive would catch it seconds later anyway) and only a dead probe —
-     * or a long absence — pays for a full authorize→ticket→socket restart.
-     * The socket may be half-open without a close frame after a network change,
-     * so the probe is capped at [PROBE_TIMEOUT_MS]; a timeout counts as dead.
+     * Mirrors the RN client's probe-then-decide policy: the surviving socket is
+     * probed, and only a dead probe pays for a full authorize→ticket→socket
+     * restart. The socket may be half-open without a close frame after a network
+     * change, so the probe is capped by [probeTimeoutMs] and a timeout counts as
+     * dead. Beside it, [awaitSilentSocket] replaces a socket that stays silent
+     * while the host answers a fresh request, well before the probe times out.
      */
     fun refreshAfterForeground(backgroundedMillis: Long) {
         if (saved() == null) return
@@ -326,30 +350,79 @@ class EnvironmentSession(
             return
         }
         val live = connection.value
-        if (live != null && backgroundedMillis in 0..SHORT_WAKE_MS) {
-            scope.launch {
-                val method =
-                    if (probeSupported) WsMethods.ServerProbe else WsMethods.ServerGetConfig
-                val answered =
-                    runCatching {
-                            withTimeout(PROBE_TIMEOUT_MS) {
-                                live.request(method, JsonObject(emptyMap()))
-                            }
-                        }
-                        .isSuccess
-                if (answered) {
-                    // The socket lived; tell the server the app is visible
-                    // again so the background-activity lease does not lapse
-                    // waiting for the next tick.
-                    reportActivity(live)
-                } else {
-                    retryNow()
-                }
-            }
+        val baseUrl = httpBaseUrl
+        if (live == null || baseUrl == null || backgroundedMillis < 0) {
+            retryNow()
             return
         }
-        retryNow()
+        val quickRoute = answersQuickly(baseUrl)
+        val timeoutMs = probeTimeoutMs(backgroundedMillis, quickRoute)
+        scope.launch {
+            val method = if (probeSupported) WsMethods.ServerProbe else WsMethods.ServerGetConfig
+            val answered =
+                coroutineScope {
+                    val probe =
+                        async {
+                            runCatching { withTimeout(timeoutMs) { live.request(method, JsonObject(emptyMap())) } }
+                                .isSuccess
+                        }
+                    val silent = async { awaitSilentSocket(live, baseUrl, quickRoute) }
+                    try {
+                        select<Boolean> {
+                            probe.onAwait { it }
+                            silent.onAwait { false }
+                        }
+                    } finally {
+                        probe.cancel()
+                        silent.cancel()
+                    }
+                }
+            // A newer connection may have replaced this one while the probe ran.
+            if (connection.value !== live) return@launch
+            if (answered) {
+                // The socket lived; tell the server the app is visible
+                // again so the background-activity lease does not lapse
+                // waiting for the next tick.
+                reportActivity(live)
+            } else {
+                retryNow()
+            }
+        }
     }
+
+    /**
+     * Returns when [live] stays silent while the host answers a fresh descriptor
+     * request, as when Android kills a suspended socket without a close event.
+     * Never returns for a socket that delivers a frame or a host that does not answer.
+     */
+    private suspend fun awaitSilentSocket(live: RpcConnection, baseUrl: String, quickRoute: Boolean) {
+        val startedAt = System.nanoTime()
+        delay(SILENT_SOCKET_CHECK_AFTER_MS)
+        // An older host answers probes with its full config, which can be slow
+        // enough to lose to a fresh request on a healthy socket.
+        if (!probeSupported) awaitCancellation()
+        // Frames queued while the app was suspended have drained by now.
+        val framesBefore = live.inboundFrames
+        // A radio still waking up or a stale pooled connection can fail one check.
+        while (!hostAnswers(baseUrl)) {
+            if (live.inboundFrames != framesBefore) awaitCancellation()
+            delay(SILENT_SOCKET_RECHECK_MS)
+        }
+        if (!quickRoute) {
+            val remaining = REMOTE_SILENT_SOCKET_AFTER_MS - (System.nanoTime() - startedAt) / 1_000_000
+            if (remaining > 0) delay(remaining)
+        }
+        if (live.inboundFrames != framesBefore) awaitCancellation()
+    }
+
+    private suspend fun hostAnswers(baseUrl: String): Boolean =
+        try {
+            http.descriptor(baseUrl, ROUTE_CHECK_TIMEOUT_MS).environmentId == environmentId
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            false
+        }
 
     /** Retries immediately, for the "Try again" affordance on a failed row. */
     fun retryNow() {
@@ -514,6 +587,7 @@ class EnvironmentSession(
         val config = established.config
         val configJob = established.configJob
         val configEnded = established.configEnded
+        var sessionAuthJob: Job? = null
         try {
             val descriptor = config.environment
             _label.value = descriptor.label.ifBlank { environment.label }
@@ -597,32 +671,14 @@ class EnvironmentSession(
             // credential store: a token minted before scopes existed would fail
             // every maintenance write with a protocol error. The read is
             // best-effort — a failed lookup leaves authenticated false, which
-            // merely hides the maintenance rows rather than blocking the
-            // connection.
+            // merely hides the maintenance rows. It runs beside the connection
+            // because a slow host gets up to a minute to answer it.
             _state.value = _state.value.copy(authenticated = false, scopes = null, permissions = null,
                 sessionExpiresAt = null, serverUpdateScope = config.auth?.serverUpdateScope)
-            val sessionAuth =
-                authorized?.let { auth ->
-                    try {
-                        http.session(auth.httpBaseUrl, auth.credential)
-                    } catch (cancelled: CancellationException) {
-                        throw cancelled
-                    } catch (error: Exception) {
-                        null
-                    }
-                }
-            if (sessionAuth != null) {
-                _state.value =
-                    _state.value.copy(
-                        authenticated = sessionAuth.authenticated,
-                        scopes = sessionAuth.scopes,
-                        permissions = sessionAuth.permissions,
-                        sessionExpiresAt = sessionAuth.expiresAt,
-                        serverUpdateScope = sessionAuth.auth?.serverUpdateScope ?: config.auth?.serverUpdateScope,
-                    )
-            }
+            sessionAuthJob = authorized?.let { auth -> scope.launch { loadSessionAuth(auth, config, opened) } }
             probeSupported = descriptor.capabilities.connectionProbe
             connection.value = opened
+            SessionConnects.connected()
             _providers.value = config.providers
             val activityJob = startActivityReporting(opened)
             val connectedAt = System.currentTimeMillis()
@@ -653,6 +709,7 @@ class EnvironmentSession(
             _state.value = _state.value.copy(phase = SessionPhase.Backoff, lastError = null)
             return System.currentTimeMillis() - connectedAt
         } finally {
+            sessionAuthJob?.cancel()
             configJob.cancel()
             connection.value = null
             httpBaseUrl = null
@@ -798,6 +855,32 @@ class EnvironmentSession(
             configJob = configJob,
             configEnded = configEnded,
         )
+    }
+
+    private suspend fun loadSessionAuth(
+        auth: EnvironmentAuthorizer.Authorized,
+        config: ServerConfigDto,
+        opened: RpcConnection,
+    ) {
+        val sessionAuth =
+            try {
+                http.session(auth.httpBaseUrl, auth.credential)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                return
+            }
+        // A slow answer can outlive its connection; the next connect resets these.
+        if (connection.value !== opened) return
+        _state.update {
+            it.copy(
+                authenticated = sessionAuth.authenticated,
+                scopes = sessionAuth.scopes,
+                permissions = sessionAuth.permissions,
+                sessionExpiresAt = sessionAuth.expiresAt,
+                serverUpdateScope = sessionAuth.auth?.serverUpdateScope ?: config.auth?.serverUpdateScope,
+            )
+        }
     }
 
     /**
@@ -1030,7 +1113,14 @@ class EnvironmentSession(
         serializer: KSerializer<T>,
     ): T =
         callAcrossHandoffs<RpcConnection, T>(
-            awaitConnection = { replacing -> awaitConnection(replacing) },
+            awaitConnection = { replacing ->
+                if (replacing == null && connection.value == null) {
+                    state.value.unreachableQueryError()?.let {
+                        throw EnvironmentHttpError(EnvironmentHttpErrorKind.Unreachable, it)
+                    }
+                }
+                awaitConnection(replacing)
+            },
             // A stopped session (say, the environment was switched off) is not
             // handing off; retrying would start() a socket nobody owns.
             handedOff = { live ->
@@ -1262,11 +1352,34 @@ class EnvironmentSession(
             }
         }
 
-        /** Foreground wakes shorter than this probe instead of restarting. */
+        /** Foreground wakes longer than this leave the data on screen stale (RN `application-active-long`). */
         const val SHORT_WAKE_MS = 10_000L
 
-        /** Mobile wake probe, matching RN's 3s `application-active-probe`. */
+        /** RN's `QUICK_CONNECTION_PROBE_TIMEOUT`. */
         const val PROBE_TIMEOUT_MS = 3_000L
+
+        /** RN's `CONNECTION_PROBE_TIMEOUT`, for a short wake on a route that can spike past 3s. */
+        const val REMOTE_PROBE_TIMEOUT_MS = 15_000L
+
+        const val SILENT_SOCKET_CHECK_AFTER_MS = 500L
+        const val SILENT_SOCKET_RECHECK_MS = 1_000L
+
+        /**
+         * Off the LAN one lost packet can stall a live socket for a second. Must
+         * end before [PROBE_TIMEOUT_MS] so a long resume replaces a silent socket
+         * instead of timing out.
+         */
+        const val REMOTE_SILENT_SOCKET_AFTER_MS = 2_500L
+
+        /** `ROUTE_CHECK_TIMEOUT_MS` in the RN connection driver. */
+        const val ROUTE_CHECK_TIMEOUT_MS = 2_500L
+
+        /**
+         * After a long suspension a slow answer reconnects as quickly as a missing
+         * one; a short wake allows a remote route the full probe window.
+         */
+        fun probeTimeoutMs(backgroundedMillis: Long, quickRoute: Boolean): Long =
+            if (backgroundedMillis > SHORT_WAKE_MS || quickRoute) PROBE_TIMEOUT_MS else REMOTE_PROBE_TIMEOUT_MS
 
         /** How long a write waits for a socket before failing instead of hanging. */
         const val AWAIT_CONNECTION_MS = 15_000L

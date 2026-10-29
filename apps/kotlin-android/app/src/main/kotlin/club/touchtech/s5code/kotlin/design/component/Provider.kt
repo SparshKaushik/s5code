@@ -60,6 +60,7 @@ fun S5ProviderMark(
             ProviderMarkKind.Claude -> drawGeometry(CLAUDE, paths, Color(0xFFD97757))
             ProviderMarkKind.Cursor -> drawGeometry(CURSOR, paths, tint)
             ProviderMarkKind.Grok -> drawGeometry(GROK, paths, tint)
+            ProviderMarkKind.Fx -> drawGeometry(FX, paths, tint)
             ProviderMarkKind.Codex -> drawGeometry(CODEX, paths, tint)
             ProviderMarkKind.OpenCode -> drawOpenCodeMark(tint)
             ProviderMarkKind.Pi -> drawPiMark(paths)
@@ -79,13 +80,14 @@ fun S5ProviderMark(
     }
 }
 
-private enum class ProviderMarkKind { Claude, Cursor, Grok, OpenCode, Codex, Antigravity, Pi, Muse, Generic }
+private enum class ProviderMarkKind { Claude, Cursor, Grok, Fx, OpenCode, Codex, Antigravity, Pi, Muse, Generic }
 
 private fun providerMarkKind(driver: String): ProviderMarkKind =
     when (driver.lowercase()) {
         "claudeagent", "claude" -> ProviderMarkKind.Claude
         "cursor" -> ProviderMarkKind.Cursor
         "grok" -> ProviderMarkKind.Grok
+        "fx" -> ProviderMarkKind.Fx
         "opencode" -> ProviderMarkKind.OpenCode
         "codex" -> ProviderMarkKind.Codex
         "antigravity" -> ProviderMarkKind.Antigravity
@@ -98,6 +100,8 @@ private data class BrandGeometry(
     val viewportWidth: Float,
     val viewportHeight: Float,
     val paths: List<String>,
+    /** The SVG viewBox's min-x, for marks whose geometry does not start at 0. */
+    val viewportX: Float = 0f,
 )
 
 private fun parsedPath(data: String): Path = PathParser().parsePathString(data).toPath()
@@ -107,6 +111,7 @@ private fun geometryFor(kind: ProviderMarkKind): BrandGeometry? =
         ProviderMarkKind.Claude -> CLAUDE
         ProviderMarkKind.Cursor -> CURSOR
         ProviderMarkKind.Grok -> GROK
+        ProviderMarkKind.Fx -> FX
         ProviderMarkKind.Codex -> CODEX
         ProviderMarkKind.Pi -> PI
         ProviderMarkKind.Muse -> MUSE
@@ -119,7 +124,7 @@ private fun DrawScope.drawGeometry(geometry: BrandGeometry, paths: List<Path>, c
     val left = (size.width - geometry.viewportWidth * scale) / 2f
     val top = (size.height - geometry.viewportHeight * scale) / 2f
     withTransform({
-        translate(left, top)
+        translate(left - geometry.viewportX * scale, top)
         scale(scale, scale, pivot = Offset.Zero)
     }) {
         paths.forEach { drawPath(it, color) }
@@ -232,6 +237,16 @@ private val CURSOR =
         listOf(
             "M457.43,125.94L244.42,2.96c-6.84-3.95-15.28-3.95-22.12,0L9.3,125.94c-5.75,3.32-9.3,9.46-9.3,16.11v247.99c0,6.65,3.55,12.79,9.3,16.11l213.01,122.98c6.84,3.95,15.28,3.95,22.12,0l213.01-122.98c5.75-3.32,9.3-9.46,9.3-16.11v-247.99c0-6.65-3.55-12.79-9.3-16.11h-.01ZM444.05,151.99l-205.63,356.16c-1.39,2.4-5.06,1.42-5.06-1.36v-233.21c0-4.66-2.49-8.97-6.53-11.31L24.87,145.67c-2.4-1.39-1.42-5.06,1.36-5.06h411.26c5.84,0,9.49,6.33,6.57,11.39h-.01Z"
         ),
+    )
+
+private val FX =
+    BrandGeometry(
+        155.861f,
+        156f,
+        listOf(
+            "M237.89 0C243.18 0 249.38 1.42 253.03 3.07L255.09 4.01L250.08 18.63L247.68 17.75C244.9 16.72 241.94 15.8 238.49 15.8C234.98 15.8 232.79 16.56 231.08 18.32C229.23 20.23 227.63 23.64 226.23 29.76L226.23 29.76L226.23 29.76L225.14 34.85H241.67L260.43 34.95L260.69 34.95L260.84 35.17L278.85 61.63L296.74 34.95H320.87L291.68 76.74L322.1 119.75H299.33L299.18 119.55L241.14 40.48L239.35 49.4H222.07L205.69 127.21C203.93 135.71 201.19 142.84 196.78 147.87C192.27 153.01 186.2 155.75 178.34 155.75C174.18 155.75 170.75 155.11 167.91 154.11L166.24 153.52V137.18L166.9 137.4L169.53 138.28C172.18 139.16 174.41 139.8 177.14 139.8C178.53 139.8 179.7 139.53 180.73 138.98C181.76 138.43 182.68 137.6 183.52 136.44C185.3 133.99 186.72 130.13 187.9 124.67L203.76 49.4H189.87L191.76 39.44L192.04 39.35L206.82 34.47L208.15 28.64C210.52 18.21 213.77 10.94 218.71 6.32C223.74 1.61 230.13 0 237.89 0ZM273.99 99.08L260.07 120.25H234.54L261 82.02L273.99 99.08Z"
+        ),
+        viewportX = 166.241f,
     )
 
 private val GROK =

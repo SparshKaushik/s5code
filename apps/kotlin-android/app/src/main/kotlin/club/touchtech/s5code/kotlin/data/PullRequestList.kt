@@ -386,6 +386,21 @@ fun nextPullRequestListInput(pages: PullRequestListPages, input: PullRequestList
     }
 }
 
+/** `pullRequestStatKey`: one row's key in an environment's diff-stat cache. */
+fun pullRequestStatKey(projectId: String, repository: String, number: Int) = "$projectId:$repository:$number"
+
+/**
+ * `withListedPullRequests`: records each listed row's `updatedAt` in [seen] and
+ * returns the stat keys whose `updatedAt` moved (a push, among other changes).
+ * Stats carry no head, so those cached counts are stale. A first sighting only records.
+ */
+fun movedPullRequestStatKeys(seen: MutableMap<String, String>, entries: List<PullRequestListEntryDto>): List<String> =
+    entries.mapNotNull { entry ->
+        val key = pullRequestStatKey(entry.projectId, entry.repository, entry.number)
+        val previous = seen.put(key, entry.updatedAt)
+        key.takeIf { previous != null && previous != entry.updatedAt }
+    }
+
 fun appendPullRequestListPage(
     previous: PullRequestListPages,
     page: PullRequestListResultDto,

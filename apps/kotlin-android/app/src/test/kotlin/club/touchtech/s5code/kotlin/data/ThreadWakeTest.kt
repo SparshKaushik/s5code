@@ -90,4 +90,14 @@ class ThreadWakeTest {
         assertEquals(wokeAt, summary(woken).wokeAtMillis)
         assertNull(summary(woken.copy(snoozedUntil = at(minute))).wokeAtMillis)
     }
+
+    @Test
+    fun `the clock ticks at the next snooze expiry when it comes before the minute`() {
+        val wakes = sequenceOf(null, "garbage", at(-minute), at(45_000), at(5 * minute))
+        assertEquals(now + 45_000, nextSnoozeWakeAfter(wakes, now))
+        assertEquals(45_000L, clockTickDelayMillis(now, nextSnoozeWakeAfter(wakes, now)))
+        assertEquals(60_000L, clockTickDelayMillis(now, now + 5 * minute))
+        assertEquals(60_000L, clockTickDelayMillis(now, null))
+        assertNull(nextSnoozeWakeAfter(sequenceOf(at(0), at(-minute)), now))
+    }
 }

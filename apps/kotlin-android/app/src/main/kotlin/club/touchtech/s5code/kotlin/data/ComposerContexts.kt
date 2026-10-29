@@ -186,6 +186,32 @@ internal fun filterComposerPullRequestMatches(
 }
 
 /**
+ * `withLinkedComposerPullRequestsFirst`: for a text query, the thread's linked
+ * pull requests that match it come ahead of the searched ones. A linked pull
+ * request the search also found keeps the search's fresher row.
+ */
+internal fun withLinkedComposerPullRequestsFirst(
+    matches: List<ComposerPullRequestCandidate>,
+    linked: List<ComposerPullRequestCandidate>,
+    query: String,
+    limit: Int,
+): List<ComposerPullRequestCandidate> {
+    fun keyOf(entry: ComposerPullRequestCandidate) = "${entry.repository.trim().lowercase()}#${entry.number}"
+    val matchesByKey = matches.associateBy(::keyOf)
+    val words = query.lowercase().split(Regex("\\s+")).filter(String::isNotEmpty)
+    val linkedFirst =
+        linked.mapNotNull { entry ->
+            matchesByKey[keyOf(entry)]
+                ?: entry.takeIf {
+                    val text = "#${it.number} ${it.title} ${it.repository} ${it.headBranch}".lowercase()
+                    words.all(text::contains)
+                }
+        }
+    val linkedKeys = linkedFirst.mapTo(hashSetOf(), ::keyOf)
+    return (linkedFirst + matches.filterNot { keyOf(it) in linkedKeys }).take(limit)
+}
+
+/**
  * The `#` row's secondary line: state, then the repository when it is not the
  * project's own (a linked pull request can live anywhere), then the title.
  */

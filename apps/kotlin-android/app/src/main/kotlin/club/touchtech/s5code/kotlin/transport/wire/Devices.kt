@@ -15,9 +15,11 @@ data class DeviceServiceStateDto(
     val hosts: List<DeviceHostSummaryDto> = emptyList(),
     /**
      * EAS cloud simulator hosts, sent apart from [hosts] so clients that only
-     * know `local | ssh` kinds keep decoding; every host is [hosts] + this.
+     * know `local | ssh` kinds keep decoding; every host is [hosts] + this + [simlockHosts].
      */
     val easHosts: List<DeviceHostSummaryDto> = emptyList(),
+    /** Simlock gateway hosts, split out the same way as [easHosts]. */
+    val simlockHosts: List<DeviceHostSummaryDto> = emptyList(),
     /** disabled | idle | installing | starting | ready | failed */
     val hostStatus: String = "idle",
     val hostStatusDetail: String? = null,
@@ -31,7 +33,7 @@ data class DeviceServiceStateDto(
 @Serializable
 data class DeviceHostSummaryDto(
     val id: String = "",
-    /** local | ssh | eas */
+    /** local | ssh | eas | simlock */
     val kind: String = "local",
     val label: String = "",
     val tools: DeviceToolVersionsDto? = null,

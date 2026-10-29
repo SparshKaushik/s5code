@@ -49,6 +49,7 @@ import club.touchtech.s5code.kotlin.design.component.S5Markdown
 import club.touchtech.s5code.kotlin.design.component.S5Screen
 import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
+import club.touchtech.s5code.kotlin.design.text.maskMarkdownFrontmatter
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.EnvironmentId
 import java.io.File
@@ -325,7 +326,7 @@ private fun AttachmentTextBody(
                             .verticalScroll(rememberScrollState())
                             .padding(S5Theme.spacing.gutter)
                     ) {
-                        S5Markdown(source = content.value.text, onCopyCode = onCopy)
+                        S5Markdown(source = maskMarkdownFrontmatter(content.value.text), onCopyCode = onCopy)
                     }
                 } else {
                     Box(Modifier.fillMaxSize().padding(S5Theme.spacing.gutter)) {

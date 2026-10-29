@@ -99,13 +99,8 @@ internal object WsMethods {
     const val TerminalWrite = "terminal.write"
     const val TerminalResize = "terminal.resize"
     const val TerminalClear = "terminal.clear"
-    const val TerminalRestart = "terminal.restart"
     const val TerminalClose = "terminal.close"
     const val SubscribeTerminalMetadata = "subscribeTerminalMetadata"
-
-    const val RewindGetStatus = "rewind.getStatus"
-    const val RewindUndo = "rewind.undo"
-    const val RewindRedo = "rewind.redo"
 
     const val FilesystemBrowse = "filesystem.browse"
     const val SourceControlLookupRepository = "sourceControl.lookupRepository"

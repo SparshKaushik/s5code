@@ -56,8 +56,8 @@ sealed interface EnvironmentCredential {
 
 class EnvironmentHttp(private val client: OkHttpClient, private val json: Json = LenientJson) {
 
-    suspend fun descriptor(httpBaseUrl: String): EnvironmentDescriptorDto =
-        get(httpBaseUrl, "/.well-known/t3/environment", authorization = null)
+    suspend fun descriptor(httpBaseUrl: String, timeoutMs: Long = REQUEST_TIMEOUT_MS): EnvironmentDescriptorDto =
+        get(httpBaseUrl, "/.well-known/t3/environment", authorization = null, timeoutMs = timeoutMs)
 
     /**
      * Same exchange, proof-bound. A relay-issued credential is minted against a
@@ -116,7 +116,10 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
      * and the server answers a POST here with 404.
      */
     suspend fun session(httpBaseUrl: String, credential: EnvironmentCredential): AuthSessionDto =
-        authenticated(httpBaseUrl, "/api/auth/session", credential, method = "GET")
+        // A timeout says nothing about grants; failing would show a busy host as read-only.
+        retryingTimeouts(REQUEST_TIMEOUT_MS, MAX_SESSION_STATE_TIMEOUT_MS) { timeoutMs ->
+            authenticated(httpBaseUrl, "/api/auth/session", credential, method = "GET", timeoutMs = timeoutMs)
+        }
 
     suspend fun webSocketTicket(
         httpBaseUrl: String,
@@ -232,6 +235,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         path: String,
         credential: EnvironmentCredential,
         method: String,
+        timeoutMs: Long = REQUEST_TIMEOUT_MS,
     ): T {
         val url = endpoint(httpBaseUrl, path)
         val body = if (method == "GET") null else EMPTY_BODY
@@ -247,7 +251,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
                 builder.header("dpop", credential.proof(method, url, credential.token))
             }
         }
-        return execute(builder.build())
+        return executeSerialized(builder.build(), kotlinx.serialization.serializer<T>(), timeoutMs = timeoutMs)
     }
 
     /** POST with a JSON body under the same credential rules as [authenticated]. */
@@ -280,10 +284,11 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         httpBaseUrl: String,
         path: String,
         authorization: String?,
+        timeoutMs: Long = REQUEST_TIMEOUT_MS,
     ): T {
         val builder = Request.Builder().url(endpoint(httpBaseUrl, path)).get()
         authorization?.let { builder.header("authorization", "Bearer $it") }
-        return execute(builder.build())
+        return executeSerialized(builder.build(), kotlinx.serialization.serializer<T>(), timeoutMs = timeoutMs)
     }
 
     private suspend inline fun <reified T> execute(request: Request): T =
@@ -293,13 +298,14 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
         request: Request,
         serializer: kotlinx.serialization.KSerializer<T>,
         taggedErrors: Boolean = false,
+        timeoutMs: Long = REQUEST_TIMEOUT_MS,
     ): T =
         withContext(Dispatchers.IO) {
             // Per-request wall clock: the shared client reads forever so a WebSocket
             // can idle, but a hung descriptor/ticket/snapshot must fail in seconds,
             // not stall a connection attempt until Android kills the coroutine.
             val callClient =
-                client.newBuilder().callTimeout(REQUEST_TIMEOUT_MS, TimeUnit.MILLISECONDS).build()
+                client.newBuilder().callTimeout(timeoutMs, TimeUnit.MILLISECONDS).build()
             val response =
                 try {
                     callClient.newCall(request).execute()
@@ -330,6 +336,7 @@ class EnvironmentHttp(private val client: OkHttpClient, private val json: Json =
     companion object {
         /** Whole-request ceiling for the HTTP half; RN caps these at ~10s. */
         private const val REQUEST_TIMEOUT_MS = 10_000L
+        private const val MAX_SESSION_STATE_TIMEOUT_MS = 60_000L
 
         /**
          * Appends the ticket and the client-identity params to the socket URL,
@@ -419,6 +426,12 @@ class EnvironmentHttpError(
     override val cause: Throwable? = null,
 ) : Exception(message, cause) {
     companion object {
+        /** The host took longer than the request allowed, as opposed to refusing it. */
+        fun isTimeout(error: Throwable): Boolean =
+            error is EnvironmentHttpError &&
+                error.kind == EnvironmentHttpErrorKind.Unreachable &&
+                error.cause is java.io.InterruptedIOException
+
         fun unreachable(cause: Throwable) =
             EnvironmentHttpError(
                 EnvironmentHttpErrorKind.Unreachable,
@@ -588,3 +601,20 @@ data class EnvironmentCloudLinkStateDto(
 )
 
 @Serializable data class WebSocketTicketDto(val ticket: String)
+
+/**
+ * Runs [request] with [initialMs], doubling the allowance after each timeout up to
+ * [maxMs]; any other failure, or a timeout at the cap, is thrown.
+ */
+internal suspend fun <T> retryingTimeouts(initialMs: Long, maxMs: Long, request: suspend (timeoutMs: Long) -> T): T {
+    var timeoutMs = initialMs
+    while (true) {
+        try {
+            return request(timeoutMs)
+        } catch (error: EnvironmentHttpError) {
+            val next = minOf(timeoutMs * 2, maxMs)
+            if (!EnvironmentHttpError.isTimeout(error) || next <= timeoutMs) throw error
+            timeoutMs = next
+        }
+    }
+}

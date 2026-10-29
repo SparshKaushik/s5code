@@ -314,10 +314,15 @@ fun planNewThreadLink(
         ?: NewThreadLinkPlan.MissingRepository(repository, request)
 }
 
+// A link's `owner/name` is GitHub's. GitCafe syncs a repository two-way with GitHub under the
+// same path, so a checkout cloned from git.cafe counts as the linked repository.
+private val PROMPT_LINK_REPOSITORY_HOSTS = listOf("github.com", "git.cafe", "staging.git.cafe")
+
 /** Callers pass projects most recently active first, so the user lands where they last worked. */
 fun findPromptLinkProject(projects: List<Project>, repository: PromptLinkRepository): Project? {
-    val key = "github.com/${repository.owner}/${repository.name}".lowercase()
-    return projects.firstOrNull { it.repositoryIdentity?.groupingCanonicalKey?.lowercase() == key }
+    val path = "${repository.owner}/${repository.name}".lowercase()
+    val keys = PROMPT_LINK_REPOSITORY_HOSTS.mapTo(hashSetOf()) { "$it/$path" }
+    return projects.firstOrNull { it.repositoryIdentity?.groupingCanonicalKey?.lowercase() in keys }
 }
 
 /** The most recently updated thread with a visible link to [pullRequest]. */

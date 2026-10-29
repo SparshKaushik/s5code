@@ -222,6 +222,12 @@ data class FilteredPullRequestActivity(val activity: PullRequestActivityDto, val
 
 private fun isBot(actor: PullRequestActorDto?) = actor?.isBot == true || actor?.login?.endsWith("[bot]") == true
 
+// A bot's approval or change request is a verdict, not chatter.
+private fun isVerdict(reviewState: String?): Boolean {
+    val state = reviewState?.trim()?.uppercase()?.replace("-", "_")
+    return state == "APPROVED" || state == "CHANGES_REQUESTED"
+}
+
 private fun discussionCommentIds(activity: PullRequestActivityDto) =
     activity.reviewThreads.flatMapTo(HashSet()) { thread -> thread.comments.map { it.id } }
 
@@ -252,7 +258,7 @@ fun filterPullRequestActivity(
         else
             activity.comments.filter { comment ->
                 comment.id !in ids &&
-                    (filter.bots || !isBot(comment.author)) &&
+                    (filter.bots || !isBot(comment.author) || isVerdict(comment.reviewState)) &&
                     (filter.resolved || comment.reviewState?.trim()?.lowercase() != "dismissed")
             }
     val filtered =

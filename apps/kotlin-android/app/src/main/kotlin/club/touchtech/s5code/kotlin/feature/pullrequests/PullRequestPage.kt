@@ -5,6 +5,7 @@ import androidx.compose.material.icons.automirrored.rounded.Chat
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.Stable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -17,12 +18,14 @@ import club.touchtech.s5code.kotlin.app.AppStore
 import club.touchtech.s5code.kotlin.app.PullRequestWorkDestination
 import club.touchtech.s5code.kotlin.app.newTaskDraftWouldBeReplaced
 import club.touchtech.s5code.kotlin.app.preparePullRequestWork
+import club.touchtech.s5code.kotlin.data.MaintainerEditsChoice
 import club.touchtech.s5code.kotlin.data.PullRequestAgentAction
 import club.touchtech.s5code.kotlin.data.PullRequestAgentTask
 import club.touchtech.s5code.kotlin.data.PullRequestPermissions
 import club.touchtech.s5code.kotlin.data.PullRequestQuery
 import club.touchtech.s5code.kotlin.data.PullRequestReference
 import club.touchtech.s5code.kotlin.data.canPerformPullRequestAction
+import club.touchtech.s5code.kotlin.data.maintainerEditsChoiceInForce
 import club.touchtech.s5code.kotlin.data.pullRequestActionConfirmation
 import club.touchtech.s5code.kotlin.data.pullRequestActionLabel
 import club.touchtech.s5code.kotlin.data.pullRequestAgentActions
@@ -76,6 +79,64 @@ fun rememberPullRequestDetail(store: AppStore, environmentId: String, reference:
     val query by remember(environmentId, reference) { store.pullRequests.detail(environmentId, reference) }
         .collectAsStateWithLifecycle(PullRequestQuery())
     return query
+}
+
+/** `usePullRequestMaintainerEdits`: the "Allow edits from maintainers" toggle, drawn optimistically. */
+@Stable
+class PullRequestMaintainerEdits internal constructor(
+    val visible: Boolean,
+    val value: Boolean,
+    val saving: Boolean,
+    val toggle: () -> Unit,
+) {
+    val subtitle: String
+        get() =
+            if (saving) {
+                "Saving…"
+            } else {
+                "Maintainers can push to this branch. If your fork has workflows, this can also give access to its secrets."
+            }
+}
+
+@Composable
+fun rememberPullRequestMaintainerEdits(
+    store: AppStore,
+    environmentId: String,
+    reference: PullRequestReference,
+    pr: PullRequestDetailDto?,
+    canEdit: Boolean,
+    confirmController: S5ConfirmDialogController,
+): PullRequestMaintainerEdits {
+    val scope = rememberCoroutineScope()
+    var saving by remember { mutableStateOf(false) }
+    var choice by remember { mutableStateOf<MaintainerEditsChoice?>(null) }
+    val kept = maintainerEditsChoiceInForce(choice, pr?.url.orEmpty(), pr?.observedAt, saving)
+    SideEffect { if (kept != choice) choice = kept }
+    val value = kept?.value ?: (pr?.maintainerCanModify == true)
+    return PullRequestMaintainerEdits(
+        visible = canEdit,
+        value = value,
+        saving = saving,
+        toggle = toggle@{
+            if (saving || pr == null || !canEdit) return@toggle
+            val next = !value
+            val previous = choice
+            saving = true
+            choice = MaintainerEditsChoice(pr.url, pr.observedAt, next)
+            scope.launch {
+                try {
+                    store.pullRequests.update(environmentId, reference, maintainerCanModify = next)
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    choice = previous
+                    confirmController.alert("Could not save maintainer access", error.alertMessage())
+                } finally {
+                    saving = false
+                }
+            }
+        },
+    )
 }
 
 /**

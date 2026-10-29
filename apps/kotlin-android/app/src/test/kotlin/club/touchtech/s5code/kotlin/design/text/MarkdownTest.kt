@@ -231,4 +231,33 @@ class MarkdownTest {
         assertTrue(parseMarkdown("").isEmpty())
         assertTrue(parseMarkdown("\n\n   \n").isEmpty())
     }
+
+    @Test
+    fun `masks leading frontmatter without moving later offsets`() {
+        val markdown = "---\r\nname: skill\r\n---\r\n# Skill\n- [ ] item\n"
+        val masked = maskMarkdownFrontmatter(markdown)
+        assertEquals("   \r\n           \r\n   \r\n# Skill\n- [ ] item\n", masked)
+        assertEquals(markdown.indexOf("[ ]"), masked.indexOf("[ ]"))
+        assertEquals("Skill", (parseMarkdown(masked).first() as MdBlock.Heading).text.single().text)
+    }
+
+    @Test
+    fun `masks frontmatter after a byte order mark, with CR endings or a dots fence`() {
+        assertEquals("    \n    \n   \n# Body", maskMarkdownFrontmatter("\uFEFF---\na: 1\n---\n# Body"))
+        assertEquals("   \r    \r   \r# Body", maskMarkdownFrontmatter("---\ra: 1\r...\r# Body"))
+        assertEquals("   \n   \n# Body", maskMarkdownFrontmatter("---\n---\n# Body"))
+    }
+
+    @Test
+    fun `leaves unterminated or non-leading frontmatter fences alone`() {
+        for (markdown in listOf("---\na: 1\n", "# A\n---\nb\n---\n", "---\na: 1\n----\n")) {
+            assertEquals(markdown, maskMarkdownFrontmatter(markdown))
+        }
+    }
+
+    @Test
+    fun `a long paragraph of unclosed brackets stays literal`() {
+        val text = "[a (b ".repeat(50_000) + "*c"
+        assertEquals(text, parseInline(text).joinToString("") { it.text })
+    }
 }

@@ -29,7 +29,7 @@ internal data class V2Presentation(
     val limitRecoverySnoozed: Boolean,
     val canSwitchProvider: Boolean,
     val queueHeld: Boolean,
-    val canReorderQueue: Boolean,
+    /** A queued message can be sent into the active run: it steers, or skips a running `/compact`. */
     val canPromoteQueued: Boolean,
     /**
      * The run is still open but its provider turn already ended, so nothing is
@@ -64,6 +64,10 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             .maxByOrNull { it.v2Long("ordinal") ?: 0 }?.v2String("status")
     }
     val turnEnded = activeTurnStatus != null && activeTurnStatus != "pending" && activeTurnStatus != "running"
+    // `promoteSkipsCompaction`: promoting into a `/compact` run stops the compaction instead of steering.
+    val promoteSkipsCompaction = activeRun?.v2String("userMessageId")?.let { messageId ->
+        projection.messages.firstOrNull { it.v2String("id") == messageId }
+    }?.let(::isCompactionCommandMessage) == true
     val automaticMessageIds = projection.messages.filter { (it["delegatedCompletion"] != null && it["delegatedCompletion"] != JsonNull) ||
         (it["notification"] != null && it["notification"] != JsonNull) }.mapTo(hashSetOf()) { it.v2String("id") }
     val pending = projection.runtimeRequests.filter { it.v2String("status") == "pending" &&
@@ -90,6 +94,9 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         .mapNotNullTo(hashSetOf()) { it.item.v2String("runId") }
     val compactionCommandRuns = items.filter { it.item.v2String("type") == "user_message" && isCompactionCommandMessage(it.item) }
         .mapNotNullTo(hashSetOf()) { it.item.v2String("runId") }
+    // A stopped compaction's own row already says it stopped. A `/compact` run stopped
+    // before its provider started has no such row, so it keeps the interrupt result.
+    val compactedCommandRuns = compactionCommandRuns.intersect(compactionItemRuns)
     val activeRunId = activeRun?.v2String("id")
     val feed = items.mapNotNull { row ->
         val item = row.item
@@ -113,6 +120,8 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
         when (type) {
             "user_message" -> {
                 if (runs[runId]?.v2String("status") in setOf("queued", "preparing")) null
+                // The queue lists a pending queued turn already; the feed shows it once it starts.
+                else if (item.v2String("inputIntent") == "queued_turn" && state == "pending") null
                 else if (isCompactionCommandMessage(item)) {
                     if (runId in compactionItemRuns) null
                     else {
@@ -169,8 +178,10 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             "thread_created" -> FeedEntry.Note(id, "Created thread: ${item.v2String("targetModel")}", runId, at)
             "notification" -> FeedEntry.Note(id, item.v2String("summary").orEmpty() +
                 item.v2String("detail")?.let { "\n$it" }.orEmpty(), runId, at)
-            "system_notice", "run_interrupt_request", "run_interrupt_result" ->
-                FeedEntry.Note(id, item.v2String("message") ?: title.orEmpty(), runId, at)
+            "system_notice" -> FeedEntry.Note(id, item.v2String("message") ?: title.orEmpty(), runId, at)
+            "run_interrupt_request" -> null
+            "run_interrupt_result" -> if (runId in compactedCommandRuns) null
+                else FeedEntry.Note(id, item.v2String("message") ?: title.orEmpty(), runId, at, stopped = true)
             "checkpoint" -> null
             "user_input_request" -> if (runId in compactionItemRuns &&
                 resumeCompactionAge(item, requests[item.v2String("requestId")]) != null) null else {
@@ -236,9 +247,7 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
             dismissible = (requests[item.v2String("requestId")]?.get("responseCapability") as? JsonObject)?.v2String("type") == "message") },
         projection.runs.filter { it.v2String("status") == "queued" && it.v2String("userMessageId") !in automaticMessageIds }
             .sortedWith(compareBy({ it.v2Long("queuePosition") ?: it.v2Long("ordinal") ?: Long.MAX_VALUE }, { it.v2Long("ordinal") ?: 0 }))
-            .map { run -> QueuedRun(run.v2String("id")!!, run.v2String("userMessageId")!!,
-                projection.messages.firstOrNull { it.v2String("id") == run.v2String("userMessageId") }?.v2String("text").orEmpty(),
-                run.v2Bool("queueHeld")) },
+            .map { run -> queuedRunOf(run, projection.messages.firstOrNull { it.v2String("id") == run.v2String("userMessageId") }) },
         projection.thread.v2String("creationSource") == "provider" && lineage?.v2String("relationshipToParent") == "subagent",
         canSteer,
         buildList {
@@ -261,8 +270,7 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
                     it.v2String("providerInstanceId") == (projection.thread["modelSelection"] as? JsonObject)?.v2String("instanceId") &&
                     it["nativeThreadRef"] != null && it["nativeThreadRef"] != JsonNull }),
         projection.runs.any { it.v2String("status") == "queued" && it.v2Bool("queueHeld") },
-        turns?.v2Bool("supportsQueuedMessages") == true,
-        canSteer,
+        promoteSkipsCompaction || canSteer,
         turnEnded,
         canSendNow = activeRun == null && projection.thread.v2String("archivedAt") == null &&
             projection.thread.v2String("deletedAt") == null,
@@ -270,13 +278,39 @@ internal fun v2Presentation(projection: V2ProjectionDto): V2Presentation {
     )
 }
 
+/**
+ * `QueuedThreadRun` in `threadWorkflows.ts`: the queued text plus the attribution
+ * its sent form would show, so the queue can say who sent it.
+ */
+internal fun queuedRunOf(run: JsonObject, message: JsonObject?): QueuedRun {
+    val presentation = message?.let { userMessagePresentation(it, messageId = it.v2String("id")) }
+    val guestName = ((message?.get("context") as? JsonObject)?.get("guest") as? JsonObject)?.v2String("name")
+    return QueuedRun(run.v2String("id")!!, run.v2String("userMessageId")!!, message?.v2String("text").orEmpty(),
+        run.v2Bool("queueHeld"), attribution = presentation?.attribution,
+        scheduledTaskId = presentation?.scheduledTaskId, senderThreadId = message?.v2String("senderThreadId"),
+        guestName = guestName)
+}
+
+/**
+ * The sender line over a queued message (`QueuedRunSender`): a guest by name, an
+ * automation by its task title, an agent by its thread title, S5 Code by name,
+ * and nothing for the user's own messages.
+ */
+internal fun queuedRunSenderLabel(run: QueuedRun, taskTitle: String?, senderThreadTitle: String?): String? = when {
+    run.guestName != null -> run.guestName
+    run.attribution == "Automation" -> taskTitle ?: "Automation"
+    run.attribution == "Agent" -> senderThreadTitle?.trim()?.takeIf(String::isNotEmpty) ?: "Agent"
+    run.attribution == "S5 Code" -> "Sent by S5 Code"
+    else -> null
+}
+
 /** `IDLE_COMPACTING_LABELS` in `packages/client-runtime/src/userMessage.ts`. */
 internal fun idleCompactingLabel(reason: String): String =
-    if (reason == "onReturn") "Compacting after being idle…" else "Compacting before the cache expires…"
+    if (reason == "onReturn") "Compacting…" else "Compacting before the cache expires…"
 
 /** `IDLE_COMPACTION_TITLES`: leads the finished compaction's token counts. */
 internal fun idleCompactionTitle(reason: String): String =
-    if (reason == "onReturn") "Context compacted after being idle" else "Context automatically compacted before cache expiry"
+    if (reason == "onReturn") "Context compacted before sending" else "Context automatically compacted before cache expiry"
 
 internal data class CompactionLabels(val title: String, val compacting: String)
 
@@ -341,7 +375,7 @@ internal fun compactionLabelsByItem(items: List<JsonObject>, requests: Map<Strin
             "compaction" -> {
                 val age = resumeAge.remove(runId)
                 val labels = byRun[runId]
-                    ?: age?.let { CompactionLabels("Context compacted after $it idle", "Compacting after $it idle…") }
+                    ?: age?.let { CompactionLabels("Context compacted after $it idle", "Compacting…") }
                 val itemId = item.v2String("id")
                 if (labels != null && itemId != null) byItem[itemId] = labels
             }

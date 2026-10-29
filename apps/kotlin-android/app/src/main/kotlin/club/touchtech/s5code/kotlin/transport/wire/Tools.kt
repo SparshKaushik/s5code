@@ -355,6 +355,8 @@ data class ServerConfigSettingsDto(
     val enableProviderUpdateChecks: Boolean = true,
     val autoResumeLimitedThreads: Boolean = false,
     val snoozeLimitedThreads: Boolean = false,
+    /** `snoozePresets`: the snooze menu's options, raw; null (older servers) means the defaults. */
+    val snoozePresets: kotlinx.serialization.json.JsonArray? = null,
     /**
      * `WorktreeCleanup`: `{"mode":"off"}`, `{"mode":"custom","rules":{…}}`, or
      * null (inherit — the `storageCleanup` worktree rules apply). Kept as raw
@@ -695,6 +697,9 @@ data class TerminalSnapshotDto(
     val updatedAt: String? = null,
     val sequence: Long? = null,
     val hasRunningSubprocess: Boolean = false,
+    /** The shared PTY grid every renderer draws; absent from older servers. */
+    val cols: Int? = null,
+    val rows: Int? = null,
 )
 
 /**
@@ -748,6 +753,9 @@ data class TerminalStreamEventDto(
     val message: String? = null,
     val hasRunningSubprocess: Boolean = false,
     val label: String? = null,
+    /** `activity` carries shared PTY grid changes, since older clients reject unknown event types. */
+    val cols: Int? = null,
+    val rows: Int? = null,
 )
 
 /* ── Usage ───────────────────────────────────────────────────────────── */

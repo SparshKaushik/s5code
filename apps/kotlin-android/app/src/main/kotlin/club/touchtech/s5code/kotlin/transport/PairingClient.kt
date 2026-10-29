@@ -2,6 +2,7 @@ package club.touchtech.s5code.kotlin.transport
 
 import android.os.Build
 import club.touchtech.s5code.kotlin.connection.PairingTarget
+import club.touchtech.s5code.kotlin.connection.pairingAddressConflict
 import club.touchtech.s5code.kotlin.data.EnvironmentStore
 
 /**
@@ -32,6 +33,7 @@ class PairingClient(
         // Checked before redeeming the one-time code, so a link to an
         // incompatible server is not spent.
         pairingBlockedByProtocol(descriptor)?.let { throw EnvironmentUnsupportedError(it) }
+        checkKnownAddress(descriptor.environmentId, target.httpBaseUrl)
         val token =
             http.exchangePairingCredential(
                     httpBaseUrl = target.httpBaseUrl,
@@ -39,6 +41,8 @@ class PairingClient(
                     deviceLabel = deviceLabel,
                 )
                 .access_token
+        // Again after the exchange, in case the environment was saved meanwhile.
+        checkKnownAddress(descriptor.environmentId, target.httpBaseUrl)
         val label = target.label?.takeIf { it.isNotBlank() } ?: descriptor.label
         store.save(
             environmentId = descriptor.environmentId,
@@ -50,6 +54,12 @@ class PairingClient(
             serverVersion = descriptor.serverVersion.orEmpty(),
         )
         return Paired(descriptor.environmentId, label)
+    }
+
+    private fun checkKnownAddress(environmentId: String, httpBaseUrl: String) {
+        pairingAddressConflict(store.environments.value, environmentId, httpBaseUrl)?.let {
+            throw IllegalStateException(it)
+        }
     }
 
     companion object {

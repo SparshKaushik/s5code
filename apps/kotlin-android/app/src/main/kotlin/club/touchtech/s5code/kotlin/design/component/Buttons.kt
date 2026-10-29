@@ -361,6 +361,7 @@ fun S5SplitButton(
     modifier: Modifier = Modifier,
     icon: ImageVector? = null,
     enabled: Boolean = true,
+    trailingEnabled: Boolean = enabled,
 ) {
     SplitButton(
         modifier = modifier,
@@ -378,7 +379,7 @@ fun S5SplitButton(
             }
         },
         trailingButton = {
-            SplitButtonDefaults.TrailingButton(onClick = onTrailingClick, enabled = enabled) {
+            SplitButtonDefaults.TrailingButton(onClick = onTrailingClick, enabled = trailingEnabled) {
                 Icon(
                     trailingIcon,
                     contentDescription = trailingLabel,

@@ -1,5 +1,6 @@
 package club.touchtech.s5code.kotlin.connection
 
+import club.touchtech.s5code.kotlin.data.SavedEnvironment
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -151,5 +152,30 @@ class PairingUrlTest {
         )
         val noCode = pairingTargetFor("macbook.local", " ")
         assertEquals(PairingUrlError.MissingCode, (noCode as PairingUrlResult.Invalid).reason)
+    }
+
+    @Test
+    fun `a pairing link cannot repoint a saved environment at a new address`() {
+        val saved =
+            listOf(
+                SavedEnvironment(
+                    environmentId = "env-1",
+                    label = "MacBook",
+                    httpBaseUrl = "https://macbook.example.test",
+                    wsBaseUrl = "wss://macbook.example.test",
+                    encryptedToken = "",
+                )
+            )
+        // Pairing again over the saved address, or a new machine, still works.
+        assertNull(pairingAddressConflict(saved, "env-1", "https://MacBook.example.test/"))
+        assertNull(pairingAddressConflict(saved, "env-2", "https://attacker.example.test/"))
+        assertEquals(
+            "That address claims to be MacBook, which is already saved. " +
+                "Change its URL from that environment's settings instead.",
+            pairingAddressConflict(saved, "env-1", "https://attacker.example.test/"),
+        )
+        // An S5 Connect row has no URL to change, so pairing the machine directly goes ahead.
+        val cloud = saved.map { it.copy(kind = club.touchtech.s5code.kotlin.data.SavedEnvironmentKind.Cloud) }
+        assertNull(pairingAddressConflict(cloud, "env-1", "http://192.168.1.20:3773"))
     }
 }

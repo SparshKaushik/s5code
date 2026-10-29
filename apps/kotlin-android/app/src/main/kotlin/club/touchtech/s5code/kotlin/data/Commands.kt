@@ -410,13 +410,12 @@ object Commands {
     }
 
     fun queueAction(type: String, threadId: String, runId: String? = null,
-        text: String? = null, beforeRunId: String? = null, targetRunId: String? = null): JsonObject = buildJsonObject {
+        text: String? = null, targetRunId: String? = null): JsonObject = buildJsonObject {
         put("type", type)
         put("commandId", newCommandId())
         put("threadId", threadId)
         runId?.let { put(if (type == "queued-message.promote-to-steer") "queuedRunId" else "runId", it) }
         text?.let { put("text", it) }
-        if (type == "queued-run.reorder") put("beforeRunId", beforeRunId)
         targetRunId?.let { put("targetRunId", it) }
     }
 

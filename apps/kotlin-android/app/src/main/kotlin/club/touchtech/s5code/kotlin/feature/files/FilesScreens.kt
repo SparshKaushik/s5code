@@ -89,6 +89,7 @@ import club.touchtech.s5code.kotlin.feature.connections.waitNotice
 import club.touchtech.s5code.kotlin.design.component.rememberClipboardWriter
 import club.touchtech.s5code.kotlin.design.component.rememberHighlightedLines
 import club.touchtech.s5code.kotlin.design.text.codeLanguageOfPath
+import club.touchtech.s5code.kotlin.design.text.maskMarkdownFrontmatter
 import club.touchtech.s5code.kotlin.design.theme.S5MaterialShapes
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.model.EnvironmentId
@@ -564,7 +565,7 @@ fun MarkdownPreviewScreen(
                         .padding(S5Theme.spacing.gutter)
                 ) {
                     S5Markdown(
-                        source = file.value.lines.joinToString("\n"),
+                        source = maskMarkdownFrontmatter(file.value.lines.joinToString("\n")),
                         onCopyCode = copy,
                         workspaceRoot = workspaceRoot,
                         onOpenFile = onOpenFile,

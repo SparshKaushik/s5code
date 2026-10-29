@@ -1,7 +1,9 @@
 package club.touchtech.s5code.kotlin.data
 
+import club.touchtech.s5code.kotlin.model.ComposerAttachmentLimits
 import kotlin.math.floor
 import kotlin.math.max
+import kotlin.math.sqrt
 
 /**
  * Anthropic rejects an image over 2000px on a side once a request holds more
@@ -27,4 +29,25 @@ fun fitImageAttachmentSize(width: Int, height: Int): Pair<Int, Int>? {
     // JS Math.round: half rounds up.
     fun fit(edge: Int) = floor(edge * scale + 0.5).toInt().coerceIn(1, IMAGE_ATTACHMENT_MAX_EDGE)
     return fit(width) to fit(height)
+}
+
+/** How many times intake shrinks a re-encode that is still over the byte limit. */
+const val MAX_BYTE_LIMIT_SHRINKS = 3
+
+/**
+ * `shrinkToByteLimit` in mobile `composerImageFit.ts`: the smaller size to try
+ * when an encode is over the image byte limit, or null when it fits or cannot
+ * shrink. PNG ignores quality, so a resampled PNG can outweigh its original;
+ * encoded size tracks pixel count, so each edge scales by the square root.
+ */
+fun shrinkImageToByteLimit(
+    width: Int,
+    height: Int,
+    bytes: Long,
+    limit: Long = ComposerAttachmentLimits.MAX_IMAGE_BYTES,
+): Pair<Int, Int>? {
+    if (bytes <= limit) return null
+    val scale = sqrt(limit.toDouble() / bytes) * 0.9
+    val next = max(1, floor(width * scale).toInt()) to max(1, floor(height * scale).toInt())
+    return if (next.first < width || next.second < height) next else null
 }

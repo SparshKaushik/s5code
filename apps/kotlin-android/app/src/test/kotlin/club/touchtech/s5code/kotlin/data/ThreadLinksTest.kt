@@ -74,6 +74,25 @@ class ThreadLinksTest {
     }
 
     @Test
+    fun `parses v2 links with their environment`() {
+        assertEquals(ThreadLink("mac", "chat-1"), parseThreadLink("t3-thread://v2/mac/chat-1"))
+        assertEquals(ThreadLink(null, "chat-1"), parseThreadLink("t3-thread://v1/chat-1"))
+        assertEquals("chat-1", parseThreadLinkHref("t3-thread://v2/mac/chat-1"))
+        assertNull(parseThreadLink("t3-thread://v2/mac"))
+        assertNull(parseThreadLink("t3-thread://v2/mac/"))
+        assertNull(parseThreadLink("t3-thread://v2//chat-1"))
+    }
+
+    @Test
+    fun `a v2 link opens only in its own environment`() {
+        val link = ThreadLink("remote", "provider%3A1")
+        val decoded = ref("remote", "provider:1")
+        assertEquals(decoded, resolveThreadLink(link, "local", listOf(ref("local", "provider%3A1"), decoded)))
+        // It never guesses another machine's copy.
+        assertNull(resolveThreadLink(link, "local", listOf(ref("other", "provider%3A1"))))
+    }
+
+    @Test
     fun `markdown presents thread links as their own kind`() {
         assertEquals(
             MarkdownLinkPresentation.Thread("t3-thread://v1/mcp:1", "mcp:1"),

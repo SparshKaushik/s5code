@@ -108,7 +108,6 @@ import club.touchtech.s5code.kotlin.transport.wire.SourceControlCloneResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlDiscoveryResultDto
 import club.touchtech.s5code.kotlin.transport.wire.SourceControlRepositoryDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalMetadataStreamEventDto
-import club.touchtech.s5code.kotlin.transport.wire.TerminalSnapshotDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalStreamEventDto
 import club.touchtech.s5code.kotlin.transport.wire.TerminalSummaryDto
 import club.touchtech.s5code.kotlin.transport.wire.ThreadDto
@@ -548,7 +547,7 @@ class LiveWorkspaceGateway(
         }
         // Word queries match the title and both branch names, newest first.
         val words = query.lowercase().split(Regex("\\s+")).filter { it.isNotEmpty() }
-        return candidates
+        val found = candidates
             .asSequence()
             .filter { entry ->
                 entry.projectId == projectId.value &&
@@ -561,8 +560,13 @@ class LiveWorkspaceGateway(
             }
             .distinctBy { it.number }
             .sortedByDescending { it.updatedAt }
-            .take(limit)
             .toList()
+        return withLinkedComposerPullRequestsFirst(
+            matches = found,
+            linked = composerPullRequestsFromLinks(threadPullRequests, projectId.value),
+            query = query,
+            limit = limit,
+        )
     }
 
     /* ── Session lifecycle ───────────────────────────────────────────── */
@@ -1070,6 +1074,12 @@ class LiveWorkspaceGateway(
                                     model.name
                                 }
                         },
+                    modelShortNames =
+                        models
+                            .mapNotNull { model ->
+                                resolveModelShortName(model.name, model.shortName, first.driver)?.let { model.slug to it }
+                            }
+                            .toMap(),
                     modelSubProviders =
                         models.mapNotNull { model ->
                             model.subProvider?.takeIf { it.isNotEmpty() }?.let {
@@ -1484,9 +1494,9 @@ class LiveWorkspaceGateway(
     override suspend fun browserAccess(environmentId: EnvironmentId): DeviceHubAccess = sessionFor(environmentId).browserAccess()
 
     override suspend fun browserCommand(environmentId: EnvironmentId, method: String, input: JsonObject): JsonObject {
-        require(method in setOf("preview.open", "preview.navigate", "preview.adjust", "preview.refresh", "preview.close"))
+        require(method in setOf("preview.open", "preview.adjust", "preview.close"))
         val session = sessionFor(environmentId)
-        return if (method in setOf("preview.refresh", "preview.close")) {
+        return if (method == "preview.close") {
             session.execute(method, input)
             JsonObject(emptyMap())
         } else session.request(method, input, JsonObject.serializer())
@@ -2138,8 +2148,8 @@ class LiveWorkspaceGateway(
         sessionFor(environmentId).subscribe(method, payload, JsonObject.serializer())
 
     override suspend fun queueAction(environmentId: EnvironmentId, id: ThreadId, type: String,
-        runId: String?, text: String?, beforeRunId: String?, targetRunId: String?) {
-        dispatch(environmentId, Commands.queueAction(type, id.value, runId, text, beforeRunId, targetRunId))
+        runId: String?, text: String?, targetRunId: String?) {
+        dispatch(environmentId, Commands.queueAction(type, id.value, runId, text, targetRunId))
     }
 
     override suspend fun respondToApproval(
@@ -3273,6 +3283,7 @@ class LiveWorkspaceGateway(
         var error: String? = null
         var hasRunningSubprocess = false
         var updatedAt: String? = null
+        var grid: Pair<Int, Int>? = null
         // Outside `flow {}` so a lifecycle restart of the collector (backgrounding
         // the app) still resumes rather than reopening, and keeps the first location.
         var replied = false
@@ -3328,6 +3339,7 @@ class LiveWorkspaceGateway(
                             status = terminalStatusOf(snapshot.status)
                             hasRunningSubprocess = snapshot.hasRunningSubprocess
                             updatedAt = snapshot.updatedAt
+                            grid = nextTerminalGrid(grid, snapshot.cols, snapshot.rows)
                             error = null
                         }
                         "output" -> {
@@ -3370,6 +3382,7 @@ class LiveWorkspaceGateway(
                         "activity" -> {
                             event.label?.takeIf { it.isNotBlank() }?.let { title = it }
                             hasRunningSubprocess = event.hasRunningSubprocess
+                            grid = nextTerminalGrid(grid, event.cols, event.rows)
                         }
                         else -> return@collect
                     }
@@ -3386,6 +3399,7 @@ class LiveWorkspaceGateway(
                             updatedAt = updatedAt,
                             outputResetVersion = outputResetVersion,
                             outputEnd = outputEnd,
+                            grid = grid,
                         )
                     )
                 }
@@ -3891,29 +3905,6 @@ class LiveWorkspaceGateway(
             )
     }
 
-    override suspend fun terminalRestart(
-        environmentId: EnvironmentId,
-        id: ThreadId,
-        terminalId: String,
-        cols: Int,
-        rows: Int,
-    ) {
-        val location = terminalLocation(environmentId, id, terminalId)
-        sessionFor(environmentId)
-            .request(
-                WsMethods.TerminalRestart,
-                buildJsonObject {
-                    put("threadId", id.value)
-                    put("terminalId", terminalId)
-                    put("cwd", location.first)
-                    location.second?.let { put("worktreePath", it) }
-                    put("cols", cols)
-                    put("rows", rows)
-                },
-                TerminalSnapshotDto.serializer(),
-            )
-    }
-
     override suspend fun terminalClose(
         environmentId: EnvironmentId,
         id: ThreadId,
@@ -3936,7 +3927,12 @@ class LiveWorkspaceGateway(
     init {
         scope.launch {
             while (true) {
-                kotlinx.coroutines.delay(60_000)
+                val now = System.currentTimeMillis()
+                val snoozedUntil =
+                    sessions.value.values.asSequence()
+                        .flatMap { it.shell.value?.threads.orEmpty().asSequence() }
+                        .map { it.snoozedUntil }
+                kotlinx.coroutines.delay(clockTickDelayMillis(now, nextSnoozeWakeAfter(snoozedUntil, now)))
                 clock.value = System.currentTimeMillis()
                 publish()
             }

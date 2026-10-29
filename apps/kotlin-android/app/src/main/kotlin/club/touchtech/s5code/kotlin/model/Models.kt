@@ -770,6 +770,8 @@ sealed interface FeedEntry {
          * (`isCompactionCommandFeedEntry` in RN).
          */
         val compactionCommand: Boolean = false,
+        /** A `run_interrupt_result`: the user stopped the run, which is not an error. */
+        val stopped: Boolean = false,
     ) : FeedEntry
 
     data class TurnDivider(override val id: String, val label: String) : FeedEntry
@@ -1004,7 +1006,6 @@ data class ThreadDetail(
     val handoffSource: HandoffEndpoint? = null,
     /** The pull request the server discovered from the thread's current branch. */
     val branchPullRequest: ThreadLinkedPullRequest? = null,
-    val canReorderQueue: Boolean = false,
     val canPromoteQueued: Boolean = false,
     /**
      * `canSendNow`: no run is active, so a held queued message can be sent on its
@@ -1055,7 +1056,18 @@ data class ThreadDetail(
     val settings: ThreadSettings = ThreadSettings(),
 )
 
-data class QueuedRun(val id: String, val messageId: String, val text: String, val held: Boolean)
+data class QueuedRun(
+    val id: String,
+    val messageId: String,
+    val text: String,
+    val held: Boolean,
+    /** [club.touchtech.s5code.kotlin.data.userMessagePresentation]'s attribution: who sent it, null for the user. */
+    val attribution: String? = null,
+    val scheduledTaskId: String? = null,
+    val senderThreadId: String? = null,
+    /** A guest's message: the owner can send or remove it, not rewrite it. */
+    val guestName: String? = null,
+)
 data class ThreadRelationship(val threadId: String, val label: String)
 
 /**
@@ -1273,6 +1285,8 @@ data class TerminalSession(
     val outputResetVersion: Int = 0,
     /** Characters appended since that reset; [buffer] is the retained tail ending here. */
     val outputEnd: Long = buffer.length.toLong(),
+    /** The PTY grid shared by every attached client as `cols to rows`; null before the server reports one. */
+    val grid: Pair<Int, Int>? = null,
 )
 
 /**
@@ -1529,6 +1543,8 @@ data class ProviderCatalogEntry(
      * everywhere it is sent.
      */
     val modelLabels: Map<String, String> = emptyMap(),
+    /** `resolveModelShortName` per slug, for the composer chip and handoff rows; picker rows keep the full name. */
+    val modelShortNames: Map<String, String> = emptyMap(),
     /**
      * `subProvider` per slug — the upstream vendor an aggregating provider
      * (OpenCode, pi) lists the model under. RN renders it as the row subtitle.
@@ -1560,6 +1576,8 @@ data class ProviderCatalogEntry(
     /** The row label for a model slug, falling back to the slug itself. */
     fun modelLabel(model: String): String =
         modelLabels[model]?.takeIf { it.isNotEmpty() } ?: model
+
+    fun modelShortLabel(model: String): String = modelShortNames[model] ?: modelLabel(model)
 }
 
 /**

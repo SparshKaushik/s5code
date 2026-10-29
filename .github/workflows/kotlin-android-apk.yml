@@ -142,6 +142,19 @@ jobs:
           --tests '*QueuedEditExitTest'
           --tests '*PlaybackInterruptionsTest'
           --tests '*AwaitCreatedProjectTest'
+          --tests '*BrowsePathInputsTest'
+          --tests '*ComposerContextsTest'
+          --tests '*ConnectionRecoveryTest'
+          --tests '*ModelShortNameTest'
+          --tests '*NewTaskDestinationTest'
+          --tests '*PairingUrlTest'
+          --tests '*ProviderInstanceTest'
+          --tests '*QueuedRunPresentationTest'
+          --tests '*SessionStateTimeoutTest'
+          --tests '*SnoozePresetsTest'
+          --tests '*TerminalGridTest'
+          --tests '*WsMethodsContractTest'
+          --tests '*V2FeedRowsTest'
           --stacktrace
 
       - name: Lint Kotlin Android client

@@ -645,6 +645,34 @@ class AppStore(application: Application) : AndroidViewModel(application) {
         }
     }
 
+    /** RN's `useRememberThreadProject`: the project New task reopens; scratch projects never count. */
+    fun rememberThreadProject(environmentId: String, projectId: String) {
+        val project =
+            workspace.projects.value.firstOrNull {
+                it.environmentId.value == environmentId && it.id.value == projectId
+            } ?: return
+        if (project.isScratch) return
+        val ref = club.touchtech.s5code.kotlin.data.ThreadProjectRef(environmentId, projectId)
+        _preferences.update { if (it.lastThreadProject == ref) it else it.copy(lastThreadProject = ref) }
+    }
+
+    /** The project New task opens straight into from the thread on screen, or null for the picker. */
+    fun newTaskStartProject(environmentId: String?, threadId: String?): club.touchtech.s5code.kotlin.model.Project? {
+        // Archived and subagent threads are current threads too, so the archive counts.
+        val thread =
+            if (environmentId == null || threadId == null) null
+            else
+                (workspace.threads.value + workspace.archived.value).firstOrNull {
+                    it.environmentId.value == environmentId && it.id.value == threadId
+                }
+        return club.touchtech.s5code.kotlin.feature.newtask.newTaskDestinationProject(
+            projects = workspace.projects.value,
+            useLastProject = _preferences.value.useLastProjectForNewThreads,
+            current = thread?.let { club.touchtech.s5code.kotlin.data.ThreadProjectRef(it.environmentId.value, it.projectId.value) },
+            last = _preferences.value.lastThreadProject,
+        )
+    }
+
     /**
      * Queues an external navigation request. A share first materializes into the
      * incoming-share inbox — the `content:` grants lapse when the sender's

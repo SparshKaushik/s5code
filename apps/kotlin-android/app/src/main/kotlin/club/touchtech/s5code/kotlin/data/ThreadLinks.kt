@@ -8,18 +8,32 @@ import java.nio.charset.CodingErrorAction
 /** A thread in one environment; thread ids are only unique within an environment. */
 data class ThreadLinkRef(val environmentId: String, val threadId: String)
 
-private const val THREAD_LINK_HREF_PREFIX = "t3-thread://v1/"
+private const val V1_PREFIX = "t3-thread://v1/"
+private const val V2_PREFIX = "t3-thread://v2/"
+
+/** A parsed thread link. A v1 link names no environment; the message's own, or a unique match, stands in. */
+data class ThreadLink(val environmentId: String?, val threadId: String)
 
 /**
- * The id as written, following `parseThreadLinkHref` in
- * `packages/shared/src/threadLinks.ts`. Thread ids can hold percent escapes of
- * their own, so it is not decoded; like the `ThreadId` schema, surrounding
- * whitespace is trimmed and a blank id is no id.
+ * `parseThreadLinkHref` in `packages/shared/src/threadLinks.ts`: the ids as
+ * written. Thread ids can hold percent escapes of their own, so they are not
+ * decoded; like the branded id schemas, surrounding whitespace is trimmed and a
+ * blank id is no id.
  */
-fun parseThreadLinkHref(href: String): String? {
-    if (!href.startsWith(THREAD_LINK_HREF_PREFIX)) return null
-    return href.substring(THREAD_LINK_HREF_PREFIX.length).trim().takeIf(String::isNotEmpty)
+fun parseThreadLink(href: String): ThreadLink? {
+    if (href.startsWith(V1_PREFIX)) {
+        return href.substring(V1_PREFIX.length).trim().takeIf(String::isNotEmpty)?.let { ThreadLink(null, it) }
+    }
+    if (!href.startsWith(V2_PREFIX)) return null
+    val path = href.substring(V2_PREFIX.length)
+    val slash = path.indexOf('/').takeIf { it >= 0 } ?: return null
+    val environmentId = path.substring(0, slash).trim().takeIf(String::isNotEmpty) ?: return null
+    val threadId = path.substring(slash + 1).trim().takeIf(String::isNotEmpty) ?: return null
+    return ThreadLink(environmentId, threadId)
 }
+
+/** The thread id a v1 or v2 link names, as written. */
+fun parseThreadLinkHref(href: String): String? = parseThreadLink(href)?.threadId
 
 /** The percent-decoded id when decoding changes it and still yields a valid id. */
 fun percentDecodedThreadLinkId(threadId: String): String? {
@@ -27,25 +41,39 @@ fun percentDecodedThreadLinkId(threadId: String): String? {
     return if (decoded == threadId) null else decoded.trim().takeIf(String::isNotEmpty)
 }
 
+/** `threadLinkCandidates`: in the link's own environment or else the message's, as written then decoded. */
+fun threadLinkCandidates(link: ThreadLink, messageEnvironmentId: String): List<ThreadLinkRef> {
+    val environmentId = link.environmentId ?: messageEnvironmentId
+    return listOfNotNull(link.threadId, percentDecodedThreadLinkId(link.threadId))
+        .map { ThreadLinkRef(environmentId, it) }
+}
+
 /**
- * `resolveThreadLinkRef`: a link names a thread id, not an environment. The
- * linking environment wins (literal id first, then the decoded one); otherwise a
- * unique match in any other connected environment does, and two or more is
- * ambiguous rather than a guess.
+ * `guessThreadLinkRef`: a v1 link its message's environment lacks opens a
+ * unique match elsewhere, and two or more is ambiguous rather than a guess. A
+ * v2 link names its environment, so it never guesses.
  */
-fun resolveThreadLinkRef(source: ThreadLinkRef, refs: List<ThreadLinkRef>): ThreadLinkRef? {
-    val ids = listOfNotNull(source.threadId, percentDecodedThreadLinkId(source.threadId))
-    for (threadId in ids) {
-        refs.firstOrNull { it.environmentId == source.environmentId && it.threadId == threadId }
-            ?.let { return it }
-    }
-    for (threadId in ids) {
+fun guessThreadLinkRef(link: ThreadLink, refs: List<ThreadLinkRef>): ThreadLinkRef? {
+    if (link.environmentId != null) return null
+    for (threadId in listOfNotNull(link.threadId, percentDecodedThreadLinkId(link.threadId))) {
         val matches = refs.filter { it.threadId == threadId }
         if (matches.size > 1) return null
         matches.firstOrNull()?.let { return it }
     }
     return null
 }
+
+/** The thread a tapped link opens: a known candidate, else a v1 guess, else null. */
+fun resolveThreadLink(link: ThreadLink, messageEnvironmentId: String, refs: List<ThreadLinkRef>): ThreadLinkRef? =
+    threadLinkCandidates(link, messageEnvironmentId).firstOrNull { it in refs } ?: guessThreadLinkRef(link, refs)
+
+/**
+ * `resolveThreadLinkRef` for a link known only by its thread id: the linking
+ * environment wins (literal id first, then the decoded one); otherwise a unique
+ * match in another connected environment does.
+ */
+fun resolveThreadLinkRef(source: ThreadLinkRef, refs: List<ThreadLinkRef>): ThreadLinkRef? =
+    resolveThreadLink(ThreadLink(null, source.threadId), source.environmentId, refs)
 
 /**
  * JavaScript's `decodeURIComponent`, which [java.net.URLDecoder] is not: that

@@ -17,6 +17,7 @@ class ProjectProvidersTest {
                 "providerInstances":{
                     "codex":{"driver":"codex","enabled":true},
                     "cursor":{"driver":"cursor"},
+                    "fx":{"driver":"fx"},
                     "claude-work":{"driver":"claudeAgent","enabled":true,"config":{"enabled":false}}
                 },
                 "projectSettingsOverrides":{
@@ -36,8 +37,9 @@ class ProjectProvidersTest {
 
     @Test
     fun `without a project switch the instance config and driver defaults decide`() {
-        // Cursor defaults off; either switch off wins; unconfigured built-ins are on.
+        // Cursor and fx default off; either switch off wins; unconfigured built-ins are on.
         assertFalse(resolveProjectProviderInstanceEnabled(settings, null, "cursor"))
+        assertFalse(resolveProjectProviderInstanceEnabled(settings, null, "fx"))
         assertFalse(resolveProjectProviderInstanceEnabled(settings, null, "claude-work"))
         assertTrue(resolveProjectProviderInstanceEnabled(settings, null, "claudeAgent"))
         assertFalse(resolveProjectProviderInstanceEnabled(settings, null, "unknown"))

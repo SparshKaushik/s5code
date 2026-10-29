@@ -73,8 +73,8 @@ internal fun SessionState.requireRpcPermissions(method: String, payload: JsonEle
         "pullRequests.runAction", "pullRequests.update", "pullRequests.comment", "pullRequests.updateComment",
         "pullRequests.submitReview", "pullRequests.replyToThread", "pullRequests.setThreadResolution",
         "pullRequests.setReaction", "pullRequests.setFilesViewed", "pullRequests.requestReviewers", "pullRequests.setLabels" -> listOf("source-control:write")
-        "preview.open", "preview.navigate", "preview.resize", "preview.adjust", "preview.refresh", "preview.close" -> listOf("preview:operate")
-        "terminal.write", "terminal.resize", "terminal.open", "terminal.restart", "terminal.close", "terminal.clear" -> listOf("terminal:operate")
+        "preview.open", "preview.resize", "preview.adjust", "preview.close" -> listOf("preview:operate")
+        "terminal.write", "terminal.resize", "terminal.open", "terminal.close", "terminal.clear" -> listOf("terminal:operate")
         "orchestration.dispatchCommand", "orchestration.launchThread", "orchestration.stopWorkflow",
         "projects.mutate", "secrets.answerRequest", "mcpApps.callTool", "mcpApps.updateModelContext",
         "scheduledTasks.upsert", "scheduledTasks.setEnabled",

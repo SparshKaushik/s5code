@@ -2,10 +2,12 @@ package club.touchtech.s5code.kotlin.design.text
 
 private val WINDOWS_DRIVE_PATH = Regex("^[A-Za-z]:[\\\\/]")
 private val RELATIVE_PREFIX = Regex("^(~/|\\.{1,2}/)")
-private val RELATIVE_FILE_PATH = Regex("^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)+(?::\\d+){0,2}$")
-private val RELATIVE_FILE_NAME = Regex("^[A-Za-z0-9._-]+\\.[A-Za-z0-9_-]+(?::\\d+){0,2}$")
+// Names may use any script (`線性代數/考試.pdf`).
+private const val NAME = """[\p{L}\p{M}\p{N}._-]+(?: +[\p{L}\p{M}\p{N}._-]+)*"""
+private val RELATIVE_FILE_PATH = Regex("""^(?:$NAME/)+$NAME(?::\d+){0,2}$""")
+private val RELATIVE_FILE_NAME = Regex("""^$NAME\.[\p{L}\p{M}\p{N}_-]+(?::\d+){0,2}$""")
 /** `src/`, `docs/My Folder/`: a relative link ending in a slash names a directory. */
-private val RELATIVE_DIRECTORY_PATH = Regex("^(?:[A-Za-z0-9._-]+(?: +[A-Za-z0-9._-]+)*/)+$")
+private val RELATIVE_DIRECTORY_PATH = Regex("""^(?:$NAME/)+$""")
 private val POSITION_SUFFIX = Regex(":(\\d+)(?::(\\d+))?$")
 private val POSIX_ROOT_PREFIXES =
     listOf("/Users/", "/home/", "/tmp/", "/var/", "/etc/", "/opt/", "/mnt/", "/Volumes/", "/private/", "/root/")
@@ -32,7 +34,7 @@ sealed interface MarkdownLinkPresentation {
 
     data class Link(val href: String?) : MarkdownLinkPresentation
 
-    /** A `t3-thread://v1/<id>` link; [threadId] is the id as written. */
+    /** A `t3-thread://` v1 or v2 link; [threadId] is the id as written. */
     data class Thread(val href: String, val threadId: String) : MarkdownLinkPresentation
 }
 

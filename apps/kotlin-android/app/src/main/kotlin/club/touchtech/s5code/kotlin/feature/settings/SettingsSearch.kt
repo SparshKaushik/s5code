@@ -31,7 +31,7 @@ private val SETTINGS_SEARCH_TERMS: Map<String, List<String>> =
             ),
         "scheduled-tasks" to listOf("automations", "schedule", "cron", "recurring", "webhook"),
         "overview" to listOf("project", "checkouts", "worktrees", "delete project"),
-        "organization" to listOf("project grouping", "group projects", "sidebar"),
+        "organization" to listOf("project grouping", "group projects", "sidebar", "new threads", "last project"),
         "threads" to
             listOf("auto-settle", "settle", "snooze", "usage limits", "auto-resume", "plan mode", "working section"),
         "follow-ups" to listOf("queue", "steer", "while the agent is running"),

@@ -102,4 +102,20 @@ class ProjectScopesTest {
         val kept = HomeUiState(environmentId = devbox)
         assertEquals(kept, kept.withAvailableEnvironment(HomeFixture.environments))
     }
+
+    @Test
+    fun `picking a project on two machines prefers a connected copy`() {
+        val mac = scratch("t3code-mac", laptop, "/mac/t3code", isScratch = false)
+        val server = scratch("t3code-server", devbox, "/srv/t3code", isScratch = false)
+        val scope = ProjectScope(key = "t3code", title = "t3code", representative = mac, projects = listOf(mac, server))
+        fun target(connected: Set<EnvironmentId>, preferred: EnvironmentId? = null) =
+            projectScopeSelectionTarget(scope, preferred?.value, connected.mapTo(hashSetOf()) { it.value })
+        assertEquals(server, target(setOf(devbox)))
+        assertEquals(server, target(setOf(devbox), preferred = laptop))
+        assertEquals(server, target(setOf(laptop, devbox), preferred = devbox))
+        assertEquals(mac, target(setOf(laptop, devbox)))
+        // With nothing connected, the usual order still applies.
+        assertEquals(server, target(emptySet(), preferred = devbox))
+        assertEquals(mac, target(emptySet()))
+    }
 }

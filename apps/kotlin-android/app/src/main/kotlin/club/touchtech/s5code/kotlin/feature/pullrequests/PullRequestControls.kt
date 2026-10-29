@@ -10,6 +10,7 @@ import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
 import androidx.compose.material.icons.automirrored.rounded.Undo
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Block
@@ -57,6 +58,7 @@ import club.touchtech.s5code.kotlin.design.component.S5IconButton
 import club.touchtech.s5code.kotlin.design.component.S5InlineLoading
 import club.touchtech.s5code.kotlin.design.component.S5MenuOption
 import club.touchtech.s5code.kotlin.design.component.S5OverflowMenu
+import club.touchtech.s5code.kotlin.design.component.S5SplitButton
 import club.touchtech.s5code.kotlin.design.theme.S5Theme
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestDetailDto
 import club.touchtech.s5code.kotlin.transport.wire.PullRequestStackDto
@@ -199,38 +201,40 @@ fun PullRequestMergeControls(
         verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
     ) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small)) {
-            S5Button(
-                text =
-                    when {
-                        busy -> "Working…"
-                        !permissions.connected -> "Reconnect to merge"
-                        else -> state.label
-                    },
-                onClick = { confirm("merge") },
-                enabled = state.canMerge,
-                emphasis = S5ActionEmphasis.Secondary,
-                modifier = Modifier.weight(1f),
-            )
-            if (busy || state.checkingStack) S5InlineLoading()
-            if (methods.isNotEmpty() || state.canAutoMerge) {
+            val text =
+                when {
+                    busy -> "Working…"
+                    !permissions.connected -> "Reconnect to merge"
+                    else -> state.label
+                }
+            val options =
+                methods.map {
+                    S5MenuOption(it, mergeMethodTitle(it), selected = it == method, enabled = state.canMerge || state.canAutoMerge)
+                } +
+                    if (state.canAutoMerge) {
+                        listOf(
+                            S5MenuOption(
+                                state.autoAction,
+                                if (pr.autoMergeEnabled == true) "Disable auto-merge" else "Enable auto-merge",
+                                Icons.Rounded.Schedule,
+                            )
+                        )
+                    } else {
+                        emptyList()
+                    }
+            if (options.isEmpty()) {
+                S5Button(
+                    text = text,
+                    onClick = { confirm("merge") },
+                    enabled = state.canMerge,
+                    emphasis = S5ActionEmphasis.Secondary,
+                    modifier = Modifier.weight(1f),
+                )
+            } else {
                 S5OverflowMenu(
                     icon = Icons.Rounded.ExpandMore,
                     label = "Merge options",
-                    options =
-                        methods.map {
-                            S5MenuOption(it, mergeMethodTitle(it), selected = it == method, enabled = !busy)
-                        } +
-                            if (state.canAutoMerge) {
-                                listOf(
-                                    S5MenuOption(
-                                        state.autoAction,
-                                        if (pr.autoMergeEnabled == true) "Disable auto-merge" else "Enable auto-merge",
-                                        Icons.Rounded.Schedule,
-                                    )
-                                )
-                            } else {
-                                emptyList()
-                            },
+                    options = options,
                     onSelect = { id ->
                         if (id in methods) {
                             selected = id
@@ -241,8 +245,22 @@ fun PullRequestMergeControls(
                     },
                     expanded = menuOpen,
                     onExpandedChange = { menuOpen = it },
+                    modifier = Modifier.weight(1f, fill = false),
+                    anchor = {
+                        S5SplitButton(
+                            text = text,
+                            onClick = { confirm("merge") },
+                            icon = Icons.AutoMirrored.Rounded.CallMerge,
+                            trailingIcon = Icons.Rounded.ExpandMore,
+                            trailingLabel = "Merge options",
+                            onTrailingClick = { menuOpen = !menuOpen },
+                            enabled = state.canMerge,
+                            trailingEnabled = options.any { it.enabled },
+                        )
+                    },
                 )
             }
+            if (busy || state.checkingStack) S5InlineLoading()
         }
         state.visibleReason?.let {
             Text(it, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)

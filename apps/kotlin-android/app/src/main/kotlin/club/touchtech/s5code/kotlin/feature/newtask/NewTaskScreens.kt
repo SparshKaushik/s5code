@@ -234,6 +234,10 @@ fun NewTaskProjectScreen(
     // wait on, so only enabled rows drive the state.
     val enabled = remember(environments) { environments.filter { it.isEnabled } }
     val hasReadyEnvironment = enabled.any { it.state == ConnectionState.Connected }
+    val connectedEnvironmentIds =
+        remember(enabled) {
+            enabled.filter { it.state == ConnectionState.Connected }.mapTo(hashSetOf()) { it.id.value }
+        }
     val hasSnapshot = enabled.any { it.snapshotLoaded }
 
     // Same scopes RN offers: repository-grouped projects sorted by recent
@@ -272,6 +276,7 @@ fun NewTaskProjectScreen(
                 worktreePath = null,
             )
         }
+        store.rememberThreadProject(project.environmentId.value, project.id.value)
         onProjectChosen()
     }
 
@@ -362,6 +367,7 @@ fun NewTaskProjectScreen(
                         projectScopeSelectionTarget(
                             scope,
                             draft.environmentId.value.takeIf { it.isNotEmpty() },
+                            connectedEnvironmentIds,
                         )
                     S5SelectableRow(
                         label = scope.title,
@@ -673,7 +679,7 @@ fun NewTaskDraftScreen(
                         .firstOrNull {
                             it.instance.instanceId == draft.settings.provider.instanceId
                         }
-                        ?.modelLabel(draft.settings.model)
+                        ?.modelShortLabel(draft.settings.model)
                         ?: draft.settings.model,
                 modelSummary =
                     remember(machineCatalog, draft.settings, draft.prompt) {
