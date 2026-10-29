@@ -42,6 +42,11 @@ export default defineConfig({
         path: "apps/web/src/**/*.{tsx,css}",
         instructions: "Hold changed code to the rules in docs/internals/web-ui.md.",
       },
+      {
+        path: "**/*.test.*",
+        instructions:
+          "Hold changed tests to the rules in docs/internals/testing.md. Request tests only as those rules allow.",
+      },
     ],
   },
   chat: { auto_reply: true },
@@ -50,6 +55,7 @@ export default defineConfig({
       filePatterns: [
         { files: "docs/internals/effect-services.md", applyTo: "{apps,packages,infra}/**/*.ts" },
         { files: "docs/internals/web-ui.md", applyTo: "apps/web/src/**/*.{tsx,css}" },
+        { files: "docs/internals/testing.md", applyTo: "{apps,packages,infra}/**/*.{ts,tsx}" },
       ],
     },
   },
