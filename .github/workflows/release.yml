@@ -320,6 +320,13 @@ jobs:
         working-directory: apps/web
         run: vp test run --project browser src/components/files/AttachmentFilePreview.browser.test.tsx
 
+      # Browser tests run source modules; this boots the production chunk graph.
+      - name: Boot the built web client
+        run: |
+          vp run --filter @t3tools/web build
+          node apps/web/scripts/verify-built-boot.ts
+
+  # Server test files run one at a time, so more small runners beat fewer big ones.
   test_server:
     name: Release server tests ${{ matrix.shard }}
     needs: [preflight]
@@ -406,13 +413,6 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
 
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
-        with:
-          node-version-file: package.json
-          cache: true
-          run-install: false
-
       # pnpm checks the lockfile and policy before reusing this result. A missing
       # artifact leaves the cache empty, so installation runs the checks again.
       - name: Download dependency verification
@@ -422,10 +422,12 @@ jobs:
           name: release-dependency-verification
           path: ${{ runner.temp }}/pnpm-metadata
 
-      - name: Install bundle dependencies
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
         env:
           pnpm_config_cache_dir: ${{ runner.temp }}/pnpm-metadata
-        run: vp install --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
 
       # The fork's self-hosted relay does not publish a client tracing
       # artifact, so there is nothing to download or load here.
@@ -490,6 +492,7 @@ jobs:
       arch: arm64
       rust_target: aarch64-apple-darwin
       resource_key: darwin-arm64
+      launch_check: true
 
   mobile:
     name: Reconcile Mobile Release
@@ -554,9 +557,9 @@ jobs:
         uses: oven-sh/setup-bun@v2
         with:
           # Pinned: the compiled binary embeds this exact Bun runtime, so a
-          # floating version would silently change what ships. Bun 1.4 adds
-          # `--asset`, which is what would let the web client be embedded.
-          bun-version: "1.3.13"
+          # floating version would silently change what ships. 1.3.x lacks
+          # node:sqlite in workers and leaks every exited Worker.
+          bun-version: "1.4.4"
 
       - name: Align package versions to release version
         run: node scripts/update-release-package-versions.ts "${{ needs.preflight.outputs.version }}"
@@ -616,14 +619,10 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
 
-      - name: Setup Vite+
-        uses: voidzero-dev/setup-vp@v1
+      - name: Setup dependencies
+        uses: ./.github/actions/setup-ci-deps
         with:
-          node-version-file: package.json
-          cache: true
-          run-install: |
-            args:
-              - --filter=@t3tools/scripts...
+          install-args: --filter=@t3tools/scripts...
 
       # `desktop-*` is the macOS build, `server-*` the self-updating Linux
       # binaries, and `android-apk` the optional mobile release artifact (the

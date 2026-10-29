@@ -1,5 +1,5 @@
 import * as Alchemy from "alchemy";
-import * as Axiom from "alchemy/Axiom";
+import * as Axiom from "@alchemy.run/axiom";
 import * as Output from "alchemy/Output";
 import * as Cause from "effect/Cause";
 import * as Effect from "effect/Effect";
@@ -9,6 +9,7 @@ import * as Schema from "effect/Schema";
 import * as Tracer from "effect/Tracer";
 
 import { relayResourceNameForStage } from "./deploymentConfig.ts";
+import { MobileMonitoring } from "./mobileTelemetry/monitoring.ts";
 import { RelayMonitoring } from "./monitoring.ts";
 
 const relayRecentSpansQuery = (dataset: string) =>
@@ -56,6 +57,31 @@ export const RelayObservability = Effect.gen(function* () {
     })),
   });
 
+  // expo-observe data, forwarded by src/mobileTelemetry. Mobile spans share the traces dataset.
+  const mobileLogs = yield* Axiom.Dataset("MobileLogsDataset", {
+    name: relayResourceNameForStage("t3-code-mobile-logs", stage),
+    kind: "otel:logs:v1",
+    description: "T3 Code mobile app errors, crashes, and log events from expo-observe.",
+    retentionDays: 30,
+    useRetentionPeriod: true,
+  });
+  const mobileMetrics = yield* Axiom.Dataset("MobileMetricsDataset", {
+    name: relayResourceNameForStage("t3-code-mobile-metrics", stage),
+    kind: "otel:metrics:v1",
+    description: "T3 Code mobile app startup and update metrics from expo-observe.",
+    retentionDays: 30,
+    useRetentionPeriod: true,
+  });
+  const mobileTelemetryIngestToken = yield* Axiom.ApiToken("MobileTelemetryAxiomIngestToken", {
+    name: relayResourceNameForStage("t3-code-mobile-telemetry-ingest", stage),
+    description: "Owned by Alchemy. Scoped ingest token the relay forwards mobile telemetry with.",
+    datasetCapabilities: Output.map(
+      Output.all(traces.name, mobileLogs.name, mobileMetrics.name),
+      (datasets) =>
+        Object.fromEntries(datasets.map((dataset) => [dataset, { ingest: ["create" as const] }])),
+    ),
+  });
+
   yield* Axiom.View("RelayRecentSpansView", {
     name: relayResourceNameForStage("t3-code-relay-recent-spans", stage),
     description: "Recent relay HTTP request spans.",
@@ -64,8 +90,17 @@ export const RelayObservability = Effect.gen(function* () {
   });
 
   yield* RelayMonitoring(traces);
+  yield* MobileMonitoring(mobileLogs, traces);
 
-  return { traces, workerIngestToken, mobileIngestToken, clientIngestToken } as const;
+  return {
+    traces,
+    workerIngestToken,
+    mobileIngestToken,
+    clientIngestToken,
+    mobileLogs,
+    mobileMetrics,
+    mobileTelemetryIngestToken,
+  } as const;
 });
 
 export const withSpanAttributes =

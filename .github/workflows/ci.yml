@@ -159,7 +159,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: "1.3.13"
+          bun-version: "1.4.4"
 
       - name: Verify Bun SQLite snapshots for V2 migration
         env:
@@ -289,15 +289,6 @@ jobs:
             !/.repos/
           sparse-checkout-cone-mode: false
 
-      # ACP process-tree live tests compile a small pthread fixture with `cc`
-      # and soft-skip when it is missing. Install build-essential so that path
-      # always runs in CI instead of silently no-oping.
-      - name: Install C toolchain for process-tree fixtures
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends build-essential
-          command -v cc
-
       - uses: ./.github/actions/setup-apt-mirrors
 
       # The desktop tests compile the browser secret helper. The install runs in
@@ -383,6 +374,12 @@ jobs:
       - name: Test file previews
         working-directory: apps/web
         run: vp test run --project browser src/components/files/AttachmentFilePreview.browser.test.tsx
+
+      # Browser tests run source modules; this boots the production chunk graph.
+      - name: Boot the built web client
+        run: |
+          vp run --filter @t3tools/web build
+          node apps/web/scripts/verify-built-boot.ts
 
   # apps/server sets `fileParallelism: false`, so its test files run strictly
   # one at a time. Sharding spreads them over separate runners instead of

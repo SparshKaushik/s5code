@@ -104,8 +104,11 @@ export const makeDeviceHubOperations = (options: {
       "list",
     );
     const devices: Array<HostDevice> = [...hubList.simulators, ...hubList.emulators];
+    const androidAvailable = yield* options.androidAvailable;
     const warnings = hubList.errors?.filter(
       (error) =>
+        // The host summary already explains a missing Android SDK; the hub's failed probes are noise.
+        !(!androidAvailable && error.message.startsWith("[android-utils] ")) &&
         // CoreSimulator can retain deleted devices; their optional usage timestamps are absent.
         !(
           error.message.startsWith("[apple-utils] Failed to read CoreSimulator plist at ") &&
@@ -115,7 +118,7 @@ export const makeDeviceHubOperations = (options: {
     );
     const details = warnings?.map((error) => error.message) ?? [];
     let androidDiscoveryIncomplete = false;
-    if (yield* options.androidAvailable) {
+    if (androidAvailable) {
       const avds = yield* run("emulator", ["-list-avds"]);
       // Discovered devices stay listed; the AVDs that could not be listed are a warning.
       if (avds.code !== 0) {

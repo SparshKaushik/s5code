@@ -8,7 +8,7 @@ import { ArtifactStore, createArtifactStore, provideFreshArtifactStore } from "a
 import { AuthProviders } from "alchemy/Auth/AuthProvider";
 import { CredentialsStoreLive } from "alchemy/Auth/Credentials";
 import { ProfileStoreLive } from "alchemy/Auth/Profile";
-import * as Cloudflare from "alchemy/Cloudflare";
+import * as Cloudflare from "@alchemy.run/cloudflare";
 import { LoggingCli } from "alchemy/Cli/LoggingCli";
 import { layerNonInteractive } from "alchemy/Interaction";
 import { Cli } from "alchemy/Report";

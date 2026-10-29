@@ -72,8 +72,7 @@ function layer(
       return {
         values: (values: DpopProofInsertValues) => ({
           onConflictDoNothing: () => ({
-            returning: (selection: unknown) => {
-              expect(selection).toBeDefined();
+            returning: () => {
               return insert(values);
             },
           }),
