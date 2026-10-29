@@ -524,7 +524,10 @@ effectIt.effect("rechecks the socket owner before stopping a Linux server withou
       input.command === "lsof"
         ? processProbeFailure(input)
         : Effect.succeed(processOutput("4242 1 4300\n5000 1 5300\n")),
-    () => Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } })),
+    Object.assign(
+      () => Promise.resolve(new Response("app", { headers: { "content-type": "text/html" } })),
+      { preconnect: () => {} },
+    ),
     FileSystem.layerNoop({
       readFileString: (path) => {
         if (path === "/proc/net/tcp") {
@@ -638,12 +641,18 @@ effectIt.effect.each(["linux", "darwin"] as const)(
           Layer.succeed(HostProcess.Platform, platform),
           FetchHttpClient.layer.pipe(
             Layer.provide(
-              Layer.succeed(FetchHttpClient.Fetch, (input) => {
-                requests.push(String(input));
-                return Promise.resolve(
-                  new Response("app", { headers: { "content-type": "text/html" } }),
-                );
-              }),
+              Layer.succeed(
+                FetchHttpClient.Fetch,
+                Object.assign(
+                  (input: string | URL | Request) => {
+                    requests.push(String(input));
+                    return Promise.resolve(
+                      new Response("app", { headers: { "content-type": "text/html" } }),
+                    );
+                  },
+                  { preconnect: () => {} },
+                ),
+              ),
             ),
           ),
         ),

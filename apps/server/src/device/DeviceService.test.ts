@@ -27,7 +27,7 @@ import * as Schema from "effect/Schema";
 import * as Sink from "effect/Sink";
 import * as Stream from "effect/Stream";
 import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
-import { HttpClient, HttpClientResponse } from "effect/http";
+import { FetchHttpClient, HttpClient, HttpClientResponse } from "effect/http";
 import { TestClock } from "effect/testing";
 import * as ServerConfig from "../config.ts";
 import * as ProcessRunner from "../processRunner.ts";
@@ -906,7 +906,7 @@ it.effect("leaves a session its host leases to every thread open when one thread
         prune: () => Effect.void,
         release: (launcher) => Effect.sync(() => void released.push(launcher)),
       },
-    ).pipe(Effect.provide(NodeCrypto.layer));
+    ).pipe(Effect.provide(NodeCrypto.layer), Effect.provideService(HttpClient.HttpClient, http));
     const threads = [ThreadId.make("pool-a"), ThreadId.make("pool-b")];
     for (const threadId of threads) {
       yield* service.open({ threadId, deviceId, platform: "ios" });
@@ -1723,7 +1723,7 @@ describe("locating a device id across hosts", () => {
           [thisMachine.id, listingHost(thisMachine, ["Pixel_10"])],
           [macMini.id, listingHost(macMini, ["MAC-UDID", "Pixel_10"])],
         ]),
-      ).pipe(Effect.provide(NodeCrypto.layer));
+      ).pipe(Effect.provide(NodeCrypto.layer), Effect.provide(FetchHttpClient.layer));
       yield* service.list;
       return yield* test(service);
     }).pipe(Effect.provide(ServerSettings.layerTest({ enableDeviceSupport: true })), Effect.scoped);
