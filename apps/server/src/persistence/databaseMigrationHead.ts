@@ -27,7 +27,10 @@ export function recordedMigrations(
     return db
       .prepare("SELECT migration_id, name FROM effect_sql_migrations ORDER BY migration_id")
       .all()
-      .map((row) => ({ id: Number(row.migration_id), name: String(row.name) }));
+      .map((row: { readonly migration_id: unknown; readonly name: unknown }) => ({
+        id: Number(row.migration_id),
+        name: String(row.name),
+      }));
   } catch {
     return null;
   } finally {

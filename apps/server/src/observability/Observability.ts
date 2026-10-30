@@ -72,6 +72,14 @@ export const layer = Layer.unwrap(
           ...(delegate ? { delegate } : {}),
         });
 
+        // Bun's getHeapStatistics walks the heap (about 10 ms a call, twice per span), which
+        // stalled the standalone server for minutes, so its binary traces without attribution.
+        if (typeof Bun !== "undefined") {
+          return Layer.mergeAll(
+            Layer.succeed(Tracer.Tracer, tracer),
+            BrowserTraceCollector.layer(sink),
+          );
+        }
         const heapAttribution = yield* HeapAttribution.make(tracer);
         yield* heapAttribution.run;
 
