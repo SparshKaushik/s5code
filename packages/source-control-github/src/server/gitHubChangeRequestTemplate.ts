@@ -11,10 +11,16 @@ const TRUNCATION_MARKER = "[truncated]";
 const TEMPLATE_PATHS = [
   ".github/pull_request_template.md",
   ".github/PULL_REQUEST_TEMPLATE.md",
+  ".github/pull_request_template.txt",
+  ".github/PULL_REQUEST_TEMPLATE.txt",
   "pull_request_template.md",
   "PULL_REQUEST_TEMPLATE.md",
+  "pull_request_template.txt",
+  "PULL_REQUEST_TEMPLATE.txt",
   "docs/pull_request_template.md",
   "docs/PULL_REQUEST_TEMPLATE.md",
+  "docs/pull_request_template.txt",
+  "docs/PULL_REQUEST_TEMPLATE.txt",
 ] as const;
 
 const TEMPLATE_DIRECTORIES = [
@@ -103,7 +109,7 @@ const readTemplateDirectory = Effect.fn("gitHubChangeRequestTemplate.readTemplat
         return false;
       }
       const relativePath = entry.path.slice(prefix.length);
-      return !relativePath.includes("/") && relativePath.toLowerCase().endsWith(".md");
+      return !relativePath.includes("/") && /\.(?:md|txt)$/i.test(relativePath);
     });
 
     const templates: string[] = [];
@@ -129,19 +135,49 @@ export const detect = Effect.fn("gitHubChangeRequestTemplate.detect")(function* 
   executeGit: ExecuteGit,
 ) {
   return yield* Effect.gen(function* () {
-    // Read regular blobs from the committed base tree so symlinks and path races never reach the host.
+    // Read committed regular blobs; worktree paths can become symlinks between validation and open.
+    // ls-tree does not support case-insensitive pathspecs; grep discovers only matching names.
+    const paths = yield* executeGit({
+      operation: "gitHubChangeRequestTemplate.findTemplatePaths",
+      cwd,
+      args: [
+        "grep",
+        "-G",
+        "--no-color",
+        "-l",
+        "-z",
+        "--full-name",
+        "--no-recurse-submodules",
+        "-e",
+        "^",
+        treeish,
+        "--",
+        ...TEMPLATE_PATHS.map((path) => `:(top,icase,literal)${path}`),
+      ],
+      maxOutputBytes: TREE_LIST_MAX_BYTES,
+    }).pipe(
+      Effect.map((result) =>
+        result.stdoutTruncated
+          ? []
+          : result.stdout
+              .split("\0")
+              .filter((path) => path.startsWith(`${treeish}:`))
+              .map((path) => path.slice(treeish.length + 1)),
+      ),
+      // grep exits with status 1 when no nonempty templates match.
+      Effect.orElseSucceed(() => []),
+    );
     // Separate file and directory ls-tree calls: on some git versions a directory
     // pathspec prefix (docs/PULL_REQUEST_TEMPLATE) shadows the matching .md file.
-    const listTreeEntries = (paths: ReadonlyArray<string>) =>
+    const listTreeEntries = (pathspecs: ReadonlyArray<string>) =>
       executeGit({
         operation: "gitHubChangeRequestTemplate.listTemplates",
         cwd,
-        args: ["ls-tree", "-r", "-z", "--full-tree", treeish, "--", ...paths],
+        args: ["ls-tree", "-r", "-z", "--full-tree", treeish, "--", ...pathspecs],
         maxOutputBytes: TREE_LIST_MAX_BYTES,
         appendTruncationMarker: true,
       });
-
-    const fileResult = yield* listTreeEntries(TEMPLATE_PATHS);
+    const fileResult = yield* listTreeEntries([...new Set([...TEMPLATE_PATHS, ...paths])]);
     const directoryResult = yield* listTreeEntries(TEMPLATE_DIRECTORIES);
     if (fileResult.stdoutTruncated || directoryResult.stdoutTruncated) {
       return Option.none();
@@ -151,12 +187,20 @@ export const detect = Effect.fn("gitHubChangeRequestTemplate.detect")(function* 
       ...parseTemplateTreeEntries(fileResult.stdout),
       ...parseTemplateTreeEntries(directoryResult.stdout),
     ];
-    const entriesByPath = new Map(entries.map((entry) => [entry.path, entry]));
-    for (const templatePath of TEMPLATE_PATHS) {
-      const entry = entriesByPath.get(templatePath);
-      if (!entry) {
-        continue;
-      }
+    const candidates = [".github/", "", "docs/"].flatMap((location) => {
+      const paths = TEMPLATE_PATHS.filter(
+        (path) => path.slice(0, path.lastIndexOf("/") + 1) === location,
+      );
+      return [
+        ...paths.flatMap((path) => entries.filter((entry) => entry.path === path)),
+        ...entries.filter(
+          (entry) =>
+            !paths.some((path) => path === entry.path) &&
+            paths.some((path) => path.toLowerCase() === entry.path.toLowerCase()),
+        ),
+      ];
+    });
+    for (const entry of candidates) {
       const template = yield* readTemplateBlob({ cwd, executeGit, entry });
       if (Option.isSome(template)) {
         return template;
