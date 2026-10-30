@@ -249,9 +249,10 @@ function recoveryFixture(
   const videoBodies: ReadableStreamDefaultController<Uint8Array>[] = [];
   const signals: AbortSignal[] = [];
   const fetch = vi.fn((url: string, init: RequestInit) => {
+    // The transport probe settles before the stream starts, so only stream reads track aborts.
+    if (url.includes("/api?")) return Promise.resolve(Response.json({}));
     const signal = init.signal!;
     signals.push(signal);
-    if (url.includes("/api?")) return Promise.resolve(Response.json({}));
     if (!url.includes("stream.avcc")) return Promise.resolve(new Response("prime"));
     return Promise.resolve(
       new Response(
@@ -514,6 +515,7 @@ describe("shared device stream readiness and recovery", () => {
   it("does not extend the first-frame deadline each time a socket reconnects", async () => {
     const { client, sockets, events } = recoveryFixture("android");
     client.start();
+    await vi.advanceTimersByTimeAsync(0);
     sockets[0]!.onopen?.();
     sockets[0]!.onclose?.({ code: 1000, reason: "restart" });
     await vi.advanceTimersByTimeAsync(14_999);
@@ -568,6 +570,7 @@ describe("shared device stream readiness and recovery", () => {
     const { client, sockets, sps, Decoder, events } = recoveryFixture("android");
     Decoder.isConfigSupported.mockResolvedValue({ supported: false });
     client.start();
+    await vi.advanceTimersByTimeAsync(0);
     sockets[0]!.onmessage?.({ data: sps });
     await vi.advanceTimersByTimeAsync(0);
     expect(events.onStatus).toHaveBeenLastCalledWith(
@@ -582,6 +585,7 @@ describe("shared device stream readiness and recovery", () => {
   it("waits for decoded Android output and bounds a rotation that never produces another frame", async () => {
     const { client, sockets, sps, events, decodedFrame, drawImage } = recoveryFixture("android");
     client.start();
+    await vi.advanceTimersByTimeAsync(0);
     sockets[0]!.onmessage?.({ data: sps });
     await vi.advanceTimersByTimeAsync(0);
     expect(events.onStatus.mock.calls.some(([status]) => status === "streaming")).toBe(false);
@@ -597,6 +601,7 @@ describe("shared device stream readiness and recovery", () => {
   it("decodes the Android keyframe that configured the decoder without restarting the encoder", async () => {
     const { client, sockets, sps, decoders, decodedFrame, events } = recoveryFixture("android");
     client.start();
+    await vi.advanceTimersByTimeAsync(0);
     sockets[0]!.onopen?.();
     // serve-emu answers every keyframe request by restarting its encoder, which
     // announces a new session before the keyframe; requests would loop forever.
@@ -621,6 +626,7 @@ describe("shared device stream readiness and recovery", () => {
         }),
     );
     client.start();
+    await vi.advanceTimersByTimeAsync(0);
     sockets[0]!.onopen?.();
     sockets[0]!.onmessage?.({ data: sps });
     sockets[0]!.onmessage?.({ data: new Uint8Array([0, 0, 0, 1, 0x41, 0x9a]).buffer });

@@ -149,29 +149,32 @@ it.effect.each(["snapshot", "mutation"] as const)(
       const releaseResponse = Promise.withResolvers<void>();
       let snapshotRequests = 0;
       let mutations = 0;
-      const fetch: typeof globalThis.fetch = async (_input, init) => {
-        const isMutation = init?.method === "POST";
-        if (isMutation) mutations++;
-        else snapshotRequests++;
-        if (slowRequest === "mutation" ? isMutation : !isMutation && snapshotRequests === 2) {
-          requestReceived.resolve();
-          await releaseResponse.promise;
-        }
-        return Response.json(
-          isMutation
-            ? {
-                id: "live-project",
-                title: NodePath.basename(workspaceRoot),
-                workspaceRoot,
-                defaultModelSelection: null,
-                scripts: [],
-                createdAt: now,
-                updatedAt: now,
-                deletedAt: null,
-              }
-            : { projects: [], updatedAt: now },
-        );
-      };
+      const fetch: typeof globalThis.fetch = Object.assign(
+        async (_input: string | URL | Request, init?: RequestInit) => {
+          const isMutation = init?.method === "POST";
+          if (isMutation) mutations++;
+          else snapshotRequests++;
+          if (slowRequest === "mutation" ? isMutation : !isMutation && snapshotRequests === 2) {
+            requestReceived.resolve();
+            await releaseResponse.promise;
+          }
+          return Response.json(
+            isMutation
+              ? {
+                  id: "live-project",
+                  title: NodePath.basename(workspaceRoot),
+                  workspaceRoot,
+                  defaultModelSelection: null,
+                  scripts: [],
+                  createdAt: now,
+                  updatedAt: now,
+                  deletedAt: null,
+                }
+              : { projects: [], updatedAt: now },
+          );
+        },
+        { preconnect: () => {} },
+      );
 
       const add = yield* runCli(["project", "add", workspaceRoot, "--base-dir", baseDir]).pipe(
         Effect.provideService(FetchHttpClient.Fetch, fetch),

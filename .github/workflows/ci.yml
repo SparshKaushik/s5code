@@ -218,20 +218,20 @@ jobs:
           });
           const exited = new Promise((resolve) => child.once("close", resolve));
           let diagnostics = "";
+          let output = "";
           child.stderr.setEncoding("utf8");
           child.stderr.on("data", (data) => { diagnostics = (diagnostics + data).slice(-10_000); });
           let deadline;
           try {
             await new Promise((resolve, reject) => {
-              let output = "";
               child.stdout.setEncoding("utf8");
               child.stdout.on("data", (data) => {
                 output = (output + data).slice(-10_000);
                 if (output.includes("S5 Code server is ready.")) resolve();
               });
               child.once("error", reject);
-              child.once("exit", (code, signal) => reject(new Error(`Server exited before readiness (${code ?? signal}): ${diagnostics}`)));
-              deadline = setTimeout(() => reject(new Error(`Server did not become ready: ${diagnostics}`)), 60_000);
+              child.once("exit", (code, signal) => reject(new Error(`Server exited before readiness (${code ?? signal}):\nstderr: ${diagnostics}\nstdout: ${output}`)));
+              deadline = setTimeout(() => reject(new Error(`Server did not become ready:\nstderr: ${diagnostics}\nstdout: ${output}`)), 60_000);
             });
             clearTimeout(deadline);
             const descriptor = await fetch(`http://127.0.0.1:${port}/.well-known/t3/environment`, { signal: AbortSignal.timeout(10_000) });

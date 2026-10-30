@@ -13,6 +13,7 @@ import {
 import { migrationManifest } from "../persistence/Migrations.ts";
 
 import { runServicePreflight } from "./servicePreflight.ts";
+import { SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
 it.each([1, 2])("blocks legacy launcher protocol %i", (launcherProtocol) => {
   expect(

@@ -1,7 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off - read synchronously by the preflight subprocess and at startup.
 import * as NodeFS from "node:fs";
-import * as NodeSqlite from "node:sqlite";
 
+import { DatabaseSync } from "../provider/sqliteCompat.ts";
 import { migrationManifest } from "./Migrations.ts";
 
 export const BUILD_MIGRATION_HEAD = Math.max(...migrationManifest.map(([id]) => id));
@@ -11,9 +11,9 @@ export const BUILD_MIGRATION_HEAD = Math.max(...migrationManifest.map(([id]) => 
 export function recordedMigrations(
   databasePath: string,
 ): ReadonlyArray<{ readonly id: number; readonly name: string }> | null {
-  let db: NodeSqlite.DatabaseSync;
+  let db;
   try {
-    db = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+    db = new DatabaseSync(databasePath, { readOnly: true });
   } catch {
     return NodeFS.existsSync(databasePath) ? null : [];
   }
