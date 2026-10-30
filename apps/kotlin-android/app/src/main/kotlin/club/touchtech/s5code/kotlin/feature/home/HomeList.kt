@@ -1,0 +1,556 @@
+package club.touchtech.s5code.kotlin.feature.home
+
+import club.touchtech.s5code.kotlin.app.HomeUiState
+import club.touchtech.s5code.kotlin.app.NewTaskDraft
+import club.touchtech.s5code.kotlin.app.ThreadDraft
+import club.touchtech.s5code.kotlin.data.HomePendingRequest
+import club.touchtech.s5code.kotlin.data.foldSearchQuery
+import club.touchtech.s5code.kotlin.data.rankMessageMatches
+import club.touchtech.s5code.kotlin.data.rankSearchItems
+import club.touchtech.s5code.kotlin.data.scoreThreadSearch
+import club.touchtech.s5code.kotlin.data.threadSearchSubject
+import club.touchtech.s5code.kotlin.model.Environment
+import club.touchtech.s5code.kotlin.model.HomeListItem
+import club.touchtech.s5code.kotlin.model.Project
+import club.touchtech.s5code.kotlin.model.ProjectGrouping
+import club.touchtech.s5code.kotlin.model.SearchMatch
+import club.touchtech.s5code.kotlin.model.SearchMatchSource
+import club.touchtech.s5code.kotlin.model.ShelfKind
+import club.touchtech.s5code.kotlin.model.ThreadFilter
+import club.touchtech.s5code.kotlin.model.ThreadSort
+import club.touchtech.s5code.kotlin.model.ThreadStatus
+import club.touchtech.s5code.kotlin.model.ThreadSummary
+import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
+
+/**
+ * Pure home-list layout. Matching the RN client, this is the single place that
+ * decides ordering, grouping, filtering, and which threads live behind the
+ * snoozed/settled shelves — so the list can be unit-tested without Compose and
+ * the UI stays a dumb renderer.
+ */
+/**
+ * A saved environment filter only applies while that environment is still
+ * saved (`useHomeListOptions` in RN); the saved choice itself is kept.
+ */
+fun HomeUiState.withAvailableEnvironment(environments: List<Environment>): HomeUiState =
+    if (environmentId == null || environments.any { it.id == environmentId }) this
+    else copy(environmentId = null)
+
+/** The project scope [HomeUiState.projectKey] selects, or null when none is available. */
+fun homeProjectFilterScope(projects: List<Project>, state: HomeUiState, grouping: ProjectGrouping): ProjectScope? {
+    val key = resolveScratchProjectScopeKey(state.projectKey, projects, grouping) ?: return null
+    return homeProjectScopes(projects, state.environmentId?.value, grouping).firstOrNull { it.key == key }
+}
+
+fun homeListItems(
+    threads: List<ThreadSummary>,
+    projects: List<Project>,
+    environments: List<Environment>,
+    state: HomeUiState,
+    grouping: ProjectGrouping,
+    sort: ThreadSort,
+    /** Unsent composer drafts, keyed by `environmentId/threadId` (legacy id accepted). */
+    drafts: Map<String, ThreadDraft> = emptyMap(),
+    /**
+     * The unsent new-task draft, so an interrupted "new task" is one tap from home
+     * rather than something the user has to walk the whole flow to find again.
+     */
+    newTask: NewTaskDraft? = null,
+    /** Actual request payloads for attention rows; shell-only rows remain usable until loaded. */
+    pendingRequests: List<HomePendingRequest> = emptyList(),
+    /** Message-body matches returned by `orchestration.searchThreads`. */
+    serverSearchMatches: List<ThreadSearchMatch> = emptyList(),
+    /** The Working shelf, or null while the user has it off. */
+    workingShelf: WorkingShelf? = null,
+    nowMillis: Long = System.currentTimeMillis(),
+): List<HomeListItem> {
+    val projectsById = projects.associateBy { it.environmentId.value to it.id.value }
+    val environmentLabels = environments.associate { it.id.value to it.label }
+    val pendingByThread =
+        pendingRequests.associateBy { it.environmentId.value to it.threadId.value }
+    val serverMatchByThread =
+        serverSearchMatches.associateBy { it.environmentId.value to it.threadId.value }
+
+    // A saved project whose environment is offline or filtered out stays selected
+    // but filters nothing, as RN does.
+    val projectRefs = homeProjectFilterScope(projects, state, grouping)
+        ?.projects?.mapTo(mutableSetOf()) { it.environmentId.value to it.id.value }
+    val listed =
+        threads.filter { thread ->
+            (state.environmentId == null || thread.environmentId == state.environmentId) &&
+                (projectRefs == null || (thread.environmentId.value to thread.projectId.value) in projectRefs) &&
+                matchesFilter(thread, state.filter)
+        }
+    val query = foldSearchQuery(state.query)
+    val search = if (query.isEmpty()) null else rankHomeSearch(listed, query, serverSearchMatches, nowMillis)
+    val visible = search?.let { it.ranked + it.contentOnly } ?: listed
+
+    val snoozed = visible.filter { it.status == ThreadStatus.Snoozed }
+    val settled = visible.filter { it.status == ThreadStatus.Settled }
+    val unshelved = visible - snoozed.toSet() - settled.toSet()
+    // Pinned threads stay in the pinned block, as in RN's partition.
+    val working =
+        if (workingShelf == null) emptyList()
+        else unshelved.filter { !it.pinned && workingShelf.isWorking(it) }
+    val active = unshelved - working.toSet()
+
+    // A search reveals what the shelves hide. Searching is asking for a specific
+    // thread, and answering "no matches" while the match sits behind a collapsed
+    // shelf is the worst of both. Same rule as `showAllThreads: hasSearchQuery` in
+    // `apps/mobile/src/features/home/HomeScreen.tsx`; the toggle itself is left
+    // alone, so clearing the search restores the shelves as the user left them.
+    //
+    // Picking a filter that *is* a shelf does the same, for a blunter reason: with
+    // the Settled filter on and the shelf collapsed, the whole screen was one
+    // collapsed header.
+    val snoozedExpanded = state.snoozedExpanded || state.filter == ThreadFilter.Snoozed
+    val settledExpanded = state.settledExpanded || state.filter == ThreadFilter.Settled
+
+    val items = mutableListOf<HomeListItem>()
+
+    // Above everything, and only on the unfiltered list: it is not a thread, so it
+    // has no status to match a filter and no title to match a search, and leaving
+    // it pinned above "no matches" would read as a result.
+    if (state.query.isBlank() && state.filter == ThreadFilter.All) {
+        newTaskDraftItem(newTask, projectsById, environmentLabels, environments.size > 1)?.let {
+            items += it
+        }
+    }
+
+    fun emitThreads(list: List<ThreadSummary>) {
+        list.forEach { thread ->
+            val project = projectsById[thread.environmentId.value to thread.projectId.value]
+            val environmentLabel =
+                environmentLabels[thread.environmentId.value].takeIf {
+                    environments.size > 1 && state.environmentId == null
+                }
+            val pending = pendingByThread[thread.environmentId.value to thread.id.value]
+            when {
+                pending?.approval != null ->
+                    items +=
+                        HomeListItem.PendingApprovalCard(
+                            thread = thread,
+                            project = project,
+                            environmentLabel = environmentLabel,
+                            approval = pending.approval,
+                        )
+                pending?.userInput != null ->
+                    items +=
+                        HomeListItem.PendingInputCard(
+                            thread = thread,
+                            project = project,
+                            environmentLabel = environmentLabel,
+                            request = pending.userInput,
+                        )
+                thread.status == ThreadStatus.Queued ->
+                    items += HomeListItem.Queued(thread, project)
+                else -> {
+                    // Only rows listed for their messages show the message and open at it.
+                    val messageMatch =
+                        serverMatchByThread[thread.environmentId.value to thread.id.value]
+                            ?.takeIf { search?.contentOnlyKeys?.contains(thread.environmentId.value to thread.id.value) == true }
+                    items +=
+                        HomeListItem.Thread(
+                            thread = thread,
+                            project = project,
+                            environmentLabel = environmentLabel,
+                            searchMatch =
+                                messageMatch?.let { SearchMatch(it.source, it.snippet) }
+                                    ?: searchMatch(thread, state.query, project, environmentLabel),
+                            searchMessageId = messageMatch?.messageId,
+                            draftPreview =
+                                draftPreview(
+                                    drafts["${thread.environmentId.value}/${thread.id.value}"]
+                                        ?: drafts[thread.id.value]
+                                ),
+                        )
+                }
+            }
+        }
+    }
+
+    if (search != null) {
+        // Searching lists every match by rank across shelves, as the RN list and
+        // the palette do, then threads listed for their messages in rank order.
+        // Searching is asking for a specific thread, so no shelf hides a match.
+        emitThreads(visible)
+        return items
+    }
+
+    // Flat keeps no sections; every other mode groups by the same logical
+    // scopes the new-task picker offers, with `buildProjectScopes` supplying
+    // the label the picker row would carry.
+    val scopeByProject =
+        if (grouping == ProjectGrouping.Flat) {
+            emptyMap()
+        } else {
+            buildProjectScopes(projects, grouping)
+                .flatMap { scope ->
+                    scope.projects.map { (it.environmentId.value to it.id.value) to scope }
+                }
+                .toMap()
+        }
+    val groups =
+        if (grouping == ProjectGrouping.Flat) {
+            mapOf("" to active)
+        } else {
+            active.groupBy { thread ->
+                scopeByProject[thread.environmentId.value to thread.projectId.value]?.title
+                    ?: projectsById[thread.environmentId.value to thread.projectId.value]?.title
+                    ?: "Ungrouped"
+            }
+        }
+    groups.entries
+        .sortedWith(
+            compareByDescending<Map.Entry<String, List<ThreadSummary>>> { entry ->
+                entry.value.any { it.pinned }
+            }
+                .thenBy { it.key.lowercase() }
+        )
+        .forEach { (label, groupThreads) ->
+            if (label.isNotEmpty()) items += HomeListItem.Section(label)
+            // With the Working shelf on, the inbox is ordered by when each thread
+            // came back (`sortInboxThreadsByReturn`), so the arrangement is set aside.
+            val comparator =
+                if (workingShelf != null && sort == ThreadSort.Recent) inboxComparator(workingShelf)
+                else homeListComparator(sort)
+            emitThreads(groupThreads.sortedWith(comparator))
+        }
+
+    if (working.isNotEmpty() && workingShelf != null) {
+        items +=
+            HomeListItem.ShelfHeader(
+                label = "Working",
+                count = working.size,
+                expanded = workingShelf.expanded,
+                kind = ShelfKind.Working,
+            )
+        // `sortWorkingThreadsBySend`: the thread the user last sent work to first.
+        if (workingShelf.expanded) {
+            emitThreads(
+                working.sortedWith(
+                    compareByDescending<ThreadSummary> { it.workingSortAtMillis }
+                        .thenBy { it.id.value }
+                        .thenBy { it.environmentId.value }
+                )
+            )
+        }
+    }
+
+    if (snoozed.isNotEmpty()) {
+        items +=
+            HomeListItem.ShelfHeader(
+                label = "Snoozed",
+                count = snoozed.size,
+                expanded = snoozedExpanded,
+                kind = ShelfKind.Snoozed,
+            )
+        if (snoozedExpanded) emitThreads(snoozed.sortedWith(homeListComparator(sort)))
+    }
+    if (settled.isNotEmpty()) {
+        items +=
+            HomeListItem.ShelfHeader(
+                label = "Settled",
+                count = settled.size,
+                expanded = settledExpanded,
+                kind = ShelfKind.Settled,
+            )
+        if (settledExpanded) emitThreads(settled.sortedWith(homeListComparator(sort)))
+    }
+    return items
+}
+
+/**
+ * The home row for an unsent new-task draft, or null when there is nothing to
+ * resume.
+ *
+ * "Nothing to resume" is deliberately about content only: a draft always carries a
+ * project and settings, so keying off those would put a permanent row on the home
+ * screen of every user who ever opened the new-task flow.
+ */
+private fun newTaskDraftItem(
+    draft: NewTaskDraft?,
+    projectsById: Map<Pair<String, String>, Project>,
+    environmentLabels: Map<String, String>,
+    showEnvironment: Boolean,
+): HomeListItem.Draft? {
+    if (draft == null) return null
+    val preview =
+        draftPreview(ThreadDraft(text = draft.prompt, attachments = draft.attachments))
+            ?: return null
+    return HomeListItem.Draft(
+        preview = preview,
+        projectTitle =
+            projectsById[draft.environmentId.value to draft.projectKey]?.title,
+        environmentLabel =
+            environmentLabels[draft.environmentId.value].takeIf { showEnvironment },
+    )
+}
+
+/**
+ * One line describing an unsent draft, or null when there is nothing to say.
+ *
+ * Mirrors the web sidebar's draft row (`SidebarDraftRow` in
+ * `apps/web/src/components/Sidebar.tsx`): the first line of the prompt, falling back
+ * to an attachment count so an image-only draft still announces itself rather than
+ * rendering as an empty row.
+ */
+fun draftPreview(draft: ThreadDraft?): String? {
+    if (draft == null) return null
+    val firstLine = draft.text.lineSequence().firstOrNull { it.isNotBlank() }?.trim()
+    if (!firstLine.isNullOrEmpty()) return firstLine
+    val count = draft.attachments.size
+    if (count == 0) return null
+    return if (count == 1) "1 attachment" else "$count attachments"
+}
+
+/** Counts per filter chip, so the chips can show live totals. */
+fun homeFilterCounts(threads: List<ThreadSummary>): Map<ThreadFilter, Int> =
+    ThreadFilter.entries.associateWith { filter -> threads.count { matchesFilter(it, filter) } }
+
+private fun matchesFilter(thread: ThreadSummary, filter: ThreadFilter): Boolean =
+    when (filter) {
+        ThreadFilter.All -> true
+        ThreadFilter.Active ->
+            thread.status == ThreadStatus.Working ||
+                thread.status == ThreadStatus.Waiting ||
+                thread.status == ThreadStatus.Queued ||
+                thread.status == ThreadStatus.Idle ||
+                thread.status == ThreadStatus.Failed || thread.status == ThreadStatus.Limited
+        ThreadFilter.Pending ->
+            thread.status == ThreadStatus.AwaitingApproval ||
+                thread.status == ThreadStatus.AwaitingInput
+        ThreadFilter.Snoozed -> thread.status == ThreadStatus.Snoozed
+        ThreadFilter.Settled -> thread.status == ThreadStatus.Settled
+    }
+
+/** The Working shelf's state for [homeListItems]: on, with the grace-held working set. */
+class WorkingShelf(
+    val expanded: Boolean,
+    val isWorking: (ThreadSummary) -> Boolean = ::isThreadWorking,
+    val returnedAt: (ThreadSummary) -> Long? = { null },
+)
+
+internal class HomeSearch(
+    /** Threads whose own fields match, best first. */
+    val ranked: List<ThreadSummary>,
+    /** Threads listed only for a message match, in the server matches' rank order. */
+    val contentOnly: List<ThreadSummary>,
+    val contentOnlyKeys: Set<Pair<String, String>>,
+)
+
+/**
+ * `buildThreadListV2Items` while searching: the palette's ranking (whole words
+ * and prefixes, then use, with a typo fallback), without picks since a list
+ * filter cannot explain them. Only listed threads are ranked: a hidden exact
+ * match must not turn typos off. Message matches rank as
+ * `useThreadListSearchMatches` ranks them.
+ */
+internal fun rankHomeSearch(
+    listed: List<ThreadSummary>,
+    query: String,
+    serverMatches: List<ThreadSearchMatch>,
+    nowMillis: Long,
+): HomeSearch {
+    val subjects = listed.associateWith { threadSearchSubject(it) }
+    val ranked =
+        rankSearchItems(listed) { thread, typos ->
+            scoreThreadSearch(query, subjects.getValue(thread), nowMillis, typos = typos, picks = false)
+        }.map { it.item }
+    val matched = ranked.toSet()
+    val byKey = listed.associateBy { it.environmentId.value to it.id.value }
+    val contentOnly =
+        rankMessageMatches(
+                matches = serverMatches,
+                quality = { it.quality },
+                hits = { it.hits },
+                messageCreatedAt = { it.messageCreatedAt },
+                subjectOf = { match -> byKey[match.environmentId.value to match.threadId.value]?.let(subjects::get) },
+                normalizedQuery = query,
+                now = nowMillis,
+                picks = false,
+            )
+            .mapNotNull { byKey[it.environmentId.value to it.threadId.value] }
+            .filter { it !in matched }
+            .distinct()
+    return HomeSearch(
+        ranked = ranked,
+        contentOnly = contentOnly,
+        contentOnlyKeys = contentOnly.mapTo(HashSet()) { it.environmentId.value to it.id.value },
+    )
+}
+
+/**
+ * The inbox order with the Working shelf on: pinned block as arranged, then
+ * attention ranks, then newest return first, where a return is the latest of
+ * creation, un-settling, the latest run's request and completion, and the
+ * moment the thread left the Working shelf (`sortInboxThreadsByReturn`).
+ */
+internal fun inboxComparator(shelf: WorkingShelf): Comparator<ThreadSummary> {
+    fun returnAt(thread: ThreadSummary) =
+        maxOf(
+            thread.createdAtMillis,
+            thread.unsettledAtMillis,
+            thread.latestRunRequestedAtMillis ?: 0,
+            thread.latestCompletedAtMillis ?: 0,
+            shelf.returnedAt(thread) ?: 0,
+        )
+    return compareByDescending<ThreadSummary> { it.pinned }
+        .thenComparator { left, right ->
+            if (left.pinned) return@thenComparator pinnedOrderCompare(left, right)
+            statusRank(left).compareTo(statusRank(right)).takeIf { it != 0 }
+                ?: returnAt(right).compareTo(returnAt(left)).takeIf { it != 0 }
+                ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+                ?: left.environmentId.value.compareTo(right.environmentId.value)
+        }
+}
+
+/**
+ * Picks the first visible field that contains the whole query. Filtering still
+ * accepts AND-ed terms across fields; this excerpt is explanatory presentation,
+ * and a single contiguous match is the only substring a row can truthfully
+ * highlight.
+ */
+fun searchMatch(
+    thread: ThreadSummary,
+    query: String,
+    project: Project?,
+    environmentLabel: String?,
+): SearchMatch? {
+    val needle = query.trim()
+    if (needle.isEmpty()) return null
+    return listOf(
+            SearchMatchSource.Title to thread.title,
+            SearchMatchSource.Excerpt to thread.excerpt,
+            SearchMatchSource.Branch to thread.branch,
+            SearchMatchSource.Project to project?.title,
+            SearchMatchSource.Repository to project?.repository,
+            SearchMatchSource.Environment to environmentLabel,
+            SearchMatchSource.Provider to thread.provider.label,
+            SearchMatchSource.Model to thread.model,
+        )
+        .firstNotNullOfOrNull { (source, text) ->
+            text?.takeIf { it.contains(needle, ignoreCase = true) }?.let { SearchMatch(source, it) }
+        }
+}
+
+/**
+ * Pinned first, then attention-needing statuses, then the requested order. This
+ * keeps approvals and failures reachable without scrolling on a busy home.
+ *
+ * Within the pinned block the user's arrangement always wins, and under Recent
+ * the active block follows `sortActiveThreadsByOrderKey` — new/reopened rows
+ * first (anchored on `max(createdAt, unsettledAt)`), then the saved
+ * arrangement. The Created/Alphabetical modes are this client's extra sorts;
+ * the arrangement only applies where an order key can be read as recency.
+ */
+internal fun homeListComparator(sort: ThreadSort): Comparator<ThreadSummary> {
+    val base =
+        compareByDescending<ThreadSummary> { it.pinned }
+            .thenBy { statusRank(it) }
+    return when (sort) {
+        ThreadSort.Recent ->
+            // Pinned block: keyed by arrangement, keyless newest-created last
+            // (`sortPinnedThreadsByOrderKey`). Active block: rank first, then
+            // keyless by re-entry anchor, then keyed rows (`sortActiveThreadsByOrderKey`).
+            compareByDescending<ThreadSummary> { it.pinned }
+                .thenComparator { left, right ->
+                    if (left.pinned) pinnedOrderCompare(left, right)
+                    else activeOrderCompare(left, right)
+                }
+        // Newest first within a status rank, on the instant rather than the label:
+        // the label is rounded, so two threads an hour apart can share a bucket.
+        ThreadSort.Created -> base.thenBy { it.id.value }
+        ThreadSort.Alphabetical -> base.thenBy { it.title.lowercase() }
+    }
+}
+
+/** `sortPinnedThreadsByOrderKey`: arranged rows by key, keyless by newest-created. */
+private fun pinnedOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
+    val leftKey = left.pinOrderKey
+    val rightKey = right.pinOrderKey
+    return when {
+        leftKey != null && rightKey != null ->
+            leftKey.compareTo(rightKey).takeIf { it != 0 }
+                ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+                ?: left.environmentId.value.compareTo(right.environmentId.value)
+        leftKey != null -> -1
+        rightKey != null -> 1
+        else ->
+            right.createdAtMillis.compareTo(left.createdAtMillis).takeIf { it != 0 }
+                ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+                ?: left.environmentId.value.compareTo(right.environmentId.value)
+    }
+}
+
+/**
+ * `sortActiveThreadsByOrderKey` applied inside one status rank: attention rows
+ * keep their lead, then unarranged threads by re-entry anchor, then arranged
+ * threads by key. Two working threads are the exception: like
+ * `sortWorkingThreadsBySend` they stay newest-send-first on
+ * [ThreadSummary.workingSortAtMillis], so a run ending or waking does not move
+ * a row and a stored arrangement cannot reorder them while they work.
+ */
+private fun activeOrderCompare(left: ThreadSummary, right: ThreadSummary): Int {
+    val rank = statusRank(left).compareTo(statusRank(right))
+    if (rank != 0) return rank
+    if (left.sortsAsWorking && right.sortsAsWorking) {
+        return right.workingSortAtMillis.compareTo(left.workingSortAtMillis).takeIf { it != 0 }
+            ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+            ?: left.environmentId.value.compareTo(right.environmentId.value)
+    }
+    val leftKey = left.activeOrderKey
+    val rightKey = right.activeOrderKey
+    if (leftKey == null && rightKey != null) return -1
+    if (leftKey != null && rightKey == null) return 1
+    val order =
+        if (leftKey != null && rightKey != null) {
+            leftKey.compareTo(rightKey)
+        } else {
+            // Re-entry anchor: createdAt re-anchored to unsettledAt, so an
+            // un-settled thread surfaces at the top rather than sinking back.
+            val leftAnchor = maxOf(left.createdAtMillis, left.unsettledAtMillis)
+            val rightAnchor = maxOf(right.createdAtMillis, right.unsettledAtMillis)
+            rightAnchor.compareTo(leftAnchor)
+        }
+    return order.takeIf { it != 0 }
+        ?: left.id.value.compareTo(right.id.value).takeIf { it != 0 }
+        ?: left.environmentId.value.compareTo(right.environmentId.value)
+}
+
+/**
+ * A turn waiting only on another thread is still a live run, which the RN list
+ * keeps in the working section (`isThreadWorking` reads the runtime alone), so
+ * starting and ending that wait does not move the row.
+ */
+private val ThreadSummary.sortsAsWorking: Boolean
+    get() = status == ThreadStatus.Working || blockedOnThreadWait
+
+private fun statusRank(thread: ThreadSummary): Int =
+    if (thread.sortsAsWorking) 3 else when (thread.status) {
+        ThreadStatus.AwaitingApproval -> 0
+        ThreadStatus.AwaitingInput -> 1
+        ThreadStatus.Failed, ThreadStatus.Limited -> 2
+        ThreadStatus.Working -> 3
+        ThreadStatus.Queued -> 4
+        ThreadStatus.Waiting -> 4
+        ThreadStatus.Idle -> 5
+        ThreadStatus.Snoozed -> 6
+        ThreadStatus.Settled -> 7
+    }
+
+/**
+ * `visibleThreadSearch`: the last settled server search stays shown while the
+ * query refines or widens its query, so rows do not blink out and back on
+ * every keystroke. Results for an unrelated query clear.
+ */
+internal fun visibleSearchMatches(query: String, settled: Pair<String, List<ThreadSearchMatch>>?): List<ThreadSearchMatch> {
+    if (settled == null) return emptyList()
+    val current = foldSearchQuery(query.trim())
+    val before = foldSearchQuery(settled.first)
+    return if (current.isNotEmpty() && before.isNotEmpty() && (current.startsWith(before) || before.startsWith(current))) {
+        settled.second
+    } else {
+        emptyList()
+    }
+}
