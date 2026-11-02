@@ -188,10 +188,12 @@ In the desktop app, open **Settings → Environments → Add environment**, choo
 or reuses a server there and opens the port forward for you. Projects, provider
 credentials, and agent work stay on the remote machine.
 
-The remote host must be Linux or an Apple Silicon Mac with `curl` or `wget`,
-`tar`, `sha256sum` or `shasum`, and [provider setup](./install.md#providers).
-The first launch downloads T3 Code's server to `~/.t3/runtime` on the host, so
-it takes longer than later ones.
+The remote host must be Linux (x64 or arm64) with `curl` or `wget`, `tar`,
+`sha256sum` or `shasum`, and [provider setup](./install.md#providers).
+The first launch downloads the server to `~/.s5code/runtime` on the host, so
+it takes longer than later ones. If a server already runs from `~/.s5code`
+there, such as one started by a `systemd` unit, the app connects to it instead
+of starting another.
 Provider CLIs must be on the `PATH` of a non-interactive login shell there;
 check with:
 

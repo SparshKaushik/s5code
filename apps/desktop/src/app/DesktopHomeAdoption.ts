@@ -1,3 +1,4 @@
+import { SERVER_HOME_DIR_NAME } from "@t3tools/shared/serverHome";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Option from "effect/Option";
@@ -31,7 +32,7 @@ export const adoptLegacyT3HomeIfNeeded = Effect.fn("adoptLegacyT3HomeIfNeeded")(
 
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const currentBase = path.join(input.homeDirectory, ".s5code");
+  const currentBase = path.join(input.homeDirectory, SERVER_HOME_DIR_NAME);
   const markerPath = path.join(currentBase, ADOPTION_MARKER);
   if (yield* fileSystem.exists(markerPath)) {
     return;

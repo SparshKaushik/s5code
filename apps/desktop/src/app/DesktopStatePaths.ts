@@ -1,3 +1,4 @@
+import { SERVER_HOME_DIR_NAME } from "@t3tools/shared/serverHome";
 import * as Option from "effect/Option";
 
 export type JoinPath = (first: string, ...segments: string[]) => string;
@@ -16,7 +17,7 @@ export function resolveDesktopBaseDir(input: {
   readonly t3Home: Option.Option<string>;
 }): string {
   return Option.getOrElse(normalizeConfiguredBaseDir(input.t3Home), () =>
-    input.joinPath(input.homeDirectory, ".s5code"),
+    input.joinPath(input.homeDirectory, SERVER_HOME_DIR_NAME),
   );
 }
 

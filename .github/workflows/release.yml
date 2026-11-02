@@ -466,8 +466,8 @@ jobs:
 
   # The fork releases the desktop app for Apple Silicon only. The job still
   # goes through release-desktop.yml (upstream's shared per-target build), but
-  # no CLI archive: the fork's self-update path consumes the
-  # s5code-server-*-linux-* binaries from the `server` job, not SEA archives.
+  # builds no SEA CLI archive: the `server` job packages its Linux binaries as
+  # the CLI archives instead.
   desktop_mac_arm64:
     name: Desktop macOS arm64
     needs: [preflight, relay_public_config, build_bundle]
@@ -509,6 +509,8 @@ jobs:
   # The fork additionally ships self-updating Linux server binaries
   # (s5code-server-*-linux-*); the binary self-update path in
   # apps/server/src/cloud/selfUpdate.ts downloads them from the release.
+  # The same binary, packaged as t3-*-linux-*.tar.gz, is the CLI archive that
+  # SSH environments, pinned runtimes, and scripts/install.sh install.
   server:
     name: Build Server Binary (${{ matrix.arch }})
     needs: [preflight, relay_public_config]
@@ -586,6 +588,21 @@ jobs:
           [[ -n "$binary" && -x "$binary" ]] || { echo "Server binary not produced for ${{ matrix.arch }}." >&2; exit 1; }
           file "$binary"
 
+      # Layout and name follow cliArchiveFileName in packages/shared/src/cliRelease.ts:
+      # one top-level directory holding the server binary as `t3`.
+      - name: Package CLI archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="${{ needs.preflight.outputs.version }}"
+          stem="t3-${version}-linux-${{ matrix.arch }}"
+          mkdir -p "$RUNNER_TEMP/cli-archive/$stem" "$RUNNER_TEMP/cli-archive-check"
+          install -m 755 "release-publish/s5code-server-${version}-linux-${{ matrix.arch }}" "$RUNNER_TEMP/cli-archive/$stem/t3"
+          tar -czf "release-publish/$stem.tar.gz" -C "$RUNNER_TEMP/cli-archive" "$stem"
+          # Unpack it the way installers do and prove the entry runs.
+          tar -xzf "release-publish/$stem.tar.gz" -C "$RUNNER_TEMP/cli-archive-check" --strip-components=1
+          "$RUNNER_TEMP/cli-archive-check/t3" --version
+
       - name: Install Chromium for standalone browser smoke test
         run: node apps/server/node_modules/playwright-core/cli.js install --with-deps --only-shell chromium
 
@@ -596,7 +613,9 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: server-linux-${{ matrix.arch }}
-          path: release-publish/s5code-server-*-linux-${{ matrix.arch }}
+          path: |
+            release-publish/s5code-server-*-linux-${{ matrix.arch }}
+            release-publish/t3-*-linux-${{ matrix.arch }}.tar.gz
           if-no-files-found: error
 
   release:
@@ -625,9 +644,10 @@ jobs:
           install-args: --filter=@t3tools/scripts...
 
       # `desktop-*` is the macOS build, `server-*` the self-updating Linux
-      # binaries, and `android-apk` the optional mobile release artifact (the
-      # APK plus fingerprint.txt). Patterns stay narrow so internal artifacts
-      # like the JS bundle never reach the release staging directory.
+      # binaries and their CLI archives, and `android-apk` the optional mobile
+      # release artifact (the APK plus fingerprint.txt). Patterns stay narrow
+      # so internal artifacts like the JS bundle never reach the release
+      # staging directory.
       - name: Download desktop artifacts
         uses: actions/download-artifact@v8
         with:
@@ -667,6 +687,16 @@ jobs:
             exit 1
           fi
 
+      # Installers verify CLI archives against SHA256SUMS before unpacking them.
+      - name: Write release checksums
+        shell: bash
+        working-directory: release-assets
+        run: |
+          set -euo pipefail
+          shopt -s failglob
+          sha256sum t3-*.tar.gz s5code-server-* > SHA256SUMS
+          cat SHA256SUMS
+
       # Updater manifests and blockmaps are what electron-updater consumes.
       # They are only listed for channels an updater is meant to follow.
       - id: release_files
@@ -682,6 +712,8 @@ jobs:
               echo 'release-assets/*.yml'
             fi
             echo 'release-assets/s5code-server-*-linux-*'
+            echo 'release-assets/t3-*-linux-*.tar.gz'
+            echo 'release-assets/SHA256SUMS'
             echo 'EOF'
           } >> "$GITHUB_OUTPUT"
 

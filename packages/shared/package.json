@@ -355,6 +355,10 @@
       "types": "./src/devHome.ts",
       "import": "./src/devHome.ts"
     },
+    "./serverHome": {
+      "types": "./src/serverHome.ts",
+      "import": "./src/serverHome.ts"
+    },
     "./devProxy": {
       "types": "./src/devProxy.ts",
       "import": "./src/devProxy.ts"
