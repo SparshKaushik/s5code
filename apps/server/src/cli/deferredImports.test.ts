@@ -85,8 +85,9 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI deferred imp
           port: 3_773,
         }),
       });
-      const unreachable = (() =>
-        Promise.reject(new Error("connection refused"))) as typeof globalThis.fetch;
+      const unreachable = Object.assign(() => Promise.reject(new Error("connection refused")), {
+        preconnect: () => {},
+      });
 
       const exit = yield* runCli(["project", "add", root, "--base-dir", baseDir]).pipe(
         Effect.provideService(FetchHttpClient.Fetch, unreachable),
