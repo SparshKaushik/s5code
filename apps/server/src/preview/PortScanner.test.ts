@@ -642,12 +642,12 @@ effectIt.effect.each(["linux", "darwin", "win32"] as const)(
           Layer.succeed(HostProcess.Environment, { T3CODE_PORT_DISCOVERY: "0" }),
           FetchHttpClient.layer.pipe(
             Layer.provide(
-              Layer.succeed(FetchHttpClient.Fetch, (input) => {
+              Layer.succeed(FetchHttpClient.Fetch, ((input) => {
                 requests.push(String(input));
                 return Promise.resolve(
                   new Response("docs", { headers: { "content-type": "text/html" } }),
                 );
-              }),
+              }) as typeof globalThis.fetch),
             ),
           ),
         ),

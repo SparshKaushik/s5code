@@ -85,8 +85,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI deferred imp
           port: 3_773,
         }),
       });
-      const unreachable: typeof globalThis.fetch = () =>
-        Promise.reject(new Error("connection refused"));
+      const unreachable = (() =>
+        Promise.reject(new Error("connection refused"))) as typeof globalThis.fetch;
 
       const exit = yield* runCli(["project", "add", root, "--base-dir", baseDir]).pipe(
         Effect.provideService(FetchHttpClient.Fetch, unreachable),
@@ -116,7 +116,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI deferred imp
 
       hooks.importsAttempted.length = 0;
       let mutations = 0;
-      const fetch: typeof globalThis.fetch = async (_input, init) => {
+      const fetch = (async (_input, init) => {
         const isMutation = init?.method === "POST";
         if (isMutation) mutations++;
         return Response.json(
@@ -133,7 +133,7 @@ it.layer(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer))("CLI deferred imp
               }
             : { projects: [], updatedAt: "2026-01-01T00:00:00.000Z" },
         );
-      };
+      }) as typeof globalThis.fetch;
 
       const exit = yield* runCli(["project", "add", workspaceRoot, "--base-dir", baseDir]).pipe(
         Effect.provideService(FetchHttpClient.Fetch, fetch),

@@ -666,7 +666,7 @@ describe("EAS Simulator host", () => {
       const host = yield* makeHost(expo, config(), yield* Scope.make());
       const service = yield* DeviceService.makeWithHosts(new Map([["eas", host]]), undefined, () =>
         Effect.succeed("/eas-agent.json"),
-      );
+      ).pipe(Effect.provideService(HttpClient.HttpClient, expo.http));
       const first = ThreadId.make("first");
       const second = ThreadId.make("second");
       const opened = yield* service.open({

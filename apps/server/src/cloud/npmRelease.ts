@@ -61,7 +61,7 @@ export const make = Effect.fn("NpmRelease.make")(function* () {
             ? Effect.succeed(Option.none<string>())
             : HttpClientResponse.filterStatusOk(response).pipe(
                 Effect.flatMap((ok) => ok.text),
-                Effect.map(Option.some),
+                Effect.asSome,
               ),
         ),
         Effect.timeout(Duration.seconds(15)),
