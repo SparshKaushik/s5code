@@ -23,9 +23,12 @@ finishes on its own, and the button keeps showing it after the desktop app
 restarts.
 
 Server updates appear only after that version is published on the S5 Code
-GitHub Releases page. Remote desktop apps do not wait for it. The confirmation
-lists each machine it skips and why, such as a machine that is offline or needs
-a manual update. Use **Settings → Environments** for those.
+GitHub Releases page. Remote desktop apps do not wait for it. Each server checks
+that it can install the release before it restarts. If the release is not
+available to a server yet, its update fails, the server keeps running, and you
+can retry. The confirmation lists each machine it skips and why, such as a
+machine that is offline or needs a manual update. Use **Settings →
+Environments** for those.
 
 If a desktop app restarts on its old version, S5 Code tells you the update did
 not apply. It does not install that version again on its own, even when another
@@ -138,11 +141,18 @@ directory and pair with the running server.
 
 ## If the desktop app does not start
 
-If the desktop app's server keeps failing at startup, T3 Code shows a "T3 Code
+If the desktop app's server keeps failing at startup, S5 Code shows an "S5 Code
 could not start" window instead of the app. If a newer version is available,
 choose **Update** to install it. If not, the window links to the last version
 that started on your computer. Download and install it to go back. Use **Copy
 details** to include the error in a bug report.
+
+## Registries and proxies
+
+Each server checks S5 Code releases on its GitHub Releases page directly.
+Providers installed with npm check through the server's own npm, so those checks
+use npm's configured registry, authentication, and proxy settings. Providers
+installed with Homebrew or pnpm check through those tools.
 
 ## Update providers
 
