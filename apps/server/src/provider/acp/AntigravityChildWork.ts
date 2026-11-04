@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- node:sqlite reads the native session database read-only.
 import * as NodeFS from "node:fs";
 import * as NodeFSP from "node:fs/promises";
-import * as NodeSqlite from "node:sqlite";
 import * as NodeURL from "node:url";
 
 import type {
@@ -15,6 +14,10 @@ import * as Schema from "effect/Schema";
 
 import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
 import { boundAntigravityToolText, isCutAntigravityToolText } from "./AntigravityProtocol.ts";
+import { DatabaseSync } from "../sqliteCompat.ts";
+
+// Bun lacks node:sqlite, so only its types are imported; sqliteCompat picks the runtime.
+type SqliteDatabase = import("node:sqlite").DatabaseSync;
 
 // Field numbers from the runtime's trajectory protos (exa.cortex_pb).
 const STEP_METADATA = 5;
@@ -176,7 +179,7 @@ interface BatchLaunch {
   readonly prompt: string;
 }
 
-const plannerCallIdsAt = (database: NodeSqlite.DatabaseSync, plannerIdx: number) => {
+const plannerCallIdsAt = (database: SqliteDatabase, plannerIdx: number) => {
   const planner = payloadOf(
     database
       .prepare(
@@ -193,7 +196,7 @@ const plannerCallIdsAt = (database: NodeSqlite.DatabaseSync, plannerIdx: number)
  * no auto-approved sibling claims, and no sibling may share the text.
  */
 function findInvokeRecord(
-  database: NodeSqlite.DatabaseSync,
+  database: SqliteDatabase,
   input: {
     readonly rootSessionId: string;
     readonly nativeTaskId: string;
@@ -441,7 +444,7 @@ export const readAntigravityChildWork = Effect.fn("readAntigravityChildWork")(fu
               )
             )?.path;
       if (profileRoot === undefined || databasePath === undefined) return [];
-      const database = new NodeSqlite.DatabaseSync(databasePath, { readOnly: true });
+      const database: SqliteDatabase = new DatabaseSync(databasePath, { readOnly: true });
       let record: InvokeRecord | undefined;
       try {
         record = findInvokeRecord(database, input);

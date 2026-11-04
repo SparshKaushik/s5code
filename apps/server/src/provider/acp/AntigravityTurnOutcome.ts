@@ -1,7 +1,6 @@
 // @effect-diagnostics nodeBuiltinImport:off -- node:sqlite and lstat read the native session log.
 import * as NodeFSP from "node:fs/promises";
 import * as NodePath from "node:path";
-import * as NodeSqlite from "node:sqlite";
 
 import type { OrchestrationV2ProviderFailure } from "@t3tools/contracts";
 import { makeProviderFailure } from "@t3tools/provider-core/server/failure";
@@ -11,6 +10,10 @@ import * as Option from "effect/Option";
 import type * as EffectAcpSchema from "effect-acp/compat";
 
 import { antigravityManagedPath, antigravityProfileRoot } from "./AntigravityProfilePaths.ts";
+import { DatabaseSync } from "../sqliteCompat.ts";
+
+// Bun lacks node:sqlite, so only its types are imported; sqliteCompat picks the runtime.
+type SqliteDatabase = import("node:sqlite").DatabaseSync;
 
 // CORTEX_STEP_TYPE_ERROR_MESSAGE in the native trajectory.
 const ERROR_STEP_TYPE = 17;
@@ -41,9 +44,9 @@ interface LastStep {
   readonly payload: Uint8Array | null;
 }
 
-const readSteps = <A>(file: string, read: (database: NodeSqlite.DatabaseSync) => A) =>
+const readSteps = <A>(file: string, read: (database: SqliteDatabase) => A) =>
   Effect.try(() => {
-    const database = new NodeSqlite.DatabaseSync(file, { readOnly: true });
+    const database: SqliteDatabase = new DatabaseSync(file, { readOnly: true });
     try {
       database.exec("PRAGMA busy_timeout = 100");
       const hasSteps =
@@ -56,14 +59,14 @@ const readSteps = <A>(file: string, read: (database: NodeSqlite.DatabaseSync) =>
     }
   });
 
-const lastStepIndex = (database: NodeSqlite.DatabaseSync) => {
+const lastStepIndex = (database: SqliteDatabase) => {
   const index = database.prepare("SELECT max(idx) AS idx FROM steps").get()?.idx;
   return typeof index === "number" ? index : -1;
 };
 
 const lastStepAfter =
   (index: number) =>
-  (database: NodeSqlite.DatabaseSync): LastStep | undefined => {
+  (database: SqliteDatabase): LastStep | undefined => {
     const row = database
       .prepare(
         `SELECT step_type AS type, substr(step_payload, 1, ?) AS payload

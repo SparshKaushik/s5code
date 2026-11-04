@@ -1,10 +1,10 @@
 // @effect-diagnostics nodeBuiltinImport:off -- fixtures write a native session database.
-import * as NodeSqlite from "node:sqlite";
 import * as NodeURL from "node:url";
 
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
 import * as Path from "effect/Path";
+import { DatabaseSync } from "../sqliteCompat.ts";
 
 export const ROOT = "7d40e54d-5977-4239-940b-246cdd81a12b";
 export const CHILD = "a357bf2720914589dd1ec49f7a816115";
@@ -88,7 +88,7 @@ export const makeProfile = Effect.fn("makeProfile")(function* (input: {
     input.transcript ?? transcriptLines.map((line) => JSON.stringify(line)).join("\n") + "\n",
   );
   const logUri = NodeURL.pathToFileURL(transcriptPath).href;
-  const database = new NodeSqlite.DatabaseSync(path.join(acp, "conversations", `${ROOT}.db`));
+  const database = new DatabaseSync(path.join(acp, "conversations", `${ROOT}.db`));
   database.exec(
     "CREATE TABLE steps (idx integer PRIMARY KEY, step_type integer NOT NULL DEFAULT 0, step_format integer NOT NULL DEFAULT 0, step_payload blob)",
   );

@@ -93,6 +93,8 @@ function parseClaudeRecord(parsed: unknown): readonly UsageRecord[] {
 
     records.push({
       provider: "claude",
+      apiProvider: executor.apiProvider,
+      inputTokensEstimated: false,
       timestampMs,
       model: advisorModel,
       sessionId: executor.sessionId,

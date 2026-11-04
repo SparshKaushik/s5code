@@ -197,7 +197,11 @@ describe("ssh tunnel scripts", () => {
         // Unreachable, so a runtime looked up anywhere else fails instead of downloading.
         const runner = { ...ARCHIVE, releaseBaseUrl: "http://127.0.0.1:9" };
         const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
-        const remote = Layer.merge(NodeServices.layer, remoteOnLocalHost(home));
+        const remote = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          remoteOnLocalHost(home),
+        );
 
         const launched = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, runner).pipe(
           Effect.provide(remote),

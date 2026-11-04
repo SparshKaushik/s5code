@@ -228,7 +228,7 @@ describe("DesktopPreReadyPlatform", () => {
       }).pipe(Effect.provide(layerRuntime));
 
       assert.deepEqual(result.clerk, { ready: true });
-      assert.equal(result.preReady.linux?.linuxWmClass, "s5code");
+      assert.equal(result.preReady.linux?.isDevelopment, false);
       assert.isNull(result.preReady.linuxPasswordStoreCommandLine);
       assert.deepEqual(events, ["pre-ready", "clerk"]);
       assert.equal(registerSchemesMock.mock.calls.length, 0);
