@@ -87,10 +87,10 @@ on:
         required: true
         type: string
       # Whether a `relay-client-tracing-config` artifact from the production
-      # relay state is expected. The fork's relay publishes none.
+      # relay state is expected. PR previews carry no tracing config.
       relay_client_tracing:
         required: false
-        default: false
+        default: true
         type: boolean
       clerk_publishable_key:
         required: true

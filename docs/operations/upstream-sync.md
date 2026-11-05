@@ -81,13 +81,23 @@ These are the things a sync must never regress. Grep for them after a merge:
   upstream's speed tiers and category-cost breakdowns.
 - **Binary self-update** — `"binary"` in `ServerSelfUpdateMethod`/`Capability`,
   `apps/server/src/cloud/binaryUpdate.ts`.
-- **Self-hosted relay** — `infra/relay/`, `.github/workflows/deploy-relay.yml`.
+- **Self-hosted relay** — `infra/relay/`, `.github/workflows/s5-deploy-relay.yml`.
+
+## Workflows: upstream files stay byte-identical
+
+Upstream's workflows are kept exactly as upstream ships them and are disabled on
+the fork (`gh workflow disable`), so a sync never conflicts in `.github/`. The
+fork's own pipelines are separate files: `s5-ci.yml`, `s5-release.yml`,
+`s5-deploy-relay.yml`, `s5-deploy-web.yml`, `s5-mobile-eas-production.yml`, and
+`s5-mobile-eas-preview.yml`. Take upstream's side for every conflict in an
+upstream workflow, and port a change the fork wants into its `s5-*` copy. A new
+upstream workflow that runs on push or pull requests needs disabling once.
+The fork's release runbook is [s5-release.md](./s5-release.md).
 
 ## Fork-intentional deletions (do NOT restore)
 
 These upstream files were removed on purpose. A sync that re-adds them is a bug:
 
-- `.github/workflows/mobile-fingerprint-check.yml` (fork has its own CI).
 - `apps/mobile/plugins/withAndroidTabletOrientation.cjs`.
 - `apps/mobile/src/components/T3Wordmark.tsx` (rebrand).
 - `infra/relay/src/dbConfig.ts` (+ test) — fork's relay rewrite.

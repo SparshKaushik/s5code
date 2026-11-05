@@ -1,4 +1,4 @@
-name: Deploy Web Frontend
+name: S5 Deploy Web Frontend
 
 # Builds the hosted web app (apps/web) against the self-hosted T3 Connect relay
 # and Clerk instance, then uploads the static bundle to Cloudflare Pages.
@@ -28,7 +28,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     env:
-      # Public build-time identifiers (same values as release.yml).
+      # Public build-time identifiers (same values as s5-release.yml).
       T3CODE_CLERK_PUBLISHABLE_KEY: pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA
       T3CODE_CLERK_JWT_TEMPLATE: s5-relay
       T3CODE_CLERK_CLI_OAUTH_CLIENT_ID: Uh0fH8x0GWSj2HIL

@@ -185,11 +185,11 @@ describe("release workflow tracing config propagation", () => {
       const fileSystem = yield* FileSystem.FileSystem;
       const path = yield* Path.Path;
       const workflowPath = yield* path.fromFileUrl(
-        new URL("../../../.github/workflows/release.yml", import.meta.url),
+        new URL("../../../.github/workflows/s5-release.yml", import.meta.url),
       );
       const workflow = yield* fileSystem.readFileString(workflowPath);
 
-      // This fork deploys its own relay (see .github/workflows/deploy-relay.yml
+      // This fork deploys its own relay (see .github/workflows/s5-deploy-relay.yml
       // and infra/relay), so the release bakes in that relay's public config
       // as constants and carries no tracing artifact or masked token output.
       expect(workflow).not.toContain("client_tracing_token:");

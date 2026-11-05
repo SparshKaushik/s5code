@@ -17,10 +17,10 @@ describe("mobile release policy", () => {
   });
 
   it("routes unified releases through fingerprint-gated mobile reconciliation", () => {
-    const releaseWorkflow = readRepoFile(".github/workflows/release.yml");
-    const mobileWorkflow = readRepoFile(".github/workflows/mobile-eas-production.yml");
+    const releaseWorkflow = readRepoFile(".github/workflows/s5-release.yml");
+    const mobileWorkflow = readRepoFile(".github/workflows/s5-mobile-eas-production.yml");
 
-    expect(releaseWorkflow).toContain("uses: ./.github/workflows/mobile-eas-production.yml");
+    expect(releaseWorkflow).toContain("uses: ./.github/workflows/s5-mobile-eas-production.yml");
     expect(releaseWorkflow).toContain("release_version: ${{ needs.preflight.outputs.version }}");
     // Android builds run locally on the runner (eas build --local) instead of
     // EAS's cloud build queue; release.yml attaches the fingerprint.txt asset

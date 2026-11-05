@@ -1,14 +1,5 @@
 name: Mobile EAS Preview
 
-# Publishes a JS-only OTA update for the PR's Android dev-client build.
-# `eas build --local` (see mobile-eas-production.yml for why) means EAS's
-# cloud build history no longer reflects what dev-client binaries reviewers
-# already have installed, so per-PR native builds are not attempted here.
-# When the native fingerprint changes on a PR, this only publishes the OTA
-# for the runtime version that fingerprint would map to; a reviewer without
-# a dev-client build matching that fingerprint needs one built and installed
-# out of band (`pnpm eas:android:preview:dev` locally) before the OTA is
-# visible in their app.
 on:
   pull_request:
     types: [opened, reopened, synchronize, labeled]
@@ -16,10 +7,12 @@ on:
 jobs:
   preview:
     name: EAS Preview
+    # Fork PRs deploy one reviewed commit per label through mobile-eas-preview-fork.yml.
     if: |
+      github.event.pull_request.head.repo.full_name == github.repository &&
       contains(github.event.pull_request.labels.*.name, '🚀 Mobile Continuous Deployment') &&
       (github.event.action != 'labeled' || github.event.label.name == '🚀 Mobile Continuous Deployment')
-    runs-on: ubuntu-24.04
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     concurrency:
       group: mobile-eas-preview-${{ github.event.pull_request.number }}
       cancel-in-progress: true
@@ -30,24 +23,17 @@ jobs:
       APP_VARIANT: preview
       NODE_OPTIONS: --max-old-space-size=8192
       MOBILE_VERSION_POLICY: fingerprint
-      # Public build-time identifiers (same values as release.yml, deploy-web.yml,
-      # and mobile-eas-production.yml) so preview dev-client builds also render
-      # the T3 Connect Settings UI and notification switches instead of
-      # silently falling back to the no-cloud-config screen.
-      T3CODE_CLERK_PUBLISHABLE_KEY: pk_live_Y2xlcmsuczVjb2RlLnRvdWNodGVjaC5jbHViJA
-      T3CODE_CLERK_JWT_TEMPLATE: s5-relay
-      T3CODE_RELAY_URL: https://relay.s5code.dpdns.org
     steps:
       - id: expo-token
-        name: Check for EXPO_TOKEN
+        name: Check for EXPO_PREVIEW_TOKEN
         env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EXPO_TOKEN: ${{ secrets.EXPO_PREVIEW_TOKEN }}
         run: |
           if [ -n "$EXPO_TOKEN" ]; then
             echo "present=true" >> "$GITHUB_OUTPUT"
           else
             echo "present=false" >> "$GITHUB_OUTPUT"
-            echo "EXPO_TOKEN is not available; skipping EAS preview."
+            echo "EXPO_PREVIEW_TOKEN is not available; skipping EAS preview."
           fi
 
       - name: Checkout
@@ -86,7 +72,7 @@ jobs:
           # continuous-deploy-fingerprint still reads `build.project.ownerAccount`.
           # Unpin once https://github.com/expo/expo-github-action/issues/358 is fixed.
           eas-version: 21.8.0
-          token: ${{ secrets.EXPO_TOKEN }}
+          token: ${{ secrets.EXPO_PREVIEW_TOKEN }}
           # npm, not pnpm: this only installs eas-cli into the action's own
           # tool dir, and pnpm 11 hard-fails that install on dtrace-provider's
           # ignored build script (no allowBuilds config outside the repo).
@@ -96,7 +82,7 @@ jobs:
         if: steps.expo-token.outputs.present == 'true'
         working-directory: apps/mobile
         env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
+          EXPO_TOKEN: ${{ secrets.EXPO_PREVIEW_TOKEN }}
         run: |
           eas env:pull preview --non-interactive
           # EAS Update disables dotenv loading. Keep the downloaded native config
@@ -111,58 +97,17 @@ jobs:
           }
           NODE
 
-      - id: fingerprint
-        name: Compute Android fingerprint
+      - name: Deploy with fingerprint check
         if: steps.expo-token.outputs.present == 'true'
-        working-directory: apps/mobile
+        uses: expo/expo-github-action/continuous-deploy-fingerprint@main
         env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          set -euo pipefail
-          # --build-profile, not --environment: eas-cli has a known bug
-          # (expo/eas-cli#3870) where --environment logs a stray
-          # "Using environment: ..." line to real stdout before the JSON
-          # redirect is installed, corrupting --json output for jq. The
-          # "preview" build profile in eas.json maps to the same EAS
-          # environment, so this is equivalent here.
-          fingerprint_json="$(eas fingerprint:generate \
-            --platform android \
-            --build-profile preview \
-            --json \
-            --non-interactive)"
-          echo "hash=$(jq -r '.hash' <<<"$fingerprint_json")" >> "$GITHUB_OUTPUT"
-
-      - name: Publish preview OTA
-        if: steps.expo-token.outputs.present == 'true'
-        working-directory: apps/mobile
-        env:
-          EXPO_TOKEN: ${{ secrets.EXPO_TOKEN }}
-        run: |
-          eas update \
-            --channel preview \
-            --environment preview \
-            --platform android \
-            --branch pr-${{ github.event.pull_request.number }} \
-            --message "PR #${{ github.event.pull_request.number }}: ${{ github.event.pull_request.title }}" \
-            --non-interactive
-
-      - name: Comment on PR
-        if: steps.expo-token.outputs.present == 'true'
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          gh pr comment ${{ github.event.pull_request.number }} \
-            --repo "${{ github.repository }}" \
-            --edit-last --create-if-none \
-            --body "$(cat <<EOF
-          ### 🚀 Mobile Preview
-
-          Published a JS-only OTA update to branch \`pr-${{ github.event.pull_request.number }}\` (Android fingerprint \`${{ steps.fingerprint.outputs.hash }}\`).
-
-          This updates JS/assets on an existing dev-client build with a matching native fingerprint. If the fingerprint changed with this push (native deps, config plugins, or app.config.ts), rebuild the dev client before this update is visible:
-
-          \`\`\`
-          pnpm --filter @t3tools/mobile eas:android:preview:dev
-          \`\`\`
-          EOF
-          )"
+          EXPO_TOKEN: ${{ secrets.EXPO_PREVIEW_TOKEN }}
+          # The Expo action otherwise suppresses the EAS command's failure output.
+          RUNNER_DEBUG: "1"
+        with:
+          profile: preview:dev
+          branch: pr-${{ github.event.pull_request.number }}
+          platform: all
+          environment: preview
+          working-directory: apps/mobile
+          github-token: ${{ secrets.GITHUB_TOKEN }}
