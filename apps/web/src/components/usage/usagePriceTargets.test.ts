@@ -117,7 +117,7 @@ describe("model price writes", () => {
       input: {
         patch: {
           usagePriceOverrides: { example: null },
-          usageModelMappings: { example: "example-model" },
+          usageModelAliases: { example: "example-model" },
         },
       },
     });

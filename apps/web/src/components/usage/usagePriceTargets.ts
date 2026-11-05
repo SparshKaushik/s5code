@@ -58,7 +58,7 @@ export async function writeUsagePrices(input: {
                         ? { usagePriceOverrides: Object.fromEntries(prices) }
                         : {}),
                       ...(aliases.length > 0
-                        ? { usageModelMappings: Object.fromEntries(aliases) }
+                        ? { usageModelAliases: Object.fromEntries(aliases) }
                         : {}),
                     },
                   },

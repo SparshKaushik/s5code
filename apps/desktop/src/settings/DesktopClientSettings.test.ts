@@ -32,7 +32,7 @@ const clientSettings: ClientSettings = {
   confirmQuit: "double-click",
   confirmThreadArchive: true,
   confirmThreadDelete: false,
-  usageModelAliases: [],
+  usageModelTags: [],
   confirmThreadUnpin: false,
   contextWindowMeterEnabled: false,
   diffFilesCollapsed: true,

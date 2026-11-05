@@ -2070,7 +2070,7 @@ describe("UsageService", () => {
           assert.strictEqual(original.buckets[0]?.unpricedRecords, 1);
 
           yield* settingsService.updateSettings({
-            usageModelMappings: { preview: "released" },
+            usageModelAliases: { preview: "released" },
             usagePriceOverrides: {
               released: { inputCostPerMillionTokens: 2, outputCostPerMillionTokens: 8 },
             },
@@ -2081,7 +2081,7 @@ describe("UsageService", () => {
           assert.strictEqual(mapped.buckets[0]?.unpricedRecords, 0);
           assert.deepStrictEqual(mapped.buckets[0]?.totals, original.buckets[0]?.totals);
 
-          yield* settingsService.updateSettings({ usageModelMappings: { preview: null } });
+          yield* settingsService.updateSettings({ usageModelAliases: { preview: null } });
           const restored = yield* service.readSummary(WINDOW);
           assert.deepStrictEqual(restored.buckets, original.buckets);
         }).pipe(

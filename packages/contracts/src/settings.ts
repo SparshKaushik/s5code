@@ -418,7 +418,7 @@ export const ClientSettingsSchema = Schema.Struct({
   confirmThreadDelete: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   confirmThreadUnpin: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Model tags are client-scoped so the same alias applies across environments.
-  usageModelAliases: Schema.Array(UsageModelAlias).pipe(
+  usageModelTags: Schema.Array(UsageModelAlias).pipe(
     Schema.withDecodingDefault(Effect.succeed([])),
   ),
   diffFilesCollapsed: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
@@ -1409,11 +1409,8 @@ export const ServerSettings = Schema.Struct({
   usagePriceOverrides: Schema.Record(TrimmedNonEmptyString, UsageModelPriceOverride).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
-  /**
-   * Exact model ID to the model its usage counts as, such as a preview slug to
-   * its released name. The mapped model is priced and reported as its target.
-   */
-  usageModelMappings: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
+
+  usageModelAliases: Schema.Record(TrimmedNonEmptyString, TrimmedNonEmptyString).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
 });
@@ -1728,8 +1725,8 @@ export const ServerSettingsPatch = Schema.Struct({
   usagePriceOverrides: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(UsageModelPriceOverride)),
   ),
-  /** Each entry replaces one model's mapping; `null` removes it. */
-  usageModelMappings: Schema.optionalKey(
+
+  usageModelAliases: Schema.optionalKey(
     Schema.Record(TrimmedNonEmptyString, Schema.NullOr(TrimmedNonEmptyString)),
   ),
 });
@@ -1840,7 +1837,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sidebarProjectSortOrder: Schema.optionalKey(SidebarProjectSortOrder),
   sidebarThreadSortOrder: Schema.optionalKey(SidebarThreadSortOrder),
   timestampFormat: Schema.optionalKey(TimestampFormat),
-  usageModelAliases: Schema.optionalKey(Schema.Array(UsageModelAlias)),
+  usageModelTags: Schema.optionalKey(Schema.Array(UsageModelAlias)),
   snapShotEnabled: Schema.optionalKey(Schema.Boolean),
   snapShotIncludeAccessibility: Schema.optionalKey(Schema.Boolean),
   snapShotShortcut: Schema.optionalKey(SnapShotShortcut),

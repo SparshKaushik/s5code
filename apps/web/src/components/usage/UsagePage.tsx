@@ -214,7 +214,7 @@ export function UsagePage() {
   const refreshingRef = useRef(false);
   const [priceDialog, setPriceDialog] = useState<{ readonly model?: string } | null>(null);
   const [tagTarget, setTagTarget] = useState<UsageModelTagTarget | null>(null);
-  const modelAliases = useClientSettings((settings) => settings.usageModelAliases);
+  const modelAliases = useClientSettings((settings) => settings.usageModelTags);
   const [selectedEnvironmentIds, setSelectedEnvironmentIds] =
     useState<ReadonlySet<EnvironmentId> | null>(null);
   const hiddenProviders = new Set(preferences.hiddenProviders);
@@ -246,7 +246,7 @@ export function UsagePage() {
   });
 
   const applyAliases = (next: readonly UsageModelAlias[]) => {
-    void updateClientSettings({ usageModelAliases: next });
+    void updateClientSettings({ usageModelTags: next });
     setTagTarget(null);
   };
   const handleTag = (catalogModelId: string) => {

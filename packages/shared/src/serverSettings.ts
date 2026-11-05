@@ -372,7 +372,7 @@ export function applyServerSettingsPatch(
     secretProviders: secretProvidersPatch,
     sourceControlHosts: sourceControlHostsPatch,
     usagePriceOverrides: usagePriceOverridesPatch,
-    usageModelMappings: usageModelMappingsPatch,
+    usageModelAliases: usageModelAliasesPatch,
     // Entry replacement: deepMerge would keep keys the client meant to clear.
     projectSettingsOverrides: projectSettingsOverridesPatch,
     projectAgentBrowserAccessOverrides: _legacyBrowserAccess,
@@ -578,11 +578,11 @@ export function applyServerSettingsPatch(
           ),
         }
       : {}),
-    ...(usageModelMappingsPatch !== undefined
+    ...(usageModelAliasesPatch !== undefined
       ? {
-          usageModelMappings: mergeSettingsEntries(
-            current.usageModelMappings,
-            usageModelMappingsPatch,
+          usageModelAliases: mergeSettingsEntries(
+            current.usageModelAliases,
+            usageModelAliasesPatch,
           ),
         }
       : {}),

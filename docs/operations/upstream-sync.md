@@ -75,7 +75,11 @@ These are the things a sync must never regress. Grep for them after a merge:
   `apps/desktop`, `apps/mobile/app.config.ts`, `apps/web/index.html`,
   `apps/web/src/branding.ts`, `packages/shared/src/devHome.ts`.
 - **Usage tags** — `UsageModelAlias`, `UsageCatalogModelId`, `userTagged` cost
-  source, `pi`/`opencode` provider kinds, `UsagePricer`. Usage readers now live with their
+  source, `pi`/`opencode` provider kinds, `UsagePricer`. Tags are the client
+  setting `usageModelTags`; the server's `usageModelAliases` is upstream's model
+  mapping. `packages/shared/src/s5SettingsKeys.ts` reads both under their
+  pre-rename S5 keys. Only Pi and OpenCode records set `apiProvider` and
+  `inputTokensEstimated`; leave upstream readers without them. Usage readers now live with their
   drivers in `packages/provider-pi` and `packages/provider-opencode`; preserve
   their per-instance roots and gateway metadata when moving them. Files:
   `packages/contracts/src/usage.ts`, `apps/server/src/usage/usagePricing.ts`,

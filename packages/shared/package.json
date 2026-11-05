@@ -139,6 +139,10 @@
       "types": "./src/Struct.ts",
       "import": "./src/Struct.ts"
     },
+    "./s5SettingsKeys": {
+      "types": "./src/s5SettingsKeys.ts",
+      "import": "./src/s5SettingsKeys.ts"
+    },
     "./serverSettings": {
       "types": "./src/serverSettings.ts",
       "import": "./src/serverSettings.ts"

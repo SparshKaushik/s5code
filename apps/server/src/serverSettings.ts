@@ -46,6 +46,7 @@ import { resolveSymlinkTarget } from "@t3tools/shared/symlink";
 import * as ServerConfig from "./config.ts";
 import { type DeepPartial, deepMerge } from "@t3tools/shared/Struct";
 import { fromJsonStringPretty, fromLenientJson } from "@t3tools/shared/schemaJson";
+import { adoptS5ServerSettingsKeys } from "@t3tools/shared/s5SettingsKeys";
 import {
   applyServerSettingsPatch,
   deriveLegacyProjectOverrides,
@@ -670,7 +671,7 @@ const make = Effect.gen(function* () {
     let parseFailure = Option.none<unknown>();
 
     if (yield* readConfigExists) {
-      const raw = yield* readRawConfig;
+      const raw = adoptS5ServerSettingsKeys(yield* readRawConfig);
       const decoded = decodeServerSettingsJsonExit(raw);
       const legacySettings = decodeLegacyProviderSettingsJsonExit(raw);
       if (legacySettings._tag === "Success") {

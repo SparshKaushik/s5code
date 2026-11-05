@@ -846,7 +846,7 @@ export const make = Effect.gen(function* () {
         aliases: input.modelAliases,
         priceOverrides: createOverrideRateTable(settings.usagePriceOverrides),
       }),
-      modelAliases: resolveModelAliases(settings.usageModelMappings),
+      modelAliases: resolveModelAliases(settings.usageModelAliases),
     });
 
     const sources: UsageSource[] = [];
