@@ -64,6 +64,7 @@ const fakePool = (
     let leases = 0;
     let renewStatus = 200;
     let catalog: unknown = CATALOG;
+    let others: ReadonlyArray<{ id: string; platform: string; device: string; os: string }> = [];
     const http = HttpClient.make((request) =>
       Effect.sync(() => {
         const url = new URL(request.url);
@@ -73,6 +74,10 @@ const fakePool = (
         if (request.headers.authorization !== "Bearer agent-token")
           return json({ error: { code: "UNAUTHENTICATED", message: "Unknown bearer token" } }, 401);
         if (url.pathname === "/v1/catalog") return json(catalog);
+        if (request.method === "GET" && url.pathname === "/v1/leases")
+          return json({ leases: others.map(({ id }) => ({ id })) });
+        const other = others.find(({ id }) => url.pathname === `/v1/leases/${id}`);
+        if (request.method === "GET" && other) return json({ lease: other });
         if (url.pathname.endsWith("/renew")) return json({}, renewStatus);
         if (request.method === "DELETE") return json({}, 202);
         return json({}, 404);
@@ -139,6 +144,9 @@ const fakePool = (
       },
       setCatalog: (next: unknown) => {
         catalog = next;
+      },
+      setOtherLeases: (next: typeof others) => {
+        others = next;
       },
     };
   });
@@ -243,6 +251,42 @@ describe("Simlock device host", () => {
       expect((yield* ready.devices.list).devices.some((device) => device.booted)).toBe(false);
       yield* Scope.close(scope, Exit.void);
       expect(pool.ran("close")).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(layer)),
+  );
+
+  it.effect("shows leases other clients hold on the token, and leaves them to their owner", () =>
+    Effect.gen(function* () {
+      const pool = yield* fakePool();
+      pool.setOtherLeases([
+        { id: "agent-lease", platform: "ios", device: "iPhone 17e", os: "26.5" },
+        { id: "stale-lease", platform: "android", device: "Pixel 8", os: "35" },
+      ]);
+      const scope = yield* Scope.make();
+      const host = yield* makeHost(pool, config(), scope);
+      const ready = yield* host.ensureReady(() => Effect.void);
+
+      const listed = (yield* ready.devices.list).devices.filter((device) => device.booted);
+      expect(listed.map((device) => [device.id, device.name, device.version])).toEqual([
+        ["agent-lease", "iPhone 17e", "iOS 26.5"],
+        ["stale-lease", "Pixel 8", "Android 35"],
+      ]);
+      expect(yield* ready.devices.boot(listed[0]!)).toBe("agent-lease");
+      expect(pool.ran("open")).toHaveLength(0);
+      expect(
+        yield* ready.upstream!(
+          "/vendor/serve-sim/helper/agent-lease/stream.avcc",
+          new URLSearchParams(),
+        ),
+      ).toMatchObject({ url: `${GATEWAY}/v1/leases/agent-lease/stream` });
+      const refused = yield* ready.devices.agentEndpoint!("agent-lease").pipe(Effect.flip);
+      expect(refused.message).toContain("another agent-device session");
+
+      yield* ready.devices.shutdown({ id: "stale-lease", platform: "android" });
+      yield* Scope.close(scope, Exit.void);
+      expect(pool.requests.filter((request) => request.startsWith("DELETE"))).toEqual([
+        "DELETE /v1/leases/stale-lease",
+      ]);
+      expect(pool.requests.some((request) => request.includes("agent-lease/renew"))).toBe(false);
     }).pipe(Effect.scoped, Effect.provide(layer)),
   );
 

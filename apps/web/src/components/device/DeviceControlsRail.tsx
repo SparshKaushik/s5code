@@ -43,7 +43,7 @@ export function DeviceControlsRail(props: {
   screenshotPending: boolean;
   onScreenshot: () => void;
   toolsOpen: boolean;
-  onTools?: () => void;
+  onTools: () => void;
   onFloat: () => void;
   onClose: () => void;
   onPowerOff: () => void;
@@ -184,16 +184,14 @@ export function DeviceControlsRail(props: {
                 </MenuRadioGroup>
               </MenuPopup>
             </Menu>
-            {props.onTools ? (
-              <RailButton
-                tooltipSide={popupSide}
-                label="Device tools"
-                pressed={props.toolsOpen}
-                onClick={props.onTools}
-              >
-                <SlidersHorizontal />
-              </RailButton>
-            ) : null}
+            <RailButton
+              tooltipSide={popupSide}
+              label="Device tools"
+              pressed={props.toolsOpen}
+              onClick={props.onTools}
+            >
+              <SlidersHorizontal />
+            </RailButton>
           </>
         ) : null}
         {props.hostKind === "simlock" ? null : (

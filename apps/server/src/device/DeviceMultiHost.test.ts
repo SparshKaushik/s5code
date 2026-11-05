@@ -93,7 +93,7 @@ it.effect("keeps hosts independent when serials collide and another host fails",
         order.push("write finished");
         return "/host-config.json";
       }),
-    ).pipe(Effect.provide(NodeCrypto.layer), Effect.provideService(HttpClient.HttpClient, http));
+    ).pipe(Effect.provide(NodeCrypto.layer));
     expect(yield* service.agentReadinessIfSupported("b")).not.toBeNull();
     const listed = yield* service.list;
     expect(listed.devices.map((device) => device.hostId).sort()).toEqual(["a", "b"]);

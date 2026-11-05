@@ -47,19 +47,12 @@ export const makeDeviceHubOperations = (options: {
   readonly hostId: DeviceHostId;
   readonly origin: string;
   readonly http: HttpClient.HttpClient;
-  /** Credentials for a remote hub; only the server ever sees them. */
-  readonly headers?: Readonly<Record<string, string>>;
   readonly run: DeviceHostReady["run"];
   /** Whether to list AVDs, which the hub does not report until they boot. */
   readonly androidAvailable: Effect.Effect<boolean>;
 }): DeviceOperations => {
   const { hostId, origin, run } = options;
-  const headers = options.headers;
-  const httpClient = (
-    headers
-      ? options.http.pipe(HttpClient.mapRequest(HttpClientRequest.setHeaders(headers)))
-      : options.http
-  ).pipe(HttpClient.withScope);
+  const httpClient = options.http.pipe(HttpClient.withScope);
 
   const hubJson = <A, I>(
     request: HttpClientRequest.HttpClientRequest,

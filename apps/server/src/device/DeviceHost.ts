@@ -67,8 +67,6 @@ export class AgentDeviceStartError extends Schema.TaggedError<AgentDeviceStartEr
 
 export interface DeviceHubEndpoint {
   readonly origin: string;
-  /** Only the server sees remote credentials; they never reach the client. */
-  readonly headers?: Readonly<Record<string, string>>;
 }
 
 export interface AgentDeviceEndpoint {
@@ -146,7 +144,6 @@ export interface DeviceOperations {
 }
 
 export interface DeviceHostReady {
-  readonly supportsActions?: boolean;
   readonly nodePath: string;
   readonly hub: DeviceHubEndpoint;
   readonly devices: DeviceOperations;

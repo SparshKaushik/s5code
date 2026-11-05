@@ -55,6 +55,14 @@ const Catalog = Schema.Struct({
   ),
 });
 const decodeCatalog = Schema.decodeUnknownEffect(Catalog);
+const decodeLeaseList = Schema.decodeUnknownEffect(
+  Schema.Struct({ leases: Schema.Array(Schema.Struct({ id: Schema.String })) }),
+);
+const decodeLease = Schema.decodeUnknownEffect(
+  Schema.Struct({
+    lease: Schema.Struct({ platform: Schema.String, device: Schema.String, os: Schema.String }),
+  }),
+);
 const decodeSessionRecord = Schema.decodeUnknownEffect(
   Schema.fromJsonString(Schema.Struct({ leaseId: Schema.String })),
 );
@@ -76,6 +84,9 @@ interface Lease {
   readonly configPath: string;
   readonly installDirectory: string;
 }
+
+/** A lease this token holds that another client opened, such as an agent's own agent-device. */
+type ForeignLease = Pick<Lease, "leaseId" | "platform" | "name" | "version">;
 
 const catalogId = (platform: DevicePlatform, model: string) => `simlock:${platform}:${model}`;
 const parseCatalogId = (id: string) => {
@@ -187,6 +198,7 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
   const agentDeviceUrl = `${gateway}/v1/agent-device`;
   const hostDir = path.join(server.stateDir, "device", "simlock", hostId);
   const leases = new Map<string, Lease>();
+  const foreign = new Map<string, ForeignLease>();
   let starting = 0;
   // Bumped by every stop, so an open that finishes after one returns its lease instead of keeping it.
   let stops = 0;
@@ -348,6 +360,35 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
     ),
   );
 
+  /** Watching another client's lease is harmless; failing to list them only hides them. */
+  const loadForeignLeases = Effect.gen(function* () {
+    const listed = yield* request("GET", "/v1/leases").pipe(Effect.flatMap(decodeLeaseList));
+    const ids = new Set(listed.leases.map((lease) => lease.id).filter((id) => !leases.has(id)));
+    for (const id of foreign.keys()) if (!ids.has(id)) foreign.delete(id);
+    yield* Effect.forEach(
+      [...ids].filter((id) => !foreign.has(id)).slice(0, 20),
+      (id) =>
+        request("GET", `/v1/leases/${encodeURIComponent(id)}`).pipe(
+          Effect.flatMap(decodeLease),
+          Effect.map(({ lease }) => {
+            if ((lease.platform !== "ios" && lease.platform !== "android") || leases.has(id))
+              return;
+            foreign.set(id, {
+              leaseId: id,
+              platform: lease.platform,
+              name: lease.device,
+              version: platformVersion(lease.platform, lease.os),
+            });
+          }),
+          Effect.ignore,
+        ),
+      { discard: true, concurrency: 4 },
+    );
+  }).pipe(
+    Effect.tapError((cause) => Effect.logDebug("Could not list Simlock leases", { cause })),
+    Effect.ignore,
+  );
+
   const forget = (lease: Lease) =>
     Effect.suspend(() => {
       leases.delete(lease.leaseId);
@@ -469,6 +510,7 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
       if (stops !== stopsAtOpen)
         return yield* unavailable("Device support stopped while the device was opening.");
       leases.set(opened.leaseId, opened);
+      foreign.delete(opened.leaseId);
       yield* FiberMap.run(keepAlive, opened.leaseId, renewLoop(opened));
       return opened.leaseId;
     }).pipe(
@@ -515,10 +557,11 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
   const devices: DeviceHost.DeviceOperations = {
     list: loadCatalog.pipe(
       Effect.mapError(operationError("list")),
+      Effect.tap(() => loadForeignLeases),
       Effect.map((available) => ({
         devices: [
           ...available,
-          ...[...leases.values()].map((lease): DeviceHost.HostDevice => ({
+          ...[...leases.values(), ...foreign.values()].map((lease): DeviceHost.HostDevice => ({
             id: lease.leaseId,
             platform: lease.platform,
             name: lease.name,
@@ -531,7 +574,7 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
       })),
     ),
     boot: (device, context) =>
-      leases.has(device.id)
+      leases.has(device.id) || foreign.has(device.id)
         ? Effect.succeed(device.id)
         : Effect.acquireUseRelease(
             reserveSlot,
@@ -541,19 +584,46 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
     attach: () => Effect.void,
     shutdown: (device) =>
       Option.match(leaseFor(device.id), {
-        onNone: () => Effect.void,
+        onNone: () =>
+          foreign.has(device.id)
+            ? request("DELETE", `/v1/leases/${encodeURIComponent(device.id)}`).pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("Could not release Simlock lease", {
+                    leaseId: device.id,
+                    cause,
+                  }),
+                ),
+                Effect.ignore,
+                Effect.ensuring(Effect.sync(() => foreign.delete(device.id))),
+              )
+            : Effect.void,
         onSome: (lease) =>
           FiberMap.remove(keepAlive, lease.leaseId).pipe(Effect.andThen(release(lease))),
       }),
     screenshot: (device) =>
       Option.match(leaseFor(device.id), {
         onNone: () =>
-          Effect.fail(operationError("screenshot")(new Error("The Simlock lease has ended"))),
+          Effect.fail(
+            operationError("screenshot")(
+              new Error(
+                foreign.has(device.id)
+                  ? "This Simlock lease belongs to another agent-device session"
+                  : "The Simlock lease has ended",
+              ),
+            ),
+          ),
         onSome: screenshotLease,
       }),
     agentEndpoint: (deviceId) =>
       Option.match(leaseFor(deviceId), {
-        onNone: () => Effect.fail(unavailable("This Simlock lease has ended.")),
+        onNone: () =>
+          Effect.fail(
+            unavailable(
+              foreign.has(deviceId)
+                ? "This Simlock lease belongs to another agent-device session; drive it from that session."
+                : "This Simlock lease has ended.",
+            ),
+          ),
         onSome: (lease) =>
           Effect.succeed({
             baseUrl: agentDeviceUrl,
@@ -584,7 +654,7 @@ export const make = Effect.fn("SimlockDeviceHost.make")(function* (
       } catch {
         return null;
       }
-      const lease = deviceId === null ? undefined : leases.get(deviceId);
+      const lease = deviceId === null ? undefined : (leases.get(deviceId) ?? foreign.get(deviceId));
       if (!lease) return null;
       return {
         url: `${gateway}/v1/leases/${encodeURIComponent(lease.leaseId)}/${stream ? "stream" : "input"}`,

@@ -224,16 +224,15 @@ const handler = Effect.gen(function* () {
     return HttpServerResponse.text("Not Found", { status: 404 });
   }
   const upstreamUrl = routed?.url ?? `${ready.hub.origin}${hubPath}${search}`;
-  const upstreamHeaders = routed ? routed.headers : (ready.hub.headers ?? {});
   if (upgrade) {
     return yield* proxyWebSocket(
       request,
       upstreamUrl.replace(/^http/, "ws"),
-      upstreamHeaders,
+      routed?.headers,
       routed?.protocols,
     );
   }
-  return yield* proxyHttp(request, upstreamUrl, upstreamHeaders);
+  return yield* proxyHttp(request, upstreamUrl, routed?.headers);
 });
 
 export const layer = HttpRouter.add("*", `${DeviceService.DEVICE_HUB_ROUTE_PREFIX}/*`, handler);

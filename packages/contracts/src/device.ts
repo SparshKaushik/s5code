@@ -176,8 +176,6 @@ export const DeviceSummary = Schema.Struct({
   version: Schema.String,
   booted: Schema.Boolean,
   physical: Schema.Boolean,
-  /** Cloud hosts can stream and automate without exposing host shell settings. */
-  supportsActions: Schema.optional(Schema.Boolean),
 });
 export type DeviceSummary = typeof DeviceSummary.Type;
 
@@ -212,7 +210,7 @@ const deviceHostSummaryFields = {
 };
 const MachineDeviceHostSummary = Schema.Struct({
   ...deviceHostSummaryFields,
-  kind: Schema.Literals(["local", "ssh", "simbox"]),
+  kind: Schema.Literals(["local", "ssh"]),
 });
 const EasDeviceHostSummary = Schema.Struct({
   ...deviceHostSummaryFields,

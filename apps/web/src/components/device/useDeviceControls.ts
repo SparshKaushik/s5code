@@ -37,7 +37,7 @@ export function useDeviceControls(options: {
   // rather than letting a reopened panel race the previous command.
   const busy = useRef(false);
 
-  const available = detail !== null && visible && device.supportsActions !== false;
+  const available = detail !== null && visible;
   const act = async (body: ActionBody) => {
     if (busy.current || !available) return;
     busy.current = true;
@@ -65,7 +65,7 @@ export function useDeviceControls(options: {
     pending,
     error,
     act,
-    disabled: pending || !detail || !visible || device.supportsActions === false,
+    disabled: pending || !detail || !visible,
     foregroundApp: foreground === undefined ? (detail?.foregroundApp ?? null) : foreground,
   };
 }

@@ -125,17 +125,16 @@ localhost without forwarding or another reachable address.
 
 ## Simbox runners
 
-Log in to the Simbox CLI on the environment server and turn on **Use devices**
-and **Agents can use devices** in **Settings → Devices**. When an
-agent runs `simbox sim`, S5 Code attaches the runner's device to that thread
-automatically. Successful `simbox exec` commands also attach a selected or
-running device. Simbox must run on the same machine and user account as the
-environment server, and its command output must reach the agent.
+Each Simbox run is its own Simlock daemon. Log in to the Simbox CLI on the
+environment server and turn on **Use devices** and **Agents can use devices** in
+**Settings → Devices**. When an agent connects with `simbox sim` or `simbox exec`,
+S5 Code adds the run as a Simlock host in **Settings → Devices** and opens the
+device the agent leased in that thread. Simbox must run on the same machine and
+user account as the environment server, and its command output must reach the
+agent.
 
-The Device panel provides live video and input. The Tools drawer is unavailable
-on Simbox hosts. Use `simbox stop` to end a run; its device sessions also disappear
-when the runner expires. Updating the Simbox CLI, runner, and S5 Code server is
-required to use this integration.
+Powering off the device in the Device panel ends the agent's lease. `simbox stop`
+removes the host, and S5 Code also removes it a few minutes after the run ends.
 
 ## Simlock hosts (alpha)
 
