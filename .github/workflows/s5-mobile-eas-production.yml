@@ -49,7 +49,7 @@ on:
         type: string
 
 concurrency:
-  group: mobile-eas-production
+  group: s5-mobile-eas-production
   cancel-in-progress: false
 
 jobs:

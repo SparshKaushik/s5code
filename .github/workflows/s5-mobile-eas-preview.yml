@@ -21,7 +21,7 @@ jobs:
       (github.event.action != 'labeled' || github.event.label.name == '🚀 Mobile Continuous Deployment')
     runs-on: ubuntu-24.04
     concurrency:
-      group: mobile-eas-preview-${{ github.event.pull_request.number }}
+      group: s5-mobile-eas-preview-${{ github.event.pull_request.number }}
       cancel-in-progress: true
     permissions:
       contents: read

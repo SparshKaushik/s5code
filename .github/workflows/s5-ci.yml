@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.sha }}
+  group: s5-ci-${{ github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
@@ -227,7 +227,7 @@ jobs:
               child.stdout.setEncoding("utf8");
               child.stdout.on("data", (data) => {
                 output = (output + data).slice(-10_000);
-                if (output.includes("S5 Code server is ready.")) resolve();
+                if (output.includes("T3 Code server is ready.")) resolve();
               });
               child.once("error", reject);
               child.once("exit", (code, signal) => reject(new Error(`Server exited before readiness (${code ?? signal}):\nstderr: ${diagnostics}\nstdout: ${output}`)));

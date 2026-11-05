@@ -151,8 +151,6 @@ describe("Claude advisor iterations", () => {
       reportedCostUsd: null,
       speed: "standard",
       dedupeKey: "msg_1:req_1",
-      apiProvider: "",
-      inputTokensEstimated: false,
     };
     const expected = [
       executor,

@@ -33,7 +33,7 @@ permissions:
   statuses: write
 
 concurrency:
-  group: relay-production
+  group: s5-relay-production
   cancel-in-progress: false
 
 jobs:
