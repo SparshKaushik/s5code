@@ -606,6 +606,11 @@ Checklist:
 
 Notes:
 
+- Without the Apple secrets, the app is signed ad hoc. macOS ties an ad hoc app's privacy
+  permissions (Accessibility, Screen Recording, and others) to that exact build, so every update
+  silently drops them. To keep them, store a self-signed code-signing certificate as
+  `MACOS_SELF_SIGN_P12` (base64 `.p12`) and its password as `MACOS_SELF_SIGN_P12_PASSWORD`. Keep the
+  same certificate: replacing it makes users grant the permissions again.
 - `APPLE_API_KEY` is stored as raw key text in secrets.
 - The workflow writes it to a temporary `AuthKey_<id>.p8` file at runtime.
 - The workflow decodes `MACOS_PROVISIONING_PROFILE`, validates it with `security cms`, and passes it
