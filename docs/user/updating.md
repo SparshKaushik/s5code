@@ -1,4 +1,4 @@
-# Updating S5 Code
+# Updating T3 Code
 
 The app you use and the server running your agents can be on different machines.
 When a server is behind your web or desktop app, the update button at the bottom
@@ -27,7 +27,7 @@ GitHub Releases page. Remote desktop apps do not wait for it. The confirmation
 lists each machine it skips and why, such as a machine that is offline or needs
 a manual update. Use **Settings → Environments** for those.
 
-If a desktop app restarts on its old version, S5 Code tells you the update did
+If a desktop app restarts on its old version, T3 Code tells you the update did
 not apply. It does not install that version again on its own, even when another
 device asks. Use the update button on that machine to retry.
 
@@ -50,7 +50,7 @@ older than its Nightly, run `t3 update --channel stable --allow-downgrade` on
 that machine.
 
 A switch is blocked for a machine whose database already has changes the
-target release does not support, or when S5 Code cannot confirm that it does.
+target release does not support, or when T3 Code cannot confirm that it does.
 The dialog says why: update a machine on its current track first when its
 release is too old to check, or wait until the target track includes the
 changes. A Mac running the desktop app must switch on that Mac.

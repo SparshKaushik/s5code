@@ -94,7 +94,7 @@ export function renderBootServiceUnit(plan: BootServicePlan): string {
   // The user manager has no reliable network-online target; server networking retries itself.
   return [
     "[Unit]",
-    "Description=S5 Code server",
+    "Description=T3 Code server",
     "StartLimitIntervalSec=300",
     "StartLimitBurst=5",
     "",
@@ -409,7 +409,7 @@ export class BootServiceInstallError extends Schema.TaggedError<BootServiceInsta
   { cause: Schema.Defect() },
 ) {
   override get message(): string {
-    return "Could not set up the S5 Code background service.";
+    return "Could not set up the T3 Code background service.";
   }
 }
 

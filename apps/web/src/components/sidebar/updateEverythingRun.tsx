@@ -327,7 +327,7 @@ export function startDesktopUpdateLaunchNotice(): () => void {
         stackedThreadToast({
           type: "error",
           title: "Update did not apply",
-          description: `S5 Code is still on ${APP_VERSION}. Install ${notAppliedVersion} again from the update button.`,
+          description: `T3 Code is still on ${APP_VERSION}. Install ${notAppliedVersion} again from the update button.`,
         }),
       );
     },

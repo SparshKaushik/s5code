@@ -1,6 +1,6 @@
-# Running S5 Code in the background
+# Running T3 Code in the background
 
-On Linux and macOS, S5 Code can run as a service for your user so you do not need
+On Linux and macOS, T3 Code can run as a service for your user so you do not need
 to keep a terminal open.
 
 ## Manage the service

@@ -1,6 +1,6 @@
-# Install S5 Code
+# Install T3 Code
 
-S5 Code runs coding agents on your computer and lets you control them from its
+T3 Code runs coding agents on your computer and lets you control them from its
 desktop, web, or mobile app. Set up the machine where the agents will work first.
 
 ## Requirements
@@ -44,7 +44,7 @@ If `t3` or `t3 start` reports an already running server, connect to that server
 instead. Stop it before starting a replacement, or use a different `--base-dir`
 for an independent server.
 
-To try S5 Code once without installing it, run `npx t3@latest` instead (needs
+To try T3 Code once without installing it, run `npx t3@latest` instead (needs
 Node.js for `npx`).
 
 ### Intel Macs
@@ -190,14 +190,14 @@ on the environment's machine. An unlisted version is unverified.
 When a provider CLI is behind its latest release, its provider card shows the
 available version. **Update now** runs the installer that owns the CLI
 (Homebrew, or a global npm, pnpm, Yarn, Bun, Volta, or Vite+ install), or the
-CLI's own update command when S5 Code cannot tell. Update a CLI installed with
-mise through mise. Cursor and Antigravity update with S5 Code. Homebrew installs
+CLI's own update command when T3 Code cannot tell. Update a CLI installed with
+mise through mise. Cursor and Antigravity update with T3 Code. Homebrew installs
 compare against the version Homebrew offers, which can trail the npm release by
 a few hours.
 
 Add another provider instance for a separate account or configuration. Each
 instance can have its own environment variables, such as API keys or a custom
-base URL. Mark secret values as sensitive; after saving, S5 Code does not display
+base URL. Mark secret values as sensitive; after saving, T3 Code does not display
 their original values.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),

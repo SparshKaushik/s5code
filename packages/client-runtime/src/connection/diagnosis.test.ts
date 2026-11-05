@@ -90,7 +90,7 @@ describe("presentConnectionDiagnosis", () => {
 
   it("tells a working tunnel apart from S5 Code not answering", () => {
     expect(diagnose(backoff(unavailable("origin_unreachable")))?.headline).toBe(
-      "Tunnel works, but S5 Code on Mac mini did not answer",
+      "Tunnel works, but T3 Code on Mac mini did not answer",
     );
     expect(results(backoff(unavailable("origin_unreachable")), "direct")).toEqual([
       "device:ok",

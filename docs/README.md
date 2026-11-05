@@ -1,6 +1,6 @@
-# S5 Code docs
+# T3 Code docs
 
-## Using S5 Code
+## Using T3 Code
 
 - [Install T3 Code](./user/install.md)
 - [Messages and context](./user/composer.md)
@@ -29,7 +29,7 @@
 
 ---
 
-## Working on S5 Code
+## Working on T3 Code
 
 Start with the [development runbook](./operations/development.md) and
 [contribution policy](../CONTRIBUTING.md).
