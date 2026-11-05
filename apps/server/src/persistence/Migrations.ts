@@ -2,9 +2,6 @@ import * as Migrator from "effect/sql/Migrator";
 import * as Effect from "effect/Effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { reconcileV2PreviewMigration } from "./reconcileV2PreviewMigration.ts";
-import { reconcileForkMigrationHistory } from "./reconcileForkMigrationHistory.ts";
-import { ensureExpectedSchema } from "./SchemaEnsure.ts";
-import migrateLegacyOpenCode from "./LegacyOpenCodeMigration.ts";
 
 import Migration0001 from "./Migrations/001_OrchestrationEvents.ts";
 import Migration0002 from "./Migrations/002_OrchestrationCommandReceipts.ts";
@@ -212,33 +209,14 @@ export interface RunMigrationsOptions {
 export const runMigrations = Effect.fn("runMigrations")(function* ({
   toMigrationInclusive,
 }: RunMigrationsOptions = {}) {
-  const upgradingV2 =
+  const includesV2 =
     toMigrationInclusive === undefined || toMigrationInclusive >= FIRST_V2_MIGRATION_ID;
-  if (upgradingV2) yield* reconcileForkMigrationHistory();
-  const previewMigrations = upgradingV2 ? yield* reconcileV2PreviewMigration() : [];
-  // Heal the V1 schema and normalize S5's historical provider ids before the
-  // V2 importer sees them. Keep the released upstream migration numbering.
-  const legacyMigrations = upgradingV2 ? yield* run({ loader: makeMigrationLoader(54) }) : [];
-  const sql = yield* SqlClient.SqlClient;
-  if (upgradingV2) {
-    const v2History = yield* sql`
-      SELECT migration_id FROM effect_sql_migrations
-      WHERE migration_id = 55 AND name = 'OrchestrationV2'
-    `;
-    if (v2History.length === 0) {
-      yield* sql.withTransaction(
-        Effect.gen(function* () {
-          yield* ensureExpectedSchema();
-          yield* migrateLegacyOpenCode;
-        }),
-      );
-    }
-    // After S5's ledger is reconciled, so fork history does not read as a clash.
+  const previewMigrations = includesV2 ? yield* reconcileV2PreviewMigration() : [];
+  if (includesV2) {
     yield* assertV2MigrationsCanRun(toMigrationInclusive);
   }
   const executedMigrations = [
     ...previewMigrations,
-    ...legacyMigrations,
     ...(yield* run({ loader: makeMigrationLoader(toMigrationInclusive) })),
   ];
   const migrations = executedMigrations.map(([id, name]) => `${id}_${name}`);
@@ -246,10 +224,7 @@ export const runMigrations = Effect.fn("runMigrations")(function* ({
     ? Effect.logDebug("Database schema is current")
     : Effect.log("Migrations ran successfully").pipe(Effect.annotateLogs({ migrations }));
 
-  // The migrator keys on migration_id: a database that recorded a different
-  // migration under a shared id (local or fork builds) keeps that id and
-  // silently skips this build's migration at it. Surface the divergence so the
-  // skipped schema change is diagnosable.
+  const sql = yield* SqlClient.SqlClient;
   const recorded = yield* sql<{
     readonly migration_id: number;
     readonly name: string;

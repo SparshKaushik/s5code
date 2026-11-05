@@ -51,11 +51,12 @@ Conflicts fall into three buckets:
 
 The server's SQLite migrations live in
 `apps/server/src/persistence/Migrations/` and are keyed by a numeric ID in
-`Migrations.ts`. Released S5 databases have migration-ID collisions with
-upstream; the upgrade reconciles their ledger and heals the legacy schema
-before importing into V2. Do not shift upstream migration IDs to preserve an
-old fork ID: the migrator skips IDs already recorded, which can silently
-skip the V2 schema itself.
+`Migrations.ts`, and `Migrations.ts` matches upstream exactly. S5 releases
+before v0.2.41 recorded fork migrations under upstream's IDs; v0.2.41 through
+v0.2.63 reconcile that ledger on upgrade, and later releases no longer do, so
+older installs must update to v0.2.63 first. Never add a fork migration or shift
+an upstream ID: the migrator skips IDs already recorded, which can silently skip
+upstream's schema changes.
 
 The V2 upgrade snapshots `state.sqlite` into `statev2.sqlite` without
 migrating the original. Existing V2 state wins on subsequent launches.
@@ -69,8 +70,10 @@ do not collide; leave them alone.
 These are the things a sync must never regress. Grep for them after a merge:
 
 - **Rebrand** — `s5code://` scheme, `~/.s5code` home dir, `app.s5code.touchtech.club`,
-  self-hosted Clerk/relay URLs, "S5 Code" copy. Files: `apps/desktop`,
-  `apps/mobile/app.config.ts`, `apps/web/index.html`, `packages/shared/src/devHome.ts`.
+  self-hosted Clerk/relay URLs, and the app, package, bundle, and launcher names.
+  Body copy stays upstream's "T3 Code" so prose never conflicts. Files:
+  `apps/desktop`, `apps/mobile/app.config.ts`, `apps/web/index.html`,
+  `apps/web/src/branding.ts`, `packages/shared/src/devHome.ts`.
 - **Usage tags** — `UsageModelAlias`, `UsageCatalogModelId`, `userTagged` cost
   source, `pi`/`opencode` provider kinds, `UsagePricer`. Usage readers now live with their
   drivers in `packages/provider-pi` and `packages/provider-opencode`; preserve
