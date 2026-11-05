@@ -1,3 +1,4 @@
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import type { DesktopUpdateState } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
@@ -15,6 +16,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopAppSettings from "../settings/DesktopAppSettings.ts";
 import * as DesktopState from "../app/DesktopState.ts";
 import * as DesktopWindow from "../window/DesktopWindow.ts";
+import * as DesktopUpdatePolicy from "./DesktopUpdatePolicy.ts";
 import * as DesktopUpdates from "./DesktopUpdates.ts";
 import * as MacUnsignedUpdateInstall from "./MacUnsignedUpdateInstall.ts";
 
@@ -44,6 +46,7 @@ export interface UpdatesHarnessOptions {
   readonly platform?: NodeJS.Platform;
   readonly packageType?: string | undefined;
   readonly installRecord?: string | undefined;
+  readonly policy?: DesktopUpdatePolicy.UpdatePolicy;
   readonly appVersion?: string;
   /** Starts from in-memory settings with this track saved, as after a restart. */
   readonly savedChannel?: DesktopAppSettings.DesktopSettings["updateChannel"];
@@ -351,6 +354,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
 
   const layer = DesktopUpdates.layer.pipe(
     Layer.provide(layerFileSystem),
+    Layer.provide(DesktopUpdatePolicy.layerTest(options.policy)),
     Layer.provideMerge(layerUpdater),
     Layer.provideMerge(layerWindow),
     Layer.provideMerge(layerDesktopWindow),
@@ -368,7 +372,7 @@ export function makeHarness(options: UpdatesHarnessOptions = {}) {
       }),
     ),
     Layer.provideMerge(layerEnvironment),
-    Layer.provideMerge(NodeServices.layer),
+    Layer.provideMerge(Layer.mergeAll(NodeServices.layer, NodeCrypto.layer)),
   );
 
   return {

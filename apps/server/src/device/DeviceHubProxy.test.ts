@@ -8,7 +8,7 @@ import {
 } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
-import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import * as NodeWS from "@effect/platform-node/NodeWS";
 import { HttpClient, HttpClientResponse, HttpRouter } from "effect/http";
 import * as EnvironmentAuth from "../auth/EnvironmentAuth.ts";
 import type * as DeviceHost from "./DeviceHost.ts";
@@ -286,7 +286,7 @@ it.each(["/panel/2/stream.avcc", "/panel/1/webrtc/offer", "/panel/3/exec"])(
 
 describe("DeviceHubProxy upstream socket", () => {
   it("opens with the hub's auth headers", async () => {
-    const server = new NodeSocket.NodeWS.WebSocketServer({ port: 0, host: "127.0.0.1" });
+    const server = new NodeWS.WebSocketServer({ port: 0, host: "127.0.0.1" });
     await new Promise<void>((resolve) => server.once("listening", () => resolve()));
     const { port } = server.address() as { port: number };
     const authorization = new Promise<string | undefined>((resolve) =>

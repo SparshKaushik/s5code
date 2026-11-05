@@ -10,9 +10,9 @@ import { CLAUDE_SYNTHETIC_MODEL } from "../provider/Drivers/claudeUsage.ts";
 import { GUARD_LENGTH, type TranscriptParsePosition } from "./usageTranscriptReader.ts";
 
 // S5 cache versions: v6 adds gateway identity and estimated-token fields; v8,
-// v9 and v10 carry upstream v7, v8 and v9 reducer state respectively.
+// v9, v10 and v12 carry upstream v7, v8, v9 and v11 reducer state respectively.
 // Upstream rows have no gateway fields and still load.
-const USAGE_SCAN_CACHE_VERSION = 10 as const;
+const USAGE_SCAN_CACHE_VERSION = 12 as const;
 const SPEED_COMPATIBLE_SINCE_VERSION = 4;
 
 /**
@@ -21,8 +21,10 @@ const SPEED_COMPATIBLE_SINCE_VERSION = 4;
  * it, dropping saved usage for deleted transcripts. Separate files keep both.
  * Legacy upstream and S5 caches are imported when this version's file is missing.
  */
-export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v10.json";
+export const SCAN_CACHE_FILE_NAME = "usage-scan-cache-v12.json";
 export const LEGACY_SCAN_CACHE_FILE_NAMES = [
+  "usage-scan-cache-v11.json",
+  "usage-scan-cache-v10.json",
   "usage-scan-cache-v9.json",
   "usage-scan-cache-v8.json",
   "usage-scan-cache-v7.json",
@@ -344,27 +346,35 @@ export function decodeScanCache(
       continue;
     }
     // Keep history for deleted rollouts, but re-parse incompatible reducer state.
-    // S5 v4/v6, v8, v9 and v10 hold upstream v5, v7, v8 and v9 state. Pi entries
+    // S5 v4/v6, v8, v9, v10 and v12 hold upstream v5, v7, v8, v9 and v11 state. Pi entries
     // from before auxiliary usage support must re-read live transcripts too.
     const stateVersion =
       root.apiProviders === undefined
         ? version
-        : version >= 10
-          ? 9
-          : version >= 9
-            ? 8
-            : version >= 8
-              ? 7
-              : 5;
+        : version >= 12
+          ? 11
+          : version >= 10
+            ? 9
+            : version >= 9
+              ? 8
+              : version >= 8
+                ? 7
+                : 5;
+    // v9 and v11 repair skipped Codex requests; clean v8+ entries stay served while unchanged.
+    // v10 adds Claude advisor calls, which no older Claude entry holds.
     const legacy =
+      (entry.p === "claude" && stateVersion < 10) ||
       (format.state !== undefined &&
         (stateVersion < 6 ||
           (entry.p === "codex" &&
-            (stateVersion < 8 || (stateVersion < 9 && malformedRecords > 0))))) ||
+            (stateVersion < 8 || (stateVersion < 11 && malformedRecords > 0))))) ||
       (entry.p === "pi" && entry.pf !== 1);
     // A corrupt state disqualifies the entry: resuming with it would attach
     // appended usage to the wrong model or replay fork-copied history.
     if (!legacy && !isValidState.get(entry.p)?.(entry.cs)) continue;
+    // Before v11 a clean scan could end past an interrupted request whose usage its state dropped,
+    // so a grown file re-parses whole instead of resuming.
+    const resumable = !legacy && !(entry.p === "codex" && stateVersion < 11);
 
     const provider = entry.p;
     const records = decodeRecords(entry.r, provider);
@@ -378,14 +388,14 @@ export function decodeScanCache(
       records,
       tailRecords,
       malformedRecords,
-      position: legacy
-        ? { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null }
-        : {
+      position: resumable
+        ? {
             resumeOffset: entry.o,
             guardLength: entry.gl,
             guardHash: entry.gh,
             state: entry.cs,
-          },
+          }
+        : { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
     });
   }
 

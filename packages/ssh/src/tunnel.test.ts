@@ -1,11 +1,15 @@
 import { assert, describe, it } from "@effect/vitest";
+import * as NodeCrypto from "@effect/platform-node/NodeCrypto";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as NetService from "@t3tools/shared/Net";
 import * as Deferred from "effect/Deferred";
 import * as Duration from "effect/Duration";
 import * as Effect from "effect/Effect";
 import * as Fiber from "effect/Fiber";
+import * as FileSystem from "effect/FileSystem";
 import * as Layer from "effect/Layer";
+import * as Path from "effect/Path";
 import * as PlatformError from "effect/PlatformError";
 import * as Result from "effect/Result";
 import * as Sink from "effect/Sink";
@@ -15,7 +19,7 @@ import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import * as SshAuth from "./auth.ts";
-import { SshCommandError } from "./errors.ts";
+import { SshCommandError, SshPasswordPromptError } from "./errors.ts";
 import * as SshTunnel from "./tunnel.ts";
 
 const makeSuccessfulProcess = (stdout: string) => {
@@ -61,8 +65,16 @@ const makeRunningProcess = (onKill: () => void) => {
   });
 };
 
+// Like the standalone server binary, which ships no web client: `/` is unavailable.
 const testHttpClient = HttpClient.make((request) =>
-  Effect.succeed(HttpClientResponse.fromWeb(request, new Response("", { status: 200 }))),
+  Effect.succeed(
+    HttpClientResponse.fromWeb(
+      request,
+      new Response("", {
+        status: new URL(request.url).pathname === "/.well-known/t3/environment" ? 200 : 503,
+      }),
+    ),
+  ),
 );
 
 const hangingHttpClient = HttpClient.make(() => Effect.never);
@@ -76,10 +88,44 @@ const testNetService = NetService.NetService.of({
 });
 
 function commandArgs(command: ChildProcess.Command): ReadonlyArray<string> {
-  return command._tag === "StandardCommand" ? command.args : [];
+  return command._tag === "StandardCommand" ? command.args.map(String) : [];
 }
 
 const ARCHIVE = { archiveVersion: "1.2.3-preview.20260911.4" } as const;
+
+// Runs the remote half of each SSH command on this machine with `home` as $HOME,
+// so the generated scripts execute for real.
+const remoteOnLocalHost = (home: string) =>
+  Layer.effect(
+    ChildProcessSpawner.ChildProcessSpawner,
+    Effect.gen(function* () {
+      const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+      return ChildProcessSpawner.make((command) => {
+        const args = commandArgs(command);
+        const [shell = "sh", ...remoteArgs] = args.slice(args.indexOf("--") + 2);
+        return spawner.spawn(
+          ChildProcess.make(shell, remoteArgs, {
+            ...(command._tag === "StandardCommand" ? command.options : {}),
+            env: { HOME: home },
+            extendEnv: true,
+          }),
+        );
+      });
+    }),
+  ).pipe(Layer.provide(NodeServices.layer));
+
+// Stands in for an installed runtime: logs its arguments and reports a live
+// default-home server on port 4321 when the launcher asks for one.
+const FAKE_T3 = `#!/bin/sh
+printf '%s\\n' "$*" >>"$HOME/t3-calls"
+case "$1 $2" in
+  "--version "*) ;;
+  "__ssh-helper runtime-port") [ -f "$3" ] && printf '%s 4321' "$PPID" ;;
+  "__ssh-helper wait-ready") ;;
+  "auth pairing") printf '{"id":"p1","credential":"TOKEN","scopes":[],"expiresAt":"2026-01-01T00:00:00.000Z"}\\n' ;;
+  *) exit 1 ;;
+esac
+`;
 
 describe("ssh tunnel scripts", () => {
   it("rejects archive versions that are not a single exact version segment", () => {
@@ -119,7 +165,10 @@ describe("ssh tunnel scripts", () => {
       }),
     );
     const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
-    const layerProcess = Layer.merge(NodeServices.layer, layerSpawner);
+    const layerProcess = Layer.merge(
+      Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+      layerSpawner,
+    );
 
     return Effect.gen(function* () {
       const result = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, ARCHIVE);
@@ -127,6 +176,47 @@ describe("ssh tunnel scripts", () => {
       assert.deepEqual(spawnedCommands[0]?.slice(-5, -1), ["sh", "-l", "-s", "--"]);
     }).pipe(Effect.provide(layerProcess));
   });
+
+  it.live.skipIf(HostProcess.Platform.defaultValue() === "win32")(
+    "adopts and pairs with the server running from the server home",
+    () =>
+      Effect.gen(function* () {
+        const fs = yield* FileSystem.FileSystem;
+        const path = yield* Path.Path;
+        const home = yield* fs.makeTempDirectoryScoped({ prefix: "t3-ssh-home-" });
+        const serverHome = path.join(home, ".s5code");
+        const runtimeDir = path.join(serverHome, "runtime", "versions", ARCHIVE.archiveVersion);
+        yield* fs.makeDirectory(runtimeDir, { recursive: true });
+        yield* fs.makeDirectory(path.join(serverHome, "userdata"));
+        yield* fs.writeFileString(path.join(runtimeDir, "t3"), FAKE_T3, { mode: 0o755 });
+        yield* fs.writeFileString(
+          path.join(runtimeDir, ".install-complete"),
+          `${ARCHIVE.archiveVersion}\n`,
+        );
+        yield* fs.writeFileString(path.join(serverHome, "userdata", "server-runtime.json"), "{}");
+        // Unreachable, so a runtime looked up anywhere else fails instead of downloading.
+        const runner = { ...ARCHIVE, releaseBaseUrl: "http://127.0.0.1:9" };
+        const target = { alias: "devbox", hostname: "devbox", username: null, port: null };
+        const remote = Layer.mergeAll(
+          NodeServices.layer,
+          NodeCrypto.layer,
+          remoteOnLocalHost(home),
+        );
+
+        const launched = yield* SshTunnel.launchOrReuseRemoteServer(target, undefined, runner).pipe(
+          Effect.provide(remote),
+        );
+        const pairing = yield* SshTunnel.issueRemotePairingToken(target, undefined, runner).pipe(
+          Effect.provide(remote),
+        );
+
+        assert.deepEqual(launched, { remotePort: 4321, remoteServerKind: "external" });
+        assert.equal(pairing.credential, "TOKEN");
+        const calls = (yield* fs.readFileString(path.join(home, "t3-calls"))).split("\n");
+        assert.include(calls, `auth pairing create --base-dir ${serverHome} --json`);
+        assert.isFalse(calls.some((call) => call.startsWith("serve ")));
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
 
   it.effect("accepts pretty-printed pairing JSON after remote shell startup noise", () => {
     const target = {
@@ -149,7 +239,10 @@ describe("ssh tunnel scripts", () => {
       ),
     );
     const layerSpawner = Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner);
-    const layerProcess = Layer.merge(NodeServices.layer, layerSpawner);
+    const layerProcess = Layer.merge(
+      Layer.mergeAll(NodeServices.layer, NodeCrypto.layer),
+      layerSpawner,
+    );
     return Effect.gen(function* () {
       const result = yield* SshTunnel.issueRemotePairingToken(target, undefined, ARCHIVE);
       assert.equal(result.credential, "LCL4R2TPHDKQ");
@@ -175,6 +268,7 @@ describe("ssh tunnel scripts", () => {
       );
       const layer = Layer.mergeAll(
         NodeServices.layer,
+        NodeCrypto.layer,
         Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Layer.succeed(HttpClient.HttpClient, hangingHttpClient),
         Layer.succeed(NetService.NetService, testNetService),
@@ -232,6 +326,7 @@ describe("ssh tunnel scripts", () => {
       );
       const layer = Layer.mergeAll(
         NodeServices.layer,
+        NodeCrypto.layer,
         Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
         Layer.succeed(HttpClient.HttpClient, hangingHttpClient),
         Layer.succeed(NetService.NetService, testNetService),
@@ -254,6 +349,85 @@ describe("ssh tunnel scripts", () => {
           if (result.failure instanceof SshCommandError) {
             assert.equal(result.failure.exitCode, 255);
             assert.equal(result.failure.stderr, diagnostic);
+          }
+        }
+      }).pipe(Effect.provide(layer), Effect.scoped);
+    }),
+  );
+
+  it.effect.each([
+    {
+      name: "does not ask for a password when the agent cannot sign an accepted key",
+      stderr:
+        'sign_and_send_pubkey: signing failed for ED25519 "/home/julius/.ssh/id_ed25519" from agent: communication with agent failed\r\n' +
+        "julius@devbox: Permission denied (publickey,password).\r\n",
+      expectedPromptAttempts: [],
+    },
+    {
+      name: "asks for a password when signing failure has no agent provenance",
+      stderr:
+        'sign_and_send_pubkey: signing failed for ED25519-CERT "key-cert.pub": agent refused operation\n' +
+        "julius@devbox: Permission denied (publickey,password).\n",
+      expectedPromptAttempts: [1],
+    },
+    {
+      name: "asks for a password when the server rejects every key",
+      stderr: "julius@devbox: Permission denied (publickey,password).\r\n",
+      expectedPromptAttempts: [1],
+    },
+  ])("$name", ({ stderr, expectedPromptAttempts }) =>
+    Effect.gen(function* () {
+      const promptAttempts: Array<number> = [];
+      const spawner = ChildProcessSpawner.make((command) =>
+        Effect.succeed(
+          commandArgs(command).includes("-G")
+            ? makeSuccessfulProcess("")
+            : {
+                ...makeSuccessfulProcess(""),
+                exitCode: Effect.succeed(ChildProcessSpawner.ExitCode(255)),
+                stderr: Stream.make(new TextEncoder().encode(stderr)),
+              },
+        ),
+      );
+      const layer = Layer.mergeAll(
+        NodeServices.layer,
+        NodeCrypto.layer,
+        Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
+        Layer.succeed(HttpClient.HttpClient, testHttpClient),
+        Layer.succeed(NetService.NetService, testNetService),
+        Layer.succeed(
+          SshAuth.SshPasswordPrompt,
+          SshAuth.SshPasswordPrompt.of({
+            isAvailable: true,
+            request: (request) =>
+              Effect.sync(() => {
+                promptAttempts.push(request.attempt);
+                return null;
+              }),
+          }),
+        ),
+        SshTunnel.SshEnvironmentManager.layer({ resolveCliRunner: Effect.succeed(ARCHIVE) }),
+      );
+      yield* Effect.gen(function* () {
+        const manager = yield* SshTunnel.SshEnvironmentManager;
+        const result = yield* Effect.result(
+          manager.ensureEnvironment({
+            alias: "devbox",
+            hostname: "devbox",
+            username: null,
+            port: null,
+          }),
+        );
+        assert.isTrue(Result.isFailure(result));
+        assert.deepEqual(promptAttempts, expectedPromptAttempts);
+        if (Result.isFailure(result)) {
+          if (expectedPromptAttempts.length === 0) {
+            assert.instanceOf(result.failure, SshCommandError);
+            if (result.failure instanceof SshCommandError) {
+              assert.equal(result.failure.stderr, stderr);
+            }
+          } else {
+            assert.instanceOf(result.failure, SshPasswordPromptError);
           }
         }
       }).pipe(Effect.provide(layer), Effect.scoped);
@@ -322,6 +496,7 @@ describe("ssh tunnel scripts", () => {
         );
         const layer = Layer.mergeAll(
           NodeServices.layer,
+          NodeCrypto.layer,
           Layer.succeed(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Layer.succeed(HttpClient.HttpClient, testHttpClient),
           Layer.succeed(NetService.NetService, testNetService),

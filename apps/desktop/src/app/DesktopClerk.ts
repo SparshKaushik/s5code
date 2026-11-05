@@ -24,6 +24,7 @@ import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import { openClerkTokenStorage } from "./ClerkTokenStore.ts";
 import * as DesktopWebLinks from "./DesktopWebLinks.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
@@ -121,14 +122,19 @@ export const discardIncompatibleClerkTokens = Effect.fn("desktop.clerk.discardIn
 
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
-    const tokensPath = path.join(input.stateDir, CLERK_TOKENS_FILE);
+    // Tokens live in the private `clerk` directory; older installs kept them beside it.
+    const tokenPaths = [
+      path.join(input.stateDir, "clerk", CLERK_TOKENS_FILE),
+      path.join(input.stateDir, CLERK_TOKENS_FILE),
+    ];
     const instancePath = path.join(input.stateDir, CLERK_INSTANCE_FILE);
     const storedKey = yield* readStoredPublishableKey(instancePath);
     if (storedKey === publishableKey) {
       return;
     }
 
-    if (yield* fileSystem.exists(tokensPath)) {
+    for (const tokensPath of tokenPaths) {
+      if (!(yield* fileSystem.exists(tokensPath))) continue;
       yield* fileSystem.remove(tokensPath, { force: true });
       yield* Effect.log("Discarded Clerk tokens from a different Clerk instance").pipe(
         Effect.annotateLogs({ stateDir: input.stateDir }),
@@ -229,7 +235,13 @@ function installClerkDesktopOriginFilter(
   });
 }
 
-export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolean) {
+export function createDesktopClerkBridge(
+  stateDir: string,
+  isDevelopment: boolean,
+  userDataPath = ".",
+) {
+  const openStorage = () =>
+    openClerkTokenStorage(stateDir, (directory) => storage({ path: directory }), userDataPath);
   // main.ts registers scheme privileges before `ready`. Clerk re-registers the
   // scheme when `renderer` is passed, after `ready`, which throws and kills
   // startup, so suppress the duplicate.
@@ -242,7 +254,7 @@ export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolea
   ).protocol;
   if (typeof protocol?.registerSchemesAsPrivileged !== "function") {
     return createClerkBridge({
-      storage: storage({ path: stateDir }),
+      storage: openStorage(),
       manageSingleInstanceLock: false,
       passkeys: true,
       renderer: {
@@ -255,7 +267,7 @@ export function createDesktopClerkBridge(stateDir: string, isDevelopment: boolea
   protocol.registerSchemesAsPrivileged = () => undefined;
   try {
     return createClerkBridge({
-      storage: storage({ path: stateDir }),
+      storage: openStorage(),
       manageSingleInstanceLock: false,
       passkeys: true,
       renderer: {
@@ -324,7 +336,8 @@ export const make = Effect.gen(function* () {
 
   yield* Effect.acquireRelease(
     Effect.try({
-      try: () => createDesktopClerkBridge(environment.stateDir, environment.isDevelopment),
+      try: () =>
+        createDesktopClerkBridge(environment.stateDir, environment.isDevelopment, userDataPath),
       catch: (cause) =>
         new DesktopClerkBridgeInitializationError({
           stateDir: environment.stateDir,

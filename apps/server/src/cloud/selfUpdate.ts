@@ -21,17 +21,24 @@ import * as Stream from "effect/Stream";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
-import { CLI_RELEASE_BASE_URL_ENV, crossesReleaseTrack } from "@t3tools/shared/cliRelease";
+import {
+  CLI_RELEASE_BASE_URL_ENV,
+  cliReleaseChannelOf,
+  crossesReleaseTrack,
+} from "@t3tools/shared/cliRelease";
 
 import packageJson from "../../package.json" with { type: "json" };
 import * as ServerConfig from "../config.ts";
 import * as DesktopAppUpdate from "../desktopUpdate/DesktopAppUpdate.ts";
 import { databaseMigrationHead } from "../persistence/databaseMigrationHead.ts";
+import * as ManagedPolicy from "../policy/ManagedPolicy.ts";
+import { managedUpdateMirror, managedUpdateRefusal } from "../policy/managedUpdates.ts";
 import * as ProcessRunner from "../processRunner.ts";
 import { ServerBinaryRuntime } from "./binaryRuntime.ts";
 import { prepareServerBinaryUpdate, restartIntoServerBinary } from "./binaryUpdate.ts";
 import {
   ensurePinnedRuntimeInstalled,
+  isUnpublishedRelease,
   pinnedRuntimeCommand,
   PinnedRuntimeInstallError,
   pinnedRuntimePaths,
@@ -42,7 +49,8 @@ import { decodeServicePreflightResult } from "./servicePreflight.ts";
 import * as ServiceLauncherClient from "./serviceLauncherClient.ts";
 import { isExactServiceVersion, SERVICE_LAUNCHER_PROTOCOL } from "./serviceProtocol.ts";
 
-const PREFLIGHT_TIMEOUT = Duration.seconds(30);
+// A staged runtime's cold start can take over a minute on a loaded, swapping host.
+const PREFLIGHT_TIMEOUT = Duration.minutes(3);
 
 export function resolveServerSelfUpdateCapability(input: {
   readonly desktopManaged: boolean;
@@ -130,6 +138,7 @@ export function trackSwitchBlockReason(input: {
 export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const serverConfig = yield* ServerConfig.ServerConfig;
   const desktopAppUpdate = yield* DesktopAppUpdate.DesktopAppUpdate;
+  const policy = yield* ManagedPolicy.ManagedPolicy;
   const launcher = yield* ServiceLauncherClient.ServiceLauncherClient;
   const runner = yield* ProcessRunner.ProcessRunner;
   const fs = yield* FileSystem.FileSystem;
@@ -142,10 +151,11 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   // requirement-free signature.
   const httpClient = yield* HttpClient.HttpClient;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
-  // Archive-distributed targets download from GitHub Releases.
-  const releaseBaseUrl = Option.getOrUndefined(
-    yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option),
-  );
+  // Archive-distributed targets download from GitHub Releases unless a managed mirror replaces it.
+  const mirror = managedUpdateMirror(policy.document);
+  const releaseBaseUrl =
+    mirror?.feedUrl ??
+    Option.getOrUndefined(yield* Config.String(CLI_RELEASE_BASE_URL_ENV).pipe(Config.option));
   const inFlight = yield* Ref.make(false);
 
   yield* pruneRuntimesOnStart({ baseDir: serverConfig.baseDir, managed: launcher.managed }).pipe(
@@ -176,6 +186,13 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
   const update: ServerSelfUpdate["Service"]["update"] = Effect.fn(
     "cloud.server_self_update.update",
   )(function* (input, reportProgress = () => Effect.void, onHandoffAccepted = () => Effect.void) {
+    const policyRefusal = managedUpdateRefusal(
+      policy.document,
+      capability === "boot-service" ? cliReleaseChannelOf(input.targetVersion.trim()) : undefined,
+    );
+    if (policyRefusal !== undefined) {
+      return yield* failWith(policyRefusal);
+    }
     if (capability === "desktop-managed") {
       const unsafeCrossing = input.channel === undefined ? null : crossesTrackUnsafely(input);
       if (unsafeCrossing !== null) return yield* failWith(unsafeCrossing);
@@ -259,6 +276,7 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         platform,
         arch,
         releaseBaseUrl,
+        requirePublishedRelease: mirror !== undefined,
         validate: (runtime) =>
           runner
             .run({
@@ -332,7 +350,12 @@ export const make = Effect.fn("cloud.server_self_update.make")(function* () {
         Effect.mapError((error) =>
           error._tag === "PinnedRuntimePreflightBlockedError"
             ? failWith(error.reason, error)
-            : failWith(`Could not prepare t3@${targetVersion}.`, error),
+            : mirror !== undefined && isUnpublishedRelease(error)
+              ? failWith(
+                  `${mirror.organization}'s update mirror has no t3@${targetVersion} for this machine.`,
+                  error,
+                )
+              : failWith(`Could not prepare t3@${targetVersion}.`, error),
         ),
       );
 

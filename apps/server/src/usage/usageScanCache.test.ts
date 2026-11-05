@@ -267,7 +267,7 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(encoded, TEST_FORMAT_MAP)).toEqual(original);
   });
 
-  it.each([5, 6, 7, 8])(
+  it.each([5, 6, 7, 8, 10])(
     "retains v%s history and compatible positions but invalidates obsolete state",
     (version) => {
       const original = cacheWith([["/gone.jsonl", 100, [record({ speed: "fast" })]]]);
@@ -334,21 +334,25 @@ describe("scan cache round trip", () => {
       };
 
       const restored = decodeScanCache(JSON.parse(JSON.stringify(legacy)), TEST_FORMAT_MAP);
-      expect(restored.get("/gone.jsonl")).toEqual(original.get("/gone.jsonl"));
+      expect(restored.get("/gone.jsonl")).toEqual(
+        version >= 10
+          ? original.get("/gone.jsonl")
+          : {
+              ...original.get("/gone.jsonl"),
+              size: -1,
+              position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+            },
+      );
       expect(restored.get("/gone-codex.jsonl")).toEqual({
         ...original.get("/gone-codex.jsonl"),
         size: -1,
         position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
       });
-      expect(restored.get("/clean-codex.jsonl")).toEqual(
-        version >= 8
-          ? cleanCodex
-          : {
-              ...cleanCodex,
-              size: -1,
-              position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
-            },
-      );
+      expect(restored.get("/clean-codex.jsonl")).toEqual({
+        ...cleanCodex,
+        size: version >= 8 ? cleanCodex.size : -1,
+        position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+      });
       expect(restored.get("/gone-pi.jsonl")).toEqual(
         version >= 6
           ? original.get("/gone-pi.jsonl")
@@ -361,36 +365,56 @@ describe("scan cache round trip", () => {
     },
   );
 
-  it.each([6, 8, 9])("keeps S5 v%s gateway rows but reparses Codex state", (version) => {
-    const original = cacheWith([
-      ["/gone.jsonl", 100, [record({ apiProvider: "agentrouter", inputTokensEstimated: true })]],
-    ]);
-    original.set("/codex.jsonl", {
-      ...original.get("/gone.jsonl")!,
-      provider: "codex",
-      // S5 v9 holds upstream v8 state, which only resumes when parsing was clean.
-      malformedRecords: 1,
-      records: [record({ provider: "codex", apiProvider: "agentrouter", dedupeKey: null })],
-      position: position({
-        state: {
-          ...initialCodexScanState(),
-          model: "gpt-6-astra",
-          speed: "fast",
-          sessionId: "session-a",
-          lastUsageSignature: null,
-          sawSessionMeta: true,
-          suppressingForkCopies: false,
-          forkCopyAnchorMs: 0,
-        },
-      }),
-    });
-    const restored = decodeScanCache(
-      JSON.parse(JSON.stringify({ ...encodeScanCache(original), version })),
-      TEST_FORMAT_MAP,
-    );
-    expect(restored.get("/gone.jsonl")).toEqual(original.get("/gone.jsonl"));
-    expect(restored.get("/codex.jsonl")).toEqual({
-      ...original.get("/codex.jsonl"),
+  it.each([6, 8, 9, 10])(
+    "keeps S5 v%s gateway rows but reparses Codex and Claude state",
+    (version) => {
+      const original = cacheWith([
+        ["/gone.jsonl", 100, [record({ apiProvider: "agentrouter", inputTokensEstimated: true })]],
+      ]);
+      original.set("/codex.jsonl", {
+        ...original.get("/gone.jsonl")!,
+        provider: "codex",
+        // S5 v9 holds upstream v8 state, which only resumes when parsing was clean.
+        malformedRecords: 1,
+        records: [record({ provider: "codex", apiProvider: "agentrouter", dedupeKey: null })],
+        position: position({
+          state: {
+            ...initialCodexScanState(),
+            model: "gpt-6-astra",
+            speed: "fast",
+            sessionId: "session-a",
+            lastUsageSignature: null,
+            sawSessionMeta: true,
+            suppressingForkCopies: false,
+            forkCopyAnchorMs: 0,
+          },
+        }),
+      });
+      const restored = decodeScanCache(
+        JSON.parse(JSON.stringify({ ...encodeScanCache(original), version })),
+        TEST_FORMAT_MAP,
+      );
+      // Claude entries from before S5 v12 predate advisor usage, so live transcripts re-read too.
+      expect(restored.get("/gone.jsonl")).toEqual({
+        ...original.get("/gone.jsonl"),
+        size: -1,
+        position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+      });
+      expect(restored.get("/codex.jsonl")).toEqual({
+        ...original.get("/codex.jsonl"),
+        size: -1,
+        position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+      });
+    },
+  );
+
+  it("re-parses a Claude transcript cached before advisor usage was counted", () => {
+    const original = cacheWith([["/claude.jsonl", 100, [record()]]]);
+    const v9 = { ...JSON.parse(makeScanCacheWriter()(original, {})), version: 9 };
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(v9)), TEST_FORMAT_MAP);
+    expect(restored.get("/claude.jsonl")).toEqual({
+      ...original.get("/claude.jsonl"),
       size: -1,
       position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
     });

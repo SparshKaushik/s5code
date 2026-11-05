@@ -8,8 +8,9 @@ import * as KeyedLock from "@t3tools/shared/KeyedLock";
 import * as NetService from "@t3tools/shared/Net";
 import { extractJsonObject, fromLenientJson } from "@t3tools/shared/schemaJson";
 import { satisfiesSemverRange } from "@t3tools/shared/semver";
+import { SERVER_HOME_DIR_NAME } from "@t3tools/shared/serverHome";
 import * as Context from "effect/Context";
-import * as Crypto from "effect/Crypto";
+import * as Digest from "effect/crypto/Digest";
 import * as Effect from "effect/Effect";
 import * as Exit from "effect/Exit";
 import * as Fiber from "effect/Fiber";
@@ -60,6 +61,9 @@ const REMOTE_ARCHIVE_DOWNLOAD_SECONDS = 240;
 const REMOTE_ARCHIVE_LOCK_WAIT_SECONDS = 360;
 const REMOTE_ARCHIVE_LAUNCH_TIMEOUT_MS = 900_000;
 const REMOTE_REUSE_READY_TIMEOUT_MS = 2_000;
+const REMOTE_SERVER_HOME = `$HOME/${SERVER_HOME_DIR_NAME}`;
+// Not `/`: the standalone server binary ships without the web client, so `/` answers 503.
+const SERVER_READINESS_PATH = "/.well-known/t3/environment";
 
 export interface RemoteT3RunnerOptions {
   readonly nodeScriptPath?: string | null;
@@ -86,7 +90,7 @@ interface SshTunnelEntry {
 
 type SshEnvironmentEffectContext =
   | ChildProcessSpawner.ChildProcessSpawner
-  | Crypto.Crypto
+  | Digest.Digest
   | FileSystem.FileSystem
   | Path.Path
   | HttpClient.HttpClient
@@ -294,7 +298,7 @@ function probe() {
       {
         hostname: "127.0.0.1",
         port,
-        path: "/",
+        path: "${SERVER_READINESS_PATH}",
         timeout: probeTimeoutMs,
       },
       (response) => {
@@ -439,13 +443,13 @@ fi
 # Self-contained release archive: no Node, npm, or compiler on the remote.
 # Unpacked into the pinned-runtime layout so \`t3 service install\` reuses it.
 T3_RELEASE_BASE_URL=@@T3_RELEASE_BASE_URL@@
-T3_RUNTIME_DIR="$HOME/.t3/runtime/versions/$T3_ARCHIVE_VERSION"
+T3_RUNTIME_DIR="${REMOTE_SERVER_HOME}/runtime/versions/$T3_ARCHIVE_VERSION"
 t3_runtime_ready() {
   [ -x "$T3_RUNTIME_DIR/t3" ] && [ "$(cat "$T3_RUNTIME_DIR/.install-complete" 2>/dev/null)" = "$T3_ARCHIVE_VERSION" ]
 }
 if ! t3_runtime_ready; then
-  mkdir -p "$HOME/.t3/runtime/versions"
-  T3_LOCK="$HOME/.t3/runtime/versions/.$T3_ARCHIVE_VERSION.install.lock"
+  mkdir -p "${REMOTE_SERVER_HOME}/runtime/versions"
+  T3_LOCK="${REMOTE_SERVER_HOME}/runtime/versions/.$T3_ARCHIVE_VERSION.install.lock"
   # uutils mkdir can report success on EEXIST, so use shell noclobber.
   # An empty lock gets a short grace period for its owner to publish a PID.
   T3_LOCK_WAITED=0
@@ -475,10 +479,10 @@ if ! t3_runtime_ready; then
   trap 'rm -rf "$T3_LOCK"' EXIT
 fi
 if ! t3_runtime_ready; then
+  # Releases publish server archives for Linux only (release.yml \`server\` job).
   case "$(uname -s)" in
-    Darwin) T3_PLATFORM="darwin" ;;
     Linux) T3_PLATFORM="linux" ;;
-    *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -s)" >&2; exit 1 ;;
+    *) printf 'S5 Code publishes SSH server archives for Linux hosts only, not %s.\\n' "$(uname -s)" >&2; exit 1 ;;
   esac
   case "$(uname -m)" in
     arm64 | aarch64) T3_ARCH="arm64" ;;
@@ -486,7 +490,7 @@ if ! t3_runtime_ready; then
     *) printf 'Remote host %s has no t3 release archive.\\n' "$(uname -m)" >&2; exit 1 ;;
   esac
   T3_ARCHIVE="t3-$T3_ARCHIVE_VERSION-$T3_PLATFORM-$T3_ARCH.tar.gz"
-  T3_STAGING="$(mktemp -d "$HOME/.t3/runtime/versions/.staging-XXXXXX")"
+  T3_STAGING="$(mktemp -d "${REMOTE_SERVER_HOME}/runtime/versions/.staging-XXXXXX")"
   trap 'rm -rf "$T3_STAGING" "$T3_LOCK"' EXIT
   t3_fetch() {
     if command -v curl >/dev/null 2>&1; then curl -fsSL --connect-timeout 30 --max-time "$3" "$1" -o "$2"
@@ -526,8 +530,8 @@ exec "$T3_RUNTIME_DIR/t3" "$@"
 const REMOTE_LAUNCH_SCRIPT = `set -eu
 @@T3_NODE_ENV_SCRIPT@@
 STATE_KEY="$1"
-STATE_DIR="$HOME/.t3/ssh-launch/$STATE_KEY"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+STATE_DIR="${REMOTE_SERVER_HOME}/ssh-launch/$STATE_KEY"
+DEFAULT_SERVER_HOME="${REMOTE_SERVER_HOME}"
 DEFAULT_RUNTIME_FILE="$DEFAULT_SERVER_HOME/userdata/server-runtime.json"
 PORT_FILE="$STATE_DIR/port"
 PID_FILE="$STATE_DIR/pid"
@@ -723,8 +727,8 @@ printf '{"remotePort":%s,"serverKind":"%s"}\\n' "$REMOTE_PORT" "\${REMOTE_MANAGE
 `;
 
 const REMOTE_PAIRING_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
-DEFAULT_SERVER_HOME="$HOME/.t3"
+STATE_DIR="${REMOTE_SERVER_HOME}/ssh-launch/@@T3_STATE_KEY@@"
+DEFAULT_SERVER_HOME="${REMOTE_SERVER_HOME}"
 RUNNER_FILE="$STATE_DIR/run-t3.sh"
 mkdir -p "$STATE_DIR"
 cat >"$RUNNER_FILE" <<'SH'
@@ -736,7 +740,7 @@ PAIRING_BASE_DIR="$DEFAULT_SERVER_HOME"
 `;
 
 const REMOTE_STOP_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="${REMOTE_SERVER_HOME}/ssh-launch/@@T3_STATE_KEY@@"
 PID_FILE="$STATE_DIR/pid"
 PORT_FILE="$STATE_DIR/port"
 MANAGED_FILE="$STATE_DIR/managed"
@@ -759,7 +763,7 @@ printf '{"stopped":true}\\n'
 `;
 
 const REMOTE_LOG_TAIL_SCRIPT = `set -eu
-STATE_DIR="$HOME/.t3/ssh-launch/@@T3_STATE_KEY@@"
+STATE_DIR="${REMOTE_SERVER_HOME}/ssh-launch/@@T3_STATE_KEY@@"
 LOG_FILE="$STATE_DIR/server.log"
 if [ -f "$LOG_FILE" ]; then
   tail -n 80 "$LOG_FILE" 2>/dev/null || true
@@ -867,7 +871,7 @@ export const launchOrReuseRemoteServer = Effect.fn("ssh/tunnel.launchOrReuseRemo
   ): Effect.fn.Return<
     { readonly remotePort: number; readonly remoteServerKind: "external" | "managed" | null },
     SshCommandError | SshInvalidTargetError | SshLaunchError,
-    ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+    ChildProcessSpawner.ChildProcessSpawner | Digest.Digest | FileSystem.FileSystem | Path.Path
   > {
     const stateKey = yield* remoteStateKey(target);
     yield* Effect.logInfo("ssh.remoteServer.launch.start", {
@@ -929,7 +933,7 @@ export const issueRemotePairingToken = Effect.fn("ssh/tunnel.issueRemotePairingT
     readonly credential: string;
   },
   SshCommandError | SshInvalidTargetError | SshPairingError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner | Digest.Digest | FileSystem.FileSystem | Path.Path
 > {
   const stateKey = yield* remoteStateKey(target);
   yield* Effect.logDebug("ssh.remoteServer.pairingToken.start", {
@@ -981,7 +985,7 @@ const stopRemoteServer = Effect.fn("ssh/tunnel.stopRemoteServer")(function* (
 ): Effect.fn.Return<
   void,
   SshCommandError | SshInvalidTargetError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner | Digest.Digest | FileSystem.FileSystem | Path.Path
 > {
   const stateKey = yield* remoteStateKey(target);
   yield* Effect.logInfo("ssh.remoteServer.stop.start", {
@@ -1007,7 +1011,7 @@ const readRemoteServerLogTail = Effect.fn("ssh/tunnel.readRemoteServerLogTail")(
 ): Effect.fn.Return<
   string,
   SshCommandError | SshInvalidTargetError,
-  ChildProcessSpawner.ChildProcessSpawner | Crypto.Crypto | FileSystem.FileSystem | Path.Path
+  ChildProcessSpawner.ChildProcessSpawner | Digest.Digest | FileSystem.FileSystem | Path.Path
 > {
   const result = yield* runSshCommand(target, {
     remoteCommandArgs: ["sh", "-s"],
@@ -1025,11 +1029,10 @@ const waitForHttpReady = (input: {
   readonly timeoutMs?: number;
   readonly intervalMs?: number;
   readonly probeTimeoutMs?: number;
-  readonly path?: string;
 }): Effect.Effect<void, SshReadinessError, HttpClient.HttpClient> =>
   waitForHttpReadyShared({
     baseUrl: input.baseUrl,
-    ...(input.path === undefined ? {} : { path: input.path }),
+    path: SERVER_READINESS_PATH,
     ...(input.timeoutMs === undefined ? {} : { timeoutMs: input.timeoutMs }),
     ...(input.intervalMs === undefined ? {} : { intervalMs: input.intervalMs }),
     probeTimeoutMs: input.probeTimeoutMs ?? SSH_READY_PROBE_TIMEOUT_MS,
@@ -1110,7 +1113,7 @@ const startSshTunnel = Effect.fn("ssh/tunnel.startSshTunnel")(function* (input: 
   SshTunnelEntry,
   SshCommandError | SshInvalidTargetError | SshReadinessError,
   | ChildProcessSpawner.ChildProcessSpawner
-  | Crypto.Crypto
+  | Digest.Digest
   | FileSystem.FileSystem
   | Path.Path
   | HttpClient.HttpClient
@@ -1454,7 +1457,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
       if (input.authSecret !== null) {
         authSecrets.delete(input.key);
       }
-      if (input.promptCount >= 2) {
+      if (input.promptCount >= 2 || SshAuth.isSshAgentSigningFailure(input.error)) {
         return yield* input.error;
       }
 
@@ -1555,7 +1558,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
     );
     tunnels.set(input.key, tunnelEntry);
     const spawnerService = yield* ChildProcessSpawner.ChildProcessSpawner;
-    const cryptoService = yield* Crypto.Crypto;
+    const digestService = yield* Digest.Digest;
     const fileSystemService = yield* FileSystem.FileSystem;
     const pathService = yield* Path.Path;
     yield* Scope.addFinalizer(
@@ -1595,7 +1598,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
               },
         ).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawnerService),
-          Effect.provideService(Crypto.Crypto, cryptoService),
+          Effect.provideService(Digest.Digest, digestService),
           Effect.provideService(FileSystem.FileSystem, fileSystemService),
           Effect.provideService(Path.Path, pathService),
         );
@@ -1778,7 +1781,7 @@ const makeSshEnvironmentManager = Effect.fn("ssh/tunnel.SshEnvironmentManager.ma
 });
 
 /**
- * @effect-expect-leaking ChildProcessSpawner | Crypto | FileSystem | HttpClient | NetService | Path | SshPasswordPrompt
+ * @effect-expect-leaking ChildProcessSpawner | Digest | FileSystem | HttpClient | NetService | Path | SshPasswordPrompt
  */
 export class SshEnvironmentManager extends Context.Service<
   SshEnvironmentManager,

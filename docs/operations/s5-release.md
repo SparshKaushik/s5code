@@ -32,7 +32,7 @@ This document covers the unified release workflow for stable and nightly desktop
 - Builds the desktop app for Apple Silicon only, as one job (`desktop_mac_arm64`, a call of
   `release-desktop.yml`) gated on the JS bundle: a macOS `arm64` DMG plus its zip and updater
   metadata. The fork ships no Windows, Linux, or Intel desktop builds.
-- Builds self-updating Linux server binaries (`s5code-server-<version>-linux-<arch>`) on matching-arch runners; the binary self-update path in `apps/server/src/cloud/selfUpdate.ts` downloads them from the release. The fork does not ship upstream's `t3-<version>-<platform>` CLI archives or `SHA256SUMS`; the launcher-managed `boot-service` update path that consumes them is not usable on this repo's releases.
+- Builds self-updating Linux server binaries (`s5code-server-<version>-linux-<arch>`) on matching-arch runners; the binary self-update path in `apps/server/src/cloud/selfUpdate.ts` downloads them from the release. The same binary, renamed `t3` inside `t3-<version>-linux-<arch>.tar.gz`, is published as the Linux CLI archive, with `SHA256SUMS` covering the archives and binaries. No macOS or Windows CLI archives are built.
 - Reconciles the Android mobile release through EAS:
   - if the current native fingerprint matches the fingerprint recorded on the previous GitHub Release, publishes an OTA update reusing that release's mobile version
   - otherwise, injects the unified release version, builds a new Android APK locally on the runner (`eas build --local`, signed with EAS-managed remote credentials but not run on EAS's cloud queue), and attaches it as `s5code-<version>.apk` alongside a `fingerprint.txt` recording the native fingerprint it was built from
@@ -270,15 +270,14 @@ Connected servers update to the client's exact version. Every released client ve
 therefore carry matching server runtime assets on the GitHub Release before users can receive
 that client.
 
-The fork ships one server runtime form on every release:
+Every release ships the Bun-compiled server in two packagings:
 
-- `s5code-server-<version>-linux-<arch>` Bun-compiled binaries for the fork's binary self-update
-  path in `apps/server/src/cloud/selfUpdate.ts`.
-
-Upstream's `t3-<version>-<platform>` CLI archives and `SHA256SUMS` are intentionally not produced:
-the fork ships no npm/SEA CLI distribution, so the archive-consuming paths (`t3 update`, the
-launcher-managed `boot-service` update, `scripts/install.sh`/`install.ps1`, SSH/WSL remote
-runtimes) do not work against this repo's releases.
+- `s5code-server-<version>-linux-<arch>` binaries for the fork's binary self-update path in
+  `apps/server/src/cloud/selfUpdate.ts`.
+- `t3-<version>-linux-<arch>.tar.gz`, the same binary packaged as `t3` in the layout
+  `cliArchiveFileName` (`packages/shared/src/cliRelease.ts`) expects, plus `SHA256SUMS`. These feed
+  `scripts/install.sh` and SSH environments. Upstream's SEA archives are not built, so there are no
+  macOS or Windows CLI archives.
 
 The `release` job waits on every build job (desktop, server, mobile) before publishing, so no
 release can exist with a client version whose server assets are missing. Preserve that dependency

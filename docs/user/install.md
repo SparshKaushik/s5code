@@ -14,7 +14,7 @@ launch T3 Code and configure providers afterwards.
 curl -fsSL https://t3.codes/install.sh | sh
 ```
 
-This starts the S5 Code server on your machine and opens the local web app.
+This starts the T3 Code server on your machine and opens the local web app.
 
 On Windows, in PowerShell:
 
@@ -31,6 +31,7 @@ line to add. Set `T3CODE_CHANNEL=nightly` to install the nightly train, or
 | ------------------------------------------------ | ----------------------------------------------------------------------- |
 | Start the server and open the web app            | `t3`                                                                    |
 | Start the server without a browser               | `t3 serve`                                                              |
+| Use it from your other devices                   | `t3 up` ([details](./remote-access.md))                                 |
 | Keep it running in the background (macOS, Linux) | `t3 service install` ([details](./background-service.md))               |
 | Move to the newest release                       | `t3 update`                                                             |
 | Reclaim database space                           | `t3 doctor` ([details](./background-service.md#reclaim-database-space)) |
@@ -169,6 +170,7 @@ computer.
 | Claude      | Install [Claude Code](https://claude.com/product/claude-code), then run `claude auth login`.                                                              |
 | Cursor      | Install [Cursor CLI](https://cursor.com/cli), then run `agent login`.                                                                                     |
 | Grok Build  | Install [Grok Build CLI](https://x.ai/cli), then run `grok login`.                                                                                        |
+| Kiro        | Install [Kiro CLI](https://kiro.dev/docs/cli/), then run `kiro-cli login`.                                                                                |
 | OpenCode    | Install [OpenCode](https://opencode.ai), then run `opencode auth login`.                                                                                  |
 | Antigravity | Install and sign in with Google from T3 Code's provider settings.                                                                                         |
 | Pi          | Install [Pi](./providers-pi.md#set-up-pi) with Node.js 22.19 or newer, then run `pi` and `/login`.                                                        |
@@ -191,9 +193,10 @@ When a provider CLI is behind its latest release, its provider card shows the
 available version. **Update now** runs the installer that owns the CLI
 (Homebrew, or a global npm, pnpm, Yarn, Bun, Volta, or Vite+ install), or the
 CLI's own update command when T3 Code cannot tell. Update a CLI installed with
-mise through mise. Cursor and Antigravity update with T3 Code. Homebrew installs
-compare against the version Homebrew offers, which can trail the npm release by
-a few hours.
+mise through mise. Cursor and Antigravity update with T3 Code. Homebrew and
+Chocolatey installs compare against the version their package manager offers,
+which can trail the npm release; update Claude installed with Chocolatey
+through Chocolatey.
 
 Add another provider instance for a separate account or configuration. Each
 instance can have its own environment variables, such as API keys or a custom
@@ -202,8 +205,8 @@ their original values.
 
 For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 [Claude](./providers-claude.md), [OpenCode](./providers-opencode.md),
-[Antigravity](./providers-antigravity.md), [Pi](./providers-pi.md),
-[Muse Code](./providers-muse.md), and [fx](./providers-fx.md).
+[Antigravity](./providers-antigravity.md), [Kiro](./providers-kiro.md),
+[Pi](./providers-pi.md), [Muse Code](./providers-muse.md), and [fx](./providers-fx.md).
 
 ## Next steps
 
@@ -211,4 +214,5 @@ For provider-specific setup and accounts, see [Codex](./providers-codex.md),
 - [Permission modes](./permission-modes.md): choose when agents ask before acting.
 - [Remote access](./remote-access.md): connect from another device.
 - [Running in the background](./background-service.md): keep a Linux or macOS host available.
-- [Keeping S5 Code in sync](./updating.md): update the app and connected servers.
+- [Keeping T3 Code in sync](./updating.md): update the app and connected servers.
+- [Managed policy](./managed-policy.md): configure T3 Code for everyone on a machine.

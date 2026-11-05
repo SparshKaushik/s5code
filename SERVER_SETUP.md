@@ -215,7 +215,7 @@ cd ~/s5code && git checkout main
 
 Create `~/s5code/.env` with the **official** public identifiers — the same values baked
 into the upstream `t3` package and this fork's release workflow
-(`.github/workflows/release.yml`, job `relay_public_config`). These are **public,
+(`.github/workflows/s5-release.yml`, job `relay_public_config`). These are **public,
 not secrets**:
 
 ```dotenv

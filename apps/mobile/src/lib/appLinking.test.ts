@@ -21,6 +21,7 @@ describe("shouldHandleAppLink", () => {
     "s5code://threads/env-1/thread-1",
     "s5code://pair?pairingUrl=x",
     "s5code-dev://settings/usage?tab=limits",
+    "https://app.s5code.touchtech.club/threads/env/thread?prompt=Fix%20expo-development-client%20and%20s5code://expo-sharing",
   ])("handles path-bearing URL %s", (url) => {
     expect(shouldHandleAppLink(url, true)).toBe(true);
   });
