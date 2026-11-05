@@ -21,6 +21,10 @@ on:
         required: false
       MACOS_PROVISIONING_PROFILE:
         required: false
+      MACOS_SELF_SIGN_P12:
+        required: false
+      MACOS_SELF_SIGN_P12_PASSWORD:
+        required: false
       AZURE_TENANT_ID:
         required: false
       AZURE_CLIENT_ID:
@@ -527,6 +531,41 @@ jobs:
           name: cli-linux-${{ inputs.arch }}
           path: wsl-runtime
 
+      # Without a Developer ID, a stable self-signed certificate keeps macOS
+      # privacy permissions across updates. Ad hoc builds lose them each time.
+      - name: Import self-signed macOS signing identity
+        if: inputs.platform == 'mac'
+        shell: bash
+        env:
+          MACOS_SELF_SIGN_P12: ${{ secrets.MACOS_SELF_SIGN_P12 }}
+          MACOS_SELF_SIGN_P12_PASSWORD: ${{ secrets.MACOS_SELF_SIGN_P12_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "$MACOS_SELF_SIGN_P12" ]]; then
+            echo "No self-signed macOS identity; builds without a Developer ID are signed ad hoc."
+            exit 0
+          fi
+          keychain="$RUNNER_TEMP/self-sign.keychain-db"
+          keychain_password="$(openssl rand -hex 16)"
+          echo "::add-mask::$keychain_password"
+          cert_path="$RUNNER_TEMP/self-sign.p12"
+          printf '%s' "$MACOS_SELF_SIGN_P12" | base64 --decode > "$cert_path"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$cert_path" -k "$keychain" -P "$MACOS_SELF_SIGN_P12_PASSWORD" -T /usr/bin/codesign
+          rm -f "$cert_path"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" >/dev/null
+          security list-keychains -d user -s "$keychain" $(security list-keychains -d user | tr -d '"')
+          # The certificate is untrusted, so codesign takes it by SHA-1, not by name.
+          identity="$(security find-certificate -a -Z "$keychain" | awk '/^SHA-1 hash:/ {print $3; exit}')"
+          if [[ -z "$identity" ]]; then
+            echo "MACOS_SELF_SIGN_P12 holds no certificate." >&2
+            exit 1
+          fi
+          echo "T3CODE_MACOS_SELF_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+          echo "macOS self-signed identity imported."
+
       - name: Build desktop artifact
         shell: bash
         env:
@@ -649,6 +688,8 @@ jobs:
             hdiutil attach -nobrowse -readonly -mountpoint "$mount" "$(ls "$GITHUB_WORKSPACE"/release/*.dmg)"
             trap 'hdiutil detach "$mount" -force >/dev/null || true' EXIT
             app=$(ls -d "$mount"/*.app)
+            codesign --verify --deep --strict --verbose=2 "$app"
+            codesign --display --requirements - "$app"
             executable=$(/usr/libexec/PlistBuddy -c "Print :CFBundleExecutable" "$app/Contents/Info.plist")
             "${check[@]}" --executable "$app/Contents/MacOS/$executable"
           else

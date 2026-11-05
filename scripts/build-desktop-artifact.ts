@@ -2858,7 +2858,11 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
           role: "Viewer",
         },
       ],
-      ...(signed ? { sign: path.join(repoRoot, "scripts/sign-macos.ts") } : {}),
+      sign: path.join(repoRoot, "scripts/sign-macos.ts"),
+      // Without a Developer ID, sign ad hoc or with the self-signed identity
+      // scripts/sign-macos.ts picks up, instead of shipping Electron's stock
+      // signature. No hardened runtime: nothing is notarized on this path.
+      ...(signed ? {} : { identity: "-", hardenedRuntime: false }),
       ...(macPasskeySigning
         ? {
             entitlements: macPasskeySigning.entitlementsPath,
