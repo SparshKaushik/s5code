@@ -6,7 +6,7 @@
 import {
   DeviceHostId,
   type OrchestrationV2TurnItem,
-  type SimlockDeviceHostConfig,
+  SimlockDeviceHostConfig,
   type ThreadId,
 } from "@t3tools/contracts";
 import * as Clock from "effect/Clock";
@@ -21,6 +21,8 @@ import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "./DeviceService.ts";
+
+const sameHosts = Schema.toEquivalence(Schema.Array(SimlockDeviceHostConfig));
 
 const receiptPattern =
   /\[simbox-device:([a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})\]/g;
@@ -157,7 +159,7 @@ const make = Effect.gen(function* () {
       Effect.gen(function* () {
         const current = yield* settings.getSettings;
         const next = change(current.simlockDeviceHosts);
-        if (JSON.stringify(next) === JSON.stringify(current.simlockDeviceHosts)) return;
+        if (sameHosts(next, current.simlockDeviceHosts)) return;
         yield* settings.updateSettings({ simlockDeviceHosts: next });
       }),
     );
