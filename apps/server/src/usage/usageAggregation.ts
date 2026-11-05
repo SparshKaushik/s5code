@@ -175,13 +175,13 @@ export class UsageAggregator {
       hourIndex,
       record.provider,
       record.model,
-      record.apiProvider,
+      record.apiProvider ?? "",
       sourcePath ?? "",
     );
 
     const priced = this.#options.pricer.price(record);
 
-    bucket.inputTokensEstimated ||= record.inputTokensEstimated;
+    bucket.inputTokensEstimated ||= record.inputTokensEstimated === true;
     const totals = bucket.totals;
     totals.uncachedInputTokens += record.totals.uncachedInputTokens;
     totals.cachedInputTokens += record.totals.cachedInputTokens;

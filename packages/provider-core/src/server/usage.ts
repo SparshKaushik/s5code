@@ -15,10 +15,10 @@ export interface UsageRecord {
   readonly provider: UsageProviderKind;
   readonly timestampMs: number;
   readonly model: string;
-  /** Gateway identity for provider-scoped catalog pricing; empty for direct vendors. */
-  readonly apiProvider: string;
+  /** Gateway identity for provider-scoped catalog pricing; absent for direct vendors. */
+  readonly apiProvider?: string;
   /** Input/cache counts estimated from context rather than billed token metrics. */
-  readonly inputTokensEstimated: boolean;
+  readonly inputTokensEstimated?: boolean;
   /**
    * Rate-table key when the provider's display name carries tiers the table
    * does not know, such as Cursor's `claude-opus-5-5-high`. Defaults to `model`.

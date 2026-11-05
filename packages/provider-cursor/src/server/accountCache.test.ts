@@ -7,8 +7,6 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 const record = (timestampMs: number): UsageRecord => ({
   provider: "cursor",
-  apiProvider: "",
-  inputTokensEstimated: false,
   timestampMs,
   model: "claude-fable-5",
   sessionId: "conversation-1",

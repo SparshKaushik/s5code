@@ -131,8 +131,8 @@ function serializeFile(entry: CachedFile, tables: InternTables): SerializedFile 
     record.dedupeKey,
     record.reportedCostUsd,
     SPEEDS.indexOf(record.speed),
-    record.inputTokensEstimated,
-    intern(tables.apiProviders, tables.apiProviderIndex, record.apiProvider),
+    record.inputTokensEstimated === true,
+    intern(tables.apiProviders, tables.apiProviderIndex, record.apiProvider ?? ""),
     record.rateModel === undefined
       ? null
       : intern(tables.models, tables.modelIndex, record.rateModel),

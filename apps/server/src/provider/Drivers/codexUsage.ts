@@ -279,8 +279,6 @@ function parseCodexRecord(parsed: unknown, state: CodexScanState): UsageRecord |
 
   return {
     provider: "codex",
-    apiProvider: "",
-    inputTokensEstimated: false,
     timestampMs,
     model: state.model,
     sessionId: state.sessionId,

@@ -187,8 +187,6 @@ export function decodeCursorAccountCaches(document: unknown): Map<string, Cursor
     }
     return {
       provider: "cursor",
-      apiProvider: "",
-      inputTokensEstimated: false,
       timestampMs,
       model,
       rateModel: cursorRateModel(model),

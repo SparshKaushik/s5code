@@ -363,14 +363,14 @@ export class UsagePricer {
     }
 
     const tagged = this.#aliasEntries.get(
-      modelAliasKey(record.provider, record.apiProvider, record.model),
+      modelAliasKey(record.provider, record.apiProvider ?? "", record.model),
     );
     if (tagged !== undefined) {
       return { rate: tagged.rate, source: "userTagged", pricedAs: tagged.id };
     }
 
     if (record.provider === "pi" || record.provider === "opencode") {
-      const entry = resolveModelRate(this.#catalog, record.apiProvider, record.model);
+      const entry = resolveModelRate(this.#catalog, record.apiProvider ?? "", record.model);
       return entry === null
         ? null
         : { rate: entry.rate, source: "modelPriced", pricedAs: entry.id };

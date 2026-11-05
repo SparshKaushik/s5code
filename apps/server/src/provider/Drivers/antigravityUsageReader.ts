@@ -300,8 +300,6 @@ function usageCandidates(
         });
         const record: UsageRecord = {
           provider: "antigravity",
-          apiProvider: "",
-          inputTokensEstimated: false,
           sessionId,
           timestampMs: entry.timestampMs ?? trajectoryTimestamp ?? fallbackTimestamp,
           model:

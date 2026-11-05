@@ -129,8 +129,6 @@ function parseGrokRecord(parsed: unknown): readonly UsageRecord[] {
     return [
       {
         provider: "grok",
-        apiProvider: "",
-        inputTokensEstimated: false,
         timestampMs,
         model: "grok",
         sessionId,
@@ -170,8 +168,6 @@ function parseGrokRecord(parsed: unknown): readonly UsageRecord[] {
 
     results.push({
       provider: "grok",
-      apiProvider: "",
-      inputTokensEstimated: false,
       timestampMs,
       model: entry.model,
       sessionId,

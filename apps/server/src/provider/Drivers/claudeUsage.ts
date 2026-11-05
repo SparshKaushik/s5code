@@ -59,8 +59,6 @@ function parseClaudeRecord(parsed: unknown): UsageRecord | null {
 
   return {
     provider: "claude",
-    apiProvider: "",
-    inputTokensEstimated: false,
     timestampMs,
     model,
     sessionId: typeof record["sessionId"] === "string" ? record["sessionId"] : "",
