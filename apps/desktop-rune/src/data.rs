@@ -64,6 +64,10 @@ pub fn fixture_state() -> State {
         state.shell_ready = true;
     }
     state.config = read_json(&dir.join("config.json"));
+    // `vcs.json`: cwd -> `{local, remote}`, as the `subscribeVcsStatus` stream folds into `State::vcs`.
+    if let Some(Value::Object(vcs)) = read_json(&dir.join("vcs.json")) {
+        state.vcs = vcs.into_iter().collect();
+    }
     if let Ok(entries) = std::fs::read_dir(dir.join("threads")) {
         for entry in entries.flatten() {
             if let Some(projection) = read_json(&entry.path()) {
