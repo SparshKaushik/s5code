@@ -502,7 +502,7 @@ fn browser_view(app: &App, t: &T) -> El {
             .on_key(|s: &mut App, e, _| {
                 let cmd = match &e.key {
                     Key::Text(v) => browser::Cmd::Text(v.clone()),
-                    Key::Return => browser::Cmd::Key("Enter"),
+                    Key::Enter => browser::Cmd::Key("Enter"),
                     Key::Backspace => browser::Cmd::Key("Backspace"),
                     Key::Tab => browser::Cmd::Key("Tab"),
                     Key::Left => browser::Cmd::Key("ArrowLeft"),

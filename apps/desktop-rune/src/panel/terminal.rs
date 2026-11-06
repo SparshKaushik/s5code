@@ -339,7 +339,7 @@ fn key(app: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
                 v.clone()
             }
         }
-        Key::Return => "\r".into(),
+        Key::Enter => "\r".into(),
         Key::Backspace => "\x7f".into(),
         Key::Tab => "\t".into(),
         Key::Escape => "\x1b".into(),
