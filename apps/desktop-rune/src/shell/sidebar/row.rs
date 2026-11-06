@@ -158,14 +158,19 @@ fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
             s.ui.shell.sidebar.menu = Some(super::menu::Menu::new(mid.clone(), at.x, at.y));
         })
+        .on_double_press({
+            let id = th.id.clone();
+            move |s: &mut App| super::start_rename(s, &id)
+        })
         .on_key({
             let id = th.id.clone();
             move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
-                if e.key == rune::Key::Enter {
-                    super::open_thread(s, &id);
-                    return true;
+                match e.key {
+                    rune::Key::Enter => super::open_thread(s, &id),
+                    rune::Key::Function(2) => super::start_rename(s, &id),
+                    _ => return false,
                 }
-                false
+                true
             }
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
@@ -250,6 +255,35 @@ fn surface(e: El, t: &T, active: bool, selected: bool, hovered: bool, dragging: 
     }
 }
 
+/// The row title, or ThreadRenameInput while it is being renamed: Enter commits, Escape cancels.
+fn title(s: &App, th: &Thread, t: &T, font: rune::TextStyle, color: rune::Color) -> El {
+    let Some((_, edit)) = s.ui.shell.sidebar.rename.as_ref().filter(|(id, _)| *id == th.id) else {
+        return text(th.title.clone()).font(font).color(color).truncate().grow(1.0).shrink();
+    };
+    rune::text_input(edit, theme::SM_MEDIUM)
+        .key("sb-rename")
+        .label("Thread title")
+        .single_line()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .px(4.0)
+        .radius(theme::radius::SM)
+        .fill(t.c.card)
+        .border(1.0, t.c.foreground)
+        .color(t.c.card_foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .on_edit(|s: &mut App| &mut s.ui.shell.sidebar.rename.get_or_insert_with(|| (String::new(), rune::TextEdit::default())).1)
+        .on_submit(|s: &mut App, _| super::commit_rename(s))
+        .on_input_key(|s: &mut App, e, _| {
+            if e.key == rune::Key::Escape {
+                s.ui.shell.sidebar.rename = None;
+                return true;
+            }
+            false
+        })
+}
+
 fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     let ui = &s.ui.shell.sidebar;
     let active = model.route.as_deref() == Some(th.id.as_str());
@@ -303,14 +337,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
 
     let provider = provider_icon(t, model, th, row_text);
-    let mut line2 = row().mt(4.0).gap(6.0).center_y().child(
-        text(th.title.clone())
-            .font(if receded { theme::TEXT_SM } else { theme::SM_MEDIUM })
-            .color(title_color)
-            .truncate()
-            .grow(1.0)
-            .shrink(),
-    );
+    let mut line2 = row().mt(4.0).gap(6.0).center_y().child(title(s, th, t, if receded { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color));
     let mut body = col().px(10.0).py(8.0).child(line1);
     match &th.branch {
         Some(branch) => {
@@ -377,7 +404,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         .gap(10.0)
         .center_y()
         .child(monogram(t, model.project(th), !(hovered || (active && !settled))))
-        .child(text(th.title.clone()).font(theme::TEXT_SM).color(title_color).truncate().grow(1.0).shrink());
+        .child(title(s, th, t, theme::TEXT_SM, title_color));
     if th.pinned {
         r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
     }

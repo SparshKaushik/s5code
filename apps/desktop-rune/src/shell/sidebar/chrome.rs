@@ -110,10 +110,39 @@ pub fn search_bar(s: &App, t: &T) -> El {
         .child(bar)
         .child(
             row()
-                .child(icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, false))
+                .child(icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(|s: &mut App| s.ui.shell.sidebar.scope_open ^= true))
                 .child(icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false))
                 .child(icon_button(t, "sb-new-thread", &i::SQUARE_PEN, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::new_thread)),
         )
+}
+
+/// The project scope picker under the filter button: all projects, or any set of them.
+pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
+    let ui = &s.ui.shell.sidebar;
+    if !ui.scope_open {
+        return;
+    }
+    let mut menu = crate::kit::Menu::new("sb-scope")
+        .anchor("sb-filter")
+        .placement(crate::kit::Placement::BottomStart)
+        .min_width(224.0)
+        .open(true)
+        .on_close(|s: &mut App| s.ui.shell.sidebar.scope_open = false)
+        .item(crate::kit::MenuItem::new("All projects").icon(&i::FOLDER).checked(ui.project_scope.is_empty()).on_select(|s: &mut App| s.ui.shell.sidebar.project_scope.clear()))
+        .separator();
+    for p in s.state().projects.iter().filter(|p| p["archivedAt"].is_null()) {
+        let id = crate::data::s(p, "id").to_string();
+        let on = ui.project_scope.contains(&id);
+        menu = menu.item(crate::kit::MenuItem::new(crate::data::s(p, "title")).checked(on).on_select(move |s: &mut App| {
+            let scope = &mut s.ui.shell.sidebar.project_scope;
+            if on {
+                scope.retain(|x| *x != id);
+            } else {
+                scope.push(id.clone());
+            }
+        }));
+    }
+    menu.overlay(&crate::kit::theme(t), overlays);
 }
 
 pub fn footer(model: &Model, t: &T) -> El {

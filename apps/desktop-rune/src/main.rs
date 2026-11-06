@@ -99,6 +99,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= chat::timeline::poll(s);
     changed |= chat::composer::poll(s);
     changed |= shell::palette::poll(s);
+    changed |= shell::sidebar::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {

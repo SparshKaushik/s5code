@@ -1,17 +1,13 @@
 //! The row context menu (`useSidebarThreadContextMenu`). Desktop shows it as a native menu, so
-//! this draws the same items with native menu metrics: 22pt rows, inset separators, no icons.
+//! it is `kit::Menu` in native mode: 22pt rows, inset separators, no icons.
 
-use rune::{Color, Cursor, Cx, El, Key, KeyEvent, Tx, col, el, icon, row, spacer, text};
+use rune::{Cx, El, Key, KeyEvent, Tx};
 
 use super::Model;
 use super::logic::Thread;
-use crate::icons as i;
-use crate::theme::{self, T};
+use crate::kit::{self, MenuEntry, MenuItem};
+use crate::theme::T;
 use crate::{App, Route};
-
-const ITEM_H: f32 = 22.0;
-const PAD_X: f32 = 26.0;
-const WIDTH: f32 = 198.0;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Sub {
@@ -29,17 +25,16 @@ pub struct Menu {
     pub sub: Option<Sub>,
     /// Just the snooze presets (the row's hover clock button).
     pub snooze_only: bool,
-    pub confirm_delete: bool,
 }
 
 impl Menu {
     pub fn new(thread: String, x: f32, y: f32) -> Menu {
-        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false, confirm_delete: false }
+        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false }
     }
 
     pub fn snooze_for(thread: String) -> Menu {
         let anchor = Some(format!("sb-snooze-{thread}"));
-        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true, confirm_delete: false }
+        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true }
     }
 }
 
@@ -59,53 +54,18 @@ pub fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     false
 }
 
-enum Entry {
-    Item { label: String, sub: Option<Sub>, checked: bool, act: Option<Box<dyn Fn(&mut App, &mut Tx)>> },
-    Separator,
-}
-
-fn item(label: impl Into<String>, act: impl Fn(&mut App, &mut Tx) + 'static) -> Entry {
-    Entry::Item { label: label.into(), sub: None, checked: false, act: Some(Box::new(act)) }
-}
-
-fn submenu(label: &str, sub: Sub) -> Entry {
-    Entry::Item { label: label.into(), sub: Some(sub), checked: false, act: None }
-}
-
-fn todo(label: impl Into<String>) -> Entry {
-    Entry::Item { label: label.into(), sub: None, checked: false, act: None }
-}
-
-struct Look {
-    fill: Color,
-    border: Color,
-    separator: Color,
-    text: Color,
-    disabled: Color,
-    highlight: Color,
-}
-
-fn look(t: &T) -> Look {
-    let rgb = |r: u8, g: u8, b: u8| rune::color::hex(&format!("#{r:02x}{g:02x}{b:02x}")).unwrap_or(Color::BLACK);
-    if t.dark {
-        Look {
-            fill: rgb(38, 38, 40),
-            border: rgb(55, 55, 56),
-            separator: rgb(60, 60, 61),
-            text: rgb(222, 222, 223),
-            disabled: rgb(222, 222, 223).alpha(0.4),
-            highlight: rgb(255, 255, 255).alpha(0.1),
-        }
-    } else {
-        Look {
-            fill: rgb(246, 246, 246),
-            border: rgb(214, 214, 214),
-            separator: rgb(222, 222, 222),
-            text: rgb(28, 28, 30),
-            disabled: rgb(28, 28, 30).alpha(0.4),
-            highlight: rgb(0, 0, 0).alpha(0.08),
-        }
+fn set_sub(s: &mut App, sub: Option<Sub>) {
+    if let Some(m) = s.ui.shell.sidebar.menu.as_mut() {
+        m.sub = sub;
     }
+}
+
+fn item(label: impl Into<String>, act: impl Fn(&mut App, &mut Tx) + 'static) -> MenuItem {
+    MenuItem::new(label).on_select_tx(act)
+}
+
+fn todo(label: impl Into<String>) -> MenuItem {
+    MenuItem::new(label).disabled(true)
 }
 
 /// "9:00 AM", as `toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })`.
@@ -147,30 +107,30 @@ pub fn snooze_presets(now: i64) -> Vec<(String, i64)> {
     out
 }
 
-fn snooze_entries(id: &str, now: i64) -> Vec<Entry> {
-    let mut out: Vec<Entry> = snooze_presets(now)
+fn snooze_entries(id: &str, now: i64) -> Vec<MenuEntry> {
+    let mut out: Vec<MenuEntry> = snooze_presets(now)
         .into_iter()
         .map(|(label, until)| {
             let id = id.to_string();
-            item(label, move |s, _| {
+            MenuEntry::item(item(label, move |s, _| {
                 super::snooze(s, &id, until);
                 close(s);
-            })
+            }))
         })
         .collect();
-    out.push(Entry::Separator);
-    out.push(todo("Custom…"));
+    out.push(MenuEntry::Separator);
+    out.push(MenuEntry::item(todo("Custom…")));
     out
 }
 
-fn copy(label: &str, value: String) -> Entry {
-    item(label, move |s, tx| {
+fn copy(label: &str, value: String) -> MenuEntry {
+    MenuEntry::item(item(label, move |s, tx| {
         tx.copy(&value);
         close(s);
-    })
+    }))
 }
 
-fn entries(s: &App, model: &Model, th: &Thread, m: &Menu, sub: Option<Sub>) -> Vec<Entry> {
+fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEntry> {
     let id = th.id.clone();
     let with = |f: fn(&mut App, &str)| {
         let id = id.clone();
@@ -188,14 +148,13 @@ fn entries(s: &App, model: &Model, th: &Thread, m: &Menu, sub: Option<Sub>) -> V
                 .into_iter()
                 .map(|(label, on)| {
                     let id = th.id.clone();
-                    let mut e = item(label, move |s, _| {
-                        super::dispatch(s, "thread.auto-settle.set", &id, serde_json::json!({ "enabled": on }));
-                        close(s);
-                    });
-                    if let Entry::Item { checked, .. } = &mut e {
-                        *checked = on == enabled;
-                    }
-                    e
+                    MenuEntry::item(
+                        item(label, move |s, _| {
+                            super::dispatch(s, "thread.auto-settle.set", &id, serde_json::json!({ "enabled": on }));
+                            close(s);
+                        })
+                        .checked(on == enabled),
+                    )
                 })
                 .collect();
         }
@@ -216,160 +175,69 @@ fn entries(s: &App, model: &Model, th: &Thread, m: &Menu, sub: Option<Sub>) -> V
         }
         None => {}
     }
+    let open = s.ui.shell.sidebar.menu.as_ref().and_then(|m| m.sub);
+    // Leaves close a sibling's submenu as the pointer moves onto them, as AppKit menus do.
+    let leaf = |i: MenuItem| MenuEntry::item(i.on_hover(|s: &mut App| set_sub(s, None)));
+    let sub_item = |label: &str, sub: Sub| {
+        MenuEntry::item(
+            MenuItem::new(label)
+                .submenu(entries(s, model, th, Some(sub)), open == Some(sub))
+                .on_submenu_change(move |s: &mut App, on| set_sub(s, on.then_some(sub))),
+        )
+    };
     let mut out = Vec::new();
     if th.pinned {
-        out.push(item("Unpin thread", with(super::unpin)));
+        out.push(leaf(item("Unpin thread", with(super::unpin))));
     } else {
-        out.push(item("Pin thread", with(|s, id| super::pin(s, id, None))));
+        out.push(leaf(item("Pin thread", with(|s, id| super::pin(s, id, None)))));
     }
     if th.settled {
-        out.push(item("Un-settle thread", with(super::unsettle)));
+        out.push(leaf(item("Un-settle thread", with(super::unsettle))));
     } else {
-        out.push(item("Settle thread", with(super::settle)));
+        out.push(leaf(item("Settle thread", with(super::settle))));
     }
     if th.snoozed(model.now) {
-        out.push(item("Wake thread", with(super::unsnooze)));
+        out.push(leaf(item("Wake thread", with(super::unsnooze))));
     } else if th.can_snooze() {
-        out.push(submenu("Snooze", Sub::Snooze));
+        out.push(sub_item("Snooze", Sub::Snooze));
     } else {
-        out.push(todo("Snooze"));
+        out.push(leaf(todo("Snooze")));
     }
-    out.push(Entry::Separator);
-    // Renaming edits the title in place, which the row doesn't do yet.
-    out.push(todo("Rename thread"));
-    out.push(item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))));
-    out.push(item("Mark unread", with(|s, id| super::dispatch(s, "thread.mark-unread", id, serde_json::json!({})))));
-    // The sidebar has no project filter yet.
-    out.push(todo(format!("Filter by {}", model.project(th))));
-    out.push(submenu("Auto-settle behavior", Sub::AutoSettle));
-    out.push(Entry::Separator);
-    out.push(submenu("Copy", Sub::Copy));
-    out.push(item("Project settings", |s, _| {
+    out.push(MenuEntry::Separator);
+    out.push(leaf(item("Rename thread", with(super::start_rename))));
+    out.push(leaf(item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }))))));
+    out.push(leaf(item("Mark unread", with(|s, id| super::dispatch(s, "thread.mark-unread", id, serde_json::json!({}))))));
+    let project = th.project_id.clone();
+    let scoped = s.ui.shell.sidebar.project_scope.contains(&project);
+    let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", model.project(th)) };
+    out.push(leaf(item(filter, move |s, _| {
+        let scope = &mut s.ui.shell.sidebar.project_scope;
+        *scope = if scoped { Vec::new() } else { vec![project.clone()] };
         close(s);
-        super::go(s, Route::Settings("general".into()));
-    }));
-    out.push(Entry::Separator);
+    })));
+    out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
+    out.push(MenuEntry::Separator);
+    out.push(sub_item("Copy", Sub::Copy));
+    out.push(leaf(item("Project settings", |s, _| {
+        close(s);
+        super::go(s, Route::Settings("projects".into()));
+    })));
+    out.push(MenuEntry::Separator);
     let archive = if th.running() { todo("Archive thread") } else { item("Archive thread", with(super::archive)) };
-    out.push(archive);
-    // The web confirms in a dialog; here a second press confirms.
-    let id = th.id.clone();
-    let delete = if m.confirm_delete {
-        item("Delete permanently?", move |s, _| {
-            super::dispatch(s, "thread.delete", &id, serde_json::json!({}));
-            super::patch(s, &id, |p| p.archived = true);
-            close(s);
-        })
-    } else {
-        item("Delete", |s, _| {
-            if let Some(m) = s.ui.shell.sidebar.menu.as_mut() {
-                m.confirm_delete = true;
-            }
-        })
-    };
-    out.push(delete);
+    out.push(leaf(archive));
+    out.push(leaf(item("Delete", with(super::request_delete))));
     out
 }
 
-fn height(entries: &[Entry]) -> f32 {
-    10.0 + 2.0 + entries.iter().map(|e| if matches!(e, Entry::Separator) { 11.0 } else { ITEM_H }).sum::<f32>()
-}
-
-fn panel(key: &str, t: &T, entries: Vec<Entry>, open: Option<Sub>, set_sub: bool) -> El {
-    let l = look(t);
-    let mut p = col().key(key.to_string()).role("menu").w(WIDTH).py(5.0).fill(l.fill).border(1.0, l.border).radius(theme::radius::MD).shadow(8.0, 24.0, Color::BLACK.alpha(0.35));
-    for (n, e) in entries.into_iter().enumerate() {
-        p = p.child(match e {
-            Entry::Separator => el().w_full().h(11.0).px(13.0).center_y().child(el().w_full().h(1.0).fill(l.separator)),
-            Entry::Item { label, sub, checked, act } => {
-                let enabled = act.is_some() || sub.is_some();
-                let color = if enabled { l.text } else { l.disabled };
-                let mut r = row()
-                    .key(format!("{key}-{n}"))
-                    .role("menuitem")
-                    .w_full()
-                    .h(ITEM_H)
-                    .pl(PAD_X)
-                    .pr(14.0)
-                    .center_y()
-                    .child(if checked { icon(&i::CHECK, 12.0).color(color).absolute(9.0, 5.0) } else { el() })
-                    .child(text(label).font(rune::TextStyle::new(13.0, 400.0)).color(color).single_line())
-                    .child(spacer());
-                if let Some(sb) = sub {
-                    r = r.child(icon(&i::CHEVRON_RIGHT, 12.0).color(color));
-                    if open == Some(sb) {
-                        r = r.fill(l.highlight);
-                    }
-                    if set_sub {
-                        r = r.on_hover_change(move |s: &mut App, on, _: &mut Tx| {
-                            if on && let Some(m) = s.ui.shell.sidebar.menu.as_mut() {
-                                m.sub = Some(sb);
-                            }
-                        });
-                        r = r.on_press(move |s: &mut App| {
-                            if let Some(m) = s.ui.shell.sidebar.menu.as_mut() {
-                                m.sub = Some(sb);
-                            }
-                        });
-                    }
-                } else if let Some(act) = act {
-                    r = r.hover(l.highlight).cursor(Cursor::Default).on_press_tx(move |s: &mut App, tx: &mut Tx| act(s, tx));
-                    if set_sub {
-                        r = r.on_hover_change(|s: &mut App, on, _: &mut Tx| {
-                            if on && let Some(m) = s.ui.shell.sidebar.menu.as_mut() {
-                                m.sub = None;
-                            }
-                        });
-                    }
-                } else if set_sub {
-                    r = r.on_hover_change(|s: &mut App, on, _: &mut Tx| {
-                        if on && let Some(m) = s.ui.shell.sidebar.menu.as_mut() {
-                            m.sub = None;
-                        }
-                    });
-                }
-                r
-            }
-        });
-    }
-    p
-}
-
-fn sub_offset(entries: &[Entry], sub: Sub) -> f32 {
-    let mut y = 6.0;
-    for e in entries {
-        match e {
-            Entry::Separator => y += 11.0,
-            Entry::Item { sub: Some(s), .. } if *s == sub => return y,
-            Entry::Item { .. } => y += ITEM_H,
-        }
-    }
-    y
-}
-
-/// The menu as window overlays: the panel, and the open submenu beside it. The panel is modal, so
-/// Escape or a click outside closes it.
-pub fn view(s: &App, cx: &mut Cx<App>, model: &Model, th: &Thread, m: &Menu, t: &T) -> Vec<El> {
-    let window = cx.layout("kit-root").map_or([0.0, 0.0, 1280.0, 900.0], |r| r);
-    let (mut x, mut y) = match m.anchor.as_ref().and_then(|k| cx.layout(k)) {
-        Some(r) => (r[0], r[1] + r[3] + 4.0),
-        None => m.at,
-    };
+/// Mounts the menu: at the pointer for a context invocation, under the clock button for snooze.
+pub fn view(s: &App, _cx: &mut Cx<App>, model: &Model, th: &Thread, m: &Menu, t: &T) -> Vec<El> {
     let root = if m.snooze_only { Some(Sub::Snooze) } else { None };
-    let main = entries(s, model, th, m, root);
-    let h = height(&main);
-    x = x.min(window[2] - WIDTH - 4.0).max(4.0);
-    y = y.min(window[3] - h - 4.0).max(4.0);
-    let mut layer = col().key("sb-menu-layer").absolute(0.0, 0.0).w_full().h_full().modal(true, close);
-    if let Some(sub) = m.sub.filter(|_| !m.snooze_only) {
-        let top = y + sub_offset(&main, sub) - 6.0;
-        let subs = entries(s, model, th, m, Some(sub));
-        let sh = height(&subs);
-        let sx = if x + WIDTH * 2.0 - 4.0 > window[2] { x - WIDTH + 4.0 } else { x + WIDTH - 4.0 };
-        let sy = top.min(window[3] - sh - 4.0).max(4.0);
-        layer = layer.child(panel("sb-menu", t, main, Some(sub), true).absolute(x, y));
-        layer = layer.child(panel("sb-submenu", t, subs, None, false).absolute(sx, sy));
-    } else {
-        layer = layer.child(panel("sb-menu", t, main, None, !m.snooze_only).absolute(x, y));
-    }
-    vec![layer]
+    let mut menu = kit::Menu::new("sb-menu").native(true).width(198.0).entries(entries(s, model, th, root)).open(true).on_close(close);
+    menu = match &m.anchor {
+        Some(key) => menu.anchor(key.clone()).placement(kit::Placement::BottomStart).gutter(4.0),
+        None => menu.at(m.at.0, m.at.1),
+    };
+    let mut layers = Vec::new();
+    menu.overlay(&kit::theme(t), &mut layers);
+    layers
 }
