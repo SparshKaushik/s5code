@@ -19,16 +19,33 @@ pub struct Ui {
     pub composer: composer::Ui,
     pub home: home::Ui,
     pub details: details::Ui,
+    pub topbar: topbar::Ui,
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
+    // Under the settings modal the frame keeps showing the route settings was opened from.
     let route = if matches!(s.route, Route::Settings(_)) {
         s.ui.settings.return_route.as_ref().unwrap_or(&s.route)
-    } else { &s.route };
+    } else {
+        &s.route
+    };
+    let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
+    let lane = details::lane(w, h, s.ui.chat.details.hidden);
     let body = match route {
         Route::Thread(id) => timeline::view(s, cx, t, id),
-        _ => home::view(s, cx, t),
+        _ => home::view(s, cx, t, &lane),
     };
+    // The composer, details card and their menus float over the body.
+    let stack = col()
+        .key("chat-body")
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .child(body)
+        .child(composer::view(s, cx, t, &lane))
+        .children(details::view(s, cx, t, &lane, w))
+        .children(details::menu(s, t))
+        .children(composer::overlays(s, cx, t));
     col()
         .key("main")
         .grow(1.0)
@@ -37,7 +54,5 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .h_full()
         .fill(t.c.background)
         .child(topbar::view(s, cx, t))
-        .child(body)
-        .child(match &s.route { Route::Thread(id) => timeline::composer_requests(s, t, id), _ => rune::el() })
-        .child(composer::view(s, cx, t))
+        .child(stack)
 }

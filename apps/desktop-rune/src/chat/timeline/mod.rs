@@ -593,10 +593,11 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
     card
 }
 
-pub fn view(app: &App, _cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
+pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
     let Some(view) = app.state().thread_views.get(thread_id) else {
         return el().grow(1.0);
     };
+    let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     let rows = rows::derive(&view.projection, app.now_ms);
     let mut stack = col()
         .w_full()
@@ -733,7 +734,9 @@ pub fn view(app: &App, _cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
         .scroll(ScrollSpec { stick_bottom: true })
         .items_center()
         .px(24.0)
-        .py(21.0)
+        .pt(21.0)
+        // The composer floats over the bottom of the list; the last row scrolls clear of it.
+        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0)
         .child(stack)
 }
 
@@ -742,7 +745,7 @@ pub fn composer_requests(app: &App, t: &T, thread_id: &str) -> El {
     let Some(view) = app.state().thread_views.get(thread_id) else {
         return el();
     };
-    let mut out = col().w_full().max_w(736.0);
+    let mut out = col().w_full();
     for row in rows::derive(&view.projection, app.now_ms) {
         if let Row::Request { request, item } = row {
             if s(request, "kind") == "user_input"
@@ -753,5 +756,5 @@ pub fn composer_requests(app: &App, t: &T, thread_id: &str) -> El {
             }
         }
     }
-    col().w_full().items_center().px(24.0).child(out)
+    out
 }
