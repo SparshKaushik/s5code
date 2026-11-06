@@ -132,6 +132,9 @@ fn table(source: &str, t: &T) -> El {
                     .py(if i == 0 { 8.8 } else { 7.2 })
                     .child(
                         Markdown::new(*cell)
+                            .on_link_tx(|_: &mut App, url, tx| {
+                                let _ = tx.open_url(url);
+                            })
                             .selectable(true)
                             .render(&style(t).body_font(font)),
                     ),
@@ -145,7 +148,7 @@ fn table(source: &str, t: &T) -> El {
         row()
             .w_full()
             .justify_end()
-            .pb(16.0)
+            .pb(4.0)
             .child(copy_button(source, t)),
     )
 }
