@@ -278,7 +278,7 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         .center_y()
         .gap(12.0)
         .child(
-            text(format!(
+            el().min_w(48.0).h(24.0).px(8.0).center().radius(6.0).fill(t.c.muted).child(text(format!(
                 "{n}{}",
                 if key == "panelAnimationDurationMs" {
                     " ms"
@@ -286,9 +286,8 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
                     "%"
                 }
             ))
-            .w(48.0)
-            .font(theme::MONO_XS)
-            .color(t.c.foreground),
+            .font(theme::weight(theme::MONO_XS, theme::MEDIUM))
+            .color(t.c.foreground)),
         )
         .child(
             crate::kit::Slider::new(n)
