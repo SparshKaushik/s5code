@@ -3,15 +3,16 @@ name = "s5code-rune"
 version = "0.0.1"
 edition = "2024"
 license = "MIT"
-description = "Prototype: the S5 Code desktop client UI rebuilt on Rune."
+description = "The S5 Code desktop client, native on Rune."
 publish = false
 
 [workspace]
+members = ["net"]
 
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda" }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", features = ["markdown"] }
-rune-theme-opencode = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda" }
+s5-net = { path = "net" }
 serde_json = "1"
 ureq = { version = "2", default-features = false, features = ["json"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }

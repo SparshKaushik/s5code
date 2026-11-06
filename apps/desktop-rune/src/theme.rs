@@ -1,120 +1,101 @@
-//! S5 Code's tokens (apps/web/src/index.css) as Rune colours, plus the kit the stock components
-//! paint with.
+//! The web client's design system in Rune terms: its resolved colour tokens (`tokens.rs`,
+//! generated), Tailwind's type scale and radii, and the font families the platform renders.
+//!
+//! Screens take a `&T` and read colours by their CSS names (`t.c.muted_foreground`), so a class
+//! like `text-foreground/75` ports as `t.c.foreground.alpha_mul(0.75)`.
 
-use rune::color::hex;
-use rune::tok::TextStyle;
-use rune::{Color, oklch};
-use rune_kit::{Kit, PaletteSeed};
+use rune::Color;
+use rune::tok::{Family, TextStyle};
+
+#[allow(unused_imports)]
+pub use crate::tokens::{Tokens, tw};
 
 #[derive(Clone, Copy)]
-pub struct P {
+pub struct T {
     pub dark: bool,
-    pub bg: Color,
-    pub sidebar: Color,
-    pub fg: Color,
-    pub muted: Color,
-    pub secondary: Color,
-    pub faint: Color,
-    pub border: Color,
-    pub input: Color,
-    pub card: Color,
-    pub accent: Color,
-    pub row_hover: Color,
-    pub row_active: Color,
-    pub row_selected: Color,
-    pub primary: Color,
-    pub on_primary: Color,
-    pub message: Color,
-    pub info: Color,
-    pub success: Color,
-    pub warning: Color,
-    pub error: Color,
-    pub scrim: Color,
+    /// Tokens as the document root resolves them.
+    pub c: Tokens,
+    /// Tokens inside the sidebar (`[data-app-sidebar]` re-points foreground, rows, labels).
+    pub sb: Tokens,
 }
 
-fn h(s: &str) -> Color {
-    hex(s).unwrap_or(Color::BLACK)
+pub fn theme(dark: bool) -> T {
+    use crate::tokens::*;
+    if dark { T { dark, c: DARK, sb: SIDEBAR_DARK } } else { T { dark, c: LIGHT, sb: SIDEBAR_LIGHT } }
 }
 
-pub fn palette(dark: bool) -> P {
-    if dark {
-        let fg = h("#f5f5f5");
-        P {
-            dark,
-            bg: h("#000000"),
-            sidebar: h("#000000"),
-            fg,
-            muted: h("#a3a3a3"),
-            secondary: h("#8f8f8f"),
-            faint: h("#6b6b6b"),
-            border: Color::WHITE.alpha(0.08),
-            input: Color::WHITE.alpha(0.11),
-            card: h("#111111"),
-            accent: h("#191a1d"),
-            row_hover: fg.alpha(0.08),
-            row_active: fg.alpha(0.11),
-            row_selected: fg.alpha(0.07),
-            primary: oklch(0.571, 0.21, 264.0),
-            on_primary: Color::WHITE,
-            message: h("#1e1e1e"),
-            info: h("#60a5fa"),
-            success: h("#34d399"),
-            warning: h("#fbbf24"),
-            error: h("#f87171"),
-            scrim: Color::BLACK.alpha(0.6),
-        }
-    } else {
-        let fg = h("#171717");
-        P {
-            dark,
-            bg: h("#ffffff"),
-            sidebar: h("#f7f7f8"),
-            fg,
-            muted: h("#737373"),
-            secondary: h("#6b6b6b"),
-            faint: h("#a3a3a3"),
-            border: Color::BLACK.alpha(0.08),
-            input: Color::BLACK.alpha(0.12),
-            card: h("#fafafa"),
-            accent: h("#ececee"),
-            row_hover: fg.alpha(0.05),
-            row_active: fg.alpha(0.08),
-            row_selected: fg.alpha(0.05),
-            primary: oklch(0.571, 0.21, 264.0),
-            on_primary: Color::WHITE,
-            message: h("#f0f0f1"),
-            info: h("#2563eb"),
-            success: h("#059669"),
-            warning: h("#d97706"),
-            error: h("#dc2626"),
-            scrim: Color::BLACK.alpha(0.3),
-        }
+/// Tailwind's `color/NN` opacity modifier: multiplies the token's own alpha.
+pub trait AlphaMul {
+    fn alpha_mul(self, k: f32) -> Color;
+}
+
+impl AlphaMul for Color {
+    fn alpha_mul(self, k: f32) -> Color {
+        self.alpha(self.a * k)
     }
 }
 
-pub const XS2: TextStyle = TextStyle::new(11.0, 400.0).lh(14.0);
-pub const XS: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0);
-pub const XS_MEDIUM: TextStyle = TextStyle::new(12.0, 500.0).lh(16.0);
-pub const SM: TextStyle = TextStyle::new(14.0, 400.0).lh(20.0);
-pub const SM_MEDIUM: TextStyle = TextStyle::new(14.0, 500.0).lh(20.0);
-pub const BASE_SEMIBOLD: TextStyle = TextStyle::new(16.0, 600.0).lh(24.0);
-pub const HERO: TextStyle = TextStyle::new(30.0, 400.0).lh(36.0).tracking(-0.6);
-pub const MONO_XS: TextStyle = TextStyle::new(12.0, 400.0).lh(16.0).mono();
-
-thread_local! {
-    static KITS: [&'static Kit; 2] = [Box::leak(Box::new(make_kit(false))), Box::leak(Box::new(make_kit(true)))];
+/// `--radius` is 0.5rem; Tailwind's `rounded-*` steps derive from it.
+pub mod radius {
+    pub const XS: f32 = 2.0;
+    pub const SM: f32 = 4.0;
+    pub const MD: f32 = 6.0;
+    pub const LG: f32 = 8.0;
+    pub const XL: f32 = 12.0;
+    pub const XL2: f32 = 16.0;
+    pub const FULL: f32 = 9999.0;
 }
 
-pub fn kit(dark: bool) -> &'static Kit {
-    KITS.with(|k| k[dark as usize])
+/// Tailwind's `--spacing` (0.25rem): `p-3` is `sp(3.0)`.
+pub const fn sp(n: f32) -> f32 {
+    n * 4.0
 }
 
-fn make_kit(dark: bool) -> Kit {
-    let p = palette(dark);
-    let mut k = Kit::from_palette(PaletteSeed { bg: p.card, fg: p.fg, accent: p.primary });
-    k.c.bg_accent = p.primary;
-    k.c.border_focus = p.primary;
-    k.radius.sm = 6.0;
-    k.radius.md = 8.0;
-    k
+/// The sans slot is Inter off macOS and San Francisco on it, as the CSS stack
+/// `-apple-system, BlinkMacSystemFont, "Inter Variable", ...` resolves.
+pub const SANS: &str = if cfg!(target_os = "macos") { "System Font" } else { "Inter" };
+
+const fn ts(size: f32, line_height: f32, weight: f32) -> TextStyle {
+    TextStyle::new(size, weight).lh(line_height)
+}
+
+/// `font-mono` (`ui-monospace, "SF Mono", ...`): SF Mono on macOS, fontconfig's monospace elsewhere.
+pub const fn mono(style: TextStyle) -> TextStyle {
+    TextStyle { family: Family::SystemMono, ..style }
+}
+
+pub const fn weight(style: TextStyle, w: f32) -> TextStyle {
+    TextStyle { weight: w, ..style }
+}
+
+// Tailwind's scale plus the app's own `text-2xs`..`text-5xs` (index.css @theme).
+pub const TEXT_5XS: TextStyle = ts(7.0, 7.0, 400.0);
+pub const TEXT_4XS: TextStyle = ts(8.0, 8.0, 400.0);
+pub const TEXT_3XS: TextStyle = ts(10.0, 14.0, 400.0);
+pub const TEXT_2XS: TextStyle = ts(11.0, 16.0, 400.0);
+pub const TEXT_XS: TextStyle = ts(12.0, 16.0, 400.0);
+pub const TEXT_SM: TextStyle = ts(14.0, 20.0, 400.0);
+pub const TEXT_BASE: TextStyle = ts(16.0, 24.0, 400.0);
+pub const TEXT_LG: TextStyle = ts(18.0, 28.0, 400.0);
+pub const TEXT_XL: TextStyle = ts(20.0, 28.0, 400.0);
+pub const TEXT_2XL: TextStyle = ts(24.0, 32.0, 400.0);
+pub const TEXT_3XL: TextStyle = ts(30.0, 36.0, 400.0);
+
+pub const MEDIUM: f32 = 500.0;
+pub const SEMIBOLD: f32 = 600.0;
+pub const BOLD: f32 = 700.0;
+
+pub const XS_MEDIUM: TextStyle = weight(TEXT_XS, MEDIUM);
+pub const SM_MEDIUM: TextStyle = weight(TEXT_SM, MEDIUM);
+pub const MONO_XS: TextStyle = mono(TEXT_XS);
+pub const MONO_SM: TextStyle = mono(TEXT_SM);
+
+/// Layout constants from index.css `:root`.
+pub mod layout {
+    pub const TOPBAR_H: f32 = 52.0;
+    pub const SIDEBAR_W: f32 = 256.0;
+    pub const CHAT_MAX_W: f32 = 736.0;
+    pub const THREAD_DETAILS_W: f32 = 280.0;
+    pub const CONTROL_RADIUS: f32 = 8.0;
+    pub const TITLEBAR_CONTROL: f32 = 28.0;
 }
