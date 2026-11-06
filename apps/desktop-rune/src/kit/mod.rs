@@ -1,7 +1,30 @@
 //! Shared web-shaped controls. `Button::new("Save").variant("outline").size("sm").build(t)`.
 //! Stateful Rune controls use `theme(t)`; mount their overlay vector in `rune_kit::root`.
 #![allow(dead_code, unused_imports)]
+mod actions;
+mod combobox;
+pub use combobox::{Combobox, ComboboxOption, ComboboxState};
+mod spinner;
+pub use spinner::Spinner;
+mod toggle;
+pub use toggle::{Tabs, ToggleGroup};
 pub mod button;
+mod toast;
+pub use toast::{Toast, ToastDeadlines, ToastRegion};
+mod segmented;
+pub use segmented::SegmentedControl;
+mod select;
+pub use select::Select;
+mod overlays;
+pub use overlays::{Popover, Tooltip};
+mod checkbox;
+mod radio;
+mod switch;
+pub use checkbox::Checkbox;
+pub use radio::{RadioGroup, RadioItem};
+pub use switch::Switch;
+pub mod menu;
+pub use menu::{Menu, MenuEntry, MenuItem, context_menu};
 mod dialog;
 mod input;
 mod slider;
@@ -17,11 +40,7 @@ pub use button::{Button, icon_button};
 pub use gallery::SCENES;
 use rune::{El, TextEdit, col, el, row, text};
 use rune_kit::ScrollBar;
-pub use rune_kit::{
-    Checkbox, Combobox, ComboboxOption, ComboboxState, Menu, MenuEntry, MenuItem, Placement,
-    Popover, Progress, RadioGroup, RadioItem, SegmentedControl, Select, Spinner, State, Switch,
-    TextArea, Toast, ToastRegion, Tooltip, context_menu,
-};
+pub use rune_kit::{Placement, Progress, State, TextArea};
 
 /// Rune's behavior with S5's semantic palette and typography, shared by all overlay controls.
 pub fn theme(t: &T) -> rune_kit::Kit {
@@ -86,26 +105,37 @@ pub fn input(edit: &TextEdit, placeholder: &str, size: &str, t: &T) -> El {
         .size(size)
         .build(t)
 }
+/// Horizontal rule: `separator(t)`; constrain its width on the parent.
 pub fn separator(t: &T) -> El {
     el().role("separator")
         .w_full()
         .h(1.)
         .fill(t.c.contrast_border)
 }
+/// Vertical rule: `vertical_separator(t)` in a row with a bounded height.
+pub fn vertical_separator(t: &T) -> El {
+    el().role("separator")
+        .w(1.)
+        .self_stretch()
+        .fill(t.c.contrast_border)
+}
+/// Keyboard hint: `kbd("⌘K", t)`.
 pub fn kbd(label: &str, t: &T) -> El {
     row()
         .role("note")
         .center()
         .h(20.)
+        .min_w(20.)
         .px(4.)
         .radius(4.)
-        .fill(t.c.contrast_foreground.alpha_mul(0.08))
+        .fill(t.c.contrast_foreground.alpha_mul(0.07))
         .child(
             text(label)
                 .font(theme::XS_MEDIUM)
-                .color(t.c.contrast_foreground),
+                .color(t.c.contrast_muted_foreground),
         )
 }
+/// Static loading placeholder: `skeleton(240., 16., t)`; no idle repaint.
 pub fn skeleton(w: f32, h: f32, t: &T) -> El {
     el().size(w, h).radius(6.).fill(t.c.accent)
 }

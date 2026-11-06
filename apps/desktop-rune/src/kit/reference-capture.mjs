@@ -13,12 +13,12 @@ if (galleryRoot) {
   for (const [state,pseudo] of [['hover','hover'],['pressed','active'],['focus','focus-visible']]) {
     const nodes = await call('DOM.querySelectorAll', {nodeId:galleryRoot,selector:'[data-gallery-state="'+state+'"]'});
     for (const nodeId of nodes.result?.nodeIds || []) {
-      await call('CSS.forcePseudoState', {nodeId,forcedPseudoClasses:[pseudo]});
+      await call('CSS.forcePseudoState', {nodeId,forcedPseudoClasses:state==='pressed'?['hover','active']:[pseudo]});
     }
   }
 }
 await sleep(250);
 `;
 const path = `${tmpdir()}/kit-reference-${process.pid}.mjs`;
-writeFileSync(path, source.replace('const dump = await evaluate', `${hook}\nconst dump = await evaluate`));
+writeFileSync(path, source.replace('const shot = await call', `${hook}\nconst shot = await call`));
 try { await import(pathToFileURL(path)); } finally { unlinkSync(path); }

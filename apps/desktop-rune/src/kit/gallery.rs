@@ -5,6 +5,24 @@ use crate::{
 };
 use rune::{Cx, El, col, row, text};
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("kit-combobox", |s| {
+        s.ui.shell.palette.gallery = Some("combobox");
+        s.ui.shell.palette.gallery_combo.open = true;
+    }),
+    ("kit-toggles", |s| {
+        s.ui.shell.palette.gallery = Some("toggles")
+    }),
+    ("kit-feedback", |s| {
+        s.ui.shell.palette.gallery = Some("feedback")
+    }),
+    ("kit-menu", |s| s.ui.shell.palette.gallery = Some("menu")),
+    ("kit-context-menu", |s| {
+        s.ui.shell.palette.gallery = Some("context-menu")
+    }),
+    ("kit-select", |s| {
+        s.ui.shell.palette.gallery = Some("select")
+    }),
+    ("kit-radio", |s| s.ui.shell.palette.gallery = Some("radio")),
     ("kit-dialog", |s| {
         s.ui.shell.palette.gallery = Some("dialog")
     }),
@@ -57,6 +75,149 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
         );
     let k = kit::theme(t);
     match which {
+        "combobox" => {
+            let mut layer = vec![];
+            let options = [
+                kit::ComboboxOption::new("system", "System"),
+                kit::ComboboxOption::new("light", "Light"),
+                kit::ComboboxOption::new("dark", "Dark"),
+            ];
+            body = body.child(
+                kit::Combobox::new(
+                    "gallery-combo",
+                    &s.ui.shell.palette.gallery_combo,
+                    &options,
+                    |s: &mut App| &mut s.ui.shell.palette.gallery_combo,
+                )
+                .current(Some("system"))
+                .placeholder("Theme")
+                .build(&k, &mut layer),
+            );
+            return rune_kit::root(body, layer);
+        }
+
+        "toggles" => {
+            body=body.child(text("Default                 Hover                 Pressed                 Focus                 Disabled").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground));
+            for variant in ["default", "outline", "segmented", "ghost", "pill"] {
+                let mut line = row().gap(12.).center_y().child(
+                    text(variant)
+                        .w(140.)
+                        .font(theme::TEXT_XS)
+                        .color(t.c.contrast_muted_foreground),
+                );
+                for state in [
+                    kit::State::Rest,
+                    kit::State::Hover,
+                    kit::State::Pressed,
+                    kit::State::Focus,
+                    kit::State::Disabled,
+                ] {
+                    line = line.child(
+                        kit::ToggleGroup::new(&["A", "B"], &[0])
+                            .variant(variant)
+                            .item_state(1, state)
+                            .build(&k),
+                    );
+                }
+                body = body.child(line);
+            }
+            body = body.child(kit::Tabs::new(&["Code", "Diff"], 0).build(&k));
+        }
+        "feedback" => {
+            for size in ["xs", "sm", "md", "lg"] {
+                body = body.child(
+                    row()
+                        .gap(12.)
+                        .child(kit::Spinner::new().size(size).build(&k))
+                        .child(kit::Spinner::new().size(size).tone("muted").build(&k)),
+                );
+            }
+            body = body
+                .child(kit::kbd("⌘K", t))
+                .child(kit::separator(t))
+                .child(kit::skeleton(240., 16., t))
+                .child(
+                    kit::Toast::new("saved", "Settings saved")
+                        .description("Your preferences have been updated.")
+                        .build(&k),
+                );
+        }
+
+        "menu" | "context-menu" => {
+            let mut layer = vec![];
+            let trigger = kit::Button::new("Open menu").variant("outline").build(t);
+            let menu = if which == "context-menu" {
+                kit::context_menu(
+                    "gallery-menu",
+                    trigger,
+                    Some(rune::PointerPress { x: 32., y: 108. }),
+                )
+            } else {
+                kit::Menu::new("gallery-menu").trigger(trigger)
+            };
+            body = body.child(
+                menu.min_width(240.)
+                    .placement(kit::Placement::BottomStart)
+                    .open(true)
+                    .group_label("Thread")
+                    .item(
+                        kit::MenuItem::new("New thread")
+                            .icon(&crate::icons::PLUS)
+                            .shortcut("⌘N"),
+                    )
+                    .item(kit::MenuItem::new("Highlighted").state(kit::State::Hover))
+                    .item(kit::MenuItem::new("Pressed").state(kit::State::Pressed))
+                    .item(kit::MenuItem::new("Focused").state(kit::State::Focus))
+                    .separator()
+                    .item(kit::MenuItem::new("Show archived").checked(true))
+                    .item(kit::MenuItem::new("Notifications").checked(false))
+                    .item(kit::MenuItem::new("System theme").radio(true))
+                    .item(kit::MenuItem::new("More").submenu(
+                        vec![kit::MenuEntry::item(kit::MenuItem::new("Move to project"))],
+                        true,
+                    ))
+                    .item(kit::MenuItem::new("Disabled").disabled(true))
+                    .item(
+                        kit::MenuItem::new("Delete thread")
+                            .variant("destructive")
+                            .icon(&crate::icons::TRASH_2),
+                    )
+                    .on_close(|s: &mut App| s.ui.shell.palette.gallery = None)
+                    .build(&k, &mut layer),
+            );
+            return rune_kit::root(body, layer);
+        }
+        "select" => {
+            let mut layer = vec![];
+            body = body.child(
+                kit::Select::new("gallery-select", &["System", "Light", "Dark"])
+                    .current(Some("System"))
+                    .open(true)
+                    .build(&k, &mut layer),
+            );
+            return rune_kit::root(body, layer);
+        }
+        "radio" => {
+            for state in [
+                kit::State::Rest,
+                kit::State::Hover,
+                kit::State::Pressed,
+                kit::State::Focus,
+                kit::State::Disabled,
+            ] {
+                body = body.child(
+                    row()
+                        .gap(24.)
+                        .child(kit::RadioItem::new("Default", true).state(state).build(&k))
+                        .child(
+                            kit::RadioItem::new("Alternative", false)
+                                .state(state)
+                                .build(&k),
+                        ),
+                );
+            }
+        }
+
         "dialog" | "alert-dialog" => {
             let mut layer = vec![];
             let dialog = kit::Dialog::new("gallery-dialog", "Delete thread?")
@@ -91,6 +252,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
                     .build(&k, &mut layer)
             } else {
                 kit::Tooltip::new("gallery-tooltip")
+                    .placement(kit::Placement::Bottom)
                     .trigger(trigger)
                     .text(&k, "More information")
                     .open(true)
