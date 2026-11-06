@@ -47,6 +47,7 @@ pub struct Ui {
 pub struct App {
     pub src: Source,
     pub appearance: Appearance,
+    pub client_settings: settings::client::ClientSettings,
     pub route: Route,
     /// Wall clock for relative times; scenes pin it so snapshots are stable.
     pub now_ms: i64,
@@ -56,7 +57,9 @@ pub struct App {
 impl App {
     fn new() -> App {
         let src = Source::Fixture(if host::server().is_some() { data::empty_state() } else { data::fixture_state() });
-        App { src, appearance: Appearance::System, route: Route::Home { project_id: None }, now_ms: data::now_ms(), ui: Ui::default() }
+        let client_settings = settings::client::ClientSettings::load();
+        let appearance = settings::appearance(&client_settings);
+        App { src, appearance, client_settings, route: Route::Home { project_id: None }, now_ms: data::now_ms(), ui: Ui::default() }
     }
 
     pub fn state(&self) -> &s5_net::State {
@@ -64,6 +67,9 @@ impl App {
     }
 
     pub fn navigate(&mut self, route: Route) {
+        if matches!(route, Route::Settings(_)) && !matches!(self.route, Route::Settings(_)) {
+            self.ui.settings.return_route = Some(self.route.clone());
+        }
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
         {
@@ -81,6 +87,7 @@ fn setup(s: &mut App, waker: Waker) {
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = s.src.net().is_some_and(|net| net.drain());
+    changed |= settings::poll(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
         s.now_ms = now;
@@ -91,7 +98,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    shell::on_key(s, e, tx)
+    settings::on_key(s, e, tx) || shell::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {

@@ -1,0 +1,907 @@
+{
+  "general": [
+    {
+      "title": "Notifications",
+      "rows": [
+        {
+          "key": "notificationMode",
+          "title": "Thread notifications",
+          "description": "System alerts when a thread finishes, fails, or needs input or approval. Applies to this device while T3 Code is open.",
+          "kind": "select",
+          "options": [
+            [
+              "off",
+              "Off"
+            ],
+            [
+              "notifications",
+              "Notifications only"
+            ],
+            [
+              "sound",
+              "Sound only"
+            ],
+            [
+              "notifications-and-sound",
+              "Notifications with sound"
+            ]
+          ]
+        },
+        {
+          "key": "inAppNotificationsEnabled",
+          "title": "In-app notifications",
+          "description": "Show a toast when another thread finishes, fails, or needs input or approval while this app has focus.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Sidebar",
+      "rows": [
+        {
+          "key": "sidebarProjectGroupingMode",
+          "title": "Project grouping",
+          "description": "Combine matching repositories across environments.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "sidebarProjectSortOrder",
+          "title": "Project order",
+          "description": "Order of projects in the sidebar project picker and command palette.",
+          "kind": "select",
+          "options": [
+            [
+              "updated_at",
+              "Last user message"
+            ],
+            [
+              "created_at",
+              "Created at"
+            ],
+            [
+              "manual",
+              "Manual"
+            ]
+          ]
+        },
+        {
+          "key": "sidebarWorkingShelfEnabled",
+          "title": "Working section",
+          "description": "Fold working and monitoring threads into a Working section. They return to the top of the inbox when they need you. The boring sidebar in Labs has no Working section.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Confirmations",
+      "rows": [
+        {
+          "key": "confirmThreadUnpin",
+          "title": "Unpin confirmation",
+          "description": "Ask before unpinning a thread from the pinned section.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "confirmThreadArchive",
+          "title": "Archive confirmation",
+          "description": "Require a second click on the inline archive action before a thread is archived.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "confirmThreadDelete",
+          "title": "Delete confirmation",
+          "description": "Ask before deleting a thread and its chat history.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "confirmQuit",
+          "title": "Quit shortcut",
+          "description": "Hold mode also quits on two quick presses.",
+          "kind": "select",
+          "options": [
+            [
+              "direct",
+              "Direct"
+            ],
+            [
+              "hold",
+              "Hold"
+            ],
+            [
+              "double-click",
+              "Double press"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Display",
+      "rows": [
+        {
+          "key": "timestampFormat",
+          "title": "Time format",
+          "description": "System default follows your browser or OS clock preference.",
+          "kind": "select",
+          "options": [
+            [
+              "locale",
+              "System default"
+            ],
+            [
+              "12-hour",
+              "12-hour"
+            ],
+            [
+              "24-hour",
+              "24-hour"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "chat": [
+    {
+      "title": "Composer",
+      "rows": [
+        {
+          "key": "composerRichTextEnabled",
+          "title": "Rich text composer",
+          "description": "Show formatted Markdown as you type.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "sendShortcut",
+          "title": "Send shortcut",
+          "description": "Choose when Enter sends a prompt or inserts a new line",
+          "kind": "select",
+          "options": [
+            [
+              "enter",
+              "Enter"
+            ],
+            [
+              "mod-enter-multiline",
+              "\u2318Enter (multi-line)"
+            ],
+            [
+              "mod-enter",
+              "\u2318Enter"
+            ]
+          ]
+        },
+        {
+          "key": "showSkillsInSlashMenu",
+          "title": "Show skills in slash menu",
+          "description": "Also include skills in the / command menu. Skills always appear when you type $.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Follow-ups",
+      "rows": [
+        {
+          "key": "followUpBehavior",
+          "title": "Follow-up behavior",
+          "description": "Queue follow-ups while the agent runs or steer the current run. ",
+          "kind": "select",
+          "options": [
+            [
+              "steer",
+              "Steer"
+            ],
+            [
+              "queue",
+              "Queue"
+            ]
+          ]
+        }
+      ]
+    }
+  ],
+  "diffs": [
+    {
+      "title": "Diffs",
+      "rows": [
+        {
+          "key": "diffLayout",
+          "title": "Diff layout",
+          "description": "Show diffs stacked or side by side. The toggle in the diff toolbar changes this too.",
+          "kind": "select",
+          "options": [
+            [
+              "stacked",
+              "Stacked"
+            ],
+            [
+              "split",
+              "Split"
+            ]
+          ]
+        },
+        {
+          "key": "diffIgnoreWhitespace",
+          "title": "Hide whitespace changes",
+          "description": "Set whether the diff panel ignores whitespace-only edits by default.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "diffFilesCollapsed",
+          "title": "Default diff file state",
+          "description": "Start with files expanded or collapsed when opening diffs or a pull request's Code tab.",
+          "kind": "select",
+          "options": [
+            [
+              false,
+              "Expanded"
+            ],
+            [
+              true,
+              "Collapsed"
+            ]
+          ]
+        },
+        {
+          "key": "diffColorScheme",
+          "title": "Diffs",
+          "description": "Choose colors for additions and deletions, including change counts.",
+          "kind": "select",
+          "options": [
+            [
+              "red-green",
+              "Red & green (default)"
+            ],
+            [
+              "blue-orange",
+              "Blue & orange"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Pull requests",
+      "rows": [
+        {
+          "key": "proactivePanelsEnabled",
+          "title": "Open pull requests and changes panels proactively",
+          "description": "Open linked pull requests first. Otherwise, open Changes for edits to at least 3 files or 50 lines.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "pullRequestLinksOpenInApp",
+          "title": "Devices",
+          "description": "Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on your git host.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    }
+  ],
+  "appearance": [
+    {
+      "title": "Interface",
+      "rows": [
+        {
+          "key": "appearanceContrast",
+          "title": "Legacy",
+          "description": "Switches the hosted app release channel.",
+          "kind": "slider",
+          "options": [
+            [
+              "latest",
+              "Latest"
+            ],
+            [
+              "nightly",
+              "Nightly"
+            ]
+          ]
+        },
+        {
+          "key": "glassOpacity",
+          "title": "Glass opacity",
+          "description": "Higher values make menus, dialogs, and the composer more solid.",
+          "kind": "slider",
+          "options": []
+        },
+        {
+          "key": "chatWidth",
+          "title": "Chat width",
+          "description": "Set how wide messages and the composer can grow on large screens.",
+          "kind": "select",
+          "options": [
+            [
+              "comfortable",
+              "Comfortable (default)"
+            ],
+            [
+              "wide",
+              "Wide"
+            ],
+            [
+              "full",
+              "Full"
+            ]
+          ]
+        },
+        {
+          "key": "effortDisplay",
+          "title": "Effort display",
+          "description": "Show reasoning effort in the composer as its name, such as High, or as bars.",
+          "kind": "select",
+          "options": [
+            [
+              "label",
+              "Word (default)"
+            ],
+            [
+              "bars",
+              "Bars"
+            ]
+          ]
+        },
+        {
+          "key": "mathRenderingEnabled",
+          "title": "Render math",
+          "description": "Typeset LaTeX math, such as $x^2$ or \\[x^2\\], in messages and Markdown previews. The composer keeps TeX source editable.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Advanced",
+      "rows": [
+        {
+          "key": "panelAnimationDurationMs",
+          "title": "Panel animations",
+          "description": "Set how fast panels open and close.",
+          "kind": "slider",
+          "options": []
+        },
+        {
+          "key": "environmentIdentificationMode",
+          "title": "Environment identification",
+          "description": "",
+          "kind": "select",
+          "options": [
+            [
+              "artwork",
+              "Artwork"
+            ],
+            [
+              "nightly-artwork",
+              "Nightly artwork"
+            ],
+            [
+              "dev-artwork",
+              "Dev artwork"
+            ],
+            [
+              "pill",
+              "Pill"
+            ],
+            [
+              "none",
+              "None"
+            ]
+          ]
+        },
+        {
+          "key": "persistComposerContextStrip",
+          "title": "Composer context",
+          "description": "Keep branch and worktree controls below the composer after a thread starts.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Typography",
+      "rows": [
+        {
+          "key": "fontSmoothing",
+          "title": "Font smoothing",
+          "description": "Use thinner grayscale text smoothing instead of the macOS default.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    }
+  ],
+  "browser": [
+    {
+      "title": "Agent access",
+      "rows": [
+        {
+          "key": "enableAgentBrowserAccess",
+          "title": "Agent browser access",
+          "description": "",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Browsing",
+      "rows": [
+        {
+          "key": "browserLinkTarget",
+          "title": "Open links in",
+          "description": "Where links in the chat and terminal open. Hold \u2318 or Ctrl while clicking a link to open it in your default browser either way.",
+          "kind": "select",
+          "options": [
+            [
+              "system",
+              "Your default browser"
+            ],
+            [
+              "app",
+              "T3 Code"
+            ]
+          ]
+        },
+        {
+          "key": "browserAutoShowFloatingPreview",
+          "title": "Auto-show floating preview",
+          "description": "Show the floating preview when an agent opens a browser or device unless the agent says otherwise.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "browserSearchEngine",
+          "title": "Search engine",
+          "description": "What the address bar searches when you type something that isn't a URL.",
+          "kind": "select",
+          "options": [
+            [
+              "duckduckgo",
+              "DuckDuckGo"
+            ],
+            [
+              "google",
+              "Google"
+            ],
+            [
+              "bing",
+              "Bing"
+            ],
+            [
+              "brave",
+              "Brave Search"
+            ],
+            [
+              "kagi",
+              "Kagi"
+            ],
+            [
+              "ecosia",
+              "Ecosia"
+            ],
+            [
+              "custom",
+              "Custom"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Advanced",
+      "rows": [
+        {
+          "key": "browserDefaultViewport",
+          "title": "Default browser viewport",
+          "description": "Tab size for you and agents. Fill fits the panel; other sizes show the device toolbar.",
+          "kind": "select",
+          "options": [
+            [
+              {
+                "_tag": "fill"
+              },
+              "Fill panel"
+            ],
+            [
+              {
+                "_tag": "freeform",
+                "width": 1280,
+                "height": 800
+              },
+              "Responsive"
+            ]
+          ]
+        },
+        {
+          "key": "browserDefaultZoomFactor",
+          "title": "Default browser zoom",
+          "description": "Page zoom applied to new browser tabs.",
+          "kind": "select",
+          "options": [
+            [
+              0.25,
+              "25%"
+            ],
+            [
+              0.33,
+              "33%"
+            ],
+            [
+              0.5,
+              "50%"
+            ],
+            [
+              0.67,
+              "67%"
+            ],
+            [
+              0.75,
+              "75%"
+            ],
+            [
+              0.8,
+              "80%"
+            ],
+            [
+              0.9,
+              "90%"
+            ],
+            [
+              1,
+              "100%"
+            ],
+            [
+              1.1,
+              "110%"
+            ],
+            [
+              1.25,
+              "125%"
+            ],
+            [
+              1.5,
+              "150%"
+            ],
+            [
+              1.75,
+              "175%"
+            ],
+            [
+              2,
+              "200%"
+            ],
+            [
+              2.5,
+              "250%"
+            ],
+            [
+              3,
+              "300%"
+            ],
+            [
+              4,
+              "400%"
+            ],
+            [
+              5,
+              "500%"
+            ]
+          ]
+        },
+        {
+          "key": "browserDefaultAppearance",
+          "title": "Default browser appearance",
+          "description": "The color scheme pages are told to prefer. System follows your OS setting.",
+          "kind": "select",
+          "options": [
+            [
+              "system",
+              "System"
+            ],
+            [
+              "light",
+              "Light"
+            ],
+            [
+              "dark",
+              "Dark"
+            ]
+          ]
+        }
+      ]
+    },
+    {
+      "title": "Recordings",
+      "rows": [
+        {
+          "key": "browserRecordingFrameRate",
+          "title": "Browser recording frame rate",
+          "description": "Maximum recording rate. 30 fps saves CPU and storage; 60 fps is smoother.",
+          "kind": "select",
+          "options": [
+            [
+              30,
+              "30 fps"
+            ],
+            [
+              60,
+              "60 fps"
+            ]
+          ]
+        },
+        {
+          "key": "browserRecordingShowKeyPresses",
+          "title": "Show key presses in recordings",
+          "description": "Show pressed keys and shortcuts in new recordings. Password fields are excluded.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "browserRecordingShowMousePresses",
+          "title": "Show mouse presses in recordings",
+          "description": "Highlight mouse presses and held buttons in new recordings.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    }
+  ],
+  "labs": [
+    {
+      "title": "Beta",
+      "rows": [
+        {
+          "key": "boringSidebarEnabled",
+          "title": "Boring sidebar (group by project)",
+          "description": "Group sidebar threads into project folders. Pinned threads stay on top, and Snoozed and Settled stay below the folders.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "boringSidebarMultilineRows",
+          "title": "Two-line folder rows",
+          "description": "In the boring sidebar, show folder threads on two lines: the title, then the branch, pull request, and agent.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "guestSharingEnabled",
+          "title": "Guest links",
+          "description": "",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "linkedEnvironmentsEnabled",
+          "title": "Linked environments",
+          "description": "",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "simlockDeviceHostsEnabled",
+          "title": "Simlock device hosts (alpha)",
+          "description": "",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Legacy",
+      "rows": [
+        {
+          "key": "planModeEnabled",
+          "title": "Plan mode (legacy)",
+          "description": "Restore Build/Plan, /plan, /default, and Shift+Tab. Off uses build mode.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "contextWindowMeterEnabled",
+          "title": "Context window indicator (legacy)",
+          "description": "Shows context window usage as a circular indicator in the composer.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    }
+  ],
+  "worktrees": [
+    {
+      "title": "Creation",
+      "rows": [
+        {
+          "key": "worktreesDirectory",
+          "title": "Worktree location",
+          "description": "Folder where new worktrees are created, on any drive, such as D:\\\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder.",
+          "kind": "input",
+          "options": []
+        },
+        {
+          "key": "newWorktreesStartFromOrigin",
+          "title": "Creation",
+          "description": "Uses the latest commit of the base branch\u2019s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Branches",
+      "rows": [
+        {
+          "key": "branchNamePrefix",
+          "title": "Branch prefix",
+          "description": "For example, t3 or t3/ produces t3/add-search. Leave empty for no prefix.",
+          "kind": "input",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Cleanup",
+      "rows": []
+    }
+  ],
+  "maintenance": [
+    {
+      "title": "Updates",
+      "rows": [
+        {
+          "key": "enableProviderUpdateChecks",
+          "title": "Provider update checks",
+          "description": "Check installed provider CLIs for newer available versions and fetch model catalog updates. When off, new models may not appear.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "continueThreadsAfterServerUpdate",
+          "title": "Continue threads after restarts",
+          "description": "Automatically resume interrupted threads after an update, crash, or machine restart on the selected environments.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Background activity",
+      "rows": []
+    }
+  ],
+  "snap-shot": [
+    {
+      "title": "SnapShots",
+      "rows": [
+        {
+          "key": "snapShotEnabled",
+          "title": "SnapShots",
+          "description": "",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Capture",
+      "rows": []
+    }
+  ],
+  "threads": [
+    {
+      "title": "New projects",
+      "rows": [
+        {
+          "key": "defaultThreadEnvMode",
+          "title": "Workspace",
+          "description": "",
+          "kind": "select",
+          "options": [
+            [
+              "local",
+              "Local"
+            ],
+            [
+              "worktree",
+              "Worktree"
+            ]
+          ]
+        },
+        {
+          "key": "addProjectBaseDirectory",
+          "title": "Add project starts in",
+          "description": "",
+          "kind": "input",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Usage limits",
+      "rows": [
+        {
+          "key": "autoResumeLimitedThreads",
+          "title": "Resume after usage limits",
+          "description": "Automatically resume threads when their usage limits reset. You can cancel auto-resume in each thread.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "snoozeLimitedThreads",
+          "title": "Snooze until limits reset",
+          "description": "Snooze threads until their usage limits reset. Enable auto-resume to continue the agent after the reset.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Auto-settle",
+      "rows": [
+        {
+          "key": "sidebarAutoSettleOnMerge",
+          "title": "Auto-settle merged threads",
+          "description": "Settle a thread when its pull request merges. Closed pull requests still settle automatically.",
+          "kind": "switch",
+          "options": []
+        },
+        {
+          "key": "sidebarAutoSettleAfterDays",
+          "title": "Days of inactivity before auto-settle",
+          "description": "Any new activity un-settles a thread automatically.",
+          "kind": "input",
+          "options": []
+        },
+        {
+          "key": "sidebarAutoSettleKeepPullRequests",
+          "title": "Keep threads with a PR",
+          "description": "Inactivity does not settle threads with a pull request. Merge and close still do.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Text generation",
+      "rows": [
+        {
+          "key": "threadTitleInstructions",
+          "title": "Thread title instructions",
+          "description": "Appended to the prompt for new and regenerated thread titles.",
+          "kind": "input",
+          "options": []
+        }
+      ]
+    }
+  ],
+  "storage": [
+    {
+      "title": "Worktrees",
+      "rows": [
+        {
+          "key": "worktreesDirectory",
+          "title": "Worktree location",
+          "description": "Folder where new worktrees are created, on any drive, such as D:\\\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder.",
+          "kind": "input",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Artifacts and logs",
+      "rows": []
+    }
+  ]
+}

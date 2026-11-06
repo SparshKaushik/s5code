@@ -27,12 +27,14 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
-    if s.ui.shell.palette.gallery.is_some() { return crate::kit::gallery::view(s, cx, t); }
-    let main = match &s.route {
-        Route::Settings(_) => settings::view(s, cx, t),
-        _ => chat::view(s, cx, t),
-    };
-    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t)).child(main);
+    if s.ui.shell.palette.gallery.is_some() {
+        return crate::kit::gallery::view(s, cx, t);
+    }
+    if matches!(s.route, Route::Settings(_)) {
+        // The web mounts settings as a route modal with its own navigation.
+        return rune_kit::root(settings::view(s, cx, t), palette::overlay(s, cx, t));
+    }
+    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t)).child(chat::view(s, cx, t));
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
     }
