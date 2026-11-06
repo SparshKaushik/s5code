@@ -1,7 +1,7 @@
 use super::{update, value};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
-use rune::{El, col, el, icon, row, text};
+use rune::{El, col, el, row, text};
 use serde_json::{Value, json};
 
 pub fn button(label: &str, t: &T) -> El {
@@ -18,38 +18,24 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
     } else {
         current.as_bool().unwrap_or(false)
     };
-    let key = key.to_owned();
-    el().key(format!("setting-{key}"))
-        .role("switch")
+    let owned = key.to_owned();
+    crate::kit::Switch::new(on)
         .label(label)
-        .checked(on)
-        .focusable(true)
-        .focus_ring(2.0, 2.0, t.c.ring)
-        .size(30.0, 18.0)
-        .radius(999.0)
-        .fill(if on { t.c.primary } else { t.c.input })
-        .hover(t.c.accent.alpha_mul(0.1))
-        .child(
-            el().absolute(if on { 14.0 } else { 2.0 }, 2.0)
-                .size(14.0, 14.0)
-                .radius(999.0)
-                .fill(if !on && t.dark {
-                    t.c.muted_foreground
-                } else {
-                    t.c.background
-                }),
-        )
-        .on_press(move |s: &mut App| {
+        .hide_label()
+        .on_toggle(move |s: &mut App| {
+            let key = owned.as_str();
             let v = if key == "sidebarProjectGroupingMode" {
                 json!(if on { "separate" } else { "repository" })
             } else {
                 json!(!on)
             };
-            update(s, &key, v);
+            update(s, key, v);
             if key == "boringSidebarEnabled" && !on {
                 update(s, "legacySidebarEnabled", json!(false));
             }
         })
+        .build(&crate::kit::theme(t))
+        .key(format!("setting-{key}"))
 }
 
 pub fn select_width(key: &str) -> f32 {
@@ -62,6 +48,25 @@ pub fn select_width(key: &str) -> f32 {
     }
 }
 
+fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
+    let current = match value(s, key) {
+        // Unset values resolve to their built-in defaults (`resolveProjectSettings`).
+        Value::Null if key == "defaultThreadEnvMode" => json!("local"),
+        Value::Null if key == "worktreeSubmodules" => json!("recursive"),
+        current => current,
+    };
+    options
+        .iter()
+        .find(|(v, _)| *v == current)
+        .map(|(_, l)| l.clone())
+        .unwrap_or_else(|| current.as_str().unwrap_or("Default").to_owned())
+}
+
+fn labels(options: &[(Value, String)]) -> Vec<String> {
+    options.iter().map(|(_, l)| l.clone()).collect()
+}
+
+/// The setting's `kit::Select` trigger; its list mounts in the settings overlay (`select_menu`).
 pub fn select(
     s: &App,
     t: &T,
@@ -70,92 +75,56 @@ pub fn select(
     options: &[(Value, String)],
     width: f32,
 ) -> El {
-    let current = value(s, key);
-    let display = options
-        .iter()
-        .find(|(v, _)| *v == current)
-        .map(|(_, l)| l.clone())
-        .unwrap_or_else(|| current.as_str().unwrap_or("Default").to_owned());
     let open = s.ui.settings.open_select.as_deref() == Some(key);
     let owned = key.to_owned();
     let choices = options.to_vec();
-    let trigger = row()
-        .key(format!("setting-{key}"))
-        .w(width)
-        .h(28.0)
-        .px(9.0)
-        .gap(8.0)
-        .center_y()
-        .radius(8.0)
-        .border(1.0, t.c.input)
-        .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
-        .hover(t.c.accent)
-        .focusable(true)
-        .role("combobox")
+    // The kit wraps its trigger in a `self_start` row; this row lets the setting row centre it.
+    row().child(crate::kit::Select::new(format!("setting-{key}"), &labels(options))
+        .current(Some(&current_label(s, key, options)))
         .label(title)
-        .expanded(open)
-        .focus_ring(2.0, 1.0, t.c.ring)
-        .on_press(move |s: &mut App| {
+        .width(width)
+        .size("sm")
+        .on_toggle(move |s: &mut App| {
             s.ui.settings.open_select = if open { None } else { Some(owned.clone()) };
             s.ui.settings.select_options = choices.clone();
         })
-        .child(
-            text(display)
-                .font(theme::TEXT_SM)
-                .color(t.c.foreground)
-                .grow(1.0),
-        )
-        .child(icon(&icons::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground));
-    trigger
+        .trigger(&crate::kit::theme(t)))
 }
 
-pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width: f32) -> El {
-    let current = value(s, key);
-    let mut menu = col()
-        .key(format!("setting-menu-{key}"))
-        .w(width)
-        .padding(4.0)
-        .gap(2.0)
-        .radius(6.0)
-        .border(1.0, t.c.border)
-        .fill(t.c.popover)
-        .role("listbox")
-        .focus_group()
-        .focus_follows();
-    for (index, (v, label)) in options.iter().enumerate() {
-        let (key, v) = (key.to_owned(), v.clone());
-        menu = menu.child(
-            el().w_full()
-                .min_h(28.0)
-                .key(format!("setting-option-{key}-{index}"))
-                .px(8.0)
-                .center_y()
-                .radius(4.0)
-                .hover(t.c.accent)
-                .focus_highlight(t.c.accent)
-                .focusable(true)
-                .role("option")
-                .label(label.clone())
-                .focus_selected(v == current)
-                .on_press(move |s: &mut App| {
-                    update(s, &key, v.clone());
-                    s.ui.settings.open_select = None;
-                })
-                .child(
-                    text(label.clone())
-                        .font(theme::TEXT_XS)
-                        .color(t.c.popover_foreground),
-                ),
-        );
+/// The open select's list, anchored to the trigger `select` mounted.
+pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width: f32, layer: &mut Vec<El>) {
+    let (owned, choices) = (key.to_owned(), options.to_vec());
+    let _trigger = crate::kit::Select::new(format!("setting-{key}"), &labels(options))
+        .current(Some(&current_label(s, key, options)))
+        .width(width)
+        .size("sm")
+        .open(true)
+        .on_choose(move |s: &mut App, label: &str, _: &mut rune::Tx| {
+            if let Some((v, _)) = choices.iter().find(|(_, l)| l == label) {
+                update(s, &owned, v.clone());
+            }
+            s.ui.settings.open_select = None;
+        })
+        .on_close(|s: &mut App| s.ui.settings.open_select = None)
+        .build(&crate::kit::theme(t), layer);
+}
+
+/// Markdown `[label](href)` links in a description: the plain copy and each label's byte range.
+fn links(copy: &str) -> (String, Vec<(std::ops::Range<usize>, String)>) {
+    let mut plain = String::new();
+    let mut links = Vec::new();
+    let mut rest = copy;
+    while let Some(open) = rest.find('[') {
+        let Some((label, after)) = rest[open + 1..].split_once("](") else { break };
+        let Some((href, tail)) = after.split_once(')') else { break };
+        plain.push_str(&rest[..open]);
+        let start = plain.len();
+        plain.push_str(label);
+        links.push((start..plain.len(), href.to_owned()));
+        rest = tail;
     }
-    menu.modal(true, |s: &mut App| s.ui.settings.open_select = None)
-        .focus_return(format!("setting-{key}"))
-        .anchored_fit(
-            format!("setting-{key}"),
-            rune::Side::Bottom,
-            rune::Align::End,
-            4.0,
-        )
+    plain.push_str(rest);
+    (plain, links)
 }
 
 pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
@@ -185,18 +154,37 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         .gap(4.0)
         .child(heading);
     if !description.is_empty() {
-        copy = copy.child(
-            text(super::balance::description(
-                description,
-                cx.layout(&format!("copy-{key}"))
-                    .map(|r| r[2])
-                    .unwrap_or(558.0)
-                    .min(672.0),
-            ))
-            .font(theme::TEXT_XS.lh(18.0))
-            .color(t.c.muted_foreground)
-            .wrap(),
-        );
+        let (plain, links) = links(description);
+        let mut body = text(super::balance::description(
+            &plain,
+            cx.layout(&format!("copy-{key}"))
+                .map(|r| r[2])
+                .unwrap_or(558.0)
+                .min(672.0),
+        ))
+        .font(theme::TEXT_XS.lh(18.0))
+        .color(t.c.muted_foreground)
+        .wrap();
+        if !links.is_empty() {
+            let underline = t.c.muted_foreground.alpha_mul(0.5);
+            body = body.spans(
+                links
+                    .iter()
+                    .map(|(r, _)| rune::Span::new(r.start, r.end).underline(underline))
+                    .collect::<Vec<_>>(),
+            );
+            for (range, href) in links {
+                body = body.link(
+                    rune::Link::new(range, href)
+                        .hover(rune::LinkPaint::new().color(t.c.foreground).underline(t.c.foreground)),
+                );
+            }
+            body = body.on_link(|s: &mut App, href: &str, _tx: &mut rune::Tx| match href.strip_prefix("/settings/") {
+                Some(page) => s.navigate(crate::Route::Settings(page.into())),
+                None => super::auth::open_url(s, href),
+            });
+        }
+        copy = copy.child(body);
     }
     let ctrl = match spec["kind"].as_str() {
         Some("switch") => row()
@@ -225,14 +213,17 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 }))
             });
             let (k1, k2) = (key.to_owned(), key.to_owned());
-            rune::text_input(&edit, theme::TEXT_XS)
+            let (height, pad) = if spec["size"] == "default" { (32.0, 11.0) } else { (28.0, 9.0) };
+            rune::text_input(&edit, theme::TEXT_SM)
                 .key(format!("setting-{key}"))
-                .w(208.0)
-                .min_h(28.0)
-                .px(9.0)
-                .py(4.0)
-                .radius(6.0)
-                .border(1.0, t.c.border)
+                .placeholder(spec["placeholder"].as_str().unwrap_or(""), t.c.muted_foreground.alpha_mul(0.72))
+                .w(spec["width"].as_f64().map_or(208.0, |w| w as f32))
+                .h(height)
+                .px(pad)
+                .center_y()
+                .radius(8.0)
+                .border(1.0, t.c.input)
+                .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
                 .color(t.c.foreground)
                 .single_line()
                 .on_edit(move |s: &mut App| {
@@ -325,7 +316,7 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         .center_y()
         .gap(12.0)
         .child(
-            text(format!(
+            el().min_w(48.0).h(24.0).px(8.0).center().radius(6.0).fill(t.c.muted).child(text(format!(
                 "{n}{}",
                 if key == "panelAnimationDurationMs" {
                     " ms"
@@ -333,9 +324,8 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
                     "%"
                 }
             ))
-            .w(48.0)
-            .font(theme::MONO_XS)
-            .color(t.c.foreground),
+            .font(theme::weight(theme::MONO_XS, theme::MEDIUM))
+            .color(t.c.foreground)),
         )
         .child(
             crate::kit::Slider::new(n)

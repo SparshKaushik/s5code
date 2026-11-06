@@ -551,7 +551,7 @@ fn native_colors(dark: bool) -> NativeColors {
         }
     }
 }
-pub(super) fn glass(e: El, k: &Kit, native: bool) -> El {
+pub(crate) fn glass(e: El, k: &Kit, native: bool) -> El {
     if native {
         let c = native_colors(k.dark);
         return e

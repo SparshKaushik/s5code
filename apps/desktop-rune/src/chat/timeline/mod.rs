@@ -593,15 +593,19 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
     card
 }
 
-pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
+/// A loaded thread with nothing to show yet; the chat column shows the empty prompt instead.
+pub fn is_empty(app: &App, thread_id: &str) -> bool {
+    app.state().thread_views.get(thread_id).is_some_and(|v| v.synchronized && rows::derive(&v.projection, app.now_ms).is_empty())
+}
+
+pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::chat::details::Lane) -> El {
     let Some(view) = app.state().thread_views.get(thread_id) else {
         return el().grow(1.0);
     };
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     let rows = rows::derive(&view.projection, app.now_ms);
     let mut stack = col()
-        .w_full()
-        .max_w(736.0)
+        .w(lane.width)
         .growth(GrowthSpec::default())
         .virtualize(100.0);
     for (index, r) in rows.into_iter().enumerate() {
@@ -732,8 +736,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
         .min_h(0.0)
         .w_full()
         .scroll(ScrollSpec { stick_bottom: true })
-        .items_center()
-        .px(24.0)
+        // Rows share the composer's lane, which the details card narrows.
+        .pl(lane.left)
         .pt(21.0)
         // The composer floats over the bottom of the list; the last row scrolls clear of it.
         .pb(composer_h + crate::chat::composer::BOTTOM + 21.0)

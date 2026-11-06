@@ -1,0 +1,42 @@
+{
+  "/home/ubuntu/projects/s5code": {
+    "local": {
+      "isRepo": true,
+      "hasPrimaryRemote": false,
+      "isDefaultRef": true,
+      "refName": "master",
+      "hasWorkingTreeChanges": false,
+      "workingTree": {
+        "files": [],
+        "insertions": 0,
+        "deletions": 0
+      }
+    },
+    "remote": {
+      "hasUpstream": false,
+      "aheadCount": 0,
+      "behindCount": 0,
+      "pr": null
+    }
+  },
+  "/home/ubuntu/s5code-ref/apps/server": {
+    "local": {
+      "isRepo": true,
+      "hasPrimaryRemote": false,
+      "isDefaultRef": false,
+      "refName": "feat/rune-desktop-prototype",
+      "hasWorkingTreeChanges": false,
+      "workingTree": {
+        "files": [],
+        "insertions": 0,
+        "deletions": 0
+      }
+    },
+    "remote": {
+      "hasUpstream": false,
+      "aheadCount": 0,
+      "behindCount": 0,
+      "pr": null
+    }
+  }
+}

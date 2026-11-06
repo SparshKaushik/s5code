@@ -59,11 +59,11 @@ pub fn draft_key(route: &Route) -> String {
 }
 
 fn draft<'a>(s: &'a App) -> Option<&'a Draft> {
-    s.ui.chat.composer.drafts.get(&draft_key(&s.route))
+    s.ui.chat.composer.drafts.get(&draft_key(s.frame_route()))
 }
 
 fn draft_mut(s: &mut App) -> &mut Draft {
-    let key = draft_key(&s.route);
+    let key = draft_key(s.frame_route());
     s.ui.chat.composer.drafts.entry(key).or_default()
 }
 
@@ -74,7 +74,7 @@ pub struct Ctx<'a> {
 }
 
 pub fn ctx(s: &App) -> Ctx<'_> {
-    match &s.route {
+    match s.frame_route() {
         Route::Thread(id) => {
             let thread = s.state().threads.iter().find(|t| data::s(t, "id") == id);
             let project = thread.and_then(|t| project_by_id(s, data::s(t, "projectId")));
@@ -166,7 +166,7 @@ pub const RUNTIME_MODES: [(&str, &str, &str, &rune::Icon); 4] = [
 
 pub fn set_runtime_mode(s: &mut App, mode: &str) {
     draft_mut(s).runtime_mode = Some(mode.to_string());
-    if let Route::Thread(id) = s.route.clone()
+    if let Route::Thread(id) = s.frame_route().clone()
         && let Some(net) = s.src.net()
     {
         net.dispatch(json!({"type": "thread.runtime-mode.set", "commandId": s5_net::uuid(), "threadId": id, "runtimeMode": mode}));
@@ -176,7 +176,7 @@ pub fn set_runtime_mode(s: &mut App, mode: &str) {
 fn toggle_plan(s: &mut App) {
     let next = if interaction_mode(s) == "plan" { "default" } else { "plan" };
     draft_mut(s).interaction_mode = Some(next.to_string());
-    if let Route::Thread(id) = s.route.clone()
+    if let Route::Thread(id) = s.frame_route().clone()
         && let Some(net) = s.src.net()
     {
         net.dispatch(json!({"type": "thread.interaction-mode.set", "commandId": s5_net::uuid(), "threadId": id, "interactionMode": next}));
@@ -192,7 +192,7 @@ fn send(s: &mut App) {
     let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
     let running = running(s);
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
-    let route = s.route.clone();
+    let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let Some(net) = s.src.net() else { return };
     match route {
@@ -339,7 +339,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
         stack = stack.child(menu.mx(22.0).mb(-17.0));
     }
     // A pending question sits directly above the composer, as on the web.
-    if let crate::Route::Thread(id) = &s.route {
+    if let crate::Route::Thread(id) = s.frame_route() {
         stack = stack.child(crate::chat::timeline::composer_requests(s, t, id));
     }
     stack.child(body)
@@ -530,7 +530,6 @@ fn on_replay_showcase(s: &mut App) {
     if let Some(id) = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| data::s(t, "id").to_string()) {
         s.navigate(Route::Thread(id));
     }
-    crate::chat::details::seed_scene_vcs(s, "master");
 }
 
 /// The references were captured when `server` was the only project, so the draft opens there.
@@ -538,12 +537,11 @@ fn on_home(s: &mut App) {
     crate::scene_clock(s);
     let server = s.state().projects.iter().find(|p| p["title"] == "server").map(|p| data::s(p, "id").to_string());
     s.navigate(Route::Home { project_id: server });
-    crate::chat::details::seed_scene_vcs(s, "feat/rune-desktop-prototype");
 }
 
 /// Marks the open thread as running, as the server reports a run in flight.
 fn seed_running(s: &mut App) {
-    let id = draft_key(&s.route);
+    let id = draft_key(s.frame_route());
     if let crate::data::Source::Fixture(state) = &mut s.src
         && let Some(t) = state.threads.iter_mut().find(|t| data::s(t, "id") == id)
     {

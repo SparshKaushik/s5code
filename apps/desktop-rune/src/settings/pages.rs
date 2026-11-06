@@ -61,30 +61,27 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         page = page.child(super::themes::view(s, t));
     }
     if let Some(sections) = specs()[path].as_array() {
+        let mut groups: Vec<(&str, Vec<El>)> = Vec::new();
         for section in sections {
             let title = section["title"].as_str().unwrap_or("");
-            if title == "Advanced" {
-                page = page.child(
-                    c::button(
-                        if s.ui.settings.advanced {
-                            "⌄ Advanced"
-                        } else {
-                            "› Advanced"
-                        },
-                        t,
-                    )
-                    .on_press(|s: &mut App| s.ui.settings.advanced = !s.ui.settings.advanced),
-                );
-                if !s.ui.settings.advanced {
-                    continue;
-                }
-            }
-            let children: Vec<_> = section["rows"]
+            let rows = section["rows"]
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|spec| c::setting_row(s, cx, t, spec))
-                .collect();
+                .map(|spec| c::setting_row(s, cx, t, spec));
+            // `AdvancedSettings`: a fold at the end of the previous section's card.
+            if title == "Advanced" {
+                if let Some((_, last)) = groups.last_mut() {
+                    last.push(advanced_trigger(s.ui.settings.advanced, t));
+                    if s.ui.settings.advanced {
+                        last.extend(rows);
+                    }
+                    continue;
+                }
+            }
+            groups.push((title, rows.collect()));
+        }
+        for (title, children) in groups {
             if !children.is_empty() {
                 page = page.child(c::section(title, children, t));
             }
@@ -103,6 +100,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "about" => super::about::view(s, t),
         _ => unavailable(path, t),
     })
+}
+
+fn advanced_trigger(open: bool, t: &T) -> El {
+    rune::row()
+        .w_full()
+        .min_h(40.0)
+        .px(16.0)
+        .gap(6.0)
+        .center_y()
+        .focusable(true)
+        .role("button")
+        .label("Advanced")
+        .expanded(open)
+        .child(
+            rune::icon(if open { &crate::icons::CHEVRON_DOWN } else { &crate::icons::CHEVRON_RIGHT }, 14.0)
+                .color(t.c.muted_foreground),
+        )
+        .child(text("Advanced").font(theme::XS_MEDIUM).color(t.c.muted_foreground))
+        .on_press(|s: &mut App| s.ui.settings.advanced = !s.ui.settings.advanced)
 }
 
 fn unavailable(path: &str, t: &T) -> El {

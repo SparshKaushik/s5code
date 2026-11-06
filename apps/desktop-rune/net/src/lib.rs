@@ -177,6 +177,10 @@ impl Net {
             .send(Command::Unwatch(Route::Thread(thread_id.to_owned())));
     }
     pub fn watch_vcs(&mut self, cwd: &str) {
+        if self.state.vcs.contains_key(cwd) {
+            return;
+        }
+        self.state.vcs.insert(cwd.to_owned(), json!({"local":null,"remote":null}));
         let _ = self.tx.send(Command::Watch(Route::Vcs(cwd.to_owned())));
     }
     pub fn unwatch_vcs(&mut self, cwd: &str) {

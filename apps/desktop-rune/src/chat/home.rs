@@ -21,7 +21,7 @@ pub struct Ui {
 /// The project the draft belongs to: the route's, else the one with the latest activity.
 pub fn draft_project(s: &App) -> Option<&Value> {
     let st = s.state();
-    if let Route::Home { project_id: Some(id) } = &s.route
+    if let Route::Home { project_id: Some(id) } = s.frame_route()
         && let Some(p) = composer::project_by_id(s, id)
     {
         return Some(p);
@@ -44,21 +44,25 @@ pub fn draft_project(s: &App) -> Option<&Value> {
         .max_by(|a, b| activity(a).cmp(&activity(b)).then_with(|| data::s(b, "title").cmp(data::s(a, "title"))))
 }
 
-pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
+/// The empty conversation (MessagesTimeline's empty state): a prompt centred in the lane.
+pub fn view(cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
-    let mut body = col().key("home").w_full().grow(1.0).min_h(0.0);
-    let prompt = col()
+    col()
+        .key("home")
         .w_full()
         .grow(1.0)
-        .center()
+        .min_h(0.0)
+        .justify_center()
+        .pl(lane.left)
         .pb(composer_h + composer::BOTTOM + 8.0)
-        .child(text("Send a message to start the conversation.").font(theme::TEXT_SM).color(t.c.muted_foreground));
-    body = body.child(prompt);
-    if let Some(banner) = provider_banner(s, t) {
-        let right_inset = (lane.left * 2.0 + lane.width).max(0.0);
-        body = body.child(row().pin(Some(0.0), Some(0.0), None, None).w(right_inset).pt(12.0).justify_center().child(banner));
-    }
-    body
+        .child(row().w(lane.width).justify_center().child(text("Send a message to start the conversation.").font(theme::TEXT_SM).color(t.c.muted_foreground)))
+}
+
+/// The provider status banner, floating at the top of the lane on any chat route.
+pub fn banner(s: &App, t: &T, lane: &Lane) -> Option<El> {
+    let banner = provider_banner(s, t)?;
+    let right_inset = (lane.left * 2.0 + lane.width).max(0.0);
+    Some(row().pin(Some(0.0), Some(0.0), None, None).w(right_inset).pt(12.0).justify_center().child(banner))
 }
 
 /// ProviderStatusBanner: the selected provider is unauthenticated or failing.

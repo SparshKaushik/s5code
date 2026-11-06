@@ -45,6 +45,7 @@ pub struct Patch {
     pub settled: Option<bool>,
     pub snoozed_until: Option<Option<i64>>,
     pub archived: bool,
+    pub title: Option<String>,
 }
 
 #[derive(Default)]
@@ -63,6 +64,15 @@ pub struct Ui {
     pub patches: HashMap<String, Patch>,
     pub back: Vec<Route>,
     pub forward: Vec<Route>,
+    /// The row whose title is being edited in place, and the edit.
+    pub rename: Option<(String, TextEdit)>,
+    /// The thread a delete confirmation is open for (`confirmThreadDelete`).
+    pub delete: Option<String>,
+    /// The row whose hover card (`ThreadHoverCard`) is showing.
+    pub card: Option<String>,
+    /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
+    pub project_scope: Vec<String>,
+    pub scope_open: bool,
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
@@ -76,8 +86,25 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             s.ui.shell.sidebar.selected.insert(id);
         }
     }),
-    // Pair with `--script` moving the pointer onto a row: `[{"t":0.1,"type":"move","x":120,"y":330}]`.
-    ("sidebar-hover", scene_home),
+    // A row's hover card, as the reference caught it (card shown, row style already settled).
+    ("sidebar-hover", |s| {
+        scene_on(s, "Replay showcase");
+        s.ui.shell.sidebar.card = thread_titled(s, "Idempotency key definition");
+    }),
+    ("sidebar-rename", |s| {
+        scene_on(s, "Replay showcase");
+        if let Some(id) = thread_titled(s, "Todo list replay") {
+            start_rename(s, &id);
+        }
+    }),
+    ("sidebar-delete", |s| {
+        scene_on(s, "Replay showcase");
+        s.ui.shell.sidebar.delete = thread_titled(s, "Todo list replay");
+    }),
+    ("sidebar-scope", |s| {
+        scene_on(s, "Replay showcase");
+        s.ui.shell.sidebar.scope_open = true;
+    }),
     ("sidebar-shelves", |s| {
         scene_home(s);
         let ids: Vec<String> = ["Docs site navigation ideas", "Approval flow replay"].iter().filter_map(|t| thread_titled(s, t)).collect();
@@ -101,7 +128,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         ui.search.focused = true;
     }),
     ("sidebar-menu", |s| {
-        scene_home(s);
+        scene_on(s, "Replay showcase");
         if let Some(id) = thread_titled(s, "Replay showcase") {
             s.ui.shell.sidebar.menu = Some(menu::Menu::new(id, 121.0, 340.0));
         }
@@ -124,8 +151,12 @@ fn thread_titled(s: &App, title: &str) -> Option<String> {
 
 /// The web's `/` redirects to the newest thread; the reference shots open on "New thread".
 fn scene_home(s: &mut App) {
+    scene_on(s, "New thread");
+}
+
+fn scene_on(s: &mut App, title: &str) {
     crate::scene_clock(s);
-    if let Some(id) = thread_titled(s, "New thread") {
+    if let Some(id) = thread_titled(s, title) {
         s.route = Route::Thread(id);
     }
 }
@@ -146,7 +177,13 @@ impl Model {
     pub fn build(s: &App) -> Model {
         let state = s.state();
         let ui = &s.ui.shell.sidebar;
-        let threads = state.threads.iter().map(|v| patched(Thread::from_shell(v), &ui.patches)).collect::<Vec<_>>();
+        let scope = &ui.project_scope;
+        let threads = state
+            .threads
+            .iter()
+            .map(|v| patched(Thread::from_shell(v), &ui.patches))
+            .filter(|t| scope.is_empty() || scope.contains(&t.project_id))
+            .collect::<Vec<_>>();
         let config = state.config.as_ref();
         let working_shelf = config.and_then(|c| c["settings"]["sidebarWorkingShelfEnabled"].as_bool()).unwrap_or(true);
         let providers = config.and_then(|c| c["providers"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
@@ -155,7 +192,7 @@ impl Model {
             threads,
             projects: state.projects.iter().map(|p| (crate::data::s(p, "id").to_string(), crate::data::s(p, "title").to_string())).collect(),
             drivers: providers.iter().map(|p| (crate::data::s(p, "instanceId").to_string(), crate::data::s(p, "driver").to_string())).collect(),
-            route: match &s.route {
+            route: match s.frame_route() {
                 Route::Thread(id) => Some(id.clone()),
                 _ => None,
             },
@@ -273,6 +310,9 @@ fn patched(mut t: Thread, patches: &HashMap<String, Patch>) -> Thread {
         t.snoozed_at = v.map(|_| t.updated_at);
     }
     t.archived |= p.archived;
+    if let Some(v) = &p.title {
+        t.title = v.clone();
+    }
     t
 }
 
@@ -360,6 +400,73 @@ pub fn unsnooze(s: &mut App, id: &str) {
 pub fn archive(s: &mut App, id: &str) {
     dispatch(s, "thread.archive", id, json!({}));
     patch(s, id, |p| p.archived = true);
+}
+
+fn client_flag(s: &App, key: &str) -> bool {
+    s.client_settings.values.get(key).or_else(|| crate::settings::client::defaults().get(key)).and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// "Delete": asks first when `confirmThreadDelete` is on, as `useThreadActionMenu` does.
+pub fn request_delete(s: &mut App, id: &str) {
+    if client_flag(s, "confirmThreadDelete") {
+        s.ui.shell.sidebar.delete = Some(id.to_string());
+    } else {
+        delete(s, id);
+    }
+}
+
+pub fn delete(s: &mut App, id: &str) {
+    s.ui.shell.sidebar.delete = None;
+    dispatch(s, "thread.delete", id, json!({}));
+    patch(s, id, |p| p.archived = true);
+    if s.route == Route::Thread(id.to_string()) {
+        go(s, Route::Home { project_id: None });
+    }
+}
+
+/// Opens the row's inline title editor (menu "Rename thread", double-click, F2).
+pub fn start_rename(s: &mut App, id: &str) {
+    let Some(title) = Model::build(s).thread(id).map(|t| t.title.clone()) else { return };
+    let mut edit = TextEdit::new(title.clone());
+    edit.set_selection(0, title.len());
+    edit.focused = true;
+    s.ui.shell.sidebar.rename = Some((id.to_string(), edit));
+}
+
+/// ThreadRenameInput commits on blur: focus moved off the editor.
+pub fn poll(s: &mut App) -> bool {
+    if s.ui.shell.sidebar.rename.as_ref().is_some_and(|(_, e)| !e.focused) {
+        commit_rename(s);
+        return true;
+    }
+    false
+}
+
+pub fn commit_rename(s: &mut App) {
+    let Some((id, edit)) = s.ui.shell.sidebar.rename.take() else { return };
+    let next = edit.text.trim().to_string();
+    let current = Model::build(s).thread(&id).map(|t| t.title.clone()).unwrap_or_default();
+    if next.is_empty() || next == current {
+        return;
+    }
+    dispatch(s, "thread.metadata.update", &id, json!({ "title": next }));
+    patch(s, &id, |p| p.title = Some(next));
+}
+
+/// The delete confirmation, as the web's destructive `dialogs.confirm`.
+fn delete_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
+    let Some(id) = s.ui.shell.sidebar.delete.clone() else { return };
+    let title = model.thread(&id).map(|t| t.title.clone()).unwrap_or_default();
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| s.ui.shell.sidebar.delete = None).build(t);
+    let confirm = crate::kit::Button::new("Delete").variant("destructive").on_press(move |s: &mut App| delete(s, &id)).build(t);
+    crate::kit::Dialog::new("sb-delete", format!("Delete thread \"{title}\"?"))
+        .alert()
+        .width(448.0)
+        .open(true)
+        .description("This permanently clears conversation history for this thread.")
+        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm))
+        .on_close(|s: &mut App| s.ui.shell.sidebar.delete = None)
+        .build(t, overlays);
 }
 
 fn reorder(s: &mut App, kind: &str, assignments: &[(String, String)]) {
@@ -516,6 +623,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     {
         overlays.extend(menu::view(s, cx, &model, th, m, t));
     }
+    row::hover_card(s, &model, t, overlays);
+    delete_dialog(s, &model, t, overlays);
+    chrome::scope_menu(s, &model, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()
         .w(layout::SIDEBAR_W + 1.0)
@@ -523,7 +633,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         .child(chrome::header(s, t, inset))
         .child(chrome::search_bar(s, t))
         .child(list)
-        .child(chrome::footer(s, &model, t));
+        .child(chrome::footer(&model, t));
     row()
         .key("sidebar")
         .w(layout::SIDEBAR_W + 2.0)

@@ -85,7 +85,7 @@ fn title(s: &App) -> String {
 }
 
 pub fn start_rename(s: &mut App) {
-    if !matches!(s.route, Route::Thread(_)) {
+    if !matches!(s.frame_route(), Route::Thread(_)) {
         return;
     }
     let current = title(s);
@@ -98,7 +98,7 @@ pub fn start_rename(s: &mut App) {
 fn commit_rename(s: &mut App) {
     let Some(edit) = s.ui.chat.topbar.rename.take() else { return };
     let next = edit.text.trim().to_string();
-    let Route::Thread(id) = s.route.clone() else { return };
+    let Route::Thread(id) = s.frame_route().clone() else { return };
     if next.is_empty() || next == title(s) {
         return;
     }

@@ -294,6 +294,14 @@ pub fn view(s: &App, t: &T) -> El {
             }
             let template = item.clone();
             let editor_dark = t.dark;
+            // The standard theme has no actions; other built-ins duplicate, saved themes edit.
+            let action = if item["id"] == builtins()[0]["id"] {
+                None
+            } else if builtins().iter().any(|b| b["id"] == item["id"]) {
+                Some((format!("Duplicate {label}"), &crate::icons::COPY))
+            } else {
+                Some(("Edit theme".to_owned(), &crate::icons::PENCIL))
+            };
             r = r.child(
                 col()
                     .grow(1.0)
@@ -315,16 +323,16 @@ pub fn view(s: &App, t: &T) -> El {
                                     .color(t.c.foreground)
                                     .grow(1.0),
                             )
-                            .child(
-                                crate::kit::Button::new("Edit theme")
+                            .children(action.map(|(name, glyph)| {
+                                crate::kit::Button::new(name)
                                     .variant("ghost-muted")
                                     .size("icon-micro")
-                                    .icon(&crate::icons::PENCIL)
+                                    .icon(glyph)
                                     .on_press(move |s: &mut App| {
                                         edit(s, template.clone(), editor_dark)
                                     })
-                                    .build(t),
-                            ),
+                                    .build(t)
+                            })),
                     ),
             );
         }
@@ -364,19 +372,21 @@ pub fn view(s: &App, t: &T) -> El {
                                 .grow(1.0),
                         )
                         .child(
-                            crate::kit::Button::new("Add theme")
-                                .variant("outline")
-                                .size("xs")
-                                .on_press(|s: &mut App| s.ui.settings.theme_import_open = true)
-                                .build(t),
-                        )
-                        .child(
                             crate::kit::Button::new("Create theme")
                                 .variant("outline")
                                 .size("xs")
+                                .icon(&crate::icons::PAINTBRUSH)
                                 .on_press(move |s: &mut App| {
                                     edit(s, builtins()[0].clone(), editor_dark)
                                 })
+                                .build(t),
+                        )
+                        .child(
+                            crate::kit::Button::new("Add theme")
+                                .variant("outline")
+                                .size("xs")
+                                .icon(&crate::icons::PLUS)
+                                .on_press(|s: &mut App| s.ui.settings.theme_import_open = true)
                                 .build(t),
                         ),
                 )

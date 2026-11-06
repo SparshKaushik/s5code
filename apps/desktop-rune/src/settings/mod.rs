@@ -116,6 +116,9 @@ pub fn value(s: &App, key: &str) -> Value {
             return providers::field_value(s, id, field);
         }
     }
+    if let Some(field) = key.strip_prefix("storageCleanup.") {
+        return server_settings(s)["storageCleanup"][field].clone();
+    }
     if scope::project_key(key) {
         if let Some(project) = &s.ui.settings.project {
             if let Some(v) = server_settings(s)["projectSettingsOverrides"][project].get(key) {
@@ -157,7 +160,12 @@ pub fn update(s: &mut App, key: &str, value: Value) {
             s.client_settings.save();
         }
     } else {
-        let patch = if let Some(project) =
+        let patch = if let Some(field) = key.strip_prefix("storageCleanup.") {
+            // The whole object, so the optimistic copy (a shallow merge) keeps the other rules.
+            let mut cleanup = server_settings(s)["storageCleanup"].clone();
+            cleanup[field] = value;
+            json!({ "storageCleanup": cleanup })
+        } else if let Some(project) =
             s.ui.settings
                 .project
                 .as_ref()
@@ -646,13 +654,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         } else {
             &s.ui.settings.select_options
         };
-        overlays.push(controls::select_menu(
-            s,
-            t,
-            key,
-            options,
-            controls::select_width(key),
-        ));
+        controls::select_menu(s, t, key, options, controls::select_width(key), &mut overlays);
     }
     rune_kit::root(
         el().absolute(0.0, 0.0)
@@ -682,25 +684,23 @@ pub fn close(s: &mut App) {
     s.navigate(route);
 }
 
+/// Settings opened by URL, as the references d10-d29 were: nothing to return to.
 fn scene(s: &mut App, path: &str) {
     crate::scene_clock(s);
     s.client_settings = client::ClientSettings::default();
-    let previous = s
-        .state()
-        .threads
-        .iter()
-        .find(|t| t["title"] == "Replay showcase")
-        .map(|t| Route::Thread(crate::data::s(t, "id").into()))
-        .unwrap_or(Route::Home { project_id: None });
     s.route = Route::Settings(path.into());
-    s.ui.settings = Ui {
-        return_route: Some(previous),
-        ..Ui::default()
-    };
+    s.ui.settings = Ui::default();
+}
+
+/// Settings opened over "Replay showcase" with mod+comma (d09).
+fn scene_from_thread(s: &mut App) {
+    scene(s, "general");
+    s.ui.settings.return_route = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| Route::Thread(crate::data::s(t, "id").into()));
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-general", |s| scene(s, "general")),
+    ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),
     ("settings-providers", |s| scene(s, "providers")),
     ("settings-browser", |s| scene(s, "browser")),

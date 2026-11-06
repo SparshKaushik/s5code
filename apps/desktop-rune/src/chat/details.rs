@@ -60,8 +60,18 @@ fn cwd(s: &App) -> Option<String> {
     worktree.or_else(|| c.project.map(|p| data::s(p, "workspaceRoot"))).filter(|p| !p.is_empty()).map(str::to_string)
 }
 
+/// The checkout's `{local, remote}` status (`subscribeVcsStatus`); `local` is null until it loads.
 fn vcs<'a>(s: &'a App) -> Option<&'a Value> {
-    s.state().vcs.get(&cwd(s)?)
+    s.state().vcs.get(&cwd(s)?).filter(|v| v["local"].is_object())
+}
+
+/// Subscribes to the framed checkout's status, as the card's `useVcsStatus` does.
+pub fn watch(s: &mut App) {
+    if let Some(cwd) = cwd(s)
+        && let Some(net) = s.src.net()
+    {
+        net.watch_vcs(&cwd);
+    }
 }
 
 /// A card row: icon, label, then trailing content. `split` leaves room for a 32-point chevron.
@@ -181,7 +191,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El
         .padding(1.0)
         .child(general);
 
-    if let Some(v) = vcs(s).filter(|v| v["isRepo"] == true) {
+    if let Some(v) = vcs(s).map(|v| &v["local"]).filter(|v| v["isRepo"] == true) {
         let branch = data::s(v, "refName").to_string();
         let mut section = col()
             .w_full()
@@ -232,7 +242,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         }
         Menu::Git => ("details-git-menu", vec![("publish".into(), "Publish repository".into()), ("commit".into(), "Commit".into())]),
         Menu::Branch => {
-            let branch = vcs(s).map(|v| data::s(v, "refName").to_string()).unwrap_or_default();
+            let branch = vcs(s).map(|v| data::s(&v["local"], "refName").to_string()).unwrap_or_default();
             ("details-branch", vec![(branch.clone(), branch)])
         }
     };
@@ -251,17 +261,6 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         list = list.child(item);
     }
     Some(list.anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, |s: &mut App| s.ui.chat.details.menu = None))
-}
-
-/// Gives scenes a repository status for the open thread's checkout, as `vcs.status` reports it.
-pub fn seed_scene_vcs(s: &mut App, branch: &str) {
-    let Some(cwd) = cwd(s) else { return };
-    if let crate::data::Source::Fixture(state) = &mut s.src {
-        state.vcs.entry(cwd).or_insert_with(|| {
-            json!({"isRepo": true, "hasPrimaryRemote": false, "isDefaultRef": true, "refName": branch, "hasWorkingTreeChanges": false,
-                   "workingTree": {"files": [], "insertions": 0, "deletions": 0}, "hasUpstream": false, "aheadCount": 0, "behindCount": 0, "pr": null})
-        });
-    }
 }
 
 #[cfg(test)]

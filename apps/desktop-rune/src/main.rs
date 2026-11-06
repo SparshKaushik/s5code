@@ -66,6 +66,14 @@ impl App {
         self.src.state()
     }
 
+    /// The route the window frame shows: under the settings modal, the one settings opened from.
+    pub fn frame_route(&self) -> &Route {
+        match (&self.route, &self.ui.settings.return_route) {
+            (Route::Settings(_), Some(back)) => back,
+            (route, _) => route,
+        }
+    }
+
     pub fn navigate(&mut self, route: Route) {
         if matches!(route, Route::Settings(_)) && !matches!(self.route, Route::Settings(_)) {
             self.ui.settings.return_route = Some(self.route.clone());
@@ -93,6 +101,8 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= chat::timeline::poll(s);
     changed |= chat::composer::poll(s);
     changed |= shell::palette::poll(s);
+    changed |= shell::sidebar::poll(s);
+    chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
         s.now_ms = now;
@@ -126,10 +136,11 @@ fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     Box::leak(all.into_boxed_slice())
 }
 
-/// Pins the clock for scenes: a minute after the newest thread update in the fixtures.
+/// Pins the clock for scenes where the references were captured: 28 minutes after the newest
+/// thread update in the fixtures ("Replay showcase" reads 29m).
 pub fn scene_clock(s: &mut App) {
     let newest = s.state().threads.iter().filter_map(|t| data::ts(t, "updatedAt")).max().unwrap_or(0);
-    s.now_ms = newest + 60_000;
+    s.now_ms = newest + 28 * 60_000;
 }
 
 fn main() {

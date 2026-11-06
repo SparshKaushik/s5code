@@ -24,17 +24,23 @@ fn hue(index: usize, dark: bool) -> Color {
 
 /// `ProjectFavicon` without an icon: the name's monogram on a 14% tint of its colour.
 pub fn monogram(t: &T, name: &str, dim: bool) -> El {
+    monogram_at(t, name, dim, 16.0)
+}
+
+/// The favicon's SVG scaled to `size` (its 16-unit viewBox drawn smaller).
+fn monogram_at(t: &T, name: &str, dim: bool, size: f32) -> El {
+    let k = size / 16.0;
     let glyphs = logic::monogram(name);
     let color = if dim { t.sb.sidebar_muted_foreground } else { hue(logic::project_color(name), t.dark) };
     // The SVG stretches two glyphs to 12px (`textLength`); tracking does the same here.
     let tracking = if glyphs.chars().count() > 1 { 1.05 } else { 0.0 };
-    el().size(16.0, 16.0)
+    el().size(size, size)
         .shrink()
-        .radius(radius::SM)
+        .radius(size / 4.0)
         .fill(color.alpha(0.14))
         .center()
         .opacity(if dim { 0.4 } else { 1.0 })
-        .child(text(glyphs).font(mono(rune::TextStyle::new(8.25, BOLD)).lh(16.0).tracking(tracking)).color(color))
+        .child(text(glyphs).font(mono(rune::TextStyle::new(8.25 * k, BOLD)).lh(size).tracking(tracking * k)).color(color))
 }
 
 /// The provider mark at 14px, 60% opaque (`ProviderInstanceIcon`).
@@ -158,20 +164,25 @@ fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
             s.ui.shell.sidebar.menu = Some(super::menu::Menu::new(mid.clone(), at.x, at.y));
         })
+        .on_double_press({
+            let id = th.id.clone();
+            move |s: &mut App| super::start_rename(s, &id)
+        })
         .on_key({
             let id = th.id.clone();
             move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
-                if e.key == rune::Key::Enter {
-                    super::open_thread(s, &id);
-                    return true;
+                match e.key {
+                    rune::Key::Enter => super::open_thread(s, &id),
+                    rune::Key::Function(2) => super::start_rename(s, &id),
+                    _ => return false,
                 }
-                false
+                true
             }
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
             let far = d.dx.hypot(d.dy) >= super::DRAG_DISTANCE;
             match d.phase {
-                Phase::Down => {}
+                Phase::Down => s.ui.shell.sidebar.card = None,
                 Phase::Move => {
                     let ui = &mut s.ui.shell.sidebar;
                     if ui.drag.is_some() || far {
@@ -200,6 +211,59 @@ fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El
                 }
             }
         })
+}
+
+/// Opens the row's hover card after the sidebar's 150ms tooltip delay (no repaint while waiting).
+fn card_trigger(li: El, id: &str) -> El {
+    let id = id.to_owned();
+    li.hover_delays(std::time::Duration::from_millis(150), std::time::Duration::ZERO)
+        .on_hover_change(move |s: &mut App, on, _: &mut Tx| {
+            let ui = &mut s.ui.shell.sidebar;
+            if on {
+                ui.card = Some(id.clone());
+            } else if ui.card.as_deref() == Some(id.as_str()) {
+                ui.card = None;
+            }
+        })
+}
+
+/// `ThreadHoverCard`: title, then project, environment, branch and model, right of the row.
+pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
+    let ui = &s.ui.shell.sidebar;
+    let Some(id) = ui.card.as_deref() else { return };
+    if ui.menu.is_some() || ui.drag.is_some() || ui.rename.as_ref().is_some_and(|(r, _)| r == id) {
+        return;
+    }
+    let Some(th) = model.threads.iter().find(|th| th.id == id) else { return };
+    let k = crate::kit::theme(t);
+    let detail = |glyph: El, label: String| {
+        row().gap(8.0).center_y().min_w(0.0)
+            .child(glyph)
+            .child(text(label).font(theme::TEXT_XS).color(t.c.foreground.alpha_mul(0.75)).truncate().shrink())
+    };
+    let mut rows = col().gap(6.0).pl(2.0).min_w(0.0);
+    let project = model.project(th);
+    if !project.is_empty() {
+        rows = rows.child(detail(monogram_at(t, project, false, 12.0), project.to_string()));
+    }
+    let env = s.state().config.as_ref().map(|c| crate::data::s(&c["environment"], "label").to_string()).unwrap_or_default();
+    if !env.is_empty() {
+        rows = rows.child(detail(icon(&i::SERVER, 12.0).color(t.c.muted_foreground).shrink(), env));
+    }
+    if let Some(branch) = &th.branch {
+        rows = rows.child(detail(icon(&i::GIT_BRANCH, 12.0).color(t.c.muted_foreground).shrink(), branch.clone()));
+    }
+    let raw = s.state().threads.iter().find(|v| crate::data::s(v, "id") == id);
+    let slug = raw.map(|v| crate::data::s(&v["modelSelection"], "model").to_string()).unwrap_or_default();
+    if let Some(driver) = model.drivers.get(&th.provider).filter(|_| !slug.is_empty()) {
+        let label = crate::chat::composer::model_name(s, &th.provider, &slug);
+        rows = rows.child(detail(crate::chat::composer::provider_icon(t, driver, 12.0).shrink().opacity(0.6), label));
+    }
+    let body = col().max_w(346.0).padding(13.0).gap(8.0)
+        .child(text(th.title.clone()).font(theme::XS_MEDIUM.lh(15.0)).color(t.c.foreground).truncate())
+        .child(rows);
+    let surface = crate::kit::menu::glass(body.key("sb-card"), &k, false).radius(6.0);
+    overlays.push(rune_kit::popover::anchored(&k, surface, &format!("sb-row-{id}"), rune_kit::Placement::RightStart, 4.0));
 }
 
 fn click(s: &mut App, id: &str, mods: rune::Mods) {
@@ -248,6 +312,35 @@ fn surface(e: El, t: &T, active: bool, selected: bool, hovered: bool, dragging: 
     } else {
         e
     }
+}
+
+/// The row title, or ThreadRenameInput while it is being renamed: Enter commits, Escape cancels.
+fn title(s: &App, th: &Thread, t: &T, font: rune::TextStyle, color: rune::Color) -> El {
+    let Some((_, edit)) = s.ui.shell.sidebar.rename.as_ref().filter(|(id, _)| *id == th.id) else {
+        return text(th.title.clone()).font(font).color(color).truncate().grow(1.0).shrink();
+    };
+    rune::text_input(edit, theme::SM_MEDIUM)
+        .key("sb-rename")
+        .label("Thread title")
+        .single_line()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
+        .px(4.0)
+        .radius(theme::radius::SM)
+        .fill(t.c.card)
+        .border(1.0, t.c.foreground)
+        .color(t.c.card_foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .on_edit(|s: &mut App| &mut s.ui.shell.sidebar.rename.get_or_insert_with(|| (String::new(), rune::TextEdit::default())).1)
+        .on_submit(|s: &mut App, _| super::commit_rename(s))
+        .on_input_key(|s: &mut App, e, _| {
+            if e.key == rune::Key::Escape {
+                s.ui.shell.sidebar.rename = None;
+                return true;
+            }
+            false
+        })
 }
 
 fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
@@ -303,14 +396,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
 
     let provider = provider_icon(t, model, th, row_text);
-    let mut line2 = row().mt(4.0).gap(6.0).center_y().child(
-        text(th.title.clone())
-            .font(if receded { theme::TEXT_SM } else { theme::SM_MEDIUM })
-            .color(title_color)
-            .truncate()
-            .grow(1.0)
-            .shrink(),
-    );
+    let mut line2 = row().mt(4.0).gap(6.0).center_y().child(title(s, th, t, if receded { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color));
     let mut body = col().px(10.0).py(8.0).child(line1);
     match &th.branch {
         Some(branch) => {
@@ -333,7 +419,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         e = e.opacity(0.7);
     }
     let over = rc.over.map(str::to_string);
-    place(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0).child(interactive(e, th, rc.section, over)), rc)
+    place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, th, rc.section, over)), rc)
 }
 
 fn wake_label(at: i64, now: i64) -> String {
@@ -377,7 +463,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         .gap(10.0)
         .center_y()
         .child(monogram(t, model.project(th), !(hovered || (active && !settled))))
-        .child(text(th.title.clone()).font(theme::TEXT_SM).color(title_color).truncate().grow(1.0).shrink());
+        .child(title(s, th, t, theme::TEXT_SM, title_color));
     if th.pinned {
         r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
     }
@@ -407,7 +493,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
     let e = surface(r.w_full(), t, active, selected, hovered, rc.dragging.is_some());
     let over = rc.over.map(str::to_string);
-    place(el().key(format!("sb-li-{}", th.id)).w_full().child(interactive(e, th, rc.section, over)), rc)
+    place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, th, rc.section, over)), rc)
 }
 
 fn marker_key(m: Marker) -> String {

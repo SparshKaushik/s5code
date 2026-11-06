@@ -190,6 +190,15 @@ fn items(s: &App) -> Vec<Item> {
             "",
             Action::Navigate(Route::Home { project_id: None }),
         ));
+        if let Route::Thread(id) = &s.route {
+            out.push(item(
+                "Restart agent session",
+                "Actions",
+                &icons::ROTATE_CCW,
+                "",
+                Action::Restart(id.clone()),
+            ));
+        }
         out.push(item(
             "Open settings",
             "Actions",
@@ -204,15 +213,6 @@ fn items(s: &App) -> Vec<Item> {
             "",
             Action::Page("themes"),
         ));
-        if let Route::Thread(id) = &s.route {
-            out.push(item(
-                "Restart agent session",
-                "Actions",
-                &icons::ROTATE_CCW,
-                "",
-                Action::Restart(id.clone()),
-            ));
-        }
         let mut threads: Vec<_> = s
             .state()
             .threads
@@ -1277,29 +1277,33 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let footer = row()
         .w_full()
         .h(41.)
-        .px(16.)
-        .gap(6.)
+        .pl(17.)
+        .pr(16.)
+        .gap(12.)
         .center_y()
         .fill(t.c.contrast_foreground.alpha_mul(0.025))
         .border(1., t.c.contrast_foreground.alpha_mul(0.07))
-        .child(kit::kbd("↑", t).min_w(20.))
-        .child(kit::kbd("↓", t).min_w(20.))
         .child(
-            text("Navigate")
-                .font(theme::TEXT_SM)
-                .color(t.c.contrast_muted_foreground),
+            row()
+                .gap(4.)
+                .center_y()
+                .child(footer_key(Some(&icons::ARROW_UP), "", t))
+                .child(footer_key(Some(&icons::ARROW_DOWN), "", t))
+                .child(footer_label("Navigate", t)),
         )
-        .child(kit::kbd("Enter", t))
         .child(
-            text("Select")
-                .font(theme::TEXT_SM)
-                .color(t.c.contrast_muted_foreground),
+            row()
+                .gap(4.)
+                .center_y()
+                .child(footer_key(None, "Enter", t))
+                .child(footer_label("Select", t)),
         )
-        .child(kit::kbd("Esc", t))
         .child(
-            text("Close")
-                .font(theme::TEXT_SM)
-                .color(t.c.contrast_muted_foreground),
+            row()
+                .gap(4.)
+                .center_y()
+                .child(footer_key(None, "Esc", t))
+                .child(footer_label("Close", t)),
         );
     let panel = col()
         .key("command-palette")
@@ -1433,4 +1437,25 @@ mod tests {
         e.key = Key::Command('k');
         assert!(!toggle_key(&s, &e));
     }
+}
+
+fn footer_key(glyph: Option<&'static rune::Icon>, label: &str, t: &T) -> El {
+    let key = row()
+        .role("note")
+        .center()
+        .h(20.)
+        .min_w(20.)
+        .px(4.)
+        .radius(4.)
+        .fill(t.c.contrast_foreground.alpha_mul(0.08));
+    match glyph {
+        Some(glyph) => key.child(icon(glyph, 12.).color(t.c.contrast_foreground)),
+        None => key.child(text(label).font(theme::XS_MEDIUM).color(t.c.contrast_foreground)),
+    }
+}
+
+fn footer_label(label: &str, t: &T) -> El {
+    text(label)
+        .font(theme::SM_MEDIUM)
+        .color(t.c.contrast_muted_foreground)
 }

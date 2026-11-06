@@ -161,7 +161,7 @@ fn table(source: &str, t: &T) -> El {
         row()
             .w_full()
             .justify_end()
-            .pb(4.0)
+            .pt(2.0)
             .child(copy_button(source, t)),
     )
 }
@@ -208,7 +208,7 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
             .gap(8.0)
             .pl(12.0)
             .pr(6.0)
-            .pt(6.0)
+            .pt(7.0)
             .child(row().grow(1.0).child(language_icons::language(language, t)))
             .child(
                 row()
@@ -237,7 +237,11 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
         let code_view = Markdown::new(fenced)
             .selectable(true)
             .scroll_wide(!wrap)
-            .render(&style(t).code_block(rune::Color::TRANSPARENT, rune::Color::TRANSPARENT));
+            .render(
+                &style(t)
+                    .code_block(rune::Color::TRANSPARENT, rune::Color::TRANSPARENT)
+                    .code_block_padding(15.4, 11.8),
+            );
         out = out.child(
             col()
                 .key(key)
