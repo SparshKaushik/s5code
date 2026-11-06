@@ -49,7 +49,11 @@ pub fn select_width(key: &str) -> f32 {
 }
 
 fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
-    let current = value(s, key);
+    let current = match value(s, key) {
+        // An unset workspace resolves to the current checkout (`resolveProjectSettings`).
+        Value::Null if key == "defaultThreadEnvMode" => json!("local"),
+        current => current,
+    };
     options
         .iter()
         .find(|(v, _)| *v == current)
@@ -171,14 +175,17 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 }))
             });
             let (k1, k2) = (key.to_owned(), key.to_owned());
-            rune::text_input(&edit, theme::TEXT_XS)
+            let (height, pad) = if spec["size"] == "default" { (32.0, 11.0) } else { (28.0, 9.0) };
+            rune::text_input(&edit, theme::TEXT_SM)
                 .key(format!("setting-{key}"))
-                .w(208.0)
-                .min_h(28.0)
-                .px(9.0)
-                .py(4.0)
-                .radius(6.0)
-                .border(1.0, t.c.border)
+                .placeholder(spec["placeholder"].as_str().unwrap_or(""), t.c.muted_foreground.alpha_mul(0.72))
+                .w(spec["width"].as_f64().map_or(208.0, |w| w as f32))
+                .h(height)
+                .px(pad)
+                .center_y()
+                .radius(8.0)
+                .border(1.0, t.c.input)
+                .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
                 .color(t.c.foreground)
                 .single_line()
                 .on_edit(move |s: &mut App| {

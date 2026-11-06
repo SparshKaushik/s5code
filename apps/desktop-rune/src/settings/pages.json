@@ -719,7 +719,10 @@
           "title": "Worktree location",
           "description": "Folder where new worktrees are created, on any drive, such as D:\\\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder.",
           "kind": "input",
-          "options": []
+          "options": [],
+          "width": 232,
+          "size": "default",
+          "placeholder": "Default"
         },
         {
           "key": "newWorktreesStartFromOrigin",
@@ -738,7 +741,10 @@
           "title": "Branch prefix",
           "description": "For example, t3 or t3/ produces t3/add-search. Leave empty for no prefix.",
           "kind": "input",
-          "options": []
+          "options": [],
+          "width": 232,
+          "size": "default",
+          "placeholder": "No prefix"
         }
       ]
     },
@@ -795,27 +801,58 @@
       "title": "New projects",
       "rows": [
         {
-          "key": "defaultThreadEnvMode",
-          "title": "Workspace",
-          "description": "",
+          "key": "addProjectBaseDirectory",
+          "title": "Add project starts in",
+          "description": "Leave empty to use \"~/\" when the Add Project browser opens.",
+          "kind": "input",
+          "options": [],
+          "width": 288,
+          "placeholder": "~/"
+        }
+      ]
+    },
+    {
+      "title": "New threads",
+      "rows": [
+        {
+          "key": "defaultRuntimeMode",
+          "title": "Permissions",
+          "description": "Default permissions for new threads. Projects can override them.",
           "kind": "select",
           "options": [
             [
-              "local",
-              "Local"
+              "approval-required",
+              "Supervised"
             ],
             [
-              "worktree",
-              "Worktree"
+              "auto-accept-edits",
+              "Auto-accept edits"
+            ],
+            [
+              "auto",
+              "Auto"
+            ],
+            [
+              "full-access",
+              "Full access"
             ]
           ]
         },
         {
-          "key": "addProjectBaseDirectory",
-          "title": "Add project starts in",
-          "description": "",
-          "kind": "input",
-          "options": []
+          "key": "defaultThreadEnvMode",
+          "title": "Workspace",
+          "description": "Where new threads start. Projects and their t3.json can override it.",
+          "kind": "select",
+          "options": [
+            [
+              "local",
+              "Current checkout"
+            ],
+            [
+              "worktree",
+              "New worktree"
+            ]
+          ]
         }
       ]
     },
@@ -886,7 +923,10 @@
           "title": "Worktree location",
           "description": "Folder where new worktrees are created, on any drive, such as D:\\\\worktrees or ~/worktrees. Existing worktrees stay where they are. Leave empty to use the T3 home folder.",
           "kind": "input",
-          "options": []
+          "options": [],
+          "width": 232,
+          "size": "default",
+          "placeholder": "Default"
         }
       ]
     },
