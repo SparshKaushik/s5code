@@ -70,7 +70,12 @@ impl MenuItem {
         self.checked = Some(value);
         self
     }
-    pub fn option(mut self,value:bool)->Self {self.checked=Some(value);self.radio=true;self.option=true;self}
+    pub fn option(mut self, value: bool) -> Self {
+        self.checked = Some(value);
+        self.radio = true;
+        self.option = true;
+        self
+    }
     pub fn radio(mut self, value: bool) -> Self {
         self.checked = Some(value);
         self.radio = true;
@@ -113,16 +118,23 @@ impl MenuItem {
 
     /// Clear sibling submenu state when the pointer enters a leaf row.
     pub fn on_hover<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
-        self.acts.transform(Box::new(move |e|e.on_hover(f)));
+        self.acts.transform(Box::new(move |e| e.on_hover(f)));
         self
     }
     /// Drive the supplied submenu's `open` state from pointer and arrow-key navigation.
     pub fn on_submenu_change<S: 'static>(mut self, f: impl Fn(&mut S, bool) + 'static) -> Self {
         let f = Rc::new(f);
-        let close=f.clone();
-        self.sub_keys=Some(Box::new(move |e|e.on_key(move |s:&mut S,key,_| {
-            if matches!(key.key,rune::Key::Left|rune::Key::Escape) {close(s,false);true} else {false}
-        })));
+        let close = f.clone();
+        self.sub_keys = Some(Box::new(move |e| {
+            e.on_key(move |s: &mut S, key, _| {
+                if matches!(key.key, rune::Key::Left | rune::Key::Escape) {
+                    close(s, false);
+                    true
+                } else {
+                    false
+                }
+            })
+        }));
         let hover = f.clone();
         let press = f.clone();
         self.acts.transform(Box::new(move |e| {
@@ -170,7 +182,11 @@ impl MenuItem {
         } else if self.danger {
             k.c.danger.fg
         } else {
-            if native {native_colors(k.dark).text} else {k.c.text_base}
+            if native {
+                native_colors(k.dark).text
+            } else {
+                k.c.text_base
+            }
         };
         let muted = if native && highlighted {
             fg
@@ -190,7 +206,9 @@ impl MenuItem {
         };
         let mut e = row()
             .key(key.clone())
-            .role(if self.option {"option"} else if self.radio {
+            .role(if self.option {
+                "option"
+            } else if self.radio {
                 "menuitemradio"
             } else if self.checked.is_some() {
                 "menuitemcheckbox"
@@ -208,7 +226,7 @@ impl MenuItem {
             })
             .px(if native { 4. } else { 8. })
             .py(if native { 2. } else { 4. })
-            .gap(if native {4.} else {8.})
+            .gap(if native { 4. } else { 8. })
             .center_y()
             .radius(4.)
             .focusable(!disabled)
@@ -225,11 +243,13 @@ impl MenuItem {
             e = e.focus_highlight(hover);
         }
         let mark = |on| {
-            el().size(if native {12.} else {16.}, 16.).center().child(
-                icon(&crate::icons::CHECK, 14.)
-                    .color(fg)
-                    .opacity(if on { 1. } else { 0. }),
-            )
+            el().size(if native { 12. } else { 16. }, 16.)
+                .center()
+                .child(
+                    icon(&crate::icons::CHECK, 14.)
+                        .color(fg)
+                        .opacity(if on { 1. } else { 0. }),
+                )
         };
         if native || (self.checked.is_some() && !self.radio) {
             e = e.child(mark(self.checked == Some(true)));
@@ -282,11 +302,15 @@ impl MenuItem {
                 .expanded(open)
                 .child(icon(&crate::icons::CHEVRON_RIGHT, 16.).color(muted));
             if open {
-                let sub = Menu::new(format!("{key}-sub")).entries(entries).native(native);
-                let sub=if native {sub.width(198.)} else {sub};
+                let sub = Menu::new(format!("{key}-sub"))
+                    .entries(entries)
+                    .native(native);
+                let sub = if native { sub.width(198.) } else { sub };
                 let mut deeper = vec![];
                 let mut surface = sub.surface(k, &mut deeper);
-                if let Some(keys)=self.sub_keys {surface=keys(surface);}
+                if let Some(keys) = self.sub_keys {
+                    surface = keys(surface);
+                }
 
                 layer.push(rune_kit::popover::anchored(
                     k,
@@ -299,7 +323,7 @@ impl MenuItem {
             }
         }
         if disabled {
-            e = e.opacity(if native {0.4} else {0.64});
+            e = e.opacity(if native { 0.4 } else { 0.64 });
         }
         self.acts.apply(e, !disabled)
     }
@@ -340,7 +364,10 @@ impl Menu {
             dismiss: None,
         }
     }
-    pub fn role(mut self,role:&'static str)->Self {self.role=role;self}
+    pub fn role(mut self, role: &'static str) -> Self {
+        self.role = role;
+        self
+    }
     pub fn trigger(mut self, value: El) -> Self {
         self.trigger = Some(value);
         self
@@ -382,9 +409,16 @@ impl Menu {
         self
     }
     /// An already-mounted row anchor, such as the sidebar's snooze button.
-    pub fn anchor(mut self, key: impl Into<String>) -> Self {self.anchor=Some(key.into());self}
+    pub fn anchor(mut self, key: impl Into<String>) -> Self {
+        self.anchor = Some(key.into());
+        self
+    }
     /// Fixed width for native menus: the sidebar uses 198 points.
-    pub fn width(mut self, width: f32) -> Self {self.width=Some(width);self.min_width=width;self}
+    pub fn width(mut self, width: f32) -> Self {
+        self.width = Some(width);
+        self.min_width = width;
+        self
+    }
     pub fn native(mut self, value: bool) -> Self {
         self.native = value;
         self
@@ -404,7 +438,7 @@ impl Menu {
     }
     fn surface(self, k: &Kit, layer: &mut Vec<El>) -> El {
         let mut rows = col().w_full().padding(5.).items_stretch();
-        let native_ink=native_colors(k.dark);
+        let native_ink = native_colors(k.dark);
         for (i, entry) in self.entries.into_iter().enumerate() {
             rows = rows.child(match entry {
                 MenuEntry::Item(item) => {
@@ -415,8 +449,12 @@ impl Menu {
                     .role("separator")
                     .h(1.)
                     .mx(8.)
-                    .my(if self.native {5.} else {4.})
-                    .fill(if self.native {native_ink.separator} else {k.c.border_base}),
+                    .my(if self.native { 5. } else { 4. })
+                    .fill(if self.native {
+                        native_ink.separator
+                    } else {
+                        k.c.border_base
+                    }),
                 MenuEntry::Label(label) => row()
                     .key(format!("label{i}"))
                     .px(8.)
@@ -424,21 +462,30 @@ impl Menu {
                     .child(text(label).font(theme::XS_MEDIUM).color(k.c.text_muted)),
             });
         }
-        let frame=col()
-                .key(format!("{}-menu", self.key))
-                .role(self.role)
-                .focus_group()
-                .min_w(self.min_width)
-                .min_h(0.)
-                .child(rune_kit::popover::fit_scroll(rows));
-        let frame=if let Some(width)=self.width {frame.w(width)} else {frame};
-        glass(frame,k,self.native)
+        let frame = col()
+            .key(format!("{}-menu", self.key))
+            .role(self.role)
+            .focus_group()
+            .min_w(self.min_width)
+            .min_h(0.)
+            .child(rune_kit::popover::fit_scroll(rows));
+        let frame = if let Some(width) = self.width {
+            frame.w(width)
+        } else {
+            frame
+        };
+        glass(frame, k, self.native)
     }
     /// Mount a menu anchored to an existing row without mounting another trigger.
-    pub fn overlay(self, k:&Kit, layer:&mut Vec<El>) { self.build(k,layer); }
+    pub fn overlay(self, k: &Kit, layer: &mut Vec<El>) {
+        self.build(k, layer);
+    }
     pub fn build(mut self, k: &Kit, layer: &mut Vec<El>) -> El {
-        let key = self.anchor.clone().unwrap_or_else(||format!("{}-trigger", self.key));
-        let trigger = row()
+        let key = self
+            .anchor
+            .clone()
+            .unwrap_or_else(|| format!("{}-trigger", self.key));
+        let trigger = row().self_start()
             .key(key.clone())
             .children(self.trigger.take().map(|t| t.expanded(self.open)));
         if !self.open {
@@ -479,17 +526,39 @@ pub fn context_menu(key: impl Into<String>, trigger: El, point: Option<PointerPr
     }
 }
 
-struct NativeColors {fill:rune::Color, border:rune::Color, separator:rune::Color, text:rune::Color}
-fn native_colors(dark: bool)->NativeColors {
-    let hex=|s|rune::color::hex(s).unwrap();
-    if dark {NativeColors {fill:hex("#262628"),border:hex("#373738"),separator:hex("#3c3c3d"),text:hex("#dededf")}}
-    else {NativeColors {fill:hex("#f6f6f6"),border:hex("#d6d6d6"),separator:hex("#dedede"),text:hex("#1c1c1e")}}
+struct NativeColors {
+    fill: rune::Color,
+    border: rune::Color,
+    separator: rune::Color,
+    text: rune::Color,
+}
+fn native_colors(dark: bool) -> NativeColors {
+    let hex = |s| rune::color::hex(s).unwrap();
+    if dark {
+        NativeColors {
+            fill: hex("#262628"),
+            border: hex("#373738"),
+            separator: hex("#3c3c3d"),
+            text: hex("#dededf"),
+        }
+    } else {
+        NativeColors {
+            fill: hex("#f6f6f6"),
+            border: hex("#d6d6d6"),
+            separator: hex("#dedede"),
+            text: hex("#1c1c1e"),
+        }
+    }
 }
 pub(super) fn glass(e: El, k: &Kit, native: bool) -> El {
     if native {
-        let c=native_colors(k.dark);
-        return e.radius(6.).fill(c.fill.alpha_mul(0.94)).backdrop_blur(16.)
-            .border(1.,c.border).shadow(8.,24.,rune::Color::BLACK.alpha_mul(0.35));
+        let c = native_colors(k.dark);
+        return e
+            .radius(6.)
+            .fill(c.fill.alpha_mul(0.94))
+            .backdrop_blur(16.)
+            .border(1., c.border)
+            .shadow(8., 24., rune::Color::BLACK.alpha_mul(0.35));
     }
     e.radius(8.)
         .fill(k.c.layer_01.alpha_mul(0.836))

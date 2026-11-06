@@ -3,6 +3,12 @@
 #![allow(dead_code, unused_imports)]
 pub mod button;
 mod actions;
+mod overlays;
+mod select;
+mod combobox;
+pub use overlays::{Popover, Tooltip};
+pub use select::Select;
+pub use combobox::{Combobox, ComboboxOption, ComboboxState};
 mod checkbox;
 mod switch;
 mod radio;
@@ -31,9 +37,9 @@ pub use gallery::SCENES;
 use rune::{El, TextEdit, col, el, row, text};
 use rune_kit::ScrollBar;
 pub use rune_kit::{
-    Combobox, ComboboxOption, ComboboxState, Placement,
-    Popover, Progress, Select, Spinner, State,
-    TextArea, Toast, ToastRegion, Tooltip,
+    Placement,
+    Progress, Spinner, State,
+    TextArea, Toast, ToastRegion,
 };
 
 /// Rune's behavior with S5's semantic palette and typography, shared by all overlay controls.
