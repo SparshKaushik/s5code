@@ -1,24 +1,28 @@
 //! Shared web-shaped controls. `Button::new("Save").variant("outline").size("sm").build(t)`.
 //! Stateful Rune controls use `theme(t)`; mount their overlay vector in `rune_kit::root`.
 #![allow(dead_code, unused_imports)]
-pub mod button;
 mod actions;
-mod overlays;
-mod select;
 mod combobox;
-pub use overlays::{Popover, Tooltip};
-pub use select::Select;
 pub use combobox::{Combobox, ComboboxOption, ComboboxState};
-mod checkbox;
-mod switch;
-mod radio;
-mod segmented;
+mod spinner;
+pub use spinner::Spinner;
 mod toggle;
-pub use checkbox::Checkbox;
-pub use switch::Switch;
-pub use radio::{RadioGroup, RadioItem};
+pub use toggle::{Tabs, ToggleGroup};
+pub mod button;
+mod toast;
+pub use toast::{Toast, ToastDeadlines, ToastRegion};
+mod segmented;
 pub use segmented::SegmentedControl;
-pub use toggle::{ToggleGroup, Tabs};
+mod select;
+pub use select::Select;
+mod overlays;
+pub use overlays::{Popover, Tooltip};
+mod checkbox;
+mod radio;
+mod switch;
+pub use checkbox::Checkbox;
+pub use radio::{RadioGroup, RadioItem};
+pub use switch::Switch;
 pub mod menu;
 pub use menu::{Menu, MenuEntry, MenuItem, context_menu};
 mod dialog;
@@ -36,11 +40,7 @@ pub use button::{Button, icon_button};
 pub use gallery::SCENES;
 use rune::{El, TextEdit, col, el, row, text};
 use rune_kit::ScrollBar;
-pub use rune_kit::{
-    Placement,
-    Progress, Spinner, State,
-    TextArea, Toast, ToastRegion,
-};
+pub use rune_kit::{Placement, Progress, State, TextArea};
 
 /// Rune's behavior with S5's semantic palette and typography, shared by all overlay controls.
 pub fn theme(t: &T) -> rune_kit::Kit {
@@ -105,12 +105,14 @@ pub fn input(edit: &TextEdit, placeholder: &str, size: &str, t: &T) -> El {
         .size(size)
         .build(t)
 }
+/// Horizontal rule: `separator(t)`; constrain its width on the parent.
 pub fn separator(t: &T) -> El {
     el().role("separator")
         .w_full()
         .h(1.)
         .fill(t.c.contrast_border)
 }
+/// Keyboard hint: `kbd("⌘K", t)`.
 pub fn kbd(label: &str, t: &T) -> El {
     row()
         .role("note")
@@ -125,6 +127,7 @@ pub fn kbd(label: &str, t: &T) -> El {
                 .color(t.c.contrast_foreground),
         )
 }
+/// Static loading placeholder: `skeleton(240., 16., t)`; no idle repaint.
 pub fn skeleton(w: f32, h: f32, t: &T) -> El {
     el().size(w, h).radius(6.).fill(t.c.accent)
 }

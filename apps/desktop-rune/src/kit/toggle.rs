@@ -62,7 +62,7 @@ impl ToggleGroup {
         root = root
             .role(if self.tabs { "tablist" } else { "group" })
             .focus_group()
-            .gap(2.);
+            .gap(if self.variant == "outline" { 0. } else { 2. });
         if segmented {
             root = root
                 .padding(2.)
@@ -86,6 +86,8 @@ impl ToggleGroup {
                     } else {
                         k.c.page
                     }
+                } else if self.variant == "ghost" {
+                    k.c.surface_hover
                 } else {
                     k.c.border_weak.alpha_mul(0.64)
                 }
@@ -101,8 +103,20 @@ impl ToggleGroup {
                 .focusable(!disabled)
                 .disabled(disabled)
                 .h(height)
-                .px(if segmented { 10. } else { 7. })
-                .radius(if segmented { 6. } else { 8. })
+                .px(if self.variant == "pill" {
+                    12.
+                } else if self.size == "segmented" {
+                    10.
+                } else {
+                    7.
+                })
+                .radius(if self.variant == "pill" {
+                    999.
+                } else if self.size == "segmented" {
+                    6.
+                } else {
+                    8.
+                })
                 .fill(fill)
                 .border(
                     1.,
@@ -118,7 +132,11 @@ impl ToggleGroup {
                 .child(
                     text(label)
                         .font(if height <= 28. {
-                            theme::XS_MEDIUM
+                            if self.variant == "pill" {
+                                theme::TEXT_XS
+                            } else {
+                                theme::XS_MEDIUM
+                            }
                         } else {
                             theme::SM_MEDIUM
                         })
