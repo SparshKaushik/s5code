@@ -82,6 +82,7 @@ fn context(app: &App) -> Option<(String, String)> {
 }
 fn activate(app: &mut App, surface: Surface) {
     app.ui.shell.panel_open = true;
+    app.ui.chat.topbar.terminal_open = surface == Surface::Terminal;
     if !app.ui.panel.surfaces.contains(&surface) {
         app.ui.panel.surfaces.push(surface);
     }
@@ -146,6 +147,19 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         app.ui.shell.panel_open = !app.ui.shell.panel_open;
         return true;
     }
+    if app.ui.shell.panel_open && shortcut(app, e, "rightPanel.new") {
+        app.ui.panel.active = None;
+        app.ui.chat.topbar.terminal_open = false;
+        return true;
+    }
+    if app.ui.shell.panel_open && shortcut(app, e, "rightPanel.close") {
+        if let Some(surface) = app.ui.panel.active {
+            close(app, surface);
+        } else {
+            app.ui.shell.panel_open = false;
+        }
+        return true;
+    }
     if shortcut(app, e, "terminal.toggle") {
         toggle_terminal(app);
         return true;
@@ -193,6 +207,7 @@ fn picker(app: &App, t: &T) -> El {
     let mut list = col().w(320.).gap(2.).child(
         text("Open a surface")
             .font(theme::SM_MEDIUM)
+            .align(rune::Align::Center)
             .color(t.c.contrast_foreground)
             .mb(10.),
     );
@@ -264,7 +279,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                         .role("tab")
                         .label(surface.title())
                         .focusable(true)
-                        .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                        .on_press(move |s: &mut App| {
+                            s.ui.panel.active = Some(surface);
+                            s.ui.chat.topbar.terminal_open = surface == Surface::Terminal;
+                        })
                         .child(
                             icon(surface.glyph())
                                 .size(14., 14.)

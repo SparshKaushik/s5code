@@ -121,7 +121,7 @@ pub fn view(app: &App, t: &T) -> El {
                 .code_block_font(theme::mono(theme::TEXT_XS).lh(20.)),
         )
     } else {
-        let mut list = col().w_full().p(8.).gap(2.);
+        let mut list = col().w_full().padding(8.).gap(2.);
         for entry in &ui.entries {
             let path = data::s(entry, "path").to_string();
             let directory = entry["kind"] == "directory";
