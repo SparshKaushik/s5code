@@ -32,14 +32,9 @@ pub fn override_patch(settings: &Value, project: &str, key: &str, next: Option<V
 pub fn reset(s: &mut App, key: &str) {
     s.ui.settings.edits.remove(key);
     if let Some(project) = s.ui.settings.project.clone().filter(|_| project_key(key)) {
-        let patch = override_patch(
-            &s.state().config.as_ref().unwrap_or(&Value::Null)["settings"],
-            &project,
-            key,
-            None,
-        );
+        let patch = override_patch(super::server_settings(s), &project, key, None);
         request(s, "server.updateSettings", json!({"patch":patch}));
-    } else if let Some(default) = super::client::ClientSettings::default().values.get(key) {
+    } else if let Some(default) = super::client::defaults().get(key) {
         super::update(s, key, default.clone());
     } else if let Some(default) = defaults().get(key) {
         super::update(s, key, default.clone());
@@ -47,15 +42,12 @@ pub fn reset(s: &mut App, key: &str) {
 }
 pub fn customized(s: &App, key: &str) -> bool {
     if let Some(project) = s.ui.settings.project.as_ref().filter(|_| project_key(key)) {
-        return s.state().config.as_ref().is_some_and(|c| {
-            c["settings"]["projectSettingsOverrides"][project]
-                .get(key)
-                .is_some()
-        });
+        return super::server_settings(s)["projectSettingsOverrides"][project]
+            .get(key)
+            .is_some();
     }
-    let clients = super::client::ClientSettings::default();
+    let clients = super::client::defaults();
     clients
-        .values
         .get(key)
         .or_else(|| defaults().get(key))
         .is_some_and(|d| *d != value(s, key))
@@ -79,6 +71,14 @@ pub fn sentence(s: &App, t: &T) -> El {
             .project
             .as_ref()
             .and_then(|id| s.state().projects.iter().find(|p| p["id"] == *id));
+    let single = s.ui.settings.environment_only
+        || matches!(&s.route,crate::Route::Settings(p) if matches!(p.as_str(),"providers"|"secrets"));
+    let environment = s
+        .state()
+        .config
+        .as_ref()
+        .and_then(|c| c["environment"]["label"].as_str())
+        .unwrap_or("Environment");
     row()
         .w_full()
         .px(16.0)
@@ -92,7 +92,7 @@ pub fn sentence(s: &App, t: &T) -> El {
         .child(
             crate::kit::Button::new(
                 project
-                    .map(|p| crate::data::s(p, "name"))
+                    .map(|p| crate::data::s(p, "title"))
                     .unwrap_or("All projects"),
             )
             .size("sm")
@@ -102,17 +102,63 @@ pub fn sentence(s: &App, t: &T) -> El {
             .build(t),
         )
         .child(
-            text("across")
+            text(if single { "on" } else { "across" })
                 .font(theme::TEXT_SM)
                 .color(t.c.muted_foreground),
         )
         .child(
-            text("All environments")
-                .font(theme::SM_MEDIUM)
-                .color(t.c.foreground),
+            crate::kit::Button::new(if single {
+                environment
+            } else {
+                "All environments"
+            })
+            .variant("ghost")
+            .size("sm")
+            .icon(&crate::icons::CHEVRON_DOWN)
+            .on_press(|s: &mut App| {
+                s.ui.settings.environment_scope_open = !s.ui.settings.environment_scope_open
+            })
+            .build(t),
         )
 }
 pub fn menu(s: &App, t: &T) -> Option<El> {
+    if s.ui.settings.environment_scope_open {
+        let environment = s
+            .state()
+            .config
+            .as_ref()
+            .and_then(|c| c["environment"]["label"].as_str())
+            .unwrap_or("Environment");
+        let single = matches!(&s.route,crate::Route::Settings(p) if matches!(p.as_str(),"providers"|"secrets"));
+        let mut menu = col()
+            .w(240.0)
+            .padding(4.0)
+            .gap(4.0)
+            .radius(8.0)
+            .border(1.0, t.c.border)
+            .fill(t.c.popover);
+        if !single {
+            menu = menu.child(super::controls::button("All environments", t).on_press(
+                |s: &mut App| {
+                    super::commit_edits(s, true);
+                    s.ui.settings.environment_only = false;
+                    s.ui.settings.environment_scope_open = false;
+                },
+            ));
+        }
+        menu = menu.child(
+            super::controls::button(environment, t).on_press(|s: &mut App| {
+                super::commit_edits(s, true);
+                s.ui.settings.environment_only = true;
+                s.ui.settings.environment_scope_open = false;
+            }),
+        );
+        return Some(el().absolute(0.0, 0.0).w_full().h_full().center().child(
+            menu.modal(true, |s: &mut App| {
+                s.ui.settings.environment_scope_open = false
+            }),
+        ));
+    }
     if !s.ui.settings.scope_open {
         return None;
     }
@@ -127,7 +173,7 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         s.state().projects.iter().map(|p| {
             (
                 p["id"].as_str().map(str::to_owned),
-                crate::data::s(p, "name").to_owned(),
+                crate::data::s(p, "title").to_owned(),
             )
         }),
     ) {

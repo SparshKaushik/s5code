@@ -1,10 +1,16 @@
+mod about;
+mod auth;
 mod balance;
 pub mod client;
+mod connections;
 mod controls;
+mod devices;
 mod keybindings;
 mod pages;
+mod projects;
 mod providers;
 mod scope;
+mod tasks;
 mod themes;
 pub use themes::apply as apply_theme;
 
@@ -16,18 +22,35 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Ui {
-    pub theme_editor: Option<Value>,
-    pub theme_name: TextEdit,
-    pub theme_colors: HashMap<String,TextEdit>,
     pub theme_edit_dark: bool,
     pub theme_import_open: bool,
     pub theme_import: TextEdit,
+    pub theme_editor: Option<Value>,
+    pub theme_name: TextEdit,
+    pub theme_colors: HashMap<String, TextEdit>,
+    pub peer_url: TextEdit,
+    pub peer_code: TextEdit,
+    pub loaded_page: Option<String>,
+    pub active_resources: Vec<(String, Value)>,
+    pub results: HashMap<String, Value>,
+    pub form: HashMap<String, Value>,
+    pub select_options: Vec<(Value, String)>,
+    pub task_editor: Option<Value>,
+    pub delete_task: Option<(Value, String)>,
+    pub auth_response: TextEdit,
+    pub auth_fields: HashMap<String, TextEdit>,
+    pub update_version: Option<String>,
+    pub delete_thread: Option<(String, String)>,
+    pub provider_picker: bool,
     pub provider: Option<String>,
     pub project: Option<String>,
+    pub environment_only: bool,
+    pub environment_scope_open: bool,
     pub scope_open: bool,
     pub open_select: Option<String>,
     pub search: TextEdit,
     pub edits: HashMap<String, TextEdit>,
+    pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
     pub error: Option<String>,
     pub advanced: bool,
@@ -47,7 +70,47 @@ pub fn appearance(client: &client::ClientSettings) -> Appearance {
     }
 }
 
+pub fn server_settings(s: &App) -> &Value {
+    s.ui.settings
+        .optimistic_settings
+        .as_ref()
+        .or_else(|| s.state().config.as_ref()?.get("settings"))
+        .unwrap_or(&Value::Null)
+}
+fn apply_patch(settings: &mut Value, patch: &Value) {
+    if !settings.is_object() {
+        *settings = json!({});
+    }
+    for (key, next) in patch.as_object().into_iter().flatten() {
+        if matches!(
+            key.as_str(),
+            "providerInstances" | "projectSettingsOverrides"
+        ) {
+            if !settings[key].is_object() {
+                settings[key] = json!({});
+            }
+            for (id, entry) in next.as_object().into_iter().flatten() {
+                if entry.is_null() {
+                    settings[key].as_object_mut().unwrap().remove(id);
+                } else {
+                    settings[key][id] = entry.clone();
+                }
+            }
+        } else {
+            settings[key] = next.clone();
+        }
+    }
+}
+
 pub fn value(s: &App, key: &str) -> Value {
+    if let Some(key) = key.strip_prefix("project::") {
+        if let Some((id, field)) = key.split_once("::") {
+            return projects::value(s, id, field);
+        }
+    }
+    if key.starts_with("form.") {
+        return s.ui.settings.form.get(key).cloned().unwrap_or(Value::Null);
+    }
     if let Some(key) = key.strip_prefix("provider::") {
         if let Some((id, field)) = key.split_once("::") {
             return providers::field_value(s, id, field);
@@ -55,12 +118,7 @@ pub fn value(s: &App, key: &str) -> Value {
     }
     if scope::project_key(key) {
         if let Some(project) = &s.ui.settings.project {
-            if let Some(v) = s
-                .state()
-                .config
-                .as_ref()
-                .and_then(|c| c["settings"]["projectSettingsOverrides"][project].get(key))
-            {
+            if let Some(v) = server_settings(s)["projectSettingsOverrides"][project].get(key) {
                 return v.clone();
             }
         }
@@ -69,18 +127,21 @@ pub fn value(s: &App, key: &str) -> Value {
         .values
         .get(key)
         .cloned()
-        .or_else(|| {
-            s.state()
-                .config
-                .as_ref()?
-                .get("settings")?
-                .get(key)
-                .cloned()
-        })
+        .or_else(|| server_settings(s).get(key).cloned())
         .unwrap_or(Value::Null)
 }
 
 pub fn update(s: &mut App, key: &str, value: Value) {
+    if let Some(key) = key.strip_prefix("project::") {
+        if let Some((id, field)) = key.split_once("::") {
+            projects::update(s, id, field, value);
+            return;
+        }
+    }
+    if key.starts_with("form.") {
+        s.ui.settings.form.insert(key.into(), value);
+        return;
+    }
     if let Some(key) = key.strip_prefix("provider::") {
         if let Some((id, field)) = key.split_once("::") {
             providers::update(s, id, field, value);
@@ -102,12 +163,7 @@ pub fn update(s: &mut App, key: &str, value: Value) {
                 .as_ref()
                 .filter(|_| scope::project_key(key))
         {
-            scope::override_patch(
-                &s.state().config.as_ref().unwrap_or(&Value::Null)["settings"],
-                project,
-                key,
-                Some(value),
-            )
+            scope::override_patch(server_settings(s), project, key, Some(value))
         } else {
             json!({key:value})
         };
@@ -116,9 +172,21 @@ pub fn update(s: &mut App, key: &str, value: Value) {
 }
 
 pub fn request(s: &mut App, method: &str, payload: Value) {
+    if method == "server.updateSettings" && matches!(s.src, crate::data::Source::Live(_)) {
+        let mut current = server_settings(s).clone();
+        apply_patch(&mut current, &payload["patch"]);
+        s.ui.settings.optimistic_settings = Some(current);
+    }
     if let Some(net) = s.src.net() {
         let id = net.request(method, payload);
         s.ui.settings.pending.insert(id, method.into());
+    }
+}
+
+pub fn http(s: &mut App, method: &str, path: &str, payload: Value) {
+    if let Some(net) = s.src.net() {
+        let id = net.http_request(method, path, payload);
+        s.ui.settings.pending.insert(id, path.into());
     }
 }
 
@@ -149,20 +217,98 @@ pub fn commit_edits(s: &mut App, all: bool) -> bool {
     changed
 }
 
+pub fn resource<'a>(s: &'a App, method: &str, payload: Value) -> Option<&'a Value> {
+    match &s.src {
+        crate::data::Source::Live(net) => net.resource(method, payload),
+        _ => None,
+    }
+}
+
 pub fn poll(s: &mut App) -> bool {
+    let page = if let Route::Settings(page) = &s.route {
+        Some(page.clone())
+    } else {
+        None
+    };
+    if page != s.ui.settings.loaded_page {
+        if page.as_deref() == Some("connections") {
+            request(s, "peerLinks.list", json!({}));
+        }
+        s.ui.settings.loaded_page = page;
+    }
+    let mut wanted = Vec::new();
+    if let Route::Settings(path) = &s.route {
+        match path.as_str() {
+            "scheduled-tasks" => wanted.push(("scheduledTasks.subscribe".to_owned(), json!({}))),
+            "access" => wanted.push(("subscribeAuthAccess".to_owned(), json!({}))),
+            "devices" => wanted.push(("subscribeDeviceState".to_owned(), json!({}))),
+
+            _ => {}
+        }
+    }
+    if matches!(&s.route,Route::Settings(p) if p=="providers") {
+        let id = s.ui.settings.provider.clone().or_else(|| {
+            s.state().config.as_ref()?["providers"]
+                .as_array()?
+                .first()?["instanceId"]
+                .as_str()
+                .map(str::to_owned)
+        });
+        if let Some(id) = id {
+            wanted.push((
+                "provider.auth.subscribe".to_owned(),
+                json!({"instanceId":id}),
+            ));
+        }
+    }
+    if wanted != s.ui.settings.active_resources {
+        if let Some(net) = s.src.net() {
+            for (method, payload) in &s.ui.settings.active_resources {
+                if !wanted.contains(&(method.clone(), payload.clone())) {
+                    net.unwatch_resource(method, payload.clone());
+                }
+            }
+            for (method, payload) in &wanted {
+                net.watch_resource(method, payload.clone());
+            }
+        }
+        s.ui.settings.active_resources = wanted;
+    }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
     let mut changed = commit_edits(s, false);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
-            s.ui.settings.pending.remove(&id);
-            s.ui.settings.error = reply.err().map(|e| {
-                e["message"]
-                    .as_str()
-                    .unwrap_or("Could not update settings")
-                    .to_owned()
-            });
+            let method = s.ui.settings.pending.remove(&id).unwrap();
+            match reply {
+                Ok(result) => {
+                    if method == "scheduledTasks.upsert" {
+                        s.ui.settings.task_editor = None;
+                    }
+                    if method == "server.upsertKeybinding" {
+                        s.ui.settings.keybinding_editor = None;
+                        s.ui.settings.shortcut = None;
+                    }
+                    if matches!(method.as_str(), "peerLinks.link" | "peerLinks.unlink") {
+                        request(s, "peerLinks.list", json!({}));
+                    }
+                    s.ui.settings.results.insert(method, result);
+                }
+                Err(error) => {
+                    s.ui.settings.error = Some(error.to_string());
+                }
+            }
             changed = true;
         }
+    }
+    if !s
+        .ui
+        .settings
+        .pending
+        .values()
+        .any(|method| method == "server.updateSettings")
+        && s.ui.settings.optimistic_settings.take().is_some()
+    {
+        changed = true;
     }
     changed
 }
@@ -223,8 +369,16 @@ pub fn label(path: &str) -> &str {
         .unwrap_or(path)
 }
 
+static SNAP_SHOT_ICON: rune::Icon = rune::Icon {
+    name: "snap-shot",
+    view: 24.0,
+    body: r#"<path d="M8 3H6a3 3 0 0 0-3 3v2M16 3h2a3 3 0 0 1 3 3v2M21 16v2a3 3 0 0 1-3 3h-2M8 21H6a3 3 0 0 1-3-3v-2" stroke="currentColor" stroke-width="2" stroke-linecap="round" fill="none"/><rect width="10" height="8" x="7" y="8" rx="2" stroke="currentColor" stroke-width="2" fill="none"/><circle cx="12" cy="12" r="1.5" stroke="currentColor" stroke-width="2" fill="none"/>"#,
+};
+
 fn nav_icon(path: &str) -> &'static rune::Icon {
     match path {
+        "snap-shot" => &SNAP_SHOT_ICON,
+        "archived" => &icons::ARCHIVE,
         "appearance" => &icons::PALETTE,
         "keybindings" => &icons::KEYBOARD,
         "browser" => &icons::GLOBE,
@@ -328,8 +482,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .gap(8.0)
                     .center_y()
                     .radius(8.0)
-                    .fill(if active { t.c.accent } else { t.c.sidebar })
-                    .hover(t.sb.accent)
+                    .fill(if active {
+                        t.sb.sidebar_row_active
+                    } else {
+                        t.c.sidebar
+                    })
+                    .hover(t.sb.sidebar_row_hover)
                     .focusable(true)
                     .role("link")
                     .label(*title)
@@ -338,7 +496,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                         s.navigate(Route::Settings(target.clone()));
                         s.ui.settings.open_select = None;
                     })
-                    .child(rune::icon(icon, 16.0).color(t.sb.muted_foreground))
+                    .child(rune::icon(icon, 16.0).color(if active {
+                        t.c.foreground
+                    } else {
+                        t.sb.sidebar_icon_color
+                    }))
                     .child(text(*title).font(theme::SM_MEDIUM).color(if active {
                         t.c.foreground
                     } else {
@@ -356,7 +518,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         }))
         .child(el().h(1.0).w_full().fill(t.c.border));
     let mut header = row()
-        .h(48.0)
+        .h(47.0)
         .w_full()
         .pl(20.0)
         .pr(8.0)
@@ -380,7 +542,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .variant("ghost")
                 .size("xs")
                 .icon(&icons::ROTATE_CCW)
-                .disabled(s.client_settings.values == client::ClientSettings::default().values)
+                .disabled(
+                    !client::ClientSettings::default()
+                        .values
+                        .iter()
+                        .any(|(key, v)| s.client_settings.values.get(key) != Some(v)),
+                )
                 .build(t)
                 .on_press(|s: &mut App| {
                     let defaults = client::ClientSettings::default();
@@ -428,8 +595,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .key("settings-modal")
         .padding(1.0)
         .modal(true, close)
-        .w(1280.0)
-        .h(820.0)
+        .w_full()
+        .max_w(1280.0)
+        .h_full()
+        .max_h(960.0)
         .radius(16.0)
         .clip_rounded(16.0)
         .border(1.0, t.c.border)
@@ -442,8 +611,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(el().w(1.0).h_full().fill(t.c.border))
         .child(content);
     let mut overlays = Vec::new();
-    themes::editor(s,t,&mut overlays);
-    themes::import_dialog(s,t,&mut overlays);
+    providers::picker(s, t, &mut overlays);
+    themes::editor(s, t, &mut overlays);
+    themes::import_dialog(s, t, &mut overlays);
+    projects::confirm_delete(s, t, &mut overlays);
+    tasks::editor(s, t, &mut overlays);
+    about::update_dialog(s, t, &mut overlays);
     if let Some(menu) = scope::menu(s, t) {
         overlays.push(menu);
     }
@@ -457,33 +630,35 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         );
     }
     if let Some(key) = &s.ui.settings.open_select {
-        if let Some(spec) = pages::specs()
+        let fallback: Vec<_> = pages::specs()
             .as_object()
             .into_iter()
             .flat_map(|p| p.values())
             .flat_map(|p| p.as_array().into_iter().flatten())
             .flat_map(|sec| sec["rows"].as_array().into_iter().flatten())
             .find(|r| r["key"].as_str() == Some(key))
-        {
-            let options: Vec<_> = spec["options"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
-                .collect();
-            overlays.push(controls::select_menu(
-                s,
-                t,
-                key,
-                &options,
-                controls::select_width(key),
-            ));
-        }
+            .into_iter()
+            .flat_map(|r| r["options"].as_array().into_iter().flatten())
+            .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
+            .collect();
+        let options = if s.ui.settings.select_options.is_empty() {
+            &fallback
+        } else {
+            &s.ui.settings.select_options
+        };
+        overlays.push(controls::select_menu(
+            s,
+            t,
+            key,
+            options,
+            controls::select_width(key),
+        ));
     }
     rune_kit::root(
         el().absolute(0.0, 0.0)
             .w_full()
             .h_full()
+            .padding(40.0)
             .center()
             .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.60 }))
             .backdrop_blur(4.0)
@@ -494,6 +669,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
 }
 
 pub fn close(s: &mut App) {
+    s.ui.settings.results.remove("/api/auth/pairing-token");
+    s.ui.settings.auth_fields.clear();
+    s.ui.settings.auth_response.clear();
+    s.ui.settings.peer_code.clear();
     commit_edits(s, true);
     let route =
         s.ui.settings
@@ -582,8 +761,31 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         return false;
     }
     if matches!(e.key, rune::Key::Escape) {
-        if s.ui.settings.theme_import_open {s.ui.settings.theme_import_open=false;return true;}
-        if s.ui.settings.theme_editor.take().is_some() {return true;}
+        if s.ui.settings.open_select.take().is_some() {
+            return true;
+        }
+        if s.ui.settings.theme_import_open {
+            s.ui.settings.theme_import_open = false;
+            return true;
+        }
+        if s.ui.settings.environment_scope_open {
+            s.ui.settings.environment_scope_open = false;
+            return true;
+        }
+        if s.ui.settings.scope_open {
+            s.ui.settings.scope_open = false;
+            return true;
+        }
+        if s.ui.settings.update_version.take().is_some()
+            || s.ui.settings.theme_editor.take().is_some()
+            || s.ui.settings.delete_thread.take().is_some()
+            || s.ui.settings.delete_task.take().is_some()
+        {
+            return true;
+        }
+        if s.ui.settings.task_editor.take().is_some() {
+            return true;
+        }
         if s.ui.settings.open_select.take().is_some() {
             return true;
         }
@@ -594,6 +796,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         return true;
     }
     if s.ui.settings.keybinding_editor.is_some()
+        && s.ui.settings.open_select.is_none()
         && s.ui.settings.shortcut.is_none()
         && !s.ui.settings.binding_when.focused
     {
@@ -635,4 +838,24 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         return true;
     }
     false
+}
+
+#[cfg(test)]
+mod patch_tests {
+    use super::*;
+    #[test]
+    fn rapid_scoped_changes_build_on_the_previous_pending_patch() {
+        let mut settings = json!({"projectSettingsOverrides":{"p":{"future":true}}});
+        for (key, value) in [
+            ("defaultAutoPull", json!(true)),
+            ("responseStreamingMode", json!("paragraph")),
+        ] {
+            let patch = scope::override_patch(&settings, "p", key, Some(value));
+            apply_patch(&mut settings, &patch);
+        }
+        assert_eq!(
+            settings["projectSettingsOverrides"]["p"],
+            json!({"future":true,"defaultAutoPull":true,"responseStreamingMode":"paragraph"})
+        );
+    }
 }

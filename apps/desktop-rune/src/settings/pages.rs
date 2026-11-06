@@ -1,8 +1,8 @@
-use super::{controls as c, request};
+use super::controls as c;
+use crate::App;
 use crate::theme::{self, T};
-use crate::{App, icons};
-use rune::{Cx, El, col, el, row, text};
-use serde_json::{Value, json};
+use rune::{Cx, El, col, text};
+use serde_json::Value;
 use std::sync::OnceLock;
 
 pub fn specs() -> &'static Value {
@@ -29,6 +29,30 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .font(theme::TEXT_SM)
                 .color(t.c.destructive),
         );
+    }
+    if s.ui
+        .settings
+        .active_resources
+        .iter()
+        .any(|(method, payload)| {
+            super::resource(s, method, payload.clone()).is_some_and(|v| v.get("error").is_some())
+        })
+    {
+        return page
+            .child(
+                text("Could not load this page. Check the connection’s permissions or reconnect.")
+                    .font(theme::TEXT_SM)
+                    .color(t.c.destructive),
+            )
+            .child(c::button("Retry", t).on_press(|s: &mut App| {
+                let resources = s.ui.settings.active_resources.clone();
+                if let Some(net) = s.src.net() {
+                    for (method, payload) in resources {
+                        net.unwatch_resource(&method, payload.clone());
+                        net.watch_resource(&method, payload);
+                    }
+                }
+            }));
     }
     if !super::scope::device_only(path) {
         page = page.child(super::scope::sentence(s, t));
@@ -69,94 +93,18 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
     }
     page.child(match path {
         "providers" => super::providers::view(s, t),
+        "devices" => super::devices::view(s, t),
+        "connections" => super::connections::view(s, t),
+        "access" => super::connections::access(s, t),
+        "scheduled-tasks" => super::tasks::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
-        "projects" => projects(s, t),
-        "archived" => archived(s, t),
-        "about" => about(t),
+        "projects" => super::projects::view(s, t),
+        "archived" => super::projects::archived(s, t),
+        "about" => super::about::view(s, t),
         _ => unavailable(path, t),
     })
 }
 
-fn projects(s: &App, t: &T) -> El {
-    let children = s
-        .state()
-        .projects
-        .iter()
-        .map(|project| {
-            row()
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .child(rune::icon(&icons::FOLDER, 16.0).color(t.c.muted_foreground))
-                .child(
-                    col()
-                        .gap(4.0)
-                        .child(
-                            text(crate::data::s(project, "name").to_owned())
-                                .font(theme::SM_MEDIUM)
-                                .color(t.c.foreground),
-                        )
-                        .child(
-                            text(crate::data::s(project, "workspaceRoot").to_owned())
-                                .font(theme::TEXT_XS)
-                                .color(t.c.muted_foreground),
-                        ),
-                )
-        })
-        .collect();
-    c::section("Projects", children, t)
-}
-fn archived(s: &App, t: &T) -> El {
-    let children = s
-        .state()
-        .archived
-        .iter()
-        .map(|thread| {
-            row().padding(16.0).w_full().child(
-                text(crate::data::s(thread, "title").to_owned())
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-            )
-        })
-        .collect();
-    c::section("Archived threads", children, t)
-}
-fn about(t: &T) -> El {
-    col()
-        .gap(32.0)
-        .w_full()
-        .child(c::section(
-            "App",
-            vec![
-                row().padding(16.0).w_full().center_y().child(
-                    col()
-                        .grow(1.0)
-                        .gap(4.0)
-                        .child(text("S5 Code").font(theme::SM_MEDIUM).color(t.c.foreground))
-                        .child(
-                            text("Current version of the application.")
-                                .font(theme::TEXT_XS)
-                                .color(t.c.muted_foreground),
-                        ),
-                ),
-            ],
-            t,
-        ))
-        .child(c::section(
-            "Legal",
-            vec![
-                text("Privacy policy")
-                    .padding(16.0)
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-                text("Open source licenses")
-                    .padding(16.0)
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-            ],
-            t,
-        ))
-}
 fn unavailable(path: &str, t: &T) -> El {
     text(format!(
         "{} settings are not yet available in the native client.",

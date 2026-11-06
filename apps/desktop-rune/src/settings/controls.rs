@@ -56,6 +56,8 @@ pub fn select_width(key: &str) -> f32 {
     match key {
         "notificationMode" => 224.0,
         "sidebarProjectSortOrder" => 176.0,
+        "sendShortcut" => 70.0,
+        "followUpBehavior" => 71.0,
         _ => 160.0,
     }
 }
@@ -76,6 +78,7 @@ pub fn select(
         .unwrap_or_else(|| current.as_str().unwrap_or("Default").to_owned());
     let open = s.ui.settings.open_select.as_deref() == Some(key);
     let owned = key.to_owned();
+    let choices = options.to_vec();
     let trigger = row()
         .key(format!("setting-{key}"))
         .w(width)
@@ -93,7 +96,8 @@ pub fn select(
         .expanded(open)
         .focus_ring(2.0, 1.0, t.c.ring)
         .on_press(move |s: &mut App| {
-            s.ui.settings.open_select = if open { None } else { Some(owned.clone()) }
+            s.ui.settings.open_select = if open { None } else { Some(owned.clone()) };
+            s.ui.settings.select_options = choices.clone();
         })
         .child(
             text(display)
@@ -252,6 +256,25 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
                 })
         }
     };
+    let environment_wide = s.ui.settings.project.is_some()
+        && !s.client_settings.values.contains_key(key)
+        && !super::scope::project_key(key);
+    let ctrl = if environment_wide {
+        ctrl.disabled(true).opacity(0.5)
+    } else {
+        ctrl
+    };
+    if s.ui.settings.project.is_some() && super::scope::project_key(key) {
+        copy = copy.child(
+            text(if super::scope::customized(s, key) {
+                "Overridden for this project"
+            } else {
+                "Inherited from environment"
+            })
+            .font(theme::TEXT_XS)
+            .color(t.c.muted_foreground),
+        );
+    }
     row()
         .key(format!("row-{key}"))
         .w_full()

@@ -10,10 +10,20 @@ pub fn field_key(id: &str, field: &str) -> String {
     format!("provider::{id}::{field}")
 }
 pub fn field_value(s: &App, id: &str, field: &str) -> Value {
-    let entry =
-        &s.state().config.as_ref().unwrap_or(&Value::Null)["settings"]["providerInstances"][id];
+    let entry = &super::server_settings(s)["providerInstances"][id];
     if field == "displayName" {
-        entry[field].clone()
+        entry
+            .get(field)
+            .cloned()
+            .or_else(|| {
+                s.state().config.as_ref()?["providers"]
+                    .as_array()?
+                    .iter()
+                    .find(|p| p["instanceId"] == id)?
+                    .get(field)
+                    .cloned()
+            })
+            .unwrap_or(Value::Null)
     } else {
         entry["config"][field].clone()
     }
@@ -40,7 +50,7 @@ pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
         .and_then(|ps| ps.iter().find(|p| p["instanceId"] == id))
         .and_then(|p| p["driver"].as_str())
         .unwrap_or("");
-    let patch = config_patch(&config["settings"], id, driver, field, value);
+    let patch = config_patch(super::server_settings(s), id, driver, field, value);
     request(s, "server.updateSettings", json!({"patch":patch}));
 }
 fn input(s: &App, t: &T, id: &str, field: &str, label: &str, description: &str) -> El {
@@ -95,7 +105,11 @@ pub fn view(s: &App, t: &T) -> El {
             .and_then(|id| ps.iter().find(|p| p["instanceId"] == *id))
             .or_else(|| ps.first())
     });
-    for p in providers.into_iter().flatten() {
+    for p in providers
+        .into_iter()
+        .flatten()
+        .filter(|p| p["enabled"] != false)
+    {
         let id = p["instanceId"].as_str().unwrap_or("").to_owned();
         let name = p["displayName"].as_str().unwrap_or(&id).to_owned();
         let status = p["message"]
@@ -132,9 +146,14 @@ pub fn view(s: &App, t: &T) -> El {
                                 .center_y()
                                 .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground))
                                 .child(
-                                    text(p["version"].as_str().unwrap_or("").to_owned())
-                                        .font(theme::MONO_XS)
-                                        .color(t.c.muted_foreground),
+                                    text(
+                                        p["version"]
+                                            .as_str()
+                                            .map(|v| format!("v{v}"))
+                                            .unwrap_or_default(),
+                                    )
+                                    .font(theme::MONO_XS)
+                                    .color(t.c.muted_foreground),
                                 ),
                         )
                         .child(
@@ -146,6 +165,9 @@ pub fn view(s: &App, t: &T) -> El {
                 ),
         );
     }
+    list = list.child(
+        c::button("Add provider", t).on_press(|s: &mut App| s.ui.settings.provider_picker = true),
+    );
     let mut details = col().grow(1.0).min_w(0.0).gap(24.0);
     if let Some(p) = selected {
         let id = p["instanceId"].as_str().unwrap_or("");
@@ -190,6 +212,7 @@ pub fn view(s: &App, t: &T) -> El {
             ],
             t,
         ));
+        details = details.child(super::auth::view(s, t, p));
         details = details.child(input(s, t, id, "displayName", "Display name", ""));
         let mut runtime = col().padding(12.0).gap(20.0).child(input(
             s,
@@ -268,4 +291,43 @@ mod tests {
             json!({"homePath":"/custom","future":true,"binaryPath":"/bin/codex"})
         );
     }
+}
+
+pub fn picker(s: &App, t: &T, layers: &mut Vec<El>) {
+    if !s.ui.settings.provider_picker {
+        return;
+    }
+    let mut choices = col().w_full().gap(8.0);
+    for p in s
+        .state()
+        .config
+        .as_ref()
+        .and_then(|c| c["providers"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|_| true)
+    {
+        let id = p["instanceId"].as_str().unwrap_or("").to_owned();
+        let enable = p["enabled"] == false;
+        choices = choices.child(
+            c::button(
+                &format!(
+                    "{} {}",
+                    if enable { "Enable" } else { "Disable" },
+                    p["displayName"].as_str().unwrap_or(&id)
+                ),
+                t,
+            )
+            .on_press(move |s: &mut App| {
+                update(s, &id, "enabled", json!(enable));
+                s.ui.settings.provider = if enable { Some(id.clone()) } else { None };
+                s.ui.settings.provider_picker = false;
+            }),
+        );
+    }
+    crate::kit::Dialog::new("add-provider", "Add provider")
+        .open(true)
+        .on_close(|s: &mut App| s.ui.settings.provider_picker = false)
+        .child(choices)
+        .build(t, layers);
 }
