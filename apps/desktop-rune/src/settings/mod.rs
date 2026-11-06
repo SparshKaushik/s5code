@@ -646,13 +646,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         } else {
             &s.ui.settings.select_options
         };
-        overlays.push(controls::select_menu(
-            s,
-            t,
-            key,
-            options,
-            controls::select_width(key),
-        ));
+        controls::select_menu(s, t, key, options, controls::select_width(key), &mut overlays);
     }
     rune_kit::root(
         el().absolute(0.0, 0.0)
