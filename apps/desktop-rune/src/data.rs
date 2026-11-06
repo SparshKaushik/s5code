@@ -36,6 +36,7 @@ pub fn empty_state() -> State {
         threads: Vec::new(),
         archived: Vec::new(),
         shell_ready: false,
+        shell_sequence: 0,
         thread_views: HashMap::new(),
         vcs: HashMap::new(),
     }
