@@ -277,3 +277,53 @@ fn access_snapshot_keeps_other_clients_and_ignores_stale_events() {
         json!([{"sessionId":"a","label":"renamed"}])
     );
 }
+
+#[test]
+fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
+    let (tx, _commands) = mpsc::channel();
+    let (incoming, rx) = mpsc::channel();
+    let mut net = Net {
+        state: State::default(),
+        tx,
+        rx,
+        replies: HashMap::new(),
+        next_id: 0,
+        resources: HashMap::new(),
+        resource_events: HashMap::new(),
+        base_url: String::new(),
+        bearer: String::new(),
+        incoming_tx: incoming.clone(),
+        wake: Arc::new(|| {}),
+    };
+    let payload = json!({"threadId":"t","terminalId":"term-1"});
+    net.watch_resource("terminal.attach", payload.clone());
+    let route = Route::Resource("terminal.attach".into(), payload.to_string());
+    let events = vec![
+        json!({"type":"snapshot","snapshot":{"history":"$ "}}),
+        json!({"type":"output","sequence":1,"data":"first"}),
+        json!({"type":"output","sequence":2,"data":"second"}),
+    ];
+    for event in &events {
+        incoming
+            .send(Incoming::Item(route.clone(), event.clone()))
+            .unwrap();
+    }
+    assert!(net.drain());
+    assert_eq!(
+        net.take_resource_events("terminal.attach", payload.clone()),
+        events
+    );
+    assert!(
+        net.take_resource_events("terminal.attach", payload.clone())
+            .is_empty()
+    );
+    incoming
+        .send(Incoming::Item(route, events[1].clone()))
+        .unwrap();
+    net.drain();
+    net.unwatch_resource("terminal.attach", payload.clone());
+    assert!(
+        net.take_resource_events("terminal.attach", payload)
+            .is_empty()
+    );
+}

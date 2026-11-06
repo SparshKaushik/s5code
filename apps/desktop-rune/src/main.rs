@@ -80,6 +80,7 @@ impl App {
 }
 
 fn setup(s: &mut App, waker: Waker) {
+    s.ui.panel.waker = Some(waker.clone());
     if let Some((url, token)) = host::server() {
         s.src = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
     }
@@ -87,6 +88,7 @@ fn setup(s: &mut App, waker: Waker) {
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = s.src.net().is_some_and(|net| net.drain());
+    changed |= panel::poll(s);
     changed |= settings::poll(s);
     changed |= chat::timeline::poll(s);
     changed |= chat::composer::poll(s);
