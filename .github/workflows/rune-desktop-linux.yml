@@ -1,0 +1,71 @@
+name: Rune desktop (Linux build for headless scenes)
+
+# Builds and tests apps/desktop-rune on Linux and uploads a bundle (binary + fixtures + tools)
+# that tools/modal_render.py runs headless on Modal to render scenes for pixel comparison.
+
+on:
+  push:
+    branches: ["feat/rune-**"]
+    paths:
+      - apps/desktop-rune/**
+      - .github/workflows/rune-desktop-linux.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rune-desktop-linux-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/desktop-rune
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: System packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq build-essential pkg-config cmake libxkbcommon-dev libxkbcommon-x11-0 \
+            libvulkan1 libssl-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev libwayland-dev libfontconfig-dev
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-rune/target
+          key: rune-linux-${{ github.ref_name }}-${{ hashFiles('apps/desktop-rune/Cargo.lock') }}
+          restore-keys: |
+            rune-linux-${{ github.ref_name }}-
+            rune-linux-
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Test
+        run: cargo test --release --locked --workspace 2>&1 | grep -E "^test |test result|panicked|FAILED|error" ; exit ${PIPESTATUS[0]}
+
+      - name: Bundle
+        run: |
+          mkdir -p bundle/target/release
+          cp target/release/s5code-rune bundle/target/release/
+          cp -r fixtures tools bundle/
+          tar czf "$RUNNER_TEMP/bundle.tgz" -C bundle .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s5code-rune-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/bundle.tgz
+          retention-days: 3
