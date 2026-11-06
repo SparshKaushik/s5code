@@ -5,6 +5,8 @@ mod keybindings;
 mod pages;
 mod providers;
 mod scope;
+mod themes;
+pub use themes::apply as apply_theme;
 
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Appearance, Route, icons};
@@ -14,6 +16,12 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Ui {
+    pub theme_editor: Option<Value>,
+    pub theme_name: TextEdit,
+    pub theme_colors: HashMap<String,TextEdit>,
+    pub theme_edit_dark: bool,
+    pub theme_import_open: bool,
+    pub theme_import: TextEdit,
     pub provider: Option<String>,
     pub project: Option<String>,
     pub scope_open: bool,
@@ -434,6 +442,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(el().w(1.0).h_full().fill(t.c.border))
         .child(content);
     let mut overlays = Vec::new();
+    themes::editor(s,t,&mut overlays);
+    themes::import_dialog(s,t,&mut overlays);
     if let Some(menu) = scope::menu(s, t) {
         overlays.push(menu);
     }
@@ -572,6 +582,8 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         return false;
     }
     if matches!(e.key, rune::Key::Escape) {
+        if s.ui.settings.theme_import_open {s.ui.settings.theme_import_open=false;return true;}
+        if s.ui.settings.theme_editor.take().is_some() {return true;}
         if s.ui.settings.open_select.take().is_some() {
             return true;
         }

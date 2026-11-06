@@ -34,7 +34,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         page = page.child(super::scope::sentence(s, t));
     }
     if path == "appearance" {
-        page = page.child(themes(s, t));
+        page = page.child(super::themes::view(s, t));
     }
     if let Some(sections) = specs()[path].as_array() {
         for section in sections {
@@ -75,77 +75,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "about" => about(t),
         _ => unavailable(path, t),
     })
-}
-
-fn themes(s: &App, t: &T) -> El {
-    let mut modes = row().gap(4.0).padding(4.0).radius(8.0).fill(t.c.muted);
-    for (v, label) in [("system", "System"), ("light", "Light"), ("dark", "Dark")] {
-        let selected = match s.appearance {
-            crate::Appearance::System => v == "system",
-            crate::Appearance::Light => v == "light",
-            crate::Appearance::Dark => v == "dark",
-        };
-        modes = modes.child(
-            c::button(label, t)
-                .fill(if selected { t.c.background } else { t.c.muted })
-                .on_press(move |s: &mut App| super::update(s, "appearance", json!(v))),
-        );
-    }
-    col()
-        .w_full()
-        .gap(16.0)
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(
-                    text("Color scheme")
-                        .font(theme::SM_MEDIUM)
-                        .color(t.c.foreground)
-                        .grow(1.0),
-                )
-                .child(modes),
-        )
-        .child(
-            text("Themes")
-                .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                .color(t.c.foreground),
-        )
-        .child(
-            row()
-                .gap(12.0)
-                .child(theme_preview("Default", t))
-                .child(theme_preview("Light", &theme::theme(false)))
-                .child(theme_preview("Dark", &theme::theme(true))),
-        )
-}
-fn theme_preview(label: &str, t: &T) -> El {
-    col()
-        .w(160.0)
-        .gap(8.0)
-        .child(
-            row()
-                .h(88.0)
-                .w_full()
-                .radius(8.0)
-                .border(1.0, t.c.border)
-                .child(el().w(36.0).h_full().fill(t.sb.sidebar))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .h_full()
-                        .padding(12.0)
-                        .gap(8.0)
-                        .fill(t.c.background)
-                        .child(el().h(6.0).w(64.0).radius(3.0).fill(t.c.muted))
-                        .child(el().h(24.0).w_full().radius(4.0).fill(t.c.card)),
-                ),
-        )
-        .child(
-            text(label.to_owned())
-                .font(theme::TEXT_XS)
-                .color(t.c.foreground),
-        )
 }
 
 fn projects(s: &App, t: &T) -> El {
