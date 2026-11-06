@@ -213,7 +213,9 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if app.ui.shell.panel_open
         && app.ui.panel.active.is_none()
-        && tx.focused().is_none()
+        && tx
+            .focused()
+            .is_none_or(|key| key.starts_with('#') || key.contains("panel-launcher"))
         && !e.mods.cmd
         && !e.mods.ctrl
         && !e.mods.alt
@@ -322,6 +324,8 @@ fn picker(app: &App, t: &T) -> El {
         );
     }
     col()
+        .key("panel-launcher")
+        .focus_group()
         .grow(1.)
         .min_h(0.)
         .center()
