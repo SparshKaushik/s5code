@@ -1,0 +1,77 @@
+name: Rune desktop prototype (macOS)
+
+on:
+  push:
+    branches: [feat/rune-desktop-prototype]
+    paths:
+      - apps/desktop-rune/**
+      - .github/workflows/rune-desktop-macos.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: rune-desktop-macos-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        working-directory: apps/desktop-rune
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup default stable
+          rustc --version
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            apps/desktop-rune/target
+          key: rune-macos-${{ runner.arch }}-${{ hashFiles('apps/desktop-rune/Cargo.lock') }}
+          restore-keys: rune-macos-${{ runner.arch }}-
+
+      - name: Build
+        run: cargo build --release --locked
+
+      - name: Bundle S5 Code (Rune).app
+        run: |
+          app="dist/S5 Code (Rune).app"
+          mkdir -p "$app/Contents/MacOS"
+          cp target/release/s5code-rune "$app/Contents/MacOS/s5code-rune"
+          cat > "$app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleName</key><string>S5 Code (Rune)</string>
+            <key>CFBundleDisplayName</key><string>S5 Code (Rune)</string>
+            <key>CFBundleIdentifier</key><string>in.newsa.s5code.rune-prototype</string>
+            <key>CFBundleExecutable</key><string>s5code-rune</string>
+            <key>CFBundlePackageType</key><string>APPL</string>
+            <key>CFBundleShortVersionString</key><string>0.0.1</string>
+            <key>CFBundleVersion</key><string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key><string>12.0</string>
+            <key>NSHighResolutionCapable</key><true/>
+          </dict>
+          </plist>
+          PLIST
+          codesign --force --deep --sign - "$app"
+          codesign --verify --verbose "$app"
+          ditto -c -k --keepParent "$app" "dist/S5-Code-Rune-macos-arm64.zip"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: S5-Code-Rune-macos-arm64
+          path: apps/desktop-rune/dist/S5-Code-Rune-macos-arm64.zip
+          if-no-files-found: error
