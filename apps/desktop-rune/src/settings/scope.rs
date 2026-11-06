@@ -1,7 +1,7 @@
 use super::{request, value};
 use crate::{
     App,
-    theme::{self, T},
+    theme::{self, AlphaMul, T},
 };
 use rune::{El, col, el, row, text};
 use serde_json::{Value, json};
@@ -89,37 +89,55 @@ pub fn sentence(s: &App, t: &T) -> El {
                 .font(theme::TEXT_SM)
                 .color(t.c.muted_foreground),
         )
-        .child(
-            crate::kit::Button::new(
-                project
-                    .map(|p| crate::data::s(p, "title"))
-                    .unwrap_or("All projects"),
-            )
-            .size("sm")
-            .variant("ghost")
-            .icon(&crate::icons::CHEVRON_DOWN)
-            .on_press(|s: &mut App| s.ui.settings.scope_open = !s.ui.settings.scope_open)
-            .build(t),
-        )
+        .child(trigger(
+            t,
+            "Project scope",
+            None,
+            project.map(|p| crate::data::s(p, "title")).unwrap_or("All projects"),
+            |s: &mut App| s.ui.settings.scope_open = !s.ui.settings.scope_open,
+        ))
         .child(
             text(if single { "on" } else { "across" })
                 .font(theme::TEXT_SM)
                 .color(t.c.muted_foreground),
         )
-        .child(
-            crate::kit::Button::new(if single {
-                environment
-            } else {
-                "All environments"
-            })
-            .variant("ghost")
-            .size("sm")
-            .icon(&crate::icons::CHEVRON_DOWN)
-            .on_press(|s: &mut App| {
+        .child(trigger(
+            t,
+            "Environment scope",
+            single.then_some(&crate::icons::SERVER),
+            if single { environment } else { "All environments" },
+            |s: &mut App| {
                 s.ui.settings.environment_scope_open = !s.ui.settings.environment_scope_open
-            })
-            .build(t),
-        )
+            },
+        ))
+}
+
+/// The scope picker's select-style trigger: optional icon, label, then the chevron.
+fn trigger(
+    t: &T,
+    name: &str,
+    glyph: Option<&'static rune::Icon>,
+    label: &str,
+    press: impl Fn(&mut App) + 'static,
+) -> El {
+    row()
+        .h(28.0)
+        .px(9.0)
+        .gap(4.0)
+        .center_y()
+        .shrink()
+        .radius(8.0)
+        .border(1.0, t.c.input)
+        .fill(if t.dark { t.c.input.alpha_mul(0.32) } else { t.c.background })
+        .hover(t.c.accent)
+        .focusable(true)
+        .focus_ring(2.0, 1.0, t.c.ring)
+        .role("button")
+        .label(format!("{name}: {label}"))
+        .children(glyph.map(|g| rune::icon(g, 14.0).color(t.c.foreground)))
+        .child(text(label.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
+        .child(rune::icon(&crate::icons::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground))
+        .on_press(press)
 }
 pub fn menu(s: &App, t: &T) -> Option<El> {
     if s.ui.settings.environment_scope_open {
