@@ -21,8 +21,6 @@ pub struct Ui {
     pub details: details::Ui,
 }
 
-pub const SCENES: &[(&str, fn(&mut App))] = &[];
-
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let body = match &s.route {
         Route::Thread(id) => timeline::view(s, cx, t, id),

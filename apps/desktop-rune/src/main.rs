@@ -109,7 +109,8 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
-    let all: Vec<(&'static str, fn(&mut App))> = [shell::SCENES, chat::SCENES, panel::SCENES, settings::SCENES].concat();
+    let all: Vec<(&'static str, fn(&mut App))> =
+        [shell::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, kit::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 

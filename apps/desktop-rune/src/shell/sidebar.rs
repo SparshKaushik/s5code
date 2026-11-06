@@ -9,6 +9,8 @@ use crate::theme::{self, T, layout};
 #[derive(Default)]
 pub struct Ui {}
 
+pub const SCENES: &[(&str, fn(&mut App))] = &[];
+
 pub fn view(st: &App, _cx: &mut Cx<App>, t: &T) -> El {
     let mut list = col().key("sidebar").w(layout::SIDEBAR_W).h_full().fill(t.sb.sidebar).pt(layout::TOPBAR_H).px(8.0).gap(4.0);
     for th in &st.state().threads {

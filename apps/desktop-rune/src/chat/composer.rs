@@ -8,6 +8,9 @@ use crate::theme::T;
 #[derive(Default)]
 pub struct Ui {}
 
+/// Scenes for the composer, topbar, home and details card.
+pub const SCENES: &[(&str, fn(&mut App))] = &[];
+
 pub fn view(_s: &App, _cx: &mut Cx<App>, _t: &T) -> El {
     el()
 }
