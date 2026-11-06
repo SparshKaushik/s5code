@@ -50,26 +50,27 @@ under fixtures `net()` is `None`, so a write there is a no-op.
 
 ## Build, render, compare
 
-Builds and renders run on a Freestyle VM (Ubuntu, lavapipe Vulkan). Never run cargo on the dev box.
+Never run cargo on the dev box. CI builds; Modal renders, on demand, and exits when done.
 
 ```sh
-# copy your checkout's crate to the VM and build
-tar czf /tmp/x.tgz -C apps/desktop-rune Cargo.toml Cargo.lock src net fixtures tools
-freestyle vm scp /tmp/x.tgz <vm>:/home/ubuntu/src.tgz
-freestyle vm exec <vm> -- bash -lc 'cd ~/s5rune && rm -rf src net/src fixtures tools && tar xzf ~/src.tgz && cargo build --release 2>&1 | tail -30'
-# render a scene headless (0.5 s) and fetch it
-freestyle vm exec <vm> -- bash -lc '~/s5rune/tools/snap.sh thread-showcase dark'
-freestyle vm scp <vm>:/home/ubuntu/shots/thread-showcase.png ./shots/
-# compare against the web reference: side-by-side + heatmap + mismatch %
-python3 tools/compare.py REF.png RUNE.png OUT.png [x0,y0,x1,y1]
+# commit, then push HEAD and build it on GitHub Actions (rune-desktop-linux.yml: build + tests);
+# downloads the bundle (binary + fixtures + tools). A failed build prints the compiler errors.
+tools/ci-build.sh OUT_DIR                 # -> OUT_DIR/bundle.tgz, ~5-8 min
+# render scenes headless on an ephemeral Modal container (~1 min for a batch; batch your scenes)
+modal run tools/modal_render.py --bundle OUT_DIR/bundle.tgz --scenes home,thread-showcase \
+    --themes dark,light --args "--chrome" --out OUT_DIR/shots
+# compare against a reference: side-by-side + heatmap + mismatch % (Pillow lives in modal-venv)
+/home/ubuntu/modal-venv/bin/python tools/compare.py REF.png RUNE.png OUT.png [x0,y0,x1,y1]
 ```
 
-`--tree` (written by `snap.sh` next to the PNG) dumps Rune's element boxes for geometry checks.
-Other Rune flags: `--chrome` draws macOS traffic lights; `--script input.json` replays input
-headless (hover, clicks, keys) before the snapshot; `--at SECONDS` picks the time.
+Each push to a `feat/rune-*` branch builds; other branch names are pushed to `feat/rune-ci/<branch>`.
+A commit must touch `apps/desktop-rune/` to trigger the build. `--tree` dumps (`<scene>.tree.json`
+next to each PNG) give Rune's element boxes for geometry checks. Other Rune flags via `--args`:
+`--chrome` draws macOS traffic lights; `--script /work/files/x.json` replays input (upload the file
+with `--files x.json`); `--at SECONDS` picks the time.
 
-References come from the real web app running in the VM (`http://localhost:5733`, server
-`http://127.0.0.1:13773`) captured as the macOS desktop app renders it (see `tools/desk.mjs`).
+References (macOS desktop layout, 1440x900, DPR 1, `dNN-*.ref.png` + `.ref.json` boxes) are in
+the lead's scratchpad `refdesk/shots/`; there is no live server or web app to capture new ones.
 
 ## Rune
 
