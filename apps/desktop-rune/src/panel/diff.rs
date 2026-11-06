@@ -68,6 +68,18 @@ pub fn load(app: &mut App) {
     app.ui.panel.diff.pending = request;
 }
 pub fn poll(app: &mut App) -> bool {
+    if app.ui.panel.active == Some(super::Surface::Diff)
+        && app.ui.panel.diff.all
+        && app.ui.panel.diff.pending.is_none()
+    {
+        let count = latest(app);
+        if count > app.ui.panel.diff.to {
+            app.ui.panel.diff.to = count;
+            load(app);
+            return true;
+        }
+    }
+
     let Some(id) = app.ui.panel.diff.pending else {
         return false;
     };
@@ -84,6 +96,14 @@ pub fn poll(app: &mut App) -> bool {
             .set_files(rune_kit::diff::parse(v["diff"].as_str().unwrap_or(""))),
         Err(e) => app.ui.panel.diff.error = Some(e.to_string()),
     };
+    if app.client_settings.values["diffFilesCollapsed"]
+        .as_bool()
+        .unwrap_or(false)
+    {
+        for index in 0..app.ui.panel.diff.state.files().len() {
+            app.ui.panel.diff.state.set_collapsed(index, true);
+        }
+    }
     true
 }
 pub fn view(app: &App, t: &T) -> El {
