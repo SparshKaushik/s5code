@@ -16,7 +16,7 @@ pub struct Assets {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let crate::Route::Thread(thread) = &app.route else {
+    let crate::Route::Thread(thread) = app.frame_route() else {
         return false;
     };
     let attachments: Vec<Value> = app

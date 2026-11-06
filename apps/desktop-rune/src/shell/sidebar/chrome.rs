@@ -116,34 +116,15 @@ pub fn search_bar(s: &App, t: &T) -> El {
         )
 }
 
-pub fn footer(s: &App, model: &Model, t: &T) -> El {
-    let on_settings = matches!(s.route, Route::Settings(_));
+pub fn footer(model: &Model, t: &T) -> El {
     let btn = |key: &str, glyph| icon_button(t, key, glyph, 32.0, 16.0, t.sb.sidebar_icon_color, false);
-    let menu = if on_settings {
-        row().child(
-            row()
-                .key("sb-back-to-app")
-                .h(32.0)
-                .px(8.0)
-                .gap(8.0)
-                .radius(layout::CONTROL_RADIUS)
-                .center_y()
-                .hover(t.sb.sidebar_row_hover)
-                .cursor(Cursor::Pointer)
-                .child(icon(&i::ARROW_LEFT, 16.0).color(t.sb.sidebar_icon_color))
-                .child(text("Back").font(theme::SM_MEDIUM).color(t.sb.sidebar_foreground))
-                .on_press(|s: &mut App| {
-                    let back = s.ui.shell.sidebar.back.iter().rev().find(|r| !matches!(r, Route::Settings(_))).cloned();
-                    super::go(s, back.unwrap_or(Route::Home { project_id: None }));
-                }),
-        )
-    } else {
-        row()
-            .gap(4.0)
-            .child(btn("sb-settings", &i::SETTINGS).on_press(|s: &mut App| super::go(s, Route::Settings("general".into()))))
-            .child(btn("sb-pull-requests", &i::GIT_PULL_REQUEST_ARROW))
-            .child(btn("sb-usage", &i::CHART_NO_AXES_COLUMN))
-    };
+    // SidebarChrome swaps these for "Back" only on utility pages (/projects/*, /pull-requests);
+    // settings is a modal over the frame, so the footer stays.
+    let menu = row()
+        .gap(4.0)
+        .child(btn("sb-settings", &i::SETTINGS).on_press(|s: &mut App| super::go(s, Route::Settings("general".into()))))
+        .child(btn("sb-pull-requests", &i::GIT_PULL_REQUEST_ARROW))
+        .child(btn("sb-usage", &i::CHART_NO_AXES_COLUMN));
     let mut bar = row().key("sb-footer").w_full().shrink().px(8.0).pt(4.0).pb(8.0).center_y().child(menu).child(spacer());
     if model.updates > 0 {
         bar = bar.child(

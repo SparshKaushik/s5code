@@ -15,12 +15,23 @@ pub struct Ui {
     pub panel_open: bool,
 }
 
-pub const SCENES: &[(&str, fn(&mut App))] = &[("home", |s| crate::scene_clock(s)), ("thread-showcase", |s| {
+/// The references open on an empty "New thread" (d01) and on "Replay showcase" (d02).
+pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("home", |s| open_titled(s, "New thread")),
+    ("thread-showcase", |s| open_titled(s, "Replay showcase")),
+    ("palette", |s| {
+        open_titled(s, "Replay showcase");
+        s.ui.shell.palette.open = true;
+        s.ui.shell.palette.query.focused = true;
+    }),
+];
+
+fn open_titled(s: &mut App, title: &str) {
     crate::scene_clock(s);
-    if let Some(id) = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| crate::data::s(t, "id").to_string()) {
+    if let Some(id) = s.state().threads.iter().find(|t| t["title"] == title).map(|t| crate::data::s(t, "id").to_string()) {
         s.navigate(Route::Thread(id));
     }
-})];
+}
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     palette::on_key(s, e, tx) || sidebar::on_key(s, e, tx)

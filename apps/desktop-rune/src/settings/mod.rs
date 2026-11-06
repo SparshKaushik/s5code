@@ -682,25 +682,23 @@ pub fn close(s: &mut App) {
     s.navigate(route);
 }
 
+/// Settings opened by URL, as the references d10-d29 were: nothing to return to.
 fn scene(s: &mut App, path: &str) {
     crate::scene_clock(s);
     s.client_settings = client::ClientSettings::default();
-    let previous = s
-        .state()
-        .threads
-        .iter()
-        .find(|t| t["title"] == "Replay showcase")
-        .map(|t| Route::Thread(crate::data::s(t, "id").into()))
-        .unwrap_or(Route::Home { project_id: None });
     s.route = Route::Settings(path.into());
-    s.ui.settings = Ui {
-        return_route: Some(previous),
-        ..Ui::default()
-    };
+    s.ui.settings = Ui::default();
+}
+
+/// Settings opened over "Replay showcase" with mod+comma (d09).
+fn scene_from_thread(s: &mut App) {
+    scene(s, "general");
+    s.ui.settings.return_route = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| Route::Thread(crate::data::s(t, "id").into()));
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-general", |s| scene(s, "general")),
+    ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),
     ("settings-providers", |s| scene(s, "providers")),
     ("settings-browser", |s| scene(s, "browser")),

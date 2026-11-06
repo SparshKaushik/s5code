@@ -155,7 +155,7 @@ impl Model {
             threads,
             projects: state.projects.iter().map(|p| (crate::data::s(p, "id").to_string(), crate::data::s(p, "title").to_string())).collect(),
             drivers: providers.iter().map(|p| (crate::data::s(p, "instanceId").to_string(), crate::data::s(p, "driver").to_string())).collect(),
-            route: match &s.route {
+            route: match s.frame_route() {
                 Route::Thread(id) => Some(id.clone()),
                 _ => None,
             },
@@ -523,7 +523,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         .child(chrome::header(s, t, inset))
         .child(chrome::search_bar(s, t))
         .child(list)
-        .child(chrome::footer(s, &model, t));
+        .child(chrome::footer(&model, t));
     row()
         .key("sidebar")
         .w(layout::SIDEBAR_W + 2.0)
