@@ -52,10 +52,15 @@ pub fn load(app: &mut App) {
             DiffMode::Unified
         });
     let payload = json!({"threadId":id,"fromTurnCount":ui.from,"toTurnCount":ui.to,"ignoreWhitespace":app.client_settings.values["diffIgnoreWhitespace"].as_bool().unwrap_or(true)});
-    let request = app
-        .src
-        .net()
-        .map(|net| net.request("orchestration.getTurnDiff", payload));
+    let (method, payload) = if ui.from == 0 {
+        (
+            "orchestration.getFullThreadDiff",
+            json!({"threadId":id,"toTurnCount":ui.to,"ignoreWhitespace":app.client_settings.values["diffIgnoreWhitespace"].as_bool().unwrap_or(true)}),
+        )
+    } else {
+        ("orchestration.getTurnDiff", payload)
+    };
+    let request = app.src.net().map(|net| net.request(method, payload));
     app.ui.panel.diff.pending = request;
 }
 pub fn poll(app: &mut App) -> bool {

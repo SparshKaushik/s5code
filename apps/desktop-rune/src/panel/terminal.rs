@@ -285,6 +285,10 @@ pub fn poll(app: &mut App) -> bool {
     changed
 }
 fn apply(ui: &mut Ui, event: &Value) {
+    if !event["error"].is_null() {
+        ui.status = event["error"].to_string();
+        return;
+    }
     let sequence = event["sequence"].as_u64();
     let kind = data::s(event, "type");
     if kind != "snapshot" && sequence.is_some_and(|s| ui.sequence.is_some_and(|old| s <= old)) {
@@ -338,6 +342,13 @@ fn key(app: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
             } else {
                 v.clone()
             }
+        }
+        Key::Command(c) if e.mods.ctrl && !e.mods.shift && c.is_ascii_alphabetic() => {
+            send(
+                app,
+                ((c.to_ascii_lowercase() as u8 - b'a' + 1) as char).to_string(),
+            );
+            return true;
         }
         Key::Enter => "\r".into(),
         Key::Backspace => "\x7f".into(),

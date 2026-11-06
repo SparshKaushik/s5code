@@ -99,6 +99,7 @@ fn close(app: &mut App, surface: Surface) {
     if app.ui.panel.active == Some(surface) {
         app.ui.panel.active = app.ui.panel.surfaces.last().copied();
     }
+    app.ui.chat.topbar.terminal_open = app.ui.panel.active == Some(Surface::Terminal);
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
@@ -214,7 +215,7 @@ pub fn toggle_terminal(app: &mut App) {
 fn action(t: &T, label: &str, glyph: &'static rune::Icon) -> kit::Button {
     let _ = t;
     kit::Button::new(label)
-        .icon(glyph, 16.)
+        .icon(glyph)
         .variant("ghost-muted")
         .size("icon-xs")
 }
@@ -423,7 +424,7 @@ fn navigate(app: &mut App) {
 fn browser_view(app: &App, t: &T) -> El {
     let status = app.ui.panel.browser.status.lock().unwrap().clone();
     let chrome = row()
-        .h(39.)
+        .h(28.)
         .px(8.)
         .gap(2.)
         .center_y()
@@ -454,6 +455,27 @@ fn browser_view(app: &App, t: &T) -> El {
                     .on_submit(|s: &mut App, _| navigate(s))
                     .build(t),
             ),
+        );
+    let chrome = chrome
+        .child(
+            action(t, "Annotate preview", &icons::MOUSE_POINTER_CLICK)
+                .disabled(true)
+                .build(t),
+        )
+        .child(
+            action(t, "Capture screenshot", &icons::CAMERA)
+                .disabled(true)
+                .build(t),
+        )
+        .child(
+            action(t, "Float preview over chat", &icons::PICTURE_IN_PICTURE_2)
+                .disabled(true)
+                .build(t),
+        )
+        .child(
+            action(t, "Preview menu", &icons::ELLIPSIS_VERTICAL)
+                .disabled(true)
+                .build(t),
         );
     let content = if status.frames == 0 {
         col().w_full().px(48.).pt(48.).gap(0.)
