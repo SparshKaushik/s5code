@@ -73,7 +73,8 @@ pub fn select(
     let open = s.ui.settings.open_select.as_deref() == Some(key);
     let owned = key.to_owned();
     let choices = options.to_vec();
-    crate::kit::Select::new(format!("setting-{key}"), &labels(options))
+    // The kit wraps its trigger in a `self_start` row; this row lets the setting row centre it.
+    row().child(crate::kit::Select::new(format!("setting-{key}"), &labels(options))
         .current(Some(&current_label(s, key, options)))
         .label(title)
         .width(width)
@@ -82,7 +83,7 @@ pub fn select(
             s.ui.settings.open_select = if open { None } else { Some(owned.clone()) };
             s.ui.settings.select_options = choices.clone();
         })
-        .trigger(&crate::kit::theme(t))
+        .trigger(&crate::kit::theme(t)))
 }
 
 /// The open select's list, anchored to the trigger `select` mounted.
