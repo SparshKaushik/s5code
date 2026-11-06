@@ -88,6 +88,14 @@ pub fn poll(app: &mut App) -> bool {
 }
 pub fn view(app: &App, t: &T) -> El {
     let ui = &app.ui.panel.diff;
+    let mut look = kit::theme(t);
+    look.c.bg_base = t.c.code_background;
+    look.c.text_base = t.c.code_foreground;
+    look.c.layer_01 = t.c.background;
+    look.c.success.icon = t.c.diff_addition;
+    look.c.success.fg = t.c.diff_addition_foreground;
+    look.c.danger.icon = t.c.diff_deletion;
+    look.c.danger.fg = t.c.diff_deletion_foreground;
     let mut toolbar = row()
         .h(40.)
         .px(8.)
@@ -184,7 +192,7 @@ pub fn view(app: &App, t: &T) -> El {
                     |s: &mut App| &mut s.ui.panel.diff.state,
                 )
                 .key("panel-diff-view")
-                .build(app, &kit::theme(t))
+                .build(app, &look)
                 .on_key(|s: &mut App, e, tx| s.ui.panel.diff.state.key(e, tx)),
             )
     };

@@ -395,6 +395,14 @@ pub fn view(app: &App, t: &T) -> El {
         }
         lines = lines.child(r);
     }
+    lines = lines.min_h((ui.screen.y + 1) as f32 * size * 1.2).child(
+        el().absolute(
+            ui.screen.x as f32 * size * 0.6,
+            ui.screen.y as f32 * size * 1.2,
+        )
+        .size(size * 0.6, size * 1.2)
+        .border(1., t.c.contrast_foreground),
+    );
     if ui.screen.lines.is_empty() {
         lines = lines.child(text(" ").font(font));
     }
@@ -458,4 +466,18 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
         b: rune::color::srgb_decode(b as f32 / 255.),
         a: 1.,
     }
+}
+
+pub fn close(app: &mut App) {
+    let ui = &mut app.ui.panel.terminal;
+    if let Some(net) = app.src.net() {
+        net.request(
+            "terminal.close",
+            json!({"threadId":ui.thread,"terminalId":"term-1"}),
+        );
+        if let Some(payload) = ui.payload.take() {
+            net.unwatch_resource("terminal.attach", payload);
+        }
+    }
+    *ui = Ui::default();
 }

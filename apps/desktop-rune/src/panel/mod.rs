@@ -97,6 +97,9 @@ fn activate(app: &mut App, surface: Surface) {
     }
 }
 fn close(app: &mut App, surface: Surface) {
+    if surface == Surface::Terminal {
+        terminal::close(app);
+    }
     app.ui.panel.surfaces.retain(|v| *v != surface);
     if app.ui.panel.active == Some(surface) {
         app.ui.panel.active = app.ui.panel.surfaces.last().copied();
@@ -175,8 +178,12 @@ fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
                     && k["key"]
                         .as_str()
                         .is_some_and(|v| v.eq_ignore_ascii_case(&key))
-                    && e.mods.cmd == (yes("modKey") || yes("metaKey"))
-                    && e.mods.ctrl == yes("ctrlKey")
+                    && e.mods.cmd
+                        == (yes("modKey")
+                            || yes("metaKey")
+                            || (!cfg!(target_os = "macos") && yes("ctrlKey")))
+                    && e.mods.ctrl
+                        == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
                     && e.mods.shift == yes("shiftKey")
                     && e.mods.alt == yes("altKey")
             })
@@ -502,10 +509,10 @@ fn browser_view(app: &App, t: &T) -> El {
                 .build(t),
         );
     let content = if status.frames == 0 {
-        col().w_full().px(48.).pt(48.).gap(0.)
+        col().w_full().px(48.).pt(60.).gap(0.)
             .child(el().size(36.,36.).radius(6.).fill(t.c.card).border(1.,t.c.border).center().child(icon(&icons::GLOBE,18.).size(18.,18.).color(t.c.muted_foreground)))
-            .child(text("No preview yet").font(theme::weight(theme::TEXT_XL,600.)).color(t.c.contrast_foreground).mt(48.))
-            .child(text(status.error.as_deref().unwrap_or("Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.")).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full().mt(28.)).center_y()
+            .child(text("No preview yet").font(theme::weight(theme::TEXT_XL,600.)).color(t.c.contrast_foreground).mt(42.))
+            .child(text(status.error.as_deref().unwrap_or("Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.")).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full().wrap().align(rune::Align::Center).mt(28.)).center_y()
     } else {
         el().grow(1.)
             .min_h(0.)
@@ -614,5 +621,25 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
         diff::overlays(app, t)
     } else {
         vec![]
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn configured_mod_key_uses_the_platform_primary_modifier() {
+        let mut app = App::new();
+        let mut state = data::empty_state();
+        state.config = Some(
+            serde_json::json!({"keybindings":[{"command":"terminal.toggle","shortcut":{"key":"j","modKey":true}}]}),
+        );
+        app.src = data::Source::Fixture(state);
+        let mut event = KeyEvent::from(Key::Command('j'));
+        event.mods.cmd = true;
+        event.mods.ctrl = !cfg!(target_os = "macos");
+        assert!(shortcut(&app, &event, "terminal.toggle"));
+        event.mods.shift = true;
+        assert!(!shortcut(&app, &event, "terminal.toggle"));
     }
 }
