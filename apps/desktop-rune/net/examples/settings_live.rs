@@ -59,6 +59,79 @@ fn main() {
         "server.refreshProviders",
         json!({"instanceId":"devReplay","fresh":true}),
     );
+    let original_provider =
+        net.state().config.as_ref().unwrap()["settings"]["providerInstances"]["devReplay"].clone();
+    let mut provider = original_provider.clone();
+    provider["displayName"] = json!("Replay settings verification");
+    call(
+        &mut net,
+        "server.updateSettings",
+        json!({"patch":{"providerInstances":{"devReplay":provider}}}),
+    );
+    wait(&mut net, |n| {
+        n.state().config.as_ref().unwrap()["settings"]["providerInstances"]["devReplay"]["displayName"]
+            == "Replay settings verification"
+    });
+    call(
+        &mut net,
+        "server.updateSettings",
+        json!({"patch":{"providerInstances":{"devReplay":original_provider}}}),
+    );
+    wait(&mut net, |n| {
+        n.state().config.as_ref().unwrap()["settings"]["providerInstances"]["devReplay"]
+            == original_provider
+    });
+    println!("provider instance configuration written and restored");
+    let project = net.state().projects[0]["id"].as_str().unwrap().to_owned();
+    let original_override =
+        net.state().config.as_ref().unwrap()["settings"]["projectSettingsOverrides"][&project]
+            .clone();
+    let mut entry = if original_override.is_object() {
+        original_override.clone()
+    } else {
+        json!({})
+    };
+    entry["enableAgentBrowserAccess"] = json!(false);
+    call(
+        &mut net,
+        "server.updateSettings",
+        json!({"patch":{"projectSettingsOverrides":{&project:entry}}}),
+    );
+    wait(&mut net, |n| {
+        n.state().config.as_ref().unwrap()["settings"]["projectSettingsOverrides"][&project]["enableAgentBrowserAccess"]
+            == false
+    });
+    call(
+        &mut net,
+        "server.updateSettings",
+        json!({"patch":{"projectSettingsOverrides":{&project:original_override}}}),
+    );
+    wait(&mut net, |n| {
+        n.state().config.as_ref().unwrap()["settings"]["projectSettingsOverrides"][&project]
+            == original_override
+    });
+    println!("project override written and reset to inheritance");
+    for method in ["scheduledTasks.subscribe", "subscribeAuthAccess"] {
+        net.watch_resource(method, json!({}));
+        wait(&mut net, |n| n.resource(method, json!({})).is_some());
+        assert!(
+            net.resource(method, json!({}))
+                .unwrap()
+                .get("error")
+                .is_none(),
+            "subscription {method} failed"
+        );
+        println!("{method}: snapshot received");
+        net.unwatch_resource(method, json!({}));
+    }
+    let id = net.http_request("GET", "/api/auth/session", json!({}));
+    let mut session = None;
+    wait(&mut net, |n| {
+        session = n.take_reply(id);
+        session.is_some()
+    });
+    assert_eq!(session.unwrap().unwrap()["authenticated"], true);
+    println!("authenticated HTTP session read succeeded");
     let key = "ctrl+alt+shift+f12";
     let command = "sidebar.toggle";
     let target = json!({"key":key,"command":command,"when":"isDesktop && !terminalFocus"});

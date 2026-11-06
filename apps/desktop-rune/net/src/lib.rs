@@ -56,7 +56,10 @@ pub type Reply = Result<Value, Value>;
 mod projection;
 mod transport;
 use serde_json::json;
-use std::sync::mpsc::{self, Receiver, Sender};
+use std::sync::{
+    Arc,
+    mpsc::{self, Receiver, Sender},
+};
 use transport::{Command, Incoming, Route};
 
 pub struct Net {
@@ -65,6 +68,11 @@ pub struct Net {
     rx: Receiver<Incoming>,
     replies: HashMap<u64, Reply>,
     next_id: u64,
+    resources: HashMap<Route, Value>,
+    base_url: String,
+    bearer: String,
+    incoming_tx: Sender<Incoming>,
+    wake: Arc<dyn Fn() + Send + Sync>,
 }
 impl Default for State {
     fn default() -> Self {
@@ -85,15 +93,27 @@ impl Net {
     pub fn connect(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
         let (tx, commands) = mpsc::channel();
         let (incoming, rx) = mpsc::channel();
+        let incoming_tx = incoming.clone();
+        let wake: Arc<dyn Fn() + Send + Sync> = Arc::new(wake);
+        let worker_wake = wake.clone();
         let base = base_url.to_owned();
-        let token = token.to_owned();
-        std::thread::spawn(move || transport::run(base, token, commands, incoming, wake));
+        let worker_token = token.to_owned();
+        std::thread::spawn(move || {
+            transport::run(base, worker_token, commands, incoming, move || {
+                worker_wake()
+            })
+        });
         Self {
             state: State::default(),
             tx,
             rx,
             replies: HashMap::new(),
             next_id: 0,
+            resources: HashMap::new(),
+            base_url: base_url.to_owned(),
+            bearer: token.to_owned(),
+            incoming_tx,
+            wake,
         }
     }
     /// Folds decoded messages without waiting for network I/O.
@@ -112,7 +132,16 @@ impl Net {
                     self.state.conn = conn;
                 }
                 Incoming::Item(route, item) => {
-                    self.state.fold(route, item);
+                    if let Route::Resource(method, _) = &route {
+                        if method == "subscribeAuthAccess" {
+                            let snapshot = self.resources.entry(route).or_insert(Value::Null);
+                            fold_access(snapshot, item);
+                        } else {
+                            self.resources.insert(route, item);
+                        }
+                    } else {
+                        self.state.fold(route, item);
+                    }
                     changed = true;
                 }
                 Incoming::Reply(id, reply) => {
@@ -148,6 +177,72 @@ impl Net {
     pub fn unwatch_vcs(&mut self, cwd: &str) {
         self.state.vcs.remove(cwd);
         let _ = self.tx.send(Command::Unwatch(Route::Vcs(cwd.to_owned())));
+    }
+    /// Subscribe to a snapshot stream; the transport reconnects and reapplies its payload.
+    pub fn watch_resource(&mut self, method: &str, payload: Value) {
+        let route = Route::Resource(method.into(), payload.to_string());
+        if self.resources.contains_key(&route) {
+            return;
+        }
+        self.resources.insert(route.clone(), Value::Null);
+        let _ = self.tx.send(Command::Watch(route));
+    }
+    pub fn resource(&self, method: &str, payload: Value) -> Option<&Value> {
+        self.resources
+            .get(&Route::Resource(method.into(), payload.to_string()))
+            .filter(|v| !v.is_null())
+    }
+    pub fn unwatch_resource(&mut self, method: &str, payload: Value) {
+        let route = Route::Resource(method.into(), payload.to_string());
+        if self.resources.remove(&route).is_some() {
+            let _ = self.tx.send(Command::Unwatch(route));
+        }
+    }
+    /// Authenticated HTTP operations share the RPC reply channel and never block the UI.
+    pub fn http_request(&mut self, method: &str, path: &str, payload: Value) -> u64 {
+        let id = self.next_id;
+        self.next_id += 1;
+        let base = self.base_url.clone();
+        let bearer = self.bearer.clone();
+        let method = method.to_owned();
+        let path = path.to_owned();
+        let tx = self.incoming_tx.clone();
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                if !path.starts_with("/api/") {
+                    return Err(json!({"message":"Unsupported API path"}));
+                }
+                let mut url =
+                    url::Url::parse(&base).map_err(|e| json!({"message":e.to_string()}))?;
+                url.set_path(&path);
+                url.set_query(None);
+                url.set_fragment(None);
+                let req = ureq::AgentBuilder::new()
+                    .redirects(0)
+                    .timeout(std::time::Duration::from_secs(30))
+                    .build()
+                    .request(&method, url.as_str())
+                    .set("Authorization", &format!("Bearer {bearer}"));
+                let response = if method == "GET" {
+                    req.call()
+                } else {
+                    req.send_json(payload)
+                };
+                match response {
+                    Ok(response) => response
+                        .into_json::<Value>()
+                        .map_err(|e| json!({"message":e.to_string()})),
+                    Err(ureq::Error::Status(code, response)) => Err(response
+                        .into_json::<Value>()
+                        .unwrap_or_else(|_| json!({"message":format!("HTTP {code}")}))),
+                    Err(error) => Err(json!({"message":error.to_string()})),
+                }
+            })();
+            let _ = tx.send(Incoming::Reply(id, result));
+            wake();
+        });
+        id
     }
     pub fn request(&mut self, tag: &str, payload: Value) -> u64 {
         let id = self.next_id;
@@ -237,9 +332,38 @@ pub fn parse_pairing_url(input: &str) -> Result<(String, String), String> {
     url.set_path("");
     Ok((url.as_str().trim_end_matches('/').to_owned(), token))
 }
+fn fold_access(state: &mut Value, event: Value) {
+    if event["type"] == "snapshot" {
+        *state = event;
+        return;
+    }
+    if event["error"].is_object() {
+        *state = event;
+        return;
+    }
+    if event["revision"].as_u64() <= state["revision"].as_u64() {
+        return;
+    }
+    let (field, key, remove) = match event["type"].as_str() {
+        Some("clientUpserted") => ("clientSessions", "sessionId", false),
+        Some("clientRemoved") => ("clientSessions", "sessionId", true),
+        Some("pairingLinkUpserted") => ("pairingLinks", "id", false),
+        Some("pairingLinkRemoved") => ("pairingLinks", "id", true),
+        _ => return,
+    };
+    if let Some(rows) = state["payload"][field].as_array_mut() {
+        rows.retain(|v| v[key] != event["payload"][key]);
+        if !remove {
+            rows.push(event["payload"].clone());
+        }
+    }
+    state["revision"] = event["revision"].clone();
+}
+
 impl State {
     fn fold(&mut self, route: Route, item: Value) {
         match route {
+            Route::Resource(..) => {}
             Route::Config => {
                 if item["type"] == "snapshot" {
                     self.config = Some(item["config"].clone());

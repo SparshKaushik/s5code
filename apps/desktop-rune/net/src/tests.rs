@@ -248,3 +248,32 @@ fn compact_pull_request_update_preserves_other_links_and_metadata() {
     assert_eq!(p["thread"]["pullRequests"][0]["number"], 1);
     assert_eq!(p["thread"]["pullRequests"][1]["source"], "agent");
 }
+
+#[test]
+fn access_snapshot_keeps_other_clients_and_ignores_stale_events() {
+    let mut state = json!({"type":"snapshot","revision":1,"payload":{"clientSessions":[{"sessionId":"a"},{"sessionId":"b"}],"pairingLinks":[]}});
+    super::fold_access(
+        &mut state,
+        json!({"type":"clientUpserted","revision":2,"payload":{"sessionId":"a","label":"renamed"}}),
+    );
+    assert_eq!(
+        state["payload"]["clientSessions"].as_array().unwrap().len(),
+        2
+    );
+    super::fold_access(
+        &mut state,
+        json!({"type":"clientRemoved","revision":1,"payload":{"sessionId":"b"}}),
+    );
+    assert_eq!(
+        state["payload"]["clientSessions"].as_array().unwrap().len(),
+        2
+    );
+    super::fold_access(
+        &mut state,
+        json!({"type":"clientRemoved","revision":3,"payload":{"sessionId":"b"}}),
+    );
+    assert_eq!(
+        state["payload"]["clientSessions"],
+        json!([{"sessionId":"a","label":"renamed"}])
+    );
+}

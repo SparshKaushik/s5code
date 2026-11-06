@@ -14,6 +14,7 @@ pub(crate) enum Route {
     Config,
     Thread(String),
     Vcs(String),
+    Resource(String, String),
 }
 pub(crate) enum Command {
     Watch(Route),
@@ -46,6 +47,10 @@ fn subscribe(route: &Route, sub: &Subscription) -> Value {
             json!({"threadId":id,"requestCompletionMarker":true}),
         ),
         Route::Vcs(cwd) => ("subscribeVcsStatus", json!({"cwd":cwd})),
+        Route::Resource(method, payload) => (
+            method.as_str(),
+            serde_json::from_str(payload).unwrap_or(json!({})),
+        ),
     };
     if matches!(route, Route::Shell | Route::Thread(_)) {
         if let Some(seq) = sub.sequence {
@@ -259,6 +264,15 @@ pub(crate) fn run(
                                             Err(exit["cause"].clone())
                                         },
                                     ));
+                                } else if let Some(route) = subs
+                                    .iter()
+                                    .find(|(route, s)| {
+                                        matches!(route, Route::Resource(..)) && s.id == id
+                                    })
+                                    .map(|(r, _)| r.clone())
+                                {
+                                    subs.remove(&route);
+                                    emit(Incoming::Item(route, json!({"error":frame["exit"]})));
                                 } else if let Some((_, sub)) =
                                     subs.iter_mut().find(|(_, s)| s.id == id)
                                 {
@@ -345,6 +359,16 @@ mod tests {
         assert_eq!(
             subscribe(&Route::Thread("t".into()), &sub)["payload"],
             json!({"threadId":"t","requestCompletionMarker":true,"afterSequence":42})
+        );
+        assert_eq!(
+            subscribe(
+                &Route::Resource(
+                    "provider.auth.subscribe".into(),
+                    json!({"instanceId":"custom"}).to_string()
+                ),
+                &sub
+            ),
+            json!({"_tag":"Request","id":5,"tag":"provider.auth.subscribe","payload":{"instanceId":"custom"},"headers":[]})
         );
         assert!(
             socket_url("https://example.com/pair#secret")
