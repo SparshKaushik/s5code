@@ -35,5 +35,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .fill(t.c.background)
         .child(topbar::view(s, cx, t))
         .child(body)
+        .child(match &s.route { Route::Thread(id) => timeline::composer_requests(s, t, id), _ => rune::el() })
         .child(composer::view(s, cx, t))
 }

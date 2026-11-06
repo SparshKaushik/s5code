@@ -69,7 +69,7 @@ fn error(app: &mut App) {
         if let crate::data::Source::Fixture(state) = &mut app.src {
             if let Some(v) = state.thread_views.get_mut(id) {
                 if let Some(items) = v.projection["visibleTurnItems"].as_array_mut() {
-                    items.push(serde_json::json!({"position":100,"item":{"id":"scene-error","type":"error","message":"The provider process exited unexpectedly. Please try again."}}));
+                    items.push(serde_json::json!({"position":100,"item":{"id":"scene-error","type":"error","status":"failed","failure":{"class":"transport_error","message":"The provider process exited unexpectedly. Please try again.","code":null,"retryable":true},"retry":{"attempt":1,"maxAttempts":3,"retryDelayMs":1000}}}));
                 }
             }
         }
