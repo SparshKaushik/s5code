@@ -23,7 +23,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[("home", |s| crate::scene_clock(s)
 })];
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    palette::on_key(s, e, tx)
+    palette::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
@@ -34,9 +34,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         // The web mounts settings as a route modal with its own navigation.
         return rune_kit::root(settings::view(s, cx, t), palette::overlay(s, cx, t));
     }
-    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t)).child(chat::view(s, cx, t));
+    let mut overlays = Vec::new();
+    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t, &mut overlays)).child(chat::view(s, cx, t));
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
     }
-    rune_kit::root(body, palette::overlay(s, cx, t))
+    overlays.extend(palette::overlay(s, cx, t));
+    rune_kit::root(body, overlays)
 }
