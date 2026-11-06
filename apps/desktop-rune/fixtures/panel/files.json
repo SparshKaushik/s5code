@@ -1,0 +1,25 @@
+{
+  "entries": [
+    {
+      "path": "src",
+      "kind": "directory"
+    },
+    {
+      "path": "tests",
+      "kind": "directory"
+    },
+    {
+      "path": "package.json",
+      "kind": "file"
+    },
+    {
+      "path": "README.md",
+      "kind": "file"
+    },
+    {
+      "path": "tsconfig.json",
+      "kind": "file"
+    }
+  ],
+  "truncated": false
+}

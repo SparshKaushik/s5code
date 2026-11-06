@@ -1,0 +1,19 @@
+{
+  "type": "snapshot",
+  "snapshot": {
+    "threadId": "fixture",
+    "terminalId": "term-1",
+    "cwd": "/workspace/s5code",
+    "worktreePath": null,
+    "status": "running",
+    "pid": 123,
+    "history": "\u001b[32m~/s5code\u001b[0m $ vp run dev\r\n\r\n  \u001b[36mVITE\u001b[0m  ready\r\n\r\n  \u279c  Local:   http://localhost:5173/\r\n  \u279c  Network: use --host to expose\r\n",
+    "exitCode": null,
+    "exitSignal": null,
+    "label": "dev",
+    "updatedAt": "2026-11-06T10:00:00Z",
+    "sequence": 1,
+    "cols": 80,
+    "rows": 40
+  }
+}

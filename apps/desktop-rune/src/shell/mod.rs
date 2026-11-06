@@ -23,7 +23,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[("home", |s| crate::scene_clock(s)
 })];
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    palette::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
+    palette::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {

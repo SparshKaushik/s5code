@@ -1,0 +1,6 @@
+{
+  "threadId": "fixture",
+  "fromTurnCount": 0,
+  "toTurnCount": 1,
+  "diff": "diff --git a/src/greet.ts b/src/greet.ts\nindex 1234567..abcdef0 100644\n--- a/src/greet.ts\n+++ b/src/greet.ts\n@@ -1,4 +1,5 @@\n export function greet(name: string) {\n-  return \"Hello \" + name;\n+  const message = `Hello, ${name}!`;\n+  return message;\n }\n \n"
+}

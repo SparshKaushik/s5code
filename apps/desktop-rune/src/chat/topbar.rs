@@ -165,7 +165,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
             d.menu = None;
         }))
         .child(toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open).on_press(|s: &mut App| {
-            s.ui.chat.topbar.terminal_open = !s.ui.chat.topbar.terminal_open;
+            crate::panel::toggle_terminal(s);
         }))
         .child(toggle(t, &icons::PANEL_RIGHT, "Toggle right panel", s.ui.shell.panel_open).on_press(|s: &mut App| {
             s.ui.shell.panel_open = !s.ui.shell.panel_open;

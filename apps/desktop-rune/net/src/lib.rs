@@ -69,6 +69,7 @@ pub struct Net {
     replies: HashMap<u64, Reply>,
     next_id: u64,
     resources: HashMap<Route, Value>,
+    resource_events: HashMap<Route, Vec<Value>>,
     base_url: String,
     bearer: String,
     incoming_tx: Sender<Incoming>,
@@ -110,6 +111,7 @@ impl Net {
             replies: HashMap::new(),
             next_id: 0,
             resources: HashMap::new(),
+            resource_events: HashMap::new(),
             base_url: base_url.to_owned(),
             bearer: token.to_owned(),
             incoming_tx,
@@ -133,6 +135,9 @@ impl Net {
                 }
                 Incoming::Item(route, item) => {
                     if let Route::Resource(method, _) = &route {
+                        if method == "terminal.attach" {
+                            self.resource_events.entry(route.clone()).or_default().push(item.clone());
+                        }
                         if method == "subscribeAuthAccess" {
                             let snapshot = self.resources.entry(route).or_insert(Value::Null);
                             fold_access(snapshot, item);
@@ -192,8 +197,13 @@ impl Net {
             .get(&Route::Resource(method.into(), payload.to_string()))
             .filter(|v| !v.is_null())
     }
+    /// Drains ordered terminal events; snapshots alone cannot preserve burst output.
+    pub fn take_resource_events(&mut self, method: &str, payload: Value) -> Vec<Value> {
+        self.resource_events.remove(&Route::Resource(method.into(), payload.to_string())).unwrap_or_default()
+    }
     pub fn unwatch_resource(&mut self, method: &str, payload: Value) {
         let route = Route::Resource(method.into(), payload.to_string());
+        self.resource_events.remove(&route);
         if self.resources.remove(&route).is_some() {
             let _ = self.tx.send(Command::Unwatch(route));
         }
