@@ -420,7 +420,7 @@
         {
           "key": "enableAgentBrowserAccess",
           "title": "Agent browser access",
-          "description": "",
+          "description": "Allow agents to use the shared browser. Projects can override it.",
           "kind": "switch",
           "options": []
         }
