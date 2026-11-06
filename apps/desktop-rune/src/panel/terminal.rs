@@ -322,6 +322,17 @@ fn apply(ui: &mut Ui, event: &Value) {
             ui.status = data::s(snapshot, "status").into();
             ui.sequence = snapshot["sequence"].as_u64();
         }
+        "activity" => {
+            let cols = event["cols"]
+                .as_u64()
+                .map(|v| v as usize)
+                .unwrap_or(ui.screen.cols);
+            let rows = event["rows"]
+                .as_u64()
+                .map(|v| v as usize)
+                .unwrap_or(ui.screen.rows);
+            ui.screen.size(cols, rows);
+        }
         "output" => ui.screen.feed(data::s(event, "data")),
         "cleared" => {
             ui.screen.lines.clear();
@@ -477,6 +488,11 @@ mod tests {
             apply(&mut ui, &json!({"type":"output","sequence":seq,"data":"x"}));
         }
         assert_eq!(plain(&ui.screen), "$ xx");
+        apply(
+            &mut ui,
+            &json!({"type":"activity","sequence":13,"cols":100,"rows":30}),
+        );
+        assert_eq!((ui.screen.cols, ui.screen.rows), (100, 30));
         apply(
             &mut ui,
             &json!({"type":"snapshot","snapshot":{"history":"resumed","sequence":20}}),
