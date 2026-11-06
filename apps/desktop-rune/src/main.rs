@@ -112,7 +112,7 @@ pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
 }
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
-    let t: T = theme::theme(is_dark(s, cx));
+    let t: T = settings::apply_theme(s, theme::theme(is_dark(s, cx)));
     shell::view(s, cx, &t)
 }
 

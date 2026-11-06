@@ -170,11 +170,11 @@
             ],
             [
               "mod-enter-multiline",
-              "\u2318Enter (multi-line)"
+              "⌘Enter (multi-line)"
             ],
             [
               "mod-enter",
-              "\u2318Enter"
+              "⌘Enter"
             ]
           ]
         },
@@ -254,7 +254,7 @@
         },
         {
           "key": "diffColorScheme",
-          "title": "Diffs",
+          "title": "Diff colors",
           "description": "Choose colors for additions and deletions, including change counts.",
           "kind": "select",
           "options": [
@@ -282,7 +282,7 @@
         },
         {
           "key": "pullRequestLinksOpenInApp",
-          "title": "Devices",
+          "title": "Open pull requests in T3 Code",
           "description": "Clicking a pull request link opens it in T3 Code. Turn off to open pull request links like any other link, on your git host.",
           "kind": "switch",
           "options": []
@@ -296,19 +296,10 @@
       "rows": [
         {
           "key": "appearanceContrast",
-          "title": "Legacy",
-          "description": "Switches the hosted app release channel.",
+          "title": "Contrast",
+          "description": "Adjust the contrast of colors and borders across the interface.",
           "kind": "slider",
-          "options": [
-            [
-              "latest",
-              "Latest"
-            ],
-            [
-              "nightly",
-              "Nightly"
-            ]
-          ]
+          "options": []
         },
         {
           "key": "glassOpacity",
@@ -441,7 +432,7 @@
         {
           "key": "browserLinkTarget",
           "title": "Open links in",
-          "description": "Where links in the chat and terminal open. Hold \u2318 or Ctrl while clicking a link to open it in your default browser either way.",
+          "description": "Where links in the chat and terminal open. Hold ⌘ or Ctrl while clicking a link to open it in your default browser either way.",
           "kind": "select",
           "options": [
             [
@@ -732,8 +723,8 @@
         },
         {
           "key": "newWorktreesStartFromOrigin",
-          "title": "Creation",
-          "description": "Uses the latest commit of the base branch\u2019s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.",
+          "title": "Start from remote",
+          "description": "Uses the latest commit of the base branch’s tracked remote branch, even if its name differs. Otherwise uses the same-named branch on origin. Uses your local branch if that remote branch is missing.",
           "kind": "switch",
           "options": []
         }

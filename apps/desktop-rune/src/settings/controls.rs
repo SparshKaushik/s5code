@@ -5,22 +5,10 @@ use rune::{El, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 pub fn button(label: &str, t: &T) -> El {
-    el().h(28.0)
-        .px(10.0)
-        .center()
-        .radius(6.0)
-        .border(1.0, t.c.border)
-        .fill(t.c.background)
-        .hover(t.c.accent)
-        .role("button")
-        .label(label)
-        .focusable(true)
-        .focus_ring(2.0, 1.0, t.c.ring)
-        .child(
-            text(label.to_owned())
-                .font(theme::TEXT_XS)
-                .color(t.c.foreground),
-        )
+    crate::kit::Button::new(label)
+        .variant("outline")
+        .size("compact")
+        .build(t)
 }
 
 pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
@@ -37,18 +25,18 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
         .checked(on)
         .focusable(true)
         .focus_ring(2.0, 2.0, t.c.ring)
-        .size(32.0, 18.0)
+        .size(30.0, 18.0)
         .radius(999.0)
         .fill(if on { t.c.primary } else { t.c.input })
         .hover(t.c.accent.alpha_mul(0.1))
         .child(
-            el().absolute(if on { 16.0 } else { 2.0 }, 2.0)
+            el().absolute(if on { 14.0 } else { 2.0 }, 2.0)
                 .size(14.0, 14.0)
                 .radius(999.0)
-                .fill(if on {
-                    t.c.primary_foreground
-                } else {
+                .fill(if !on && t.dark {
                     t.c.muted_foreground
+                } else {
+                    t.c.background
                 }),
         )
         .on_press(move |s: &mut App| {
@@ -62,6 +50,16 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
                 update(s, "legacySidebarEnabled", json!(false));
             }
         })
+}
+
+pub fn select_width(key: &str) -> f32 {
+    match key {
+        "notificationMode" => 224.0,
+        "sidebarProjectSortOrder" => 176.0,
+        "sendShortcut" => 70.0,
+        "followUpBehavior" => 71.0,
+        _ => 160.0,
+    }
 }
 
 pub fn select(
@@ -80,6 +78,7 @@ pub fn select(
         .unwrap_or_else(|| current.as_str().unwrap_or("Default").to_owned());
     let open = s.ui.settings.open_select.as_deref() == Some(key);
     let owned = key.to_owned();
+    let choices = options.to_vec();
     let trigger = row()
         .key(format!("setting-{key}"))
         .w(width)
@@ -87,9 +86,9 @@ pub fn select(
         .px(9.0)
         .gap(8.0)
         .center_y()
-        .radius(6.0)
-        .border(1.0, t.c.border)
-        .fill(t.c.input.alpha_mul(0.3))
+        .radius(8.0)
+        .border(1.0, t.c.input)
+        .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
         .hover(t.c.accent)
         .focusable(true)
         .role("combobox")
@@ -97,11 +96,12 @@ pub fn select(
         .expanded(open)
         .focus_ring(2.0, 1.0, t.c.ring)
         .on_press(move |s: &mut App| {
-            s.ui.settings.open_select = if open { None } else { Some(owned.clone()) }
+            s.ui.settings.open_select = if open { None } else { Some(owned.clone()) };
+            s.ui.settings.select_options = choices.clone();
         })
         .child(
             text(display)
-                .font(theme::TEXT_XS)
+                .font(theme::TEXT_SM)
                 .color(t.c.foreground)
                 .grow(1.0),
         )
@@ -158,21 +158,44 @@ pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width
         )
 }
 
-pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
+pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
     let description = spec["description"].as_str().unwrap_or("");
-    let mut copy = col().grow(1.0).min_w(0.0).gap(4.0).child(
+    let mut heading = row().gap(6.0).center_y().child(
         text(title.to_owned())
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );
+    if super::scope::customized(s, key) {
+        let owned = key.to_owned();
+        heading = heading.child(
+            crate::kit::Button::new(format!("Reset {title}"))
+                .variant("ghost-muted")
+                .size("icon-micro")
+                .icon(&icons::UNDO_2)
+                .on_press(move |s: &mut App| super::scope::reset(s, &owned))
+                .build(t),
+        );
+    }
+    let mut copy = col()
+        .key(format!("copy-{key}"))
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .child(heading);
     if !description.is_empty() {
         copy = copy.child(
-            text(description.to_owned())
-                .font(theme::TEXT_XS.lh(18.0))
-                .color(t.c.muted_foreground)
-                .wrap(),
+            text(super::balance::description(
+                description,
+                cx.layout(&format!("copy-{key}"))
+                    .map(|r| r[2])
+                    .unwrap_or(558.0)
+                    .min(672.0),
+            ))
+            .font(theme::TEXT_XS.lh(18.0))
+            .color(t.c.muted_foreground)
+            .wrap(),
         );
     }
     let ctrl = match spec["kind"].as_str() {
@@ -187,18 +210,7 @@ pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
                 .flatten()
                 .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
                 .collect();
-            select(
-                s,
-                t,
-                key,
-                title,
-                &options,
-                if key == "notificationMode" {
-                    224.0
-                } else {
-                    160.0
-                },
-            )
+            select(s, t, key, title, &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
         _ => {
@@ -244,6 +256,25 @@ pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
                 })
         }
     };
+    let environment_wide = s.ui.settings.project.is_some()
+        && !s.client_settings.values.contains_key(key)
+        && !super::scope::project_key(key);
+    let ctrl = if environment_wide {
+        ctrl.disabled(true).opacity(0.5)
+    } else {
+        ctrl
+    };
+    if s.ui.settings.project.is_some() && super::scope::project_key(key) {
+        copy = copy.child(
+            text(if super::scope::customized(s, key) {
+                "Overridden for this project"
+            } else {
+                "Inherited from environment"
+            })
+            .font(theme::TEXT_XS)
+            .color(t.c.muted_foreground),
+        );
+    }
     row()
         .key(format!("row-{key}"))
         .w_full()
@@ -258,6 +289,7 @@ pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
 pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
     let mut group = col()
         .w_full()
+        .padding(1.0)
         .radius(12.0)
         .border(1.0, t.c.border.alpha_mul(0.6))
         .fill(t.c.card.alpha_mul(0.4));
@@ -271,11 +303,11 @@ pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            text(title.to_owned())
-                .h(28.0)
-                .px(16.0)
-                .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                .color(t.c.foreground),
+            el().h(28.0).px(16.0).center_y().child(
+                text(title.to_owned())
+                    .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
+                    .color(t.c.foreground),
+            ),
         )
         .child(group)
 }
@@ -287,72 +319,31 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         "glassOpacity" => (40.0, 100.0, 5.0),
         _ => (0.0, 400.0, 25.0),
     };
-    let ratio = ((n - min) / (max - min)).clamp(0.0, 1.0);
-    let (k1, k2) = (key.to_owned(), key.to_owned());
+    let key = key.to_owned();
     row()
         .w(208.0)
         .center_y()
         .gap(12.0)
         .child(
-            el().w(48.0)
-                .h(24.0)
-                .center()
-                .radius(6.0)
-                .fill(t.c.muted)
-                .child(
-                    text(format!(
-                        "{n}{}",
-                        if key == "panelAnimationDurationMs" {
-                            " ms"
-                        } else {
-                            "%"
-                        }
-                    ))
-                    .font(theme::MONO_XS)
-                    .color(t.c.foreground),
-                ),
+            text(format!(
+                "{n}{}",
+                if key == "panelAnimationDurationMs" {
+                    " ms"
+                } else {
+                    "%"
+                }
+            ))
+            .w(48.0)
+            .font(theme::MONO_XS)
+            .color(t.c.foreground),
         )
         .child(
-            el().w(148.0)
-                .h(20.0)
-                .role("slider")
+            crate::kit::Slider::new(n)
+                .range(min, max)
+                .step(step)
+                .width(148.0)
                 .label(title)
-                .focusable(true)
-                .on_drag(move |s: &mut App, d, _| {
-                    if !d.cancelled() {
-                        let next = (min + (d.x / d.w).clamp(0.0, 1.0) * (max - min)) / step;
-                        update(s, &k1, json!(next.round() * step));
-                    }
-                })
-                .on_key(move |s: &mut App, e, _| {
-                    let delta = match e.key {
-                        rune::Key::Right | rune::Key::Up => step,
-                        rune::Key::Left | rune::Key::Down => -step,
-                        _ => return false,
-                    };
-                    update(s, &k2, json!((n + delta).clamp(min, max)));
-                    true
-                })
-                .child(
-                    el().absolute(0.0, 8.0)
-                        .w(148.0)
-                        .h(4.0)
-                        .radius(2.0)
-                        .fill(t.c.muted),
-                )
-                .child(
-                    el().absolute(0.0, 8.0)
-                        .w(148.0 * ratio)
-                        .h(4.0)
-                        .radius(2.0)
-                        .fill(t.c.primary),
-                )
-                .child(
-                    el().absolute(132.0 * ratio, 2.0)
-                        .size(16.0, 16.0)
-                        .radius(8.0)
-                        .fill(t.c.background)
-                        .border(1.0, t.c.primary),
-                ),
+                .on_change(move |s: &mut App, n, _| update(s, &key, json!(n)))
+                .build(t),
         )
 }

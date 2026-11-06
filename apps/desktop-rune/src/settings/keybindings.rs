@@ -1,7 +1,7 @@
 use super::{controls as c, request};
 use crate::App;
-use crate::theme::{self, T};
-use rune::{El, col, row, text, text_input};
+use crate::theme::{self, AlphaMul, T};
+use rune::{El, col, el, row, text, text_input};
 use serde_json::{Value, json};
 
 const GROUPS: &[(&str, &[&str])] = &[
@@ -30,7 +30,8 @@ pub fn view(s: &App, t: &T) -> El {
     let search = text_input(&s.ui.settings.keybinding_search, theme::TEXT_SM)
         .single_line()
         .placeholder("Search keybindings", t.c.muted_foreground)
-        .w(280.0)
+        .grow(1.0)
+        .min_w(0.0)
         .h(32.0)
         .px(12.0)
         .radius(6.0)
@@ -39,7 +40,17 @@ pub fn view(s: &App, t: &T) -> El {
         .on_edit(|s: &mut App| &mut s.ui.settings.keybinding_search);
     body = body.child(c::section(
         "Keybindings",
-        vec![row().padding(12.0).gap(8.0).child(search)],
+        vec![row().padding(12.0).gap(8.0).child(search).child(
+            c::button("Add keybinding", t).on_press(|s: &mut App| {
+                s.ui.settings.keybinding_editor = Some("__new".into());
+                s.ui.settings.shortcut = None;
+                s.ui.settings.binding_target = None;
+                s.ui.settings.binding_when = rune::TextEdit::new("");
+                s.ui.settings
+                    .form
+                    .insert("form.binding.command".into(), json!("sidebar.toggle"));
+            }),
+        )],
         t,
     ));
     let bindings = s
@@ -74,6 +85,7 @@ pub fn view(s: &App, t: &T) -> El {
                     target["when"] = json!(when);
                 }
                 let owned = command.to_owned();
+                let edit_when = when.clone();
                 row()
                     .key(format!("binding-{command}-{i}"))
                     .w_full()
@@ -96,17 +108,17 @@ pub fn view(s: &App, t: &T) -> El {
                                 } else {
                                     when
                                 })
+                                .h(24.0)
                                 .font(theme::MONO_XS)
                                 .color(t.c.muted_foreground),
                             ),
                     )
-                    .child(
-                        c::button(&shortcut_label(shortcut), t).on_press(move |s: &mut App| {
-                            s.ui.settings.keybinding_editor = Some(owned.clone());
-                            s.ui.settings.binding_target = Some(target.clone());
-                            s.ui.settings.shortcut = None;
-                        }),
-                    )
+                    .child(shortcut_chips(shortcut, t).on_press(move |s: &mut App| {
+                        s.ui.settings.keybinding_editor = Some(owned.clone());
+                        s.ui.settings.binding_target = Some(target.clone());
+                        s.ui.settings.shortcut = None;
+                        s.ui.settings.binding_when = rune::TextEdit::new(edit_when.clone());
+                    }))
             })
             .collect();
         body = body.child(c::section(group, rows, t));
@@ -177,8 +189,12 @@ fn shortcut_input(shortcut: &Value) -> String {
     parts.push(if key == " " { "space" } else { key }.to_owned());
     parts.join("+")
 }
-fn shortcut_label(shortcut: &Value) -> String {
-    let mut out = String::new();
+fn shortcut_chips(shortcut: &Value, t: &T) -> El {
+    let mut chips = row()
+        .gap(4.0)
+        .focusable(true)
+        .role("button")
+        .label("Edit shortcut");
     for (field, symbol) in [
         ("ctrlKey", "⌃"),
         ("altKey", "⌥"),
@@ -186,16 +202,72 @@ fn shortcut_label(shortcut: &Value) -> String {
         ("metaKey", "⌘"),
         ("modKey", "⌘"),
     ] {
-        if shortcut[field].as_bool() == Some(true) {
-            out.push_str(symbol);
+        if shortcut[field] == true {
+            chips = chips.child(
+                el().h(20.0)
+                    .min_w(20.0)
+                    .px(4.0)
+                    .center()
+                    .radius(4.0)
+                    .fill(t.c.foreground.alpha_mul(0.07))
+                    .child(
+                        text(symbol)
+                            .font(theme::TEXT_XS)
+                            .color(t.c.muted_foreground),
+                    ),
+            );
         }
     }
-    out.push_str(&shortcut["key"].as_str().unwrap_or("").to_uppercase());
-    out
+    chips.child(
+        el().h(20.0)
+            .min_w(20.0)
+            .px(4.0)
+            .center()
+            .radius(4.0)
+            .fill(t.c.foreground.alpha_mul(0.07))
+            .child(
+                text(shortcut["key"].as_str().unwrap_or("").to_uppercase())
+                    .font(theme::TEXT_XS)
+                    .color(t.c.muted_foreground),
+            ),
+    )
+}
+
+fn defaults() -> &'static Vec<Value> {
+    static DEFAULTS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| serde_json::from_str(include_str!("keybinding-defaults.json")).unwrap())
 }
 
 pub fn editor(s: &App, t: &T) -> Option<El> {
-    if let Some(command) = &s.ui.settings.keybinding_editor {
+    if let Some(editor) = &s.ui.settings.keybinding_editor {
+        let command = if editor == "__new" {
+            s.ui.settings
+                .form
+                .get("form.binding.command")
+                .and_then(Value::as_str)
+                .unwrap_or("sidebar.toggle")
+        } else {
+            editor
+        };
+        let command_options: Vec<_> = defaults()
+            .iter()
+            .map(|b| b["command"].as_str().unwrap_or(""))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .map(|c| (json!(c), label(c)))
+            .collect();
+        let command_select = if editor == "__new" {
+            c::select(
+                s,
+                t,
+                "form.binding.command",
+                "Command",
+                &command_options,
+                400.0,
+            )
+        } else {
+            el()
+        };
         return Some(
             col()
                 .w(480.0)
@@ -204,6 +276,8 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
                 .radius(12.0)
                 .border(1.0, t.c.border)
                 .fill(t.c.popover)
+                .child(text(s.ui.settings.error.clone().unwrap_or_default()).font(theme::TEXT_XS).color(t.c.destructive).wrap())
+                .child(command_select)
                 .child(
                     text(format!("Edit shortcut: {}", label(command)))
                         .font(theme::SM_MEDIUM)
@@ -220,6 +294,13 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
                     .font(theme::TEXT_SM)
                     .color(t.c.muted_foreground),
                 )
+                .child(row().gap(8.0).child(c::button("Record shortcut",t).on_press(|s:&mut App|s.ui.settings.shortcut=None))
+                    .child(c::button("Use current shortcut",t).disabled(s.ui.settings.binding_target.is_none()).on_press(|s:&mut App|s.ui.settings.shortcut=s.ui.settings.binding_target.as_ref().and_then(|t|t["key"].as_str()).map(str::to_owned))))
+                .child(text("When").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(crate::kit::Input::new(&s.ui.settings.binding_when).placeholder("Always (e.g. !terminalFocus)")
+                    .on_edit(|s: &mut App| &mut s.ui.settings.binding_when).build(t).single_line())
+                .child(text(if conflicts(s,command) { "This shortcut is already assigned. Check that the When conditions do not overlap." } else { "" })
+                    .font(theme::TEXT_XS).color(t.c.destructive).wrap())
                 .child(
                     row()
                         .gap(8.0)
@@ -228,22 +309,27 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
                                 .disabled(s.ui.settings.shortcut.is_none())
                                 .on_press(|s: &mut App| {
                                     if let (Some(command), Some(key)) = (
-                                        s.ui.settings.keybinding_editor.clone(),
+                                        s.ui.settings.keybinding_editor.as_ref().map(|editor|if editor=="__new" {s.ui.settings.form.get("form.binding.command").and_then(Value::as_str).unwrap_or("sidebar.toggle").to_owned()}else{editor.clone()}),
                                         s.ui.settings.shortcut.clone(),
                                     ) {
                                         let mut payload = json!({"command":command,"key":key});
                                         if let Some(target) = &s.ui.settings.binding_target {
                                             payload["replace"] = target.clone();
-                                            if let Some(when) = target.get("when") {
-                                                payload["when"] = when.clone();
-                                            }
                                         }
+                                        let when=s.ui.settings.binding_when.text.trim();
+                                        if !when.is_empty() { payload["when"]=json!(when); }
                                         request(s, "server.upsertKeybinding", payload);
-                                        s.ui.settings.keybinding_editor = None;
-                                        s.ui.settings.shortcut = None;
+
                                     }
                                 }),
                         )
+                        .child(c::button("Reset",t).disabled(s.ui.settings.binding_target.is_none()).on_press(|s:&mut App|{
+                            let Some(target)=s.ui.settings.binding_target.clone() else{return;};
+                            if let Some(default)=defaults().iter().find(|b|b["command"]==target["command"]) {let mut payload=default.clone();payload["replace"]=target;request(s,"server.upsertKeybinding",payload);s.ui.settings.keybinding_editor=None;}
+                        }))
+                        .child(c::button("Remove",t).disabled(s.ui.settings.binding_target.is_none()).on_press(|s:&mut App|{
+                            if let Some(target)=s.ui.settings.binding_target.clone(){request(s,"server.removeKeybinding",target);s.ui.settings.keybinding_editor=None;}
+                        }))
                         .child(
                             c::button("Cancel", t)
                                 .on_press(|s: &mut App| s.ui.settings.keybinding_editor = None),
@@ -253,6 +339,21 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
         );
     }
     None
+}
+
+fn conflicts(s: &App, command: &str) -> bool {
+    let Some(key) = &s.ui.settings.shortcut else {
+        return false;
+    };
+    s.state()
+        .config
+        .as_ref()
+        .and_then(|c| c["keybindings"].as_array())
+        .is_some_and(|bindings| {
+            bindings
+                .iter()
+                .any(|b| shortcut_input(&b["shortcut"]) == *key && b["command"] != command)
+        })
 }
 
 fn when_expression(ast: &Value) -> String {

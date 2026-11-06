@@ -8,10 +8,15 @@ pub struct ClientSettings {
     pub error: Option<String>,
 }
 
+pub fn defaults() -> &'static Map<String, Value> {
+    static DEFAULTS: std::sync::OnceLock<Map<String, Value>> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| serde_json::from_str(include_str!("defaults.json")).unwrap())
+}
+
 impl Default for ClientSettings {
     fn default() -> Self {
         Self {
-            values: serde_json::from_str(include_str!("defaults.json")).unwrap(),
+            values: defaults().clone(),
             path: config_path(),
             error: None,
         }

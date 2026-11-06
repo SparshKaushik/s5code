@@ -72,5 +72,9 @@
   "snapShotFlash": true,
   "snapShotAnimations": true,
   "wordWrap": true,
-  "mathRenderingEnabled": false
+  "mathRenderingEnabled": false,
+  "themeLight": "t3-code",
+  "themeDark": "t3-code",
+  "customThemes": [],
+  "appearance": "system"
 }

@@ -1,8 +1,8 @@
-use super::{controls as c, request};
+use super::controls as c;
+use crate::App;
 use crate::theme::{self, T};
-use crate::{App, icons};
-use rune::{Cx, El, col, el, row, text};
-use serde_json::{Value, json};
+use rune::{Cx, El, col, text};
+use serde_json::Value;
 use std::sync::OnceLock;
 
 pub fn specs() -> &'static Value {
@@ -10,7 +10,7 @@ pub fn specs() -> &'static Value {
     PAGES.get_or_init(|| serde_json::from_str(include_str!("pages.json")).unwrap())
 }
 
-pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
+pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
     let mut page = col()
         .w_full()
         .max_w(896.0)
@@ -30,8 +30,35 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .color(t.c.destructive),
         );
     }
+    if s.ui
+        .settings
+        .active_resources
+        .iter()
+        .any(|(method, payload)| {
+            super::resource(s, method, payload.clone()).is_some_and(|v| v.get("error").is_some())
+        })
+    {
+        return page
+            .child(
+                text("Could not load this page. Check the connection’s permissions or reconnect.")
+                    .font(theme::TEXT_SM)
+                    .color(t.c.destructive),
+            )
+            .child(c::button("Retry", t).on_press(|s: &mut App| {
+                let resources = s.ui.settings.active_resources.clone();
+                if let Some(net) = s.src.net() {
+                    for (method, payload) in resources {
+                        net.unwatch_resource(&method, payload.clone());
+                        net.watch_resource(&method, payload);
+                    }
+                }
+            }));
+    }
+    if !super::scope::device_only(path) {
+        page = page.child(super::scope::sentence(s, t));
+    }
     if path == "appearance" {
-        page = page.child(themes(s, t));
+        page = page.child(super::themes::view(s, t));
     }
     if let Some(sections) = specs()[path].as_array() {
         for section in sections {
@@ -56,7 +83,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|spec| c::setting_row(s, t, spec))
+                .map(|spec| c::setting_row(s, cx, t, spec))
                 .collect();
             if !children.is_empty() {
                 page = page.child(c::section(title, children, t));
@@ -65,238 +92,19 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
         return page;
     }
     page.child(match path {
-        "providers" => providers(s, t),
+        "providers" => super::providers::view(s, t),
+        "devices" => super::devices::view(s, t),
+        "connections" => super::connections::view(s, t),
+        "access" => super::connections::access(s, t),
+        "scheduled-tasks" => super::tasks::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
-        "projects" => projects(s, t),
-        "archived" => archived(s, t),
-        "about" => about(t),
+        "projects" => super::projects::view(s, t),
+        "archived" => super::projects::archived(s, t),
+        "about" => super::about::view(s, t),
         _ => unavailable(path, t),
     })
 }
 
-fn themes(s: &App, t: &T) -> El {
-    let mut modes = row().gap(4.0).padding(4.0).radius(8.0).fill(t.c.muted);
-    for (v, label) in [("system", "System"), ("light", "Light"), ("dark", "Dark")] {
-        let selected = match s.appearance {
-            crate::Appearance::System => v == "system",
-            crate::Appearance::Light => v == "light",
-            crate::Appearance::Dark => v == "dark",
-        };
-        modes = modes.child(
-            c::button(label, t)
-                .fill(if selected { t.c.background } else { t.c.muted })
-                .on_press(move |s: &mut App| super::update(s, "appearance", json!(v))),
-        );
-    }
-    col()
-        .w_full()
-        .gap(16.0)
-        .child(
-            row()
-                .w_full()
-                .center_y()
-                .child(
-                    text("Color scheme")
-                        .font(theme::SM_MEDIUM)
-                        .color(t.c.foreground)
-                        .grow(1.0),
-                )
-                .child(modes),
-        )
-        .child(
-            text("Themes")
-                .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                .color(t.c.foreground),
-        )
-        .child(
-            row()
-                .gap(12.0)
-                .child(theme_preview("Default", t))
-                .child(theme_preview("Light", &theme::theme(false)))
-                .child(theme_preview("Dark", &theme::theme(true))),
-        )
-}
-fn theme_preview(label: &str, t: &T) -> El {
-    col()
-        .w(160.0)
-        .gap(8.0)
-        .child(
-            row()
-                .h(88.0)
-                .w_full()
-                .radius(8.0)
-                .border(1.0, t.c.border)
-                .child(el().w(36.0).h_full().fill(t.sb.sidebar))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .h_full()
-                        .padding(12.0)
-                        .gap(8.0)
-                        .fill(t.c.background)
-                        .child(el().h(6.0).w(64.0).radius(3.0).fill(t.c.muted))
-                        .child(el().h(24.0).w_full().radius(4.0).fill(t.c.card)),
-                ),
-        )
-        .child(
-            text(label.to_owned())
-                .font(theme::TEXT_XS)
-                .color(t.c.foreground),
-        )
-}
-
-fn providers(s: &App, t: &T) -> El {
-    let mut content = col().w_full().gap(16.0).child(
-        row()
-            .w_full()
-            .center_y()
-            .child(
-                text("Providers")
-                    .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                    .color(t.c.foreground)
-                    .grow(1.0),
-            )
-            .child(c::button("Refresh", t).on_press(|s: &mut App| {
-                request(
-                    s,
-                    "server.refreshProviders",
-                    json!({"fresh":true,"reloadSecrets":true}),
-                )
-            })),
-    );
-    if let Some(providers) = s
-        .state()
-        .config
-        .as_ref()
-        .and_then(|c| c["providers"].as_array())
-    {
-        for provider in providers {
-            let name = provider["displayName"]
-                .as_str()
-                .or(provider["driver"].as_str())
-                .unwrap_or("Provider");
-            let id = provider["driver"].as_str().unwrap_or(name).to_owned();
-            let version = provider["version"].as_str().unwrap_or("Not installed");
-            let status = provider["status"].as_str().unwrap_or("");
-            let head = row()
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .center_y()
-                .child(rune::icon(&icons::BOT, 20.0).color(t.c.foreground))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .gap(4.0)
-                        .child(
-                            text(name.to_owned())
-                                .font(theme::SM_MEDIUM)
-                                .color(t.c.foreground),
-                        )
-                        .child(
-                            text(format!("{version}  {status}"))
-                                .font(theme::TEXT_XS)
-                                .color(t.c.muted_foreground),
-                        ),
-                )
-                .child(
-                    c::button("Check for updates", t).on_press(move |s: &mut App| {
-                        request(s, "server.updateProvider", json!({"provider":id}))
-                    }),
-                );
-            content = content.child(
-                col()
-                    .w_full()
-                    .border(1.0, t.c.border)
-                    .radius(12.0)
-                    .fill(t.c.card)
-                    .child(head),
-            );
-        }
-    }
-    content
-}
-
-fn projects(s: &App, t: &T) -> El {
-    let children = s
-        .state()
-        .projects
-        .iter()
-        .map(|project| {
-            row()
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .child(rune::icon(&icons::FOLDER, 16.0).color(t.c.muted_foreground))
-                .child(
-                    col()
-                        .gap(4.0)
-                        .child(
-                            text(crate::data::s(project, "name").to_owned())
-                                .font(theme::SM_MEDIUM)
-                                .color(t.c.foreground),
-                        )
-                        .child(
-                            text(crate::data::s(project, "workspaceRoot").to_owned())
-                                .font(theme::TEXT_XS)
-                                .color(t.c.muted_foreground),
-                        ),
-                )
-        })
-        .collect();
-    c::section("Projects", children, t)
-}
-fn archived(s: &App, t: &T) -> El {
-    let children = s
-        .state()
-        .archived
-        .iter()
-        .map(|thread| {
-            row().padding(16.0).w_full().child(
-                text(crate::data::s(thread, "title").to_owned())
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-            )
-        })
-        .collect();
-    c::section("Archived threads", children, t)
-}
-fn about(t: &T) -> El {
-    col()
-        .gap(32.0)
-        .w_full()
-        .child(c::section(
-            "App",
-            vec![
-                row().padding(16.0).w_full().center_y().child(
-                    col()
-                        .grow(1.0)
-                        .gap(4.0)
-                        .child(text("S5 Code").font(theme::SM_MEDIUM).color(t.c.foreground))
-                        .child(
-                            text("Current version of the application.")
-                                .font(theme::TEXT_XS)
-                                .color(t.c.muted_foreground),
-                        ),
-                ),
-            ],
-            t,
-        ))
-        .child(c::section(
-            "Legal",
-            vec![
-                text("Privacy policy")
-                    .padding(16.0)
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-                text("Open source licenses")
-                    .padding(16.0)
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-            ],
-            t,
-        ))
-}
 fn unavailable(path: &str, t: &T) -> El {
     text(format!(
         "{} settings are not yet available in the native client.",

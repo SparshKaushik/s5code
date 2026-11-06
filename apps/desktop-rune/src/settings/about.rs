@@ -1,0 +1,151 @@
+use super::{controls as c, request};
+use crate::{
+    App, Route,
+    theme::{self, T},
+};
+use rune::{El, col, row, text};
+use serde_json::json;
+
+pub fn view(s: &App, t: &T) -> El {
+    let version = s
+        .state()
+        .config
+        .as_ref()
+        .and_then(|c| c["environment"]["serverVersion"].as_str())
+        .unwrap_or("Unknown");
+    let update = s.ui.settings.results.get("server.getNpmRelease");
+    let target = update.and_then(|v| v["version"].as_str());
+    let can_update = s
+        .state()
+        .config
+        .as_ref()
+        .and_then(|c| c["environment"]["capabilities"]["serverSelfUpdate"].as_str())
+        .is_some_and(|capability| capability != "unsupported");
+    let mut controls = row().gap(8.0).child(
+        c::button("Check for updates", t)
+            .on_press(|s: &mut App| request(s, "server.getNpmRelease", json!({"spec":"latest"}))),
+    );
+    if let Some(target) = target.filter(|target| *target != version) {
+        let target = target.to_owned();
+        controls = controls.child(
+            c::button("Update server", t)
+                .disabled(!can_update)
+                .on_press(move |s: &mut App| s.ui.settings.update_version = Some(target.clone())),
+        );
+    }
+    col()
+        .w_full()
+        .gap(32.0)
+        .child(c::section(
+            "App",
+            vec![
+                col()
+                    .w_full()
+                    .padding(16.0)
+                    .gap(12.0)
+                    .child(
+                        text(format!("S5 Code {}", env!("CARGO_PKG_VERSION")))
+                            .font(theme::SM_MEDIUM)
+                            .color(t.c.foreground),
+                    )
+                    .child(
+                        text(format!("Native client · Server {version}"))
+                            .font(theme::TEXT_XS)
+                            .color(t.c.muted_foreground),
+                    )
+                    .child(controls)
+                    .child(
+                        text(
+                            target
+                                .map(|v| format!("Latest release: {v}"))
+                                .unwrap_or_default(),
+                        )
+                        .font(theme::TEXT_XS)
+                        .color(t.c.muted_foreground),
+                    ),
+            ],
+            t,
+        ))
+        .child(c::section(
+            "Legal",
+            vec![
+                row()
+                    .w_full()
+                    .padding(16.0)
+                    .center_y()
+                    .gap(12.0)
+                    .child(
+                        col()
+                            .grow(1.0)
+                            .gap(4.0)
+                            .child(
+                                text("Privacy policy")
+                                    .font(theme::SM_MEDIUM)
+                                    .color(t.c.foreground),
+                            )
+                            .child(
+                                text("How we handle your data, including anonymous usage data.")
+                                    .font(theme::TEXT_XS)
+                                    .color(t.c.muted_foreground),
+                            ),
+                    )
+                    .child(c::button("View policy", t).on_press(|s: &mut App| {
+                        super::auth::open_url(s, "https://t3.codes/privacy-policy")
+                    })),
+                row()
+                    .w_full()
+                    .padding(16.0)
+                    .center_y()
+                    .gap(12.0)
+                    .child(
+                        col()
+                            .grow(1.0)
+                            .gap(4.0)
+                            .child(
+                                text("Open source licenses")
+                                    .font(theme::SM_MEDIUM)
+                                    .color(t.c.foreground),
+                            )
+                            .child(
+                                text("Notices for dependencies, assets, and optional tools.")
+                                    .font(theme::TEXT_XS)
+                                    .color(t.c.muted_foreground),
+                            ),
+                    )
+                    .child(c::button("View licenses", t).on_press(|s: &mut App| {
+                        s.navigate(Route::Settings("open-source-licenses".into()))
+                    })),
+            ],
+            t,
+        ))
+}
+pub fn update_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
+    let Some(version) = &s.ui.settings.update_version else {
+        return;
+    };
+    let version = version.clone();
+    crate::kit::Dialog::new("update-server", "Update server?")
+        .open(true)
+        .alert()
+        .description(format!(
+            "Install {version}? The server will restart and connected clients will reconnect."
+        ))
+        .on_close(|s: &mut App| s.ui.settings.update_version = None)
+        .child(
+            row()
+                .gap(8.0)
+                .child(
+                    c::button("Cancel", t)
+                        .on_press(|s: &mut App| s.ui.settings.update_version = None),
+                )
+                .child(
+                    crate::kit::Button::new("Update server")
+                        .on_press(move |s: &mut App| {
+                            request(s, "server.updateServer", json!({"targetVersion":version}));
+                            s.ui.settings.update_version = None;
+                        })
+                        .build(t),
+                ),
+        )
+        .build(t, layers);
+}

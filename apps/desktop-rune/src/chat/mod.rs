@@ -22,7 +22,10 @@ pub struct Ui {
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
-    let body = match &s.route {
+    let route = if matches!(s.route, Route::Settings(_)) {
+        s.ui.settings.return_route.as_ref().unwrap_or(&s.route)
+    } else { &s.route };
+    let body = match route {
         Route::Thread(id) => timeline::view(s, cx, t, id),
         _ => home::view(s, cx, t),
     };
