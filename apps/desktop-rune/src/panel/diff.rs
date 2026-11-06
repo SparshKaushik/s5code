@@ -176,7 +176,9 @@ pub fn view(app: &App, t: &T) -> El {
         col()
             .grow(1.)
             .min_h(0.)
-            .child(list.max_h(140.).scroll(rune::ScrollSpec::default()))
+            .child(list.max_h(140.).scroll(rune::ScrollSpec {
+                stick_bottom: false,
+            }))
             .child(
                 DiffView::new(
                     |s: &App| &s.ui.panel.diff.state,

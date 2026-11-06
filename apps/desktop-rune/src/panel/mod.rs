@@ -214,7 +214,7 @@ pub fn toggle_terminal(app: &mut App) {
 fn action(t: &T, label: &str, glyph: &'static rune::Icon) -> kit::Button {
     let _ = t;
     kit::Button::new(label)
-        .icon(glyph)
+        .icon(glyph, 16.)
         .variant("ghost-muted")
         .size("icon-xs")
 }
@@ -246,7 +246,7 @@ fn picker(app: &App, t: &T) -> El {
                 .label(surface.title())
                 .disabled(!available)
                 .child(
-                    icon(surface.glyph())
+                    icon(surface.glyph(), 16.)
                         .size(16., 16.)
                         .color(t.c.contrast_foreground),
                 )
@@ -261,7 +261,7 @@ fn picker(app: &App, t: &T) -> El {
         );
     }
     for (title, glyph, key) in [
-        ("Pull request", &icons::GIT_PULL_REQUEST, "P"),
+        ("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"),
         ("Linked pull requests", &icons::LINK, "L"),
         ("Device", &icons::SMARTPHONE, "M"),
     ] {
@@ -275,7 +275,11 @@ fn picker(app: &App, t: &T) -> El {
                 .role("button")
                 .label(title)
                 .disabled(true)
-                .child(icon(glyph).size(16., 16.).color(t.c.contrast_foreground))
+                .child(
+                    icon(glyph, 16.)
+                        .size(16., 16.)
+                        .color(t.c.contrast_foreground),
+                )
                 .child(
                     text(title)
                         .font(theme::TEXT_SM)
@@ -324,7 +328,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                             s.ui.chat.topbar.terminal_open = surface == Surface::Terminal;
                         })
                         .child(
-                            icon(surface.glyph())
+                            icon(surface.glyph(), 16.)
                                 .size(14., 14.)
                                 .color(t.c.muted_foreground),
                         )
@@ -453,7 +457,7 @@ fn browser_view(app: &App, t: &T) -> El {
         );
     let content = if status.frames == 0 {
         col().w_full().px(48.).pt(48.).gap(0.)
-            .child(el().size(36.,36.).radius(6.).fill(t.c.card).border(1.,t.c.border).center().child(icon(&icons::GLOBE).size(18.,18.).color(t.c.muted_foreground)))
+            .child(el().size(36.,36.).radius(6.).fill(t.c.card).border(1.,t.c.border).center().child(icon(&icons::GLOBE,18.).size(18.,18.).color(t.c.muted_foreground)))
             .child(text("No preview yet").font(theme::weight(theme::TEXT_XL,600.)).color(t.c.contrast_foreground).mt(48.))
             .child(text(status.error.as_deref().unwrap_or("Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.")).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full().mt(28.)).center_y()
     } else {

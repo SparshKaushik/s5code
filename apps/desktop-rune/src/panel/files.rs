@@ -138,11 +138,14 @@ pub fn view(app: &App, t: &T) -> El {
                     .role("button")
                     .label(&path)
                     .child(
-                        icon(if directory {
-                            &icons::FOLDER
-                        } else {
-                            &icons::FILE
-                        })
+                        icon(
+                            if directory {
+                                &icons::FOLDER
+                            } else {
+                                &icons::FILE
+                            },
+                            14.,
+                        )
                         .size(14., 14.)
                         .color(t.c.muted_foreground),
                     )
@@ -171,7 +174,9 @@ pub fn view(app: &App, t: &T) -> El {
             col()
                 .grow(1.)
                 .min_h(0.)
-                .scroll(ScrollSpec::default())
+                .scroll(ScrollSpec {
+                    stick_bottom: false,
+                })
                 .child(content),
         )
 }

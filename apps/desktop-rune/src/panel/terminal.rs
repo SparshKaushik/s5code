@@ -389,7 +389,7 @@ pub fn view(app: &App, t: &T) -> El {
     }
     col().grow(1.).min_h(0.).child(row().h(32.).px(8.).center_y().child(text(format!("Terminal  {}",ui.status)).font(theme::TEXT_XS).color(t.c.muted_foreground).grow(1.))
         .child(kit::Button::new("Clear terminal").icon(&icons::TRASH_2).variant("ghost-muted").size("icon-xs").on_press(|s:&mut App|{let thread=s.ui.panel.terminal.thread.clone();if let Some(n)=s.src.net(){n.request("terminal.clear",json!({"threadId":thread,"terminalId":"term-1"}));}s.ui.panel.terminal.screen.lines.clear();s.ui.panel.terminal.screen.x=0;s.ui.panel.terminal.screen.y=0;}).build(t)))
-        .child(el().grow(1.).min_h(0.).w_full().key("panel-terminal-grid").padding(8.).scroll(ScrollSpec::default()).focusable(true).role("textbox").label("Terminal input").on_key(key).on_paste(|s:&mut App,v,_|send(s,v.into())).on_layout(move |s:&mut App,r|{
+        .child(el().grow(1.).min_h(0.).w_full().key("panel-terminal-grid").padding(8.).scroll(ScrollSpec {stick_bottom: true}).focusable(true).role("textbox").label("Terminal input").on_key(key).on_paste(|s:&mut App,v,_|send(s,v.into())).on_layout(move |s:&mut App,r|{
             let grid=(((r[2]-16.)/(size*0.6)).floor().clamp(1.,1000.) as usize,((r[3]-16.)/(size*1.2)).floor().clamp(1.,500.) as usize);
             if s.ui.panel.terminal.grid!=grid {s.ui.panel.terminal.grid=grid;s.ui.panel.terminal.screen.size(grid.0,grid.1);let thread=s.ui.panel.terminal.thread.clone();if let Some(n)=s.src.net(){n.request("terminal.resize",json!({"threadId":thread,"terminalId":"term-1","cols":grid.0,"rows":grid.1}));}}
         }).child(lines))
