@@ -5,7 +5,10 @@ use rune::{El, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 pub fn button(label: &str, t: &T) -> El {
-    crate::kit::Button::new(label).variant("outline").size("compact").build(t)
+    crate::kit::Button::new(label)
+        .variant("outline")
+        .size("compact")
+        .build(t)
 }
 
 pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
@@ -30,8 +33,8 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
             el().absolute(if on { 14.0 } else { 2.0 }, 2.0)
                 .size(14.0, 14.0)
                 .radius(999.0)
-                .fill(if on {
-                    t.c.primary_foreground
+                .fill(if !on && t.dark {
+                    t.c.muted_foreground
                 } else {
                     t.c.background
                 }),
@@ -82,7 +85,7 @@ pub fn select(
         .center_y()
         .radius(8.0)
         .border(1.0, t.c.input)
-        .fill(t.c.input.alpha_mul(if t.dark {0.32} else {0.0}))
+        .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
         .hover(t.c.accent)
         .focusable(true)
         .role("combobox")
@@ -151,21 +154,44 @@ pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width
         )
 }
 
-pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
+pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
     let description = spec["description"].as_str().unwrap_or("");
-    let mut copy = col().grow(1.0).min_w(0.0).gap(4.0).child(
+    let mut heading = row().gap(6.0).center_y().child(
         text(title.to_owned())
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );
+    if super::scope::customized(s, key) {
+        let owned = key.to_owned();
+        heading = heading.child(
+            crate::kit::Button::new(format!("Reset {title}"))
+                .variant("ghost-muted")
+                .size("icon-micro")
+                .icon(&icons::UNDO_2)
+                .on_press(move |s: &mut App| super::scope::reset(s, &owned))
+                .build(t),
+        );
+    }
+    let mut copy = col()
+        .key(format!("copy-{key}"))
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(4.0)
+        .child(heading);
     if !description.is_empty() {
         copy = copy.child(
-            text(description.to_owned())
-                .font(theme::TEXT_XS.lh(18.0))
-                .color(t.c.muted_foreground)
-                .wrap(),
+            text(super::balance::description(
+                description,
+                cx.layout(&format!("copy-{key}"))
+                    .map(|r| r[2])
+                    .unwrap_or(558.0)
+                    .min(672.0),
+            ))
+            .font(theme::TEXT_XS.lh(18.0))
+            .color(t.c.muted_foreground)
+            .wrap(),
         );
     }
     let ctrl = match spec["kind"].as_str() {
@@ -180,14 +206,7 @@ pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
                 .flatten()
                 .map(|o| (o[0].clone(), o[1].as_str().unwrap_or("").to_owned()))
                 .collect();
-            select(
-                s,
-                t,
-                key,
-                title,
-                &options,
-                select_width(key),
-            )
+            select(s, t, key, title, &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
         _ => {
@@ -247,6 +266,7 @@ pub fn setting_row(s: &App, t: &T, spec: &Value) -> El {
 pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
     let mut group = col()
         .w_full()
+        .padding(1.0)
         .radius(12.0)
         .border(1.0, t.c.border.alpha_mul(0.6))
         .fill(t.c.card.alpha_mul(0.4));
@@ -260,11 +280,11 @@ pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            text(title.to_owned())
-                .h(28.0)
-                .px(16.0)
-                .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                .color(t.c.foreground),
+            el().h(28.0).px(16.0).center_y().child(
+                text(title.to_owned())
+                    .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
+                    .color(t.c.foreground),
+            ),
         )
         .child(group)
 }
@@ -277,9 +297,30 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
         _ => (0.0, 400.0, 25.0),
     };
     let key = key.to_owned();
-    row().w(208.0).center_y().gap(12.0)
-        .child(text(format!("{n}{}", if key == "panelAnimationDurationMs" { " ms" } else { "%" }))
-            .w(48.0).font(theme::MONO_XS).color(t.c.foreground))
-        .child(crate::kit::Slider::new(n).range(min, max).step(step).width(148.0)
-            .label(title).on_change(move |s: &mut App, n, _| update(s, &key, json!(n))).build(t))
+    row()
+        .w(208.0)
+        .center_y()
+        .gap(12.0)
+        .child(
+            text(format!(
+                "{n}{}",
+                if key == "panelAnimationDurationMs" {
+                    " ms"
+                } else {
+                    "%"
+                }
+            ))
+            .w(48.0)
+            .font(theme::MONO_XS)
+            .color(t.c.foreground),
+        )
+        .child(
+            crate::kit::Slider::new(n)
+                .range(min, max)
+                .step(step)
+                .width(148.0)
+                .label(title)
+                .on_change(move |s: &mut App, n, _| update(s, &key, json!(n)))
+                .build(t),
+        )
 }

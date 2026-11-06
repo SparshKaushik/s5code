@@ -1,7 +1,10 @@
+mod balance;
 pub mod client;
 mod controls;
 mod keybindings;
 mod pages;
+mod providers;
+mod scope;
 
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Appearance, Route, icons};
@@ -11,6 +14,9 @@ use std::collections::HashMap;
 
 #[derive(Default)]
 pub struct Ui {
+    pub provider: Option<String>,
+    pub project: Option<String>,
+    pub scope_open: bool,
     pub open_select: Option<String>,
     pub search: TextEdit,
     pub edits: HashMap<String, TextEdit>,
@@ -18,6 +24,7 @@ pub struct Ui {
     pub error: Option<String>,
     pub advanced: bool,
     pub keybinding_editor: Option<String>,
+    pub binding_when: TextEdit,
     pub shortcut: Option<String>,
     pub binding_target: Option<Value>,
     pub keybinding_search: TextEdit,
@@ -33,6 +40,23 @@ pub fn appearance(client: &client::ClientSettings) -> Appearance {
 }
 
 pub fn value(s: &App, key: &str) -> Value {
+    if let Some(key) = key.strip_prefix("provider::") {
+        if let Some((id, field)) = key.split_once("::") {
+            return providers::field_value(s, id, field);
+        }
+    }
+    if scope::project_key(key) {
+        if let Some(project) = &s.ui.settings.project {
+            if let Some(v) = s
+                .state()
+                .config
+                .as_ref()
+                .and_then(|c| c["settings"]["projectSettingsOverrides"][project].get(key))
+            {
+                return v.clone();
+            }
+        }
+    }
     s.client_settings
         .values
         .get(key)
@@ -49,6 +73,12 @@ pub fn value(s: &App, key: &str) -> Value {
 }
 
 pub fn update(s: &mut App, key: &str, value: Value) {
+    if let Some(key) = key.strip_prefix("provider::") {
+        if let Some((id, field)) = key.split_once("::") {
+            providers::update(s, id, field, value);
+            return;
+        }
+    }
     if s.client_settings.values.contains_key(key) || key == "appearance" {
         s.client_settings.values.insert(key.into(), value);
         if key == "appearance" {
@@ -58,7 +88,22 @@ pub fn update(s: &mut App, key: &str, value: Value) {
             s.client_settings.save();
         }
     } else {
-        request(s, "server.updateSettings", json!({"patch":{key:value}}));
+        let patch = if let Some(project) =
+            s.ui.settings
+                .project
+                .as_ref()
+                .filter(|_| scope::project_key(key))
+        {
+            scope::override_patch(
+                &s.state().config.as_ref().unwrap_or(&Value::Null)["settings"],
+                project,
+                key,
+                Some(value),
+            )
+        } else {
+            json!({key:value})
+        };
+        request(s, "server.updateSettings", json!({"patch":patch}));
     }
 }
 
@@ -69,9 +114,36 @@ pub fn request(s: &mut App, method: &str, payload: Value) {
     }
 }
 
+pub fn commit_edits(s: &mut App, all: bool) -> bool {
+    let keys: Vec<_> =
+        s.ui.settings
+            .edits
+            .iter()
+            .filter(|(_, edit)| all || !edit.focused)
+            .map(|(key, _)| key.clone())
+            .collect();
+    let mut changed = false;
+    for key in keys {
+        let edit = s.ui.settings.edits.remove(&key).unwrap();
+        let current = value(s, &key);
+        let next = if current.is_number() {
+            serde_json::from_str(&edit.text)
+                .ok()
+                .filter(Value::is_number)
+        } else {
+            Some(json!(edit.text))
+        };
+        if let Some(next) = next.filter(|n| *n != current) {
+            update(s, &key, next);
+            changed = true;
+        }
+    }
+    changed
+}
+
 pub fn poll(s: &mut App) -> bool {
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = false;
+    let mut changed = commit_edits(s, false);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             s.ui.settings.pending.remove(&id);
@@ -179,7 +251,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         p => p,
     };
     let mut nav = col()
-        .w(240.0)
+        .w(239.0)
         .h_full()
         .fill(t.c.sidebar)
         .px(8.0)
@@ -205,9 +277,17 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .center_y()
             .child(icon(&icons::SEARCH, 16.0).color(t.sb.muted_foreground))
             .child(search)
-            .child(el().size(20.0,20.0).center().radius(4.0)
-                .fill(t.c.foreground.alpha_mul(0.07))
-                .child(text("/").font(theme::XS_MEDIUM).color(t.sb.muted_foreground))),
+            .child(
+                el().size(20.0, 20.0)
+                    .center()
+                    .radius(4.0)
+                    .fill(t.c.foreground.alpha_mul(0.07))
+                    .child(
+                        text("/")
+                            .font(theme::XS_MEDIUM)
+                            .color(t.sb.muted_foreground),
+                    ),
+            ),
     );
     let query = s.ui.settings.search.text.to_lowercase();
     for (index, (heading, items)) in NAV.iter().enumerate() {
@@ -246,6 +326,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .role("link")
                     .label(*title)
                     .on_press(move |s: &mut App| {
+                        commit_edits(s, true);
                         s.navigate(Route::Settings(target.clone()));
                         s.ui.settings.open_select = None;
                     })
@@ -260,7 +341,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         nav = nav.child(group);
     }
     let nav = col()
-        .w(240.0)
+        .w(239.0)
         .h_full()
         .child(nav.scroll(rune::ScrollSpec {
             stick_bottom: false,
@@ -286,19 +367,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         )
         .child(el().grow(1.0));
     if path == "general" {
-        header = header.child(crate::kit::Button::new("Restore device defaults").variant("ghost").size("xs").icon(&icons::ROTATE_CCW).disabled(s.client_settings.values == client::ClientSettings::default().values).build(t).on_press(
-            |s: &mut App| {
-                let defaults = client::ClientSettings::default();
-                s.client_settings.values.extend(defaults.values);
-                s.client_settings
-                    .values
-                    .insert("appearance".into(), json!("system"));
-                s.appearance = Appearance::System;
-                if matches!(s.src, crate::data::Source::Live(_)) {
-                    s.client_settings.save();
-                }
-            },
-        ));
+        header = header.child(
+            crate::kit::Button::new("Restore device defaults")
+                .variant("ghost")
+                .size("xs")
+                .icon(&icons::ROTATE_CCW)
+                .disabled(s.client_settings.values == client::ClientSettings::default().values)
+                .build(t)
+                .on_press(|s: &mut App| {
+                    let defaults = client::ClientSettings::default();
+                    s.client_settings.values.extend(defaults.values);
+                    s.client_settings
+                        .values
+                        .insert("appearance".into(), json!("system"));
+                    s.appearance = Appearance::System;
+                    if matches!(s.src, crate::data::Source::Live(_)) {
+                        s.client_settings.save();
+                    }
+                }),
+        );
     }
     header = header.child(
         el().size(28.0, 28.0)
@@ -331,6 +418,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     );
     let modal = row()
         .key("settings-modal")
+        .padding(1.0)
         .modal(true, close)
         .w(1280.0)
         .h(820.0)
@@ -346,6 +434,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(el().w(1.0).h_full().fill(t.c.border))
         .child(content);
     let mut overlays = Vec::new();
+    if let Some(menu) = scope::menu(s, t) {
+        overlays.push(menu);
+    }
     if let Some(editor) = keybindings::editor(s, t) {
         overlays.push(
             el().absolute(0.0, 0.0)
@@ -375,26 +466,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 t,
                 key,
                 &options,
-                if key == "notificationMode" {
-                    224.0
-                } else {
-                    160.0
-                },
+                controls::select_width(key),
             ));
         }
     }
     rune_kit::root(
-        el().absolute(0.0, 0.0).w_full()
+        el().absolute(0.0, 0.0)
+            .w_full()
             .h_full()
             .center()
             .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.60 }))
             .backdrop_blur(4.0)
             .child(modal),
         overlays,
-    ).absolute(0.0, 0.0)
+    )
+    .absolute(0.0, 0.0)
 }
 
 pub fn close(s: &mut App) {
+    commit_edits(s, true);
     let route =
         s.ui.settings
             .return_route
@@ -406,11 +496,18 @@ pub fn close(s: &mut App) {
 fn scene(s: &mut App, path: &str) {
     crate::scene_clock(s);
     s.client_settings = client::ClientSettings::default();
-    let previous = s.state().threads.iter().find(|t| t["title"] == "Replay showcase")
+    let previous = s
+        .state()
+        .threads
+        .iter()
+        .find(|t| t["title"] == "Replay showcase")
         .map(|t| Route::Thread(crate::data::s(t, "id").into()))
         .unwrap_or(Route::Home { project_id: None });
     s.route = Route::Settings(path.into());
-    s.ui.settings = Ui { return_route: Some(previous), ..Ui::default() };
+    s.ui.settings = Ui {
+        return_route: Some(previous),
+        ..Ui::default()
+    };
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
@@ -484,7 +581,10 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         close(s);
         return true;
     }
-    if s.ui.settings.keybinding_editor.is_some() && s.ui.settings.shortcut.is_none() {
+    if s.ui.settings.keybinding_editor.is_some()
+        && s.ui.settings.shortcut.is_none()
+        && !s.ui.settings.binding_when.focused
+    {
         let key = match &e.key {
             rune::Key::Text(s) => {
                 if s == " " {

@@ -10,7 +10,7 @@ pub fn specs() -> &'static Value {
     PAGES.get_or_init(|| serde_json::from_str(include_str!("pages.json")).unwrap())
 }
 
-pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
+pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
     let mut page = col()
         .w_full()
         .max_w(896.0)
@@ -29,6 +29,9 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .font(theme::TEXT_SM)
                 .color(t.c.destructive),
         );
+    }
+    if !super::scope::device_only(path) {
+        page = page.child(super::scope::sentence(s, t));
     }
     if path == "appearance" {
         page = page.child(themes(s, t));
@@ -56,7 +59,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .as_array()
                 .into_iter()
                 .flatten()
-                .map(|spec| c::setting_row(s, t, spec))
+                .map(|spec| c::setting_row(s, cx, t, spec))
                 .collect();
             if !children.is_empty() {
                 page = page.child(c::section(title, children, t));
@@ -65,7 +68,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, path: &str) -> El {
         return page;
     }
     page.child(match path {
-        "providers" => providers(s, t),
+        "providers" => super::providers::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
         "projects" => projects(s, t),
         "archived" => archived(s, t),
@@ -143,78 +146,6 @@ fn theme_preview(label: &str, t: &T) -> El {
                 .font(theme::TEXT_XS)
                 .color(t.c.foreground),
         )
-}
-
-fn providers(s: &App, t: &T) -> El {
-    let mut content = col().w_full().gap(16.0).child(
-        row()
-            .w_full()
-            .center_y()
-            .child(
-                text("Providers")
-                    .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                    .color(t.c.foreground)
-                    .grow(1.0),
-            )
-            .child(c::button("Refresh", t).on_press(|s: &mut App| {
-                request(
-                    s,
-                    "server.refreshProviders",
-                    json!({"fresh":true,"reloadSecrets":true}),
-                )
-            })),
-    );
-    if let Some(providers) = s
-        .state()
-        .config
-        .as_ref()
-        .and_then(|c| c["providers"].as_array())
-    {
-        for provider in providers {
-            let name = provider["displayName"]
-                .as_str()
-                .or(provider["driver"].as_str())
-                .unwrap_or("Provider");
-            let id = provider["driver"].as_str().unwrap_or(name).to_owned();
-            let version = provider["version"].as_str().unwrap_or("Not installed");
-            let status = provider["status"].as_str().unwrap_or("");
-            let head = row()
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .center_y()
-                .child(rune::icon(&icons::BOT, 20.0).color(t.c.foreground))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .gap(4.0)
-                        .child(
-                            text(name.to_owned())
-                                .font(theme::SM_MEDIUM)
-                                .color(t.c.foreground),
-                        )
-                        .child(
-                            text(format!("{version}  {status}"))
-                                .font(theme::TEXT_XS)
-                                .color(t.c.muted_foreground),
-                        ),
-                )
-                .child(
-                    c::button("Check for updates", t).on_press(move |s: &mut App| {
-                        request(s, "server.updateProvider", json!({"provider":id}))
-                    }),
-                );
-            content = content.child(
-                col()
-                    .w_full()
-                    .border(1.0, t.c.border)
-                    .radius(12.0)
-                    .fill(t.c.card)
-                    .child(head),
-            );
-        }
-    }
-    content
 }
 
 fn projects(s: &App, t: &T) -> El {

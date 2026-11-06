@@ -74,6 +74,14 @@ pub fn view(s: &App, t: &T) -> El {
                     target["when"] = json!(when);
                 }
                 let owned = command.to_owned();
+                let add_command = owned.clone();
+                let remove = target.clone();
+                let reset_target = target.clone();
+                let default = defaults()
+                    .iter()
+                    .find(|b| b["command"] == command && b["when"].as_str().unwrap_or("") == when)
+                    .cloned();
+                let edit_when = when.clone();
                 row()
                     .key(format!("binding-{command}-{i}"))
                     .w_full()
@@ -105,8 +113,27 @@ pub fn view(s: &App, t: &T) -> El {
                             s.ui.settings.keybinding_editor = Some(owned.clone());
                             s.ui.settings.binding_target = Some(target.clone());
                             s.ui.settings.shortcut = None;
+                            s.ui.settings.binding_when = rune::TextEdit::new(edit_when.clone());
                         }),
                     )
+                    .child(c::button("Add", t).on_press(move |s: &mut App| {
+                        s.ui.settings.keybinding_editor = Some(add_command.clone());
+                        s.ui.settings.binding_target = None;
+                        s.ui.settings.shortcut = None;
+                        s.ui.settings.binding_when = rune::TextEdit::new("");
+                    }))
+                    .child(c::button("Remove", t).on_press(move |s: &mut App| {
+                        request(s, "server.removeKeybinding", remove.clone())
+                    }))
+                    .child(c::button("Reset", t).disabled(default.is_none()).on_press(
+                        move |s: &mut App| {
+                            if let Some(default) = &default {
+                                let mut payload = default.clone();
+                                payload["replace"] = reset_target.clone();
+                                request(s, "server.upsertKeybinding", payload);
+                            }
+                        },
+                    ))
             })
             .collect();
         body = body.child(c::section(group, rows, t));
@@ -194,6 +221,11 @@ fn shortcut_label(shortcut: &Value) -> String {
     out
 }
 
+fn defaults() -> &'static Vec<Value> {
+    static DEFAULTS: std::sync::OnceLock<Vec<Value>> = std::sync::OnceLock::new();
+    DEFAULTS.get_or_init(|| serde_json::from_str(include_str!("keybinding-defaults.json")).unwrap())
+}
+
 pub fn editor(s: &App, t: &T) -> Option<El> {
     if let Some(command) = &s.ui.settings.keybinding_editor {
         return Some(
@@ -220,6 +252,11 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
                     .font(theme::TEXT_SM)
                     .color(t.c.muted_foreground),
                 )
+                .child(text("When").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(crate::kit::Input::new(&s.ui.settings.binding_when).placeholder("Always (e.g. !terminalFocus)")
+                    .on_edit(|s: &mut App| &mut s.ui.settings.binding_when).build(t).single_line())
+                .child(text(if conflicts(s,command) { "This shortcut is already assigned. Check that the When conditions do not overlap." } else { "" })
+                    .font(theme::TEXT_XS).color(t.c.destructive).wrap())
                 .child(
                     row()
                         .gap(8.0)
@@ -234,10 +271,9 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
                                         let mut payload = json!({"command":command,"key":key});
                                         if let Some(target) = &s.ui.settings.binding_target {
                                             payload["replace"] = target.clone();
-                                            if let Some(when) = target.get("when") {
-                                                payload["when"] = when.clone();
-                                            }
                                         }
+                                        let when=s.ui.settings.binding_when.text.trim();
+                                        if !when.is_empty() { payload["when"]=json!(when); }
                                         request(s, "server.upsertKeybinding", payload);
                                         s.ui.settings.keybinding_editor = None;
                                         s.ui.settings.shortcut = None;
@@ -253,6 +289,21 @@ pub fn editor(s: &App, t: &T) -> Option<El> {
         );
     }
     None
+}
+
+fn conflicts(s: &App, command: &str) -> bool {
+    let Some(key) = &s.ui.settings.shortcut else {
+        return false;
+    };
+    s.state()
+        .config
+        .as_ref()
+        .and_then(|c| c["keybindings"].as_array())
+        .is_some_and(|bindings| {
+            bindings
+                .iter()
+                .any(|b| shortcut_input(&b["shortcut"]) == *key && b["command"] != command)
+        })
 }
 
 fn when_expression(ast: &Value) -> String {

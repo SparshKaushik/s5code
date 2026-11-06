@@ -1,0 +1,133 @@
+{
+  "favorites": null,
+  "providerModelPreferences": null,
+  "worktreeCleanup": null,
+  "storageCleanup": {
+    "worktreeKeepWhen": "uncommitted-changes",
+    "worktreeAfterDays": null,
+    "worktreeSettledAfterDays": null,
+    "worktreeOnMerge": false,
+    "worktreeOnDelete": false,
+    "worktreeUnchanged": false,
+    "browserArtifactsAfterDays": null,
+    "logsAfterDays": null
+  },
+  "worktreesDirectory": "",
+  "previousWorktreesDirectories": [],
+  "responseStreamingMode": "paragraph",
+  "enableProviderUpdateChecks": true,
+  "continueThreadsAfterServerUpdate": true,
+  "enableAgentBrowserAccess": true,
+  "projectAgentBrowserAccessOverrides": {},
+  "defaultAutoPull": false,
+  "defaultProjectScripts": [],
+  "projectScriptOverrides": {},
+  "projectAutoPullOverrides": {},
+  "defaultModelSelection": null,
+  "fallbackModelSelection": null,
+  "defaultRuntimeMode": "full-access",
+  "projectSettingsOverrides": {},
+  "projectSettingsFolded": false,
+  "enableAgentDeviceAccess": false,
+  "enableDeviceSupport": false,
+  "deviceOnboardingCompleted": false,
+  "deviceHosts": [],
+  "easDeviceHosts": [],
+  "simlockDeviceHosts": [],
+  "simlockDeviceHostsEnabled": false,
+  "sidebarAutoSettleAfterDays": 3,
+  "compactIdleThreads": false,
+  "snoozeLimitedThreads": false,
+  "autoResumeLimitedThreads": false,
+  "snoozePresets": [
+    {
+      "kind": "after",
+      "minutes": 60
+    },
+    {
+      "kind": "after",
+      "minutes": 180
+    },
+    {
+      "kind": "at",
+      "day": "today",
+      "time": "18:00"
+    },
+    {
+      "kind": "at",
+      "day": "tomorrow",
+      "time": "09:00"
+    },
+    {
+      "kind": "at",
+      "day": "monday",
+      "time": "09:00"
+    }
+  ],
+  "hiddenThreadTags": [],
+  "hideTaggedThreads": false,
+  "guestSharingEnabled": false,
+  "linkedEnvironmentsEnabled": false,
+  "sidebarAutoSettleKeepPullRequests": false,
+  "sidebarAutoSettleOnMerge": true,
+  "backgroundActivity": {
+    "schemaVersion": 1,
+    "profile": "balanced",
+    "overrides": {}
+  },
+  "automaticGitFetchInterval": {
+    "_id": "Duration",
+    "_tag": "Millis",
+    "millis": 30000
+  },
+  "providerHealthRefreshInterval": {
+    "_id": "Duration",
+    "_tag": "Millis",
+    "millis": 300000
+  },
+  "backgroundActivityProfile": "balanced",
+  "defaultTheme": "",
+  "defaultThemeSetAt": "",
+  "environmentIcon": null,
+  "defaultThreadEnvMode": null,
+  "newWorktreesStartFromOrigin": true,
+  "worktreeSubmodules": null,
+  "addProjectBaseDirectory": "",
+  "textGenerationModelSelection": {
+    "instanceId": "codex",
+    "model": "gpt-6-luna",
+    "options": [
+      {
+        "id": "reasoningEffort",
+        "value": "low"
+      }
+    ]
+  },
+  "threadTitleInstructions": "",
+  "branchNamingMode": "static",
+  "branchNamePrefix": "t3",
+  "branchNameInstructions": "",
+  "removeAgentCreditsOnMerge": false,
+  "sourceControlWritingStyle": {
+    "mode": "repo_conventions",
+    "customInstructions": "",
+    "followChangeRequestTemplates": true
+  },
+  "sourceControlWriterModelSelection": null,
+  "reviewGuidesEnabled": false,
+  "reviewGuideModelSelection": null,
+  "reviewGuideInstructions": "",
+  "pullRequestMergeMethod": null,
+  "providerInstances": {},
+  "observability": {
+    "otlpTracesUrl": "",
+    "otlpMetricsUrl": "",
+    "otlpLogsUrl": ""
+  },
+  "sourceControlHosts": {},
+  "usageLimitSources": {},
+  "secretProviders": {},
+  "cursorKeychainUsageEnabled": false,
+  "usagePriceOverrides": {},
+  "usageModelAliases": {}
+}
