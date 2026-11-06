@@ -52,12 +52,17 @@ fn prose(source: &str, t: &T) -> El {
         .filter(|s| !s.trim().is_empty())
         .enumerate()
     {
+        let mut block_style = style(t);
+        if block.starts_with("####") {
+            block_style =
+                block_style.heading_font(3, theme::weight(theme::TEXT_SM.lh(18.2), 600.0));
+        }
         let mut content = Markdown::new(block)
             .selectable(true)
             .on_link_tx(|_: &mut App, url, tx| {
                 let _ = tx.open_url(url);
             })
-            .render(&style(t));
+            .render(&block_style);
         if index > 0 && block.starts_with('#') {
             content = col().pt(9.6).child(content);
         }
@@ -74,6 +79,14 @@ fn prose(source: &str, t: &T) -> El {
 }
 
 fn table(source: &str, t: &T) -> El {
+    if source.contains("\\|") || source.lines().nth(1).is_some_and(|line| line.contains(':')) {
+        return Markdown::new(source)
+            .selectable(true)
+            .on_link_tx(|_: &mut App, url, tx| {
+                let _ = tx.open_url(url);
+            })
+            .render(&style(t));
+    }
     let lines: Vec<Vec<&str>> = source
         .lines()
         .enumerate()
