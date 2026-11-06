@@ -68,6 +68,8 @@ pub struct Ui {
     pub rename: Option<(String, TextEdit)>,
     /// The thread a delete confirmation is open for (`confirmThreadDelete`).
     pub delete: Option<String>,
+    /// The row whose hover card (`ThreadHoverCard`) is showing.
+    pub card: Option<String>,
     /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
     pub project_scope: Vec<String>,
     pub scope_open: bool,
@@ -84,8 +86,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             s.ui.shell.sidebar.selected.insert(id);
         }
     }),
-    // Pair with `--script` moving the pointer onto a row: `[{"t":0.1,"type":"move","x":120,"y":330}]`.
-    ("sidebar-hover", |s| scene_on(s, "Replay showcase")),
+    // The rested hover a pointer would leave: row styling plus its hover card.
+    ("sidebar-hover", |s| {
+        scene_on(s, "Replay showcase");
+        let id = thread_titled(s, "Idempotency key definition");
+        s.ui.shell.sidebar.hover = id.clone();
+        s.ui.shell.sidebar.card = id;
+    }),
     ("sidebar-rename", |s| {
         scene_on(s, "Replay showcase");
         if let Some(id) = thread_titled(s, "Todo list replay") {
@@ -618,6 +625,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     {
         overlays.extend(menu::view(s, cx, &model, th, m, t));
     }
+    row::hover_card(s, &model, t, overlays);
     delete_dialog(s, &model, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
