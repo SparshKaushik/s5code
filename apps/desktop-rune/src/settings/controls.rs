@@ -50,8 +50,9 @@ pub fn select_width(key: &str) -> f32 {
 
 fn current_label(s: &App, key: &str, options: &[(Value, String)]) -> String {
     let current = match value(s, key) {
-        // An unset workspace resolves to the current checkout (`resolveProjectSettings`).
+        // Unset values resolve to their built-in defaults (`resolveProjectSettings`).
         Value::Null if key == "defaultThreadEnvMode" => json!("local"),
+        Value::Null if key == "worktreeSubmodules" => json!("recursive"),
         current => current,
     };
     options

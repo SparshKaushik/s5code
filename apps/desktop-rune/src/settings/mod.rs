@@ -116,6 +116,9 @@ pub fn value(s: &App, key: &str) -> Value {
             return providers::field_value(s, id, field);
         }
     }
+    if let Some(field) = key.strip_prefix("storageCleanup.") {
+        return server_settings(s)["storageCleanup"][field].clone();
+    }
     if scope::project_key(key) {
         if let Some(project) = &s.ui.settings.project {
             if let Some(v) = server_settings(s)["projectSettingsOverrides"][project].get(key) {
@@ -157,7 +160,12 @@ pub fn update(s: &mut App, key: &str, value: Value) {
             s.client_settings.save();
         }
     } else {
-        let patch = if let Some(project) =
+        let patch = if let Some(field) = key.strip_prefix("storageCleanup.") {
+            // The whole object, so the optimistic copy (a shallow merge) keeps the other rules.
+            let mut cleanup = server_settings(s)["storageCleanup"].clone();
+            cleanup[field] = value;
+            json!({ "storageCleanup": cleanup })
+        } else if let Some(project) =
             s.ui.settings
                 .project
                 .as_ref()
