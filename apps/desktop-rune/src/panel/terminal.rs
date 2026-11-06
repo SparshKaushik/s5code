@@ -246,6 +246,7 @@ pub struct Ui {
     sequence: Option<u64>,
     status: String,
     grid: (usize, usize),
+    pending: Vec<u64>,
 }
 pub fn attach(app: &mut App) {
     let Some((thread, cwd)) = super::context(app) else {
@@ -259,7 +260,9 @@ pub fn attach(app: &mut App) {
             n.unwatch_resource("terminal.attach", payload);
         }
     }
+    let pending = std::mem::take(&mut app.ui.panel.terminal.pending);
     app.ui.panel.terminal = Ui::default();
+    app.ui.panel.terminal.pending = pending;
     let payload = json!({"threadId":thread,"terminalId":"term-1","cwd":cwd,"cols":80,"rows":40,"resume":true});
     app.ui.panel.terminal.thread = thread;
     app.ui.panel.terminal.grid = (80, 40);
@@ -270,15 +273,28 @@ pub fn attach(app: &mut App) {
     app.ui.panel.terminal.payload = Some(payload);
 }
 pub fn poll(app: &mut App) -> bool {
+    let pending = std::mem::take(&mut app.ui.panel.terminal.pending);
+    let mut reply_changed = false;
+    for id in pending {
+        match app.src.net().and_then(|net| net.take_reply(id)) {
+            None => app.ui.panel.terminal.pending.push(id),
+            Some(Err(error)) => {
+                app.ui.panel.terminal.status = error.to_string();
+                reply_changed = true;
+            }
+            Some(Ok(_)) => {}
+        }
+    }
+
     let Some(payload) = app.ui.panel.terminal.payload.clone() else {
-        return false;
+        return reply_changed;
     };
     let events = app
         .src
         .net()
         .map(|n| n.take_resource_events("terminal.attach", payload))
         .unwrap_or_default();
-    let changed = !events.is_empty();
+    let changed = !events.is_empty() || reply_changed;
     for event in events {
         apply(&mut app.ui.panel.terminal, &event);
     }
@@ -323,13 +339,23 @@ fn apply(ui: &mut Ui, event: &Value) {
 fn send(app: &mut App, data: String) {
     let thread = app.ui.panel.terminal.thread.clone();
     if let Some(n) = app.src.net() {
-        n.request(
+        let id = n.request(
             "terminal.write",
             json!({"threadId":thread,"terminalId":"term-1","data":data}),
         );
+        app.ui.panel.terminal.pending.push(id);
     }
 }
 fn key(app: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
+    if super::shortcut(app, e, "terminal.toggle") {
+        super::toggle_terminal(app);
+        return true;
+    }
+    if super::shortcut(app, e, "rightPanel.toggle") {
+        app.ui.shell.panel_open = !app.ui.shell.panel_open;
+        return true;
+    }
+
     let data = match &e.key {
         Key::Text(v) => {
             if e.mods.ctrl {
@@ -407,10 +433,10 @@ pub fn view(app: &App, t: &T) -> El {
         lines = lines.child(text(" ").font(font));
     }
     col().grow(1.).min_h(0.).child(row().h(32.).px(8.).center_y().child(text(format!("Terminal  {}",ui.status)).font(theme::TEXT_XS).color(t.c.muted_foreground).grow(1.))
-        .child(kit::Button::new("Clear terminal").icon(&icons::TRASH_2).variant("ghost-muted").size("icon-xs").on_press(|s:&mut App|{let thread=s.ui.panel.terminal.thread.clone();if let Some(n)=s.src.net(){n.request("terminal.clear",json!({"threadId":thread,"terminalId":"term-1"}));}s.ui.panel.terminal.screen.lines.clear();s.ui.panel.terminal.screen.x=0;s.ui.panel.terminal.screen.y=0;}).build(t)))
+        .child(kit::Button::new("Clear terminal").icon(&icons::TRASH_2).variant("ghost-muted").size("icon-xs").on_press(|s:&mut App|{let thread=s.ui.panel.terminal.thread.clone();if let Some(n)=s.src.net(){let id=n.request("terminal.clear",json!({"threadId":thread,"terminalId":"term-1"}));s.ui.panel.terminal.pending.push(id);}s.ui.panel.terminal.screen.lines.clear();s.ui.panel.terminal.screen.x=0;s.ui.panel.terminal.screen.y=0;}).build(t)))
         .child(el().grow(1.).min_h(0.).w_full().key("panel-terminal-grid").padding(8.).scroll(ScrollSpec {stick_bottom: true}).focusable(true).role("textbox").label("Terminal input").on_key(key).on_paste(|s:&mut App,v,_|send(s,v.into())).on_layout(move |s:&mut App,r|{
             let grid=(((r[2]-16.)/(size*0.6)).floor().clamp(1.,1000.) as usize,((r[3]-16.)/(size*1.2)).floor().clamp(1.,500.) as usize);
-            if s.ui.panel.terminal.grid!=grid {s.ui.panel.terminal.grid=grid;s.ui.panel.terminal.screen.size(grid.0,grid.1);let thread=s.ui.panel.terminal.thread.clone();if let Some(n)=s.src.net(){n.request("terminal.resize",json!({"threadId":thread,"terminalId":"term-1","cols":grid.0,"rows":grid.1}));}}
+            if s.ui.panel.terminal.grid!=grid {s.ui.panel.terminal.grid=grid;s.ui.panel.terminal.screen.size(grid.0,grid.1);let thread=s.ui.panel.terminal.thread.clone();if let Some(n)=s.src.net(){let id=n.request("terminal.resize",json!({"threadId":thread,"terminalId":"term-1","cols":grid.0,"rows":grid.1}));s.ui.panel.terminal.pending.push(id);}}
         }).child(lines))
 }
 pub fn fixture(app: &mut App) {
@@ -471,13 +497,16 @@ fn rgb(r: u8, g: u8, b: u8) -> Color {
 pub fn close(app: &mut App) {
     let ui = &mut app.ui.panel.terminal;
     if let Some(net) = app.src.net() {
-        net.request(
+        let id = net.request(
             "terminal.close",
             json!({"threadId":ui.thread,"terminalId":"term-1"}),
         );
+        ui.pending.push(id);
         if let Some(payload) = ui.payload.take() {
             net.unwatch_resource("terminal.attach", payload);
         }
     }
+    let pending = std::mem::take(&mut ui.pending);
     *ui = Ui::default();
+    ui.pending = pending;
 }
