@@ -670,21 +670,21 @@
         {
           "key": "guestSharingEnabled",
           "title": "Guest links",
-          "description": "",
+          "description": "Share a thread with a guest who watches it live in their browser and sends messages you approve. Needs T3 Connect: sign in and link this machine in [Sharing & access](/settings/access). While it is off, every guest link stops working.",
           "kind": "switch",
           "options": []
         },
         {
           "key": "linkedEnvironmentsEnabled",
           "title": "Linked environments",
-          "description": "",
+          "description": "Let agents here work on your other machines, and theirs here. Turn it on for each machine, then link them in [Connections](/settings/connections). While it is off, nothing new starts over a link; tasks already running finish.",
           "kind": "switch",
           "options": []
         },
         {
           "key": "simlockDeviceHostsEnabled",
           "title": "Simlock device hosts (alpha)",
-          "description": "",
+          "description": "Let the Device panel lease simulators and emulators from your own [Simlock](https://incubator.callstack.com/simlock/) pool, added in [Devices](/settings/devices). An alpha that may change or break. T3 Code never installs Simlock.",
           "kind": "switch",
           "options": []
         }

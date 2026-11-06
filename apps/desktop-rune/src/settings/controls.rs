@@ -108,6 +108,24 @@ pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width
         .build(&crate::kit::theme(t), layer);
 }
 
+/// Markdown `[label](href)` links in a description: the plain copy and each label's byte range.
+fn links(copy: &str) -> (String, Vec<(std::ops::Range<usize>, String)>) {
+    let mut plain = String::new();
+    let mut links = Vec::new();
+    let mut rest = copy;
+    while let Some(open) = rest.find('[') {
+        let Some((label, after)) = rest[open + 1..].split_once("](") else { break };
+        let Some((href, tail)) = after.split_once(')') else { break };
+        plain.push_str(&rest[..open]);
+        let start = plain.len();
+        plain.push_str(label);
+        links.push((start..plain.len(), href.to_owned()));
+        rest = tail;
+    }
+    plain.push_str(rest);
+    (plain, links)
+}
+
 pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
@@ -135,18 +153,37 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         .gap(4.0)
         .child(heading);
     if !description.is_empty() {
-        copy = copy.child(
-            text(super::balance::description(
-                description,
-                cx.layout(&format!("copy-{key}"))
-                    .map(|r| r[2])
-                    .unwrap_or(558.0)
-                    .min(672.0),
-            ))
-            .font(theme::TEXT_XS.lh(18.0))
-            .color(t.c.muted_foreground)
-            .wrap(),
-        );
+        let (plain, links) = links(description);
+        let mut body = text(super::balance::description(
+            &plain,
+            cx.layout(&format!("copy-{key}"))
+                .map(|r| r[2])
+                .unwrap_or(558.0)
+                .min(672.0),
+        ))
+        .font(theme::TEXT_XS.lh(18.0))
+        .color(t.c.muted_foreground)
+        .wrap();
+        if !links.is_empty() {
+            let underline = t.c.muted_foreground.alpha_mul(0.5);
+            body = body.spans(
+                links
+                    .iter()
+                    .map(|(r, _)| rune::Span::new(r.start, r.end).underline(underline))
+                    .collect::<Vec<_>>(),
+            );
+            for (range, href) in links {
+                body = body.link(
+                    rune::Link::new(range, href)
+                        .hover(rune::LinkPaint::new().color(t.c.foreground).underline(t.c.foreground)),
+                );
+            }
+            body = body.on_link(|s: &mut App, href: &str, _tx: &mut rune::Tx| match href.strip_prefix("/settings/") {
+                Some(page) => s.navigate(crate::Route::Settings(page.into())),
+                None => super::auth::open_url(s, href),
+            });
+        }
+        copy = copy.child(body);
     }
     let ctrl = match spec["kind"].as_str() {
         Some("switch") => row()
