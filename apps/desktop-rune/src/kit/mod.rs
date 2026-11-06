@@ -3,6 +3,16 @@
 #![allow(dead_code, unused_imports)]
 pub mod button;
 mod actions;
+mod checkbox;
+mod switch;
+mod radio;
+mod segmented;
+mod toggle;
+pub use checkbox::Checkbox;
+pub use switch::Switch;
+pub use radio::{RadioGroup, RadioItem};
+pub use segmented::SegmentedControl;
+pub use toggle::{ToggleGroup, Tabs};
 pub mod menu;
 pub use menu::{Menu, MenuEntry, MenuItem, context_menu};
 mod dialog;
@@ -21,8 +31,8 @@ pub use gallery::SCENES;
 use rune::{El, TextEdit, col, el, row, text};
 use rune_kit::ScrollBar;
 pub use rune_kit::{
-    Checkbox, Combobox, ComboboxOption, ComboboxState, Placement,
-    Popover, Progress, RadioGroup, RadioItem, SegmentedControl, Select, Spinner, State, Switch,
+    Combobox, ComboboxOption, ComboboxState, Placement,
+    Popover, Progress, Select, Spinner, State,
     TextArea, Toast, ToastRegion, Tooltip,
 };
 
