@@ -12,6 +12,8 @@ pub struct Ui {
     pub to: u64,
     pending: Option<u64>,
     error: Option<String>,
+    all: bool,
+    select_open: bool,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -21,6 +23,8 @@ impl Default for Ui {
             to: 0,
             pending: None,
             error: None,
+            all: true,
+            select_open: false,
         }
     }
 }
@@ -52,7 +56,7 @@ pub fn load(app: &mut App) {
             DiffMode::Unified
         });
     let payload = json!({"threadId":id,"fromTurnCount":ui.from,"toTurnCount":ui.to,"ignoreWhitespace":app.client_settings.values["diffIgnoreWhitespace"].as_bool().unwrap_or(true)});
-    let (method, payload) = if ui.from == 0 {
+    let (method, payload) = if ui.all {
         (
             "orchestration.getFullThreadDiff",
             json!({"threadId":id,"toTurnCount":ui.to,"ignoreWhitespace":app.client_settings.values["diffIgnoreWhitespace"].as_bool().unwrap_or(true)}),
@@ -89,41 +93,31 @@ pub fn view(app: &App, t: &T) -> El {
         .px(8.)
         .gap(4.)
         .center_y()
-        .child(
-            kit::Button::new(if ui.from == 0 {
-                "All turns".into()
-            } else {
-                format!("Turn {}", ui.to)
-            })
-            .variant("ghost-muted")
-            .size("xs")
-            .on_press(|s: &mut App| {
-                s.ui.panel.diff.from = 0;
-                load(s);
-            })
-            .build(t),
-        )
+        .child(selector(app).trigger(&kit::theme(t)))
         .child(
             kit::Button::new("Previous turn")
                 .icon(&icons::CHEVRON_LEFT)
                 .variant("ghost-muted")
                 .size("icon-xs")
-                .disabled(ui.to == 0)
+                .disabled(ui.to <= 1)
                 .on_press(|s: &mut App| {
                     s.ui.panel.diff.to = s.ui.panel.diff.to.saturating_sub(1);
                     s.ui.panel.diff.from = s.ui.panel.diff.to.saturating_sub(1);
+                    s.ui.panel.diff.all = false;
                     load(s);
                 })
                 .build(t),
         )
         .child(
             kit::Button::new("Next turn")
+                .disabled(ui.to >= latest(app))
                 .icon(&icons::CHEVRON_RIGHT)
                 .variant("ghost-muted")
                 .size("icon-xs")
                 .on_press(|s: &mut App| {
                     s.ui.panel.diff.to += 1;
                     s.ui.panel.diff.from = s.ui.panel.diff.to.saturating_sub(1);
+                    s.ui.panel.diff.all = false;
                     load(s);
                 })
                 .build(t),
@@ -209,4 +203,72 @@ pub fn fixture(app: &mut App) {
         .diff
         .state
         .set_files(rune_kit::diff::parse(value["diff"].as_str().unwrap()));
+}
+
+fn latest(app: &App) -> u64 {
+    super::context(app)
+        .and_then(|(id, _)| app.state().thread_views.get(&id))
+        .and_then(|v| v.projection["checkpoints"].as_array())
+        .map(|v| {
+            v.iter()
+                .filter_map(|v| v["appRunOrdinal"].as_u64())
+                .max()
+                .unwrap_or(0)
+        })
+        .unwrap_or(0)
+}
+fn selector(app: &App) -> kit::Select {
+    let mut options = vec!["All turns".to_string()];
+    if let Some((id, _)) = super::context(app) {
+        if let Some(rows) = app
+            .state()
+            .thread_views
+            .get(&id)
+            .and_then(|v| v.projection["checkpoints"].as_array())
+        {
+            for row in rows {
+                if let Some(n) = row["appRunOrdinal"].as_u64() {
+                    options.push(format!("Turn {n}"));
+                }
+            }
+        }
+    }
+    let selected = if app.ui.panel.diff.all {
+        "All turns".into()
+    } else {
+        format!("Turn {}", app.ui.panel.diff.to)
+    };
+    kit::Select::new("panel-turn-select", &options)
+        .label("Select turns")
+        .current(Some(&selected))
+        .width(130.)
+        .size("compact")
+        .variant("ghost")
+        .open(app.ui.panel.diff.select_open)
+        .on_toggle(|s: &mut App| s.ui.panel.diff.select_open = !s.ui.panel.diff.select_open)
+        .on_close(|s: &mut App| s.ui.panel.diff.select_open = false)
+        .on_choose(|s: &mut App, value, _| {
+            s.ui.panel.diff.select_open = false;
+            s.ui.panel.diff.all = value == "All turns";
+            s.ui.panel.diff.to = value
+                .strip_prefix("Turn ")
+                .and_then(|v| v.parse().ok())
+                .unwrap_or_else(|| latest(s));
+            s.ui.panel.diff.from = if s.ui.panel.diff.all {
+                0
+            } else {
+                s.ui.panel.diff.to.saturating_sub(1)
+            };
+            load(s);
+        })
+}
+pub fn overlays(app: &App, t: &T) -> Vec<El> {
+    let mut layers = vec![];
+    if app.ui.panel.diff.select_open {
+        selector(app).build(&kit::theme(t), &mut layers);
+    }
+    layers
+}
+pub fn select_checkpoint(app: &mut App) {
+    app.ui.panel.diff.all = false;
 }

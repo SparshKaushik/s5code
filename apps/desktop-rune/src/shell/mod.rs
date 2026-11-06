@@ -41,6 +41,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         overlays.clear();
         overlays.push(settings::view(s, cx, t));
     }
+    overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
     rune_kit::root(body, overlays)
 }

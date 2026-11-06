@@ -124,7 +124,7 @@ impl Screen {
             'B' => self.y = (self.y + amount).min(4000),
             'C' => self.x = (self.x + amount).min(self.cols.max(1) - 1),
             'D' => self.x = self.x.saturating_sub(amount),
-            'G' => self.x = amount - 1,
+            'G' => self.x = (amount - 1).min(self.cols.max(1) - 1),
             'H' | 'f' => {
                 let top = self.lines.len().saturating_sub(self.rows);
                 self.y = top + amount.saturating_sub(1).min(self.rows.max(1) - 1);

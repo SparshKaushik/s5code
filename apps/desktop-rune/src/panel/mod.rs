@@ -46,6 +46,7 @@ pub struct Ui {
     browser: browser::Browser,
     url: TextEdit,
     browser_started: bool,
+    thread: String,
     pub waker: Option<Waker>,
 }
 impl Default for Ui {
@@ -60,6 +61,7 @@ impl Default for Ui {
             browser: Default::default(),
             url: TextEdit::new(""),
             browser_started: false,
+            thread: String::new(),
             waker: None,
         }
     }
@@ -123,15 +125,37 @@ pub fn open_diff(app: &mut App, checkpoint: Value) {
         .or(checkpoint["appRunOrdinal"].as_u64())
         .unwrap_or(1);
     app.ui.panel.diff.from = app.ui.panel.diff.to.saturating_sub(1);
+    diff::select_checkpoint(app);
     activate(app, Surface::Diff);
 }
 pub fn poll(app: &mut App) -> bool {
+    let mut context_changed = false;
+    if matches!(app.src, crate::data::Source::Live(_)) {
+        let thread = context(app).map(|(id, _)| id).unwrap_or_default();
+        if app.ui.panel.thread != thread {
+            app.ui.panel.thread = thread;
+            app.ui.panel.diff = diff::Ui::default();
+            app.ui.panel.files = files::Ui::default();
+            if app.ui.shell.panel_open {
+                match app.ui.panel.active {
+                    Some(Surface::Diff) => diff::load(app),
+                    Some(Surface::Files) => files::load(app, String::new()),
+                    _ => {}
+                }
+            }
+            context_changed = true;
+        }
+        if app.ui.panel.active == Some(Surface::Terminal) {
+            terminal::attach(app);
+        }
+    }
+
     let mut changed = diff::poll(app) | files::poll(app) | terminal::poll(app);
     if app.ui.chat.topbar.terminal_open && app.ui.panel.active != Some(Surface::Terminal) {
         activate(app, Surface::Terminal);
         changed = true;
     }
-    changed
+    changed | context_changed
 }
 fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
     app.state()
@@ -583,4 +607,12 @@ pub(super) fn notice(t: &T, message: &str) -> El {
             .font(theme::TEXT_XS)
             .color(t.c.muted_foreground.alpha_mul(0.7)),
     )
+}
+
+pub fn overlays(app: &App, t: &T) -> Vec<El> {
+    if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
+        diff::overlays(app, t)
+    } else {
+        vec![]
+    }
 }
