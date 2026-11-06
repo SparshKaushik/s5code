@@ -112,19 +112,27 @@ pub fn separator(t: &T) -> El {
         .h(1.)
         .fill(t.c.contrast_border)
 }
+/// Vertical rule: `vertical_separator(t)` in a row with a bounded height.
+pub fn vertical_separator(t: &T) -> El {
+    el().role("separator")
+        .w(1.)
+        .self_stretch()
+        .fill(t.c.contrast_border)
+}
 /// Keyboard hint: `kbd("⌘K", t)`.
 pub fn kbd(label: &str, t: &T) -> El {
     row()
         .role("note")
         .center()
         .h(20.)
+        .min_w(20.)
         .px(4.)
         .radius(4.)
-        .fill(t.c.contrast_foreground.alpha_mul(0.08))
+        .fill(t.c.contrast_foreground.alpha_mul(0.07))
         .child(
             text(label)
                 .font(theme::XS_MEDIUM)
-                .color(t.c.contrast_foreground),
+                .color(t.c.contrast_muted_foreground),
         )
 }
 /// Static loading placeholder: `skeleton(240., 16., t)`; no idle repaint.

@@ -10,7 +10,7 @@ pub struct Select {
     key: String,
     options: Vec<String>,
     current: Option<String>,
-    disabled_options:Vec<String>,
+    disabled_options: Vec<String>,
     placeholder: String,
     label: Option<String>,
     open: bool,
@@ -29,7 +29,7 @@ impl Select {
             key: key.into(),
             options: options.iter().map(|v| v.as_ref().into()).collect(),
             current: None,
-            disabled_options:vec![],
+            disabled_options: vec![],
             placeholder: "Select".into(),
             label: None,
             open: false,
@@ -43,7 +43,10 @@ impl Select {
             close: None,
         }
     }
-    pub fn disabled_option(mut self,value:impl Into<String>)->Self {self.disabled_options.push(value.into());self}
+    pub fn disabled_option(mut self, value: impl Into<String>) -> Self {
+        self.disabled_options.push(value.into());
+        self
+    }
     pub fn current(mut self, value: Option<&str>) -> Self {
         self.current = value.map(str::to_owned);
         self
@@ -179,7 +182,9 @@ impl Select {
             .placement(Placement::BottomStart)
             .open(self.open && !disabled);
         for option in self.options {
-            let mut item = MenuItem::new(&option).option(self.current.as_ref() == Some(&option)).disabled(self.disabled_options.contains(&option));
+            let mut item = MenuItem::new(&option)
+                .option(self.current.as_ref() == Some(&option))
+                .disabled(self.disabled_options.contains(&option));
             if let Some(choose) = &self.choose {
                 let action = choose(&option);
                 // The shared row renderer drops this transformation for disabled rows.

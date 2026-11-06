@@ -1,4 +1,4 @@
-//! RadioGroup and RadioItem (`@opencode/ui` forms/radio).
+//! Web radio items with Rune arrow-key group navigation.
 
 use rune::{El, Shadow, TextStyle, Tx, col, el, row, text};
 
@@ -79,7 +79,11 @@ impl RadioItem {
         if self.state == State::Focus {
             control = control.outline(2., -2., c.border_focus);
         }
-        let control=if disabled {control.opacity(0.64)}else{control};
+        let control = if disabled {
+            control.opacity(0.64)
+        } else {
+            control
+        };
         let label_color = c.text_base;
         let mut words = col().key("text").gap(6.0).child(
             text(self.label.clone())

@@ -485,7 +485,8 @@ impl Menu {
             .anchor
             .clone()
             .unwrap_or_else(|| format!("{}-trigger", self.key));
-        let trigger = row().self_start()
+        let trigger = row()
+            .self_start()
             .key(key.clone())
             .children(self.trigger.take().map(|t| t.expanded(self.open)));
         if !self.open {

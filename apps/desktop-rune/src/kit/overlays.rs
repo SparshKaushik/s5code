@@ -151,7 +151,8 @@ impl Popover {
     }
     pub fn build(self, k: &Kit, layer: &mut Vec<El>) -> El {
         let key = format!("{}-trigger", self.key);
-        let trigger = row().self_start()
+        let trigger = row()
+            .self_start()
             .key(key.clone())
             .children(self.trigger.map(|e| e.expanded(self.open)));
         if !self.open {

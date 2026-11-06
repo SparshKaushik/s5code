@@ -365,7 +365,11 @@ impl<S: 'static> Combobox<S> {
                 true
             })
             .key("search");
-        let mut rows = col().w_full().growth(rune::GrowthSpec::default()).virtualize(28.).reveal_selected(true);
+        let mut rows = col()
+            .w_full()
+            .growth(rune::GrowthSpec::default())
+            .virtualize(28.)
+            .reveal_selected(true);
         for (position, original) in choices.iter().copied().enumerate() {
             let option = &self.options[original];
             let selected = self.current.as_deref() == Some(&option.id);

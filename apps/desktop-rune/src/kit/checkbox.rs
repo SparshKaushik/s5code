@@ -55,7 +55,7 @@ impl Checkbox {
         self.indeterminate = on;
         self
     }
-    /// Replace the check mark (the web's `icon` prop), drawn at 14 points.
+    /// Replace the check mark (the web's `icon` prop), drawn at 12 points.
     pub fn icon(mut self, i: &'static Icon) -> Self {
         self.glyph = Some(i);
         self
