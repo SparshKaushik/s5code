@@ -35,7 +35,7 @@ pub fn load(app: &mut App) {
         .and_then(|v| v.projection["checkpoints"].as_array())
         .map(|rows| {
             rows.iter()
-                .filter_map(|r| r["turnCount"].as_u64())
+                .filter_map(|r| r["appRunOrdinal"].as_u64())
                 .max()
                 .unwrap_or(0)
         })

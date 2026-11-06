@@ -102,9 +102,24 @@ fn close(app: &mut App, surface: Surface) {
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
+    let checkpoint = if checkpoint["appRunOrdinal"].is_null() {
+        if let Route::Thread(id) = &app.route {
+            app.state()
+                .thread_views
+                .get(id)
+                .and_then(|v| v.projection["checkpoints"].as_array())
+                .and_then(|rows| rows.iter().find(|v| v["id"] == checkpoint["checkpointId"]))
+                .cloned()
+                .unwrap_or(checkpoint)
+        } else {
+            checkpoint
+        }
+    } else {
+        checkpoint
+    };
     app.ui.panel.diff.to = checkpoint["checkpointTurnCount"]
         .as_u64()
-        .or(checkpoint["turnCount"].as_u64())
+        .or(checkpoint["appRunOrdinal"].as_u64())
         .unwrap_or(1);
     app.ui.panel.diff.from = app.ui.panel.diff.to.saturating_sub(1);
     activate(app, Surface::Diff);
@@ -243,6 +258,31 @@ fn picker(app: &App, t: &T) -> El {
                 )
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
                 .on_press(move |s: &mut App| activate(s, surface)),
+        );
+    }
+    for (title, glyph, key) in [
+        ("Pull request", &icons::GIT_PULL_REQUEST, "P"),
+        ("Linked pull requests", &icons::LINK, "L"),
+        ("Device", &icons::SMARTPHONE, "M"),
+    ] {
+        list = list.child(
+            row()
+                .h(32.)
+                .px(10.)
+                .gap(10.)
+                .center_y()
+                .opacity(0.5)
+                .role("button")
+                .label(title)
+                .disabled(true)
+                .child(icon(glyph).size(16., 16.).color(t.c.contrast_foreground))
+                .child(
+                    text(title)
+                        .font(theme::TEXT_SM)
+                        .color(t.c.contrast_foreground)
+                        .grow(1.),
+                )
+                .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground)),
         );
     }
     col()
@@ -465,6 +505,11 @@ fn browser_view(app: &App, t: &T) -> El {
                     Key::Return => browser::Cmd::Key("Enter"),
                     Key::Backspace => browser::Cmd::Key("Backspace"),
                     Key::Tab => browser::Cmd::Key("Tab"),
+                    Key::Left => browser::Cmd::Key("ArrowLeft"),
+                    Key::Right => browser::Cmd::Key("ArrowRight"),
+                    Key::Up => browser::Cmd::Key("ArrowUp"),
+                    Key::Down => browser::Cmd::Key("ArrowDown"),
+                    Key::Escape => browser::Cmd::Key("Escape"),
                     _ => return false,
                 };
                 s.ui.panel.browser.send(cmd);
