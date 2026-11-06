@@ -1,4 +1,7 @@
+mod attachments;
 mod markdown;
+
+mod language_icons;
 mod requests;
 mod rows;
 mod scenes;
@@ -15,7 +18,12 @@ pub use scenes::SCENES;
 
 #[derive(Default)]
 pub struct Ui {
+    assets: attachments::Assets,
+    pub diff_target: Option<Value>,
+    responding: HashMap<String, u64>,
+    response_errors: HashMap<String, String>,
     pub expanded: HashSet<String>,
+    pub question_index: HashMap<String, usize>,
     pub wrapped: HashSet<String>,
     pub custom_answers: HashMap<String, rune::TextEdit>,
     pub answers: HashMap<String, HashMap<String, Vec<String>>>,
@@ -41,9 +49,10 @@ fn button(label: &str, t: &T) -> El {
 
 pub(super) fn copy_button(content: &str, t: &T) -> El {
     let content = content.to_owned();
-    icon(&icons::COPY, 12.0)
-        .color(t.c.muted_foreground)
-        .padding(6.0)
+    row()
+        .size(24.0, 24.0)
+        .center()
+        .child(icon(&icons::COPY, 12.0).color(t.c.muted_foreground))
         .radius(4.0)
         .hover(t.c.muted)
         .focusable(true)
@@ -91,33 +100,109 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         }
         return card;
     }
-    if matches!(kind, "error" | "notification" | "system_notice") {
-        let detail = ["message", "text", "title"]
-            .into_iter()
-            .map(|key| s(item, key))
-            .find(|v| !v.is_empty())
-            .unwrap_or("An error occurred");
+    if kind == "compaction" {
+        let active = matches!(s(item, "status"), "pending" | "running" | "waiting");
+        let failed = s(item, "status") == "failed";
+        let label = if active {
+            "Compacting context".to_owned()
+        } else if failed {
+            "Context compaction failed".to_owned()
+        } else if let (Some(before), Some(after)) = (
+            item["beforeTokenCount"].as_u64(),
+            item["afterTokenCount"].as_u64(),
+        ) {
+            format!("Context compacted {before} → {after} tokens")
+        } else {
+            "Context compacted".to_owned()
+        };
+        let color = if failed {
+            t.c.destructive
+        } else {
+            t.c.muted_foreground
+        };
         return row()
-            .gap(8.0)
-            .padding(12.0)
-            .radius(8.0)
-            .fill(t.c.destructive.alpha_mul(0.08))
-            .border(1.0, t.c.destructive.alpha_mul(0.25))
-            .child(icon(&icons::CIRCLE_ALERT, 16.0).color(t.c.destructive))
-            .child(text(detail).font(theme::TEXT_SM).color(t.c.destructive));
+            .w_full()
+            .gap(12.0)
+            .py(4.0)
+            .child(el().grow(1.0).h(1.0).fill(t.c.border.alpha_mul(0.7)))
+            .child(icon(&icons::MINIMIZE_2, 12.0).color(color))
+            .child(text(label).font(theme::TEXT_XS).color(color))
+            .child(el().grow(1.0).h(1.0).fill(t.c.border.alpha_mul(0.7)));
+    }
+    if matches!(kind, "error" | "notification" | "system_notice") {
+        let detail = [
+            s(&item["failure"], "message"),
+            s(item, "message"),
+            s(item, "text"),
+            s(item, "title"),
+        ]
+        .into_iter()
+        .find(|v| !v.is_empty())
+        .unwrap_or("An error occurred");
+        let mut notice = col()
+            .gap(4.0)
+            .child(text(detail).font(theme::TEXT_SM).color(if kind == "error" {
+                t.c.destructive
+            } else {
+                t.c.muted_foreground
+            }));
+        if let Some(attempt) = item["retry"]["attempt"].as_u64() {
+            notice = notice.child(
+                text(format!(
+                    "Retrying… (attempt {attempt}{})",
+                    item["retry"]["maxAttempts"]
+                        .as_u64()
+                        .map(|max| format!("/{max}"))
+                        .unwrap_or_default()
+                ))
+                .font(theme::TEXT_XS)
+                .color(t.c.muted_foreground),
+            );
+        }
+        return row()
+            .gap(12.0)
+            .px(4.0)
+            .py(4.0)
+            .child(
+                icon(
+                    if kind == "error" {
+                        &icons::CIRCLE_ALERT
+                    } else {
+                        &icons::INFO
+                    },
+                    16.0,
+                )
+                .color(if kind == "error" {
+                    t.c.destructive
+                } else {
+                    t.c.muted_foreground
+                }),
+            )
+            .child(notice);
     }
     if kind == "checkpoint" {
         let files = array(item, "files");
+        let checkpoint = item.clone();
+        let additions: u64 = files.iter().filter_map(|f| f["additions"].as_u64()).sum();
+        let deletions: u64 = files.iter().filter_map(|f| f["deletions"].as_u64()).sum();
         return row()
+            .focusable(true)
+            .role("button")
+            .label("View changes")
+            .radius(6.0)
+            .hover(t.c.muted)
+            .on_press(move |app: &mut App| crate::panel::open_diff(app, checkpoint.clone()))
             .gap(6.0)
             .px(4.0)
             .py(6.0)
             .child(icon(&icons::FILES, 14.0).color(t.c.muted_foreground))
             .child(
                 text(format!(
-                    "{} file{} changed",
+                    "{} file{} changed  +{} −{}",
                     files.len(),
-                    if files.len() == 1 { "" } else { "s" }
+                    if files.len() == 1 { "" } else { "s" },
+                    additions,
+                    deletions
                 ))
                 .font(theme::TEXT_XS)
                 .color(t.c.muted_foreground),
@@ -216,39 +301,80 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
 }
 
 fn respond(app: &mut App, thread: &str, request: &str, fields: Value) {
-    if let Some(net) = app.src.net() {
-        let mut command = json!({"type":"runtime-request.respond","commandId":s5_net::uuid(),"threadId":thread,"requestId":request});
-        if let Some(fields) = fields.as_object() {
-            for (k, v) in fields {
-                command[k] = v.clone();
-            }
-        }
-        net.dispatch(command);
+    if app.ui.chat.timeline.responding.contains_key(request) {
+        return;
     }
+    if let Some(net) = app.src.net() {
+        let command = requests::command(thread, request, fields);
+        let rpc = net.dispatch(command);
+        app.ui
+            .chat
+            .timeline
+            .responding
+            .insert(request.to_owned(), rpc);
+        app.ui.chat.timeline.response_errors.remove(request);
+    }
+}
+
+pub fn poll(app: &mut App) -> bool {
+    let mut changed = attachments::poll(app);
+    let Some(net) = app.src.net() else {
+        return changed;
+    };
+    let ui = &mut app.ui.chat.timeline;
+    ui.responding.retain(|id, rpc| {
+        let Some(reply) = net.take_reply(*rpc) else {
+            return true;
+        };
+        changed = true;
+        if let Err(error) = reply {
+            ui.response_errors.insert(id.clone(), error.to_string());
+        }
+        false
+    });
+    changed
 }
 
 fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value>, t: &T) -> El {
     let item = item.unwrap_or(request);
     let request_id = s(request, "id");
     let live = s(&request["responseCapability"], "type") == "live";
-    let question = s(request, "kind") == "user_input" || s(item, "type") == "user_input";
-    let mut card = col()
-        .gap(8.0)
-        .padding(12.0)
-        .radius(8.0)
-        .border(1.0, t.c.border)
-        .w_full();
-    card = card.child(
-        text(if question {
-            "Question"
-        } else {
-            "Waiting for approval"
-        })
-        .font(theme::SM_MEDIUM)
-        .color(t.c.foreground),
-    );
+    let question = s(request, "kind") == "user_input" || s(item, "type") == "user_input_request";
+    let can_answer = s(&request["responseCapability"], "type") != "not_resumable";
+    let mut card = col().gap(4.0).w_full();
     if question {
-        for q in array(item, "questions") {
+        card = card
+            .padding(16.0)
+            .radius(16.0)
+            .fill(t.c.secondary)
+            .border(1.0, t.c.border);
+    }
+    if question {
+        let questions = array(item, "questions");
+        let index = app
+            .ui
+            .chat
+            .timeline
+            .question_index
+            .get(request_id)
+            .copied()
+            .unwrap_or(0)
+            .min(questions.len().saturating_sub(1));
+        card = card.child(
+            text(format!(
+                "{} · {}/{}",
+                questions
+                    .get(index)
+                    .map(|q| s(q, "header"))
+                    .filter(|s| !s.is_empty())
+                    .unwrap_or("Question"),
+                index + 1,
+                questions.len()
+            ))
+            .font(theme::SM_MEDIUM)
+            .color(t.c.foreground),
+        );
+        for q in questions.iter().skip(index).take(1) {
             let qid = s(q, "id");
             card = card.child(
                 text(s(q, "question"))
@@ -269,8 +395,10 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
                 let multiple = q["multiSelect"].as_bool().unwrap_or(false);
                 let (r, q, l) = (request_id.to_owned(), qid.to_owned(), value.to_owned());
                 card = card.child(
-                    button(&format!("{} {label}", if selected { "●" } else { "○" }), t).on_press(
-                        move |app: &mut App| {
+                    button(&format!("{} {label}", if selected { "●" } else { "○" }), t)
+                        .w_full()
+                        .py(6.0)
+                        .on_press(move |app: &mut App| {
                             let values = app
                                 .ui
                                 .chat
@@ -289,10 +417,9 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
                             } else {
                                 *values = vec![l.clone()];
                             }
-                        },
-                    ),
+                        }),
                 );
-                if !s(option, "description").is_empty() {
+                if !s(option, "description").is_empty() && s(option, "description") != label {
                     card = card.child(
                         text(s(option, "description"))
                             .font(theme::TEXT_XS)
@@ -332,25 +459,52 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
         }
         let (thread, r) = (thread_id.to_owned(), request_id.to_owned());
         let question_item = item.clone();
-        card = card.child(button("Submit answers", t).on_press(move |app: &mut App| {
-            let selected = app
-                .ui
-                .chat
-                .timeline
-                .answers
-                .get(&r)
-                .cloned()
-                .unwrap_or_default();
-            let answers = requests::answers(&question_item, &selected, |qid| {
+        if can_answer && index + 1 < questions.len() {
+            let r = r.clone();
+            card = card.child(button("Next", t).on_press(move |app: &mut App| {
                 app.ui
                     .chat
                     .timeline
-                    .custom_answers
-                    .get(&format!("{r}/{qid}"))
-                    .map(|e| e.text.clone())
-            });
-            respond(app, &thread, &r, json!({"answers":answers}));
-        }));
+                    .question_index
+                    .insert(r.clone(), index + 1);
+            }));
+        } else if can_answer {
+            card = card.child(button("Submit answers", t).on_press(move |app: &mut App| {
+                let selected = app
+                    .ui
+                    .chat
+                    .timeline
+                    .answers
+                    .get(&r)
+                    .cloned()
+                    .unwrap_or_default();
+                let answers = requests::answers(&question_item, &selected, |qid| {
+                    app.ui
+                        .chat
+                        .timeline
+                        .custom_answers
+                        .get(&format!("{r}/{qid}"))
+                        .map(|e| e.text.clone())
+                });
+                respond(app, &thread, &r, json!({"answers":answers}));
+            }));
+        } else {
+            card = card.child(
+                text("Provider process is gone. Interrupt or restart the run to respond.")
+                    .font(theme::TEXT_XS)
+                    .color(t.c.muted_foreground),
+            );
+        }
+        if index > 0 {
+            let r = request_id.to_owned();
+            card = card.child(button("Previous", t).on_press(move |app: &mut App| {
+                app.ui
+                    .chat
+                    .timeline
+                    .question_index
+                    .insert(r.clone(), index - 1);
+            }));
+        }
     } else {
         let detail = ["prompt", "detail", "command", "input", "title"]
             .iter()
@@ -359,22 +513,38 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
             .cloned()
             .unwrap_or(Value::Null);
         card = card.child(
-            text(
-                detail
-                    .as_str()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| detail.to_string()),
-            )
-            .font(theme::MONO_XS)
-            .color(t.c.foreground),
+            row()
+                .gap(12.0)
+                .child(icon(&icons::TERMINAL, 16.0).color(t.c.muted_foreground))
+                .child(
+                    text(
+                        detail
+                            .as_str()
+                            .map(str::to_owned)
+                            .unwrap_or_else(|| detail.to_string()),
+                    )
+                    .font(theme::MONO_XS.lh(20.0))
+                    .color(t.c.foreground),
+                ),
         );
         if live {
-            let mut actions = row().gap(8.0);
+            let more_key = format!("approval-more-{request_id}");
+            let more = app.ui.chat.timeline.expanded.contains(&more_key);
+            let mut actions = row()
+                .gap(8.0)
+                .pl(28.0)
+                .child(icon(&icons::SHIELD, 12.0).color(t.c.muted_foreground))
+                .child(
+                    text("Waiting for approval ·")
+                        .font(theme::TEXT_XS)
+                        .color(t.c.muted_foreground),
+                );
             let options: Vec<_> = if array(item, "options").is_empty() {
                 vec![
-                    ("Allow once", "accept"),
-                    ("Allow for session", "acceptForSession"),
-                    ("Deny", "decline"),
+                    ("Decline", "decline"),
+                    ("Approve", "accept"),
+                    ("Always allow this session", "acceptForSession"),
+                    ("Cancel", "cancel"),
                 ]
             } else {
                 array(item, "options")
@@ -382,12 +552,24 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
                     .map(|o| (s(o, "label"), s(o, "decision")))
                     .collect()
             };
+            let has_more = options
+                .iter()
+                .any(|(_, d)| !matches!(*d, "accept" | "decline"));
             for (label, decision) in options {
+                if !more && !matches!(decision, "accept" | "decline") {
+                    continue;
+                }
                 let decision = decision.to_owned();
                 let (thread, r) = (thread_id.to_owned(), request_id.to_owned());
                 actions = actions.child(button(label, t).on_press(move |app: &mut App| {
                     respond(app, &thread, &r, json!({"decision":decision}))
                 }));
+            }
+            if has_more {
+                actions = actions.child(
+                    button(if more { "Less" } else { "More" }, t)
+                        .on_press(move |app: &mut App| toggle(app, &more_key)),
+                );
             }
             card = card.child(actions);
         } else {
@@ -397,6 +579,16 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
                     .color(t.c.muted_foreground),
             );
         }
+    }
+    if app.ui.chat.timeline.responding.contains_key(request_id) {
+        card = card.child(
+            text("Responding…")
+                .font(theme::TEXT_XS)
+                .color(t.c.muted_foreground),
+        );
+    }
+    if let Some(error) = app.ui.chat.timeline.response_errors.get(request_id) {
+        card = card.child(text(error).font(theme::TEXT_XS).color(t.c.destructive));
     }
     card
 }
@@ -416,36 +608,30 @@ pub fn view(app: &App, _cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
             Row::User(item) => {
                 let mut content = col().gap(8.0);
                 for attachment in array(item, "attachments") {
+                    content = content.child(attachments::view(app, attachment, t));
+                }
+                if !s(item, "text").is_empty() {
                     content = content.child(
-                        row()
-                            .gap(8.0)
-                            .padding(8.0)
-                            .child(icon(&icons::FILE, 16.0).color(t.c.muted_foreground))
+                        col()
+                            .padding(12.0)
+                            .radius(16.0)
+                            .fill(t.c.message_surface)
                             .child(
-                                text(s(attachment, "name"))
-                                    .font(theme::TEXT_SM)
-                                    .color(t.c.foreground),
+                                text(s(item, "text"))
+                                    .font(theme::TEXT_SM.lh(22.75))
+                                    .color(t.c.message_foreground)
+                                    .selectable(true),
                             ),
                     );
                 }
-                content = content.child(
-                    text(s(item, "text"))
-                        .font(theme::TEXT_SM.lh(22.75))
-                        .color(t.c.message_foreground)
-                        .selectable(true),
-                );
-                let bubble = content
-                    .padding(12.0)
-                    .radius(16.0)
-                    .fill(t.c.message_surface)
-                    .max_w(580.0);
+                let bubble = content.max_w(580.0);
                 (
                     s(item, "id").to_owned(),
                     col()
                         .w_full()
                         .hover_group()
                         .gap(4.0)
-                        .pb(20.0)
+                        .pb(8.0)
                         .child(row().w_full().justify_end().child(bubble))
                         .child(
                             row()
@@ -512,7 +698,22 @@ pub fn view(app: &App, _cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
             Row::Item(item) => (s(item, "id").to_owned(), item_view(app, item, t)),
             Row::Request { request, item } => (
                 s(request, "id").to_owned(),
-                request_view(app, thread_id, request, item, t),
+                if s(request, "kind") == "user_input"
+                    || item.is_some_and(|i| s(i, "type") == "user_input_request")
+                {
+                    row()
+                        .gap(12.0)
+                        .px(4.0)
+                        .py(4.0)
+                        .child(icon(&icons::MESSAGE_CIRCLE, 16.0).color(t.c.muted_foreground))
+                        .child(
+                            text("Input requested")
+                                .font(theme::TEXT_SM)
+                                .color(t.c.muted_foreground),
+                        )
+                } else {
+                    request_view(app, thread_id, request, item, t)
+                },
             ),
         };
         stack = stack.child(
@@ -534,4 +735,23 @@ pub fn view(app: &App, _cx: &mut Cx<App>, t: &T, thread_id: &str) -> El {
         .px(24.0)
         .py(21.0)
         .child(stack)
+}
+
+/// Question panels belong above the composer; approval details also remain inline.
+pub fn composer_requests(app: &App, t: &T, thread_id: &str) -> El {
+    let Some(view) = app.state().thread_views.get(thread_id) else {
+        return el();
+    };
+    let mut out = col().w_full().max_w(736.0);
+    for row in rows::derive(&view.projection, app.now_ms) {
+        if let Row::Request { request, item } = row {
+            if s(request, "kind") == "user_input"
+                || item.is_some_and(|i| s(i, "type") == "user_input_request")
+            {
+                out = out.child(request_view(app, thread_id, request, item, t));
+                break;
+            }
+        }
+    }
+    col().w_full().items_center().px(24.0).child(out)
 }

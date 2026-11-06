@@ -102,7 +102,7 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
             }
         } else if matches!(
             kind,
-            "error" | "notification" | "system_notice" | "proposed_plan"
+            "error" | "notification" | "system_notice" | "proposed_plan" | "compaction"
         ) {
             flush(&mut rows, &mut work, work_run, &runs, now);
             rows.push(Row::Item(item));
@@ -188,11 +188,16 @@ mod tests {
         let p = json!({"runtimeRequests":[{"id":"q","status":"pending"}],"turnItems":[
             {"id":"t","type":"reasoning","ordinal":1},
             {"id":"a","type":"approval_request","requestId":"q","ordinal":2},
-            {"id":"e","type":"error","ordinal":3}]});
+            {"id":"e","type":"error","ordinal":3},{"id":"compact","type":"compaction","ordinal":4}]});
         let rows = derive(&p, 0);
         assert!(matches!(
             rows.as_slice(),
-            [Row::Work { .. }, Row::Request { .. }, Row::Item(_)]
+            [
+                Row::Work { .. },
+                Row::Request { .. },
+                Row::Item(_),
+                Row::Item(_)
+            ]
         ));
     }
     #[test]

@@ -1,6 +1,16 @@
 use super::rows::array;
 use crate::data::s;
-use serde_json::{Map, Value};
+use serde_json::{Map, Value, json};
+
+pub fn command(thread: &str, request: &str, fields: Value) -> Value {
+    let mut command = json!({"type":"runtime-request.respond","commandId":s5_net::uuid(),"threadId":thread,"requestId":request});
+    for key in ["decision", "answers", "feedback"] {
+        if let Some(value) = fields.get(key) {
+            command[key] = value.clone();
+        }
+    }
+    command
+}
 use std::collections::HashMap;
 
 pub fn answers(
@@ -35,6 +45,24 @@ pub fn answers(
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    fn response_commands_preserve_decisions_and_answer_shapes() {
+        for decision in ["accept", "decline", "cancel", "acceptForSession"] {
+            let c = command(
+                "thread",
+                "request",
+                json!({"decision":decision,"type":"ignored"}),
+            );
+            assert_eq!(c["type"], "runtime-request.respond");
+            assert_eq!(c["threadId"], "thread");
+            assert_eq!(c["requestId"], "request");
+            assert_eq!(c["decision"], decision);
+            assert!(c["answers"].is_null());
+        }
+        let c = command("thread", "request", json!({"answers":{"q":["one","two"]}}));
+        assert_eq!(c["answers"], json!({"q":["one","two"]}));
+        assert!(c["decision"].is_null());
+    }
     #[test]
     fn single_answers_are_strings_multiple_answers_are_arrays_and_custom_takes_precedence() {
         let item = json!({"questions":[{"id":"single"},{"id":"multi","multiSelect":true},{"id":"custom"},{"id":"fixed","allowCustomAnswer":false}]});
