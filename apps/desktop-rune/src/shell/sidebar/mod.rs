@@ -86,12 +86,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             s.ui.shell.sidebar.selected.insert(id);
         }
     }),
-    // The rested hover a pointer would leave: row styling plus its hover card.
+    // A row's hover card, as the reference caught it (card shown, row style already settled).
     ("sidebar-hover", |s| {
         scene_on(s, "Replay showcase");
-        let id = thread_titled(s, "Idempotency key definition");
-        s.ui.shell.sidebar.hover = id.clone();
-        s.ui.shell.sidebar.card = id;
+        s.ui.shell.sidebar.card = thread_titled(s, "Idempotency key definition");
     }),
     ("sidebar-rename", |s| {
         scene_on(s, "Replay showcase");
