@@ -81,6 +81,7 @@ fn setup(s: &mut App, waker: Waker) {
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = s.src.net().is_some_and(|net| net.drain());
+    changed |= chat::composer::poll(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
         s.now_ms = now;
