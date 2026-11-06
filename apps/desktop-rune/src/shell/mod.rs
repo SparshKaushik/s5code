@@ -20,8 +20,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[("home", |s| crate::scene_clock(s)
     }
 })];
 
-pub fn on_key(_s: &mut App, _e: &KeyEvent, _tx: &mut Tx) -> bool {
-    false
+pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    sidebar::on_key(s, e, tx)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
@@ -29,9 +29,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         Route::Settings(_) => settings::view(s, cx, t),
         _ => chat::view(s, cx, t),
     };
-    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t)).child(main);
+    let mut overlays = Vec::new();
+    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t, &mut overlays)).child(main);
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
     }
-    rune_kit::root(body, Vec::new())
+    rune_kit::root(body, overlays)
 }
