@@ -386,7 +386,7 @@ fn footer(s: &App, t: &T) -> El {
         );
     }
     right = right.child(primary_action(s, t));
-    row().w_full().px(9.0).pt(10.0).center_y().child(left).child(spacer()).child(right)
+    row().w_full().px(8.0).pt(10.0).center_y().child(left).child(spacer()).child(right)
 }
 
 fn primary_action(s: &App, t: &T) -> El {

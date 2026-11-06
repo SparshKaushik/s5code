@@ -18,13 +18,14 @@ pub struct Ui {
     /// The rail entry shown: a provider instance id or `favorites`.
     pub rail: Option<String>,
     pub query: TextEdit,
-    pub active: usize,
+    /// The keyboard-highlighted row; none until the user moves through the list.
+    pub active: Option<usize>,
     pub runtime_open: bool,
 }
 
 impl Default for Ui {
     fn default() -> Ui {
-        Ui { open: false, rail: None, query: TextEdit::new(""), active: 0, runtime_open: false }
+        Ui { open: false, rail: None, query: TextEdit::new(""), active: None, runtime_open: false }
     }
 }
 
@@ -32,7 +33,7 @@ pub fn toggle(s: &mut App) {
     let p = &mut s.ui.chat.composer.picker;
     p.open = !p.open;
     p.rail = None;
-    p.active = 0;
+    p.active = None;
     p.runtime_open = false;
     p.query = TextEdit::new("");
     p.query.focused = p.open;
@@ -84,10 +85,10 @@ fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     let list = rows(s);
     let p = &mut s.ui.chat.composer.picker;
     match &e.key {
-        Key::Down if !list.is_empty() => p.active = (p.active + 1) % list.len(),
-        Key::Up if !list.is_empty() => p.active = (p.active + list.len() - 1) % list.len(),
+        Key::Down if !list.is_empty() => p.active = Some(p.active.map_or(0, |a| (a + 1) % list.len())),
+        Key::Up if !list.is_empty() => p.active = Some(p.active.map_or(list.len() - 1, |a| (a + list.len() - 1) % list.len())),
         Key::Enter => {
-            if let Some((i, m, _)) = list.into_iter().nth(p.active) {
+            if let Some((i, m, _)) = list.into_iter().nth(p.active.unwrap_or(0)) {
                 pick(s, i, m);
             }
         }
@@ -113,33 +114,32 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let panel = t.c.muted.alpha_mul(0.4);
 
     // Rail: favourites, a divider, then each provider; a primary bar marks the shown entry.
-    let rail_item = |key: String, mark: El, active: bool| {
+    let rail_item = |key: String, mark: El, active: bool, ready: bool| {
         let id = key.clone();
-        let mut item = el()
-            .key(format!("picker-rail-{key}"))
-            .w(44.0)
-            .h(40.0)
-            .center()
-            .cursor(Cursor::Pointer)
-            .hover(t.c.accent)
-            .child(mark)
-            .on_press(move |s: &mut App| {
+        let mut item = el().key(format!("picker-rail-{key}")).w(44.0).h(40.0).center().child(mark);
+        // An instance that isn't ready can't be browsed (opacity-50, disabled).
+        item = if ready {
+            item.cursor(Cursor::Pointer).hover(t.c.accent).on_press(move |s: &mut App| {
                 let p = &mut s.ui.chat.composer.picker;
                 p.rail = Some(id.clone());
-                p.active = 0;
-            });
+                p.active = None;
+            })
+        } else {
+            item.opacity(0.5)
+        };
         if active {
             item = item.child(el().absolute(37.0, 10.0).size(3.0, 20.0).radius(radius::FULL).fill(t.c.primary));
         }
         item
     };
     let mut rail_col = col().w(44.0).h_full().pt(2.0).fill(t.c.muted.alpha_mul(0.3));
-    rail_col = rail_col.child(rail_item(FAVORITES.into(), icon(&STAR_FILLED, 20.0).color(t.c.foreground), r == FAVORITES).help("Favorites"));
+    rail_col = rail_col.child(rail_item(FAVORITES.into(), icon(&STAR_FILLED, 20.0).color(t.c.foreground), r == FAVORITES, true).help("Favorites"));
     rail_col = rail_col.child(el().h(5.0).w_full().center().child(el().h(1.0).w(20.0).fill(line)));
     for prov in rail_providers(s) {
         let id = data::s(prov, "instanceId").to_string();
         let mark = provider_icon(t, data::s(prov, "driver"), 20.0);
-        rail_col = rail_col.child(rail_item(id.clone(), mark, r == id).help(data::s(prov, "displayName").to_string()));
+        let ready = data::s(prov, "status") == "ready";
+        rail_col = rail_col.child(rail_item(id.clone(), mark, r == id, ready).help(data::s(prov, "displayName").to_string()));
     }
 
     // Models: search, then one row per model.
@@ -159,10 +159,13 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
                 .placeholder("Search models...", t.c.placeholder)
                 .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
                 .on_edit(|s: &mut App| &mut s.ui.chat.composer.picker.query)
-                .on_input_change(|s: &mut App, _| s.ui.chat.composer.picker.active = 0)
+                .on_input_change(|s: &mut App, _| s.ui.chat.composer.picker.active = None)
                 .on_input_key(on_key),
         );
-    let header = col().w_full().px(13.0).pt(9.0).pb(8.0).child(search);
+    let mut header = col().w_full().px(13.0).pt(9.0).pb(8.0).child(search);
+    if p.query.focused {
+        header = header.child(el().absolute(13.0, 41.0).w(290.0).h(1.0).fill(t.c.primary));
+    }
     let list = rows(s);
     let mut models = col().w_full().px(8.0).pt(8.0);
     if list.is_empty() {
@@ -196,14 +199,14 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         if n < 9 {
             r = r.child(
                 el().h(20.0)
-                    .px(6.0)
+                    .px(4.0)
                     .center()
                     .radius(radius::SM)
                     .fill(t.c.foreground.alpha_mul(0.07))
                     .child(text(format!("⌘{}", n + 1)).font(theme::XS_MEDIUM).color(t.c.muted_foreground)),
             );
         }
-        if n == p.active {
+        if p.active == Some(n) {
             r = r.fill(t.c.accent);
         }
         let (i2, m2) = (instance.clone(), slug.clone());
@@ -297,6 +300,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .border(1.0, t.c.border)
         .shadow(8.0, 24.0, rune::Color::BLACK.alpha(if t.dark { 0.4 } else { 0.12 }))
         .clip_rounded(radius::LG)
+        .padding(1.0)
         .child(body)
         .child(footer)
         .anchored("composer-model-chip", Side::Top, Align::End, 4.0)

@@ -114,7 +114,8 @@ pub fn provider_banner(s: &App, t: &T) -> Option<El> {
             .pt(15.0)
             .pb(13.0)
             .radius(radius::XL)
-            .fill(t.c.error_surface)
+            // alert-glass: the page background with a 4% destructive tint.
+            .fill(t.c.destructive.alpha_mul(0.04))
             .border(1.0, t.c.error.alpha_mul(0.32))
             .role("alert")
             .child(icon(&icons::INFO, 16.0).color(t.c.error).mt(2.0))
@@ -125,7 +126,7 @@ pub fn provider_banner(s: &App, t: &T) -> Option<El> {
                     .min_w(0.0)
                     .child(text(title).font(theme::SM_MEDIUM).color(fg))
                     .child(text(message).font(theme::TEXT_SM).color(fg.alpha_mul(0.8)).wrap().max_lines(3))
-                    .child(row().w_full().pt(8.0).child(spacer()).child(refresh)),
+                    .child(row().w_full().pt(6.0).child(spacer()).child(refresh)),
             )
             .child(dismiss.mt(-2.0)),
     )

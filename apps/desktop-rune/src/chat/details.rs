@@ -4,7 +4,7 @@
 //! what narrows the lane.
 
 use rune::tok::TextStyle;
-use rune::{Align, Color, Cursor, Cx, El, Side, col, el, icon, row, spacer, text};
+use rune::{Align, Color, Cursor, Cx, El, Side, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 use crate::chat::composer;
@@ -78,7 +78,7 @@ fn action(t: &T, key: &str, glyph: El, label: &str, color: Color) -> El {
         .cursor(Cursor::Pointer)
         .label(label.to_string())
         .child(glyph)
-        .child(text(label.to_string()).font(ROW).color(color).truncate().shrink())
+        .child(text(label.to_string()).font(ROW).color(color).truncate().grow(1.0).shrink().min_w(0.0))
 }
 
 fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
@@ -192,8 +192,8 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El
             .child(
                 action(t, "details-branch", icon(&icons::GIT_BRANCH, 16.0).color(muted), &branch, fg)
                     .w_full()
+                    .pr(8.0)
                     .role("combobox")
-                    .child(spacer())
                     .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
@@ -214,7 +214,6 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El
         section = section.child(
             action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
                 .w_full()
-                .child(spacer())
                 .child(row().gap(6.0).child(text(format!("+{add}")).font(stat).color(muted)).child(text(format!("-{del}")).font(stat).color(muted)))
                 .on_press(|s: &mut App| s.ui.shell.panel_open = true),
         );
