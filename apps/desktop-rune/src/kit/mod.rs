@@ -2,6 +2,9 @@
 //! Stateful Rune controls use `theme(t)`; mount their overlay vector in `rune_kit::root`.
 #![allow(dead_code, unused_imports)]
 pub mod button;
+mod actions;
+pub mod menu;
+pub use menu::{Menu, MenuEntry, MenuItem, context_menu};
 mod dialog;
 mod input;
 mod slider;
@@ -18,9 +21,9 @@ pub use gallery::SCENES;
 use rune::{El, TextEdit, col, el, row, text};
 use rune_kit::ScrollBar;
 pub use rune_kit::{
-    Checkbox, Combobox, ComboboxOption, ComboboxState, Menu, MenuEntry, MenuItem, Placement,
+    Checkbox, Combobox, ComboboxOption, ComboboxState, Placement,
     Popover, Progress, RadioGroup, RadioItem, SegmentedControl, Select, Spinner, State, Switch,
-    TextArea, Toast, ToastRegion, Tooltip, context_menu,
+    TextArea, Toast, ToastRegion, Tooltip,
 };
 
 /// Rune's behavior with S5's semantic palette and typography, shared by all overlay controls.
