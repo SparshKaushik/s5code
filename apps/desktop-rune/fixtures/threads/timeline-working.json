@@ -1,0 +1,211 @@
+{
+  "thread": {
+    "createdBy": "user",
+    "creationSource": "web",
+    "id": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+    "projectId": "7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f",
+    "title": "Timeline showcase fixture",
+    "providerInstanceId": "devReplay",
+    "modelSelection": {
+      "instanceId": "devReplay",
+      "model": "showcase"
+    },
+    "runtimeMode": "approval-required",
+    "interactionMode": "default",
+    "branch": null,
+    "worktreePath": null,
+    "pullRequests": [],
+    "activeProviderThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+    "lineage": {
+      "parentThreadId": null,
+      "relationshipToParent": null,
+      "rootThreadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476"
+    },
+    "forkedFrom": null,
+    "createdAt": "2026-11-06T10:14:57.877Z",
+    "updatedAt": "2026-11-06T10:14:58.007Z",
+    "archivedAt": null,
+    "settledOverride": null,
+    "settledAt": null,
+    "snoozedUntil": null,
+    "snoozedAt": null,
+    "lastVisitedAt": "2026-11-06T10:14:58.006Z",
+    "deletedAt": null
+  },
+  "runs": [
+    {
+      "id": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+      "threadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "ordinal": 1,
+      "providerInstanceId": "devReplay",
+      "modelSelection": {
+        "instanceId": "devReplay",
+        "model": "showcase"
+      },
+      "providerThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+      "userMessageId": "3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+      "rootNodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "activeAttemptId": "run-attempt:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:attempt:1",
+      "status": "starting",
+      "queuePosition": null,
+      "requestedAt": "2026-11-06T10:14:58.007Z",
+      "startedAt": null,
+      "completedAt": null,
+      "checkpointId": null,
+      "contextHandoffId": null
+    }
+  ],
+  "attempts": [
+    {
+      "id": "run-attempt:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:attempt:1",
+      "runId": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+      "attemptOrdinal": 1,
+      "rootNodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "providerInstanceId": "devReplay",
+      "providerThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+      "providerTurnId": null,
+      "reason": "initial",
+      "status": "pending",
+      "startedAt": null,
+      "completedAt": null
+    }
+  ],
+  "nodes": [
+    {
+      "id": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "threadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "runId": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+      "parentNodeId": null,
+      "rootNodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "kind": "root_turn",
+      "status": "pending",
+      "countsForRun": true,
+      "providerThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "runtimeRequestId": null,
+      "checkpointScopeId": "checkpoint-scope:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:name:root",
+      "startedAt": null,
+      "completedAt": null
+    }
+  ],
+  "subagents": [],
+  "providerSessions": [],
+  "providerThreads": [
+    {
+      "id": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+      "driver": "acpRegistry",
+      "providerInstanceId": "devReplay",
+      "providerSessionId": "provider-session:provider-instance:devReplay:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:83a2f9ff-9f7a-4276-b467-e8990ebf44c2",
+      "appThreadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "ownerNodeId": null,
+      "nativeThreadRef": null,
+      "nativeConversationHeadRef": null,
+      "status": "not_loaded",
+      "firstRunOrdinal": 1,
+      "lastRunOrdinal": 1,
+      "handoffIds": [],
+      "forkedFrom": null,
+      "pendingBackgroundTasks": [],
+      "contextUsage": null,
+      "nativeMetadata": null,
+      "goal": null,
+      "createdAt": "2026-11-06T10:14:58.007Z",
+      "updatedAt": "2026-11-06T10:14:58.007Z"
+    }
+  ],
+  "providerTurns": [],
+  "runtimeRequests": [],
+  "messages": [
+    {
+      "createdBy": "user",
+      "creationSource": "web",
+      "id": "3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+      "threadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "runId": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+      "nodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "role": "user",
+      "text": "Show me what you can do.",
+      "attachments": [],
+      "streaming": false,
+      "createdAt": "2026-11-06T10:14:58.007Z",
+      "updatedAt": "2026-11-06T10:14:58.007Z"
+    }
+  ],
+  "plans": [],
+  "turnItems": [
+    {
+      "id": "turn-item:message:3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+      "threadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "runId": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+      "nodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "providerThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+      "providerTurnId": null,
+      "nativeItemRef": null,
+      "parentItemId": null,
+      "ordinal": 1000001,
+      "status": "completed",
+      "title": null,
+      "startedAt": "2026-11-06T10:14:58.007Z",
+      "completedAt": "2026-11-06T10:14:58.007Z",
+      "updatedAt": "2026-11-06T10:14:58.007Z",
+      "createdBy": "user",
+      "creationSource": "web",
+      "type": "user_message",
+      "messageId": "3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+      "inputIntent": "turn_start",
+      "text": "Show me what you can do.",
+      "attachments": []
+    }
+  ],
+  "checkpointScopes": [
+    {
+      "id": "checkpoint-scope:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:name:root",
+      "threadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "runId": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+      "nodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+      "parentScopeId": null,
+      "providerThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+      "kind": "root_run",
+      "ordinalWithinParent": 0,
+      "advancesAppRunCount": true,
+      "cwd": "/home/ubuntu/projects/s5code",
+      "createdAt": "2026-11-06T10:14:58.007Z"
+    }
+  ],
+  "checkpoints": [],
+  "contextHandoffs": [],
+  "contextTransfers": [],
+  "visibleTurnItems": [
+    {
+      "position": 0,
+      "visibility": "local",
+      "sourceThreadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+      "sourceItemId": "turn-item:message:3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+      "item": {
+        "id": "turn-item:message:3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+        "threadId": "thread:project:7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f:83e118b4-cac5-4d51-9c42-5249d942e476",
+        "runId": "run:thread:thread%3Aproject%3A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%3A83e118b4-cac5-4d51-9c42-5249d942e476:ordinal:1",
+        "nodeId": "node:run:run%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1:root",
+        "providerThreadId": "provider-thread:provider:acpRegistry:native-thread:pending%3Arun%3Athread%3Athread%253Aproject%253A7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f%253A83e118b4-cac5-4d51-9c42-5249d942e476%3Aordinal%3A1",
+        "providerTurnId": null,
+        "nativeItemRef": null,
+        "parentItemId": null,
+        "ordinal": 1000001,
+        "status": "completed",
+        "title": null,
+        "startedAt": "2026-11-06T10:14:58.007Z",
+        "completedAt": "2026-11-06T10:14:58.007Z",
+        "updatedAt": "2026-11-06T10:14:58.007Z",
+        "createdBy": "user",
+        "creationSource": "web",
+        "type": "user_message",
+        "messageId": "3aad6b37-4e29-47f5-8db1-2b8dab740af5",
+        "inputIntent": "turn_start",
+        "text": "Show me what you can do.",
+        "attachments": []
+      }
+    }
+  ],
+  "updatedAt": "2026-11-06T10:14:58.007Z"
+}
