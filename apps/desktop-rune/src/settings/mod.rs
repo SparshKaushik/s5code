@@ -3,7 +3,7 @@ mod controls;
 mod keybindings;
 mod pages;
 
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, Appearance, Route, icons};
 use rune::{Cx, El, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
@@ -185,13 +185,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .px(8.0)
         .pt(8.0)
         .gap(16.0);
-    let search = rune::text_input(&s.ui.settings.search, theme::TEXT_SM)
+    let search = rune::text_input(&s.ui.settings.search, theme::SM_MEDIUM.lh(21.0))
         .key("settings-search")
         .single_line()
         .placeholder("Search", t.sb.muted_foreground)
-        .w_full()
-        .h(32.0)
-        .px(8.0)
+        .grow(1.0)
+        .min_w(0.0)
+        .h(21.0)
+        .px(0.0)
         .radius(6.0)
         .fill(t.c.sidebar)
         .color(t.sb.muted_foreground)
@@ -199,10 +200,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     nav = nav.child(
         row()
             .h(32.0)
-            .gap(6.0)
+            .px(8.0)
+            .gap(8.0)
             .center_y()
             .child(icon(&icons::SEARCH, 16.0).color(t.sb.muted_foreground))
-            .child(search),
+            .child(search)
+            .child(el().size(20.0,20.0).center().radius(4.0)
+                .fill(t.c.foreground.alpha_mul(0.07))
+                .child(text("/").font(theme::XS_MEDIUM).color(t.sb.muted_foreground))),
     );
     let query = s.ui.settings.search.text.to_lowercase();
     for (index, (heading, items)) in NAV.iter().enumerate() {
@@ -216,7 +221,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .font(theme::XS_MEDIUM)
                     .color(t.sb.muted_foreground)
                     .px(8.0)
-                    .h(24.0),
+                    .h(16.0),
             );
         }
         for (target, title) in *items {
@@ -231,10 +236,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .key(format!("settings-nav-{target}"))
                     .w_full()
                     .h(32.0)
-                    .px(8.0)
+                    .px(10.0)
                     .gap(8.0)
                     .center_y()
-                    .radius(6.0)
+                    .radius(8.0)
                     .fill(if active { t.c.accent } else { t.c.sidebar })
                     .hover(t.sb.accent)
                     .focusable(true)
@@ -248,7 +253,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .child(text(*title).font(theme::SM_MEDIUM).color(if active {
                         t.c.foreground
                     } else {
-                        t.c.muted_foreground
+                        t.sb.muted_foreground.alpha_mul(0.8)
                     })),
             );
         }
@@ -264,7 +269,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let mut header = row()
         .h(48.0)
         .w_full()
-        .px(20.0)
+        .pl(20.0)
+        .pr(8.0)
         .gap(12.0)
         .center_y()
         .child(
@@ -280,7 +286,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         )
         .child(el().grow(1.0));
     if path == "general" {
-        header = header.child(controls::button("Restore device defaults", t).on_press(
+        header = header.child(crate::kit::Button::new("Restore device defaults").variant("ghost").size("xs").icon(&icons::ROTATE_CCW).disabled(s.client_settings.values == client::ClientSettings::default().values).build(t).on_press(
             |s: &mut App| {
                 let defaults = client::ClientSettings::default();
                 s.client_settings.values.extend(defaults.values);
@@ -331,6 +337,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .radius(16.0)
         .clip_rounded(16.0)
         .border(1.0, t.c.border)
+        .shadow(25.0, 50.0, rune::Color::BLACK.alpha(0.4))
+        .focusable(true)
+        .role("dialog")
+        .label("Settings")
         .fill(t.c.background)
         .child(nav)
         .child(el().w(1.0).h_full().fill(t.c.border))
@@ -374,13 +384,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         }
     }
     rune_kit::root(
-        el().w_full()
+        el().absolute(0.0, 0.0).w_full()
             .h_full()
             .center()
-            .fill(t.c.background)
+            .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.60 }))
+            .backdrop_blur(4.0)
             .child(modal),
         overlays,
-    )
+    ).absolute(0.0, 0.0)
 }
 
 pub fn close(s: &mut App) {
@@ -395,8 +406,11 @@ pub fn close(s: &mut App) {
 fn scene(s: &mut App, path: &str) {
     crate::scene_clock(s);
     s.client_settings = client::ClientSettings::default();
+    let previous = s.state().threads.iter().find(|t| t["title"] == "Replay showcase")
+        .map(|t| Route::Thread(crate::data::s(t, "id").into()))
+        .unwrap_or(Route::Home { project_id: None });
     s.route = Route::Settings(path.into());
-    s.ui.settings = Ui::default();
+    s.ui.settings = Ui { return_route: Some(previous), ..Ui::default() };
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
