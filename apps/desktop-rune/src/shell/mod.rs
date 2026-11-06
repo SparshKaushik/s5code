@@ -26,7 +26,7 @@ pub fn on_key(_s: &mut App, _e: &KeyEvent, _tx: &mut Tx) -> bool {
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if matches!(s.route, Route::Settings(_)) {
-        return rune_kit::root(rune::el().w_full().h_full().center().fill(t.c.background).child(settings::view(s, cx, t)), Vec::new());
+        return settings::view(s, cx, t);
     }
     let main = match &s.route {
         Route::Settings(_) => settings::view(s, cx, t),

@@ -20,18 +20,7 @@
   "browserSearchEngine": "duckduckgo",
   "browserCustomSearchUrl": "",
   "browserAutoShowFloatingPreview": true,
-  "browserProfiles": [
-    {
-      "id": "default",
-      "name": "Default",
-      "kind": "persistent"
-    },
-    {
-      "id": "incognito",
-      "name": "Incognito",
-      "kind": "incognito"
-    }
-  ],
+  "browserProfiles": [],
   "browserDefaultProfileId": "default",
   "confirmQuit": "hold",
   "confirmThreadArchive": false,
