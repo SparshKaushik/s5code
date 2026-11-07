@@ -17,6 +17,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as TestClock from "effect/testing/TestClock";
 import { HttpClient, HttpClientResponse } from "effect/http";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "./DeviceService.ts";
 import * as Registration from "./SimboxDeviceRegistration.ts";
@@ -62,22 +63,11 @@ const receiptDirectory = Effect.gen(function* () {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const directory = yield* fs.makeTempDirectoryScoped({ prefix: "s5-simbox-registration-" });
-  const previous = process.env.SIMBOX_DEVICE_REGISTRATION_DIR;
-  yield* Effect.acquireRelease(
-    Effect.sync(() => {
-      process.env.SIMBOX_DEVICE_REGISTRATION_DIR = directory;
-    }),
-    () =>
-      Effect.sync(() => {
-        if (previous === undefined) delete process.env.SIMBOX_DEVICE_REGISTRATION_DIR;
-        else process.env.SIMBOX_DEVICE_REGISTRATION_DIR = previous;
-      }),
-  );
   return { fs, directory, file: path.join(directory, `${id}.json`) };
 });
 
 /** A device service whose Simbox host lists one lease, the agent's. */
-const fixture = (options: { readonly healthy?: boolean } = {}) => {
+const fixture = (directory: string, options: { readonly healthy?: boolean } = {}) => {
   const opened: Array<DeviceOpenInput> = [];
   const state = {
     hosts: [{ id: hostId }],
@@ -112,7 +102,13 @@ const fixture = (options: { readonly healthy?: boolean } = {}) => {
     Layer.provideMerge(
       ServerSettings.layerTest({ enableDeviceSupport: true, enableAgentDeviceAccess: true }),
     ),
-    Layer.provide(Layer.mergeAll(devices, http)),
+    Layer.provide(
+      Layer.mergeAll(
+        devices,
+        http,
+        Layer.succeed(HostProcess.Environment, { SIMBOX_DEVICE_REGISTRATION_DIR: directory }),
+      ),
+    ),
   );
   return { opened, layer };
 };
@@ -143,7 +139,7 @@ describe("Simbox CLI registration receipts", () => {
       Effect.gen(function* () {
         const { fs, directory, file } = yield* receiptDirectory;
         yield* fs.writeFileString(file, yield* encode(descriptor(yield* Clock.currentTimeMillis)));
-        const { opened, layer } = fixture();
+        const { opened, layer } = fixture(directory);
         const saved = yield* Effect.gen(function* () {
           const registration = yield* Registration.SimboxDeviceRegistration;
           const event = item(
@@ -174,7 +170,7 @@ describe("Simbox CLI registration receipts", () => {
       const { fs, directory, file } = yield* receiptDirectory;
       const now = yield* Clock.currentTimeMillis;
       yield* fs.writeFileString(file, yield* encode(descriptor(now - 600_000)));
-      const { opened, layer } = fixture();
+      const { opened, layer } = fixture(directory);
       const saved = yield* Effect.gen(function* () {
         yield* (yield* Registration.SimboxDeviceRegistration).observe(item(marker));
         return yield* (yield* ServerSettings.ServerSettingsService).getSettings;
@@ -187,8 +183,8 @@ describe("Simbox CLI registration receipts", () => {
 
   it.effect("removes a run on `simbox stop` and once its tunnel stays gone", () =>
     Effect.gen(function* () {
-      const { fs, file } = yield* receiptDirectory;
-      const { layer } = fixture({ healthy: false });
+      const { fs, directory, file } = yield* receiptDirectory;
+      const { layer } = fixture(directory, { healthy: false });
       const hosts = yield* Effect.gen(function* () {
         const registration = yield* Registration.SimboxDeviceRegistration;
         const settings = yield* ServerSettings.ServerSettingsService;
