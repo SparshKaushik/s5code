@@ -5,7 +5,7 @@
 use rune::{Cursor, Cx, El, Tx, col, el, icon, row, text};
 use serde_json::{Value, json};
 
-use super::{ctx, draft, draft_mut, provider, selection};
+use super::{ctx, draft, draft_mut, provider, selection, set_interaction_mode, supports_plan};
 use crate::data;
 use crate::icons;
 use crate::theme::{self, T, radius};
@@ -49,6 +49,9 @@ pub struct Item {
 
 const BUILTIN_SLASH: [(&str, &str); 3] =
     [("model", "Switch response model for this thread"), ("side", "Ask a side question in a new side chat"), ("btw", "Same as /side")];
+/// Shown after `/model` when the provider has plan mode.
+const PLAN_SLASH: [(&str, &str); 2] =
+    [("plan", "Switch this thread into plan mode"), ("default", "Switch this thread back to normal build mode")];
 
 pub fn open_menu(s: &App) -> Option<Open> {
     let d = draft(s)?;
@@ -80,7 +83,12 @@ pub fn items(s: &App, m: &Open) -> Vec<Item> {
     let item = |id: String, label: String, description: String| Item { id, label, description, folder: None };
     match m.kind {
         Kind::Slash => {
-            let builtins = BUILTIN_SLASH.iter().map(|(n, d)| item(format!("/{n}"), format!("/{n}"), d.to_string()));
+            let plan: &[(&str, &str)] = if supports_plan(s) { &PLAN_SLASH[..] } else { &[] };
+            let builtins = BUILTIN_SLASH[..1]
+                .iter()
+                .chain(plan)
+                .chain(&BUILTIN_SLASH[1..])
+                .map(|(n, d)| item(format!("/{n}"), format!("/{n}"), d.to_string()));
             let provided = provider_list(s, "slashCommands")
                 .into_iter()
                 .map(|c| item(format!("/{}", data::s(c, "name")), format!("/{}", data::s(c, "name")), data::s(c, "description").to_string()));
@@ -160,6 +168,13 @@ pub fn choose(s: &mut App, m: &Open, index: usize, _tx: &mut Tx) {
         super::picker::toggle(s);
         return;
     }
+    if let Some(mode) = item.id.strip_prefix('/').filter(|_| m.kind == Kind::Slash).filter(|id| PLAN_SLASH.iter().any(|(n, _)| n == id)) {
+        let d = draft_mut(s);
+        d.edit.set_selection(m.start, m.end);
+        d.edit.insert("");
+        set_interaction_mode(s, mode);
+        return;
+    }
     let d = draft_mut(s);
     d.edit.set_selection(m.start, m.end);
     match m.kind {
@@ -224,4 +239,25 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Option<El> {
     }
     let rows = col().w_full().max_h(280.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(rows);
     Some(surface(t).px(8.0).pt(8.0).pb(8.0 + 17.0).child(rows).child(el()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn slash_labels(model: &str) -> Vec<String> {
+        let mut s = App::new();
+        let d = draft_mut(&mut s);
+        d.model = Some((model.into(), "m".into()));
+        d.edit = rune::TextEdit::new("/");
+        d.edit.set_caret(1);
+        let m = open_menu(&s).unwrap();
+        items(&s, &m).into_iter().map(|i| i.label).take(5).collect()
+    }
+
+    #[test]
+    fn plan_commands_follow_model_only_for_plan_capable_providers() {
+        assert_eq!(slash_labels("codex"), ["/model", "/plan", "/default", "/side", "/btw"]);
+        assert_eq!(slash_labels("devReplay")[..3], ["/model", "/side", "/btw"]);
+    }
 }

@@ -48,6 +48,9 @@ pub struct Ui {
     pub picker: picker::Ui,
     mention: menu::Mention,
     launches: Vec<(u64, String)>,
+    /// Messages waiting on `assets.persistChatAttachments`: the request, the command or launch
+    /// payload, and the thread a launch starts.
+    uploads: Vec<(u64, Value, Option<String>)>,
 }
 
 /// The draft key for a route: the thread id, or `home` for the new-thread draft.
@@ -175,11 +178,15 @@ pub fn set_runtime_mode(s: &mut App, mode: &str) {
 
 fn toggle_plan(s: &mut App) {
     let next = if interaction_mode(s) == "plan" { "default" } else { "plan" };
-    draft_mut(s).interaction_mode = Some(next.to_string());
+    set_interaction_mode(s, next);
+}
+
+fn set_interaction_mode(s: &mut App, mode: &str) {
+    draft_mut(s).interaction_mode = Some(mode.to_string());
     if let Route::Thread(id) = s.frame_route().clone()
         && let Some(net) = s.src.net()
     {
-        net.dispatch(json!({"type": "thread.interaction-mode.set", "commandId": s5_net::uuid(), "threadId": id, "interactionMode": next}));
+        net.dispatch(json!({"type": "thread.interaction-mode.set", "commandId": s5_net::uuid(), "threadId": id, "interactionMode": mode}));
     }
 }
 
@@ -189,40 +196,103 @@ fn send(s: &mut App) {
     if text.is_empty() && d.attachments.is_empty() {
         return;
     }
+    // A file that can no longer be read keeps the draft as it is.
+    let Some(uploads) = d.attachments.iter().map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
     let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
     let running = running(s);
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
-    let Some(net) = s.src.net() else { return };
-    match route {
+    let message_id = s5_net::uuid();
+    let (thread_id, payload, launch) = match route {
         Route::Thread(id) => {
             let mut cmd = json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
-                "threadId": id, "messageId": s5_net::uuid(), "text": text, "attachments": [],
+                "threadId": id, "messageId": message_id, "text": text, "attachments": [],
                 "deliveryIntent": if running { "steer" } else { "auto" },
                 "dispatchMode": {"type": "start_immediately"},
             });
             if let Some(m) = model {
                 cmd["modelSelection"] = m;
             }
-            net.dispatch(cmd);
+            (id, cmd, false)
         }
         _ => {
             let Some(project_id) = project_id else { return };
             let thread_id = format!("thread:project:{project_id}:{}", s5_net::uuid());
-            let request = net.request("orchestration.launchThread", json!({
+            let params = json!({
                 "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project_id,
                 "title": "New thread", "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
                 "interactionMode": interaction, "workspaceStrategy": {"type": "root"},
-                "initialMessage": {"messageId": s5_net::uuid(), "text": text, "attachments": []},
-            }));
-            s.ui.chat.composer.launches.push((request, thread_id));
+                "initialMessage": {"messageId": message_id, "text": text, "attachments": []},
+            });
+            (thread_id, params, true)
+        }
+    };
+    let launch = launch.then(|| thread_id.clone());
+    let Some(net) = s.src.net() else { return };
+    let composer = &mut s.ui.chat.composer;
+    if uploads.is_empty() {
+        deliver(net, &mut composer.launches, payload, launch, json!([]));
+    } else {
+        let request = net.request(
+            "assets.persistChatAttachments",
+            json!({"threadId": thread_id, "messageId": message_id, "attachments": uploads}),
+        );
+        composer.uploads.push((request, payload, launch));
+    }
+    sent(s);
+}
+
+/// Image types the server stores (PROVIDER_SEND_TURN_SUPPORTED_IMAGE_MIME_TYPES), by extension.
+const IMAGE_TYPES: [(&str, &str); 5] =
+    [("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")];
+const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+
+/// An image file as `assets.persistChatAttachments` takes it, inlined as a data URL.
+fn upload(path: &str) -> Option<Value> {
+    use base64::Engine;
+    let path = std::path::Path::new(path);
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let mime = IMAGE_TYPES.iter().find(|(e, _)| *e == ext)?.1;
+    let bytes = std::fs::read(path).ok().filter(|b| b.len() <= MAX_IMAGE_BYTES)?;
+    let data = base64::engine::general_purpose::STANDARD.encode(&bytes);
+    Some(json!({
+        "type": "image", "name": path.file_name()?.to_str()?, "mimeType": mime,
+        "sizeBytes": bytes.len(), "dataUrl": format!("data:{mime};base64,{data}"),
+    }))
+}
+
+/// Sends a message, or launches the thread it starts, with its stored attachments.
+fn deliver(net: &mut s5_net::Net, launches: &mut Vec<(u64, String)>, mut payload: Value, launch: Option<String>, attachments: Value) {
+    match launch {
+        Some(thread_id) => {
+            payload["initialMessage"]["attachments"] = attachments;
+            launches.push((net.request("orchestration.launchThread", payload), thread_id));
+        }
+        None => {
+            payload["attachments"] = attachments;
+            net.dispatch(payload);
         }
     }
+}
+
+/// A sent home draft starts the next one fresh, so it picks up the new thread's model and the
+/// default modes (useHandleNewThread); a thread draft keeps its overrides.
+fn sent(s: &mut App) {
+    let home = !matches!(s.frame_route(), Route::Thread(_));
     let d = draft_mut(s);
-    d.edit.clear();
-    d.attachments.clear();
+    if home {
+        *d = Draft::default();
+    } else {
+        d.edit.clear();
+        d.attachments.clear();
+    }
+}
+
+/// Opening a thread or the new-thread draft puts the caret in its composer (ChatView).
+pub fn focus(s: &mut App, route: &Route) {
+    s.ui.chat.composer.drafts.entry(draft_key(route)).or_default().edit.focused = true;
 }
 
 fn stop(s: &mut App) {
@@ -240,6 +310,20 @@ fn stop(s: &mut App) {
 pub fn poll(s: &mut App) -> bool {
     let Some(net) = s.src.net() else { return false };
     let mut changed = false;
+    let composer = &mut s.ui.chat.composer;
+    let mut i = 0;
+    while i < composer.uploads.len() {
+        let Some(reply) = net.take_reply(composer.uploads[i].0) else {
+            i += 1;
+            continue;
+        };
+        let (_, payload, launch) = composer.uploads.remove(i);
+        match reply {
+            Ok(v) => deliver(net, &mut composer.launches, payload, launch, v["attachments"].clone()),
+            Err(e) => eprintln!("composer: storing attachments failed: {e}"),
+        }
+        changed = true;
+    }
     let mut opened = None;
     s.ui.chat.composer.launches.retain(|(request, thread_id)| match net.take_reply(*request) {
         Some(reply) => {
@@ -455,7 +539,8 @@ fn attachment_chips(t: &T, paths: &[String]) -> El {
 }
 
 fn attach(tx: &mut Tx) {
-    let options = rune::FileDialogOptions { title: "Attach files".into(), ..Default::default() };
+    let exts: Vec<&str> = IMAGE_TYPES.iter().map(|(e, _)| *e).collect();
+    let options = rune::FileDialogOptions { title: "Attach images".into(), ..Default::default() }.filter("Images", &exts);
     tx.open_file(options, |s: &mut App, picked: rune::FileDialogResult, _| {
         if let Ok(Some(path)) = picked {
             draft_mut(s).attachments.push(path.display().to_string());
@@ -594,3 +679,56 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.chat.details.hidden = true;
     }),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn uploads_inline_supported_images_only() {
+        let dir = std::env::temp_dir().join(format!("s5-upload-{}", s5_net::uuid()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let png = dir.join("shot.PNG");
+        std::fs::write(&png, [1u8, 2, 3]).unwrap();
+        let notes = dir.join("notes.txt");
+        std::fs::write(&notes, "hi").unwrap();
+        let v = upload(png.to_str().unwrap()).unwrap();
+        assert_eq!(v, json!({"type": "image", "name": "shot.PNG", "mimeType": "image/png", "sizeBytes": 3, "dataUrl": "data:image/png;base64,AQID"}));
+        assert!(upload(notes.to_str().unwrap()).is_none());
+        assert!(upload(dir.join("gone.png").to_str().unwrap()).is_none());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn navigating_focuses_the_route_draft() {
+        let mut s = App::new();
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id.clone()));
+        assert!(s.ui.chat.composer.drafts[&id].edit.focused);
+        s.navigate(Route::Home { project_id: None });
+        assert!(s.ui.chat.composer.drafts["home"].edit.focused);
+    }
+
+    #[test]
+    fn sending_resets_the_home_draft_but_keeps_thread_overrides() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        let d = draft_mut(&mut s);
+        d.edit = TextEdit::new("hi");
+        d.model = Some(("replay".into(), "write-approval".into()));
+        d.runtime_mode = Some("approval-required".into());
+        sent(&mut s);
+        let d = draft(&s).unwrap();
+        assert!(d.edit.text.is_empty() && d.model.is_none() && d.runtime_mode.is_none());
+
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id));
+        let d = draft_mut(&mut s);
+        d.edit = TextEdit::new("hi");
+        d.runtime_mode = Some("approval-required".into());
+        sent(&mut s);
+        let d = draft(&s).unwrap();
+        assert!(d.edit.text.is_empty());
+        assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
+    }
+}

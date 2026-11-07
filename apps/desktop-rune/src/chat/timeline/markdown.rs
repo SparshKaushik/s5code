@@ -44,7 +44,7 @@ fn code_background(t: &T) -> rune::Color {
     }
 }
 
-fn prose(source: &str, t: &T) -> El {
+fn prose(app: &App, source: &str, t: &T) -> El {
     let mut out = col().w_full().gap(10.4);
     for (index, block) in source
         .trim()
@@ -71,14 +71,14 @@ fn prose(source: &str, t: &T) -> El {
             .nth(1)
             .is_some_and(|line| line.contains("---") && line.contains('|'))
         {
-            content = table(block, t);
+            content = table(app, block, t);
         }
         out = out.child(content);
     }
     out
 }
 
-fn table(source: &str, t: &T) -> El {
+fn table(app: &App, source: &str, t: &T) -> El {
     if source.contains("\\|") || source.lines().nth(1).is_some_and(|line| line.contains(':')) {
         return Markdown::new(source)
             .selectable(true)
@@ -162,7 +162,7 @@ fn table(source: &str, t: &T) -> El {
             .w_full()
             .justify_end()
             .pt(2.0)
-            .child(copy_button(source, t)),
+            .child(copy_button(app, source, t)),
     )
 }
 
@@ -183,7 +183,7 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
             continue;
         };
         if i > start {
-            out = out.child(prose(&lines[start..i].concat(), t));
+            out = out.child(prose(app, &lines[start..i].concat(), t));
         }
         let language = line
             .trim_start_matches(marker)
@@ -232,7 +232,7 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
                         }
                     }),
             )
-            .child(copy_button(&code, t));
+            .child(copy_button(app, &code, t));
         let fenced = format!("```{language}\n{code}\n```");
         let code_view = Markdown::new(fenced)
             .selectable(true)
@@ -265,7 +265,7 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
         start = i;
     }
     if start < lines.len() {
-        out = out.child(prose(&lines[start..].concat(), t));
+        out = out.child(prose(app, &lines[start..].concat(), t));
     }
     if source.is_empty() {
         out = out.child(icon(&icons::ELLIPSIS, 16.0).color(t.c.muted_foreground));
