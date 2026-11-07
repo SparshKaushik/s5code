@@ -19,6 +19,7 @@ import * as PubSub from "effect/PubSub";
 import * as Schema from "effect/Schema";
 import * as Semaphore from "effect/Semaphore";
 import { HttpClient, HttpClientRequest, HttpClientResponse } from "effect/http";
+import * as HostProcess from "@t3tools/shared/HostProcess";
 import * as ServerSettings from "../serverSettings.ts";
 import * as DeviceService from "./DeviceService.ts";
 
@@ -119,11 +120,12 @@ const make = Effect.gen(function* () {
   const settings = yield* ServerSettings.ServerSettingsService;
   const receiptLock = yield* Semaphore.make(1);
   const settingsLock = yield* Semaphore.make(1);
+  const environment = yield* HostProcess.Environment;
+  const home = yield* HostProcess.HomeDirectory;
   const directory =
-    process.env.SIMBOX_DEVICE_REGISTRATION_DIR ??
+    environment.SIMBOX_DEVICE_REGISTRATION_DIR ??
     path.join(
-      process.env.XDG_CONFIG_HOME ??
-        path.join(process.env.HOME ?? process.env.USERPROFILE ?? "", ".config"),
+      environment.XDG_CONFIG_HOME ?? path.join(home, ".config"),
       "simbox",
       "device-registrations",
     );
