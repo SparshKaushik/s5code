@@ -1,0 +1,2658 @@
+{
+ "summary": {
+  "contractVersion": 9,
+  "readAt": "2026-11-06T10:04:18.000Z",
+  "timeZone": "UTC",
+  "sinceDay": "2026-10-08",
+  "untilDay": "2026-11-06",
+  "buckets": [
+   {
+    "day": "2026-10-08",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 470618,
+     "cachedInputTokens": 3398914,
+     "cacheCreationTokens": 156872,
+     "outputTokens": 83665,
+     "reasoningTokens": 33466
+    },
+    "costUsd": 2.1962,
+    "cacheSavingsUsd": 1.3616,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.8346,
+     "cacheRead": 0.3734,
+     "cacheWrite": 0.2416,
+     "output": 0.7467
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 63,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-08",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 631691,
+     "cachedInputTokens": 4562213,
+     "cacheCreationTokens": 210563,
+     "outputTokens": 112300,
+     "reasoningTokens": 44920
+    },
+    "costUsd": 6.6679,
+    "cacheSavingsUsd": 4.1341,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.5338,
+     "cacheRead": 1.1335,
+     "cacheWrite": 0.7335,
+     "output": 2.2671
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 85,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-08",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 421011,
+     "cachedInputTokens": 3040636,
+     "cacheCreationTokens": 140337,
+     "outputTokens": 74846,
+     "reasoningTokens": 29938
+    },
+    "costUsd": 4.444,
+    "cacheSavingsUsd": 2.7553,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.6887,
+     "cacheRead": 0.7555,
+     "cacheWrite": 0.4888,
+     "output": 1.511
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 57,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-09",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 592154,
+     "cachedInputTokens": 4276668,
+     "cacheCreationTokens": 197384,
+     "outputTokens": 105271,
+     "reasoningTokens": 42108
+    },
+    "costUsd": 2.7634,
+    "cacheSavingsUsd": 1.7133,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.0501,
+     "cacheRead": 0.4698,
+     "cacheWrite": 0.304,
+     "output": 0.9396
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 79,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-09",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 541009,
+     "cachedInputTokens": 3907292,
+     "cacheCreationTokens": 180336,
+     "outputTokens": 96179,
+     "reasoningTokens": 38471
+    },
+    "costUsd": 5.7107,
+    "cacheSavingsUsd": 3.5406,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.1701,
+     "cacheRead": 0.9708,
+     "cacheWrite": 0.6282,
+     "output": 1.9416
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 73,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-09",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 201173,
+     "cachedInputTokens": 1452918,
+     "cacheCreationTokens": 67057,
+     "outputTokens": 35764,
+     "reasoningTokens": 14305
+    },
+    "costUsd": 2.1235,
+    "cacheSavingsUsd": 1.3166,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.8069,
+     "cacheRead": 0.361,
+     "cacheWrite": 0.2336,
+     "output": 0.722
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 27,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-10",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 594912,
+     "cachedInputTokens": 4296586,
+     "cacheCreationTokens": 198304,
+     "outputTokens": 105762,
+     "reasoningTokens": 42304
+    },
+    "costUsd": 6.2796,
+    "cacheSavingsUsd": 3.8934,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.3862,
+     "cacheRead": 1.0675,
+     "cacheWrite": 0.6908,
+     "output": 2.1351
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 80,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-10",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 396781,
+     "cachedInputTokens": 2865641,
+     "cacheCreationTokens": 132260,
+     "outputTokens": 70538,
+     "reasoningTokens": 28215
+    },
+    "costUsd": 4.1882,
+    "cacheSavingsUsd": 2.5967,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5915,
+     "cacheRead": 0.712,
+     "cacheWrite": 0.4607,
+     "output": 1.424
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 53,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-11",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 443736,
+     "cachedInputTokens": 3204764,
+     "cacheCreationTokens": 147912,
+     "outputTokens": 78886,
+     "reasoningTokens": 31554
+    },
+    "costUsd": 2.0708,
+    "cacheSavingsUsd": 1.2839,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.7869,
+     "cacheRead": 0.352,
+     "cacheWrite": 0.2278,
+     "output": 0.7041
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 60,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-11",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 663994,
+     "cachedInputTokens": 4795514,
+     "cacheCreationTokens": 221331,
+     "outputTokens": 118043,
+     "reasoningTokens": 47217
+    },
+    "costUsd": 7.0088,
+    "cacheSavingsUsd": 4.3455,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.6633,
+     "cacheRead": 1.1915,
+     "cacheWrite": 0.771,
+     "output": 2.383
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 89,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-11",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 197107,
+     "cachedInputTokens": 1423554,
+     "cacheCreationTokens": 65702,
+     "outputTokens": 35041,
+     "reasoningTokens": 14016
+    },
+    "costUsd": 2.0806,
+    "cacheSavingsUsd": 1.29,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.7906,
+     "cacheRead": 0.3537,
+     "cacheWrite": 0.2289,
+     "output": 0.7074
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 27,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-12",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 500041,
+     "cachedInputTokens": 3611410,
+     "cacheCreationTokens": 166680,
+     "outputTokens": 88896,
+     "reasoningTokens": 35558
+    },
+    "costUsd": 2.3335,
+    "cacheSavingsUsd": 1.4468,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.8867,
+     "cacheRead": 0.3967,
+     "cacheWrite": 0.2567,
+     "output": 0.7934
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 67,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-12",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 658874,
+     "cachedInputTokens": 4758538,
+     "cacheCreationTokens": 219624,
+     "outputTokens": 117133,
+     "reasoningTokens": 46853
+    },
+    "costUsd": 6.9548,
+    "cacheSavingsUsd": 4.312,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.6428,
+     "cacheRead": 1.1823,
+     "cacheWrite": 0.765,
+     "output": 2.3646
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 88,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-12",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 379102,
+     "cachedInputTokens": 2737963,
+     "cacheCreationTokens": 126367,
+     "outputTokens": 67396,
+     "reasoningTokens": 26958
+    },
+    "costUsd": 4.0016,
+    "cacheSavingsUsd": 2.481,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5206,
+     "cacheRead": 0.6803,
+     "cacheWrite": 0.4402,
+     "output": 1.3605
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 51,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-13",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 355599,
+     "cachedInputTokens": 2568217,
+     "cacheCreationTokens": 118533,
+     "outputTokens": 63217,
+     "reasoningTokens": 25286
+    },
+    "costUsd": 1.6595,
+    "cacheSavingsUsd": 1.0289,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.6306,
+     "cacheRead": 0.2821,
+     "cacheWrite": 0.1825,
+     "output": 0.5642
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 48,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-13",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 716574,
+     "cachedInputTokens": 5175261,
+     "cacheCreationTokens": 238858,
+     "outputTokens": 127391,
+     "reasoningTokens": 50956
+    },
+    "costUsd": 7.5638,
+    "cacheSavingsUsd": 4.6896,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.8742,
+     "cacheRead": 1.2858,
+     "cacheWrite": 0.832,
+     "output": 2.5717
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 96,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-13",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 434646,
+     "cachedInputTokens": 3139110,
+     "cacheCreationTokens": 144882,
+     "outputTokens": 77270,
+     "reasoningTokens": 30908
+    },
+    "costUsd": 4.5879,
+    "cacheSavingsUsd": 2.8445,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.7434,
+     "cacheRead": 0.7799,
+     "cacheWrite": 0.5047,
+     "output": 1.5599
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 58,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-14",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 1169204,
+     "cachedInputTokens": 8444256,
+     "cacheCreationTokens": 389734,
+     "outputTokens": 207858,
+     "reasoningTokens": 83143
+    },
+    "costUsd": 5.4563,
+    "cacheSavingsUsd": 3.3829,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.0734,
+     "cacheRead": 0.9276,
+     "cacheWrite": 0.6002,
+     "output": 1.8551
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 156,
+    "unpricedRecords": 0,
+    "sessions": 5
+   },
+   {
+    "day": "2026-10-14",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 558352,
+     "cachedInputTokens": 4032546,
+     "cacheCreationTokens": 186117,
+     "outputTokens": 99262,
+     "reasoningTokens": 39704
+    },
+    "costUsd": 5.8937,
+    "cacheSavingsUsd": 3.6541,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.2396,
+     "cacheRead": 1.0019,
+     "cacheWrite": 0.6483,
+     "output": 2.0039
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 75,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-14",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 206761,
+     "cachedInputTokens": 1493277,
+     "cacheCreationTokens": 68920,
+     "outputTokens": 36757,
+     "reasoningTokens": 14702
+    },
+    "costUsd": 2.1825,
+    "cacheSavingsUsd": 1.3532,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.8294,
+     "cacheRead": 0.371,
+     "cacheWrite": 0.2401,
+     "output": 0.7421
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 28,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-15",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 810589,
+     "cachedInputTokens": 5854256,
+     "cacheCreationTokens": 270196,
+     "outputTokens": 144104,
+     "reasoningTokens": 57641
+    },
+    "costUsd": 3.7828,
+    "cacheSavingsUsd": 2.3453,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4375,
+     "cacheRead": 0.6431,
+     "cacheWrite": 0.4161,
+     "output": 1.2862
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 109,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-15",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 558577,
+     "cachedInputTokens": 4034171,
+     "cacheCreationTokens": 186192,
+     "outputTokens": 99302,
+     "reasoningTokens": 39720
+    },
+    "costUsd": 5.8961,
+    "cacheSavingsUsd": 3.6556,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.2405,
+     "cacheRead": 1.0023,
+     "cacheWrite": 0.6486,
+     "output": 2.0047
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 75,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-15",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 483379,
+     "cachedInputTokens": 3491075,
+     "cacheCreationTokens": 161126,
+     "outputTokens": 85934,
+     "reasoningTokens": 34373
+    },
+    "costUsd": 5.1023,
+    "cacheSavingsUsd": 3.1634,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.9389,
+     "cacheRead": 0.8674,
+     "cacheWrite": 0.5613,
+     "output": 1.7348
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 65,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-16",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 553252,
+     "cachedInputTokens": 3995715,
+     "cacheCreationTokens": 184417,
+     "outputTokens": 98356,
+     "reasoningTokens": 39342
+    },
+    "costUsd": 2.5818,
+    "cacheSavingsUsd": 1.6007,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.9811,
+     "cacheRead": 0.4389,
+     "cacheWrite": 0.284,
+     "output": 0.8778
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 74,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-16",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 533007,
+     "cachedInputTokens": 3849495,
+     "cacheCreationTokens": 177669,
+     "outputTokens": 94756,
+     "reasoningTokens": 37902
+    },
+    "costUsd": 5.6262,
+    "cacheSavingsUsd": 3.4882,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.138,
+     "cacheRead": 0.9565,
+     "cacheWrite": 0.6189,
+     "output": 1.9129
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 72,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-16",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 221671,
+     "cachedInputTokens": 1600963,
+     "cacheCreationTokens": 73890,
+     "outputTokens": 39408,
+     "reasoningTokens": 15763
+    },
+    "costUsd": 2.3399,
+    "cacheSavingsUsd": 1.4507,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.8892,
+     "cacheRead": 0.3978,
+     "cacheWrite": 0.2574,
+     "output": 0.7956
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 30,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-17",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 556669,
+     "cachedInputTokens": 4020390,
+     "cacheCreationTokens": 185556,
+     "outputTokens": 98963,
+     "reasoningTokens": 39585
+    },
+    "costUsd": 5.876,
+    "cacheSavingsUsd": 3.6431,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.2329,
+     "cacheRead": 0.9989,
+     "cacheWrite": 0.6464,
+     "output": 1.9978
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 75,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-17",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 352991,
+     "cachedInputTokens": 2549381,
+     "cacheCreationTokens": 117663,
+     "outputTokens": 62754,
+     "reasoningTokens": 25101
+    },
+    "costUsd": 3.726,
+    "cacheSavingsUsd": 2.3101,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4159,
+     "cacheRead": 0.6334,
+     "cacheWrite": 0.4099,
+     "output": 1.2668
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 48,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-18",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 349629,
+     "cachedInputTokens": 2525101,
+     "cacheCreationTokens": 116543,
+     "outputTokens": 62156,
+     "reasoningTokens": 24862
+    },
+    "costUsd": 1.6316,
+    "cacheSavingsUsd": 1.0116,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.62,
+     "cacheRead": 0.2774,
+     "cacheWrite": 0.1795,
+     "output": 0.5547
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 47,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-18",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 1027115,
+     "cachedInputTokens": 7418055,
+     "cacheCreationTokens": 342371,
+     "outputTokens": 182598,
+     "reasoningTokens": 73039
+    },
+    "costUsd": 10.8418,
+    "cacheSavingsUsd": 6.7219,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 4.1199,
+     "cacheRead": 1.8431,
+     "cacheWrite": 1.1926,
+     "output": 3.6862
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 137,
+    "unpricedRecords": 0,
+    "sessions": 4
+   },
+   {
+    "day": "2026-10-18",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 459138,
+     "cachedInputTokens": 3316000,
+     "cacheCreationTokens": 153046,
+     "outputTokens": 81624,
+     "reasoningTokens": 32649
+    },
+    "costUsd": 4.8465,
+    "cacheSavingsUsd": 3.0048,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.8417,
+     "cacheRead": 0.8239,
+     "cacheWrite": 0.5331,
+     "output": 1.6478
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 62,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-19",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 737854,
+     "cachedInputTokens": 5328948,
+     "cacheCreationTokens": 245951,
+     "outputTokens": 131174,
+     "reasoningTokens": 52469
+    },
+    "costUsd": 3.4433,
+    "cacheSavingsUsd": 2.1348,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.3085,
+     "cacheRead": 0.5854,
+     "cacheWrite": 0.3788,
+     "output": 1.1707
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 99,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-19",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 591500,
+     "cachedInputTokens": 4271949,
+     "cacheCreationTokens": 197166,
+     "outputTokens": 105155,
+     "reasoningTokens": 42062
+    },
+    "costUsd": 6.2436,
+    "cacheSavingsUsd": 3.871,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.3726,
+     "cacheRead": 1.0614,
+     "cacheWrite": 0.6868,
+     "output": 2.1228
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 79,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-19",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 158769,
+     "cachedInputTokens": 1146668,
+     "cacheCreationTokens": 52923,
+     "outputTokens": 28225,
+     "reasoningTokens": 11290
+    },
+    "costUsd": 1.6759,
+    "cacheSavingsUsd": 1.0391,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.6368,
+     "cacheRead": 0.2849,
+     "cacheWrite": 0.1843,
+     "output": 0.5698
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 22,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-20",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 405504,
+     "cachedInputTokens": 2928644,
+     "cacheCreationTokens": 135168,
+     "outputTokens": 72089,
+     "reasoningTokens": 28835
+    },
+    "costUsd": 1.8924,
+    "cacheSavingsUsd": 1.1733,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.7191,
+     "cacheRead": 0.3217,
+     "cacheWrite": 0.2082,
+     "output": 0.6434
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 55,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-20",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 636818,
+     "cachedInputTokens": 4599242,
+     "cacheCreationTokens": 212272,
+     "outputTokens": 113212,
+     "reasoningTokens": 45284
+    },
+    "costUsd": 6.722,
+    "cacheSavingsUsd": 4.1676,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.5544,
+     "cacheRead": 1.1427,
+     "cacheWrite": 0.7394,
+     "output": 2.2855
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 85,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-20",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 408372,
+     "cachedInputTokens": 2949360,
+     "cacheCreationTokens": 136124,
+     "outputTokens": 72599,
+     "reasoningTokens": 29039
+    },
+    "costUsd": 4.3106,
+    "cacheSavingsUsd": 2.6726,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.638,
+     "cacheRead": 0.7328,
+     "cacheWrite": 0.4742,
+     "output": 1.4656
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 55,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-21",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 589820,
+     "cachedInputTokens": 4259812,
+     "cacheCreationTokens": 196606,
+     "outputTokens": 104856,
+     "reasoningTokens": 41942
+    },
+    "costUsd": 2.7525,
+    "cacheSavingsUsd": 1.7066,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.0459,
+     "cacheRead": 0.4679,
+     "cacheWrite": 0.3028,
+     "output": 0.9359
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 79,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-21",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 671578,
+     "cachedInputTokens": 4850290,
+     "cacheCreationTokens": 223859,
+     "outputTokens": 119391,
+     "reasoningTokens": 47756
+    },
+    "costUsd": 7.0889,
+    "cacheSavingsUsd": 4.3951,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.6938,
+     "cacheRead": 1.2051,
+     "cacheWrite": 0.7798,
+     "output": 2.4102
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 90,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-21",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 361228,
+     "cachedInputTokens": 2608874,
+     "cacheCreationTokens": 120409,
+     "outputTokens": 64218,
+     "reasoningTokens": 25687
+    },
+    "costUsd": 3.813,
+    "cacheSavingsUsd": 2.3641,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4489,
+     "cacheRead": 0.6482,
+     "cacheWrite": 0.4194,
+     "output": 1.2964
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 49,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-22",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 790962,
+     "cachedInputTokens": 5712510,
+     "cacheCreationTokens": 263654,
+     "outputTokens": 140615,
+     "reasoningTokens": 56246
+    },
+    "costUsd": 3.6912,
+    "cacheSavingsUsd": 2.2885,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4027,
+     "cacheRead": 0.6275,
+     "cacheWrite": 0.406,
+     "output": 1.255
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 106,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-22",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 515280,
+     "cachedInputTokens": 3721469,
+     "cacheCreationTokens": 171760,
+     "outputTokens": 91605,
+     "reasoningTokens": 36642
+    },
+    "costUsd": 5.4391,
+    "cacheSavingsUsd": 3.3722,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.0669,
+     "cacheRead": 0.9246,
+     "cacheWrite": 0.5983,
+     "output": 1.8493
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 69,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-22",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 324883,
+     "cachedInputTokens": 2346382,
+     "cacheCreationTokens": 108294,
+     "outputTokens": 57757,
+     "reasoningTokens": 23102
+    },
+    "costUsd": 3.4293,
+    "cacheSavingsUsd": 2.1262,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.3031,
+     "cacheRead": 0.583,
+     "cacheWrite": 0.3772,
+     "output": 1.166
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 44,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-23",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 544317,
+     "cachedInputTokens": 3931184,
+     "cacheCreationTokens": 181439,
+     "outputTokens": 96767,
+     "reasoningTokens": 38706
+    },
+    "costUsd": 2.5402,
+    "cacheSavingsUsd": 1.5749,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.9653,
+     "cacheRead": 0.4318,
+     "cacheWrite": 0.2794,
+     "output": 0.8637
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 73,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-23",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 801639,
+     "cachedInputTokens": 5789618,
+     "cacheCreationTokens": 267213,
+     "outputTokens": 142513,
+     "reasoningTokens": 57005
+    },
+    "costUsd": 8.4617,
+    "cacheSavingsUsd": 5.2463,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 3.2154,
+     "cacheRead": 1.4385,
+     "cacheWrite": 0.9308,
+     "output": 2.877
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 107,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-23",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 457720,
+     "cachedInputTokens": 3305761,
+     "cacheCreationTokens": 152573,
+     "outputTokens": 81372,
+     "reasoningTokens": 32548
+    },
+    "costUsd": 4.8315,
+    "cacheSavingsUsd": 2.9955,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.836,
+     "cacheRead": 0.8214,
+     "cacheWrite": 0.5315,
+     "output": 1.6427
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 62,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-24",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 625932,
+     "cachedInputTokens": 4520627,
+     "cacheCreationTokens": 208644,
+     "outputTokens": 111276,
+     "reasoningTokens": 44510
+    },
+    "costUsd": 6.6071,
+    "cacheSavingsUsd": 4.0964,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.5107,
+     "cacheRead": 1.1232,
+     "cacheWrite": 0.7268,
+     "output": 2.2464
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 84,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-24",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 341872,
+     "cachedInputTokens": 2469078,
+     "cacheCreationTokens": 113957,
+     "outputTokens": 60777,
+     "reasoningTokens": 24310
+    },
+    "costUsd": 3.6087,
+    "cacheSavingsUsd": 2.2374,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.3713,
+     "cacheRead": 0.6135,
+     "cacheWrite": 0.397,
+     "output": 1.227
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 46,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-25",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 787322,
+     "cachedInputTokens": 5686215,
+     "cacheCreationTokens": 262440,
+     "outputTokens": 139968,
+     "reasoningTokens": 55987
+    },
+    "costUsd": 3.6742,
+    "cacheSavingsUsd": 2.278,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.3962,
+     "cacheRead": 0.6246,
+     "cacheWrite": 0.4042,
+     "output": 1.2492
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 105,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-25",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 655038,
+     "cachedInputTokens": 4730830,
+     "cacheCreationTokens": 218346,
+     "outputTokens": 116451,
+     "reasoningTokens": 46580
+    },
+    "costUsd": 6.9143,
+    "cacheSavingsUsd": 4.2869,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.6274,
+     "cacheRead": 1.1754,
+     "cacheWrite": 0.7606,
+     "output": 2.3509
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 88,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-25",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 467959,
+     "cachedInputTokens": 3379708,
+     "cacheCreationTokens": 155986,
+     "outputTokens": 83192,
+     "reasoningTokens": 33276
+    },
+    "costUsd": 4.9396,
+    "cacheSavingsUsd": 3.0626,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.877,
+     "cacheRead": 0.8397,
+     "cacheWrite": 0.5434,
+     "output": 1.6795
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 63,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-26",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 407613,
+     "cachedInputTokens": 2943875,
+     "cacheCreationTokens": 135871,
+     "outputTokens": 72464,
+     "reasoningTokens": 28985
+    },
+    "costUsd": 1.9022,
+    "cacheSavingsUsd": 1.1794,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.7228,
+     "cacheRead": 0.3234,
+     "cacheWrite": 0.2092,
+     "output": 0.6467
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 55,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-26",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 778152,
+     "cachedInputTokens": 5619991,
+     "cacheCreationTokens": 259384,
+     "outputTokens": 138338,
+     "reasoningTokens": 55335
+    },
+    "costUsd": 8.2138,
+    "cacheSavingsUsd": 5.0926,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 3.1212,
+     "cacheRead": 1.3963,
+     "cacheWrite": 0.9035,
+     "output": 2.7927
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 104,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-26",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 430282,
+     "cachedInputTokens": 3107593,
+     "cacheCreationTokens": 143427,
+     "outputTokens": 76494,
+     "reasoningTokens": 30597
+    },
+    "costUsd": 4.5419,
+    "cacheSavingsUsd": 2.816,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.7259,
+     "cacheRead": 0.7721,
+     "cacheWrite": 0.4996,
+     "output": 1.5442
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 58,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-26",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 127062,
+     "cachedInputTokens": 917671,
+     "cacheCreationTokens": 42354,
+     "outputTokens": 22588,
+     "reasoningTokens": 9035
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 17,
+    "unpricedRecords": 17,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-27",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 853268,
+     "cachedInputTokens": 6162494,
+     "cacheCreationTokens": 284422,
+     "outputTokens": 151692,
+     "reasoningTokens": 60676
+    },
+    "costUsd": 3.9819,
+    "cacheSavingsUsd": 2.4688,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5131,
+     "cacheRead": 0.6769,
+     "cacheWrite": 0.438,
+     "output": 1.3538
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 114,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-27",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 359713,
+     "cachedInputTokens": 2597933,
+     "cacheCreationTokens": 119904,
+     "outputTokens": 63949,
+     "reasoningTokens": 25579
+    },
+    "costUsd": 3.797,
+    "cacheSavingsUsd": 2.3541,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4429,
+     "cacheRead": 0.6455,
+     "cacheWrite": 0.4177,
+     "output": 1.291
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 48,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-27",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 277033,
+     "cachedInputTokens": 2000794,
+     "cacheCreationTokens": 92344,
+     "outputTokens": 49250,
+     "reasoningTokens": 19700
+    },
+    "costUsd": 2.9242,
+    "cacheSavingsUsd": 1.813,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.1112,
+     "cacheRead": 0.4971,
+     "cacheWrite": 0.3217,
+     "output": 0.9942
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 37,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-27",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 165944,
+     "cachedInputTokens": 1198486,
+     "cacheCreationTokens": 55314,
+     "outputTokens": 29501,
+     "reasoningTokens": 11800
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 23,
+    "unpricedRecords": 23,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-28",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 538414,
+     "cachedInputTokens": 3888545,
+     "cacheCreationTokens": 179471,
+     "outputTokens": 95718,
+     "reasoningTokens": 38287
+    },
+    "costUsd": 2.5126,
+    "cacheSavingsUsd": 1.5578,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.9548,
+     "cacheRead": 0.4271,
+     "cacheWrite": 0.2764,
+     "output": 0.8543
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 72,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-28",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 1253794,
+     "cachedInputTokens": 9055183,
+     "cacheCreationTokens": 417931,
+     "outputTokens": 222896,
+     "reasoningTokens": 89158
+    },
+    "costUsd": 13.2345,
+    "cacheSavingsUsd": 8.2054,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 5.0291,
+     "cacheRead": 2.2499,
+     "cacheWrite": 1.4558,
+     "output": 4.4997
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 168,
+    "unpricedRecords": 0,
+    "sessions": 5
+   },
+   {
+    "day": "2026-10-28",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 351647,
+     "cachedInputTokens": 2539674,
+     "cacheCreationTokens": 117215,
+     "outputTokens": 62515,
+     "reasoningTokens": 25006
+    },
+    "costUsd": 3.7118,
+    "cacheSavingsUsd": 2.3013,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4105,
+     "cacheRead": 0.631,
+     "cacheWrite": 0.4083,
+     "output": 1.262
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 47,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-29",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 859636,
+     "cachedInputTokens": 6208486,
+     "cacheCreationTokens": 286545,
+     "outputTokens": 152824,
+     "reasoningTokens": 61129
+    },
+    "costUsd": 4.0116,
+    "cacheSavingsUsd": 2.4872,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5244,
+     "cacheRead": 0.682,
+     "cacheWrite": 0.4413,
+     "output": 1.3639
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 115,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-29",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 707021,
+     "cachedInputTokens": 5106267,
+     "cacheCreationTokens": 235673,
+     "outputTokens": 125692,
+     "reasoningTokens": 50276
+    },
+    "costUsd": 7.463,
+    "cacheSavingsUsd": 4.6271,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.8359,
+     "cacheRead": 1.2687,
+     "cacheWrite": 0.8209,
+     "output": 2.5374
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 95,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-29",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 299746,
+     "cachedInputTokens": 2164838,
+     "cacheCreationTokens": 99915,
+     "outputTokens": 53288,
+     "reasoningTokens": 21315
+    },
+    "costUsd": 3.164,
+    "cacheSavingsUsd": 1.9617,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.2023,
+     "cacheRead": 0.5379,
+     "cacheWrite": 0.348,
+     "output": 1.0758
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 40,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-29",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 132158,
+     "cachedInputTokens": 954475,
+     "cacheCreationTokens": 44052,
+     "outputTokens": 23494,
+     "reasoningTokens": 9397
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 18,
+    "unpricedRecords": 18,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-30",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 895912,
+     "cachedInputTokens": 6470477,
+     "cacheCreationTokens": 298637,
+     "outputTokens": 159273,
+     "reasoningTokens": 63709
+    },
+    "costUsd": 4.1809,
+    "cacheSavingsUsd": 2.5922,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5887,
+     "cacheRead": 0.7108,
+     "cacheWrite": 0.4599,
+     "output": 1.4215
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 120,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-10-30",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 1010088,
+     "cachedInputTokens": 7295086,
+     "cacheCreationTokens": 336696,
+     "outputTokens": 179571,
+     "reasoningTokens": 71828
+    },
+    "costUsd": 10.662,
+    "cacheSavingsUsd": 6.6104,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 4.0516,
+     "cacheRead": 1.8125,
+     "cacheWrite": 1.1728,
+     "output": 3.6251
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 135,
+    "unpricedRecords": 0,
+    "sessions": 4
+   },
+   {
+    "day": "2026-10-30",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 312687,
+     "cachedInputTokens": 2258301,
+     "cacheCreationTokens": 104229,
+     "outputTokens": 55588,
+     "reasoningTokens": 22235
+    },
+    "costUsd": 3.3006,
+    "cacheSavingsUsd": 2.0464,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.2542,
+     "cacheRead": 0.5611,
+     "cacheWrite": 0.3631,
+     "output": 1.1222
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 42,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-30",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 199211,
+     "cachedInputTokens": 1438746,
+     "cacheCreationTokens": 66403,
+     "outputTokens": 35415,
+     "reasoningTokens": 14166
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 27,
+    "unpricedRecords": 27,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-31",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 568455,
+     "cachedInputTokens": 4105511,
+     "cacheCreationTokens": 189485,
+     "outputTokens": 101058,
+     "reasoningTokens": 40423
+    },
+    "costUsd": 6.0004,
+    "cacheSavingsUsd": 3.7202,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.2802,
+     "cacheRead": 1.0201,
+     "cacheWrite": 0.66,
+     "output": 2.0401
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 76,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-10-31",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 436204,
+     "cachedInputTokens": 3150368,
+     "cacheCreationTokens": 145401,
+     "outputTokens": 77547,
+     "reasoningTokens": 31018
+    },
+    "costUsd": 4.6044,
+    "cacheSavingsUsd": 2.8547,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.7497,
+     "cacheRead": 0.7827,
+     "cacheWrite": 0.5065,
+     "output": 1.5655
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 59,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-10-31",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 207746,
+     "cachedInputTokens": 1500394,
+     "cacheCreationTokens": 69248,
+     "outputTokens": 36932,
+     "reasoningTokens": 14772
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 28,
+    "unpricedRecords": 28,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-01",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 1255029,
+     "cachedInputTokens": 9064098,
+     "cacheCreationTokens": 418343,
+     "outputTokens": 223116,
+     "reasoningTokens": 89246
+    },
+    "costUsd": 5.8568,
+    "cacheSavingsUsd": 3.6312,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.2256,
+     "cacheRead": 0.9957,
+     "cacheWrite": 0.6442,
+     "output": 1.9913
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 168,
+    "unpricedRecords": 0,
+    "sessions": 5
+   },
+   {
+    "day": "2026-11-01",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 661356,
+     "cachedInputTokens": 4776464,
+     "cacheCreationTokens": 220452,
+     "outputTokens": 117574,
+     "reasoningTokens": 47029
+    },
+    "costUsd": 6.981,
+    "cacheSavingsUsd": 4.3282,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.6528,
+     "cacheRead": 1.1868,
+     "cacheWrite": 0.7679,
+     "output": 2.3735
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 89,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-01",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 186551,
+     "cachedInputTokens": 1347313,
+     "cacheCreationTokens": 62183,
+     "outputTokens": 33164,
+     "reasoningTokens": 13265
+    },
+    "costUsd": 1.9692,
+    "cacheSavingsUsd": 1.2209,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.7483,
+     "cacheRead": 0.3348,
+     "cacheWrite": 0.2166,
+     "output": 0.6695
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 25,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-01",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 115554,
+     "cachedInputTokens": 834559,
+     "cacheCreationTokens": 38518,
+     "outputTokens": 20543,
+     "reasoningTokens": 8217
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 16,
+    "unpricedRecords": 16,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-02",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 621739,
+     "cachedInputTokens": 4490344,
+     "cacheCreationTokens": 207246,
+     "outputTokens": 110531,
+     "reasoningTokens": 44212
+    },
+    "costUsd": 2.9015,
+    "cacheSavingsUsd": 1.7989,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.1026,
+     "cacheRead": 0.4933,
+     "cacheWrite": 0.3192,
+     "output": 0.9865
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 83,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-02",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 568821,
+     "cachedInputTokens": 4108153,
+     "cacheCreationTokens": 189607,
+     "outputTokens": 101123,
+     "reasoningTokens": 40449
+    },
+    "costUsd": 6.0042,
+    "cacheSavingsUsd": 3.7226,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.2816,
+     "cacheRead": 1.0207,
+     "cacheWrite": 0.6605,
+     "output": 2.0414
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 76,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-02",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 382347,
+     "cachedInputTokens": 2761400,
+     "cacheCreationTokens": 127449,
+     "outputTokens": 67972,
+     "reasoningTokens": 27188
+    },
+    "costUsd": 4.0359,
+    "cacheSavingsUsd": 2.5023,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5336,
+     "cacheRead": 0.6861,
+     "cacheWrite": 0.4439,
+     "output": 1.3722
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 51,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-02",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 158063,
+     "cachedInputTokens": 1141573,
+     "cacheCreationTokens": 52687,
+     "outputTokens": 28100,
+     "reasoningTokens": 11240
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 22,
+    "unpricedRecords": 22,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-03",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 488589,
+     "cachedInputTokens": 3528702,
+     "cacheCreationTokens": 162863,
+     "outputTokens": 86860,
+     "reasoningTokens": 34744
+    },
+    "costUsd": 2.2801,
+    "cacheSavingsUsd": 1.4137,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.8664,
+     "cacheRead": 0.3876,
+     "cacheWrite": 0.2508,
+     "output": 0.7752
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 66,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-03",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 453802,
+     "cachedInputTokens": 3277461,
+     "cacheCreationTokens": 151267,
+     "outputTokens": 80675,
+     "reasoningTokens": 32270
+    },
+    "costUsd": 4.7901,
+    "cacheSavingsUsd": 2.9699,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.8202,
+     "cacheRead": 0.8143,
+     "cacheWrite": 0.5269,
+     "output": 1.6286
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 61,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-03",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 365009,
+     "cachedInputTokens": 2636180,
+     "cacheCreationTokens": 121669,
+     "outputTokens": 64890,
+     "reasoningTokens": 25956
+    },
+    "costUsd": 3.8529,
+    "cacheSavingsUsd": 2.3888,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.4641,
+     "cacheRead": 0.655,
+     "cacheWrite": 0.4238,
+     "output": 1.31
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 49,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-03",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 103226,
+     "cachedInputTokens": 745527,
+     "cacheCreationTokens": 34408,
+     "outputTokens": 18351,
+     "reasoningTokens": 7340
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 14,
+    "unpricedRecords": 14,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-04",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 593363,
+     "cachedInputTokens": 4285406,
+     "cacheCreationTokens": 197787,
+     "outputTokens": 105486,
+     "reasoningTokens": 42194
+    },
+    "costUsd": 2.769,
+    "cacheSavingsUsd": 1.7168,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.0522,
+     "cacheRead": 0.4707,
+     "cacheWrite": 0.3046,
+     "output": 0.9415
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 80,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-04",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 640043,
+     "cachedInputTokens": 4622532,
+     "cacheCreationTokens": 213347,
+     "outputTokens": 113785,
+     "reasoningTokens": 45514
+    },
+    "costUsd": 6.756,
+    "cacheSavingsUsd": 4.1887,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.5673,
+     "cacheRead": 1.1485,
+     "cacheWrite": 0.7432,
+     "output": 2.297
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 86,
+    "unpricedRecords": 0,
+    "sessions": 2
+   },
+   {
+    "day": "2026-11-04",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 389818,
+     "cachedInputTokens": 2815352,
+     "cacheCreationTokens": 129939,
+     "outputTokens": 69300,
+     "reasoningTokens": 27720
+    },
+    "costUsd": 4.1147,
+    "cacheSavingsUsd": 2.5511,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.5636,
+     "cacheRead": 0.6995,
+     "cacheWrite": 0.4526,
+     "output": 1.399
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 52,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-05",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 338010,
+     "cachedInputTokens": 2441186,
+     "cacheCreationTokens": 112670,
+     "outputTokens": 60090,
+     "reasoningTokens": 24036
+    },
+    "costUsd": 1.5774,
+    "cacheSavingsUsd": 0.978,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.5994,
+     "cacheRead": 0.2682,
+     "cacheWrite": 0.1735,
+     "output": 0.5363
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 46,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-05",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 882935,
+     "cachedInputTokens": 6376757,
+     "cacheCreationTokens": 294311,
+     "outputTokens": 156966,
+     "reasoningTokens": 62786
+    },
+    "costUsd": 9.3199,
+    "cacheSavingsUsd": 5.7783,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 3.5416,
+     "cacheRead": 1.5844,
+     "cacheWrite": 1.0252,
+     "output": 3.1688
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 118,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-11-05",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 410035,
+     "cachedInputTokens": 2961367,
+     "cacheCreationTokens": 136678,
+     "outputTokens": 72895,
+     "reasoningTokens": 29158
+    },
+    "costUsd": 4.3282,
+    "cacheSavingsUsd": 2.6835,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.6447,
+     "cacheRead": 0.7358,
+     "cacheWrite": 0.4761,
+     "output": 1.4716
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 55,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-05",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 255660,
+     "cachedInputTokens": 1846433,
+     "cacheCreationTokens": 85220,
+     "outputTokens": 45450,
+     "reasoningTokens": 18180
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 35,
+    "unpricedRecords": 35,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-06",
+    "provider": "codex",
+    "model": "gpt-5.5-codex",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 1080756,
+     "cachedInputTokens": 7805461,
+     "cacheCreationTokens": 360252,
+     "outputTokens": 192134,
+     "reasoningTokens": 76853
+    },
+    "costUsd": 5.0435,
+    "cacheSavingsUsd": 3.127,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 1.9165,
+     "cacheRead": 0.8574,
+     "cacheWrite": 0.5548,
+     "output": 1.7148
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 145,
+    "unpricedRecords": 0,
+    "sessions": 4
+   },
+   {
+    "day": "2026-11-06",
+    "provider": "claude",
+    "model": "claude-opus-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 679052,
+     "cachedInputTokens": 4904267,
+     "cacheCreationTokens": 226350,
+     "outputTokens": 120720,
+     "reasoningTokens": 48288
+    },
+    "costUsd": 7.1678,
+    "cacheSavingsUsd": 4.444,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 2.7238,
+     "cacheRead": 1.2185,
+     "cacheWrite": 0.7885,
+     "output": 2.4371
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 91,
+    "unpricedRecords": 0,
+    "sessions": 3
+   },
+   {
+    "day": "2026-11-06",
+    "provider": "claude",
+    "model": "claude-haiku-5-5",
+    "apiProvider": "",
+    "totals": {
+     "uncachedInputTokens": 185437,
+     "cachedInputTokens": 1339272,
+     "cacheCreationTokens": 61812,
+     "outputTokens": 32966,
+     "reasoningTokens": 13186
+    },
+    "costUsd": 1.9574,
+    "cacheSavingsUsd": 1.2136,
+    "inputTokensEstimated": false,
+    "categoryCostUsd": {
+     "input": 0.7438,
+     "cacheRead": 0.3328,
+     "cacheWrite": 0.2153,
+     "output": 0.6655
+    },
+    "costSource": "modelPriced",
+    "pricedAs": null,
+    "records": 25,
+    "unpricedRecords": 0,
+    "sessions": 1
+   },
+   {
+    "day": "2026-11-06",
+    "provider": "opencode",
+    "model": "kimi-k3",
+    "apiProvider": "moonshot",
+    "totals": {
+     "uncachedInputTokens": 109436,
+     "cachedInputTokens": 790375,
+     "cacheCreationTokens": 36478,
+     "outputTokens": 19455,
+     "reasoningTokens": 7782
+    },
+    "costUsd": 0,
+    "cacheSavingsUsd": 0,
+    "inputTokensEstimated": false,
+    "costSource": "unpriced",
+    "pricedAs": null,
+    "records": 15,
+    "unpricedRecords": 15,
+    "sessions": 1
+   }
+  ],
+  "sources": [
+   {
+    "fingerprint": {
+     "hostId": "devbox",
+     "provider": "codex",
+     "resolvedHomePath": "/home/ubuntu/.codex",
+     "volumeId": "66306:1"
+    },
+    "status": "ok",
+    "scannedFiles": 120,
+    "skippedFiles": 0,
+    "malformedRecords": 0,
+    "distinctSessions": 64,
+    "message": null
+   },
+   {
+    "fingerprint": {
+     "hostId": "devbox",
+     "provider": "claude",
+     "resolvedHomePath": "/home/ubuntu/.claude",
+     "volumeId": "66306:1"
+    },
+    "status": "ok",
+    "scannedFiles": 120,
+    "skippedFiles": 0,
+    "malformedRecords": 0,
+    "distinctSessions": 118,
+    "message": null
+   },
+   {
+    "fingerprint": {
+     "hostId": "devbox",
+     "provider": "opencode",
+     "resolvedHomePath": "/home/ubuntu/.local/share/opencode",
+     "volumeId": "66306:1"
+    },
+    "status": "ok",
+    "scannedFiles": 120,
+    "skippedFiles": 0,
+    "malformedRecords": 0,
+    "distinctSessions": 9,
+    "message": null
+   }
+  ],
+  "pricing": {
+   "status": "fresh",
+   "source": "models.dev",
+   "fetchedAt": "2026-11-06T05:05:18.000Z",
+   "knownModels": 1840
+  },
+  "scanDurationMs": 412
+ },
+ "limits": {
+  "codex": {
+   "checkedAt": "2026-11-06T10:04:18.000Z",
+   "windows": [
+    {
+     "id": "primary",
+     "kind": "session",
+     "label": "5 hour",
+     "usedPercent": 38,
+     "resetsAt": "2026-11-06T12:19:18.000Z",
+     "windowDurationMins": 300
+    },
+    {
+     "id": "secondary",
+     "kind": "weekly",
+     "label": "Weekly",
+     "usedPercent": 71,
+     "resetsAt": "2026-11-08T15:05:18.000Z",
+     "windowDurationMins": 10080
+    }
+   ]
+  },
+  "claudeAgent": {
+   "checkedAt": "2026-11-06T10:04:18.000Z",
+   "windows": [
+    {
+     "id": "five_hour",
+     "kind": "session",
+     "label": "5 hour",
+     "usedPercent": 12,
+     "resetsAt": "2026-11-06T14:16:18.000Z",
+     "windowDurationMins": 300
+    },
+    {
+     "id": "seven_day",
+     "kind": "weekly",
+     "label": "Weekly",
+     "usedPercent": 46,
+     "resetsAt": "2026-11-10T11:05:18.000Z",
+     "windowDurationMins": 10080
+    },
+    {
+     "id": "seven_day_opus",
+     "kind": "weekly",
+     "label": "Weekly \u00b7 Opus",
+     "usedPercent": 83,
+     "resetsAt": "2026-11-10T11:05:18.000Z",
+     "windowDurationMins": 10080
+    }
+   ]
+  }
+ },
+ "auth": {
+  "codex": {
+   "status": "authenticated",
+   "email": "sparsh@example.com",
+   "label": "ChatGPT Pro"
+  },
+  "claudeAgent": {
+   "status": "authenticated",
+   "email": "sparsh@example.com",
+   "label": "Claude Max"
+  }
+ }
+}

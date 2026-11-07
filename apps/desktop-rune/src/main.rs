@@ -9,6 +9,7 @@ mod data;
 mod host;
 mod icons;
 mod kit;
+mod pages;
 mod panel;
 mod settings;
 mod shell;
@@ -27,12 +28,22 @@ pub enum Appearance {
     Dark,
 }
 
-/// The web client's routes: `/` (new thread draft), `/$environmentId/$threadId`, `/settings/*`.
+/// The web client's routes: `/` (new thread draft), `/$environmentId/$threadId`, `/settings/*`,
+/// `/pull-requests` and `/usage`.
 #[derive(Clone, PartialEq, Debug)]
 pub enum Route {
     Home { project_id: Option<String> },
     Thread(String),
     Settings(String),
+    PullRequests,
+    Usage,
+}
+
+impl Route {
+    /// Settings and usage are route modals: the frame keeps the route they opened over.
+    fn is_modal(&self) -> bool {
+        matches!(self, Route::Settings(_) | Route::Usage)
+    }
 }
 
 /// Per-surface UI state; each module owns its struct.
@@ -42,6 +53,7 @@ pub struct Ui {
     pub chat: chat::Ui,
     pub panel: panel::Ui,
     pub settings: settings::Ui,
+    pub pages: pages::Ui,
 }
 
 pub struct App {
@@ -68,17 +80,20 @@ impl App {
         self.src.state()
     }
 
-    /// The route the window frame shows: under the settings modal, the one settings opened from.
+    /// The route the window frame shows: under a route modal, the one it opened from.
     pub fn frame_route(&self) -> &Route {
         match (&self.route, &self.ui.settings.return_route) {
-            (Route::Settings(_), Some(back)) => back,
+            (Route::Settings(_) | Route::Usage, Some(back)) => back,
             (route, _) => route,
         }
     }
 
     pub fn navigate(&mut self, route: Route) {
-        if matches!(route, Route::Settings(_)) && !matches!(self.route, Route::Settings(_)) {
+        if route.is_modal() && !self.route.is_modal() {
             self.ui.settings.return_route = Some(self.route.clone());
+        }
+        if matches!(route, Route::Home { .. } | Route::Thread(_)) {
+            self.ui.pages.main_route = Some(route.clone());
         }
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
@@ -121,6 +136,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= chat::composer::poll(s);
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);
+    changed |= pages::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
@@ -132,7 +148,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    settings::on_key(s, e, tx) || shell::on_key(s, e, tx)
+    settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
@@ -151,7 +167,7 @@ fn view(s: &App, cx: &mut Cx<App>) -> El {
 /// Every module's scenes, gathered once.
 fn scenes() -> &'static [(&'static str, fn(&mut App))] {
     let all: Vec<(&'static str, fn(&mut App))> =
-        [shell::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, kit::SCENES].concat();
+        [shell::SCENES, shell::sidebar::SCENES, chat::timeline::SCENES, chat::composer::SCENES, panel::SCENES, settings::SCENES, pages::SCENES, kit::SCENES].concat();
     Box::leak(all.into_boxed_slice())
 }
 
