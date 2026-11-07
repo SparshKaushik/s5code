@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 
 /// The web terminal's blink period; it blinks only while focused.
 const BLINK: Duration = Duration::from_millis(500);
+const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 const PADDING: f32 = 4.;
 
 pub struct Session {
@@ -33,6 +34,8 @@ pub struct Session {
     /// Set once the drawer has acted on the session ending.
     pub ended: bool,
     exit_noted: bool,
+    /// When the PTY hears the settled grid (`notifyResize` in the web's ghostty surface).
+    notify_at: Option<Instant>,
 }
 
 impl Session {
@@ -52,6 +55,7 @@ impl Session {
             fit: None,
             ended: false,
             exit_noted: false,
+            notify_at: None,
         }
     }
 
@@ -202,14 +206,9 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
     if session.vt.size() == (cols, rows) || session.payload.is_none() {
         return;
     }
+    // The grid reflows now; the shell only hears settled sizes so a drag doesn't reprint its prompt.
     session.vt.resize(cols, rows);
-    if let Some(net) = app.src.net() {
-        let request = net.request(
-            "terminal.resize",
-            json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}),
-        );
-        app.ui.panel.terminal.pending.push(request);
-    }
+    session.notify_at = Some(Instant::now() + RESIZE_SETTLE);
 }
 
 pub fn palette(t: &T) -> Palette {
@@ -259,6 +258,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut writes = vec![];
     let mut ended = vec![];
     let mut refit = vec![];
+    let mut notify = vec![];
     for index in 0..app.ui.panel.terminal.sessions.len() {
         let payload = app.ui.panel.terminal.sessions[index].payload.clone();
         let events = match (payload, app.src.net()) {
@@ -308,6 +308,25 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         if on != session.cursor_on {
             session.cursor_on = on;
             changed = true;
+        }
+        if let Some(at) = session.notify_at {
+            let now = Instant::now();
+            if now >= at {
+                session.notify_at = None;
+                let (cols, rows) = session.vt.size();
+                notify.push((session.thread.clone(), session.id.clone(), cols, rows));
+            } else {
+                tx.wake_after(at - now);
+            }
+        }
+    }
+    for (thread, id, cols, rows) in notify {
+        if let Some(net) = app.src.net() {
+            let request = net.request(
+                "terminal.resize",
+                json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}),
+            );
+            app.ui.panel.terminal.pending.push(request);
         }
     }
     for (thread, id, data) in writes {

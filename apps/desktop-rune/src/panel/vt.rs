@@ -866,17 +866,44 @@ mod tests {
         assert!(vt.take_replies(&palette()).is_empty());
     }
 
+    /// Every line from the top of scrollback to the bottom of the screen.
+    fn all_lines(vt: &Vt) -> Vec<String> {
+        let grid = vt.term.grid();
+        let history = grid.history_size() as i32;
+        (-history..vt.rows as i32)
+            .map(|line| {
+                (0..vt.cols)
+                    .map(|col| grid[Point::new(Line(line), Column(col))].c)
+                    .collect::<String>()
+                    .trim_end()
+                    .to_string()
+            })
+            .collect()
+    }
+
     #[test]
-    fn resize_keeps_the_grid_and_cursor_on_screen() {
+    fn resize_reflows_the_normal_screen_and_truncates_the_alternate_one() {
         let mut vt = Vt::new(10, 4);
         vt.feed("abcdefghij");
         vt.resize(5, 4);
         assert_eq!(vt.size(), (5, 4));
-        assert!(vt.text().starts_with("abcde\n"), "{:?}", vt.text());
+        let lines = all_lines(&vt);
+        let start = lines.iter().position(|l| l == "abcde");
+        assert!(
+            start.is_some_and(|i| lines.get(i + 1).is_some_and(|l| l == "fghij")),
+            "reflow error: {lines:?}"
+        );
         vt.resize(5, 1);
         let (rows, cursor) = vt.frame(&palette());
-        assert_eq!(rows.len(), 1);
+        assert_eq!(rows.len(), 1, "reflow error: {:?}", all_lines(&vt));
         assert_eq!(cursor.unwrap().row, 0);
+
+        let mut vt = Vt::new(10, 4);
+        vt.feed("\x1b[?1049habcdefghij");
+        vt.resize(5, 4);
+        let lines = all_lines(&vt);
+        assert_eq!(lines[0], "abcde", "reflow error: {lines:?}");
+        assert!(!lines.iter().any(|l| l.contains('f')), "reflow error: {lines:?}");
     }
 
     #[test]
