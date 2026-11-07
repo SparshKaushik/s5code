@@ -111,7 +111,7 @@ pub fn search_bar(s: &App, t: &T) -> El {
         .child(
             row()
                 .child(icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(|s: &mut App| s.ui.shell.sidebar.scope_open ^= true))
-                .child(icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false))
+                .child(icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(crate::shell::palette::open_add_project))
                 .child(icon_button(t, "sb-new-thread", &i::SQUARE_PEN, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::new_thread)),
         )
 }

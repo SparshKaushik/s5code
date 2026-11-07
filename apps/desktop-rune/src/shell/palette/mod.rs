@@ -6,6 +6,11 @@ use crate::{
 use rune::{Cx, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
+mod actions;
+mod add_project;
+mod scenes;
+pub use scenes::SCENES;
+
 #[derive(Default)]
 pub struct Ui {
     pub open: bool,
@@ -23,7 +28,18 @@ pub struct Ui {
     search_due: Option<i64>,
     message_matches: Vec<serde_json::Value>,
     restart: Option<Restart>,
-    notice: Option<(String, i64)>,
+    notice: Option<Notice>,
+    /// Pages under the current one, so Escape and Backspace walk back.
+    back: Vec<(String, String)>,
+    /// Arrow keys picked a row; views without auto-highlight leave Enter to submit until then.
+    picked: bool,
+    add: add_project::State,
+    act: actions::State,
+}
+struct Notice {
+    title: String,
+    description: Option<String>,
+    until: i64,
 }
 struct Restart {
     thread: String,
@@ -39,6 +55,25 @@ enum Action {
     Theme(Appearance),
     Restart(String),
     OpenProject(String),
+    AddProject,
+    NewProject,
+    Source(add_project::Source),
+    Browse(String),
+    TogglePublish,
+    Triage,
+    Find,
+    CopyThread,
+    LinkPr(String),
+    ShowPrs,
+    Files,
+    OpenFile(String),
+}
+enum Trailing {
+    None,
+    Chevron,
+    /// Not ready: a "Setup Required" button that explains why.
+    Setup(String),
+    Check(bool),
 }
 struct SearchTerm {
     value: String,
@@ -76,9 +111,14 @@ struct Item {
     title: String,
     group: &'static str,
     glyph: &'static rune::Icon,
-    shortcut: &'static str,
+    shortcut: String,
     action: Action,
     subtitle: Option<String>,
+    description: Option<String>,
+    disabled: bool,
+    trailing: Trailing,
+    brand: Option<usize>,
+    highlight: Option<(Vec<(usize, usize)>, Vec<(usize, usize)>)>,
     timestamp: Option<String>,
     fields: Vec<SearchTerm>,
     pick: (i64, bool),
@@ -89,16 +129,25 @@ fn item(
     title: impl Into<String>,
     group: &'static str,
     glyph: &'static rune::Icon,
-    shortcut: &'static str,
+    shortcut: &str,
     action: Action,
 ) -> Item {
     Item {
         title: title.into(),
         group,
         glyph,
-        shortcut,
+        shortcut: shortcut.into(),
         action: action.clone(),
         subtitle: None,
+        description: None,
+        disabled: false,
+        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::NewProject | Action::Files) {
+            Trailing::Chevron
+        } else {
+            Trailing::None
+        },
+        brand: None,
+        highlight: None,
         timestamp: None,
         pick: (0, false),
         references: vec![],
@@ -130,9 +179,112 @@ fn item(
     }
 }
 
+fn keywords(terms: &[&str]) -> Vec<SearchTerm> {
+    terms.iter().map(|v| SearchTerm::keyword(*v)).collect()
+}
+/// A configured shortcut as the web's mac labels write it: ⌃⌥⇧⌘ then the key.
+fn shortcut_label(s: &App, command: &str) -> String {
+    let binding = s.state().config.as_ref().and_then(|v| v["keybindings"].as_array()).and_then(|rows| {
+        rows.iter().find(|v| v["command"] == command && v["when"].is_null()).or_else(|| rows.iter().find(|v| v["command"] == command))
+    });
+    let Some(k) = binding.map(|v| &v["shortcut"]) else { return String::new() };
+    let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+    let mut label = String::new();
+    for (on, glyph) in [(yes("ctrlKey"), "⌃"), (yes("altKey"), "⌥"), (yes("shiftKey"), "⇧"), (yes("modKey") || yes("metaKey"), "⌘")] {
+        if on {
+            label.push_str(glyph);
+        }
+    }
+    let key = k["key"].as_str().unwrap_or("");
+    label.push_str(&match key {
+        "enter" => "↵".into(),
+        "escape" => "Esc".into(),
+        "arrowup" => "↑".into(),
+        "arrowdown" => "↓".into(),
+        "arrowleft" => "←".into(),
+        "arrowright" => "→".into(),
+        "backspace" => "⌫".into(),
+        "space" => "Space".into(),
+        other => other.to_uppercase(),
+    });
+    label
+}
+fn toast(s: &mut App, title: &str, description: Option<&str>) {
+    s.ui.shell.palette.notice = Some(Notice {
+        title: title.into(),
+        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
+        until: data::now_ms() + 4000,
+    });
+}
+/// The first `message` in an Effect cause, else the reply's own text.
+fn error_message(error: &serde_json::Value, fallback: &str) -> String {
+    fn find(v: &serde_json::Value) -> Option<&str> {
+        match v {
+            serde_json::Value::Object(map) => map
+                .get("message")
+                .and_then(|m| m.as_str())
+                .filter(|m| !m.is_empty())
+                .or_else(|| map.values().find_map(find)),
+            serde_json::Value::Array(rows) => rows.iter().find_map(find),
+            _ => None,
+        }
+    }
+    find(error)
+        .map(str::to_owned)
+        .or_else(|| error.as_str().map(str::to_owned))
+        .unwrap_or_else(|| fallback.into())
+}
+fn push_page(s: &mut App, page: &str, query: &str) {
+    let ui = &mut s.ui.shell.palette;
+    let previous = (std::mem::take(&mut ui.page), ui.query.text.clone());
+    ui.back.push(previous);
+    ui.page = page.into();
+    set_query(s, query);
+}
+fn pop_page(s: &mut App) {
+    let (page, query) = s.ui.shell.palette.back.pop().unwrap_or_default();
+    if s.ui.shell.palette.page == "add-clone" {
+        s.ui.shell.palette.add.clone = None;
+    }
+    s.ui.shell.palette.page = page;
+    set_query(s, &query);
+    add_project::sync_browse(s);
+}
+fn set_query(s: &mut App, query: &str) {
+    let ui = &mut s.ui.shell.palette;
+    ui.search_due = None;
+    ui.message_matches.clear();
+    ui.query = TextEdit::new(query);
+    ui.query.focused = true;
+    ui.selected = 0;
+    ui.picked = false;
+}
+/// Opens the palette on the add-project sources, as the sidebar's Add project button does.
+pub fn open_add_project(s: &mut App) {
+    reset(s, true);
+    add_project::open(s);
+}
+fn reset(s: &mut App, open: bool) {
+    let ui = &mut s.ui.shell.palette;
+    ui.open = open;
+    ui.page.clear();
+    ui.back.clear();
+    ui.add.clone = None;
+    set_query(s, "");
+}
+
 fn items(s: &App) -> Vec<Item> {
+    if let Some(rows) = add_project::raw_items(s) {
+        return rows;
+    }
     let ui = &s.ui.shell.palette;
+    if ui.page == "files" {
+        return actions::file_items(s);
+    }
     let mut out = vec![];
+    if ui.page == "add-project" {
+        out = add_project::source_items(s);
+    }
     if ui.page == "themes" {
         out.extend(
             [
@@ -190,6 +342,7 @@ fn items(s: &App) -> Vec<Item> {
             "",
             Action::Navigate(Route::Home { project_id: None }),
         ));
+        out.extend(actions::thread_items(s));
         if let Route::Thread(id) = &s.route {
             out.push(item(
                 "Restart agent session",
@@ -199,6 +352,7 @@ fn items(s: &App) -> Vec<Item> {
                 Action::Restart(id.clone()),
             ));
         }
+        out.extend(actions::tail_items(s));
         out.push(item(
             "Open settings",
             "Actions",
@@ -666,6 +820,9 @@ fn token_score(source: &str, token: &str, typos: bool, mid_word: bool) -> f32 {
 /// Request only queries that can search message content; replies are applied after Net drains.
 pub fn search_changed(s: &mut App, tx: &mut Tx) {
     let query = normalize_query(&s.ui.shell.palette.query.text);
+    s.ui.shell.palette.picked = false;
+    add_project::sync_browse(s);
+    actions::files_changed(s, tx);
     s.ui.shell.palette.selected = 0;
     s.ui.shell.palette.search_due = None;
     s.ui.shell.palette.message_matches.clear();
@@ -685,7 +842,8 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     tx.wake_after(std::time::Duration::from_millis(200));
 }
 pub fn poll(s: &mut App) -> bool {
-    let mut changed = false;
+    let mut changed = add_project::poll(s);
+    changed |= actions::poll(s);
     let acknowledgements = std::mem::take(&mut s.ui.shell.palette.acknowledgements);
     for id in acknowledgements {
         if s.src.net().and_then(|net| net.take_reply(id)).is_none() {
@@ -697,7 +855,7 @@ pub fn poll(s: &mut App) -> bool {
         .palette
         .notice
         .as_ref()
-        .is_some_and(|(_, until)| data::now_ms() >= *until)
+        .is_some_and(|v| data::now_ms() >= v.until)
     {
         s.ui.shell.palette.notice = None;
         changed = true;
@@ -706,18 +864,12 @@ pub fn poll(s: &mut App) -> bool {
         match s.src.net().and_then(|net| net.take_reply(restart.pending)) {
             None => s.ui.shell.palette.restart = Some(restart),
             Some(Err(_)) => {
-                s.ui.shell.palette.notice = Some((
-                    "Unable to restart agent session".into(),
-                    data::now_ms() + 4000,
-                ));
+                toast(s, "Unable to restart agent session", None);
                 changed = true;
             }
             Some(Ok(_)) => {
                 if restart.refreshed {
-                    s.ui.shell.palette.notice = Some((
-                        "Agent session will restart on your next message".into(),
-                        data::now_ms() + 4000,
-                    ));
+                    toast(s, "Agent session will restart on your next message", None);
                     changed = true;
                 } else if let Some(net) = s.src.net() {
                     restart.pending = if let Some(session) = restart.remaining.pop() {
@@ -973,18 +1125,30 @@ fn one_edit(a: &[char], b: &[char], swap_only: bool) -> bool {
             || (b.len() > 0 && *a == b[1..])
             || (a.len() > 0 && b.len() > 0 && a[1..] == b[1..])))
 }
-fn execute(s: &mut App, action: Action) {
+fn execute(s: &mut App, action: Action, tx: &mut Tx) {
     match action {
-        Action::Page(page) => {
-            let ui = &mut s.ui.shell.palette;
-            ui.search_due = None;
-            ui.message_matches.clear();
-            ui.page = page.into();
-            ui.query = TextEdit::default();
-            ui.query.focused = true;
-            ui.selected = 0;
-            return;
+        Action::Page(page) => return push_page(s, page, ""),
+        Action::AddProject => return add_project::open(s),
+        Action::NewProject => return add_project::choose(s, add_project::Source::New),
+        Action::Source(source) => return add_project::choose(s, source),
+        Action::Browse(to) => {
+            set_query(s, &to);
+            return add_project::sync_browse(s);
         }
+        Action::TogglePublish => return add_project::toggle_publish(s),
+        Action::Files => {
+            push_page(s, "files", "");
+            actions::open_files(s);
+            return tx.wake_after(std::time::Duration::from_millis(1));
+        }
+        Action::Triage => actions::triage(s),
+        Action::Find => actions::find(s),
+        Action::CopyThread => {
+            actions::copy_thread(s, tx);
+        }
+        Action::LinkPr(thread) => actions::open_link(s, thread),
+        Action::ShowPrs => actions::show_pull_requests(s),
+        Action::OpenFile(path) => crate::panel::open_file(s, path),
         Action::Navigate(route) => {
             if let Route::Thread(id) = &route {
                 let visited = s
@@ -1019,7 +1183,7 @@ fn execute(s: &mut App, action: Action) {
             let route = thread.map(Route::Thread).unwrap_or(Route::Home {
                 project_id: Some(project),
             });
-            execute(s, Action::Navigate(route));
+            execute(s, Action::Navigate(route), tx);
         }
         Action::Restart(id) => {
             if s.ui.shell.palette.restart.is_some() {
@@ -1103,55 +1267,77 @@ fn toggle_key(s: &App, e: &KeyEvent) -> bool {
     }
     e.is_command('k') && !e.mods.shift && !e.mods.alt
 }
+/// Shortcuts the palette owns while closed, which the web also binds outside the terminal.
+fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if crate::panel::terminal_active(s) {
+        return false;
+    }
+    if crate::panel::shortcut(s, e, "filePicker.toggle") {
+        if s.ui.shell.palette.open && s.ui.shell.palette.page == "files" {
+            s.ui.shell.palette.open = false;
+        } else {
+            reset(s, true);
+            execute(s, Action::Files, tx);
+        }
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "thread.copyReference") && actions::copy_thread(s, tx) {
+        s.ui.shell.palette.open = false;
+        return true;
+    }
+    false
+}
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if toggle_key(s, e) {
-        let ui = &mut s.ui.shell.palette;
-        ui.open = !ui.open;
-        ui.search_due = None;
-        ui.message_matches.clear();
-        ui.query = TextEdit::default();
-        ui.page.clear();
-        ui.selected = 0;
-        if ui.open {
-            ui.query.focused = true;
-        }
+        let open = !s.ui.shell.palette.open;
+        reset(s, open);
+        return true;
+    }
+    if global_shortcut(s, e, tx) {
         return true;
     }
     if !s.ui.shell.palette.open {
         return false;
     }
     let rows = items(s);
-    let ui = &mut s.ui.shell.palette;
-    match e.key {
+    let raw = add_project::raw(s);
+    match &e.key {
         Key::Escape => {
-            if !ui.page.is_empty() {
-                ui.page.clear();
-                ui.query = TextEdit::default();
+            if s.ui.shell.palette.page.is_empty() {
+                s.ui.shell.palette.open = false;
             } else {
-                ui.open = false;
+                pop_page(s);
             }
         }
-        Key::Backspace if ui.query.text.is_empty() && !ui.page.is_empty() => {
-            ui.page.clear();
-            ui.selected = 0;
-        }
-        Key::Down => {
-            ui.selected = if rows.is_empty() {
+        Key::Backspace if s.ui.shell.palette.query.text.is_empty() && !s.ui.shell.palette.page.is_empty() => pop_page(s),
+        key @ (Key::Down | Key::Up) => {
+            let ui = &mut s.ui.shell.palette;
+            let n = rows.len();
+            let down = matches!(key, Key::Down);
+            ui.selected = if n == 0 {
                 0
+            } else if raw && !ui.picked {
+                if down { 0 } else { n - 1 }
+            } else if down {
+                (ui.selected + 1) % n
             } else {
-                (ui.selected + 1) % rows.len()
-            }
+                (ui.selected + n - 1) % n
+            };
+            ui.picked = n > 0;
         }
-        Key::Up => {
-            ui.selected = if rows.is_empty() {
-                0
-            } else {
-                (ui.selected + rows.len() - 1) % rows.len()
-            }
+        Key::Tab if raw => {
+            let ui = &s.ui.shell.palette;
+            let highlighted = if ui.picked { rows.get(ui.selected).map(|v| v.action.clone()) } else { None };
+            add_project::complete(s, highlighted);
+            return true;
         }
         Key::Enter => {
-            if let Some(item) = rows.get(ui.selected) {
-                execute(s, item.action.clone());
+            let ui = &s.ui.shell.palette;
+            let row = rows.get(ui.selected).filter(|v| !v.disabled);
+            if raw && (!ui.picked || e.mods.cmd || e.mods.ctrl || row.is_none()) {
+                add_project::submit(s);
+            } else if let Some(row) = row {
+                execute(s, row.action.clone(), tx);
             }
             return true;
         }
@@ -1160,121 +1346,193 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     tx.scroll_into_view(format!("palette-item-{}", s.ui.shell.palette.selected));
     true
 }
-pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
-    if !s.ui.shell.palette.open {
-        return s
-            .ui
-            .shell
-            .palette
-            .notice
-            .as_ref()
-            .map(|(title, _)| {
-                kit::ToastRegion::new()
-                    .toast(kit::Toast::new("palette-notice", title).build(&kit::theme(t)))
-                    .build(&kit::theme(t))
-            })
-            .into_iter()
-            .collect();
-    }
+
+fn placeholder(s: &App) -> String {
     let ui = &s.ui.shell.palette;
-    let rows = items(s);
-    let input = text_input(&ui.query, theme::TEXT_SM)
-        .key("palette-query")
-        .w_full()
-        .h(34.)
-        .py(7.)
-        .font(theme::TEXT_SM)
-        .color(t.c.contrast_foreground)
-        .placeholder(
-            "Search commands, projects, and threads...",
-            t.c.contrast_placeholder,
-        )
-        .on_input_key(on_key)
-        .on_edit(|s: &mut App| &mut s.ui.shell.palette.query)
-        .on_input_change(search_changed);
-    let head = row()
-        .w_full()
-        .h(48.)
-        .px(17.)
-        .gap(12.)
-        .center_y()
-        .child(icon(&icons::SEARCH, 16.).color(t.c.contrast_icon_muted))
-        .child(input);
-    let mut list = col().w_full().padding(8.);
-    let mut group = "";
-    for (i, v) in rows.iter().enumerate() {
-        if group != v.group {
-            group = v.group;
-            list = list.child(
-                row().w_full().h(28.).px(8.).center_y().child(
-                    text(group)
-                        .font(theme::XS_MEDIUM)
-                        .color(t.c.contrast_muted_foreground),
-                ),
-            );
+    if ui.page == "files" {
+        "Search files…".into()
+    } else if ui.page == "add-new" {
+        "Project name".into()
+    } else if add_project::repository_step(s) {
+        match ui.add.clone.as_ref().and_then(|c| c.provider) {
+            None => "Enter Git clone URL".into(),
+            Some(i) => format!("Enter {} repository ({})", add_project::PROVIDERS[i].label, add_project::PROVIDERS[i].hint),
         }
-        let action = v.action.clone();
-        let mut label = col().grow(1.).child(
-            text(v.title.clone())
-                .font(theme::TEXT_SM)
-                .color(t.c.contrast_foreground),
-        );
-        if let Some(subtitle) = &v.subtitle {
-            label = label.child(
-                text(subtitle)
-                    .font(theme::TEXT_XS)
-                    .color(t.c.contrast_muted_foreground),
-            );
-        }
-        let mut entry = row()
-            .key(format!("palette-item-{i}"))
-            .role("option")
-            .label(v.title.clone())
-            .w_full()
-            .h(if v.subtitle.is_some() { 50. } else { 32. })
-            .px(8.)
-            .gap(8.)
-            .center_y()
-            .radius(6.)
-            .fill(if ui.selected == i {
-                t.c.accent
-            } else {
-                rune::Color::TRANSPARENT
+    } else if add_project::browsing(s) {
+        "Enter path (e.g. ~/projects/my-app)".into()
+    } else if !ui.page.is_empty() {
+        "Search...".into()
+    } else {
+        "Search commands, projects, and threads...".into()
+    }
+}
+fn submit_modifier() -> &'static str {
+    if cfg!(target_os = "macos") { "⌘ Enter" } else { "Ctrl Enter" }
+}
+/// The add-project submit button that sits at the input's end.
+fn submit_button(s: &App, t: &T) -> Option<El> {
+    let ui = &s.ui.shell.palette;
+    let busy = add_project::busy(s);
+    let picked_key = if ui.picked { submit_modifier() } else { "Enter" };
+    let (label, key, disabled) = if ui.page == "add-new" {
+        (if busy { "Creating" } else { "Create" }, picked_key, ui.query.text.trim().is_empty() || busy)
+    } else if add_project::repository_step(s) {
+        let label = if busy {
+            "Working"
+        } else if ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none()) {
+            "Continue"
+        } else {
+            "Lookup"
+        };
+        (label, "Enter", ui.query.text.trim().is_empty() || busy)
+    } else if add_project::browsing(s) {
+        let confirm = ui.add.clone.as_ref().is_some_and(|c| c.confirm.is_some());
+        let create = add_project::will_create(s);
+        let label = match (confirm, busy, create) {
+            (true, true, _) => "Cloning",
+            (true, false, true) => "Create & Clone",
+            (true, false, false) => "Clone",
+            (false, _, true) => "Create & Add",
+            (false, _, false) => "Add",
+        };
+        (label, picked_key, add_project::view(s).needs_project || (confirm && busy))
+    } else {
+        return None;
+    };
+    Some(
+        kit::Button::new(label)
+            .variant("outline")
+            .size("xs")
+            .disabled(disabled)
+            .on_press(|s: &mut App| {
+                add_project::submit(s);
             })
-            .hover(t.c.accent)
-            .on_press(move |s: &mut App| execute(s, action.clone()))
-            .child(icon(v.glyph, 16.).color(t.c.contrast_icon_muted))
-            .child(label);
-        if let Some(timestamp) = &v.timestamp {
-            entry = entry.child(
-                text(timestamp)
-                    .font(theme::TEXT_XS)
-                    .color(t.c.contrast_muted_foreground),
-            );
-        }
-        if !v.shortcut.is_empty() {
-            entry = entry.child(
-                text(v.shortcut)
-                    .font(theme::XS_MEDIUM)
-                    .color(t.c.contrast_secondary_label),
-            );
-        }
-        if matches!(v.action, Action::Page(_)) {
-            entry = entry.child(icon(&icons::CHEVRON_RIGHT, 14.).color(t.c.contrast_icon_muted));
-        }
-        list = list.child(entry);
+            .build(t)
+            .child(kit::kbd(key, t).mr(-2.))
+            .key("palette-submit"),
+    )
+}
+fn summary_row(glyph: El, title: String, description: String, t: &T) -> El {
+    row()
+        .w_full()
+        .min_h(32.)
+        .px(8.)
+        .py(6.)
+        .gap(8.)
+        .center_y()
+        .child(glyph)
+        .child(
+            col()
+                .grow(1.)
+                .shrink()
+                .child(text(title).font(theme::TEXT_SM).color(t.c.contrast_foreground).truncate())
+                .child(
+                    text(description)
+                        .font(theme::TEXT_XS)
+                        .color(t.c.contrast_muted_foreground.alpha_mul(0.85))
+                        .truncate(),
+                ),
+        )
+}
+/// The repository being cloned, or the project being created, above the rows.
+fn summary(s: &App, t: &T) -> Option<El> {
+    let ui = &s.ui.shell.palette;
+    if ui.page == "add-new" {
+        let root = add_project::new_projects_root(s).unwrap_or_default();
+        let name = ui.query.text.trim();
+        let (title, description) = if name.is_empty() {
+            ("New project".to_string(), format!("Goes in {root}"))
+        } else {
+            (name.to_string(), format!("Creates {}", add_project::clone_destination(&root, &add_project::folder_name(name))))
+        };
+        let glyph = icon(&icons::FOLDER_GIT_2, 16.).color(t.c.contrast_icon_muted);
+        return Some(col().w_full().padding(8.).pb(0.).child(summary_row(glyph, title, description, t)));
     }
-    if rows.is_empty() {
-        list = list.child(kit::empty("No results found.", "", t));
+    let flow = ui.add.clone.as_ref().filter(|_| ui.page == "add-clone")?;
+    let confirm = flow.confirm.as_ref()?;
+    let glyph = flow
+        .provider
+        .and_then(|i| add_project::brand(i, 16., t.c.contrast_icon_muted))
+        .unwrap_or_else(|| icon(&icons::GIT_PULL_REQUEST_ARROW, 16.).color(t.c.contrast_icon_muted));
+    let title = confirm.name_with_owner.clone().unwrap_or_else(|| confirm.input.clone());
+    Some(
+        col()
+            .w_full()
+            .padding(8.)
+            .pb(0.)
+            .child(
+                row().px(8.).py(6.).child(text("Repository").font(theme::XS_MEDIUM).color(t.c.contrast_muted_foreground)),
+            )
+            .child(summary_row(glyph, title, confirm.url.clone(), t)),
+    )
+}
+/// What an empty raw view says instead of rows.
+fn empty_text(s: &App) -> Option<String> {
+    let ui = &s.ui.shell.palette;
+    if ui.page == "files" {
+        return Some(ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into()));
     }
-    let list = kit::scroll_area(
-        "palette-results",
-        list.max_h(330.).scroll(ScrollSpec {
-            stick_bottom: false,
-        }),
-        t,
+    if add_project::repository_step(s) {
+        let url = ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none());
+        return Some(if url {
+            "Enter a Git clone URL and press Enter to continue."
+        } else {
+            "Enter a repository path and press Enter to look it up."
+        }
+        .into());
+    }
+    if add_project::browsing(s) {
+        let confirm = ui.add.clone.as_ref().is_some_and(|c| c.confirm.is_some());
+        return Some(if confirm {
+            "Choose a destination path and press Enter to clone."
+        } else if add_project::will_create(s) {
+            "Press Enter to create this folder and add it as a project."
+        } else {
+            "No matching commands, projects, or threads."
+        }
+        .into());
+    }
+    add_project::page_is_flow(&ui.page).then(|| "No matching commands, projects, or threads.".into())
+}
+fn note(label: String, t: &T) -> El {
+    row().w_full().px(16.).py(12.).child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground))
+}
+fn footer(s: &App, rows: &[Item], t: &T) -> El {
+    let ui = &s.ui.shell.palette;
+    let picked_row = if ui.picked { rows.get(ui.selected) } else { None };
+    let action = if ui.page == "files" {
+        Some("Open file")
+    } else if ui.page == "add-new" {
+        Some(match picked_row.map(|v| &v.action) {
+            None => "Create",
+            Some(Action::TogglePublish) => "Toggle",
+            Some(_) => "Select",
+        })
+    } else if add_project::repository_step(s) {
+        Some(if ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none()) { "Continue" } else { "Lookup" })
+    } else if add_project::browsing(s) {
+        let can_submit = !ui.query.text.trim().is_empty() && !add_project::view(s).needs_project;
+        (!can_submit || picked_row.is_some()).then_some("Select")
+    } else {
+        Some("Select")
+    };
+    let group = |key: El, label: &str| row().gap(4.).center_y().child(key).child(footer_label(label, t));
+    let mut hints = row().gap(12.).center_y().child(
+        row()
+            .gap(4.)
+            .center_y()
+            .child(footer_key(Some(&icons::ARROW_UP), "", t))
+            .child(footer_key(Some(&icons::ARROW_DOWN), "", t))
+            .child(footer_label("Navigate", t)),
     );
-    let footer = row()
+    if let Some(action) = action {
+        hints = hints.child(group(footer_key(None, "Enter", t), action));
+    }
+    if !ui.page.is_empty() {
+        hints = hints.child(group(footer_key(None, "Backspace", t), "Back"));
+    }
+    hints = hints.child(group(footer_key(None, "Esc", t), if ui.page.is_empty() { "Close" } else { "Back" }));
+    let mut bar = row()
         .w_full()
         .h(41.)
         .pl(17.)
@@ -1283,43 +1541,220 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .center_y()
         .fill(t.c.contrast_foreground.alpha_mul(0.025))
         .border(1., t.c.contrast_foreground.alpha_mul(0.07))
-        .child(
+        .child(hints)
+        .child(el().grow(1.));
+    if add_project::browsing(s) {
+        let manager = if cfg!(target_os = "macos") {
+            "Finder"
+        } else if cfg!(target_os = "windows") {
+            "File Explorer"
+        } else {
+            "Files"
+        };
+        bar = bar.child(
             row()
-                .gap(4.)
+                .key("palette-open-in-files")
+                .role("button")
+                .label(format!("Open in {manager}"))
+                .px(8.)
+                .radius(8.)
                 .center_y()
-                .child(footer_key(Some(&icons::ARROW_UP), "", t))
-                .child(footer_key(Some(&icons::ARROW_DOWN), "", t))
-                .child(footer_label("Navigate", t)),
-        )
-        .child(
-            row()
-                .gap(4.)
-                .center_y()
-                .child(footer_key(None, "Enter", t))
-                .child(footer_label("Select", t)),
-        )
-        .child(
-            row()
-                .gap(4.)
-                .center_y()
-                .child(footer_key(None, "Esc", t))
-                .child(footer_label("Close", t)),
+                .cursor(rune::Cursor::Pointer)
+                .on_press_tx(add_project::pick_folder)
+                .child(text(format!("Open in {manager}")).font(theme::XS_MEDIUM).color(t.c.contrast_muted_foreground)),
         );
-    let panel = col()
+    }
+    bar
+}
+fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
+    let ui = &s.ui.shell.palette;
+    let muted = t.c.contrast_muted_foreground;
+    let title = match &v.highlight {
+        Some((ranges, _)) => actions::highlighted(&v.title, ranges, theme::TEXT_SM, muted, t.c.contrast_foreground),
+        None => text(v.title.clone()).font(theme::TEXT_SM).color(t.c.contrast_foreground).truncate(),
+    };
+    let mut label = col().grow(1.).shrink().child(title);
+    if let Some(subtitle) = &v.subtitle {
+        label = label.child(text(subtitle).font(theme::TEXT_XS).color(muted).truncate());
+    } else if let Some(description) = &v.description {
+        let color = muted.alpha_mul(0.7);
+        label = label.child(match &v.highlight {
+            Some((_, ranges)) => actions::highlighted(description, ranges, theme::TEXT_XS, color, t.c.contrast_foreground),
+            None => text(description).font(theme::TEXT_XS).color(color).truncate(),
+        });
+    }
+    let glyph = v
+        .brand
+        .and_then(|b| add_project::brand(b, 16., t.c.contrast_icon_muted))
+        .unwrap_or_else(|| icon(v.glyph, 16.).color(t.c.contrast_icon_muted));
+    let selected = ui.selected == i && (!raw || ui.picked);
+    let mut entry = row()
+        .key(format!("palette-item-{i}"))
+        .role("option")
+        .label(v.title.clone())
+        .w_full()
+        .h(if v.subtitle.is_some() {
+            50.
+        } else if v.description.is_some() {
+            48.
+        } else {
+            32.
+        })
+        .px(8.)
+        .gap(8.)
+        .center_y()
+        .radius(6.)
+        .fill(if selected { t.c.accent } else { rune::Color::TRANSPARENT })
+        .child(glyph)
+        .child(label);
+    if v.disabled {
+        entry = entry.opacity(0.64);
+    } else {
+        let action = v.action.clone();
+        entry = entry.hover(t.c.accent).on_press_tx(move |s: &mut App, tx| execute(s, action.clone(), tx));
+    }
+    if let Some(timestamp) = &v.timestamp {
+        entry = entry.child(text(timestamp).font(theme::TEXT_XS).color(muted));
+    }
+    if !v.shortcut.is_empty() {
+        entry = entry.child(text(v.shortcut.clone()).font(theme::XS_MEDIUM).color(t.c.contrast_secondary_label));
+    }
+    match &v.trailing {
+        Trailing::None => {}
+        Trailing::Chevron => entry = entry.child(icon(&icons::CHEVRON_RIGHT, 14.).color(t.c.contrast_icon_muted)),
+        Trailing::Setup(hint) => {
+            entry = entry.child(
+                kit::Button::new("Setup Required")
+                    .variant("warning-outline")
+                    .size("micro")
+                    .on_press(|s: &mut App| {
+                        s.ui.shell.palette.open = false;
+                        s.navigate(Route::Settings("source-control".into()));
+                    })
+                    .build(t)
+                    .help(hint.clone()),
+            )
+        }
+        Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
+    }
+    entry
+}
+pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
+    let mut out = vec![];
+    if s.ui.shell.palette.open {
+        out.extend(palette(s, t));
+    }
+    actions::link_dialog(s, t, &mut out);
+    if let Some(notice) = &s.ui.shell.palette.notice {
+        let mut toast = kit::Toast::new("palette-notice", notice.title.clone());
+        if let Some(description) = &notice.description {
+            toast = toast.description(description.clone());
+        }
+        out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
+    }
+    out
+}
+fn palette(s: &App, t: &T) -> Vec<El> {
+    let ui = &s.ui.shell.palette;
+    let rows = items(s);
+    let raw = add_project::raw(s);
+    let input = text_input(&ui.query, theme::TEXT_SM)
+        .key("palette-query")
+        .w_full()
+        .h(34.)
+        .py(7.)
+        .font(theme::TEXT_SM)
+        .color(t.c.contrast_foreground)
+        .placeholder(placeholder(s), t.c.contrast_placeholder)
+        .on_input_key(on_key)
+        .on_edit(|s: &mut App| &mut s.ui.shell.palette.query)
+        .on_input_change(search_changed);
+    let lead = if !ui.page.is_empty() {
+        row()
+            .key("palette-back")
+            .role("button")
+            .label("Back")
+            .center()
+            .cursor(rune::Cursor::Pointer)
+            .on_press(pop_page)
+            .child(icon(&icons::ARROW_LEFT, 16.).color(t.c.contrast_icon_muted))
+    } else if add_project::browsing(s) {
+        icon(&icons::FOLDER_PLUS, 16.).color(t.c.contrast_icon_muted)
+    } else {
+        icon(&icons::SEARCH, 16.).color(t.c.contrast_icon_muted)
+    };
+    let submit = submit_button(s, t);
+    let mut head = row()
+        .w_full()
+        .h(48.)
+        .pl(17.)
+        .pr(if submit.is_some() { 10. } else { 17. })
+        .gap(12.)
+        .center_y()
+        .child(lead)
+        .child(input);
+    if let Some(submit) = submit {
+        head = head.child(submit);
+    }
+    let mut list = col().w_full().padding(8.);
+    let mut group = "";
+    for (i, v) in rows.iter().enumerate() {
+        if group != v.group {
+            group = v.group;
+            let heading = if group == actions::FILES_GROUP { actions::heading(s) } else { group.to_string() };
+            if !heading.is_empty() {
+                list = list.child(
+                    row()
+                        .w_full()
+                        .h(28.)
+                        .px(8.)
+                        .center_y()
+                        .child(text(heading).font(theme::XS_MEDIUM).color(t.c.contrast_muted_foreground)),
+                );
+            }
+        }
+        list = list.child(row_view(s, i, v, raw, t));
+    }
+    let browse_error = add_project::browsing(s).then(|| add_project::browse_error(s)).flatten();
+    if let Some(error) = browse_error {
+        list = list.child(note(error, t).role("alert"));
+    } else if add_project::browsing(s) && add_project::browse_pending(s) {
+        list = list.child(note("Loading folders...".into(), t));
+    } else if rows.is_empty() {
+        list = list.child(match empty_text(s) {
+            Some(label) => col()
+                .w_full()
+                .py(40.)
+                .center()
+                .child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground)),
+            None => kit::empty("No results found.", "", t),
+        });
+    }
+    let tall = ui.page == "files";
+    let list = kit::scroll_area(
+        "palette-results",
+        list.max_h(if tall { 400. } else { 330. }).scroll(ScrollSpec { stick_bottom: false }),
+        t,
+    );
+    let mut panel = col()
         .key("command-palette")
         .role("dialog")
         .label("Command palette")
         .transition(rune::Transition::scale(0.98).combined(rune::Transition::opacity()))
         .w(576.)
-        .max_h(420.)
+        .max_h(if tall { 490. } else { 420. })
         .radius(16.)
         .clip_rounded(16.)
         .fill(t.c.background.alpha_mul(0.8))
         .backdrop_blur(16.)
         .border(1., t.c.contrast_foreground.alpha_mul(0.1))
-        .child(head)
+        .child(head);
+    if let Some(summary) = summary(s, t) {
+        panel = panel.child(summary);
+    }
+    let panel = panel
         .child(list)
-        .child(footer)
+        .child(footer(s, &rows, t))
         .modal(true, |s: &mut App| s.ui.shell.palette.open = false);
     vec![
         el().key("palette-backdrop")

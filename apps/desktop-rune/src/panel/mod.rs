@@ -96,6 +96,15 @@ fn activate(app: &mut App, surface: Surface) {
         _ => {}
     }
 }
+/// Opens `path` (relative to the thread's workspace) in the Files surface.
+pub fn open_file(app: &mut App, path: String) {
+    activate(app, Surface::Files);
+    files::read(app, path);
+}
+/// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
+pub fn terminal_active(app: &App) -> bool {
+    app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)
+}
 fn close(app: &mut App, surface: Surface) {
     if surface == Surface::Terminal {
         terminal::close(app);
@@ -160,7 +169,7 @@ pub fn poll(app: &mut App) -> bool {
     }
     changed | context_changed
 }
-fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
+pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
     app.state()
         .config
         .as_ref()

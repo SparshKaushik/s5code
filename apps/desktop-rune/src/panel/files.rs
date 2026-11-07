@@ -27,7 +27,7 @@ pub fn load(app: &mut App, directory: String) {
     app.ui.panel.files.pending = request.map(|id| (id, false));
     app.ui.panel.files.error = None;
 }
-fn read(app: &mut App, path: String) {
+pub(super) fn read(app: &mut App, path: String) {
     let Some((_, cwd)) = super::context(app) else {
         return;
     };
