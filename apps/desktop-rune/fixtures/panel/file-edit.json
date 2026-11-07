@@ -1,0 +1,6 @@
+{
+  "relativePath": "src/terminals.ts",
+  "contents": "import { Effect } from \"effect\";\n\nimport type { TerminalSession } from \"./types\";\n\nconst DEFAULT_COLS = 120;\nconst DEFAULT_ROWS = 30;\n\nexport interface AttachOptions {\n  readonly threadId: string;\n  readonly terminalId: string;\n  readonly cwd: string;\n  readonly resume?: boolean;\n}\n\n/** Finds the session for a terminal, starting one when none is running. */\nexport const attach = Effect.fn(\"Terminals.attach\")(function* (options: AttachOptions) {\n  const sessions = yield* TerminalSessions;\n  const session = sessions.get(options.threadId, options.terminalId);\n  return session ?? (yield* sessions.start({ ...options, cols: DEFAULT_COLS, rows: DEFAULT_ROWS }));\n});\n\nexport function label(session: TerminalSession, index: number): string {\n  const title = session.title.trim();\n  return title.length > 0 ? title : `Terminal ${index + 1}`;\n}\n\nexport function resize(session: TerminalSession, cols: number, rows: number) {\n  if (cols === session.cols && rows === session.rows) return session;\n  return { ...session, cols, rows };\n}\n",
+  "byteLength": 1032,
+  "truncated": false
+}

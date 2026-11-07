@@ -1,8 +1,10 @@
 //! Workspace surfaces; wire payloads stay identical to the web client's RPCs.
 pub mod browser;
 mod diff;
+pub mod drawer;
 mod files;
 mod terminal;
+mod vt;
 
 use crate::{
     App, Route, data, icons, kit,
@@ -43,6 +45,7 @@ pub struct Ui {
     pub diff: diff::Ui,
     files: files::Ui,
     terminal: terminal::Ui,
+    drawer: drawer::Ui,
     browser: browser::Browser,
     url: TextEdit,
     browser_started: bool,
@@ -58,6 +61,7 @@ impl Default for Ui {
             diff: Default::default(),
             files: Default::default(),
             terminal: Default::default(),
+            drawer: Default::default(),
             browser: Default::default(),
             url: TextEdit::new(""),
             browser_started: false,
@@ -84,7 +88,6 @@ fn context(app: &App) -> Option<(String, String)> {
 }
 fn activate(app: &mut App, surface: Surface) {
     app.ui.shell.panel_open = true;
-    app.ui.chat.topbar.terminal_open = surface == Surface::Terminal;
     if !app.ui.panel.surfaces.contains(&surface) {
         app.ui.panel.surfaces.push(surface);
     }
@@ -92,19 +95,32 @@ fn activate(app: &mut App, surface: Surface) {
     match surface {
         Surface::Diff => diff::load(app),
         Surface::Files => files::load(app, "".into()),
-        Surface::Terminal => terminal::attach(app),
+        Surface::Terminal => drawer::open_panel(app),
         _ => {}
     }
 }
 fn close(app: &mut App, surface: Surface) {
-    if surface == Surface::Terminal {
-        terminal::close(app);
+    match surface {
+        Surface::Terminal => drawer::close_panel(app),
+        Surface::Files => files::flush(app),
+        _ => {}
     }
+    remove_surface(app, surface);
+}
+fn remove_surface(app: &mut App, surface: Surface) {
     app.ui.panel.surfaces.retain(|v| *v != surface);
     if app.ui.panel.active == Some(surface) {
         app.ui.panel.active = app.ui.panel.surfaces.last().copied();
     }
-    app.ui.chat.topbar.terminal_open = app.ui.panel.active == Some(Surface::Terminal);
+}
+/// Opens a workspace file in the Files surface (the palette's "Go to file").
+pub fn open_file(app: &mut App, path: String) {
+    app.ui.shell.panel_open = true;
+    if !app.ui.panel.surfaces.contains(&Surface::Files) {
+        app.ui.panel.surfaces.push(Surface::Files);
+    }
+    app.ui.panel.active = Some(Surface::Files);
+    files::open(app, path);
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
@@ -131,14 +147,14 @@ pub fn open_diff(app: &mut App, checkpoint: Value) {
     diff::select_checkpoint(app);
     activate(app, Surface::Diff);
 }
-pub fn poll(app: &mut App) -> bool {
+pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut context_changed = false;
     if matches!(app.src, crate::data::Source::Live(_)) {
         let thread = context(app).map(|(id, _)| id).unwrap_or_default();
         if app.ui.panel.thread != thread {
             app.ui.panel.thread = thread;
             app.ui.panel.diff = diff::Ui::default();
-            app.ui.panel.files = files::Ui::default();
+            files::reset(app);
             if app.ui.shell.panel_open {
                 match app.ui.panel.active {
                     Some(Surface::Diff) => diff::load(app),
@@ -149,15 +165,11 @@ pub fn poll(app: &mut App) -> bool {
             context_changed = true;
         }
         if app.ui.panel.active == Some(Surface::Terminal) {
-            terminal::attach(app);
+            drawer::open_panel(app);
         }
     }
 
-    let mut changed = diff::poll(app) | files::poll(app) | terminal::poll(app);
-    if app.ui.chat.topbar.terminal_open && app.ui.panel.active != Some(Surface::Terminal) {
-        activate(app, Surface::Terminal);
-        changed = true;
-    }
+    let changed = diff::poll(app) | files::poll(app, tx) | terminal::poll(app, tx) | drawer::poll(app);
     changed | context_changed
 }
 fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
@@ -196,7 +208,6 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if app.ui.shell.panel_open && shortcut(app, e, "rightPanel.new") {
         app.ui.panel.active = None;
-        app.ui.chat.topbar.terminal_open = false;
         return true;
     }
     if app.ui.shell.panel_open && shortcut(app, e, "rightPanel.close") {
@@ -236,14 +247,9 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     false
 }
+/// The topbar button and `terminal.toggle`: the thread's bottom drawer.
 pub fn toggle_terminal(app: &mut App) {
-    if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal) {
-        app.ui.shell.panel_open = false;
-        app.ui.chat.topbar.terminal_open = false;
-    } else {
-        app.ui.chat.topbar.terminal_open = true;
-        activate(app, Surface::Terminal);
-    }
+    drawer::toggle(app);
 }
 fn action(t: &T, label: &str, glyph: &'static rune::Icon) -> kit::Button {
     let _ = t;
@@ -359,15 +365,24 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                         .role("tab")
                         .label(surface.title())
                         .focusable(true)
-                        .on_press(move |s: &mut App| {
-                            s.ui.panel.active = Some(surface);
-                            s.ui.chat.topbar.terminal_open = surface == Surface::Terminal;
+                        .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                        .child({
+                            let glyph = el().size(14., 14.).child(
+                                icon(surface.glyph(), 16.)
+                                    .size(14., 14.)
+                                    .color(t.c.muted_foreground),
+                            );
+                            if surface == Surface::Files && files::pending(app) {
+                                glyph.child(
+                                    el().absolute(10., 10.)
+                                        .size(6., 6.)
+                                        .radius(3.)
+                                        .fill(t.c.muted_foreground),
+                                )
+                            } else {
+                                glyph
+                            }
                         })
-                        .child(
-                            icon(surface.glyph(), 16.)
-                                .size(14., 14.)
-                                .color(t.c.muted_foreground),
-                        )
                         .child(
                             text(surface.title())
                                 .font(theme::TEXT_XS)
@@ -390,17 +405,17 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(el().grow(1.))
         .child(
             action(t, "Close right panel", &icons::PANEL_RIGHT)
-                .on_press(|s: &mut App| {
-                    s.ui.shell.panel_open = false;
-                    s.ui.chat.topbar.terminal_open = false;
-                })
+                .on_press(|s: &mut App| s.ui.shell.panel_open = false)
                 .build(t),
         );
     let content = match app.ui.panel.active {
         None => picker(app, t),
         Some(Surface::Diff) => diff::view(app, t),
         Some(Surface::Files) => files::view(app, t),
-        Some(Surface::Terminal) => terminal::view(app, t),
+        Some(Surface::Terminal) => col()
+            .grow(1.)
+            .min_h(0.)
+            .child(drawer::surface(app, t, drawer::Owner::Panel, width - 1.)),
         Some(Surface::Browser) => browser_view(app, t),
     };
     row()
@@ -606,11 +621,66 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, Some(Surface::Files));
         files::fixture(s);
     }),
-    ("panel-terminal", |s| {
-        scene(s, Some(Surface::Terminal));
-        terminal::fixture(s);
+    ("panel-files-edit", |s| {
+        scene(s, Some(Surface::Files));
+        files::edit_fixture(s, None, false);
+    }),
+    ("panel-files-edit-dirty", |s| {
+        scene(s, Some(Surface::Files));
+        files::edit_fixture(s, Some("  // Reuse the running session first.\n"), false);
+    }),
+    ("panel-files-edit-error", |s| {
+        scene(s, Some(Surface::Files));
+        files::edit_fixture(s, Some("  // Reuse the running session first.\n"), true);
+    }),
+    ("panel-terminal", |s| panel_terminal(s, TERMINAL_DEV)),
+    ("panel-terminal-vim", |s| panel_terminal(s, TERMINAL_VIM)),
+    ("panel-terminal-htop", |s| panel_terminal(s, TERMINAL_HTOP)),
+    ("terminal-drawer", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        drawer::fixture(s, drawer::Owner::Drawer, &[(&[("term-1", TERMINAL_DEV)], false)], "term-1");
+    }),
+    ("terminal-drawer-split", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        drawer::fixture(
+            s,
+            drawer::Owner::Drawer,
+            &[
+                (&[("term-1", TERMINAL_DEV), ("term-2", TERMINAL_HTOP)], false),
+                (&[("term-3", TERMINAL_VIM)], false),
+            ],
+            "term-2",
+        );
+    }),
+    ("terminal-drawer-stacked", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        drawer::fixture(
+            s,
+            drawer::Owner::Drawer,
+            &[(&[("term-1", TERMINAL_DEV), ("term-2", TERMINAL_VIM)], true)],
+            "term-1",
+        );
+    }),
+    ("terminal-drawer-close", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        drawer::fixture(s, drawer::Owner::Drawer, &[(&[("term-1", TERMINAL_DEV)], false)], "term-1");
+        drawer::request_close(s, drawer::Owner::Drawer, "term-1");
     }),
 ];
+
+const TERMINAL_DEV: &str = include_str!("../../fixtures/panel/terminal.json");
+const TERMINAL_VIM: &str = include_str!("../../fixtures/panel/terminal-vim.json");
+const TERMINAL_HTOP: &str = include_str!("../../fixtures/panel/terminal-htop.json");
+
+fn panel_terminal(app: &mut App, recorded: &str) {
+    (crate::shell::SCENES[1].1)(app);
+    drawer::fixture(app, drawer::Owner::Panel, &[(&[("term-1", recorded)], false)], "term-1");
+    app.ui.shell.panel_open = true;
+    if !app.ui.panel.surfaces.contains(&Surface::Terminal) {
+        app.ui.panel.surfaces.push(Surface::Terminal);
+    }
+    app.ui.panel.active = Some(Surface::Terminal);
+}
 
 pub(super) fn notice(t: &T, message: &str) -> El {
     col().grow(1.).min_h(0.).center().px(20.).child(
@@ -621,11 +691,13 @@ pub(super) fn notice(t: &T, message: &str) -> El {
 }
 
 pub fn overlays(app: &App, t: &T) -> Vec<El> {
-    if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
+    let mut out = if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
         diff::overlays(app, t)
     } else {
         vec![]
-    }
+    };
+    drawer::overlays(app, t, &mut out);
+    out
 }
 
 #[cfg(test)]

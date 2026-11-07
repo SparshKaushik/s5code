@@ -49,4 +49,5 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(composer::overlays(s, cx, t));
     main.child(topbar::view(s, cx, t))
         .child(stack)
+        .children(crate::panel::drawer::view(s, cx, t))
 }
