@@ -109,6 +109,11 @@ fn remove(s: &mut App, id: &str) {
     s.ui.settings.profiles.remove = None;
 }
 
+/// Kit menus truncate labels to a fixed width; the web's popup grows to its longest item.
+fn fit(longest: &str) -> f32 {
+    (longest.chars().count() as f32 * 6.6 + 26.0).ceil().max(160.0)
+}
+
 fn close_menu(s: &mut App) {
     s.ui.settings.profiles.menu = None;
 }
@@ -176,8 +181,10 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
     match s.ui.settings.profiles.menu.as_deref() {
         Some("add") => {
             let full = user_profiles(s).len() >= MAX_COUNT;
+            let longest = if full { "You’ve reached the profile limit" } else { "No supported browsers found" };
             let mut menu = Menu::new("profiles-add-menu")
                 .anchor("profiles-add")
+                .width(fit(longest))
                 .placement(Placement::BottomEnd)
                 .gutter(4.0)
                 .open(true)
@@ -199,8 +206,10 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
                 let available = removal_available(s);
                 let is_default = default_id(s) == id;
                 let (set_id, clear, remove) = (id.clone(), (id.clone(), name.clone()), (id.clone(), name.clone()));
+                let longest = if available { "Remove profile and data" } else { "Connect to an environment to clear profile data" };
                 let mut menu = Menu::new("profile-options-menu")
                     .anchor(format!("profile-options-{id}"))
+                    .width(fit(longest))
                     .placement(Placement::BottomEnd)
                     .gutter(4.0)
                     .open(true)

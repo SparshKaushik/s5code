@@ -323,12 +323,9 @@ pub fn poll(s: &mut App) -> bool {
             changed = true;
         }
     }
-    if !s
-        .ui
-        .settings
-        .pending
-        .values()
-        .any(|method| method == "server.updateSettings")
+    // Fixtures never confirm a write, so a staged copy stays.
+    if matches!(s.src, crate::data::Source::Live(_))
+        && !s.ui.settings.pending.values().any(|method| method == "server.updateSettings")
         && s.ui.settings.optimistic_settings.take().is_some()
     {
         changed = true;
