@@ -378,7 +378,10 @@ mod tests {
     fn branch_menu_offers_create_for_a_new_name() {
         let refs = vec!["main".to_string(), "feature/x".to_string()];
         assert_eq!(branch_items(&refs, "").len(), 2);
-        assert_eq!(branch_items(&refs, "FEAT"), vec![("feature/x".into(), "feature/x".into())]);
+        assert_eq!(
+            branch_items(&refs, "FEAT"),
+            vec![("feature/x".into(), "feature/x".into()), (format!("{CREATE}FEAT"), "Create new branch \"FEAT\"".into())]
+        );
         assert_eq!(branch_items(&refs, "main").len(), 1);
         let created = branch_items(&refs, " my branch ");
         assert_eq!(created, vec![(format!("{CREATE}my-branch"), "Create new branch \"my branch\"".into())]);
