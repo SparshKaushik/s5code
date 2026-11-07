@@ -68,7 +68,6 @@ pub fn view(s: &App, t: &T) -> El {
         }
     }
     links.push(col().padding(16.0).gap(12.0)
-        .child(c::switch(s,t,"linkedEnvironmentsEnabled","Allow linked environments"))
         .child(text("Link an environment").font(theme::SM_MEDIUM).color(t.c.foreground))
         .child(crate::kit::Input::new(&s.ui.settings.peer_url).placeholder("Environment URL").on_edit(|s:&mut App|&mut s.ui.settings.peer_url).build(t).single_line())
         .child(crate::kit::Input::new(&s.ui.settings.peer_code).placeholder("Pairing code").on_edit(|s:&mut App|&mut s.ui.settings.peer_code).build(t).single_line().secure())

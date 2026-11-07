@@ -22,7 +22,7 @@ pub fn view(s: &App, t: &T) -> El {
     let mut fields = col().w_full().gap(16.0).padding(16.0);
     for (field, label) in [("title", "Name"), ("faviconPath", "Icon path")] {
         let key = format!("project::{id}::{field}");
-        let owned = key.clone();
+        let (owned, submit) = (key.clone(), key.clone());
         let edit =
             s.ui.settings
                 .edits
@@ -42,6 +42,12 @@ pub fn view(s: &App, t: &T) -> El {
                                 .edits
                                 .entry(owned.clone())
                                 .or_insert_with(|| edit.clone())
+                        })
+                        .on_submit(move |s: &mut App, _: &mut rune::Tx| {
+                            let text = s.ui.settings.edits.get(&submit).map(|e| json!(e.text));
+                            if let Some(text) = text.filter(|v| *v != super::value(s, &submit)) {
+                                super::update(s, &submit, text);
+                            }
                         })
                         .build(t)
                         .key(key)
@@ -80,11 +86,27 @@ pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
         json!({"type":"project.update","commandId":s5_net::uuid(),"projectId":id,field:value}),
     );
 }
-pub fn archived(s: &App, t: &T) -> El {
-    let threads: Vec<_> = s
-        .state()
-        .archived
+pub const ARCHIVED_SNAPSHOT: &str = "orchestration.getArchivedShellSnapshot";
+
+/// The shell stream's snapshot never carries archived threads, so the page fetches them and lets
+/// this session's archive/restore events win over the fetched copy.
+fn archived_rows(fetched: &[Value], live: &[Value], active: &[Value]) -> Vec<Value> {
+    let mut rows: Vec<Value> = fetched
         .iter()
+        .filter(|row| live.iter().all(|l| l["id"] != row["id"]))
+        .chain(live)
+        .filter(|row| active.iter().all(|a| a["id"] != row["id"]))
+        .cloned()
+        .collect();
+    rows.sort_by(|a, b| crate::data::s(b, "archivedAt").cmp(crate::data::s(a, "archivedAt")));
+    rows
+}
+
+pub fn archived(s: &App, t: &T) -> El {
+    let fetched = s.ui.settings.results.get(ARCHIVED_SNAPSHOT).and_then(|r| r["threads"].as_array());
+    let fetched = fetched.map(Vec::as_slice).unwrap_or_default();
+    let threads: Vec<_> = archived_rows(fetched, &s.state().archived, &s.state().threads)
+        .into_iter()
         .filter(|thread| {
             s.ui.settings
                 .project
@@ -114,7 +136,7 @@ pub fn archived(s: &App, t: &T) -> El {
         );
     }
     let mut rows = Vec::new();
-    for thread in threads {
+    for thread in &threads {
         let restore = crate::data::s(thread, "id").to_owned();
         let delete = restore.clone();
         let title = crate::data::s(thread, "title").to_owned();
@@ -182,4 +204,28 @@ pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {
                 ),
         )
         .build(t, layers);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::archived_rows;
+    use serde_json::json;
+
+    #[test]
+    fn archived_rows_merge_the_fetch_with_live_events() {
+        let fetched = [
+            json!({"id":"old","title":"fetched","archivedAt":"2026-11-01T00:00:00Z"}),
+            json!({"id":"restored","archivedAt":"2026-11-02T00:00:00Z"}),
+            json!({"id":"renamed","title":"stale","archivedAt":"2026-11-03T00:00:00Z"}),
+        ];
+        let live = [
+            json!({"id":"renamed","title":"live","archivedAt":"2026-11-03T00:00:00Z"}),
+            json!({"id":"new","archivedAt":"2026-11-04T00:00:00Z"}),
+        ];
+        let active = [json!({"id":"restored"})];
+        let rows = archived_rows(&fetched, &live, &active);
+        let ids: Vec<_> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["new", "renamed", "old"]);
+        assert_eq!(rows[1]["title"], "live");
+    }
 }

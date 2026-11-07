@@ -264,6 +264,9 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("connections") {
             request(s, "peerLinks.list", json!({}));
         }
+        if page.as_deref() == Some("archived") {
+            request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+        }
         s.ui.settings.loaded_page = page;
     }
     let mut wanted = Vec::new();
@@ -313,6 +316,9 @@ pub fn poll(s: &mut App) -> bool {
                     }
                     if matches!(method.as_str(), "peerLinks.link" | "peerLinks.unlink") {
                         request(s, "peerLinks.list", json!({}));
+                    }
+                    if method == "thread action" {
+                        request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
                     }
                     s.ui.settings.results.insert(method, result);
                 }
@@ -641,9 +647,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     about::update_dialog(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
     browser_profiles::overlays(s, t, &mut overlays);
-    if let Some(menu) = scope::menu(s, t) {
-        overlays.push(menu);
-    }
+    scope::menu(s, t, &mut overlays);
     if let Some(editor) = keybindings::editor(s, t) {
         overlays.push(
             el().absolute(0.0, 0.0)
