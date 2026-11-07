@@ -594,7 +594,9 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
         .label("Terminal input")
         .absolute(x(cursor_col), y(cursor_row.min(rows.len().saturating_sub(1))))
         .size(1., m.cell_h)
-        .opacity(0.)
+        // Not `opacity(0.)`: Rune never focuses a field it doesn't show.
+        .color(Color::TRANSPARENT)
+        .caret(Color::TRANSPARENT, Color::TRANSPARENT)
         .on_edit(move |s: &mut App| {
             let ui = &mut s.ui.panel.terminal;
             match ui
