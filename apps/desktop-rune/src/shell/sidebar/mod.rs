@@ -633,7 +633,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         .child(chrome::header(s, t, inset))
         .child(chrome::search_bar(s, t))
         .child(list)
-        .child(chrome::footer(&model, t));
+        .child(chrome::footer(s, &model, t));
     row()
         .key("sidebar")
         .w(layout::SIDEBAR_W + 2.0)

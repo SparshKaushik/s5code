@@ -6,7 +6,7 @@ pub mod palette;
 use rune::{Cx, El, KeyEvent, Tx, row};
 
 use crate::theme::T;
-use crate::{App, Route, chat, panel, settings};
+use crate::{App, Route, chat, pages, panel, settings};
 
 #[derive(Default)]
 pub struct Ui {
@@ -42,7 +42,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         return crate::kit::gallery::view(s, cx, t);
     }
     let mut overlays = Vec::new();
-    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar::view(s, cx, t, &mut overlays)).child(chat::view(s, cx, t));
+    let sidebar = sidebar::view(s, cx, t, &mut overlays);
+    let main = match s.frame_route() {
+        Route::PullRequests => pages::pull_requests::view(s, cx, t, &mut overlays),
+        // Usage opened with nothing to return to sits over an empty main column.
+        Route::Usage => rune::col().key("main").grow(1.0).h_full().fill(t.c.background),
+        _ => chat::view(s, cx, t),
+    };
+    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main);
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
     }
@@ -51,6 +58,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         body = body.inert();
         overlays.clear();
         overlays.push(settings::view(s, cx, t));
+    }
+    if matches!(s.route, Route::Usage) {
+        body = body.inert();
+        overlays.clear();
+        overlays.push(pages::usage::view(s, cx, t));
     }
     overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
