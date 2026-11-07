@@ -825,6 +825,68 @@ pub fn search(threads: &[Thread], query: &str) -> Vec<usize> {
     hits.into_iter().map(|h| h.2).collect()
 }
 
+/// `VISIT_DISPATCH_THROTTLE_MS`: each visit is a full command dispatch and shell broadcast.
+pub const VISIT_THROTTLE_MS: i64 = 10_000;
+
+/// The web's `createThreadVisitTracker`: showing a thread records one open, then advances its
+/// visit watermark as the shell updates, so finished rows stop reading "Done" once seen.
+#[derive(Default)]
+pub struct Visits {
+    thread: Option<String>,
+    open_pending: bool,
+    /// A palette pick that already sent the open (with its query) at this `updatedAt`.
+    claimed: Option<(String, i64)>,
+    last_sent: Option<i64>,
+    last_sent_at: i64,
+}
+
+impl Visits {
+    pub fn claim_open(&mut self, id: &str, updated_at: i64) {
+        self.claimed = Some((id.to_string(), updated_at));
+    }
+
+    /// The `thread.visit` to send for the shown thread's shell now: `(visitedAt, opened)`.
+    pub fn tick(&mut self, shown: Option<&str>, shell: Option<&Value>, now: i64) -> Option<(String, bool)> {
+        if self.thread.as_deref() != shown {
+            let claimed = self.claimed.take().filter(|(id, _)| Some(id.as_str()) == shown);
+            *self = Visits {
+                thread: shown.map(str::to_string),
+                open_pending: claimed.is_none(),
+                last_sent: claimed.map(|(_, at)| at),
+                last_sent_at: if claimed.is_some() { now } else { 0 },
+                claimed: None,
+            };
+        }
+        let shell = shell?;
+        let visited = shell["updatedAt"].as_str()?;
+        let updated = iso_ms(visited)?;
+        // Servers without visit tracking leave the field out.
+        let last_visited = opt_ts(shell.get("lastVisitedAt")?);
+        if std::mem::take(&mut self.open_pending) {
+            return Some(self.sent(visited, updated, now, true));
+        }
+        if last_visited.is_some_and(|v| v >= updated) {
+            // Seen already, so a later mark-unread (which leaves updatedAt alone) stays sticky.
+            if self.last_sent.is_none_or(|s| s < updated) {
+                self.last_sent = Some(updated);
+            }
+            return None;
+        }
+        if self.last_sent.is_some_and(|s| s >= updated) {
+            return None;
+        }
+        let completed = opt_ts(&shell["latestRunCompletedAt"]);
+        let unseen = completed.is_some_and(|c| last_visited.is_none_or(|v| c > v));
+        (unseen || now - self.last_sent_at >= VISIT_THROTTLE_MS).then(|| self.sent(visited, updated, now, false))
+    }
+
+    fn sent(&mut self, visited: &str, updated: i64, now: i64, opened: bool) -> (String, bool) {
+        self.last_sent = Some(updated);
+        self.last_sent_at = now;
+        (visited.to_string(), opened)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -877,6 +939,31 @@ mod tests {
         assert!(Thread { run: run.clone(), last_visited_at: Some(ms("2026-03-09T10:00:00Z")), ..Default::default() }.unread());
         assert!(!Thread { run: run.clone(), last_visited_at: Some(ms("2026-03-09T10:06:00Z")), ..Default::default() }.unread());
         assert!(Thread { run, last_visited_at: Some(i64::MIN), ..Default::default() }.unread());
+    }
+
+    #[test]
+    fn visits_open_once_then_advance_the_watermark_throttled_and_keep_mark_unread() {
+        let shell = |updated: &str, visited: &str, done: &str| json!({ "updatedAt": updated, "lastVisitedAt": visited, "latestRunCompletedAt": done });
+        let (a, b, c) = ("2026-03-09T10:00:00.000Z", "2026-03-09T10:01:00.000Z", "2026-03-09T10:02:00.000Z");
+        let mut v = Visits::default();
+        assert_eq!(v.tick(None, None, 0), None);
+        // Showing a seen thread still records the open.
+        assert_eq!(v.tick(Some("t"), Some(&shell(a, a, a)), 1_000), Some((a.into(), true)));
+        assert_eq!(v.tick(Some("t"), Some(&shell(a, a, a)), 2_000), None);
+        // A finished run the user is looking at is seen at once.
+        assert_eq!(v.tick(Some("t"), Some(&shell(b, a, b)), 3_000), Some((b.into(), false)));
+        // Not resent before the echo lands.
+        assert_eq!(v.tick(Some("t"), Some(&shell(b, a, b)), 4_000), None);
+        // Mid-run updates wait out the throttle.
+        assert_eq!(v.tick(Some("t"), Some(&shell(c, b, b)), 5_000), None);
+        assert_eq!(v.tick(Some("t"), Some(&shell(c, b, b)), 13_000), Some((c.into(), false)));
+        // Mark unread rewinds lastVisitedAt without touching updatedAt: it stays unread.
+        assert_eq!(v.tick(Some("t"), Some(&shell(c, a, b)), 60_000), None);
+        // A palette pick already sent the open.
+        v.claim_open("u", ms(a));
+        assert_eq!(v.tick(Some("u"), Some(&shell(a, "2026-03-09T09:00:00.000Z", a)), 61_000), None);
+        // No visit support on the server: nothing is sent.
+        assert_eq!(Visits::default().tick(Some("t"), Some(&json!({ "updatedAt": a })), 0), None);
     }
 
     #[test]

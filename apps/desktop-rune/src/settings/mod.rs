@@ -264,6 +264,9 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("connections") {
             request(s, "peerLinks.list", json!({}));
         }
+        if page.as_deref() == Some("archived") {
+            projects::refresh_archived(s);
+        }
         s.ui.settings.loaded_page = page;
     }
     let mut wanted = Vec::new();
@@ -313,6 +316,9 @@ pub fn poll(s: &mut App) -> bool {
                     }
                     if matches!(method.as_str(), "peerLinks.link" | "peerLinks.unlink") {
                         request(s, "peerLinks.list", json!({}));
+                    }
+                    if method == projects::THREAD_ACTION {
+                        projects::refresh_archived(s);
                     }
                     s.ui.settings.results.insert(method, result);
                 }

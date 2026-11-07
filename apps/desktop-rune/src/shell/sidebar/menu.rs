@@ -218,8 +218,10 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
     out.push(MenuEntry::Separator);
     out.push(sub_item("Copy", Sub::Copy));
-    out.push(leaf(item("Project settings", |s, _| {
+    let settings_project = th.project_id.clone();
+    out.push(leaf(item("Project settings", move |s, _| {
         close(s);
+        s.ui.settings.project = Some(settings_project.clone()).filter(|p| !p.is_empty());
         super::go(s, Route::Settings("projects".into()));
     })));
     out.push(MenuEntry::Separator);

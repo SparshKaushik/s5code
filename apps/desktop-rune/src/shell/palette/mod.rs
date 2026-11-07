@@ -67,6 +67,7 @@ enum Action {
     ShowPrs,
     Files,
     OpenFile(String),
+    ProjectSettings(String),
 }
 enum Trailing {
     None,
@@ -264,6 +265,11 @@ pub fn open_add_project(s: &mut App) {
     reset(s, true);
     add_project::open(s);
 }
+/// Opens the palette on "New thread in...", as `chat.new` does with several projects.
+pub fn open_new_thread_in(s: &mut App) {
+    reset(s, true);
+    push_page(s, "projects", "");
+}
 fn reset(s: &mut App, open: bool) {
     let ui = &mut s.ui.shell.palette;
     ui.open = open;
@@ -353,6 +359,14 @@ fn items(s: &App) -> Vec<Item> {
             ));
         }
         out.extend(actions::tail_items(s));
+        if crate::pages::pull_requests::supported(s) {
+            let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
+            prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
+            out.push(prs);
+        }
+        let mut usage = item("Open usage", "Actions", &icons::CHART_NO_AXES_COLUMN, &shortcut_label(s, "usage.open"), Action::Navigate(Route::Usage));
+        usage.fields = keywords(&["usage", "use", "tokens", "cost", "spend", "limits", "stats", "analytics"]);
+        out.push(usage);
         out.push(item(
             "Open settings",
             "Actions",
@@ -360,6 +374,16 @@ fn items(s: &App) -> Vec<Item> {
             "⌘,",
             Action::Navigate(Route::Settings("general".into())),
         ));
+        // The current project, else the first, as the web's contextual project group.
+        if let Some(p) = project
+            .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
+            .or_else(|| s.state().projects.first())
+        {
+            let mut settings = item("Project settings", "Actions", &icons::FOLDER, "", Action::ProjectSettings(data::s(p, "id").into()));
+            settings.description = Some(data::s(p, "title").into());
+            settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "workspace", "checkout", "remove"]);
+            out.push(settings);
+        }
         out.push(item(
             "Change theme",
             "Actions",
@@ -1158,14 +1182,21 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                     .find(|v| v["id"] == *id)
                     .map(|v| data::s(v, "updatedAt").to_owned());
                 let query = limit_utf16(&normalize_query(&s.ui.shell.palette.query.text), 200);
-                if let Some(visited) = visited
-                    && let Some(net) = s.src.net()
-                {
-                    let ack=net.dispatch(serde_json::json!({"type":"thread.visit","threadId":id,"visitedAt":visited,"opened":true,"searchQuery":query}));
-                    s.ui.shell.palette.acknowledgements.push(ack);
+                if let Some(visited) = visited {
+                    if let Some(at) = data::iso_ms(&visited) {
+                        s.ui.shell.sidebar.visits.claim_open(id, at);
+                    }
+                    if let Some(net) = s.src.net() {
+                        let ack=net.dispatch(serde_json::json!({"type":"thread.visit","threadId":id,"visitedAt":visited,"opened":true,"searchQuery":query}));
+                        s.ui.shell.palette.acknowledgements.push(ack);
+                    }
                 }
             }
-            s.navigate(route)
+            crate::shell::sidebar::go(s, route)
+        }
+        Action::ProjectSettings(project) => {
+            s.ui.settings.project = Some(project);
+            crate::shell::sidebar::go(s, Route::Settings("projects".into()))
         }
         Action::Theme(mode) => s.appearance = mode,
         Action::OpenProject(project) => {
@@ -1629,7 +1660,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
                     .size("micro")
                     .on_press(|s: &mut App| {
                         s.ui.shell.palette.open = false;
-                        s.navigate(Route::Settings("source-control".into()));
+                        crate::shell::sidebar::go(s, Route::Settings("source-control".into()));
                     })
                     .build(t)
                     .help(hint.clone()),

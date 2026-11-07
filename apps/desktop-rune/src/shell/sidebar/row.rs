@@ -711,9 +711,34 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let viewport = cx.layout("sb-scroll").map_or(0.0, |r| r[3]);
 
     if items.iter().all(|it| matches!(it, Item::Marker(_))) && model.sections.settled.is_empty() {
-        return el().key("sb-scroll").w_full().grow(1.0).shrink().child(
-            el().w_full().py(24.0).center().child(text("No threads yet").font(theme::TEXT_XS).color(t.sb.muted_foreground.alpha_mul(0.6))),
-        );
+        let muted = t.sb.muted_foreground.alpha_mul(0.6);
+        let mut empty = col().w_full().px(8.0).py(24.0).gap(8.0).center();
+        if s.state().projects.is_empty() {
+            let add = row()
+                .key("sb-empty-add-project")
+                .gap(6.0)
+                .px(10.0)
+                .py(4.0)
+                .center_y()
+                .radius(radius::MD)
+                .border(1.0, t.sb.sidebar_border)
+                .hover(t.sb.sidebar_row_hover)
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label("Add project")
+                .child(icon(&i::PLUS, 12.0).color(t.sb.sidebar_muted_foreground))
+                .child(text("Add project").font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.sb.sidebar_muted_foreground))
+                .on_press(crate::shell::palette::open_add_project);
+            empty = empty.child(text("No projects yet").font(theme::TEXT_XS).color(muted)).child(add);
+        } else {
+            let label = match ui.project_scope.as_slice() {
+                [] => "No threads yet".to_string(),
+                [one] => format!("No threads in {} yet", model.projects.get(one).map(String::as_str).unwrap_or("this project")),
+                _ => "No threads in these projects yet".to_string(),
+            };
+            empty = empty.child(text(label).font(theme::TEXT_XS).color(muted));
+        }
+        return el().key("sb-scroll").w_full().grow(1.0).shrink().child(empty);
     }
 
     let mut content = col().key("sb-list").w_full().min_h(viewport).px(8.0).py(8.0);

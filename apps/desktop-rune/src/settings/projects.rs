@@ -80,11 +80,28 @@ pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
         json!({"type":"project.update","commandId":s5_net::uuid(),"projectId":id,field:value}),
     );
 }
+const ARCHIVED_SNAPSHOT: &str = "orchestration.getArchivedShellSnapshot";
+pub const THREAD_ACTION: &str = "thread action";
+
+/// The shell stream carries no archived threads, so the page asks for them, as the web's
+/// `useArchivedThreadSnapshots` does.
+pub fn refresh_archived(s: &mut App) {
+    request(s, ARCHIVED_SNAPSHOT, json!({}));
+}
+
 pub fn archived(s: &App, t: &T) -> El {
+    let fetched = s.ui.settings.results.get(ARCHIVED_SNAPSHOT).and_then(|v| v["threads"].as_array());
+    let live: std::collections::HashSet<&str> = s.state().threads.iter().map(|v| crate::data::s(v, "id")).collect();
+    let mut seen = std::collections::HashSet::new();
     let threads: Vec<_> = s
         .state()
         .archived
         .iter()
+        .chain(fetched.into_iter().flatten())
+        .filter(|v| {
+            let id = crate::data::s(v, "id");
+            !live.contains(id) && seen.insert(id)
+        })
         .filter(|thread| {
             s.ui.settings
                 .project
@@ -149,7 +166,7 @@ pub fn archived(s: &App, t: &T) -> El {
 fn dispatch(s: &mut App, command: Value) {
     if let Some(net) = s.src.net() {
         let id = net.dispatch(command);
-        s.ui.settings.pending.insert(id, "thread action".into());
+        s.ui.settings.pending.insert(id, THREAD_ACTION.into());
     }
 }
 pub fn confirm_delete(s: &App, t: &T, layers: &mut Vec<El>) {

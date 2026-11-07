@@ -73,6 +73,7 @@ pub struct Ui {
     /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
     pub project_scope: Vec<String>,
     pub scope_open: bool,
+    pub visits: logic::Visits,
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
@@ -433,8 +434,20 @@ pub fn start_rename(s: &mut App, id: &str) {
     s.ui.shell.sidebar.rename = Some((id.to_string(), edit));
 }
 
-/// ThreadRenameInput commits on blur: focus moved off the editor.
+/// ThreadRenameInput commits on blur: focus moved off the editor. Also records visits to the
+/// thread on screen.
 pub fn poll(s: &mut App) -> bool {
+    let shown = match &s.route {
+        Route::Thread(id) => Some(id.clone()),
+        _ => None,
+    };
+    let shell = shown.as_ref().and_then(|id| s.state().threads.iter().find(|t| t["id"] == *id).cloned());
+    if let Some((visited_at, opened)) = s.ui.shell.sidebar.visits.tick(shown.as_deref(), shell.as_ref(), crate::data::now_ms())
+        && let Some(id) = shown
+    {
+        let extra = if opened { json!({ "visitedAt": visited_at, "opened": true }) } else { json!({ "visitedAt": visited_at }) };
+        dispatch(s, "thread.visit", &id, extra);
+    }
     if s.ui.shell.sidebar.rename.as_ref().is_some_and(|(_, e)| !e.focused) {
         commit_rename(s);
         return true;
@@ -535,8 +548,71 @@ pub fn open_thread(s: &mut App, id: &str) {
     go(s, Route::Thread(id.to_string()));
 }
 
+/// `chat.new`: with several open projects, pick one in the palette; otherwise `chat.newLocal`.
 pub fn new_thread(s: &mut App) {
-    go(s, Route::Home { project_id: None });
+    let projects = &s.state().projects;
+    let open = projects.iter().filter(|p| p["archivedAt"].is_null()).count();
+    if open == 1 || projects.is_empty() {
+        new_local(s);
+    } else {
+        crate::shell::palette::open_new_thread_in(s);
+    }
+}
+
+/// `chat.newLocal`: a new thread in the current project, else the first open one.
+pub fn new_local(s: &mut App) {
+    let current = match &s.route {
+        Route::Thread(id) => s.state().threads.iter().find(|t| t["id"] == *id).map(|t| crate::data::s(t, "projectId").to_string()),
+        Route::Home { project_id } => project_id.clone(),
+        _ => None,
+    };
+    let project = current
+        .filter(|p| !p.is_empty())
+        .or_else(|| s.state().projects.iter().find(|p| p["archivedAt"].is_null()).map(|p| crate::data::s(p, "id").to_string()));
+    match project {
+        Some(id) => go(s, Route::Home { project_id: Some(id) }),
+        None => crate::shell::palette::open_new_thread_in(s),
+    }
+}
+
+/// The open thread's sidebar row, for the shortcuts that act on it.
+fn shown_thread(s: &App) -> Option<Thread> {
+    let Route::Thread(id) = &s.route else { return None };
+    Model::build(s).thread(id).cloned()
+}
+
+/// `thread.settle` (toggles) and `thread.pin` (toggles) on the open thread.
+fn thread_shortcut(s: &mut App, e: &KeyEvent) -> bool {
+    let settle_key = crate::panel::shortcut(s, e, "thread.settle");
+    if !settle_key && !crate::panel::shortcut(s, e, "thread.pin") {
+        return false;
+    }
+    let Some(t) = shown_thread(s) else { return true };
+    match (settle_key, t.settled, t.pinned) {
+        (true, true, _) => unsettle(s, &t.id),
+        (true, false, _) => settle(s, &t.id),
+        (false, _, true) => unpin(s, &t.id),
+        (false, _, false) => pin(s, &t.id, None),
+    }
+    true
+}
+
+/// Shortcuts from the server's keybindings that the web binds outside the terminal.
+fn bound_key(s: &mut App, e: &KeyEvent) -> bool {
+    if crate::panel::terminal_active(s) {
+        return false;
+    }
+    let commands = ["navigation.back", "navigation.forward", "usage.open", "chat.newWithoutProject", "chat.newLocal", "chat.new"];
+    match commands.into_iter().find(|c| crate::panel::shortcut(s, e, c)) {
+        Some("navigation.back") => go_back(s),
+        Some("navigation.forward") => go_forward(s),
+        Some("usage.open") => go(s, Route::Usage),
+        Some("chat.newWithoutProject") => go(s, Route::Home { project_id: None }),
+        Some("chat.newLocal") => new_local(s),
+        Some(_) => new_thread(s),
+        None => return thread_shortcut(s, e),
+    }
+    true
 }
 
 fn clear_search(s: &mut App) {
@@ -552,10 +628,11 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.shell.sidebar.menu.is_some() {
         return menu::on_key(s, e, tx);
     }
+    if bound_key(s, e) {
+        return true;
+    }
     match &e.key {
         Key::Command('b') if !m.shift => s.ui.shell.sidebar.collapsed ^= true,
-        Key::Command('n') if !m.shift => new_thread(s),
-        Key::Command('o') if m.shift => new_thread(s),
         Key::Command(c @ ('[' | ']' | '{' | '}')) if m.shift => step(s, if matches!(c, '[' | '{') { -1 } else { 1 }),
         Key::Command(c @ '1'..='9') if !m.shift => {
             let ids = Model::build(s).visible_ids(&s.ui.shell.sidebar);
