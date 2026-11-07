@@ -99,6 +99,10 @@ fn activate(app: &mut App, surface: Surface) {
         _ => {}
     }
 }
+/// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
+pub fn terminal_active(app: &App) -> bool {
+    app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)
+}
 fn close(app: &mut App, surface: Surface) {
     match surface {
         Surface::Terminal => drawer::close_panel(app),
@@ -172,7 +176,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let changed = diff::poll(app) | files::poll(app, tx) | terminal::poll(app, tx) | drawer::poll(app);
     changed | context_changed
 }
-fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
+pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
     app.state()
         .config
         .as_ref()
