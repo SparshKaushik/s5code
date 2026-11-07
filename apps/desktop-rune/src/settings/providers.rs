@@ -923,8 +923,9 @@ pub fn secret_control(s: &App, t: &T, key: &str, title: &str, placeholder: &str)
     let instance = instance_of(s, id, &driver);
     let saved = &instance["config"][field];
     let configured = saved.as_str().is_some_and(|v| !v.is_empty()) || saved.is_object();
+    // Rune wraps placeholders instead of clipping them, and the full sentence doesn't fit 224px.
     let placeholder = if configured {
-        STORED_SECRET
+        "Stored secret"
     } else if placeholder.is_empty() {
         "Not set"
     } else {
