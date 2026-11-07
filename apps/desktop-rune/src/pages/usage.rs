@@ -859,7 +859,7 @@ fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> S
         let r = if n == 0 || n + 1 == shown.len() { radius::FULL } else { radius::XS };
         bar = bar.child(el().grow(*v as f32).w(0.0).min_w(4.0).h(8.0).radius(r).fill(*c));
     }
-    let mut legend = row().w_full().gap(16.0);
+    let mut legend = row().w_full().flex_wrap().gaps(4.0, 16.0);
     for (label, v, c) in &shown {
         legend = legend.child(
             row()
