@@ -944,6 +944,11 @@ impl Undos {
     pub fn push(&mut self, action: UndoAction, id: &str, plan: Vec<UndoStep>, now: i64) {
         // Re-pinning or re-snoozing would un-settle a settled thread, and an archived one
         // leaves the list, so these supersede the thread's older entries.
+        // The notice's timer clears everything, as the web's expiry does; a new action never
+        // revives an expired one.
+        if now >= self.expires {
+            self.live.clear();
+        }
         let supersedes = |a: UndoAction| a == action || matches!(action, UndoAction::Archived) || (action == UndoAction::Settled && matches!(a, UndoAction::Unpinned | UndoAction::Snoozed));
         self.live.retain(|(a, other, _)| other != id || !supersedes(*a));
         self.live.push((action, id.to_string(), plan));
@@ -1014,6 +1019,9 @@ mod tests {
         u.push(UndoAction::Snoozed, "d", vec![UndoStep::Unsnooze], 3_000);
         assert_eq!(u.notice(3_000 + UNDO_MS), None);
         assert!(u.take(3_000 + UNDO_MS).is_empty());
+        u.push(UndoAction::Settled, "e", vec![UndoStep::Unsettle], 20_000);
+        u.push(UndoAction::Settled, "f", vec![UndoStep::Unsettle], 30_000);
+        assert_eq!(u.notice(30_000), Some((UndoAction::Settled, 1)));
     }
 
     fn ms(iso: &str) -> i64 {
