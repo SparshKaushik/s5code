@@ -131,15 +131,22 @@ pub fn ensure(app: &mut App, thread: &str, id: &str, cwd: &str, worktree: Option
         return;
     }
     let mut session = Session::new(thread, id);
-    let mut payload = json!({"threadId":thread,"terminalId":id,"cwd":cwd,"resume":true});
-    if let Some(path) = worktree {
-        payload["worktreePath"] = json!(path);
-    }
+    let payload = attach_payload(thread, id, cwd, worktree);
     if let Some(net) = app.src.net() {
         net.watch_resource("terminal.attach", payload.clone());
         session.payload = Some(payload);
     }
     app.ui.panel.terminal.sessions.push(session);
+}
+
+/// No `resume`, like the web's first attach: the server answers a resumed attach to an id it
+/// closed with `closed`, so a new terminal reusing that id would end as soon as it opened.
+fn attach_payload(thread: &str, id: &str, cwd: &str, worktree: Option<&str>) -> Value {
+    let mut payload = json!({"threadId":thread,"terminalId":id,"cwd":cwd});
+    if let Some(path) = worktree {
+        payload["worktreePath"] = json!(path);
+    }
+    payload
 }
 
 /// Stops the process and deletes its history; a failed close falls back to typing `exit`.
@@ -742,6 +749,14 @@ mod tests {
             );
             assert!(session.vt.text().contains(expect), "{}", session.vt.text());
         }
+    }
+
+    #[test]
+    fn attach_opens_a_closed_id_again() {
+        let payload = attach_payload("t", "term-2", "/repo", Some("/wt"));
+        assert!(payload.get("resume").is_none(), "{payload}");
+        assert_eq!(payload["worktreePath"], "/wt");
+        assert!(attach_payload("t", "term-2", "/repo", None).get("worktreePath").is_none());
     }
 
     #[test]
