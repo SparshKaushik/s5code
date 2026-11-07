@@ -1,5 +1,8 @@
 """Live-test the real windowed app on a Modal sandbox: Xvfb + lavapipe, the bundled Linux server
-the app starts itself (src/host.rs), the free Replay (dev) agent for turns, and a demo git project.
+the app starts itself (src/host.rs), the free Replay (dev) agent and OpenCode (use its free
+`opencode/*-free` models for real turns) for turns, and a demo git project. Anonymous free use is
+rate-limited per IP and Modal's shared IPs are usually over it, so `start` signs OpenCode in with
+$OPENCODE_API_KEY (an opencode.ai Zen key; free models stay free) when it is set.
 
     tools/ci-build.sh OUT                        # bundle.tgz + s5code-server for HEAD
     PY=/home/ubuntu/modal-venv/bin/python
@@ -40,6 +43,8 @@ image = (
         "git", "vim", "htop", "tmux", "less", "curl", "ca-certificates", "sqlite3", "iproute2",
     )
     .run_commands("curl -fsSL https://deb.nodesource.com/setup_24.x | bash - && apt-get install -y nodejs")
+    # Real turns with OpenCode's free `opencode/*-free` models; see OPENCODE_API_KEY below.
+    .run_commands("npm install -g opencode-ai@latest && opencode --version")
 )
 
 ENV = "export DISPLAY=:99 VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json HOME=/root"
@@ -135,6 +140,10 @@ def main(argv: list[str]):
         upload_build(sb, out_dir)
         sh(sb, SETUP)
         sb.filesystem.write_text(json.dumps(SETTINGS), "/root/.s5code/userdata/settings.json")
+        if key := os.environ.get("OPENCODE_API_KEY"):
+            sh(sb, "mkdir -p /root/.local/share/opencode")
+            sb.filesystem.write_text(json.dumps({"opencode": {"type": "api", "key": key}}),
+                                     "/root/.local/share/opencode/auth.json")
         sh(sb, XVFB)
         print(sh(sb, LAUNCH).strip())
         print(f"sandbox {sb.object_id} up; state in {STATE}")
