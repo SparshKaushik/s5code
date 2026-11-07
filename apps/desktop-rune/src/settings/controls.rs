@@ -44,6 +44,8 @@ pub fn select_width(key: &str) -> f32 {
         "sidebarProjectSortOrder" => 176.0,
         "sendShortcut" => 70.0,
         "followUpBehavior" => 71.0,
+        k if k.starts_with("snooze::when::") => 128.0,
+        k if k.starts_with("snooze::unit::") => 112.0,
         _ => 160.0,
     }
 }
@@ -130,7 +132,16 @@ fn links(copy: &str) -> (String, Vec<(std::ops::Range<usize>, String)>) {
 pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
-    let description = spec["description"].as_str().unwrap_or("");
+    let dynamic = super::models::description(s, key).or_else(|| {
+        (key == "responseStreamingMode").then(|| {
+            match value(s, key).as_str() {
+                Some("turn") => "Text appears once the agent finishes its turn.",
+                _ => "Each paragraph or code block appears as soon as it is complete.",
+            }
+            .to_owned()
+        })
+    });
+    let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
     let mut heading = row().gap(6.0).center_y().child(
         text(title.to_owned())
             .font(theme::SM_MEDIUM)
@@ -186,7 +197,10 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         }
         copy = copy.child(body);
     }
-    let ctrl = match spec["kind"].as_str() {
+    let (ctrl, children) = match spec["kind"].as_str() {
+        Some("snooze") => super::snooze::parts(s, t),
+        Some("profiles") => super::browser_profiles::parts(s, t),
+        kind => (match kind {
         Some("switch") => row()
             .w(160.0)
             .child(el().grow(1.0))
@@ -201,51 +215,16 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             select(s, t, key, title, &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
-        _ => {
-            let current = value(s, key);
-            let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| {
-                rune::TextEdit::new(current.as_str().map(str::to_owned).unwrap_or_else(|| {
-                    if current.is_null() {
-                        String::new()
-                    } else {
-                        current.to_string()
-                    }
-                }))
-            });
-            let (k1, k2) = (key.to_owned(), key.to_owned());
-            let (height, pad) = if spec["size"] == "default" { (32.0, 11.0) } else { (28.0, 9.0) };
-            rune::text_input(&edit, theme::TEXT_SM)
-                .key(format!("setting-{key}"))
-                .placeholder(spec["placeholder"].as_str().unwrap_or(""), t.c.muted_foreground.alpha_mul(0.72))
-                .w(spec["width"].as_f64().map_or(208.0, |w| w as f32))
-                .h(height)
-                .px(pad)
-                .center_y()
-                .radius(8.0)
-                .border(1.0, t.c.input)
-                .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
-                .color(t.c.foreground)
-                .single_line()
-                .on_edit(move |s: &mut App| {
-                    s.ui.settings
-                        .edits
-                        .entry(k1.clone())
-                        .or_insert_with(|| edit.clone())
-                })
-                .on_submit(move |s: &mut App, _| {
-                    if let Some(edit) = s.ui.settings.edits.get(&k2) {
-                        let raw = edit.text.clone();
-                        let v = if value(s, &k2).is_number() {
-                            serde_json::from_str(&raw).ok().filter(Value::is_number)
-                        } else {
-                            Some(json!(raw))
-                        };
-                        if let Some(v) = v {
-                            update(s, &k2, v);
-                        }
-                    }
-                })
-        }
+        Some("model") => super::models::control(s, t, key),
+        _ => input(
+            s,
+            t,
+            key,
+            spec["width"].as_f64().map_or(208.0, |w| w as f32),
+            spec["placeholder"].as_str().unwrap_or(""),
+            spec["size"] == "default",
+        ),
+    }, None),
     };
     let environment_wide = s.ui.settings.project.is_some()
         && !s.client_settings.values.contains_key(key)
@@ -266,15 +245,59 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             .color(t.c.muted_foreground),
         );
     }
-    row()
-        .key(format!("row-{key}"))
-        .w_full()
-        .px(16.0)
-        .py(12.0)
-        .gap(32.0)
-        .center_y()
-        .child(copy)
-        .child(ctrl)
+    let line = row().w_full().gap(32.0).center_y().child(copy).child(ctrl);
+    // `SettingsRow` children sit under the copy and control: `pt-3 pb-1` instead of `py-3`.
+    match children {
+        Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
+        None => line.key(format!("row-{key}")).px(16.0).py(12.0),
+    }
+}
+
+/// A settings text field: edits stay local until Enter or blur commit them through `update`.
+pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_size: bool) -> El {
+    let current = value(s, key);
+    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| {
+        rune::TextEdit::new(current.as_str().map(str::to_owned).unwrap_or_else(|| {
+            if current.is_null() {
+                String::new()
+            } else {
+                current.to_string()
+            }
+        }))
+    });
+    let (k1, k2) = (key.to_owned(), key.to_owned());
+    let (height, pad) = if default_size { (32.0, 11.0) } else { (28.0, 9.0) };
+    rune::text_input(&edit, theme::TEXT_SM)
+        .key(format!("setting-{key}"))
+        .placeholder(placeholder, t.c.muted_foreground.alpha_mul(0.72))
+        .w(width)
+        .h(height)
+        .px(pad)
+        .py((height - 20.0) / 2.0)
+        .radius(8.0)
+        .border(1.0, t.c.input)
+        .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
+        .color(t.c.foreground)
+        .single_line()
+        .on_edit(move |s: &mut App| {
+            s.ui.settings
+                .edits
+                .entry(k1.clone())
+                .or_insert_with(|| edit.clone())
+        })
+        .on_submit(move |s: &mut App, _| {
+            if let Some(edit) = s.ui.settings.edits.get(&k2) {
+                let raw = edit.text.clone();
+                let v = if value(s, &k2).is_number() {
+                    serde_json::from_str(&raw).ok().filter(Value::is_number)
+                } else {
+                    Some(json!(raw))
+                };
+                if let Some(v) = v {
+                    update(s, &k2, v);
+                }
+            }
+        })
 }
 
 pub fn section(title: &str, children: Vec<El>, t: &T) -> El {

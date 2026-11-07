@@ -31,6 +31,9 @@ pub fn override_patch(settings: &Value, project: &str, key: &str, next: Option<V
 }
 pub fn reset(s: &mut App, key: &str) {
     s.ui.settings.edits.remove(key);
+    if key == "snoozePresets" {
+        return super::snooze::reset(s);
+    }
     if let Some(project) = s.ui.settings.project.clone().filter(|_| project_key(key)) {
         let patch = override_patch(super::server_settings(s), &project, key, None);
         request(s, "server.updateSettings", json!({"patch":patch}));
@@ -41,6 +44,14 @@ pub fn reset(s: &mut App, key: &str) {
     }
 }
 pub fn customized(s: &App, key: &str) -> bool {
+    // Row order is only display order, so it doesn't make the list differ from the defaults.
+    if key == "snoozePresets" {
+        return super::snooze::customized(s);
+    }
+    // Profiles are a list the user builds, not a value with a default to go back to.
+    if key == "browserProfiles" {
+        return false;
+    }
     if let Some(project) = s.ui.settings.project.as_ref().filter(|_| project_key(key)) {
         return super::server_settings(s)["projectSettingsOverrides"][project]
             .get(key)

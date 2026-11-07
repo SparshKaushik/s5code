@@ -64,10 +64,16 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         let mut groups: Vec<(&str, Vec<El>)> = Vec::new();
         for section in sections {
             let title = section["title"].as_str().unwrap_or("");
+            // Snooze options and the fallback model are environment-wide; project scope hides them.
+            let project = s.ui.settings.project.is_some();
+            if project && title == "Snooze" {
+                continue;
+            }
             let rows = section["rows"]
                 .as_array()
                 .into_iter()
                 .flatten()
+                .filter(|spec| !(project && spec["key"] == "fallbackModelSelection"))
                 .map(|spec| c::setting_row(s, cx, t, spec));
             // `AdvancedSettings`: a fold at the end of the previous section's card.
             if title == "Advanced" {
@@ -89,7 +95,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         return page;
     }
     page.child(match path {
-        "providers" => super::providers::view(s, t),
+        "providers" => super::providers::view(s, cx, t),
         "devices" => super::devices::view(s, t),
         "connections" => super::connections::view(s, t),
         "access" => super::connections::access(s, t),
