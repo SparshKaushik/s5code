@@ -99,6 +99,10 @@ fn activate(app: &mut App, surface: Surface) {
         _ => {}
     }
 }
+/// The thread details card's "Changes" row (`openChangesFromThreadPanel`).
+pub fn open_changes(app: &mut App) {
+    activate(app, Surface::Diff);
+}
 /// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
 pub fn terminal_active(app: &App) -> bool {
     app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)

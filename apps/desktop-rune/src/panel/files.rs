@@ -278,6 +278,27 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     changed
 }
 
+/// Up from an open file shows its folder; from a folder, the folder's parent.
+fn up(ui: &Ui) -> String {
+    if !ui.selected.is_empty() {
+        return ui.directory.clone();
+    }
+    ui.directory
+        .rsplit_once('/')
+        .map(|(p, _)| p.to_string())
+        .unwrap_or_default()
+}
+
+/// Relists the folder and re-reads the open file (`onRefreshSelectedFile`), keeping a draft.
+fn refresh(s: &mut App) {
+    load(s, s.ui.panel.files.directory.clone());
+    let ui = &s.ui.panel.files;
+    if !ui.selected.is_empty() && ui.writes.is_empty() && ui.editor.text == ui.saved {
+        let path = ui.selected.clone();
+        read(s, path);
+    }
+}
+
 fn on_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
     if matches!(e.key, Key::Escape) {
         s.ui.panel.files.editor.focused = false;
@@ -339,13 +360,7 @@ pub fn view(app: &App, t: &T) -> El {
                 .variant("ghost-muted")
                 .size("icon-xs")
                 .on_press(|s: &mut App| {
-                    let path =
-                        s.ui.panel
-                            .files
-                            .directory
-                            .rsplit_once('/')
-                            .map(|(p, _)| p.to_string())
-                            .unwrap_or_default();
+                    let path = up(&s.ui.panel.files);
                     close_file(s);
                     load(s, path);
                 })
@@ -370,7 +385,7 @@ pub fn view(app: &App, t: &T) -> El {
                 .icon(&icons::REFRESH_CW)
                 .variant("ghost-muted")
                 .size("icon-xs")
-                .on_press(|s: &mut App| load(s, s.ui.panel.files.directory.clone()))
+                .on_press(refresh)
                 .build(t),
         );
     let content = if let Some(error) = &ui.error {
@@ -500,6 +515,18 @@ mod tests {
         let mut ui = Ui::default();
         show(&mut ui, (0..10).map(|_| "x\n").collect(), false);
         assert!(ui.numbers.starts_with(" 1\n 2\n"), "{:?}", ui.numbers);
+    }
+
+    #[test]
+    fn up_from_a_file_shows_its_folder() {
+        let mut ui = Ui::default();
+        ui.directory = "src/lib".into();
+        ui.selected = "src/lib/a.ts".into();
+        assert_eq!(up(&ui), "src/lib");
+        ui.selected.clear();
+        assert_eq!(up(&ui), "src");
+        ui.directory = "src".into();
+        assert_eq!(up(&ui), "");
     }
 
     #[test]
