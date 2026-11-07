@@ -14,6 +14,7 @@ import * as Effect from "effect/Effect";
 import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Redacted from "effect/Redacted";
+import * as Schema from "effect/Schema";
 import * as Stream from "effect/Stream";
 import * as Etag from "effect/http/Etag";
 import * as HttpMiddleware from "effect/http/HttpMiddleware";
@@ -108,6 +109,15 @@ const layerRelayApi = Layer.mergeAll(
 );
 
 const CloudMintKeyPair = Alchemy.KeyPair("CloudMintKeyPair");
+const encodeFcmServiceAccount = Schema.encodeEffect(
+  Schema.fromJsonString(
+    Schema.Struct({
+      project_id: Schema.String,
+      client_email: Schema.String,
+      private_key: Schema.String,
+    }),
+  ),
+);
 const ApnsDeliveryJobSigningSecret = Alchemy.makeRandom("ApnsDeliveryJobSigningSecret", {
   bytes: 32,
 });
@@ -159,11 +169,11 @@ export const layer = Api.make(
       fcmServiceAccountDirect ??
       (Option.isSome(fcmProjectId) && Option.isSome(fcmClientEmail) && Option.isSome(fcmPrivateKey)
         ? Redacted.make(
-            JSON.stringify({
+            yield* encodeFcmServiceAccount({
               project_id: fcmProjectId.value,
               client_email: fcmClientEmail.value,
               private_key: Redacted.value(fcmPrivateKey.value).replace(/\\n/g, "\n"),
-            }),
+            }).pipe(Effect.orDie),
           )
         : undefined);
     const apnsDeliveryJobSigningSecret = yield* randomApnsDeliveryJobSigningSecret;
