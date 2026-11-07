@@ -136,6 +136,17 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
     rows
 }
 
+/// A todo list's work-row label: `Tasks {done}/{n} · {current step}` (session-logic.ts).
+pub fn todo_label(item: &Value) -> String {
+    let steps = array(item, "steps");
+    let done = steps.iter().filter(|step| s(step, "status") == "completed").count();
+    let current = ["running", "pending"].iter().find_map(|status| steps.iter().find(|step| s(step, "status") == *status));
+    match current {
+        Some(step) => format!("Tasks {done}/{} · {}", steps.len(), s(step, "text")),
+        None => format!("Tasks {done}/{}", steps.len()),
+    }
+}
+
 fn flush<'a>(
     rows: &mut Vec<Row<'a>>,
     work: &mut Vec<&'a Value>,
@@ -168,7 +179,17 @@ fn flush<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use serde_json::json;
+
+    #[test]
+    fn todo_label_counts_done_steps_and_names_the_current_one() {
+        let steps = |a: &str, b: &str, c: &str| json!({"steps":[{"text":"Read","status":a},{"text":"Edit","status":b},{"text":"Test","status":c}]});
+        assert_eq!(todo_label(&steps("completed", "pending", "running")), "Tasks 1/3 · Test");
+        assert_eq!(todo_label(&steps("completed", "pending", "pending")), "Tasks 1/3 · Edit");
+        assert_eq!(todo_label(&steps("completed", "completed", "completed")), "Tasks 3/3");
+    }
+
     #[test]
     fn folds_intermediate_reply_and_work_but_keeps_final_reply() {
         let p = json!({"runs":[{"id":"r","startedAt":"1970-01-01T00:00:00Z","completedAt":"1970-01-01T00:00:22Z"}],"turnItems":[

@@ -100,6 +100,9 @@ impl App {
         {
             net.watch_thread(id);
         }
+        if matches!(route, Route::Home { .. } | Route::Thread(_)) && route != self.route {
+            chat::composer::focus(self, &route);
+        }
         self.route = route;
     }
 }

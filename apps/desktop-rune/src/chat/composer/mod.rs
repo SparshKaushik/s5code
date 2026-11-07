@@ -175,11 +175,15 @@ pub fn set_runtime_mode(s: &mut App, mode: &str) {
 
 fn toggle_plan(s: &mut App) {
     let next = if interaction_mode(s) == "plan" { "default" } else { "plan" };
-    draft_mut(s).interaction_mode = Some(next.to_string());
+    set_interaction_mode(s, next);
+}
+
+fn set_interaction_mode(s: &mut App, mode: &str) {
+    draft_mut(s).interaction_mode = Some(mode.to_string());
     if let Route::Thread(id) = s.frame_route().clone()
         && let Some(net) = s.src.net()
     {
-        net.dispatch(json!({"type": "thread.interaction-mode.set", "commandId": s5_net::uuid(), "threadId": id, "interactionMode": next}));
+        net.dispatch(json!({"type": "thread.interaction-mode.set", "commandId": s5_net::uuid(), "threadId": id, "interactionMode": mode}));
     }
 }
 
@@ -220,9 +224,25 @@ fn send(s: &mut App) {
             s.ui.chat.composer.launches.push((request, thread_id));
         }
     }
+    sent(s);
+}
+
+/// A sent home draft starts the next one fresh, so it picks up the new thread's model and the
+/// default modes (useHandleNewThread); a thread draft keeps its overrides.
+fn sent(s: &mut App) {
+    let home = !matches!(s.frame_route(), Route::Thread(_));
     let d = draft_mut(s);
-    d.edit.clear();
-    d.attachments.clear();
+    if home {
+        *d = Draft::default();
+    } else {
+        d.edit.clear();
+        d.attachments.clear();
+    }
+}
+
+/// Opening a thread or the new-thread draft puts the caret in its composer (ChatView).
+pub fn focus(s: &mut App, route: &Route) {
+    s.ui.chat.composer.drafts.entry(draft_key(route)).or_default().edit.focused = true;
 }
 
 fn stop(s: &mut App) {
@@ -594,3 +614,41 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.chat.details.hidden = true;
     }),
 ];
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn navigating_focuses_the_route_draft() {
+        let mut s = App::new();
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id.clone()));
+        assert!(s.ui.chat.composer.drafts[&id].edit.focused);
+        s.navigate(Route::Home { project_id: None });
+        assert!(s.ui.chat.composer.drafts["home"].edit.focused);
+    }
+
+    #[test]
+    fn sending_resets_the_home_draft_but_keeps_thread_overrides() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        let d = draft_mut(&mut s);
+        d.edit = TextEdit::new("hi");
+        d.model = Some(("replay".into(), "write-approval".into()));
+        d.runtime_mode = Some("approval-required".into());
+        sent(&mut s);
+        let d = draft(&s).unwrap();
+        assert!(d.edit.text.is_empty() && d.model.is_none() && d.runtime_mode.is_none());
+
+        let id = data::s(&s.state().threads[0], "id").to_string();
+        s.navigate(Route::Thread(id));
+        let d = draft_mut(&mut s);
+        d.edit = TextEdit::new("hi");
+        d.runtime_mode = Some("approval-required".into());
+        sent(&mut s);
+        let d = draft(&s).unwrap();
+        assert!(d.edit.text.is_empty());
+        assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
+    }
+}

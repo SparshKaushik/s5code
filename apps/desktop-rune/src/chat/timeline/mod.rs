@@ -27,6 +27,8 @@ pub struct Ui {
     pub wrapped: HashSet<String>,
     pub custom_answers: HashMap<String, rune::TextEdit>,
     pub answers: HashMap<String, HashMap<String, Vec<String>>>,
+    /// The text a copy button last copied, and when.
+    copied: Option<(String, i64)>,
 }
 
 fn toggle(app: &mut App, id: &str) {
@@ -47,18 +49,30 @@ fn button(label: &str, t: &T) -> El {
         .role("button")
 }
 
-pub(super) fn copy_button(content: &str, t: &T) -> El {
+/// How long a copy button shows its check (ANCHORED_COPY_TOAST_TIMEOUT_MS).
+const COPIED_MS: i64 = 1000;
+
+fn copied(app: &App, content: &str) -> bool {
+    app.ui.chat.timeline.copied.as_ref().is_some_and(|(c, at)| c == content && crate::data::now_ms() - at < COPIED_MS)
+}
+
+pub(super) fn copy_button(app: &App, content: &str, t: &T) -> El {
+    let done = copied(app, content);
     let content = content.to_owned();
     row()
         .size(24.0, 24.0)
         .center()
-        .child(icon(&icons::COPY, 12.0).color(t.c.muted_foreground))
+        .child(if done { icon(&icons::CHECK, 12.0).color(t.c.primary) } else { icon(&icons::COPY, 12.0).color(t.c.muted_foreground) })
         .radius(4.0)
         .hover(t.c.muted)
         .focusable(true)
         .role("button")
-        .label("Copy")
-        .on_press_tx(move |_: &mut App, tx| tx.copy(content.clone()))
+        .label(if done { "Copied" } else { "Copy" })
+        .on_press_tx(move |app: &mut App, tx| {
+            tx.copy(content.clone());
+            app.ui.chat.timeline.copied = Some((content.clone(), crate::data::now_ms()));
+            tx.wake_after(std::time::Duration::from_millis(COPIED_MS as u64));
+        })
 }
 
 fn item_view(app: &App, item: &Value, t: &T) -> El {
@@ -67,38 +81,6 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let expanded = app.ui.chat.timeline.expanded.contains(&id);
     if kind == "assistant_message" {
         return markdown::view(app, s(item, "text"), &id, t);
-    }
-    if kind == "todo_list" {
-        let mut card = col()
-            .w_full()
-            .gap(6.0)
-            .padding(12.0)
-            .radius(8.0)
-            .border(1.0, t.c.border);
-        card = card.child(text("Plan").font(theme::SM_MEDIUM).color(t.c.foreground));
-        for step in array(item, "steps") {
-            card = card.child(
-                row()
-                    .gap(8.0)
-                    .child(
-                        icon(
-                            if s(step, "status") == "completed" {
-                                &icons::CHECK
-                            } else {
-                                &icons::CIRCLE
-                            },
-                            14.0,
-                        )
-                        .color(t.c.muted_foreground),
-                    )
-                    .child(
-                        text(s(step, "text"))
-                            .font(theme::TEXT_SM)
-                            .color(t.c.foreground),
-                    ),
-            );
-        }
-        return card;
     }
     if kind == "compaction" {
         let active = matches!(s(item, "status"), "pending" | "running" | "waiting");
@@ -224,9 +206,13 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         "reasoning" => &icons::BRAIN,
         "command_execution" => &icons::TERMINAL,
         "file_change" => &icons::SQUARE_PEN,
+        "todo_list" => &icons::LIST_TODO,
         _ => &icons::WRENCH,
     };
-    let title = if kind == "reasoning" {
+    let todo = (kind == "todo_list").then(|| rows::todo_label(item));
+    let title = if let Some(label) = &todo {
+        label.as_str()
+    } else if kind == "reasoning" {
         "Thought"
     } else if kind == "command_execution" && !s(item, "input").is_empty() {
         s(item, "input")
@@ -269,7 +255,32 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                 .color(t.c.muted_foreground),
             ),
     );
-    if expanded {
+    if expanded && todo.is_some() {
+        let mut steps = col().w_full().gap(6.0).px(28.0);
+        for step in array(item, "steps") {
+            steps = steps.child(
+                row()
+                    .gap(8.0)
+                    .child(
+                        icon(
+                            if s(step, "status") == "completed" {
+                                &icons::CHECK
+                            } else {
+                                &icons::CIRCLE
+                            },
+                            14.0,
+                        )
+                        .color(t.c.muted_foreground),
+                    )
+                    .child(
+                        text(s(step, "text"))
+                            .font(theme::TEXT_SM)
+                            .color(t.c.foreground),
+                    ),
+            );
+        }
+        out = out.child(steps);
+    } else if expanded {
         let detail = if kind == "reasoning" {
             s(item, "text").to_owned()
         } else {
@@ -294,7 +305,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             col()
                 .px(28.0)
                 .child(markdown::view(app, &detail, s(item, "id"), t))
-                .child(copy_button(&detail, t)),
+                .child(copy_button(app, &detail, t)),
         );
     }
     out
@@ -607,7 +618,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     let mut stack = col()
         .w(lane.width)
         .growth(GrowthSpec::default())
-        .virtualize(100.0);
+        .virtualize(100.0)
+        // The composer floats over the list's bottom. Scroll extent counts the stack's own
+        // padding but not the viewport's, so the clearance lives here.
+        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0);
     for (index, r) in rows.into_iter().enumerate() {
         let (key, body) = match r {
             Row::User(item) => {
@@ -642,7 +656,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                             row()
                                 .w_full()
                                 .justify_end()
-                                .child(copy_button(s(item, "text"), t).group_opacity(0.0, 1.0)),
+                                .child(copy_button(app, s(item, "text"), t).group_opacity(0.0, 1.0)),
                         ),
                 )
             }
@@ -654,7 +668,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     .px(4.0)
                     .gap(6.0)
                     .child(markdown::view(app, s(item, "text"), s(item, "id"), t))
-                    .child(row().child(copy_button(s(item, "text"), t).group_opacity(0.0, 1.0))),
+                    .child(row().child(copy_button(app, s(item, "text"), t).group_opacity(0.0, 1.0))),
             ),
             Row::Work { id, label, items } => {
                 let expanded = app.ui.chat.timeline.expanded.contains(&id);
@@ -739,8 +753,6 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         // Rows share the composer's lane, which the details card narrows.
         .pl(lane.left)
         .pt(21.0)
-        // The composer floats over the bottom of the list; the last row scrolls clear of it.
-        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0)
         .child(stack)
 }
 
