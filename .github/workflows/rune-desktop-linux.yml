@@ -52,16 +52,17 @@ jobs:
             rune-linux-
 
       - name: Build
-        run: cargo build --release --locked
+        run: cargo build --release
 
       - name: Test
-        run: cargo test --release --locked --workspace 2>&1 | grep -E "^test |test result|panicked|FAILED|error" ; exit ${PIPESTATUS[0]}
+        run: cargo test --release --workspace 2>&1 | grep -E "^test |test result|panicked|FAILED|error" ; exit ${PIPESTATUS[0]}
 
       - name: Bundle
         run: |
           mkdir -p bundle/target/release
           cp target/release/s5code-rune bundle/target/release/
           cp -r fixtures tools bundle/
+          cp Cargo.lock bundle/
           tar czf "$RUNNER_TEMP/bundle.tgz" -C bundle .
 
       - uses: actions/upload-artifact@v4
