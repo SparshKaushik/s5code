@@ -55,9 +55,7 @@ pub fn poll(app: &mut App) -> bool {
                 assets.failed.insert(id.to_owned());
                 continue;
             };
-            let Some((base, _)) = crate::host::server() else {
-                continue;
-            };
+            let base = net.base_url().to_owned();
             let url = format!("{}{}", base.trim_end_matches('/'), s(&reply, "relativeUrl"));
             let pixels = Pixels::new();
             if s(&a, "mimeType").starts_with("image/") {

@@ -52,14 +52,16 @@ pub struct App {
     /// Wall clock for relative times; scenes pin it so snapshots are stable.
     pub now_ms: i64,
     pub ui: Ui,
+    /// Server lifecycle from `host`: the bundled server becoming ready, or failing for good.
+    host: Option<std::sync::mpsc::Receiver<host::Event>>,
 }
 
 impl App {
     fn new() -> App {
-        let src = Source::Fixture(if host::server().is_some() { data::empty_state() } else { data::fixture_state() });
+        let src = Source::Fixture(if host::live() { data::empty_state() } else { data::fixture_state() });
         let client_settings = settings::client::ClientSettings::load();
         let appearance = settings::appearance(&client_settings);
-        App { src, appearance, client_settings, route: Route::Home { project_id: None }, now_ms: data::now_ms(), ui: Ui::default() }
+        App { src, appearance, client_settings, route: Route::Home { project_id: None }, now_ms: data::now_ms(), ui: Ui::default(), host: None }
     }
 
     pub fn state(&self) -> &s5_net::State {
@@ -89,13 +91,30 @@ impl App {
 
 fn setup(s: &mut App, waker: Waker) {
     s.ui.panel.waker = Some(waker.clone());
-    if let Some((url, token)) = host::server() {
-        s.src = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
+    s.host = host::start(move || waker());
+}
+
+fn poll_host(s: &mut App) -> bool {
+    let Some(event) = s.host.as_ref().and_then(|rx| rx.try_recv().ok()) else { return false };
+    match event {
+        host::Event::Ready { url, token } => {
+            let waker = s.ui.panel.waker.clone().expect("setup stores the waker");
+            s.src = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
+            s.navigate(s.route.clone());
+        }
+        host::Event::Failed(reason) => {
+            eprintln!("s5code-rune: {reason}");
+            if let Source::Fixture(state) = &mut s.src {
+                state.conn = s5_net::Conn::Closed(reason);
+            }
+        }
     }
+    true
 }
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
-    let mut changed = s.src.net().is_some_and(|net| net.drain());
+    let mut changed = poll_host(s);
+    changed |= s.src.net().is_some_and(|net| net.drain());
     changed |= panel::poll(s);
     changed |= settings::poll(s);
     changed |= chat::timeline::poll(s);
@@ -144,6 +163,9 @@ pub fn scene_clock(s: &mut App) {
 }
 
 fn main() {
+    if std::env::args().any(|a| a == "--check-server") {
+        std::process::exit(host::check());
+    }
     let spec = AppSpec {
         min_size: Some((640.0, 480.0)),
         families: (theme::SANS, "ui-monospace"),

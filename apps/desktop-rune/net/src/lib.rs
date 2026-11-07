@@ -156,6 +156,9 @@ impl Net {
         }
         changed
     }
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
     pub fn state(&self) -> &State {
         &self.state
     }

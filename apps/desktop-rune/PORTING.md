@@ -11,6 +11,7 @@ The web client (`apps/web`) is the spec. Port what it renders, not what you thin
 | `net/` (`s5-net`) | Server protocol: Effect-RPC over WebSocket, the shell/config/thread state, commands. No UI. |
 | `src/main.rs` | `App`, `Route`, `Ui`, spec, scene registry. Keep it small. |
 | `src/data.rs` | `Source` (live `Net` or recorded fixtures) and readers over JSON rows (`s`, `ts`, `iso_ms`). |
+| `src/host.rs` | The server: `S5_SERVER_URL` + `S5_TOKEN`, else the bundled `s5code-server` beside the executable (the Bun binary, `scripts/build-server-binary.ts --platform darwin`), started and supervised like the Electron app's backend. `--check-server` starts it, signs in and loads the shell, then exits. |
 | `src/theme.rs` | `T` (resolved tokens), Tailwind type scale, radii, spacing, layout constants. |
 | `src/tokens.rs` | Generated colour tokens: root scope (`t.c`) and sidebar scope (`t.sb`), dark and light. |
 | `src/icons.rs` | Generated: every lucide-react icon apps/web imports, as `icons::NAME`. |

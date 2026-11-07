@@ -21,22 +21,30 @@ import serverPackageJson from "../apps/server/package.json" with { type: "json" 
 import { patchStandaloneCursorSdk } from "./lib/standalone-cursor-sdk.ts";
 
 /**
- * Builds a standalone Bun server binary for Linux x64/arm64 from `apps/server/dist/bin.mjs`.
- * It embeds libfff_c, Cursor's platform package, and Playwright as assets, but not the web client.
- * Usage: node scripts/build-server-binary.ts --arch x64 --output-dir release
+ * Builds a standalone Bun server binary for Linux x64/arm64 (release) or macOS (bundled into the
+ * Rune desktop app) from `apps/server/dist/bin.mjs`. It embeds libfff_c, Cursor's platform
+ * package, and Playwright as assets, but not the web client.
+ * Usage: node scripts/build-server-binary.ts [--platform darwin] --arch x64 --output-dir release
  */
 
 const encodeJsonString = Schema.encodeEffect(Schema.fromJsonString(Schema.Unknown));
 
-const archToTarget = {
-  x64: "bun-linux-x64",
-  arm64: "bun-linux-arm64",
-} as const;
+const archs = ["x64", "arm64"] as const;
+type Arch = (typeof archs)[number];
+const platforms = ["linux", "darwin"] as const;
+type Platform = (typeof platforms)[number];
+
+/** fff's native package and library per platform; Linux ships glibc builds. */
+const fffLibrary = (platform: Platform, arch: Arch) =>
+  platform === "linux"
+    ? { packageName: `@ff-labs/fff-bin-linux-${arch}-gnu`, file: "libfff_c.so" }
+    : { packageName: `@ff-labs/fff-bin-darwin-${arch}`, file: "libfff_c.dylib" };
 
 /** Fallback when neither --release-repo nor GITHUB_REPOSITORY is set. */
 const DEFAULT_RELEASE_REPO = "SparshKaushik/s5code";
 
 const ServerBinaryEnvConfig = Config.all({
+  platform: Config.String("T3CODE_SERVER_PLATFORM").pipe(Config.option),
   arch: Config.String("T3CODE_SERVER_ARCH").pipe(Config.option),
   outputDir: Config.String("T3CODE_SERVER_OUTPUT_DIR").pipe(Config.option),
   buildVersion: Config.String("T3CODE_SERVER_VERSION").pipe(Config.option),
@@ -154,11 +162,12 @@ const runCommand = Effect.fn("runCommand")(function* (
  */
 const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
   repoRoot: string,
-  arch: keyof typeof archToTarget,
+  platform: Platform,
+  arch: Arch,
 ): Effect.fn.Return<string, ServerBinaryBuildError, FileSystem.FileSystem | Path.Path> {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
-  const packageName = `@ff-labs/fff-bin-linux-${arch}-gnu`;
+  const { packageName, file } = fffLibrary(platform, arch);
   const missing = (detail: string) =>
     new ServerBinaryBuildError({ kind: "missing-fff-library", detail });
 
@@ -177,11 +186,11 @@ const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
       ),
     catch: (cause) =>
       missing(
-        `Could not resolve ${packageName}. pnpm only installs the platform binaries allowed by \`supportedArchitectures\` in pnpm-workspace.yaml, so \`vp i\` on a host that allows linux-${arch} is what provides it. (${String(cause)})`,
+        `Could not resolve ${packageName}. pnpm only installs the platform binaries allowed by \`supportedArchitectures\` in pnpm-workspace.yaml, so \`vp i\` on a host that allows ${platform}-${arch} is what provides it. (${String(cause)})`,
       ),
   });
 
-  const libraryPath = path.join(path.dirname(resolved), "libfff_c.so");
+  const libraryPath = path.join(path.dirname(resolved), file);
   const exists = yield* fs.exists(libraryPath).pipe(Effect.orElseSucceed(() => false));
   if (!exists) {
     return yield* missing(`Resolved the ${packageName} package but ${libraryPath} does not exist.`);
@@ -191,14 +200,15 @@ const resolveFffLibraryPath = Effect.fn("resolveFffLibraryPath")(function* (
 
 const resolveCursorPlatformDirectory = Effect.fn("resolveCursorPlatformDirectory")(function* (
   repoRoot: string,
-  arch: keyof typeof archToTarget,
+  platform: Platform,
+  arch: Arch,
 ) {
   const fs = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const sdkDirectory = yield* fs.realPath(
     path.join(repoRoot, "apps/server/node_modules/@cursor/sdk"),
   );
-  const packageName = `@cursor/sdk-linux-${arch}`;
+  const packageName = `@cursor/sdk-${platform}-${arch}`;
   const manifestPath = yield* Effect.try({
     try: () =>
       NodeModule.createRequire(path.join(sdkDirectory, "package.json")).resolve(
@@ -230,6 +240,7 @@ const resolveCursorPlatformDirectory = Effect.fn("resolveCursorPlatformDirectory
 });
 
 const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (input: {
+  readonly platform: Option.Option<string>;
   readonly arch: Option.Option<string>;
   readonly outputDir: Option.Option<string>;
   readonly buildVersion: Option.Option<string>;
@@ -242,18 +253,26 @@ const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (input: {
   const repoRoot = yield* RepoRoot;
 
   const arch = mergeOptions(input.arch, env.arch, "x64");
-  if (!(arch in archToTarget)) {
+  if (!archs.includes(arch as Arch)) {
     return yield* new ServerBinaryBuildError({
       kind: "unsupported-arch",
-      detail: `Unsupported server binary arch "${arch}". Supported: ${Object.keys(archToTarget).join(", ")}.`,
+      detail: `Unsupported server binary arch "${arch}". Supported: ${archs.join(", ")}.`,
+    });
+  }
+  const platform = mergeOptions(input.platform, env.platform, "linux");
+  if (!platforms.includes(platform as Platform)) {
+    return yield* new ServerBinaryBuildError({
+      kind: "unsupported-platform",
+      detail: `Unsupported server binary platform "${platform}". Supported: ${platforms.join(", ")}.`,
     });
   }
 
   const outputDir = path.resolve(repoRoot, mergeOptions(input.outputDir, env.outputDir, "release"));
 
   return {
-    arch: arch as keyof typeof archToTarget,
-    target: archToTarget[arch as keyof typeof archToTarget],
+    platform: platform as Platform,
+    arch: arch as Arch,
+    target: `bun-${platform}-${arch}`,
     outputDir,
     version:
       mergeOptions(input.buildVersion, env.buildVersion, undefined) ?? serverPackageJson.version,
@@ -268,7 +287,8 @@ const resolveBuildOptions = Effect.fn("resolveBuildOptions")(function* (input: {
 });
 
 const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
-  readonly arch: keyof typeof archToTarget;
+  readonly platform: Platform;
+  readonly arch: Arch;
   readonly target: string;
   readonly outputDir: string;
   readonly version: string;
@@ -297,16 +317,21 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
     });
   }
 
-  const binaryName = `s5code-server-${options.version}-linux-${options.arch}`;
+  const platformArch = `${options.platform}-${options.arch}`;
+  const binaryName = `s5code-server-${options.version}-${platformArch}`;
   const outfile = path.join(options.outputDir, binaryName);
 
   yield* fs.makeDirectory(options.outputDir, { recursive: true });
 
-  const fffLibraryPath = yield* resolveFffLibraryPath(repoRoot, options.arch);
+  const fffLibraryPath = yield* resolveFffLibraryPath(repoRoot, options.platform, options.arch);
 
   const scratch = yield* fs.makeTempDirectoryScoped({ prefix: "s5code-server-build-" });
-  const cursorDirectory = yield* resolveCursorPlatformDirectory(repoRoot, options.arch);
-  const cursorArchive = path.join(scratch, `cursor-sdk-native-linux-${options.arch}.tgz`);
+  const cursorDirectory = yield* resolveCursorPlatformDirectory(
+    repoRoot,
+    options.platform,
+    options.arch,
+  );
+  const cursorArchive = path.join(scratch, `cursor-sdk-native-${platformArch}.tgz`);
   yield* runCommand(
     "archive Cursor native helpers",
     "tar",
@@ -341,8 +366,9 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
   );
 
   // --splitting keeps `node:sqlite` in a lazy chunk; hoisted, it kills Bun at startup.
-  // --bytecode cannot combine with splitting. The defines mark a self-updating
-  // release; the loader plugin is scoped to Cursor's flattened entry.
+  // --bytecode cannot combine with splitting. The defines mark a self-updating release
+  // (binaryRuntime accepts only Linux targets, so a macOS binary inside an app never
+  // replaces itself); the loader plugin is scoped to Cursor's flattened entry.
   const compileScript = `
     import { dirname } from "node:path";
     ${patchStandaloneCursorSdk.toString()}
@@ -353,7 +379,7 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
       splitting: true,
       minify: true,
       define: ${yield* encodeJsonString({
-        "process.env.T3CODE_SERVER_BINARY_TARGET": yield* encodeJsonString(`linux-${options.arch}`),
+        "process.env.T3CODE_SERVER_BINARY_TARGET": yield* encodeJsonString(platformArch),
         "process.env.T3CODE_SERVER_BINARY_REPO": yield* encodeJsonString(options.releaseRepo),
       })},
       plugins: [{
@@ -425,13 +451,13 @@ const buildServerBinary = Effect.fn("buildServerBinary")(function* (options: {
 
   yield* Effect.log("[server-binary] Done.").pipe(Effect.annotateLogs({ artifact: outfile }));
 
-  // Only runnable when the host can execute the target. Release CI therefore
-  // builds each Linux arch on a matching runner: a cross-compiled arm64 binary
-  // can omit @yuuang/ffi-rs-linux-arm64-gnu (pulled in by @ff-labs/fff-node) and
-  // still look like a successful compile until --version dies at process start.
+  // Only runnable when the host can execute the target. CI therefore builds each
+  // target on a matching runner: a cross-compiled arm64 binary can omit
+  // @yuuang/ffi-rs-linux-arm64-gnu (pulled in by @ff-labs/fff-node) and still
+  // look like a successful compile until --version dies at process start.
   const hostPlatform = yield* HostProcess.Platform;
   const hostArch = yield* HostProcess.Architecture;
-  if (hostPlatform === "linux" && hostArch === options.arch) {
+  if (hostPlatform === options.platform && hostArch === options.arch) {
     yield* Effect.log(`[server-binary] Smoke-testing ${outfile} --version...`);
     yield* runCommand("server binary --version", outfile, ["--version"], {
       verbose: options.verbose,
@@ -455,8 +481,12 @@ function containsBytes(haystack: Uint8Array, needle: string): boolean {
 }
 
 const buildServerBinaryCli = Command.make("build-server-binary", {
-  arch: Flag.Literals("arch", ["x64", "arm64"]).pipe(
-    Flag.withDescription("Target Linux arch: x64 or arm64 (env: T3CODE_SERVER_ARCH)."),
+  platform: Flag.Literals("platform", platforms).pipe(
+    Flag.withDescription("Target OS: linux or darwin (env: T3CODE_SERVER_PLATFORM)."),
+    Flag.optional,
+  ),
+  arch: Flag.Literals("arch", archs).pipe(
+    Flag.withDescription("Target arch: x64 or arm64 (env: T3CODE_SERVER_ARCH)."),
     Flag.optional,
   ),
   outputDir: Flag.String("output-dir").pipe(
@@ -484,7 +514,7 @@ const buildServerBinaryCli = Command.make("build-server-binary", {
     Flag.optional,
   ),
 }).pipe(
-  Command.withDescription("Build a precompiled standalone Linux server binary."),
+  Command.withDescription("Build a precompiled standalone server binary."),
   Command.withHandler((input) =>
     Effect.gen(function* () {
       const options = yield* resolveBuildOptions(input);

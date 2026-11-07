@@ -5,6 +5,7 @@ on:
     branches: [feat/rune-desktop-prototype]
     paths:
       - apps/desktop-rune/**
+      - scripts/build-server-binary.ts
       - .github/workflows/rune-desktop-macos.yml
   workflow_dispatch:
 
@@ -44,11 +45,33 @@ jobs:
       - name: Build
         run: cargo build --release --locked
 
+      # The app starts this bundled server on launch, as the Electron app starts its own.
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/scripts...
+
+      - name: Setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Same pin as s5-release.yml: the compiled binary embeds this Bun runtime.
+          bun-version: "1.4.4"
+
+      - name: Build server binary
+        working-directory: .
+        run: node scripts/build-server-binary.ts --platform darwin --arch arm64 --output-dir "$RUNNER_TEMP/server" --verbose
+
       - name: Bundle S5 Code (Rune).app
         run: |
           app="dist/S5 Code (Rune).app"
           mkdir -p "$app/Contents/MacOS"
           cp target/release/s5code-rune "$app/Contents/MacOS/s5code-rune"
+          install -m 755 "$RUNNER_TEMP"/server/s5code-server-*-darwin-arm64 "$app/Contents/MacOS/s5code-server"
           cat > "$app/Contents/Info.plist" <<'PLIST'
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -66,8 +89,12 @@ jobs:
           </dict>
           </plist>
           PLIST
+          codesign --force --sign - "$app/Contents/MacOS/s5code-server"
           codesign --force --deep --sign - "$app"
           codesign --verify --verbose "$app"
+          # Start the bundled server, sign in and load the shell, against a throwaway T3 home.
+          T3CODE_HOME="$RUNNER_TEMP/t3home" "$app/Contents/MacOS/s5code-rune" --check-server || {
+            tail -80 "$RUNNER_TEMP/t3home/userdata/logs/desktop-rune-server.log"; exit 1; }
           ditto -c -k --keepParent "$app" "dist/S5-Code-Rune-macos-arm64.zip"
 
       - uses: actions/upload-artifact@v7
