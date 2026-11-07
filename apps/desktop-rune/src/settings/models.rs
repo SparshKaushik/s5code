@@ -20,6 +20,8 @@ pub struct Picker {
     /// The rail entry shown: an instance id or `favorites`.
     pub rail: Option<String>,
     pub query: TextEdit,
+    /// The keyboard-highlighted row; Enter picks it, or the first row when unset.
+    pub active: Option<usize>,
 }
 
 pub fn is_model_key(key: &str) -> bool {
@@ -161,6 +163,7 @@ pub fn toggle(s: &mut App, key: &str) {
     }
     p.open = Some(key.to_owned());
     p.rail = None;
+    p.active = None;
     p.query = TextEdit::new("");
     p.query.focused = true;
 }
@@ -225,18 +228,51 @@ fn pick(s: &mut App, key: &str, instance: String, model: String) {
     update(s, key, json!({"instanceId": instance, "model": model}));
 }
 
+/// The rail entry shown: the one picked, else the current selection's provider.
+fn shown_rail(s: &App, key: &str) -> String {
+    s.ui.settings
+        .models
+        .rail
+        .clone()
+        .or_else(|| selection(s, key).map(|(i, _)| i))
+        .unwrap_or_else(|| FAVORITES.into())
+}
+
+/// Arrow keys wrap through the rows, starting from the first (Down) or last (Up).
+fn step(active: Option<usize>, len: usize, down: bool) -> Option<usize> {
+    if len == 0 {
+        return None;
+    }
+    Some(match (active, down) {
+        (None, true) => 0,
+        (None, false) => len - 1,
+        (Some(a), true) => (a + 1) % len,
+        (Some(a), false) => (a + len - 1) % len,
+    })
+}
+
+fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
+    let Some(key) = s.ui.settings.models.open.clone() else { return false };
+    let list = rows(s, &key, &shown_rail(s, &key));
+    let p = &mut s.ui.settings.models;
+    match e.key {
+        rune::Key::Down => p.active = step(p.active, list.len(), true),
+        rune::Key::Up => p.active = step(p.active, list.len(), false),
+        rune::Key::Enter => {
+            if let Some((i, m, _)) = list.into_iter().nth(p.active.unwrap_or(0)) {
+                pick(s, &key, i, m);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
 /// The open picker's popover, anchored under its trigger.
 pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(key) = s.ui.settings.models.open.clone() else { return };
     let current = selection(s, &key);
-    let rail = s
-        .ui
-        .settings
-        .models
-        .rail
-        .clone()
-        .or_else(|| current.as_ref().map(|(i, _)| i.clone()))
-        .unwrap_or_else(|| FAVORITES.into());
+    let rail = shown_rail(s, &key);
     let line = t.c.border.alpha_mul(0.7);
 
     // Rail: w-11 p-1 gap-1, square buttons, a primary bar on the shown entry.
@@ -252,6 +288,7 @@ pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
         item = if enabled {
             item.cursor(Cursor::Pointer).hover(t.c.foreground.alpha_mul(0.1)).on_press(move |s: &mut App| {
                 s.ui.settings.models.rail = Some(target.clone());
+                s.ui.settings.models.active = None;
             })
         } else {
             item.opacity(0.5)
@@ -298,7 +335,9 @@ pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
                 .color(t.c.foreground)
                 .placeholder("Search models...", t.c.placeholder)
                 .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
-                .on_edit(|s: &mut App| &mut s.ui.settings.models.query),
+                .on_edit(|s: &mut App| &mut s.ui.settings.models.query)
+                .on_input_change(|s: &mut App, _| s.ui.settings.models.active = None)
+                .on_input_key(on_key),
         );
     let header = col()
         .w_full()
@@ -309,7 +348,7 @@ pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
     let list = rows(s, &key, &rail);
     let searching = !q.text.trim().is_empty();
     let mut body = col().w_full().pl(8.0).pr(1.0).py(6.0).gap(2.0);
-    for (instance, slug, name) in &list {
+    for (n, (instance, slug, name)) in list.iter().enumerate() {
         let driver = providers(s)
             .iter()
             .find(|p| p["instanceId"] == instance.as_str())
@@ -324,9 +363,11 @@ pub fn popover(s: &App, t: &T, layers: &mut Vec<El>) {
             label = label.child(icon(&icons::CHECK, 14.0).color(t.c.foreground));
         }
         let (k, i, m) = (key.clone(), instance.clone(), slug.clone());
+        let active = s.ui.settings.models.active == Some(n);
         body = body.child(
             row()
                 .key(format!("settings-model-{instance}-{slug}"))
+                .fill(if active { t.c.accent } else { rune::Color::TRANSPARENT })
                 .w_full()
                 .h(32.0)
                 .px(8.0)
@@ -444,6 +485,14 @@ mod tests {
         assert_eq!(selectable_entry(&entries, Some("codex")).unwrap()["instanceId"], "codex");
         assert_eq!(selectable_entry(&entries, Some("off")).unwrap()["instanceId"], "opencode");
         assert_eq!(selectable_entry(&entries, None).unwrap()["instanceId"], "opencode");
+    }
+    #[test]
+    fn arrow_keys_wrap_through_the_rows() {
+        assert_eq!(step(None, 3, true), Some(0));
+        assert_eq!(step(None, 3, false), Some(2));
+        assert_eq!(step(Some(2), 3, true), Some(0));
+        assert_eq!(step(Some(0), 3, false), Some(2));
+        assert_eq!(step(Some(1), 0, true), None);
     }
     #[test]
     fn default_model_skips_custom_models() {

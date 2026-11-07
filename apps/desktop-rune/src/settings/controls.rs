@@ -42,8 +42,8 @@ pub fn select_width(key: &str) -> f32 {
     match key {
         "notificationMode" => 224.0,
         "sidebarProjectSortOrder" => 176.0,
-        "sendShortcut" => 70.0,
-        "followUpBehavior" => 71.0,
+        // Web `w-auto`: the trigger fits the current label.
+        "sendShortcut" | "followUpBehavior" => 0.0,
         k if k.starts_with("snooze::when::") => 128.0,
         k if k.starts_with("snooze::unit::") => 112.0,
         _ => 160.0,
@@ -100,6 +100,7 @@ pub fn select_menu(s: &App, t: &T, key: &str, options: &[(Value, String)], width
         .current(Some(&current_label(s, key, options)))
         .width(width)
         .size("sm")
+        .align_end()
         .open(true)
         .on_choose(move |s: &mut App, label: &str, _: &mut rune::Tx| {
             if let Some((v, _)) = choices.iter().find(|(_, l)| l == label) {
@@ -279,6 +280,8 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
         .border(1.0, t.c.input)
         .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
         .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
         .single_line()
         .on_edit(move |s: &mut App| {
             s.ui.settings
@@ -302,6 +305,11 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
 }
 
 pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
+    section_with_actions(title, vec![], children, t)
+}
+
+/// Web `SettingsSection` `headerAction`: buttons trail the title, `gap-2` apart.
+pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t: &T) -> El {
     let mut group = col()
         .w_full()
         .padding(1.0)
@@ -318,11 +326,19 @@ pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
         .w_full()
         .gap(10.0)
         .child(
-            el().h(28.0).px(16.0).center_y().child(
-                text(title.to_owned())
-                    .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
-                    .color(t.c.foreground),
-            ),
+            row()
+                .w_full()
+                .h(28.0)
+                .px(16.0)
+                .gap(8.0)
+                .center_y()
+                .child(
+                    text(title.to_owned())
+                        .font(theme::weight(theme::TEXT_BASE, theme::SEMIBOLD))
+                        .color(t.c.foreground)
+                        .grow(1.0),
+                )
+                .children(actions),
         )
         .child(group)
 }

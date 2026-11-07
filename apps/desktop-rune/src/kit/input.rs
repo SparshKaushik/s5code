@@ -93,6 +93,7 @@ impl Input {
                 },
             )
             .color(t.c.contrast_foreground)
+            .caret(t.c.contrast_foreground, t.c.primary.alpha_mul(0.3))
             .focus_ring(3., -3., t.c.ring.alpha_mul(0.24));
         if self.disabled {
             return e.disabled(true).opacity(0.64);

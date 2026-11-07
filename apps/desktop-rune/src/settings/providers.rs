@@ -889,6 +889,8 @@ fn small_input(edit: &TextEdit, key: &str, placeholder: &str, t: &T, mono: bool)
         .border(1.0, t.c.input)
         .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
         .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
         .single_line()
 }
 
@@ -906,6 +908,8 @@ fn secret_input(s: &App, t: &T, key: &str, placeholder: &str, mono: bool) -> El 
         .border(1.0, t.c.input)
         .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
         .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
         .single_line()
         .secure()
         .on_edit(move |s: &mut App| s.ui.settings.edits.entry(k1.clone()).or_insert_with(|| edit.clone()))

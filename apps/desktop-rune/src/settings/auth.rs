@@ -43,6 +43,22 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
             },
         ));
     };
+    if state.get("error").is_some() {
+        let refresh = id.clone();
+        return content
+            .child(
+                text("Could not load sign-in status.")
+                    .font(theme::TEXT_XS)
+                    .color(t.c.destructive),
+            )
+            .child(c::button("Retry", t).on_press(move |s: &mut App| {
+                if let Some(net) = s.src.net() {
+                    let payload = json!({"instanceId":refresh});
+                    net.unwatch_resource("provider.auth.subscribe", payload.clone());
+                    net.watch_resource("provider.auth.subscribe", payload);
+                }
+            }));
+    }
     if let Some(message) = state["message"].as_str() {
         content = content.child(
             text(message.to_owned())

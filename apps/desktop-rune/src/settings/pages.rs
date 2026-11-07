@@ -7,7 +7,16 @@ use std::sync::OnceLock;
 
 pub fn specs() -> &'static Value {
     static PAGES: OnceLock<Value> = OnceLock::new();
-    PAGES.get_or_init(|| serde_json::from_str(include_str!("pages.json")).unwrap())
+    PAGES.get_or_init(|| {
+        let modifier = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
+        serde_json::from_str(&include_str!("pages.json").replace("{mod}", modifier)).unwrap()
+    })
+}
+
+/// Provider sign-in status fails per instance (e.g. a CLI that isn't installed); like web,
+/// the auth section reports it inline instead of hiding the Providers page.
+fn blocks_page(method: &str) -> bool {
+    method != "provider.auth.subscribe"
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
@@ -35,7 +44,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         .active_resources
         .iter()
         .any(|(method, payload)| {
-            super::resource(s, method, payload.clone()).is_some_and(|v| v.get("error").is_some())
+            blocks_page(method)
+                && super::resource(s, method, payload.clone()).is_some_and(|v| v.get("error").is_some())
         })
     {
         return page
@@ -134,4 +144,13 @@ fn unavailable(path: &str, t: &T) -> El {
     ))
     .font(theme::TEXT_SM)
     .color(t.c.muted_foreground)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn provider_auth_errors_do_not_hide_the_page() {
+        assert!(!super::blocks_page("provider.auth.subscribe"));
+        assert!(super::blocks_page("scheduledTasks.subscribe"));
+    }
 }
