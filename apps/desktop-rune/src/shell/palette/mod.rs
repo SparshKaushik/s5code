@@ -1660,7 +1660,9 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     let raw = add_project::raw(s);
     let input = text_input(&ui.query, theme::TEXT_SM)
         .key("palette-query")
-        .w_full()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
         .h(34.)
         .py(7.)
         .font(theme::TEXT_SM)
