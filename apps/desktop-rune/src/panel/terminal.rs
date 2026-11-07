@@ -464,9 +464,9 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
     let m = metrics(app);
     let palette = palette(t);
     app.ui.panel.terminal.palette.set(Some(palette));
-    let key = format!("terminal-{thread}-{id}");
+    let el_key = format!("terminal-{thread}-{id}");
     let mut grid = el()
-        .key(key.clone())
+        .key(el_key.clone())
         .grow(1.)
         .min_h(0.)
         .min_w(0.)
@@ -571,7 +571,7 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
     let (t7, i7) = (t1.clone(), i1.clone());
     let input = text_input(&session.input, m.font)
         .single_line()
-        .key(format!("{key}-input"))
+        .key(format!("{el_key}-input"))
         .label("Terminal input")
         .absolute(x(cursor_col), y(cursor_row.min(rows.len().saturating_sub(1))))
         .size(1., m.cell_h)
