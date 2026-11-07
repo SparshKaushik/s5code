@@ -6,10 +6,13 @@ mod connections;
 mod controls;
 mod devices;
 mod keybindings;
+mod models;
 mod pages;
 mod projects;
 mod providers;
 mod scope;
+mod snooze;
+mod browser_profiles;
 mod tasks;
 mod themes;
 pub use themes::apply as apply_theme;
@@ -60,6 +63,9 @@ pub struct Ui {
     pub binding_target: Option<Value>,
     pub keybinding_search: TextEdit,
     pub return_route: Option<Route>,
+    pub models: models::Picker,
+    pub snooze: snooze::Draft,
+    pub profiles: browser_profiles::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -111,6 +117,12 @@ pub fn value(s: &App, key: &str) -> Value {
     if key.starts_with("form.") {
         return s.ui.settings.form.get(key).cloned().unwrap_or(Value::Null);
     }
+    if let Some(key) = key.strip_prefix("snooze::") {
+        return snooze::value(s, key);
+    }
+    if let Some(key) = key.strip_prefix("profile::") {
+        return browser_profiles::value(s, key);
+    }
     if let Some(key) = key.strip_prefix("provider::") {
         if let Some((id, field)) = key.split_once("::") {
             return providers::field_value(s, id, field);
@@ -143,6 +155,14 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
     if key.starts_with("form.") {
         s.ui.settings.form.insert(key.into(), value);
+        return;
+    }
+    if let Some(key) = key.strip_prefix("snooze::") {
+        snooze::set(s, key, value);
+        return;
+    }
+    if let Some(key) = key.strip_prefix("profile::") {
+        browser_profiles::rename(s, key, value);
         return;
     }
     if let Some(key) = key.strip_prefix("provider::") {
@@ -625,6 +645,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     projects::confirm_delete(s, t, &mut overlays);
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
+    models::popover(s, t, &mut overlays);
+    browser_profiles::overlays(s, t, &mut overlays);
     if let Some(menu) = scope::menu(s, t) {
         overlays.push(menu);
     }
@@ -754,13 +776,97 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene(s, "keybindings");
         s.ui.settings.keybinding_editor = Some("New thread".into());
     }),
+    ("settings-threads-light", |s| {
+        scene(s, "threads");
+        s.appearance = Appearance::Light;
+    }),
+    ("settings-threads-model-picker", |s| threads_picker(s, false)),
+    ("settings-threads-model-picker-light", |s| threads_picker(s, true)),
+    ("settings-threads-snooze-edited", |s| threads_snooze(s, false)),
+    ("settings-threads-snooze-edited-light", |s| threads_snooze(s, true)),
+    ("settings-browser-light", |s| {
+        scene(s, "browser");
+        s.appearance = Appearance::Light;
+    }),
+    ("settings-browser-profiles", |s| browser_profiles_scene(s, false, None)),
+    ("settings-browser-profiles-light", |s| browser_profiles_scene(s, true, None)),
+    ("settings-browser-profile-menu", |s| browser_profiles_scene(s, false, Some("profile-work"))),
+    ("settings-browser-profile-menu-light", |s| browser_profiles_scene(s, true, Some("profile-work"))),
+    ("settings-browser-add-profile-menu", |s| browser_profiles_scene(s, false, Some("add"))),
+    ("settings-browser-remove-profile", |s| {
+        browser_profiles_scene(s, false, None);
+        s.ui.settings.profiles.remove = Some(("profile-work".into(), "Work".into()));
+    }),
+    ("settings-browser-remove-profile-light", |s| {
+        browser_profiles_scene(s, true, None);
+        s.ui.settings.profiles.remove = Some(("profile-work".into(), "Work".into()));
+    }),
 ];
+
+/// Scenes stage server settings as the optimistic copy a live write would leave.
+fn stage_settings(s: &mut App, patch: Value) {
+    let mut current = server_settings(s).clone();
+    apply_patch(&mut current, &patch);
+    s.ui.settings.optimistic_settings = Some(current);
+}
+
+fn threads_picker(s: &mut App, light: bool) {
+    scene(s, "threads");
+    if light {
+        s.appearance = Appearance::Light;
+    }
+    stage_settings(s, json!({"favorites": [{"provider": "opencode", "model": "opencode/big-pickle"}]}));
+    models::toggle(s, "defaultModelSelection");
+}
+
+fn threads_snooze(s: &mut App, light: bool) {
+    scene(s, "threads");
+    if light {
+        s.appearance = Appearance::Light;
+    }
+    // A passed "today" option, a duplicate, a same-minute wake, and the 8-option cap.
+    stage_settings(
+        s,
+        json!({
+            "fallbackModelSelection": {"instanceId": "opencode", "model": "opencode/big-pickle"},
+            "snoozePresets": [
+                {"kind": "after", "minutes": 30},
+                {"kind": "after", "minutes": 90},
+                {"kind": "at", "day": "today", "time": "07:00"},
+                {"kind": "at", "day": "tomorrow", "time": "09:00"},
+                {"kind": "at", "day": "tomorrow", "time": "09:00"},
+                {"kind": "after", "minutes": 2880},
+                {"kind": "at", "day": "saturday", "time": "10:30"},
+                {"kind": "at", "day": "monday", "time": "09:00"}
+            ]
+        }),
+    );
+}
+
+fn browser_profiles_scene(s: &mut App, light: bool, menu: Option<&str>) {
+    scene(s, "browser");
+    if light {
+        s.appearance = Appearance::Light;
+    }
+    s.client_settings.values.insert(
+        "browserProfiles".into(),
+        json!([
+            {"id": "profile-work", "name": "Work", "kind": "persistent"},
+            {"id": "profile-testing", "name": "QA accounts", "kind": "persistent"}
+        ]),
+    );
+    s.client_settings.values.insert("browserDefaultProfileId".into(), json!("profile-work"));
+    s.ui.settings.profiles.menu = menu.map(str::to_owned);
+}
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
     if !matches!(s.route, Route::Settings(_)) {
         return false;
     }
     if matches!(e.key, rune::Key::Escape) {
+        if s.ui.settings.models.open.take().is_some() || browser_profiles::escape(s) {
+            return true;
+        }
         if s.ui.settings.open_select.take().is_some() {
             return true;
         }

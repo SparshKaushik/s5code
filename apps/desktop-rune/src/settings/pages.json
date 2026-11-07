@@ -430,6 +430,13 @@
       "title": "Browsing",
       "rows": [
         {
+          "key": "browserProfiles",
+          "title": "Browser profiles",
+          "description": "Profiles separate cookies and logins. Incognito data is cleared when the app closes.",
+          "kind": "profiles",
+          "options": []
+        },
+        {
           "key": "browserLinkTarget",
           "title": "Open links in",
           "description": "Where links in the chat and terminal open. Hold ⌘ or Ctrl while clicking a link to open it in your default browser either way.",
@@ -875,6 +882,20 @@
       "title": "New threads",
       "rows": [
         {
+          "key": "defaultModelSelection",
+          "title": "Model",
+          "description": "Default model for new threads. Projects can override it.",
+          "kind": "model",
+          "options": []
+        },
+        {
+          "key": "fallbackModelSelection",
+          "title": "Fallback model",
+          "description": "Used for new threads when the default model's provider is out of usage.",
+          "kind": "model",
+          "options": []
+        },
+        {
           "key": "defaultRuntimeMode",
           "title": "Permissions",
           "description": "Default permissions for new threads. Projects can override them.",
@@ -913,6 +934,18 @@
               "New worktree"
             ]
           ]
+        }
+      ]
+    },
+    {
+      "title": "Snooze",
+      "rows": [
+        {
+          "key": "snoozePresets",
+          "title": "Snooze options",
+          "description": "Choices in every snooze menu, listed soonest first. Weekdays mean the next one after today.",
+          "kind": "snooze",
+          "options": []
         }
       ]
     },
@@ -965,11 +998,39 @@
       "title": "Text generation",
       "rows": [
         {
+          "key": "textGenerationModelSelection",
+          "title": "Text generation model",
+          "description": "Used for thread titles and other generated text on connected devices with this provider. Source control can override it.",
+          "kind": "model",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Advanced",
+      "rows": [
+        {
           "key": "threadTitleInstructions",
           "title": "Thread title instructions",
           "description": "Appended to the prompt for new and regenerated thread titles.",
           "kind": "input",
           "options": []
+        },
+        {
+          "key": "responseStreamingMode",
+          "title": "Response streaming",
+          "description": "",
+          "kind": "select",
+          "options": [
+            [
+              "turn",
+              "Wait for the full response"
+            ],
+            [
+              "paragraph",
+              "Show finished paragraphs"
+            ]
+          ]
         }
       ]
     }
