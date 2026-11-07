@@ -5,6 +5,13 @@ use rune::{El, Tx, icon, row, text};
 use rune_kit::{Kit, Placement, State};
 
 type Choose = Box<dyn Fn(&str) -> Box<dyn FnOnce(El) -> El>>;
+
+fn text_width(label: &str, font: rune::TextStyle) -> f32 {
+    rune::text::measure(label, &[], font, None).0
+}
+
+/// Menu padding (5 + 5), item padding (8 + 8), the 16 px check slot and its 8 px gap, borders.
+const MENU_CHROME: f32 = 52.;
 /// `Select::new("theme", &["System","Light","Dark"]).current(Some("System")).build(&kit, &mut layer)`.
 pub struct Select {
     key: String,
@@ -19,6 +26,7 @@ pub struct Select {
     size: String,
     ghost: bool,
     invalid: bool,
+    align_end: bool,
     toggle: Option<Box<dyn FnOnce(El) -> El>>,
     choose: Option<Choose>,
     close: Option<Box<dyn FnOnce(Menu) -> Menu>>,
@@ -38,6 +46,7 @@ impl Select {
             size: "default".into(),
             ghost: false,
             invalid: false,
+            align_end: false,
             toggle: None,
             choose: None,
             close: None,
@@ -63,6 +72,7 @@ impl Select {
         self.open = value;
         self
     }
+    /// `0.` sizes the trigger to its label, like web's `w-auto`.
     pub fn width(mut self, value: f32) -> Self {
         self.width = value;
         self
@@ -73,6 +83,11 @@ impl Select {
     }
     pub fn variant(mut self, value: &str) -> Self {
         self.ghost = value == "ghost";
+        self
+    }
+    /// Web `SelectPopup align="end"`: a popup wider than its trigger grows leftwards.
+    pub fn align_end(mut self) -> Self {
+        self.align_end = true;
         self
     }
     pub fn invalid(mut self, value: bool) -> Self {
@@ -122,13 +137,18 @@ impl Select {
             _ => (32., 11., 8., 8., theme::TEXT_SM),
         };
         let name = self.current.as_deref().unwrap_or(&self.placeholder);
+        let width = if self.width > 0. {
+            self.width
+        } else {
+            text_width(name, font) + padding * 2. + gap + 14. + 2.
+        };
         let mut trigger = row()
             .role("combobox")
             .label(self.label.unwrap_or_else(|| name.into()))
             .expanded(self.open)
             .focusable(!disabled)
             .disabled(disabled)
-            .w(self.width)
+            .w(width)
             .h(height)
             .px(padding)
             .gap(gap)
@@ -175,11 +195,24 @@ impl Select {
         } else if let Some(toggle) = self.toggle {
             trigger = toggle(trigger);
         }
+        // Web's popup grows to its longest option; measure only while it is shown.
+        let fit = if self.open && !disabled {
+            self.options
+                .iter()
+                .map(|o| text_width(o, theme::TEXT_SM) + MENU_CHROME)
+                .fold(width, f32::max)
+        } else {
+            width
+        };
         let mut menu = Menu::new(self.key)
             .role("listbox")
             .trigger(trigger)
-            .min_width(self.width)
-            .placement(Placement::BottomStart)
+            .min_width(fit)
+            .placement(if self.align_end {
+                Placement::BottomEnd
+            } else {
+                Placement::BottomStart
+            })
             .open(self.open && !disabled);
         for option in self.options {
             let mut item = MenuItem::new(&option)

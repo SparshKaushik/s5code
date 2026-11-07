@@ -143,15 +143,13 @@ pub fn view(s: &App, t: &T) -> El {
                 ),
         );
     }
-    col()
-        .w_full()
-        .gap(16.0)
-        .child(
-            row()
-                .w_full()
-                .child(c::button("New task", t).on_press(|s: &mut App| edit(s, None))),
-        )
-        .child(c::section("Scheduled tasks", children, t))
+    let new_task = crate::kit::Button::new("New task")
+        .variant("ghost-muted")
+        .size("xs")
+        .icon(&crate::icons::PLUS)
+        .on_press(|s: &mut App| edit(s, None))
+        .build(t);
+    c::section_with_actions("Scheduled tasks", vec![new_task], children, t)
 }
 pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
     if let Some(task) = &s.ui.settings.task_editor {

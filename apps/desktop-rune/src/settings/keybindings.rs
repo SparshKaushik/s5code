@@ -34,10 +34,22 @@ pub fn view(s: &App, t: &T) -> El {
         .min_w(0.0)
         .h(32.0)
         .px(12.0)
+        .py(6.0)
         .radius(6.0)
         .border(1.0, t.c.border)
         .color(t.c.foreground)
-        .on_edit(|s: &mut App| &mut s.ui.settings.keybinding_search);
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
+        .on_edit(|s: &mut App| &mut s.ui.settings.keybinding_search)
+        .on_input_key(|s: &mut App, e, tx| {
+            // Web blurs an empty keybinding search before Escape can leave Settings.
+            let search = &mut s.ui.settings.keybinding_search;
+            if matches!(e.key, rune::Key::Escape) && search.text.is_empty() {
+                tx.blur();
+                return true;
+            }
+            super::clear_search_on_escape(search, e)
+        });
     body = body.child(c::section(
         "Keybindings",
         vec![row().padding(12.0).gap(8.0).child(search).child(

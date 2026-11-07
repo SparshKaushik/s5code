@@ -264,6 +264,9 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("connections") {
             request(s, "peerLinks.list", json!({}));
         }
+        if page.as_deref() == Some("archived") {
+            request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+        }
         s.ui.settings.loaded_page = page;
     }
     let mut wanted = Vec::new();
@@ -313,6 +316,9 @@ pub fn poll(s: &mut App) -> bool {
                     }
                     if matches!(method.as_str(), "peerLinks.link" | "peerLinks.unlink") {
                         request(s, "peerLinks.list", json!({}));
+                    }
+                    if method == "thread action" {
+                        request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
                     }
                     s.ui.settings.results.insert(method, result);
                 }
@@ -450,7 +456,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .radius(6.0)
         .fill(t.c.sidebar)
         .color(t.sb.muted_foreground)
-        .on_edit(|s: &mut App| &mut s.ui.settings.search);
+        .caret(t.sb.foreground, t.c.primary.alpha_mul(0.3))
+        .on_edit(|s: &mut App| &mut s.ui.settings.search)
+        .on_input_key(|s: &mut App, e, _| clear_search_on_escape(&mut s.ui.settings.search, e));
     nav = nav.child(
         row()
             .h(32.0)
@@ -640,9 +648,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     about::update_dialog(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
     browser_profiles::overlays(s, t, &mut overlays);
-    if let Some(menu) = scope::menu(s, t) {
-        overlays.push(menu);
-    }
+    scope::menu(s, t, &mut overlays);
     if let Some(editor) = keybindings::editor(s, t) {
         overlays.push(
             el().absolute(0.0, 0.0)
@@ -1048,6 +1054,17 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
     false
 }
 
+/// Web search fields clear on Escape before Escape leaves Settings.
+/// A search field's own Escape: clears its text first. The field sees the key before its editor
+/// blurs and hands it on to `on_key`, which would close Settings.
+pub fn clear_search_on_escape(search: &mut TextEdit, e: &rune::KeyEvent) -> bool {
+    let clear = matches!(e.key, rune::Key::Escape) && !search.text.is_empty();
+    if clear {
+        search.clear();
+    }
+    clear
+}
+
 #[cfg(test)]
 mod patch_tests {
     use super::*;
@@ -1065,5 +1082,14 @@ mod patch_tests {
             settings["projectSettingsOverrides"]["p"],
             json!({"future":true,"defaultAutoPull":true,"responseStreamingMode":"paragraph"})
         );
+    }
+    #[test]
+    fn escape_clears_a_search_before_closing() {
+        let key = |key| rune::KeyEvent { key, mods: Default::default() };
+        let mut search = TextEdit::new("theme");
+        assert!(!clear_search_on_escape(&mut search, &key(rune::Key::Enter)));
+        assert!(clear_search_on_escape(&mut search, &key(rune::Key::Escape)));
+        assert_eq!(search.text, "");
+        assert!(!clear_search_on_escape(&mut search, &key(rune::Key::Escape)), "empty search lets Escape through");
     }
 }

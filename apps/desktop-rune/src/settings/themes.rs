@@ -336,6 +336,10 @@ pub fn view(s: &App, t: &T) -> El {
                     ),
             );
         }
+        // Web's auto-fit grid keeps a short last row at column width.
+        for _ in group.len()..3 {
+            r = r.child(el().grow(1.0).min_w(0.0));
+        }
         cards = cards.child(r);
     }
     let editor_dark = t.dark;
@@ -364,6 +368,7 @@ pub fn view(s: &App, t: &T) -> El {
                         .w_full()
                         .h(28.0)
                         .px(16.0)
+                        .gap(8.0)
                         .center_y()
                         .child(
                             text("Themes")
@@ -614,6 +619,8 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .border(1.0, t.c.border)
                 .radius(8.0)
                 .color(t.c.foreground)
+                .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+                .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
                 .on_edit(|s: &mut App| &mut s.ui.settings.theme_import),
         )
         .child(

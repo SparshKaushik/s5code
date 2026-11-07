@@ -74,16 +74,18 @@ impl Dialog {
         } else {
             dismiss
         };
-        let mut heading = col().grow(1.).gap(8.).child(
+        let mut heading = col().grow(1.).min_w(0.).gap(8.).child(
             text(&self.title)
                 .font(theme::weight(theme::TEXT_LG, 600.))
-                .color(t.c.contrast_foreground),
+                .color(t.c.contrast_foreground)
+                .wrap(),
         );
         if let Some(description) = self.description {
             heading = heading.child(
                 text(description)
                     .font(theme::TEXT_SM)
-                    .color(t.c.contrast_muted_foreground),
+                    .color(t.c.contrast_muted_foreground)
+                    .wrap(),
             );
         }
         let panel = col()

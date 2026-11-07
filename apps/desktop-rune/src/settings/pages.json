@@ -170,11 +170,11 @@
             ],
             [
               "mod-enter-multiline",
-              "⌘Enter (multi-line)"
+              "{mod} + Enter for multiline prompts"
             ],
             [
               "mod-enter",
-              "⌘Enter"
+              "{mod} + Enter always"
             ]
           ]
         },

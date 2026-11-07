@@ -3,7 +3,7 @@ use crate::{
     App,
     theme::{self, AlphaMul, T},
 };
-use rune::{El, col, el, row, text};
+use rune::{El, row, text};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
@@ -102,6 +102,7 @@ pub fn sentence(s: &App, t: &T) -> El {
         )
         .child(trigger(
             t,
+            "scope-project",
             "Project scope",
             None,
             project.map(|p| crate::data::s(p, "title")).unwrap_or("All projects"),
@@ -114,6 +115,7 @@ pub fn sentence(s: &App, t: &T) -> El {
         )
         .child(trigger(
             t,
+            "scope-environment",
             "Environment scope",
             single.then_some(&crate::icons::SERVER),
             if single { environment } else { "All environments" },
@@ -126,12 +128,14 @@ pub fn sentence(s: &App, t: &T) -> El {
 /// The scope picker's select-style trigger: optional icon, label, then the chevron.
 fn trigger(
     t: &T,
+    key: &str,
     name: &str,
     glyph: Option<&'static rune::Icon>,
     label: &str,
     press: impl Fn(&mut App) + 'static,
 ) -> El {
     row()
+        .key(key.to_owned())
         .h(28.0)
         .px(9.0)
         .gap(4.0)
@@ -150,54 +154,52 @@ fn trigger(
         .child(rune::icon(&crate::icons::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground))
         .on_press(press)
 }
-pub fn menu(s: &App, t: &T) -> Option<El> {
+/// The open scope picker, anchored under its trigger like web's select popups.
+pub fn menu(s: &App, t: &T, layers: &mut Vec<El>) {
+    use crate::kit::{Menu, MenuItem};
+    let k = crate::kit::theme(t);
     if s.ui.settings.environment_scope_open {
         let environment = s
             .state()
             .config
             .as_ref()
             .and_then(|c| c["environment"]["label"].as_str())
-            .unwrap_or("Environment");
+            .unwrap_or("Environment")
+            .to_owned();
         let single = matches!(&s.route,crate::Route::Settings(p) if matches!(p.as_str(),"providers"|"secrets"));
-        let mut menu = col()
-            .w(240.0)
-            .padding(4.0)
-            .gap(4.0)
-            .radius(8.0)
-            .border(1.0, t.c.border)
-            .fill(t.c.popover);
+        let only = s.ui.settings.environment_only || single;
+        let mut menu = Menu::new("environment-scope")
+            .role("listbox")
+            .anchor("scope-environment")
+            .placement(crate::kit::Placement::BottomStart)
+            .gutter(4.0)
+            .open(true)
+            .on_close(|s: &mut App| s.ui.settings.environment_scope_open = false);
         if !single {
-            menu = menu.child(super::controls::button("All environments", t).on_press(
-                |s: &mut App| {
-                    super::commit_edits(s, true);
-                    s.ui.settings.environment_only = false;
-                    s.ui.settings.environment_scope_open = false;
-                },
-            ));
-        }
-        menu = menu.child(
-            super::controls::button(environment, t).on_press(|s: &mut App| {
+            menu = menu.item(MenuItem::new("All environments").option(!only).on_select(|s: &mut App| {
                 super::commit_edits(s, true);
-                s.ui.settings.environment_only = true;
+                s.ui.settings.environment_only = false;
                 s.ui.settings.environment_scope_open = false;
-            }),
-        );
-        return Some(el().absolute(0.0, 0.0).w_full().h_full().center().child(
-            menu.modal(true, |s: &mut App| {
-                s.ui.settings.environment_scope_open = false
-            }),
-        ));
+            }));
+        }
+        menu.item(MenuItem::new(environment).option(only).on_select(|s: &mut App| {
+            super::commit_edits(s, true);
+            s.ui.settings.environment_only = true;
+            s.ui.settings.environment_scope_open = false;
+        }))
+        .overlay(&k, layers);
+        return;
     }
     if !s.ui.settings.scope_open {
-        return None;
+        return;
     }
-    let mut menu = col()
-        .w(280.0)
-        .padding(4.0)
-        .gap(2.0)
-        .radius(8.0)
-        .border(1.0, t.c.border)
-        .fill(t.c.popover);
+    let mut menu = Menu::new("project-scope")
+        .role("listbox")
+        .anchor("scope-project")
+        .placement(crate::kit::Placement::BottomStart)
+        .gutter(4.0)
+        .open(true)
+        .on_close(|s: &mut App| s.ui.settings.scope_open = false);
     for (id, label) in std::iter::once((None, "All projects".to_owned())).chain(
         s.state().projects.iter().map(|p| {
             (
@@ -206,21 +208,14 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             )
         }),
     ) {
-        menu = menu.child(
-            super::controls::button(&label, t).on_press(move |s: &mut App| {
-                super::commit_edits(s, true);
-                s.ui.settings.project = id.clone();
-                s.ui.settings.scope_open = false;
-            }),
-        );
+        let selected = s.ui.settings.project == id;
+        menu = menu.item(MenuItem::new(label).option(selected).on_select(move |s: &mut App| {
+            super::commit_edits(s, true);
+            s.ui.settings.project = id.clone();
+            s.ui.settings.scope_open = false;
+        }));
     }
-    Some(
-        el().absolute(0.0, 0.0)
-            .w_full()
-            .h_full()
-            .center()
-            .child(menu.modal(true, |s: &mut App| s.ui.settings.scope_open = false)),
-    )
+    menu.overlay(&k, layers);
 }
 
 #[cfg(test)]
