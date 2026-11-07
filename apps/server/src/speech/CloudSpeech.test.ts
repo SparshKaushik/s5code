@@ -19,7 +19,9 @@ it.effect.each(["openai", "xai"] as const)("sends only to %s using its own saved
     let resolved: string | undefined;
     let cached: string | undefined;
     const read = vi.fn(() => Effect.sync(() => [(cached ??= resolved)]));
-    const upstream = vi.fn<typeof fetch>(async () => Response.json({ text: "hello" }));
+    const upstream = vi.fn<typeof fetch>(
+      Object.assign(async () => Response.json({ text: "hello" }), { preconnect: () => {} }),
+    );
     const service = yield* CloudSpeech.CloudSpeech.pipe(
       Effect.provide(
         CloudSpeech.layer.pipe(
@@ -98,10 +100,14 @@ it.effect.each(["openai", "xai"] as const)("sends only to %s using its own saved
 
 it.effect("uploads to OpenRouter only for a listed exact model, as zero-retention JSON WAV", () =>
   Effect.gen(function* () {
-    const upstream = vi.fn<typeof fetch>(async (input) =>
-      new URL(String(input)).pathname.endsWith("/models")
-        ? Response.json({ data: [{ id: "acme/transcribe-1" }, { id: "acme/transcribe-2" }] })
-        : Response.json({ text: "hello" }),
+    const upstream = vi.fn<typeof fetch>(
+      Object.assign(
+        async (input: Parameters<typeof fetch>[0]) =>
+          new URL(String(input)).pathname.endsWith("/models")
+            ? Response.json({ data: [{ id: "acme/transcribe-1" }, { id: "acme/transcribe-2" }] })
+            : Response.json({ text: "hello" }),
+        { preconnect: () => {} },
+      ),
     );
     const service = yield* CloudSpeech.CloudSpeech.pipe(
       Effect.provide(
@@ -173,14 +179,17 @@ it.effect("removing a key while a catalog read is pending prevents the upload", 
     const catalogStarted = Promise.withResolvers<void>();
     const catalog = Promise.withResolvers<Response>();
     const uploads: string[] = [];
-    const upstream: typeof fetch = async (input) => {
-      if (new URL(String(input)).pathname.endsWith("/models")) {
-        catalogStarted.resolve();
-        return catalog.promise;
-      }
-      uploads.push(String(input));
-      return Response.json({ text: "unexpected" });
-    };
+    const upstream: typeof fetch = Object.assign(
+      async (input: Parameters<typeof fetch>[0]) => {
+        if (new URL(String(input)).pathname.endsWith("/models")) {
+          catalogStarted.resolve();
+          return catalog.promise;
+        }
+        uploads.push(String(input));
+        return Response.json({ text: "unexpected" });
+      },
+      { preconnect: () => {} },
+    );
     yield* service.setKey("openrouter", Redacted.make("old-key"));
     const job = yield* service
       .transcribe(
