@@ -457,7 +457,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .fill(t.c.sidebar)
         .color(t.sb.muted_foreground)
         .caret(t.sb.foreground, t.c.primary.alpha_mul(0.3))
-        .on_edit(|s: &mut App| &mut s.ui.settings.search);
+        .on_edit(|s: &mut App| &mut s.ui.settings.search)
+        .on_input_key(|s: &mut App, e, _| clear_search_on_escape(&mut s.ui.settings.search, e));
     nav = nav.child(
         row()
             .h(32.0)
@@ -963,7 +964,7 @@ fn browser_profiles_scene(s: &mut App, light: bool, menu: Option<&str>) {
     s.ui.settings.profiles.menu = menu.map(str::to_owned);
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
     if !matches!(s.route, Route::Settings(_)) {
         return false;
     }
@@ -1003,16 +1004,6 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
             return true;
         }
         if s.ui.settings.keybinding_editor.take().is_some() {
-            return true;
-        }
-        if clear_focused_search(&mut s.ui.settings.keybinding_search)
-            || clear_focused_search(&mut s.ui.settings.search)
-        {
-            return true;
-        }
-        // Web blurs an empty keybinding search before Escape can leave Settings.
-        if s.ui.settings.keybinding_search.focused {
-            tx.blur();
             return true;
         }
         close(s);
@@ -1064,8 +1055,10 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
 }
 
 /// Web search fields clear on Escape before Escape leaves Settings.
-fn clear_focused_search(search: &mut TextEdit) -> bool {
-    let clear = search.focused && !search.text.is_empty();
+/// A search field's own Escape: clears its text first. The field sees the key before its editor
+/// blurs and hands it on to `on_key`, which would close Settings.
+pub fn clear_search_on_escape(search: &mut TextEdit, e: &rune::KeyEvent) -> bool {
+    let clear = matches!(e.key, rune::Key::Escape) && !search.text.is_empty();
     if clear {
         search.clear();
     }
@@ -1091,12 +1084,12 @@ mod patch_tests {
         );
     }
     #[test]
-    fn escape_clears_a_focused_search_before_closing() {
+    fn escape_clears_a_search_before_closing() {
+        let key = |key| rune::KeyEvent { key, mods: Default::default() };
         let mut search = TextEdit::new("theme");
-        assert!(!clear_focused_search(&mut search), "unfocused text stays");
-        search.focused = true;
-        assert!(clear_focused_search(&mut search));
+        assert!(!clear_search_on_escape(&mut search, &key(rune::Key::Enter)));
+        assert!(clear_search_on_escape(&mut search, &key(rune::Key::Escape)));
         assert_eq!(search.text, "");
-        assert!(!clear_focused_search(&mut search), "empty search lets Escape through");
+        assert!(!clear_search_on_escape(&mut search, &key(rune::Key::Escape)), "empty search lets Escape through");
     }
 }
