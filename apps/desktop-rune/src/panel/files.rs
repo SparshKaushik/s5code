@@ -1,6 +1,6 @@
 use crate::{
     App, data, icons, kit,
-    theme::{self, T},
+    theme::{self, AlphaMul, T},
 };
 use rune::{El, Key, KeyEvent, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
