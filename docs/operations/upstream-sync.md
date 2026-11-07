@@ -105,7 +105,7 @@ The fork's release runbook is [s5-release.md](./s5-release.md).
 
 These upstream files were removed on purpose. A sync that re-adds them is a bug:
 
-- `apps/mobile/plugins/withAndroidTabletOrientation.cjs`.
+- `apps/mobile/plugins/withAndroidTabletOrientation.cjs` (+ test).
 - `apps/mobile/src/components/T3Wordmark.tsx` (rebrand).
 - `infra/relay/src/dbConfig.ts` (+ test) — fork's relay rewrite.
 
