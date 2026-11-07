@@ -67,6 +67,7 @@ enum Action {
     ShowPrs,
     Files,
     OpenFile(String),
+    ProjectSettings(String),
 }
 enum Trailing {
     None,
@@ -182,20 +183,43 @@ fn item(
 fn keywords(terms: &[&str]) -> Vec<SearchTerm> {
     terms.iter().map(|v| SearchTerm::keyword(*v)).collect()
 }
-/// A configured shortcut as the web's mac labels write it: ⌃⌥⇧⌘ then the key.
-fn shortcut_label(s: &App, command: &str) -> String {
+/// A configured shortcut as the web's `shortcutLabelForCommand` writes it: ⌃⌥⇧⌘ then the key on
+/// mac, "Ctrl+Shift+N" elsewhere.
+pub fn shortcut_label(s: &App, command: &str) -> String {
     let binding = s.state().config.as_ref().and_then(|v| v["keybindings"].as_array()).and_then(|rows| {
         rows.iter().find(|v| v["command"] == command && v["when"].is_null()).or_else(|| rows.iter().find(|v| v["command"] == command))
     });
-    let Some(k) = binding.map(|v| &v["shortcut"]) else { return String::new() };
+    binding.map_or_else(String::new, |v| format_shortcut(&v["shortcut"], cfg!(target_os = "macos")))
+}
+
+fn format_shortcut(k: &serde_json::Value, mac: bool) -> String {
     let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+    let key = k["key"].as_str().unwrap_or("");
+    let (ctrl, meta) = (yes("ctrlKey") || (yes("modKey") && !mac), yes("metaKey") || (yes("modKey") && mac));
+    if !mac {
+        let mut parts: Vec<String> = [(ctrl, "Ctrl"), (yes("altKey"), "Alt"), (yes("shiftKey"), "Shift"), (meta, "Meta")]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| name.to_string())
+            .collect();
+        parts.push(match key {
+            " " | "space" => "Space".into(),
+            "escape" => "Esc".into(),
+            "arrowup" => "Up".into(),
+            "arrowdown" => "Down".into(),
+            "arrowleft" => "Left".into(),
+            "arrowright" => "Right".into(),
+            one if one.chars().count() == 1 => one.to_uppercase(),
+            word => word.chars().take(1).flat_map(char::to_uppercase).chain(word.chars().skip(1)).collect(),
+        });
+        return parts.join("+");
+    }
     let mut label = String::new();
-    for (on, glyph) in [(yes("ctrlKey"), "⌃"), (yes("altKey"), "⌥"), (yes("shiftKey"), "⇧"), (yes("modKey") || yes("metaKey"), "⌘")] {
+    for (on, glyph) in [(ctrl, "⌃"), (yes("altKey"), "⌥"), (yes("shiftKey"), "⇧"), (meta, "⌘")] {
         if on {
             label.push_str(glyph);
         }
     }
-    let key = k["key"].as_str().unwrap_or("");
     label.push_str(&match key {
         "enter" => "↵".into(),
         "escape" => "Esc".into(),
@@ -264,6 +288,11 @@ pub fn open_add_project(s: &mut App) {
     reset(s, true);
     add_project::open(s);
 }
+/// Opens the palette on "New thread in...", as `chat.new` does with several projects.
+pub fn open_new_thread_in(s: &mut App) {
+    reset(s, true);
+    push_page(s, "projects", "");
+}
 fn reset(s: &mut App, open: bool) {
     let ui = &mut s.ui.shell.palette;
     ui.open = open;
@@ -322,7 +351,7 @@ fn items(s: &App) -> Vec<Item> {
                 format!("New thread in {}", data::s(p, "title")),
                 "Actions",
                 &icons::SQUARE_PEN,
-                "⇧⌘N",
+                &shortcut_label(s, "chat.newLocal"),
                 Action::Navigate(Route::Home {
                     project_id: Some(data::s(p, "id").into()),
                 }),
@@ -339,7 +368,7 @@ fn items(s: &App) -> Vec<Item> {
             "New thread without a project",
             "Actions",
             &icons::MESSAGE_SQUARE_DASHED,
-            "",
+            &shortcut_label(s, "chat.newWithoutProject"),
             Action::Navigate(Route::Home { project_id: None }),
         ));
         out.extend(actions::thread_items(s));
@@ -353,13 +382,31 @@ fn items(s: &App) -> Vec<Item> {
             ));
         }
         out.extend(actions::tail_items(s));
+        if crate::pages::pull_requests::supported(s) {
+            let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
+            prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
+            out.push(prs);
+        }
+        let mut usage = item("Open usage", "Actions", &icons::CHART_NO_AXES_COLUMN, &shortcut_label(s, "usage.open"), Action::Navigate(Route::Usage));
+        usage.fields = keywords(&["usage", "use", "tokens", "cost", "spend", "limits", "stats", "analytics"]);
+        out.push(usage);
         out.push(item(
             "Open settings",
             "Actions",
             &icons::SETTINGS,
-            "⌘,",
+            "",
             Action::Navigate(Route::Settings("general".into())),
         ));
+        // The current project, else the first, as the web's contextual project group.
+        if let Some(p) = project
+            .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
+            .or_else(|| s.state().projects.first())
+        {
+            let mut settings = item("Project settings", "Actions", &icons::FOLDER, "", Action::ProjectSettings(data::s(p, "id").into()));
+            settings.description = Some(data::s(p, "title").into());
+            settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "workspace", "checkout", "remove"]);
+            out.push(settings);
+        }
         out.push(item(
             "Change theme",
             "Actions",
@@ -1158,14 +1205,21 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                     .find(|v| v["id"] == *id)
                     .map(|v| data::s(v, "updatedAt").to_owned());
                 let query = limit_utf16(&normalize_query(&s.ui.shell.palette.query.text), 200);
-                if let Some(visited) = visited
-                    && let Some(net) = s.src.net()
-                {
-                    let ack=net.dispatch(serde_json::json!({"type":"thread.visit","threadId":id,"visitedAt":visited,"opened":true,"searchQuery":query}));
-                    s.ui.shell.palette.acknowledgements.push(ack);
+                if let Some(visited) = visited {
+                    if let Some(at) = data::iso_ms(&visited) {
+                        s.ui.shell.sidebar.visits.claim_open(id, at);
+                    }
+                    if let Some(net) = s.src.net() {
+                        let ack=net.dispatch(serde_json::json!({"type":"thread.visit","threadId":id,"visitedAt":visited,"opened":true,"searchQuery":query}));
+                        s.ui.shell.palette.acknowledgements.push(ack);
+                    }
                 }
             }
-            s.navigate(route)
+            crate::shell::sidebar::go(s, route)
+        }
+        Action::ProjectSettings(project) => {
+            s.ui.settings.project = Some(project);
+            crate::shell::sidebar::go(s, Route::Settings("projects".into()))
         }
         Action::Theme(mode) => s.appearance = mode,
         Action::OpenProject(project) => {
@@ -1629,7 +1683,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
                     .size("micro")
                     .on_press(|s: &mut App| {
                         s.ui.shell.palette.open = false;
-                        s.navigate(Route::Settings("source-control".into()));
+                        crate::shell::sidebar::go(s, Route::Settings("source-control".into()));
                     })
                     .build(t)
                     .help(hint.clone()),
@@ -1779,6 +1833,15 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shortcut_labels_spell_modifiers_out_off_mac() {
+        let k = serde_json::json!({ "key": "n", "modKey": true, "shiftKey": true });
+        assert_eq!(format_shortcut(&k, false), "Ctrl+Shift+N");
+        assert_eq!(format_shortcut(&k, true), "⇧⌘N");
+        let k = serde_json::json!({ "key": "arrowleft", "metaKey": true, "altKey": true });
+        assert_eq!(format_shortcut(&k, false), "Alt+Meta+Left");
+        assert_eq!(format_shortcut(&serde_json::json!({ "key": "enter", "ctrlKey": true }), false), "Ctrl+Enter");
+    }
     #[test]
     fn names_match_word_starts_joined_words_and_restricted_typos() {
         for (name, query, expected) in [

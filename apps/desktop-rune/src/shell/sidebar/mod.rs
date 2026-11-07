@@ -73,6 +73,18 @@ pub struct Ui {
     /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
     pub project_scope: Vec<String>,
     pub scope_open: bool,
+    pub visits: logic::Visits,
+    pub undos: logic::Undos,
+    /// The server's message matches for a search: (query, thread ids).
+    pub content: (String, Vec<String>),
+    content_due: Option<(i64, String)>,
+    content_req: Option<(u64, String)>,
+}
+
+impl Ui {
+    pub fn content_hits(&self) -> &[String] {
+        if self.content.0 == self.search.text.trim() { &self.content.1 } else { &[] }
+    }
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
@@ -365,7 +377,38 @@ pub fn pin(s: &mut App, id: &str, key: Option<String>) {
     });
 }
 
+/// Offers the footer's undo for an action about to change the thread.
+fn record(s: &mut App, action: logic::UndoAction, id: &str) {
+    let Some(plan) = Model::build(s).thread(id).map(|t| logic::undo_plan(action, t)) else { return };
+    s.ui.shell.sidebar.undos.push(action, id, plan, crate::data::now_ms());
+}
+
+/// `thread.undo`: reverses the notice's newest group of actions.
+pub fn undo(s: &mut App) -> bool {
+    let group = s.ui.shell.sidebar.undos.take(crate::data::now_ms());
+    for (id, plan) in &group {
+        for step in plan {
+            match step {
+                logic::UndoStep::Unsettle => unsettle(s, id),
+                logic::UndoStep::Pin(key) => pin(s, id, key.clone()),
+                // A snooze can lapse before Undo runs, and the server rejects an expired one.
+                logic::UndoStep::Snooze(until) if *until > crate::data::now_ms() => set_snooze(s, id, *until),
+                logic::UndoStep::Snooze(_) => {}
+                logic::UndoStep::Unsnooze => unsnooze(s, id),
+                logic::UndoStep::Unarchive => {
+                    dispatch(s, "thread.unarchive", id, json!({}));
+                    if let Some(p) = s.ui.shell.sidebar.patches.get_mut(id) {
+                        p.archived = false;
+                    }
+                }
+            }
+        }
+    }
+    !group.is_empty()
+}
+
 pub fn unpin(s: &mut App, id: &str) {
+    record(s, logic::UndoAction::Unpinned, id);
     dispatch(s, "thread.unpin", id, json!({}));
     patch(s, id, |p| {
         p.pinned = Some(false);
@@ -374,6 +417,7 @@ pub fn unpin(s: &mut App, id: &str) {
 }
 
 pub fn settle(s: &mut App, id: &str) {
+    record(s, logic::UndoAction::Settled, id);
     dispatch(s, "thread.settle", id, json!({ "settledAt": iso(crate::data::now_ms()) }));
     patch(s, id, |p| {
         p.settled = Some(true);
@@ -388,6 +432,11 @@ pub fn unsettle(s: &mut App, id: &str) {
 }
 
 pub fn snooze(s: &mut App, id: &str, until: i64) {
+    record(s, logic::UndoAction::Snoozed, id);
+    set_snooze(s, id, until);
+}
+
+fn set_snooze(s: &mut App, id: &str, until: i64) {
     dispatch(s, "thread.snooze", id, json!({ "snoozedUntil": iso(until) }));
     patch(s, id, |p| p.snoozed_until = Some(Some(until)));
 }
@@ -398,6 +447,7 @@ pub fn unsnooze(s: &mut App, id: &str) {
 }
 
 pub fn archive(s: &mut App, id: &str) {
+    record(s, logic::UndoAction::Archived, id);
     dispatch(s, "thread.archive", id, json!({}));
     patch(s, id, |p| p.archived = true);
 }
@@ -433,13 +483,51 @@ pub fn start_rename(s: &mut App, id: &str) {
     s.ui.shell.sidebar.rename = Some((id.to_string(), edit));
 }
 
-/// ThreadRenameInput commits on blur: focus moved off the editor.
+/// ThreadRenameInput commits on blur: focus moved off the editor. Also records visits to the
+/// thread on screen.
 pub fn poll(s: &mut App) -> bool {
+    let searched = poll_content(s);
+    let shown = match &s.route {
+        Route::Thread(id) => Some(id.clone()),
+        _ => None,
+    };
+    let shell = shown.as_ref().and_then(|id| s.state().threads.iter().find(|t| t["id"] == *id).cloned());
+    if let Some((visited_at, opened)) = s.ui.shell.sidebar.visits.tick(shown.as_deref(), shell.as_ref(), crate::data::now_ms())
+        && let Some(id) = shown
+    {
+        let extra = if opened { json!({ "visitedAt": visited_at, "opened": true }) } else { json!({ "visitedAt": visited_at }) };
+        dispatch(s, "thread.visit", &id, extra);
+    }
     if s.ui.shell.sidebar.rename.as_ref().is_some_and(|(_, e)| !e.focused) {
         commit_rename(s);
         return true;
     }
-    false
+    searched
+}
+
+/// Asks the server which threads' messages match the search, 200ms after typing stops, as the
+/// web's sidebar does through `orchestration.searchThreads`.
+fn poll_content(s: &mut App) -> bool {
+    let now = crate::data::now_ms();
+    let ui = &mut s.ui.shell.sidebar;
+    let query = ui.search.text.trim().to_string();
+    let wanted = ui.content_due.as_ref().map(|d| &d.1).or(ui.content_req.as_ref().map(|r| &r.1)).unwrap_or(&ui.content.0);
+    if *wanted != query {
+        ui.content_due = (!query.is_empty()).then(|| (now + 200, query));
+    }
+    if let Some((_, q)) = ui.content_due.take_if(|(due, _)| now >= *due)
+        && let Some(net) = s.src.net()
+    {
+        let id = net.request("orchestration.searchThreads", json!({ "query": q.chars().take(200).collect::<String>(), "limit": 20 }));
+        s.ui.shell.sidebar.content_req = Some((id, q));
+    }
+    let Some(id) = s.ui.shell.sidebar.content_req.as_ref().map(|r| r.0) else { return false };
+    let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
+    let ui = &mut s.ui.shell.sidebar;
+    let (_, q) = ui.content_req.take().unwrap_or_default();
+    let ids = reply.ok().and_then(|v| v["matches"].as_array().map(|m| m.iter().filter_map(|m| m["threadId"].as_str().map(str::to_string)).collect::<Vec<_>>()));
+    ui.content = (q, ids.unwrap_or_default());
+    true
 }
 
 pub fn commit_rename(s: &mut App) {
@@ -535,8 +623,80 @@ pub fn open_thread(s: &mut App, id: &str) {
     go(s, Route::Thread(id.to_string()));
 }
 
+/// `chat.new`: with several open projects, pick one in the palette; otherwise `chat.newLocal`.
 pub fn new_thread(s: &mut App) {
-    go(s, Route::Home { project_id: None });
+    let projects = &s.state().projects;
+    let open = projects.iter().filter(|p| p["archivedAt"].is_null()).count();
+    if open == 1 || projects.is_empty() {
+        new_local(s);
+    } else {
+        crate::shell::palette::open_new_thread_in(s);
+    }
+}
+
+/// `chat.newLocal`: a new thread in the current project, else the first open one.
+pub fn new_local(s: &mut App) {
+    let current = match &s.route {
+        Route::Thread(id) => s.state().threads.iter().find(|t| t["id"] == *id).map(|t| crate::data::s(t, "projectId").to_string()),
+        Route::Home { project_id } => project_id.clone(),
+        _ => None,
+    };
+    let project = current
+        .filter(|p| !p.is_empty())
+        .or_else(|| s.state().projects.iter().find(|p| p["archivedAt"].is_null()).map(|p| crate::data::s(p, "id").to_string()));
+    match project {
+        Some(id) => go(s, Route::Home { project_id: Some(id) }),
+        None => crate::shell::palette::open_new_thread_in(s),
+    }
+}
+
+/// The open thread's sidebar row, for the shortcuts that act on it.
+fn shown_thread(s: &App) -> Option<Thread> {
+    let Route::Thread(id) = &s.route else { return None };
+    Model::build(s).thread(id).cloned()
+}
+
+/// `thread.settle` (toggles) and `thread.pin` (toggles) on the open thread.
+fn thread_shortcut(s: &mut App, e: &KeyEvent) -> bool {
+    let settle_key = crate::panel::shortcut(s, e, "thread.settle");
+    if !settle_key && !crate::panel::shortcut(s, e, "thread.pin") {
+        return false;
+    }
+    let Some(t) = shown_thread(s) else { return true };
+    match (settle_key, t.settled, t.pinned) {
+        (true, true, _) => unsettle(s, &t.id),
+        (true, false, _) => settle(s, &t.id),
+        (false, _, true) => unpin(s, &t.id),
+        (false, _, false) => pin(s, &t.id, None),
+    }
+    true
+}
+
+/// Any key but `thread.undo` hands mod+z back to text fields (`releaseThreadUndoShortcut`).
+pub fn release_undo_key(s: &mut App, e: &KeyEvent) {
+    if !crate::panel::shortcut(s, e, "thread.undo") {
+        s.ui.shell.sidebar.undos.release();
+    }
+}
+
+/// Shortcuts from the server's keybindings that the web binds outside the terminal.
+fn bound_key(s: &mut App, e: &KeyEvent) -> bool {
+    if crate::panel::terminal_active(s) {
+        return false;
+    }
+    let commands = ["navigation.back", "navigation.forward", "usage.open", "chat.newWithoutProject", "chat.newLocal", "chat.new", "thread.undo"];
+    match commands.into_iter().find(|c| crate::panel::shortcut(s, e, c)) {
+        Some("navigation.back") => go_back(s),
+        Some("navigation.forward") => go_forward(s),
+        Some("usage.open") => go(s, Route::Usage),
+        Some("chat.newWithoutProject") => go(s, Route::Home { project_id: None }),
+        Some("chat.newLocal") => new_local(s),
+        // A collapsed sidebar hides the notice, so text fields keep their own undo.
+        Some("thread.undo") => return !s.ui.shell.sidebar.collapsed && s.ui.shell.sidebar.undos.claims_key(crate::data::now_ms()) && undo(s),
+        Some(_) => new_thread(s),
+        None => return thread_shortcut(s, e),
+    }
+    true
 }
 
 fn clear_search(s: &mut App) {
@@ -552,10 +712,11 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.shell.sidebar.menu.is_some() {
         return menu::on_key(s, e, tx);
     }
+    if bound_key(s, e) {
+        return true;
+    }
     match &e.key {
         Key::Command('b') if !m.shift => s.ui.shell.sidebar.collapsed ^= true,
-        Key::Command('n') if !m.shift => new_thread(s),
-        Key::Command('o') if m.shift => new_thread(s),
         Key::Command(c @ ('[' | ']' | '{' | '}')) if m.shift => step(s, if matches!(c, '[' | '{') { -1 } else { 1 }),
         Key::Command(c @ '1'..='9') if !m.shift => {
             let ids = Model::build(s).visible_ids(&s.ui.shell.sidebar);
@@ -590,7 +751,7 @@ fn step(s: &mut App, by: i32) {
 fn search_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     let hits: Vec<String> = {
         let model = Model::build(s);
-        logic::search(&model.threads, &s.ui.shell.sidebar.search.text).into_iter().map(|i| model.threads[i].id.clone()).collect()
+        logic::search(&model.threads, &s.ui.shell.sidebar.search.text, s.ui.shell.sidebar.content_hits()).into_iter().map(|i| model.threads[i].id.clone()).collect()
     };
     let ui = &mut s.ui.shell.sidebar;
     match e.key {

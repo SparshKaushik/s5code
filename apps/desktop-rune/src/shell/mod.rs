@@ -34,6 +34,7 @@ fn open_titled(s: &mut App, title: &str) {
 }
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    sidebar::release_undo_key(s, e);
     palette::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 

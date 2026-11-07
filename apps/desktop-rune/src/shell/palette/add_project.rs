@@ -658,7 +658,7 @@ fn add(s: &mut App, raw: &str) {
             return;
         }
         s.ui.shell.palette.open = false;
-        s.navigate(route);
+        crate::shell::sidebar::go(s, route);
         return;
     }
     let project_id = s5_net::uuid();
@@ -858,7 +858,7 @@ pub fn poll(s: &mut App) -> bool {
 fn finish(s: &mut App, route: Route) {
     s.ui.shell.palette.open = false;
     s.ui.shell.palette.add.clone = None;
-    s.navigate(route);
+    crate::shell::sidebar::go(s, route);
 }
 
 // Brand marks. Icons render as one-colour masks, so multi-colour marks stack a layer per colour.

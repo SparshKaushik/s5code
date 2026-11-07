@@ -483,7 +483,7 @@ pub fn poll(s: &mut App) -> bool {
             Some(Ok(v)) => {
                 let route = Route::Home { project_id: Some(data::s(&v, "projectId").to_owned()) };
                 s.ui.chat.composer.drafts.entry(crate::chat::composer::draft_key(&route)).or_default().edit = TextEdit::new(prompt);
-                s.navigate(route);
+                crate::shell::sidebar::go(s, route);
                 changed = true;
             }
         },
