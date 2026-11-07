@@ -178,6 +178,7 @@ pub fn open_link(s: &mut App, thread: String) {
 
 // Pull request references, as the source control definitions parse them.
 
+#[derive(Debug)]
 pub struct Link {
     pub host: String,
     pub repository: String,
