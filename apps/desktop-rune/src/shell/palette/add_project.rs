@@ -164,7 +164,8 @@ fn resolve(v: &str, cwd: Option<&str>) -> String {
     let (Some(cwd), true) = (cwd, relative(v)) else {
         return normalize(v);
     };
-    let Some((root, separator, base)) = split_absolute(&normalize(cwd)) else {
+    let cwd = normalize(cwd);
+    let Some((root, separator, base)) = split_absolute(&cwd) else {
         return normalize(v);
     };
     let mut segments: Vec<&str> = base;

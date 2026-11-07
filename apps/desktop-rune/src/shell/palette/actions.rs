@@ -407,7 +407,7 @@ pub fn files_empty(s: &App) -> &'static str {
         "No matching files."
     }
 }
-pub fn highlighted(content: &str, ranges: &[(usize, usize)], font: &str, base: rune::Color, strong: rune::Color) -> El {
+pub fn highlighted(content: &str, ranges: &[(usize, usize)], font: rune::tok::TextStyle, base: rune::Color, strong: rune::Color) -> El {
     let spans = ranges.iter().map(|(a, b)| rune::Span::new(*a, *b).weight(theme::SEMIBOLD).color(strong)).collect();
     rune::rich(content, spans).font(font).color(base).truncate()
 }
