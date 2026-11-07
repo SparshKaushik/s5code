@@ -100,8 +100,10 @@ fn activate(app: &mut App, surface: Surface) {
     }
 }
 fn close(app: &mut App, surface: Surface) {
-    if surface == Surface::Terminal {
-        drawer::close_panel(app);
+    match surface {
+        Surface::Terminal => drawer::close_panel(app),
+        Surface::Files => files::flush(app),
+        _ => {}
     }
     remove_surface(app, surface);
 }
@@ -110,6 +112,15 @@ fn remove_surface(app: &mut App, surface: Surface) {
     if app.ui.panel.active == Some(surface) {
         app.ui.panel.active = app.ui.panel.surfaces.last().copied();
     }
+}
+/// Opens a workspace file in the Files surface (the palette's "Go to file").
+pub fn open_file(app: &mut App, path: String) {
+    app.ui.shell.panel_open = true;
+    if !app.ui.panel.surfaces.contains(&Surface::Files) {
+        app.ui.panel.surfaces.push(Surface::Files);
+    }
+    app.ui.panel.active = Some(Surface::Files);
+    files::open(app, path);
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
@@ -143,7 +154,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         if app.ui.panel.thread != thread {
             app.ui.panel.thread = thread;
             app.ui.panel.diff = diff::Ui::default();
-            app.ui.panel.files = files::Ui::default();
+            files::reset(app);
             if app.ui.shell.panel_open {
                 match app.ui.panel.active {
                     Some(Surface::Diff) => diff::load(app),
@@ -158,7 +169,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
     }
 
-    let changed = diff::poll(app) | files::poll(app) | terminal::poll(app, tx) | drawer::poll(app);
+    let changed = diff::poll(app) | files::poll(app, tx) | terminal::poll(app, tx) | drawer::poll(app);
     changed | context_changed
 }
 fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
@@ -355,11 +366,23 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                         .label(surface.title())
                         .focusable(true)
                         .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
-                        .child(
-                            icon(surface.glyph(), 16.)
-                                .size(14., 14.)
-                                .color(t.c.muted_foreground),
-                        )
+                        .child({
+                            let glyph = el().size(14., 14.).child(
+                                icon(surface.glyph(), 16.)
+                                    .size(14., 14.)
+                                    .color(t.c.muted_foreground),
+                            );
+                            if surface == Surface::Files && files::pending(app) {
+                                glyph.child(
+                                    el().absolute(10., 10.)
+                                        .size(6., 6.)
+                                        .radius(3.)
+                                        .fill(t.c.muted_foreground),
+                                )
+                            } else {
+                                glyph
+                            }
+                        })
                         .child(
                             text(surface.title())
                                 .font(theme::TEXT_XS)
@@ -597,6 +620,18 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-files", |s| {
         scene(s, Some(Surface::Files));
         files::fixture(s);
+    }),
+    ("panel-files-edit", |s| {
+        scene(s, Some(Surface::Files));
+        files::edit_fixture(s, None, false);
+    }),
+    ("panel-files-edit-dirty", |s| {
+        scene(s, Some(Surface::Files));
+        files::edit_fixture(s, Some("  // Reuse the running session first.\n"), false);
+    }),
+    ("panel-files-edit-error", |s| {
+        scene(s, Some(Surface::Files));
+        files::edit_fixture(s, Some("  // Reuse the running session first.\n"), true);
     }),
     ("panel-terminal", |s| panel_terminal(s, TERMINAL_DEV)),
     ("panel-terminal-vim", |s| panel_terminal(s, TERMINAL_VIM)),
