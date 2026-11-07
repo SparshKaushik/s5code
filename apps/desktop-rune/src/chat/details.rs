@@ -4,7 +4,7 @@
 //! what narrows the lane.
 
 use rune::tok::TextStyle;
-use rune::{Align, Color, Cursor, Cx, El, Side, col, el, icon, row, text};
+use rune::{Align, Color, Cursor, Cx, El, Key, KeyEvent, Side, TextEdit, Tx, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
 
 use crate::chat::composer;
@@ -18,6 +18,16 @@ pub struct Ui {
     /// The user closed the card from the topbar toggle.
     pub hidden: bool,
     pub menu: Option<Menu>,
+    /// Local branches from `vcs.listRefs`, loaded when the branch menu opens.
+    refs: Vec<String>,
+    branch_query: TextEdit,
+    pending: Option<(u64, Pending)>,
+}
+
+enum Pending {
+    List,
+    /// A switch or create; its reply moves the thread onto the branch.
+    Branch(String),
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -113,6 +123,85 @@ fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
 fn toggle_menu(s: &mut App, menu: Menu) {
     let ui = &mut s.ui.chat.details;
     ui.menu = if ui.menu == Some(menu) { None } else { Some(menu) };
+    if ui.menu == Some(Menu::Branch) {
+        ui.branch_query = TextEdit::new("");
+        ui.branch_query.focused = true;
+        if let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) {
+            let id = net.request("vcs.listRefs", json!({"cwd": cwd, "refKind": "local", "limit": 100}));
+            s.ui.chat.details.pending = Some((id, Pending::List));
+        }
+    }
+}
+
+/// The branch menu's rows for `query`: matches, then "Create" when no branch has that name.
+fn branch_items(refs: &[String], query: &str) -> Vec<(String, String)> {
+    let query = query.trim();
+    let needle = query.to_lowercase();
+    let mut items: Vec<_> = refs.iter().filter(|r| r.to_lowercase().contains(&needle)).map(|r| (r.clone(), r.clone())).collect();
+    let name = sanitize_ref_name(query);
+    if !name.is_empty() && !refs.contains(&name) {
+        items.push((format!("{CREATE}{name}"), format!("Create new branch \"{query}\"")));
+    }
+    items
+}
+const CREATE: &str = "\0create:";
+
+/// `sanitizeNewRefName`: whitespace runs become `-`.
+fn sanitize_ref_name(raw: &str) -> String {
+    raw.split_whitespace().collect::<Vec<_>>().join("-")
+}
+
+/// Switches to, or creates and switches to, a branch (BranchToolbarBranchSelector).
+fn pick_branch(s: &mut App, id: &str) {
+    s.ui.chat.details.menu = None;
+    let Some(cwd) = cwd(s) else { return };
+    let Some(net) = s.src.net() else { return };
+    let request = match id.strip_prefix(CREATE) {
+        Some(name) => net.request("vcs.createRef", json!({"cwd": cwd, "refName": name, "switchRef": true})),
+        None => net.request("vcs.switchRef", json!({"cwd": cwd, "refName": id})),
+    };
+    let name = id.strip_prefix(CREATE).unwrap_or(id).to_string();
+    s.ui.chat.details.pending = Some((request, Pending::Branch(name)));
+}
+
+fn on_branch_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
+    match &e.key {
+        Key::Escape => s.ui.chat.details.menu = None,
+        Key::Enter => {
+            let ui = &s.ui.chat.details;
+            let query = ui.branch_query.text.trim();
+            let items = branch_items(&ui.refs, query);
+            let exact = items.iter().find(|(id, _)| id == query).or(items.first()).map(|(id, _)| id.clone());
+            if let Some(id) = exact {
+                pick_branch(s, &id);
+            }
+        }
+        _ => return false,
+    }
+    true
+}
+
+pub fn poll(s: &mut App) -> bool {
+    let Some(id) = s.ui.chat.details.pending.as_ref().map(|p| p.0) else { return false };
+    let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
+    let Some((_, pending)) = s.ui.chat.details.pending.take() else { return false };
+    match (pending, reply) {
+        (Pending::List, Ok(v)) => {
+            s.ui.chat.details.refs = v["refs"].as_array().into_iter().flatten().filter(|r| r["isRemote"] != true).map(|r| data::s(r, "name").to_string()).collect();
+        }
+        (Pending::Branch(name), Ok(v)) => {
+            let branch = v["refName"].as_str().unwrap_or(&name).to_string();
+            let c = composer::ctx(s);
+            let thread = c.thread.map(|t| data::s(t, "id").to_string());
+            let worktree = c.thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty()).map(str::to_string);
+            if let (Some(thread), Some(net)) = (thread, s.src.net()) {
+                net.dispatch(json!({"type": "thread.metadata.update", "threadId": thread, "branch": branch, "worktreePath": worktree}));
+            }
+        }
+        (Pending::List, Err(e)) => crate::shell::palette::toast(s, "Failed to load branches.", e["message"].as_str()),
+        (Pending::Branch(_), Err(e)) => crate::shell::palette::toast(s, "Failed to switch ref.", e["message"].as_str()),
+    }
+    true
 }
 
 fn open_in_editor(s: &mut App, editor: Option<String>) {
@@ -224,8 +313,13 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El
         section = section.child(
             action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
                 .w_full()
-                .child(row().gap(6.0).child(text(format!("+{add}")).font(stat).color(muted)).child(text(format!("-{del}")).font(stat).color(muted)))
-                .on_press(|s: &mut App| s.ui.shell.panel_open = true),
+                .child(
+                    row()
+                        .gap(6.0)
+                        .child(text(format!("+{add}")).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
+                        .child(text(format!("-{del}")).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
+                )
+                .on_press(|s: &mut App| crate::panel::open_changes(s)),
         );
         card = card.child(section);
     }
@@ -241,20 +335,33 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
             ("details-editor-menu", if list.is_empty() { vec![(String::new(), "No editors found".into())] } else { list })
         }
         Menu::Git => ("details-git-menu", vec![("publish".into(), "Publish repository".into()), ("commit".into(), "Commit".into())]),
-        Menu::Branch => {
-            let branch = vcs(s).map(|v| data::s(&v["local"], "refName").to_string()).unwrap_or_default();
-            ("details-branch", vec![(branch.clone(), branch)])
-        }
+        Menu::Branch => ("details-branch", branch_items(&s.ui.chat.details.refs, &s.ui.chat.details.branch_query.text)),
     };
     let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
+    if which == Menu::Branch {
+        list = list.w(260.0).child(
+            text_input(&s.ui.chat.details.branch_query, theme::TEXT_SM)
+                .key("details-branch-search")
+                .w_full()
+                .h(32.0)
+                .px(8.0)
+                .font(theme::TEXT_SM)
+                .color(t.c.foreground)
+                .placeholder("Search branches…", t.c.muted_foreground)
+                .on_input_key(on_branch_key)
+                .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query),
+        );
+    }
     for (id, label) in items {
         let enabled = !id.is_empty();
         let mut item = row().h(32.0).px(8.0).center_y().radius(radius::MD).child(text(label).font(theme::TEXT_SM).color(if enabled { t.c.foreground } else { t.c.muted_foreground }));
         if enabled {
             item = item.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| {
                 s.ui.chat.details.menu = None;
-                if which == Menu::Editor {
-                    open_in_editor(s, Some(id.clone()));
+                match which {
+                    Menu::Editor => open_in_editor(s, Some(id.clone())),
+                    Menu::Branch => pick_branch(s, &id),
+                    Menu::Git => {}
                 }
             });
         }
@@ -265,7 +372,17 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
 
 #[cfg(test)]
 mod tests {
-    use super::lane;
+    use super::{CREATE, branch_items, lane};
+
+    #[test]
+    fn branch_menu_offers_create_for_a_new_name() {
+        let refs = vec!["main".to_string(), "feature/x".to_string()];
+        assert_eq!(branch_items(&refs, "").len(), 2);
+        assert_eq!(branch_items(&refs, "FEAT"), vec![("feature/x".into(), "feature/x".into())]);
+        assert_eq!(branch_items(&refs, "main").len(), 1);
+        let created = branch_items(&refs, " my branch ");
+        assert_eq!(created, vec![(format!("{CREATE}my-branch"), "Create new branch \"my branch\"".into())]);
+    }
 
     #[test]
     fn lane_matches_web_layout() {

@@ -209,7 +209,7 @@ fn shortcut_label(s: &App, command: &str) -> String {
     });
     label
 }
-fn toast(s: &mut App, title: &str, description: Option<&str>) {
+pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
     s.ui.shell.palette.notice = Some(Notice {
         title: title.into(),
         description: description.filter(|v| !v.is_empty()).map(str::to_owned),
