@@ -111,7 +111,7 @@ fn remove(s: &mut App, id: &str) {
 
 /// Kit menus truncate labels to a fixed width; the web's popup grows to its longest item.
 fn fit(longest: &str) -> f32 {
-    (longest.chars().count() as f32 * 6.6 + 26.0).ceil().max(160.0)
+    (longest.chars().count() as f32 * 7.0 + 28.0).ceil().max(160.0)
 }
 
 fn close_menu(s: &mut App) {

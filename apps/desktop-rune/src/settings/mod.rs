@@ -794,8 +794,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         browser_profiles_scene(s, true, None);
         s.ui.settings.profiles.remove = Some(("profile-work".into(), "Work".into()));
     }),
-    ("settings-providers-models", |s| providers_scene(s, false, "opencode")),
-    ("settings-providers-models-light", |s| providers_scene(s, true, "opencode")),
+    ("settings-providers-models", |s| providers_models(s, false)),
+    ("settings-providers-models-light", |s| providers_models(s, true)),
     ("settings-providers-claude", |s| providers_scene(s, false, "claudeAgent")),
     ("settings-providers-claude-light", |s| providers_scene(s, true, "claudeAgent")),
     ("settings-providers-custom-model", |s| providers_custom_model(s, false)),
@@ -840,9 +840,15 @@ fn providers_scene(s: &mut App, light: bool, selected: &str) {
     s.ui.settings.provider = Some(selected.into());
 }
 
+fn providers_models(s: &mut App, light: bool) {
+    providers_scene(s, light, "opencode");
+    s.ui.settings.providers_ui.scene_bottom = true;
+}
+
 fn providers_custom_model(s: &mut App, light: bool) {
     providers_scene(s, light, "claudeAgent");
     let ui = &mut s.ui.settings.providers_ui;
+    ui.scene_bottom = true;
     ui.adding = true;
     ui.custom = rune::TextEdit::new("claude-sonnet-5-preview".to_owned());
     ui.error = Some("That custom model is already saved.".into());

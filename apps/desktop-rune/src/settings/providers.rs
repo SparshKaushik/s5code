@@ -41,6 +41,8 @@ pub struct Ui {
     pub env_adding: bool,
     /// `(instance id, reset)` awaiting the remove or reset confirmation.
     pub confirm: Option<(String, bool)>,
+    /// Scenes only: open the detail pane scrolled to its end, where Models sits.
+    pub scene_bottom: bool,
 }
 
 pub struct Row {
@@ -1395,7 +1397,7 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
     let detail = match rows.iter().find(|r| Some(&r.id) == selected.as_ref()) {
         Some(r) => kit::scroll_area(
             "provider-detail",
-            col().w_full().h_full().scroll(rune::ScrollSpec { stick_bottom: false }).child(col().key(format!("provider-detail-{}", r.id)).w_full().py(16.0).gap(24.0).children(editor(s, cx, t, r))),
+            col().w_full().h_full().scroll(rune::ScrollSpec { stick_bottom: s.ui.settings.providers_ui.scene_bottom }).child(col().key(format!("provider-detail-{}", r.id)).w_full().py(16.0).gap(24.0).children(editor(s, cx, t, r))),
             t,
         ),
         None => col().w_full().padding(24.0).child(
