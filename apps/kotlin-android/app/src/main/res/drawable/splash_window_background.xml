@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Launch window for API 26-30, which have no platform splash screen: the window
+  background *is* the splash. A layer-list of the scheme background plus the
+  centred wordmark, so those releases get the same first frame as API 31+ rather
+  than a bare colour.
+-->
+<layer-list xmlns:android="http://schemas.android.com/apk/res/android">
+    <item android:drawable="@color/window_background" />
+    <item
+        android:gravity="center"
+        android:width="132dp"
+        android:height="74dp">
+        <bitmap
+            android:src="@drawable/s5_mark_alpha"
+            android:gravity="fill"
+            android:tint="@color/splash_icon_tint" />
+    </item>
+</layer-list>

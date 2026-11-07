@@ -1,0 +1,1681 @@
+package club.touchtech.s5code.kotlin.feature.home
+
+import androidx.activity.compose.BackHandler
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.foundation.horizontalScroll
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.rounded.Article
+import androidx.compose.material.icons.automirrored.rounded.Chat
+import androidx.compose.material.icons.rounded.BarChart
+import androidx.compose.material.icons.automirrored.rounded.Sort
+import androidx.compose.material.icons.rounded.Add
+import androidx.compose.material.icons.rounded.Archive
+import androidx.compose.material.icons.rounded.Bedtime
+import androidx.compose.material.icons.rounded.CloudOff
+import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Download
+import androidx.compose.material.icons.rounded.Key
+import androidx.compose.material.icons.rounded.DoneAll
+import androidx.compose.material.icons.rounded.ArrowDownward
+import androidx.compose.material.icons.rounded.ArrowUpward
+import androidx.compose.material.icons.rounded.EditNote
+import androidx.compose.material.icons.rounded.ExpandLess
+import androidx.compose.material.icons.rounded.ExpandMore
+import androidx.compose.material.icons.rounded.Hub
+import androidx.compose.material.icons.automirrored.rounded.CallMerge
+import androidx.compose.material.icons.rounded.Inbox
+import androidx.compose.material.icons.rounded.MoreVert
+import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.Refresh
+import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Settings
+import androidx.compose.material.icons.rounded.SystemUpdate
+import androidx.compose.material.icons.rounded.Timer
+import androidx.compose.material.icons.rounded.Warning
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.Icon
+import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.Snackbar
+import androidx.compose.material3.TextButton
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.runtime.withFrameNanos
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalFocusManager
+import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import club.touchtech.s5code.kotlin.app.AppStore
+import club.touchtech.s5code.kotlin.app.HomeTab
+import club.touchtech.s5code.kotlin.app.discarded
+import club.touchtech.s5code.kotlin.data.PullRequestReference
+import club.touchtech.s5code.kotlin.design.component.S5BottomTabs
+import club.touchtech.s5code.kotlin.design.component.S5Tab
+import club.touchtech.s5code.kotlin.feature.pullrequests.PullRequestListScreen
+import club.touchtech.s5code.kotlin.feature.pullrequests.pullRequestEnvironments
+import club.touchtech.s5code.kotlin.feature.settings.SettingsScreen
+import club.touchtech.s5code.kotlin.feature.usage.UsageScreen
+import club.touchtech.s5code.kotlin.data.ReorderSection
+import club.touchtech.s5code.kotlin.data.cacheSizeLabel
+import club.touchtech.s5code.kotlin.design.component.S5ActionEmphasis
+import club.touchtech.s5code.kotlin.design.component.S5Button
+import club.touchtech.s5code.kotlin.design.component.S5ButtonStyle
+import club.touchtech.s5code.kotlin.design.component.S5Card
+import club.touchtech.s5code.kotlin.design.component.S5CardTone
+import club.touchtech.s5code.kotlin.design.component.S5ConnectedButtonGroup
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogController
+import club.touchtech.s5code.kotlin.design.component.S5ConfirmDialogRequest
+import club.touchtech.s5code.kotlin.design.component.S5EmptyState
+import club.touchtech.s5code.kotlin.design.component.S5WaitState
+import club.touchtech.s5code.kotlin.design.component.S5HeroFab
+import club.touchtech.s5code.kotlin.design.component.S5IconButton
+import club.touchtech.s5code.kotlin.design.component.S5LoadingStrip
+import club.touchtech.s5code.kotlin.design.component.S5MenuOption
+import club.touchtech.s5code.kotlin.design.component.S5Notice
+import club.touchtech.s5code.kotlin.design.component.S5OverflowMenu
+import club.touchtech.s5code.kotlin.design.component.S5ProjectIcon
+import club.touchtech.s5code.kotlin.design.component.S5Screen
+import club.touchtech.s5code.kotlin.design.component.S5SearchField
+import club.touchtech.s5code.kotlin.design.component.S5SectionHeader
+import club.touchtech.s5code.kotlin.design.component.S5SkeletonRow
+import club.touchtech.s5code.kotlin.design.component.S5SwipeAction
+import club.touchtech.s5code.kotlin.design.component.S5SwipeableRow
+import club.touchtech.s5code.kotlin.design.component.S5TopBarProminence
+import club.touchtech.s5code.kotlin.design.component.S5WaitPill
+import club.touchtech.s5code.kotlin.design.theme.S5Theme
+import club.touchtech.s5code.kotlin.feature.connections.WaitPhase
+import club.touchtech.s5code.kotlin.feature.connections.connectionPresentation
+import club.touchtech.s5code.kotlin.feature.connections.waitNotice
+import club.touchtech.s5code.kotlin.feature.connections.waitPillLabel
+import club.touchtech.s5code.kotlin.model.EnvironmentId
+import club.touchtech.s5code.kotlin.model.HomeListItem
+import club.touchtech.s5code.kotlin.model.Project
+import club.touchtech.s5code.kotlin.model.ShelfKind
+import club.touchtech.s5code.kotlin.model.ThreadFilter
+import club.touchtech.s5code.kotlin.model.ThreadId
+import club.touchtech.s5code.kotlin.model.ThreadSort
+import club.touchtech.s5code.kotlin.model.ThreadStatus
+import club.touchtech.s5code.kotlin.model.ThreadSummary
+import club.touchtech.s5code.kotlin.model.ThreadSearchMatch
+import club.touchtech.s5code.kotlin.platform.updates.AppUpdateStatus
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+/**
+ * Merged workspace home. One list across every environment, with search,
+ * filters, project grouping, collapsible snoozed/settled shelves, and per-thread
+ * quick actions. The hero action is the new-task FAB.
+ */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+fun HomeScreen(
+    store: AppStore,
+    onOpenThread: (String, String) -> Unit,
+    onNewTask: () -> Unit,
+    onResumeDraft: () -> Unit,
+    onConnections: () -> Unit,
+    onArchive: () -> Unit,
+    confirmController: S5ConfirmDialogController,
+    hardwareShortcut: club.touchtech.s5code.kotlin.app.S5HardwareShortcutEvent? = null,
+    onEscape: () -> Unit = {},
+    onOpenPullRequest: (environmentId: String, reference: PullRequestReference) -> Unit = { _, _ -> },
+    onRequestPullRequestReview: (environmentId: String, reference: PullRequestReference) -> Unit = onOpenPullRequest,
+    /** Opens a settings page from the Settings tab. */
+    onOpenRoute: (String) -> Unit = {},
+) {
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val known by store.pullRequests.knownEnvironments.collectAsStateWithLifecycle()
+    val home by store.home.collectAsStateWithLifecycle()
+    // The tab exists only where some environment can list pull requests.
+    val pullRequestsAvailable = remember(environments, known) { pullRequestEnvironments(environments, known).isNotEmpty() }
+    val tab = if (pullRequestsAvailable || home.tab != HomeTab.PullRequests) home.tab else HomeTab.Threads
+    // RN's Android workspace navigation (T3WorkspaceNavigationModule `tabTitle`):
+    // Settings and Usage are tabs rather than pushed pages, and the new-task
+    // FAB lives on Chats alone.
+    val bottomBar: @Composable () -> Unit = {
+        S5BottomTabs(
+            tabs =
+                listOfNotNull(
+                    S5Tab(HomeTab.Threads, "Chats", Icons.AutoMirrored.Rounded.Chat),
+                    S5Tab(HomeTab.PullRequests, "Pulls", Icons.AutoMirrored.Rounded.CallMerge)
+                        .takeIf { pullRequestsAvailable },
+                    S5Tab(HomeTab.Usage, "Usage", Icons.Rounded.BarChart),
+                    S5Tab(HomeTab.Settings, "Settings", Icons.Rounded.Settings),
+                ),
+            selected = tab,
+            onSelect = { selected -> store.updateHome { it.copy(tab = selected) } },
+        )
+    }
+    val openSettingsTab = { store.updateHome { it.copy(tab = HomeTab.Settings) } }
+    // Back from another tab returns to Chats before it leaves the app, as the
+    // Android bottom-navigation guidance has it.
+    BackHandler(enabled = tab != HomeTab.Threads) { store.updateHome { it.copy(tab = HomeTab.Threads) } }
+    when (tab) {
+        HomeTab.Threads ->
+            ThreadsHome(
+                store = store,
+                onOpenThread = onOpenThread,
+                onNewTask = onNewTask,
+                onResumeDraft = onResumeDraft,
+                onConnections = onConnections,
+                onArchive = onArchive,
+                confirmController = confirmController,
+                hardwareShortcut = hardwareShortcut,
+                onEscape = onEscape,
+                bottomBar = bottomBar,
+            )
+        HomeTab.PullRequests ->
+            PullRequestListScreen(
+                store = store,
+                onOpenPullRequest = onOpenPullRequest,
+                onRequestReview = onRequestPullRequestReview,
+                onSettings = openSettingsTab,
+                onConnections = onConnections,
+                confirmController = confirmController,
+                bottomBar = bottomBar,
+            )
+        HomeTab.Usage -> UsageScreen(store = store, onBack = null, bottomBar = bottomBar)
+        HomeTab.Settings -> SettingsScreen(store = store, onBack = null, onOpen = onOpenRoute, bottomBar = bottomBar)
+    }
+}
+
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
+@Composable
+private fun ThreadsHome(
+    store: AppStore,
+    onOpenThread: (String, String) -> Unit,
+    onNewTask: () -> Unit,
+    /**
+     * Reopens the unsent new-task draft. Separate from [onNewTask] because it skips
+     * the project step: the draft already has a project, and asking again is what
+     * made the draft feel lost in the first place.
+     */
+    onResumeDraft: () -> Unit,
+    onConnections: () -> Unit,
+    onArchive: () -> Unit,
+    confirmController: S5ConfirmDialogController,
+    hardwareShortcut: club.touchtech.s5code.kotlin.app.S5HardwareShortcutEvent? = null,
+    onEscape: () -> Unit = {},
+    bottomBar: @Composable () -> Unit = {},
+) {
+    val scope = rememberCoroutineScope()
+    val focusManager = LocalFocusManager.current
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val searchFocusRequester = remember { FocusRequester() }
+    val threads by store.workspace.threads.collectAsStateWithLifecycle()
+    val projects by store.workspace.projects.collectAsStateWithLifecycle()
+    val environments by store.workspace.environments.collectAsStateWithLifecycle()
+    val savedHome by store.home.collectAsStateWithLifecycle()
+    val home = remember(savedHome, environments) { savedHome.withAvailableEnvironment(environments) }
+    val preferences by store.preferences.collectAsStateWithLifecycle()
+    val threadDrafts by store.threadDrafts.collectAsStateWithLifecycle()
+    val newTaskDraft by store.draft.collectAsStateWithLifecycle()
+    val pendingRequests by store.workspace.pendingRequests.collectAsStateWithLifecycle()
+    val paired by store.paired.collectAsStateWithLifecycle()
+    val sessionRestored by store.sessionRestored.collectAsStateWithLifecycle()
+    val updateStatus by store.updates.status.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+
+    var searchVisible by rememberSaveable { mutableStateOf(false) }
+    var sortMenuOpen by remember { mutableStateOf(false) }
+    var rowMenuFor by remember { mutableStateOf<String?>(null) }
+    var submittingRequestKey by remember { mutableStateOf<String?>(null) }
+    // The matches with the query they answer: `visibleThreadSearch` keeps them
+    // while the query refines or widens theirs, so rows do not blink per keystroke.
+    var searchResult by remember { mutableStateOf<Pair<String, List<ThreadSearchMatch>>?>(null) }
+    var searchLoading by remember { mutableStateOf(false) }
+    // The row the Custom… snooze sheet was opened for; it snoozes on confirm.
+    var customSnoozeFor by remember { mutableStateOf<ThreadSummary?>(null) }
+    // One Undo at a time, like RN's ThreadUndoNotice: settle, snooze, and unpin
+    // move a row out from under the thumb, so each offers the way back for 5s.
+    var undoNotice by remember { mutableStateOf<ThreadUndoNotice?>(null) }
+    // RN's `claim.isCurrent()`: a slow action whose thread has since been acted on
+    // again must not offer an undo that replays stale state.
+    val undoClaims = remember { mutableMapOf<Pair<EnvironmentId, ThreadId>, Int>() }
+    LaunchedEffect(undoNotice) {
+        val shown = undoNotice ?: return@LaunchedEffect
+        delay(5_000)
+        if (undoNotice === shown) undoNotice = null
+    }
+
+    LaunchedEffect(hardwareShortcut?.id) {
+        when (hardwareShortcut?.shortcut) {
+            club.touchtech.s5code.kotlin.app.S5HardwareShortcut.NewTask -> Unit
+            club.touchtech.s5code.kotlin.app.S5HardwareShortcut.FocusSearch -> {
+                searchVisible = true
+                withFrameNanos { }
+                searchFocusRequester.requestFocus()
+                keyboardController?.show()
+            }
+            club.touchtech.s5code.kotlin.app.S5HardwareShortcut.Escape -> {
+                if (searchVisible) {
+                    searchVisible = false
+                    store.updateHome { it.copy(query = "") }
+                    focusManager.clearFocus(force = true)
+                    keyboardController?.hide()
+                } else {
+                    onEscape()
+                }
+            }
+            null -> Unit
+        }
+    }
+
+    BackHandler(enabled = searchVisible) {
+        searchVisible = false
+        store.updateHome { it.copy(query = "") }
+        focusManager.clearFocus(force = true)
+        keyboardController?.hide()
+    }
+
+    val searchEnvironmentIds =
+        remember(environments, home.environmentId) {
+            environments
+                .filter { environment ->
+                    environment.state == club.touchtech.s5code.kotlin.model.ConnectionState.Connected &&
+                        (home.environmentId == null || environment.id == home.environmentId)
+                }
+                .map { it.id }
+                .toSet()
+        }
+
+    LaunchedEffect(home.query, searchEnvironmentIds) {
+        val query = home.query.trim().take(200).trim()
+        // The server needs a word of three or more letters; shorter queries
+        // would always come back empty (`useThreadSearch`).
+        if (club.touchtech.s5code.kotlin.data.messageSearchTokens(query).long.isEmpty() || searchEnvironmentIds.isEmpty()) {
+            searchResult = null
+            searchLoading = false
+            return@LaunchedEffect
+        }
+        searchLoading = true
+        delay(SEARCH_DEBOUNCE_MILLIS)
+        try {
+            searchResult = query to store.workspace.searchThreads(searchEnvironmentIds, query)
+        } catch (cancelled: CancellationException) {
+            throw cancelled
+        } catch (error: Exception) {
+            searchResult = null
+            store.showError(error.message ?: "Message search could not be completed.")
+        } finally {
+            searchLoading = false
+        }
+    }
+    val searchMatches = remember(searchResult, home.query) { visibleSearchMatches(home.query, searchResult) }
+
+    val inbox by store.inbox.collectAsStateWithLifecycle()
+    val workingShelf =
+        remember(inbox, preferences.workingShelfEnabled, preferences.workingThreadsExpanded) {
+            if (!preferences.workingShelfEnabled) null
+            else WorkingShelf(
+                expanded = preferences.workingThreadsExpanded,
+                isWorking = inbox::isWorking,
+                returnedAt = inbox::returnedAt,
+            )
+        }
+
+    /**
+     * Opens a home row. A row listed for a message match opens at that message;
+     * a pick from a search sends its open with the query, as RN's palette does,
+     * so the server's frecency learns which thread the query meant.
+     */
+    fun openThreadRow(thread: ThreadSummary, searchMessageId: String?) {
+        if (searchMessageId != null) {
+            club.touchtech.s5code.kotlin.feature.thread.ThreadMessageJumps.request(
+                club.touchtech.s5code.kotlin.feature.thread.threadJumpKey(thread.environmentId.value, thread.id.value),
+                searchMessageId,
+            )
+        }
+        val picked = club.touchtech.s5code.kotlin.data.pickedQuery(home.query)
+        if (picked.isNotEmpty()) {
+            club.touchtech.s5code.kotlin.data.ThreadOpens.claim(thread.environmentId.value, thread.id.value, System.currentTimeMillis())
+            store.sendThreadOpen(
+                thread.environmentId,
+                thread.id,
+                thread.updatedAtMillis.takeIf { it > 0 } ?: System.currentTimeMillis(),
+                searchQuery = picked,
+            )
+        }
+        onOpenThread(thread.environmentId.value, thread.id.value)
+    }
+
+    fun reportError(message: String) = store.showError(message)
+
+    /**
+     * Executes a move: replans at action time so a stale menu can't write keys
+     * against an order that has since changed.
+     */
+    fun moveAssignmentsFor(thread: ThreadSummary, direction: MoveDirection): List<Pair<ThreadId, String>>? {
+        val section = thread.pinned
+        val reorderable =
+            environments
+                .filter {
+                    if (section) it.capabilities.threadPinReorder
+                    else it.capabilities.threadActiveReorder
+                }
+                .mapTo(mutableSetOf()) { it.id.value }
+        val sectionThreads =
+            threads.filter {
+                it.status != ThreadStatus.Snoozed &&
+                    it.status != ThreadStatus.Settled &&
+                    it.pinned == section
+            }
+        val toRow = { row: ThreadSummary ->
+            ThreadOrderRow(
+                compositeId = "${row.environmentId.value}:${row.id.value}",
+                environmentId = row.environmentId.value,
+                orderKey = if (section) row.pinOrderKey else row.activeOrderKey,
+            )
+        }
+        return planThreadMove(
+            ordered = sectionThreads.sortedWith(homeListComparator(preferences.threadSort)).map(toRow),
+            allThreads = sectionThreads.map(toRow),
+            reorderableEnvironmentIds = reorderable,
+            movedCompositeId = "${thread.environmentId.value}:${thread.id.value}",
+            direction = direction,
+        )?.map { assignment ->
+            ThreadId(assignment.id.substringAfter(':')) to assignment.orderKey
+        }
+    }
+
+    /**
+     * The Undo [action] earns once it succeeds, planned from [thread] as it was
+     * before. Null for actions that are their own undo or have none.
+     */
+    fun undoFor(thread: ThreadSummary, action: String): ThreadUndoNotice? {
+        val undo =
+            when {
+                action == "settle" && thread.status != ThreadStatus.Settled -> ThreadUndoAction.Settled
+                action.startsWith("snooze:") ||
+                    (action == "snooze" && thread.status != ThreadStatus.Snoozed) -> ThreadUndoAction.Snoozed
+                action == "pin" && thread.pinned -> ThreadUndoAction.Unpinned
+                else -> return null
+            }
+        return ThreadUndoNotice(undo, thread.environmentId, thread.id, planThreadUndo(undo, thread))
+    }
+
+    /**
+     * A lifecycle or placement action on a thread supersedes its pending Undo:
+     * restoring the older state on top of the newer one would fight what the
+     * user just did. Title and read-state actions leave it alone.
+     */
+    /** Returns the action's claim on the thread's undo; null for non-lifecycle actions. */
+    fun supersedeUndo(thread: ThreadSummary, action: String): Int? {
+        val lifecycle =
+            action.startsWith("snooze") ||
+                action in setOf("settle", "unsnooze", "pin", "archive", "delete", "move-up", "move-down")
+        if (!lifecycle) return null
+        val claim = undoClaims.merge(thread.environmentId to thread.id, 1, Int::plus)
+        val pending = undoNotice
+        if (pending != null && pending.environmentId == thread.environmentId && pending.threadId == thread.id) undoNotice = null
+        return claim
+    }
+
+    fun runUndo(notice: ThreadUndoNotice) {
+        if (undoNotice !== notice) return
+        undoNotice = null
+        val pinReorder =
+            environments.firstOrNull { it.id == notice.environmentId }?.capabilities?.threadPinReorder == true
+        scope.launch {
+            try {
+                executeThreadUndo(notice.plan, System::currentTimeMillis) { step ->
+                    when (step) {
+                        ThreadUndoStep.Unsettle -> store.workspace.setSettled(notice.environmentId, notice.threadId, false)
+                        ThreadUndoStep.Unsnooze -> store.workspace.setSnoozed(notice.environmentId, notice.threadId, false)
+                        is ThreadUndoStep.Pin -> {
+                            store.workspace.setPinned(notice.environmentId, notice.threadId, true)
+                            // The pin write takes no key here, so the old place
+                            // comes back with a reorder where the server has one.
+                            if (pinReorder && step.orderKey != null) {
+                                store.workspace.reorderThreads(
+                                    notice.environmentId,
+                                    ReorderSection.Pinned,
+                                    listOf(notice.threadId to step.orderKey),
+                                )
+                            }
+                        }
+                        is ThreadUndoStep.Snooze ->
+                            store.workspace.setSnoozed(notice.environmentId, notice.threadId, true, step.untilIso)
+                    }
+                }
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportError(error.message ?: "The thread action could not be undone.")
+            }
+        }
+    }
+
+    fun launchThreadAction(thread: ThreadSummary, picked: String) {
+        val action = resolveSnoozeMenuAction(picked) ?: run {
+            store.showError("That snooze time has passed. Choose another time.")
+            return
+        }
+        if (action == "new-thread-on-branch") {
+            // Straight to the draft, prefilled like RN's NewTaskSheet params:
+            // same environment, same project, the thread's branch/worktree.
+            store.updateDraft {
+                it.copy(
+                    environmentId = thread.environmentId,
+                    projectKey = thread.projectId.value,
+                    branch = thread.branch.orEmpty(),
+                    worktreePath = thread.worktreePath,
+                    workspaceMode = club.touchtech.s5code.kotlin.model.WorkspaceMode.CurrentCheckout,
+                )
+            }
+            onResumeDraft()
+            return
+        }
+        val claim = supersedeUndo(thread, action)
+        val undo = undoFor(thread, action)
+        scope.launch {
+            try {
+                val (moveUp, moveDown) =
+                    when (action) {
+                        "move-up" -> moveAssignmentsFor(thread, MoveDirection.Up) to null
+                        "move-down" -> null to moveAssignmentsFor(thread, MoveDirection.Down)
+                        else -> null to null
+                    }
+                performThreadAction(
+                    store = store,
+                    environmentId = thread.environmentId,
+                    id = thread.id,
+                    action = action,
+                    pinned = thread.pinned,
+                    status = thread.status,
+                    moveUpAssignments = moveUp,
+                    moveDownAssignments = moveDown,
+                    moveSection =
+                        if (thread.pinned) ReorderSection.Pinned else ReorderSection.Active,
+                )
+                if (undo != null && undoClaims[thread.environmentId to thread.id] == claim) undoNotice = undo
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                reportError(error.message ?: "The thread action could not be completed.")
+            }
+        }
+    }
+
+    val items =
+        remember(
+            threads,
+            projects,
+            environments,
+            home,
+            preferences.projectGrouping,
+            preferences.threadSort,
+            threadDrafts,
+            newTaskDraft,
+            pendingRequests,
+            searchMatches,
+            workingShelf,
+        ) {
+            homeListItems(
+                threads = threads,
+                projects = projects,
+                environments = environments,
+                state = home,
+                grouping = preferences.projectGrouping,
+                sort = preferences.threadSort,
+                drafts = threadDrafts,
+                newTask = newTaskDraft,
+                pendingRequests = pendingRequests,
+                serverSearchMatches = searchMatches,
+                workingShelf = workingShelf,
+            )
+        }
+    val counts = remember(threads) { homeFilterCounts(threads) }
+    // `buildHomeProjectScopes`: one option per logical project in the selected
+    // environment, with every "No project" merged into one.
+    val projectScopes =
+        remember(projects, home.environmentId, preferences.projectGrouping) {
+            homeProjectScopes(projects, home.environmentId?.value, preferences.projectGrouping)
+        }
+    val selectedProjectScopeKey =
+        remember(projects, home, preferences.projectGrouping) {
+            homeProjectFilterScope(projects, home, preferences.projectGrouping)?.key
+        }
+    // Swipe actions are capability-gated per environment, and a merged home draws
+    // rows from several at once.
+    val environmentsById = remember(environments) { environments.associateBy { it.id.value } }
+
+    /**
+     * Move availability per row, `compositeId → (canMoveUp, canMoveDown)`.
+     * Computed once per data change rather than inside each row's trailing
+     * lambda: the planner is O(section) per query, so per-row composition would
+     * make it quadratic in recompositions instead of once in data.
+     */
+    val moveAvailability =
+        remember(threads, environments, preferences.threadSort, preferences.projectGrouping, preferences.workingShelfEnabled) {
+            val result = mutableMapOf<String, Pair<Boolean, Boolean>>()
+            val reorderablePin =
+                environments
+                    .filter { it.capabilities.threadPinReorder }
+                    .mapTo(mutableSetOf()) { it.id.value }
+            val reorderableActive =
+                environments
+                    .filter { it.capabilities.threadActiveReorder }
+                    .mapTo(mutableSetOf()) { it.id.value }
+            // With the Working shelf on, the inbox is ordered by return time, so
+            // only pinned threads can move (RN's `moveAvailability`).
+            for (section in if (preferences.workingShelfEnabled) listOf(true) else listOf(true, false)) {
+                val reorderable = if (section) reorderablePin else reorderableActive
+                val sectionThreads =
+                    threads.filter {
+                        it.status != ThreadStatus.Snoozed &&
+                            it.status != ThreadStatus.Settled &&
+                            it.pinned == section
+                    }
+                if (sectionThreads.isEmpty()) continue
+                // The ordered section mirrors what the list renders; every row
+                // is an anchor so a respread can re-key hidden rows too.
+                val visual = sectionThreads.sortedWith(homeListComparator(preferences.threadSort))
+                val toRow = { row: ThreadSummary ->
+                    ThreadOrderRow(
+                        compositeId = "${row.environmentId.value}:${row.id.value}",
+                        environmentId = row.environmentId.value,
+                        orderKey = if (section) row.pinOrderKey else row.activeOrderKey,
+                    )
+                }
+                val ordered = visual.map(toRow)
+                val all = sectionThreads.map(toRow)
+                for (thread in sectionThreads) {
+                    val compositeId = "${thread.environmentId.value}:${thread.id.value}"
+                    if (thread.environmentId.value !in reorderable) {
+                        result[compositeId] = false to false
+                        continue
+                    }
+                    fun has(direction: MoveDirection) =
+                        planThreadMove(
+                            ordered = ordered,
+                            allThreads = all,
+                            reorderableEnvironmentIds = reorderable,
+                            movedCompositeId = compositeId,
+                            direction = direction,
+                        ) != null
+                    result[compositeId] = has(MoveDirection.Up) to has(MoveDirection.Down)
+                }
+            }
+            result
+        }
+
+    val listState = rememberLazyListState()
+    // Switched-off environments have no session and no threads, so they count
+    // toward neither "unreachable" nor the wait.
+    val enabledEnvironments = remember(environments) { environments.filter { it.isEnabled } }
+    // The header line under the title. It debounces the same 800ms as RN so a
+    // reconnect blip does not flash text under the title.
+    val rawConnectionStatus =
+        remember(environments, paired, sessionRestored) {
+            homeConnectionStatus(environments, paired, sessionRestored)
+        }
+    var connectionStatus by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(rawConnectionStatus) {
+        if (rawConnectionStatus == null) {
+            connectionStatus = null
+        } else {
+            delay(800)
+            connectionStatus = rawConnectionStatus
+        }
+    }
+    // What the list is waiting on, if anything. A pill once there are rows, the whole
+    // screen when there are none.
+    val wait =
+        remember(enabledEnvironments, items.isEmpty(), paired, sessionRestored) {
+            waitNotice(
+                states = enabledEnvironments.map { it.state },
+                environmentLabel = enabledEnvironments.singleOrNull()?.label,
+                resourceName = "threads",
+                hasContent = items.isNotEmpty(),
+                // The filter decides what renders, not whether data exists: an
+                // empty Pending or Snoozed tab on a live connection is a real
+                // answer, not a load in flight.
+                loaded = enabledEnvironments.any { it.snapshotLoaded },
+                awaitingEnvironments =
+                    environments.isEmpty() && (!sessionRestored || paired),
+            )
+        }
+
+    S5Screen(
+        title = "S5 Code",
+        subtitle = connectionStatus,
+        prominence = S5TopBarProminence.Hero,
+        bottomBar = bottomBar,
+        actions = {
+            S5IconButton(
+                icon = if (searchVisible) Icons.Rounded.Close else Icons.Rounded.Search,
+                label = if (searchVisible) "Close search" else "Search threads",
+                onClick = {
+                    searchVisible = !searchVisible
+                    if (!searchVisible) store.updateHome { it.copy(query = "") }
+                },
+            )
+            S5OverflowMenu(
+                icon = Icons.AutoMirrored.Rounded.Sort,
+                label = "Filter and sort",
+                expanded = sortMenuOpen,
+                onExpandedChange = { sortMenuOpen = it },
+                options =
+                    buildList {
+                        // RN's HomeHeader exposes Environment and Project
+                        // filter submenus ahead of the sort options.
+                        if (enabledEnvironments.size > 1) {
+                            add(
+                                S5MenuOption(
+                                    id = "environment",
+                                    label = "Environment",
+                                    icon = Icons.Rounded.Hub,
+                                    children =
+                                        listOf(
+                                            S5MenuOption(
+                                                id = "env:",
+                                                label = "All environments",
+                                                selected = home.environmentId == null,
+                                            )
+                                        ) +
+                                            enabledEnvironments.map { environment ->
+                                                S5MenuOption(
+                                                    id = "env:${environment.id.value}",
+                                                    label = environment.label,
+                                                    selected =
+                                                        home.environmentId == environment.id,
+                                                )
+                                            },
+                                )
+                            )
+                        }
+                        if (projectScopes.isNotEmpty()) {
+                            add(
+                                S5MenuOption(
+                                    id = "project",
+                                    label = "Project",
+                                    children =
+                                        listOf(
+                                            S5MenuOption(
+                                                id = "project:",
+                                                label = "All projects",
+                                                selected = selectedProjectScopeKey == null,
+                                            )
+                                        ) +
+                                            projectScopes.map { scope ->
+                                                S5MenuOption(
+                                                    id = "project:${scope.key}",
+                                                    label = scope.title,
+                                                    selected = selectedProjectScopeKey == scope.key,
+                                                )
+                                            },
+                                )
+                            )
+                        }
+                        ThreadSort.entries.forEach { sort ->
+                            add(
+                                S5MenuOption(
+                                    id = "sort:${sort.name}",
+                                    label = sort.label,
+                                    selected = preferences.threadSort == sort,
+                                )
+                            )
+                        }
+                    },
+                onSelect = { id ->
+                    when {
+                        id.startsWith("env:") ->
+                            store.updateHome {
+                                it.copy(
+                                    environmentId =
+                                        id.removePrefix("env:")
+                                            .takeIf(String::isNotEmpty)
+                                            ?.let(::EnvironmentId)
+                                )
+                            }
+                        id.startsWith("project:") ->
+                            store.updateHome {
+                                it.copy(
+                                    projectKey =
+                                        id.removePrefix("project:").takeIf(String::isNotEmpty)
+                                )
+                            }
+                        else ->
+                            store.updatePreferences {
+                                it.copy(threadSort = ThreadSort.valueOf(id.removePrefix("sort:")))
+                            }
+                    }
+                },
+            )
+            S5IconButton(icon = Icons.Rounded.Hub, label = "Connections", onClick = onConnections)
+        },
+        floatingActionButton = {
+            // The pill sits above the FAB rather than over the list: it describes the
+            // whole screen, and a banner pushed in above the rows would move the row
+            // under the user's thumb every time a connection wobbled.
+            Column(
+                horizontalAlignment = Alignment.End,
+                verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+            ) {
+                undoNotice?.let { notice ->
+                    Snackbar(
+                        modifier = Modifier.widthIn(max = 360.dp),
+                        action = {
+                            TextButton(onClick = { runUndo(notice) }) { Text("Undo") }
+                        },
+                        dismissAction = {
+                            S5IconButton(
+                                icon = Icons.Rounded.Close,
+                                label = "Dismiss",
+                                onClick = { if (undoNotice === notice) undoNotice = null },
+                            )
+                        },
+                    ) {
+                        Text("${notice.action.label} thread")
+                    }
+                }
+                AnimatedVisibility(wait != null && items.isNotEmpty()) {
+                    wait?.let { notice ->
+                        S5WaitPill(
+                            label = waitPillLabel(notice),
+                            spinning = notice.spinning,
+                            onClick = onConnections,
+                        )
+                    }
+                }
+                S5HeroFab(icon = Icons.Rounded.Add, label = "New task", onClick = onNewTask)
+            }
+        },
+    ) { padding ->
+        Column(Modifier.fillMaxSize().padding(padding)) {
+            AnimatedVisibility(searchVisible) {
+                S5SearchField(
+                    value = home.query,
+                    onValueChange = { text -> store.updateHome { it.copy(query = text) } },
+                    placeholder = "Search threads",
+                    focusRequester = searchFocusRequester,
+                    modifier =
+                        Modifier.padding(
+                            horizontal = S5Theme.spacing.gutter,
+                            vertical = S5Theme.spacing.small,
+                        ),
+                )
+            }
+            if (searchLoading) S5LoadingStrip()
+            Row(
+                Modifier.fillMaxWidth()
+                    .horizontalScroll(rememberScrollState())
+                    .padding(horizontal = S5Theme.spacing.gutter, vertical = S5Theme.spacing.small),
+                horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+            ) {
+                S5ConnectedButtonGroup(
+                    options = ThreadFilter.entries,
+                    selected = home.filter,
+                    onSelect = { filter -> store.updateHome { it.copy(filter = filter) } },
+                    label = { filter ->
+                        val count = counts[filter] ?: 0
+                        if (filter == ThreadFilter.All) filter.label else "${filter.label} $count"
+                    },
+                )
+            }
+
+            if (items.isEmpty() && wait?.phase == WaitPhase.Loading) {
+                // Connected and waiting on the first snapshot: rows are coming, so the
+                // screen shows their shape. A centred spinner here reads as "something
+                // is wrong", and the empty state would be an outright lie.
+                Column(Modifier.fillMaxSize()) {
+                    repeat(HOME_SKELETON_ROWS) { S5SkeletonRow() }
+                }
+            } else if (items.isEmpty() && wait != null && home.query.isBlank()) {
+                // Connecting, offline, or needing sign-in: say so rather than claiming
+                // there are no threads. "No threads yet" on a connection that has not
+                // landed is the lie the RN client's notice exists to avoid.
+                S5WaitState(
+                    title = wait.title,
+                    detail = wait.detail,
+                    icon = if (wait.phase == WaitPhase.SignInNeeded) Icons.Rounded.Key else Icons.Rounded.CloudOff,
+                    spinning = wait.spinning,
+                    actionLabel = if (wait.spinning) null else "Open connections",
+                    onAction = onConnections,
+                )
+            } else if (items.isEmpty()) {
+                // With no environment at all the list can never fill; RN's
+                // empty state sends you to add one rather than to New task,
+                // which would dead-end at an empty project picker.
+                val noEnvironments = environments.isEmpty() && sessionRestored
+                S5EmptyState(
+                    icon = if (noEnvironments) Icons.Rounded.Hub else Icons.Rounded.Inbox,
+                    title =
+                        when {
+                            noEnvironments -> "No environments connected"
+                            home.query.isBlank() -> "No threads yet"
+                            else -> "No results"
+                        },
+                    detail =
+                        when {
+                            noEnvironments ->
+                                "Add an environment to load projects and start coding sessions."
+                            home.query.isBlank() ->
+                                "Create a task to start a new coding session."
+                            else -> "No threads matching \"${home.query}\"."
+                        },
+                    actionLabel =
+                        when {
+                            noEnvironments -> "Add environment"
+                            home.query.isBlank() -> "New task"
+                            else -> "Clear search"
+                        },
+                    onAction = {
+                        when {
+                            noEnvironments -> onConnections()
+                            home.query.isBlank() -> onNewTask()
+                            else -> store.updateHome { it.copy(query = "") }
+                        }
+                    },
+                )
+            } else {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding =
+                        PaddingValues(
+                            start = S5Theme.spacing.gutter,
+                            end = S5Theme.spacing.gutter,
+                            bottom = 96.dp,
+                        ),
+                    verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                ) {
+                    when (val update = updateStatus) {
+                        is AppUpdateStatus.Available -> {
+                            item(key = "home-app-update-notice") {
+                                Box(Modifier.animateItem()) {
+                                    HomeUpdateNotice(
+                                        title = "Update available: ${update.release.title}",
+                                        subtitle = "Version ${update.release.version} · ${cacheSizeLabel(update.release.apkSizeBytes)}",
+                                        actionLabel = "Download",
+                                        onAction = { store.updates.downloadUpdate(update.release) },
+                                        onDismiss = { store.updates.dismiss() },
+                                    )
+                                }
+                            }
+                        }
+
+                        is AppUpdateStatus.Downloading -> {
+                            item(key = "home-app-update-notice") {
+                                Box(Modifier.animateItem()) {
+                                    HomeUpdateNotice(
+                                        title = "Downloading update… ${(update.progress * 100).toInt()}%",
+                                        subtitle = "${cacheSizeLabel(update.bytesDownloaded)} of ${cacheSizeLabel(update.totalBytes)}",
+                                        actionLabel = null,
+                                        onAction = null,
+                                        onDismiss = null,
+                                        progress = update.progress,
+                                    )
+                                }
+                            }
+                        }
+
+                        is AppUpdateStatus.ReadyToInstall -> {
+                            item(key = "home-app-update-notice") {
+                                Box(Modifier.animateItem()) {
+                                    HomeUpdateNotice(
+                                        title = "Update ready to install",
+                                        subtitle = update.release.apkName,
+                                        actionLabel = "Install",
+                                        onAction = { store.updates.installUpdate(context, update.apkFile) },
+                                        onDismiss = { store.updates.dismiss() },
+                                    )
+                                }
+                            }
+                        }
+
+                        else -> Unit
+                    }
+
+                    items(items, key = { it.key }) { item ->
+                        Box(Modifier.animateItem()) {
+                        when (item) {
+                            is HomeListItem.Section -> S5SectionHeader(item.label)
+
+                            is HomeListItem.Draft ->
+                                DraftRow(
+                                    item = item,
+                                    onClick = onResumeDraft,
+                                    onDiscard = {
+                                        store.updateDraft { it.discarded() }
+                                    },
+                                )
+
+                            is HomeListItem.ShelfHeader ->
+                                ShelfHeaderRow(
+                                    item = item,
+                                    onToggle = {
+                                        if (item.kind == ShelfKind.Working) {
+                                            store.updatePreferences {
+                                                it.copy(workingThreadsExpanded = !it.workingThreadsExpanded)
+                                            }
+                                        } else {
+                                            store.updateHome { state ->
+                                                when (item.kind) {
+                                                    ShelfKind.Snoozed ->
+                                                        state.copy(snoozedExpanded = !state.snoozedExpanded)
+                                                    else ->
+                                                        state.copy(settledExpanded = !state.settledExpanded)
+                                                }
+                                            }
+                                        }
+                                    },
+                                )
+
+                            is HomeListItem.Queued ->
+                                QueuedRow(item, store.workspace::projectIconUrl)
+
+                            is HomeListItem.PendingApprovalCard -> {
+                                val requestKey = item.key
+                                HomeApprovalCard(
+                                    item = item,
+                                    resolveProjectIconUrl = store.workspace::projectIconUrl,
+                                    submitting = submittingRequestKey == requestKey,
+                                    onOpenThread = {
+                                        onOpenThread(
+                                            item.thread.environmentId.value,
+                                            item.thread.id.value,
+                                        )
+                                    },
+                                    onDecision = { decision ->
+                                        if (submittingRequestKey == null) {
+                                            submittingRequestKey = requestKey
+                                            scope.launch {
+                                                try {
+                                                    store.workspace.respondToApproval(
+                                                        item.thread.environmentId,
+                                                        item.thread.id,
+                                                        item.approval.id,
+                                                        decision,
+                                                    )
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (error: Exception) {
+                                                    reportError(
+                                                        error.message ?: "The approval response could not be sent."
+                                                    )
+                                                } finally {
+                                                    if (submittingRequestKey == requestKey) {
+                                                        submittingRequestKey = null
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                )
+                            }
+
+                            is HomeListItem.PendingInputCard -> {
+                                val requestKey = item.key
+                                HomeUserInputCard(
+                                    item = item,
+                                    resolveProjectIconUrl = store.workspace::projectIconUrl,
+                                    submitting = submittingRequestKey == requestKey,
+                                    onOpenThread = {
+                                        onOpenThread(
+                                            item.thread.environmentId.value,
+                                            item.thread.id.value,
+                                        )
+                                    },
+                                    onSubmit = { answers ->
+                                        if (submittingRequestKey == null) {
+                                            submittingRequestKey = requestKey
+                                            scope.launch {
+                                                try {
+                                                    store.workspace.respondToInput(
+                                                        item.thread.environmentId,
+                                                        item.thread.id,
+                                                        item.request.id,
+                                                        answers,
+                                                    )
+                                                } catch (cancelled: CancellationException) {
+                                                    throw cancelled
+                                                } catch (error: Exception) {
+                                                    reportError(
+                                                        error.message ?: "The answer could not be sent."
+                                                    )
+                                                } finally {
+                                                    if (submittingRequestKey == requestKey) {
+                                                        submittingRequestKey = null
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    },
+                                )
+                            }
+
+                            is HomeListItem.Thread -> {
+                                val threadKey = item.thread.id.value
+                                val environment =
+                                    environmentsById[item.thread.environmentId.value]
+                                val swipes =
+                                    threadSwipeActions(
+                                        thread = item.thread,
+                                        // `!= false` would offer settle to a
+                                        // server that has never heard of it —
+                                        // a command the server rejects kills
+                                        // the socket, so support must be proven.
+                                        settlementSupported =
+                                            environment
+                                                ?.capabilities
+                                                ?.threadSettlement == true,
+                                        snoozeSupported =
+                                            environment?.capabilities?.threadSnooze == true,
+                                    )
+                                key(item.thread.status) {
+                                    S5SwipeableRow(
+                                        endAction =
+                                            swipes.end?.let { action ->
+                                                swipeActionFor(action) {
+                                                    launchThreadAction(item.thread, action.command)
+                                                }
+                                            },
+                                        startAction =
+                                            swipes.start?.let { action ->
+                                                swipeActionFor(action) {
+                                                    launchThreadAction(item.thread, action.command)
+                                                }
+                                            },
+                                    ) {
+                                        ThreadRow(
+                                            thread = item.thread,
+                                            project = item.project,
+                                            environmentLabel = item.environmentLabel,
+                                            draftPreview = item.draftPreview,
+                                            searchMatch = item.searchMatch,
+                                            searchQuery = home.query,
+                                            resolveProjectIconUrl = store.workspace::projectIconUrl,
+                                            onClick = { openThreadRow(item.thread, item.searchMessageId) },
+                                            onDismissWoke =
+                                                item.thread.wokeAtMillis?.let { wokeAt ->
+                                                    {
+                                                        // The wake's own timestamp, not now: a
+                                                        // later wake must still surface.
+                                                        scope.launch {
+                                                            try {
+                                                                store.workspace.visitThread(
+                                                                    item.thread.environmentId,
+                                                                    item.thread.id,
+                                                                    wokeAt,
+                                                                )
+                                                            } catch (cancelled: CancellationException) {
+                                                                throw cancelled
+                                                            } catch (_: Exception) {
+                                                            }
+                                                        }
+                                                    }
+                                                },
+                                            trailing = {
+                                                val titleRegenerationSupported =
+                                                    environment
+                                                        ?.capabilities
+                                                        ?.threadTitleRegeneration == true
+                                                val (canMoveUp, canMoveDown) =
+                                                    moveAvailability[
+                                                        "${item.thread.environmentId.value}:${item.thread.id.value}"
+                                                    ] ?: (false to false)
+                                                S5OverflowMenu(
+                                                    icon = Icons.Rounded.MoreVert,
+                                                    label = "Thread actions",
+                                                    expanded = rowMenuFor == threadKey,
+                                                    onExpandedChange = { open ->
+                                                        rowMenuFor = if (open) threadKey else null
+                                                    },
+                                                    options =
+                                                        threadMenuOptions(
+                                                            thread = item.thread,
+                                                            settlementSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadSettlement == true,
+                                                            snoozeSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadSnooze == true,
+                                                            pinningSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadPinning == true,
+                                                            titleRegenerationSupported =
+                                                                titleRegenerationSupported,
+                                                            autoSettleOptOutSupported =
+                                                                environment
+                                                                    ?.capabilities
+                                                                    ?.threadAutoSettleOptOut == true,
+                                                            // Only the open menu shows them, and they resolve against now.
+                                                            snoozePresets =
+                                                                if (rowMenuFor == threadKey) {
+                                                                    resolveSnoozePresets(
+                                                                        presets =
+                                                                            parseSnoozePresetSettings(
+                                                                                environment?.serverSettings?.snoozePresets
+                                                                            ),
+                                                                    )
+                                                                } else {
+                                                                    emptyList()
+                                                                },
+                                                            canMoveUp = canMoveUp,
+                                                            canMoveDown = canMoveDown,
+                                                            visitedTrackingSupported = environment?.capabilities?.threadVisitedTracking == true,
+                                                        ),
+                                                    onSelect = { action ->
+                                                        val runAction = {
+                                                            launchThreadAction(item.thread, action)
+                                                        }
+                                                        if (action == "snooze:custom") {
+                                                            // The date/duration
+                                                            // sheet resolves to
+                                                            // an instant first.
+                                                            customSnoozeFor =
+                                                                item.thread
+                                                        } else if (action == "delete") {
+                                                            confirmController.show(
+                                                                S5ConfirmDialogRequest(
+                                                                    title = "Delete thread?",
+                                                                    message =
+                                                                        "\"${item.thread.title}\" will be permanently deleted, including its terminal history.",
+                                                                    confirmText = "Delete",
+                                                                    destructive = true,
+                                                                    onConfirm = runAction,
+                                                                )
+                                                            )
+                                                        } else {
+                                                            runAction()
+                                                        }
+                                                    },
+                                                )
+                                            },
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                        }
+                    }
+                    item(key = "archive-link") {
+                        Box(Modifier.fillMaxWidth().padding(top = S5Theme.spacing.large)) {
+                            S5Button(
+                                text = "Archived threads",
+                                onClick = onArchive,
+                                icon = Icons.Rounded.Archive,
+                                emphasis = S5ActionEmphasis.Prominent,
+                                style = S5ButtonStyle.Text,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    customSnoozeFor?.let { thread ->
+        CustomSnoozeDialog(
+            onDismiss = { customSnoozeFor = null },
+            onSnooze = { untilIso ->
+                val target = thread
+                customSnoozeFor = null
+                supersedeUndo(target, "snooze")
+                scope.launch {
+                    runCatching {
+                            store.workspace.setSnoozed(
+                                target.environmentId, target.id, true, untilIso,
+                            )
+                        }
+                        .onSuccess { undoNotice = undoFor(target, "snooze:$untilIso") }
+                        .onFailure { store.showError(it.message ?: "Snooze failed.") }
+                }
+            },
+        )
+    }
+}
+
+/**
+ * How a swipe action is dressed. Settle reads as completion and snooze as
+ * deferral, so they borrow the settled and approval status colors rather than
+ * inventing a second palette for the same two ideas.
+ */
+@Composable
+private fun swipeActionFor(action: ThreadSwipeAction, onAction: () -> Unit): S5SwipeAction =
+    when (action) {
+        ThreadSwipeAction.Settle,
+        ThreadSwipeAction.Unsettle ->
+            S5SwipeAction(
+                label = action.label,
+                icon = Icons.Rounded.DoneAll,
+                containerColor = S5Theme.status.settledContainer,
+                contentColor = S5Theme.status.onSettledContainer,
+                onAction = onAction,
+            )
+        ThreadSwipeAction.Snooze,
+        ThreadSwipeAction.Unsnooze ->
+            S5SwipeAction(
+                label = action.label,
+                icon = Icons.Rounded.Bedtime,
+                containerColor = S5Theme.status.approvalContainer,
+                contentColor = S5Theme.status.onApprovalContainer,
+                onAction = onAction,
+            )
+        ThreadSwipeAction.Archive ->
+            S5SwipeAction(
+                label = action.label,
+                icon = Icons.Rounded.Archive,
+                containerColor = MaterialTheme.colorScheme.surfaceContainerHighest,
+                contentColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                onAction = onAction,
+            )
+    }
+
+/**
+ * Row menu for a thread in the list, matching the RN client's card menus in
+ * `thread-list-v2-items.tsx`. The capability flags gate the *write*, not just
+ * the label: a command a server does not understand is a protocol defect that
+ * kills the socket, so settle, snooze, and pin are absent rather than disabled
+ * when the environment cannot honor them.
+ *
+ * The menu's shape follows the RN variant: a snoozed row only wakes or deletes;
+ * a pre-settlement server gets archive in place of the lifecycle items; a
+ * settled row un-settles; and an active row settles and snoozes. Pin and
+ * regenerate join every modern variant.
+ */
+internal fun threadMenuOptions(
+    thread: ThreadSummary,
+    settlementSupported: Boolean,
+    snoozeSupported: Boolean,
+    pinningSupported: Boolean,
+    titleRegenerationSupported: Boolean,
+    /** `threadAutoSettleOptOut`: the server accepts `thread.auto-settle.set`. */
+    autoSettleOptOutSupported: Boolean = false,
+    snoozePresets: List<SnoozePreset> = resolveSnoozePresets(),
+    /** `createThreadMovePlanner` results for this row; null hides the item. */
+    canMoveUp: Boolean = false,
+    canMoveDown: Boolean = false,
+    visitedTrackingSupported: Boolean = false,
+): List<S5MenuOption> {
+    return buildList {
+        if (visitedTrackingSupported) add(S5MenuOption(id = "mark-unread", label = "Mark unread", icon = Icons.Rounded.EditNote))
+        // Prepended like the RN Android menu: the branch the thread already
+        // runs on is the fastest way to ask for a second attempt.
+        thread.branch?.let { branch ->
+            add(
+                S5MenuOption(
+                    id = "new-thread-on-branch",
+                    label = "New thread on $branch",
+                    icon = Icons.Rounded.EditNote,
+                )
+            )
+        }
+        if (canMoveUp) {
+            add(S5MenuOption(id = "move-up", label = "Move up", icon = Icons.Rounded.ArrowUpward))
+        }
+        if (canMoveDown) {
+            add(
+                S5MenuOption(
+                    id = "move-down",
+                    label = "Move down",
+                    icon = Icons.Rounded.ArrowDownward,
+                )
+            )
+        }
+        when {
+            thread.status == ThreadStatus.Snoozed ->
+                add(
+                    S5MenuOption(
+                        id = "unsnooze",
+                        label = "Wake thread",
+                        icon = Icons.Rounded.Bedtime,
+                    )
+                )
+            // Pre-settlement servers get no lifecycle items, only Archive below.
+            !settlementSupported -> Unit
+            thread.status == ThreadStatus.Settled ->
+                add(
+                    S5MenuOption(
+                        id = "settle",
+                        label = "Un-settle",
+                        icon = Icons.Rounded.DoneAll,
+                    )
+                )
+            else -> {
+                add(
+                    S5MenuOption(id = "settle", label = "Settle", icon = Icons.Rounded.DoneAll)
+                )
+                if (snoozeSupported && threadSnoozable(thread)) {
+                    add(
+                        S5MenuOption(
+                            id = "snooze",
+                            label = "Snooze",
+                            icon = Icons.Rounded.Bedtime,
+                            children =
+                                snoozePresets.map { preset ->
+                                    S5MenuOption(
+                                        id = snoozeMenuAction(preset),
+                                        label = preset.label,
+                                        supporting = preset.whenLabel,
+                                    )
+                                } +
+                                    // RN's `snooze:custom` opens a date/duration
+                                    // picker instead of dispatching directly.
+                                    listOf(
+                                        S5MenuOption(
+                                            id = "snooze:custom",
+                                            label = "Custom…",
+                                        )
+                                    ),
+                        )
+                    )
+                }
+            }
+        }
+        if (pinningSupported && thread.status != ThreadStatus.Snoozed) {
+            add(
+                S5MenuOption(
+                    id = "pin",
+                    label = if (thread.pinned) "Unpin" else "Pin",
+                    icon = Icons.Rounded.PushPin,
+                )
+            )
+        }
+        if (titleRegenerationSupported) {
+            add(
+                S5MenuOption(
+                    id = "regenerate-title",
+                    label = if (thread.titleRegenerating) "Regenerating…" else "Regenerate title",
+                    icon = Icons.Rounded.Refresh,
+                    enabled = !thread.titleRegenerating,
+                )
+            )
+        }
+        // A submenu with the current option checked, not a one-shot action —
+        // this is a setting. Settled and snoozed rows keep it too: RN and web
+        // share one menu builder across row variants, and Disabled keeps a
+        // long-running thread out of the settled shelf however quiet it gets.
+        if (autoSettleOptOutSupported) {
+            add(
+                S5MenuOption(
+                    id = "auto-settle",
+                    label = "Auto-settle behavior",
+                    icon = Icons.Rounded.Timer,
+                    children =
+                        listOf(
+                            S5MenuOption(
+                                id = "auto-settle:enabled",
+                                label = "Enabled",
+                                selected = !thread.autoSettleDisabled,
+                            ),
+                            S5MenuOption(
+                                id = "auto-settle:disabled",
+                                label = "Disabled",
+                                selected = thread.autoSettleDisabled,
+                            ),
+                        ),
+                )
+            )
+        }
+        // Every row variant keeps Archive next to Delete, as RN's menus do: it is
+        // the reversible way to take a thread off the list for good.
+        add(S5MenuOption(id = "archive", label = "Archive", icon = Icons.Rounded.Archive))
+        add(
+            S5MenuOption(
+                id = "delete",
+                label = "Delete",
+                icon = Icons.Rounded.Close,
+                destructive = true,
+            )
+        )
+    }
+}
+
+private suspend fun performThreadAction(
+    store: AppStore,
+    environmentId: EnvironmentId,
+    id: ThreadId,
+    action: String,
+    pinned: Boolean,
+    status: ThreadStatus,
+    /** Move plans the menu was built with; absent means no reorder happens. */
+    moveUpAssignments: List<Pair<ThreadId, String>>? = null,
+    moveDownAssignments: List<Pair<ThreadId, String>>? = null,
+    moveSection: ReorderSection = if (pinned) ReorderSection.Pinned else ReorderSection.Active,
+) {
+    when {
+        action == "pin" -> store.workspace.setPinned(environmentId, id, !pinned)
+        action == "mark-unread" -> store.workspace.markThreadUnread(environmentId, id)
+        action == "move-up" ->
+            moveUpAssignments?.let { store.workspace.reorderThreads(environmentId, moveSection, it) }
+        action == "move-down" ->
+            moveDownAssignments?.let {
+                store.workspace.reorderThreads(environmentId, moveSection, it)
+            }
+        action.startsWith("snooze:") -> {
+            val untilIso = action.removePrefix("snooze:")
+            store.workspace.setSnoozed(environmentId, id, true, untilIso)
+        }
+        action == "snooze" -> store.workspace.setSnoozed(environmentId, id, status != ThreadStatus.Snoozed)
+        action == "unsnooze" -> store.workspace.setSnoozed(environmentId, id, false)
+        action == "settle" -> store.workspace.setSettled(environmentId, id, status != ThreadStatus.Settled)
+        action == "auto-settle:enabled" -> store.workspace.setAutoSettle(environmentId, id, true)
+        action == "auto-settle:disabled" -> store.workspace.setAutoSettle(environmentId, id, false)
+        action == "regenerate-title" -> store.workspace.regenerateTitle(environmentId, id)
+        action == "archive" -> store.workspace.setArchived(environmentId, id, true)
+        action == "delete" -> store.workspace.deleteThread(environmentId, id)
+    }
+}
+
+@Composable
+private fun ShelfHeaderRow(item: HomeListItem.ShelfHeader, onToggle: () -> Unit) {
+    S5Card(tone = S5CardTone.Receded, onClick = onToggle, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(S5Theme.spacing.medium),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Icon(
+                if (item.expanded) Icons.Rounded.ExpandLess else Icons.Rounded.ExpandMore,
+                contentDescription = null,
+                modifier = Modifier.size(20.dp),
+            )
+            Text("${item.label} (${item.count})", style = MaterialTheme.typography.labelLargeEmphasized)
+        }
+    }
+}
+
+/**
+ * The unsent new-task draft, at the top of the list.
+ *
+ * Amber and a pencil, matching the in-thread draft line and the web sidebar's draft
+ * row, so "unsent" reads the same wherever it appears. Discard is on the row rather
+ * than behind a menu: this is the one row whose whole purpose is to be temporary,
+ * and the alternative is a prompt the user has to open just to clear.
+ */
+@Composable
+private fun DraftRow(item: HomeListItem.Draft, onClick: () -> Unit, onDiscard: () -> Unit) {
+    S5Card(tone = S5CardTone.Receded, onClick = onClick, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(S5Theme.spacing.large),
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.medium),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(
+                Icons.Rounded.EditNote,
+                contentDescription = null,
+                tint = S5Theme.status.approval,
+                modifier = Modifier.size(20.dp),
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    "Unsent task",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = S5Theme.status.approval,
+                )
+                Text(
+                    item.preview,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                // The project is what tells two drafts apart, and a draft with no
+                // project yet is still resumable, so the line is dropped rather than
+                // filled with a placeholder.
+                listOfNotNull(item.projectTitle, item.environmentLabel)
+                    .takeIf { it.isNotEmpty() }
+                    ?.let { meta ->
+                        Text(
+                            meta.joinToString(" · "),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
+                    }
+            }
+            S5IconButton(
+                icon = Icons.Rounded.Close,
+                label = "Discard draft",
+                onClick = onDiscard,
+            )
+        }
+    }
+}
+
+@Composable
+private fun QueuedRow(item: HomeListItem.Queued, resolveProjectIconUrl: suspend (Project) -> String?) {
+    S5Card(tone = S5CardTone.Receded, modifier = Modifier.fillMaxWidth()) {
+        Row(
+            Modifier.fillMaxWidth().padding(S5Theme.spacing.large),
+            horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.medium),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            S5ProjectIcon(
+                project = item.project,
+                resolveUrl = resolveProjectIconUrl,
+                size = 28.dp,
+            )
+            Column(Modifier.weight(1f)) {
+                Text(
+                    item.thread.title,
+                    style = MaterialTheme.typography.titleSmall,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    item.thread.excerpt ?: "Queued until the environment reconnects",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Icon(
+                Icons.AutoMirrored.Rounded.Article,
+                contentDescription = null,
+                tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier.size(18.dp),
+            )
+        }
+    }
+}
+
+/**
+ * Placeholder rows drawn while the first snapshot lands. Six, which is about a
+ * phone screen: fewer reads as a broken list, and more only adds rows nobody sees
+ * before the real ones replace them.
+ */
+private const val HOME_SKELETON_ROWS = 6
+// RN's THREAD_SEARCH_DEBOUNCE_MS.
+private const val SEARCH_DEBOUNCE_MILLIS = 120L
+
+@Composable
+private fun HomeUpdateNotice(
+    title: String,
+    subtitle: String,
+    actionLabel: String?,
+    onAction: (() -> Unit)?,
+    onDismiss: (() -> Unit)?,
+    progress: Float? = null,
+) {
+    S5Card(tone = S5CardTone.Hero, modifier = Modifier.fillMaxWidth()) {
+        Column(
+            Modifier.fillMaxWidth().padding(S5Theme.spacing.medium),
+            verticalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+        ) {
+            Row(
+                Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(S5Theme.spacing.small),
+                    modifier = Modifier.weight(1f),
+                ) {
+                    Icon(
+                        Icons.Rounded.SystemUpdate,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp),
+                    )
+                    Column {
+                        Text(title, style = MaterialTheme.typography.labelLargeEmphasized)
+                        Text(
+                            subtitle,
+                            style = S5Theme.code.inlineTechnical,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                }
+                if (onDismiss != null) {
+                    S5IconButton(
+                        icon = Icons.Rounded.Close,
+                        label = "Dismiss update notice",
+                        onClick = onDismiss,
+                    )
+                }
+            }
+
+            if (progress != null) {
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth().clip(MaterialTheme.shapes.extraSmall),
+                )
+            } else if (actionLabel != null && onAction != null) {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.CenterEnd) {
+                    S5Button(
+                        text = actionLabel,
+                        icon = Icons.Rounded.Download,
+                        onClick = onAction,
+                        style = S5ButtonStyle.Filled,
+                    )
+                }
+            }
+        }
+    }
+}
