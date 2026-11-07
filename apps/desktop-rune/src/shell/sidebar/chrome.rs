@@ -173,7 +173,7 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
         }
         menu.child(btn("sb-usage", &i::CHART_NO_AXES_COLUMN).label("Usage").on_press(|s: &mut App| super::go(s, Route::Usage)))
     };
-    let mut bar = row().key("sb-footer").w_full().shrink().px(8.0).pt(4.0).pb(8.0).center_y().child(menu).child(spacer());
+    let mut bar = row().key("sb-footer").w_full().shrink().px(8.0).pt(4.0).pb(8.0).center_y().child(menu).child(undo_notice(s, t));
     if model.updates > 0 {
         bar = bar.child(
             el().key("sb-update")
@@ -190,6 +190,36 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
         );
     }
     bar
+}
+
+/// `SidebarThreadUndoNotice`: fills the footer's free space, right-aligned, while an action can
+/// be undone.
+fn undo_notice(s: &App, t: &T) -> El {
+    let Some((action, count)) = s.ui.shell.sidebar.undos.notice(crate::data::now_ms()) else { return spacer() };
+    let action = format!("{action:?}");
+    let summary = if count == 1 { action } else { format!("{action} {count}") };
+    let shortcut = crate::shell::palette::shortcut_label(s, "thread.undo");
+    let label = if shortcut.is_empty() { "Undo".to_string() } else { format!("{shortcut} to undo") };
+    row()
+        .key("sb-undo")
+        .grow(1.0)
+        .shrink()
+        .h(24.0)
+        .gap(4.0)
+        .center_y()
+        .child(spacer())
+        .child(text(format!("{summary},")).font(theme::TEXT_2XS).color(t.sb.sidebar_muted_foreground))
+        .child(
+            text(label.clone())
+                .font(theme::TEXT_2XS)
+                .color(t.sb.sidebar_muted_foreground)
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label(label)
+                .on_press(|s: &mut App| {
+                    super::undo(s);
+                }),
+        )
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -275,7 +305,7 @@ pub fn placeholder(t: &T, label: &str, target: bool) -> El {
 /// Search results replace the list: one row per hit, the highlighted one filled.
 pub fn search_results(s: &App, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
-    let hits = logic::search(&model.threads, &ui.search.text);
+    let hits = logic::search(&model.threads, &ui.search.text, ui.content_hits());
     let mut list = col().key("sb-results").w_full().px(8.0).py(8.0).gap(1.0);
     if hits.is_empty() {
         list = list.child(el().w_full().px(8.0).py(24.0).center().child(text("No threads found").font(theme::TEXT_XS).color(t.sb.sidebar_muted_foreground)));

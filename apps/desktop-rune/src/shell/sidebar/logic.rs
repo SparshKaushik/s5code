@@ -798,7 +798,9 @@ pub fn project_color(name: &str) -> usize {
 }
 
 /// Search: case-insensitive title or branch matches, title-prefix matches first, then recency.
-pub fn search(threads: &[Thread], query: &str) -> Vec<usize> {
+/// Title and branch hits, then the threads listed only because the server found the query in
+/// their messages (`content`, in its order), as `searchSidebarThreads`.
+pub fn search(threads: &[Thread], query: &str, content: &[String]) -> Vec<usize> {
     let q = query.trim().to_lowercase();
     if q.is_empty() {
         return Vec::new();
@@ -822,7 +824,15 @@ pub fn search(threads: &[Thread], query: &str) -> Vec<usize> {
         })
         .collect();
     hits.sort_by(|a, b| a.0.cmp(&b.0).then(b.1.cmp(&a.1)));
-    hits.into_iter().map(|h| h.2).collect()
+    let mut out: Vec<usize> = hits.into_iter().map(|h| h.2).collect();
+    for id in content {
+        if let Some(i) = threads.iter().position(|t| t.id == *id && !t.archived && !t.hidden)
+            && !out.contains(&i)
+        {
+            out.push(i);
+        }
+    }
+    out
 }
 
 /// `VISIT_DISPATCH_THROTTLE_MS`: each visit is a full command dispatch and shell broadcast.
@@ -848,11 +858,11 @@ impl Visits {
     /// The `thread.visit` to send for the shown thread's shell now: `(visitedAt, opened)`.
     pub fn tick(&mut self, shown: Option<&str>, shell: Option<&Value>, now: i64) -> Option<(String, bool)> {
         if self.thread.as_deref() != shown {
-            let claimed = self.claimed.take().filter(|(id, _)| Some(id.as_str()) == shown);
+            let claimed = self.claimed.take().filter(|(id, _)| Some(id.as_str()) == shown).map(|(_, at)| at);
             *self = Visits {
                 thread: shown.map(str::to_string),
                 open_pending: claimed.is_none(),
-                last_sent: claimed.map(|(_, at)| at),
+                last_sent: claimed,
                 last_sent_at: if claimed.is_some() { now } else { 0 },
                 claimed: None,
             };
@@ -887,10 +897,124 @@ impl Visits {
     }
 }
 
+/// How long the footer's undo notice stays (`showThreadUndoNotice`).
+pub const UNDO_MS: i64 = 5_000;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UndoAction {
+    Settled,
+    Snoozed,
+    Unpinned,
+    Archived,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum UndoStep {
+    Unsettle,
+    Pin(Option<String>),
+    Snooze(i64),
+    Unsnooze,
+    Unarchive,
+}
+
+/// `planThreadUndo`: the commands that put a thread back where the action found it.
+pub fn undo_plan(action: UndoAction, t: &Thread) -> Vec<UndoStep> {
+    let pin = UndoStep::Pin(t.pin_key.clone());
+    // Pinning clears snooze on the server, so the snooze comes back after the pin.
+    let snooze = t.snoozed_until.map(UndoStep::Snooze);
+    match action {
+        UndoAction::Snoozed => vec![UndoStep::Unsnooze],
+        UndoAction::Archived => vec![UndoStep::Unarchive],
+        UndoAction::Unpinned => std::iter::once(pin).chain(snooze).collect(),
+        UndoAction::Settled => std::iter::once(UndoStep::Unsettle).chain(t.pinned.then_some(pin)).chain(snooze).collect(),
+    }
+}
+
+/// The live undoable thread actions behind the footer notice. One timer covers them all; the
+/// notice and Undo act on the newest run of the same action.
+#[derive(Default)]
+pub struct Undos {
+    live: Vec<(UndoAction, String, Vec<UndoStep>)>,
+    expires: i64,
+    /// A new notice owns mod+z, even over a text field, until another key is pressed.
+    claimed: bool,
+}
+
+impl Undos {
+    pub fn push(&mut self, action: UndoAction, id: &str, plan: Vec<UndoStep>, now: i64) {
+        // Re-pinning or re-snoozing would un-settle a settled thread, and an archived one
+        // leaves the list, so these supersede the thread's older entries.
+        let supersedes = |a: UndoAction| a == action || matches!(action, UndoAction::Archived) || (action == UndoAction::Settled && matches!(a, UndoAction::Unpinned | UndoAction::Snoozed));
+        self.live.retain(|(a, other, _)| other != id || !supersedes(*a));
+        self.live.push((action, id.to_string(), plan));
+        self.expires = now + UNDO_MS;
+        self.claimed = true;
+    }
+
+    pub fn release(&mut self) {
+        self.claimed = false;
+    }
+
+    pub fn claims_key(&self, now: i64) -> bool {
+        self.claimed && self.group_len(now) > 0
+    }
+
+    fn group_len(&self, now: i64) -> usize {
+        if now >= self.expires {
+            return 0;
+        }
+        let Some((latest, ..)) = self.live.last() else { return 0 };
+        self.live.iter().rev().take_while(|(a, ..)| a == latest).count()
+    }
+
+    pub fn notice(&self, now: i64) -> Option<(UndoAction, usize)> {
+        let n = self.group_len(now);
+        (n > 0).then(|| (self.live[self.live.len() - 1].0, n))
+    }
+
+    /// Takes the newest group for Undo; an expired notice undoes nothing.
+    pub fn take(&mut self, now: i64) -> Vec<(String, Vec<UndoStep>)> {
+        let n = self.group_len(now);
+        if now >= self.expires {
+            self.live.clear();
+        }
+        self.live.split_off(self.live.len() - n).into_iter().map(|(_, id, plan)| (id, plan)).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn undo_groups_the_newest_action_and_restores_pin_then_snooze() {
+        let pinned = Thread { pinned: true, pin_key: Some("a0".into()), snoozed_until: Some(9), ..Default::default() };
+        assert_eq!(undo_plan(UndoAction::Settled, &pinned), [UndoStep::Unsettle, UndoStep::Pin(Some("a0".into())), UndoStep::Snooze(9)]);
+        assert_eq!(undo_plan(UndoAction::Settled, &Thread::default()), [UndoStep::Unsettle]);
+        assert_eq!(undo_plan(UndoAction::Unpinned, &Thread::default()), [UndoStep::Pin(None)]);
+
+        let mut u = Undos::default();
+        u.push(UndoAction::Unpinned, "a", vec![UndoStep::Pin(None)], 0);
+        u.push(UndoAction::Archived, "b", vec![UndoStep::Unarchive], 0);
+        u.push(UndoAction::Archived, "c", vec![UndoStep::Unarchive], 1_000);
+        assert_eq!(u.notice(1_000), Some((UndoAction::Archived, 2)));
+        assert!(u.claims_key(1_000));
+        u.release();
+        assert!(!u.claims_key(1_000));
+        let ids: Vec<_> = u.take(1_000).into_iter().map(|(id, _)| id).collect();
+        assert_eq!(ids, ["b", "c"]);
+        assert_eq!(u.notice(1_000), Some((UndoAction::Unpinned, 1)));
+        // Settling supersedes the thread's own unpin undo.
+        u.push(UndoAction::Settled, "a", vec![UndoStep::Unsettle], 2_000);
+        assert_eq!(u.notice(2_000), Some((UndoAction::Settled, 1)));
+        assert_eq!(u.take(2_000).len(), 1);
+        assert_eq!(u.notice(2_000), None);
+        // The notice expires five seconds after the newest action, taking everything with it.
+        u.push(UndoAction::Snoozed, "d", vec![UndoStep::Unsnooze], 3_000);
+        assert_eq!(u.notice(3_000 + UNDO_MS), None);
+        assert!(u.take(3_000 + UNDO_MS).is_empty());
+    }
 
     fn ms(iso: &str) -> i64 {
         iso_ms(iso).unwrap()
@@ -1306,7 +1430,10 @@ mod tests {
     fn search_ranks_prefix_then_word_then_substring() {
         let t = |id: &str, title: &str, at: i64| Thread { id: id.into(), title: title.into(), updated_at: at, ..Default::default() };
         let threads = vec![t("sub", "Unsidebar", 9), t("word", "Fix sidebar", 1), t("prefix", "Sidebar v2", 0), t("miss", "Docs", 9)];
-        assert_eq!(search(&threads, "side"), [2, 1, 0]);
-        assert!(search(&threads, "  ").is_empty());
+        assert_eq!(search(&threads, "side", &[]), [2, 1, 0]);
+        assert!(search(&threads, "  ", &[]).is_empty());
+        // Message matches follow, in server order, without repeating a title hit.
+        let content = ["miss".to_string(), "word".into(), "gone".into()];
+        assert_eq!(search(&threads, "side", &content), [2, 1, 0, 3]);
     }
 }

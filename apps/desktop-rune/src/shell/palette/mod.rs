@@ -183,20 +183,43 @@ fn item(
 fn keywords(terms: &[&str]) -> Vec<SearchTerm> {
     terms.iter().map(|v| SearchTerm::keyword(*v)).collect()
 }
-/// A configured shortcut as the web's mac labels write it: ⌃⌥⇧⌘ then the key.
-fn shortcut_label(s: &App, command: &str) -> String {
+/// A configured shortcut as the web's `shortcutLabelForCommand` writes it: ⌃⌥⇧⌘ then the key on
+/// mac, "Ctrl+Shift+N" elsewhere.
+pub fn shortcut_label(s: &App, command: &str) -> String {
     let binding = s.state().config.as_ref().and_then(|v| v["keybindings"].as_array()).and_then(|rows| {
         rows.iter().find(|v| v["command"] == command && v["when"].is_null()).or_else(|| rows.iter().find(|v| v["command"] == command))
     });
-    let Some(k) = binding.map(|v| &v["shortcut"]) else { return String::new() };
+    binding.map_or_else(String::new, |v| format_shortcut(&v["shortcut"], cfg!(target_os = "macos")))
+}
+
+fn format_shortcut(k: &serde_json::Value, mac: bool) -> String {
     let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+    let key = k["key"].as_str().unwrap_or("");
+    let (ctrl, meta) = (yes("ctrlKey") || (yes("modKey") && !mac), yes("metaKey") || (yes("modKey") && mac));
+    if !mac {
+        let mut parts: Vec<String> = [(ctrl, "Ctrl"), (yes("altKey"), "Alt"), (yes("shiftKey"), "Shift"), (meta, "Meta")]
+            .into_iter()
+            .filter(|(on, _)| *on)
+            .map(|(_, name)| name.to_string())
+            .collect();
+        parts.push(match key {
+            " " | "space" => "Space".into(),
+            "escape" => "Esc".into(),
+            "arrowup" => "Up".into(),
+            "arrowdown" => "Down".into(),
+            "arrowleft" => "Left".into(),
+            "arrowright" => "Right".into(),
+            one if one.chars().count() == 1 => one.to_uppercase(),
+            word => word.chars().take(1).flat_map(char::to_uppercase).chain(word.chars().skip(1)).collect(),
+        });
+        return parts.join("+");
+    }
     let mut label = String::new();
-    for (on, glyph) in [(yes("ctrlKey"), "⌃"), (yes("altKey"), "⌥"), (yes("shiftKey"), "⇧"), (yes("modKey") || yes("metaKey"), "⌘")] {
+    for (on, glyph) in [(ctrl, "⌃"), (yes("altKey"), "⌥"), (yes("shiftKey"), "⇧"), (meta, "⌘")] {
         if on {
             label.push_str(glyph);
         }
     }
-    let key = k["key"].as_str().unwrap_or("");
     label.push_str(&match key {
         "enter" => "↵".into(),
         "escape" => "Esc".into(),
@@ -328,7 +351,7 @@ fn items(s: &App) -> Vec<Item> {
                 format!("New thread in {}", data::s(p, "title")),
                 "Actions",
                 &icons::SQUARE_PEN,
-                "⇧⌘N",
+                &shortcut_label(s, "chat.newLocal"),
                 Action::Navigate(Route::Home {
                     project_id: Some(data::s(p, "id").into()),
                 }),
@@ -345,7 +368,7 @@ fn items(s: &App) -> Vec<Item> {
             "New thread without a project",
             "Actions",
             &icons::MESSAGE_SQUARE_DASHED,
-            "",
+            &shortcut_label(s, "chat.newWithoutProject"),
             Action::Navigate(Route::Home { project_id: None }),
         ));
         out.extend(actions::thread_items(s));
@@ -371,7 +394,7 @@ fn items(s: &App) -> Vec<Item> {
             "Open settings",
             "Actions",
             &icons::SETTINGS,
-            "⌘,",
+            "",
             Action::Navigate(Route::Settings("general".into())),
         ));
         // The current project, else the first, as the web's contextual project group.
@@ -1810,6 +1833,15 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn shortcut_labels_spell_modifiers_out_off_mac() {
+        let k = serde_json::json!({ "key": "n", "modKey": true, "shiftKey": true });
+        assert_eq!(format_shortcut(&k, false), "Ctrl+Shift+N");
+        assert_eq!(format_shortcut(&k, true), "⇧⌘N");
+        let k = serde_json::json!({ "key": "arrowleft", "metaKey": true, "altKey": true });
+        assert_eq!(format_shortcut(&k, false), "Alt+Meta+Left");
+        assert_eq!(format_shortcut(&serde_json::json!({ "key": "enter", "ctrlKey": true }), false), "Ctrl+Enter");
+    }
     #[test]
     fn names_match_word_starts_joined_words_and_restricted_typos() {
         for (name, query, expected) in [
