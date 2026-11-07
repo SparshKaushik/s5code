@@ -216,6 +216,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         }
         Some("slider") => slider(s, t, key, title),
         Some("model") => super::models::control(s, t, key),
+        Some("secret") => super::providers::secret_control(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")),
         _ => input(
             s,
             t,

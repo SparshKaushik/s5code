@@ -808,6 +808,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("settings-providers-loading-light", |s| providers_state(s, true, s5_net::Conn::Connecting)),
     ("settings-providers-error", |s| providers_error(s, false)),
     ("settings-providers-error-light", |s| providers_error(s, true)),
+    ("settings-providers-secrets", |s| providers_secrets(s, false, "codex_work")),
+    ("settings-providers-secrets-light", |s| providers_secrets(s, true, "codex_work")),
+    ("settings-providers-password", |s| providers_secrets(s, false, "opencode")),
+    ("settings-providers-password-light", |s| providers_secrets(s, true, "opencode")),
 ];
 
 /// The providers page with model preferences and a second Codex instance staged.
@@ -838,6 +842,29 @@ fn providers_scene(s: &mut App, light: bool, selected: &str) {
         }),
     );
     s.ui.settings.provider = Some(selected.into());
+}
+
+/// A stored sensitive variable, a secret provider reference, and a stored OpenCode password.
+fn providers_secrets(s: &mut App, light: bool, selected: &str) {
+    providers_scene(s, light, selected);
+    stage_settings(
+        s,
+        json!({"providerInstances": {
+            "codex_work": {
+                "driver": "codex",
+                "displayName": "Codex (work)",
+                "config": {"homePath": "~/.codex-work"},
+                "environment": [
+                    {"name": "OPENAI_BASE_URL", "value": "https://proxy.internal/v1", "sensitive": false},
+                    {"name": "OPENAI_API_KEY", "value": "", "sensitive": true, "valueRedacted": true},
+                    {"name": "GITHUB_TOKEN", "value": "", "sensitive": true,
+                        "secret": {"provider": "onepassword", "reference": "op://Engineering/GitHub/token"}}
+                ]
+            },
+            "opencode": {"driver": "opencode", "config": {"serverUrl": "http://127.0.0.1:4096", "serverPassword": "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}"}}
+        }}),
+    );
+    s.ui.settings.providers_ui.scene_bottom = selected == "codex_work";
 }
 
 fn providers_models(s: &mut App, light: bool) {

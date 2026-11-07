@@ -29,6 +29,14 @@ const DRIVERS: &[(&str, &str, bool)] = &[
     ("acpRegistry", "ACP Registry", false),
 ];
 const FILTER_THRESHOLD: usize = 8;
+/// What the server sends in place of a secret config field it holds (`SECRET_REDACTED`).
+const SECRET_REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
+const STORED_SECRET: &str = "Stored secret, enter a new value to replace";
+static LOCK_OPEN: rune::Icon = rune::Icon {
+    name: "lock-open",
+    view: 24.0,
+    body: "<rect width=\"18\" height=\"11\" x=\"3\" y=\"11\" rx=\"2\" ry=\"2\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M7 11V7a5 5 0 0 1 9.9-1\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
+};
 
 #[derive(Default)]
 pub struct Ui {
@@ -36,13 +44,19 @@ pub struct Ui {
     pub custom: TextEdit,
     pub adding: bool,
     pub error: Option<String>,
-    pub env_name: TextEdit,
-    pub env_value: TextEdit,
-    pub env_adding: bool,
+    pub env_draft: Option<EnvDraft>,
     /// `(instance id, reset)` awaiting the remove or reset confirmation.
     pub confirm: Option<(String, bool)>,
     /// Scenes only: open the detail pane scrolled to its end, where Models sits.
     pub scene_bottom: bool,
+}
+
+/// `ProviderEnvironmentEditor`'s rows while they differ from what was published: blank rows,
+/// and rows whose name isn't valid yet. Dropped once the environment changes underneath.
+pub struct EnvDraft {
+    instance: String,
+    rows: Vec<Value>,
+    seen: Value,
 }
 
 pub struct Row {
@@ -136,12 +150,13 @@ fn display_name(instance: &Value) -> String {
     }
 }
 
+/// The `server.updateSettings` payload that saves one instance.
+fn upsert_payload(id: &str, instance: Value, patch: Value) -> Value {
+    json!({"patch": patch, "providerInstanceMutation": {"operation": "upsert", "instanceId": id, "instance": instance}})
+}
+
 fn upsert(s: &mut App, id: &str, instance: Value, patch: Value) {
-    request(
-        s,
-        "server.updateSettings",
-        json!({"patch": patch, "providerInstanceMutation": {"operation": "upsert", "instanceId": id, "instance": instance}}),
-    );
+    request(s, "server.updateSettings", upsert_payload(id, instance, patch));
 }
 
 fn remove_instance(s: &mut App, id: &str) {
@@ -198,7 +213,7 @@ pub fn apply_extras(settings: &mut Value, payload: &Value) {
                 map.remove(id);
             }
             _ => {
-                map.insert(id.to_owned(), mutation["instance"].clone());
+                map.insert(id.to_owned(), redact_instance(&mutation["instance"]));
             }
         }
     }
@@ -209,6 +224,18 @@ pub fn field_key(id: &str, field: &str) -> String {
 }
 
 pub fn field_value(s: &App, id: &str, field: &str) -> Value {
+    if let Some((index, part)) = env_field(field) {
+        let row = env_rows(s, id).get(index).cloned().unwrap_or(Value::Null);
+        return match part {
+            "name" => row["name"].clone(),
+            _ if row["valueRedacted"] == true || !row["value"].is_string() => json!(""),
+            _ => row["value"].clone(),
+        };
+    }
+    // A secret field never shows what it holds; its input only takes a replacement.
+    if is_secret_field(&driver_of(s, id), field) {
+        return json!("");
+    }
     let entry = &server_settings(s)["providerInstances"][id];
     if field == "displayName" || field == "enabled" { entry[field].clone() } else { entry["config"][field].clone() }
 }
@@ -240,7 +267,18 @@ pub fn config_patch(settings: &Value, id: &str, driver: &str, field: &str, value
 }
 
 pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
+    if let Some((index, part)) = env_field(field) {
+        let mut rows = env_rows(s, id);
+        if rows.get_mut(index).is_some_and(|row| edit_row(row, part, value.as_str().unwrap_or(""))) {
+            set_environment(s, id, rows);
+        }
+        return;
+    }
     let driver = driver_of(s, id);
+    // An empty commit keeps a stored secret (`SecretInput`); Clear is how one is removed.
+    if is_secret_field(&driver, field) && value.as_str().is_some_and(|v| v.trim().is_empty()) {
+        return;
+    }
     let previous = instance_of(s, id, &driver);
     let next = config_patch(server_settings(s), id, &driver, field, value)["providerInstances"][id].clone();
     // Turning off the text generation provider puts text generation back on its default.
@@ -251,6 +289,197 @@ pub fn update(s: &mut App, id: &str, field: &str, value: Value) {
         json!({})
     };
     upsert(s, id, next, patch);
+}
+
+// --- Secrets --------------------------------------------------------------------------------
+
+/// Config fields the server keeps in its secret store (`secretSetting` in the driver schemas).
+fn secret_fields(driver: &str) -> &'static [&'static str] {
+    match driver {
+        "opencode" => &["serverPassword"],
+        "antigravity" => &["apiKey"],
+        _ => &[],
+    }
+}
+
+fn is_secret_field(driver: &str, field: &str) -> bool {
+    secret_fields(driver).contains(&field)
+}
+
+/// The instance as the server will report it back: sensitive variable values and secret fields
+/// are stored separately, so the app's own copy never holds them either.
+pub fn redact_instance(instance: &Value) -> Value {
+    let mut next = instance.clone();
+    if let Some(environment) = instance.get("environment") {
+        next["environment"] = redact_environment(environment);
+    }
+    for field in secret_fields(instance["driver"].as_str().unwrap_or("")) {
+        if let Some(value) = next.get_mut("config").and_then(|c| c.get_mut(*field)) {
+            if value.as_str().is_some_and(|v| !v.is_empty()) {
+                *value = json!(SECRET_REDACTED);
+            }
+        }
+    }
+    next
+}
+
+fn redact_environment(environment: &Value) -> Value {
+    let rows = environment.as_array().into_iter().flatten().map(|row| {
+        let typed = row["sensitive"] == true && row.get("secret").is_none();
+        if typed && row["value"].as_str().is_some_and(|v| !v.is_empty()) {
+            let mut row = row.clone();
+            row["value"] = json!("");
+            row["valueRedacted"] = json!(true);
+            row
+        } else {
+            row.clone()
+        }
+    });
+    json!(rows.collect::<Vec<_>>())
+}
+
+fn clear_secret(s: &mut App, id: &str, field: &str) {
+    let driver = driver_of(s, id);
+    let next = config_patch(server_settings(s), id, &driver, field, json!(""))["providerInstances"][id].clone();
+    upsert(s, id, next, json!({}));
+}
+
+// --- Environment variables --------------------------------------------------------------------
+
+/// `env.<index>.<name|value>`, the fields behind a variable row's inputs.
+fn env_field(field: &str) -> Option<(usize, &str)> {
+    let (index, part) = field.strip_prefix("env.")?.split_once('.')?;
+    Some((index.parse().ok()?, part))
+}
+
+fn published_environment(s: &App, id: &str) -> Value {
+    match &server_settings(s)["providerInstances"][id]["environment"] {
+        Value::Array(rows) => json!(rows),
+        _ => json!([]),
+    }
+}
+
+fn env_rows(s: &App, id: &str) -> Vec<Value> {
+    let published = published_environment(s, id);
+    match &s.ui.settings.providers_ui.env_draft {
+        Some(draft) if draft.instance == id && draft.seen == published => draft.rows.clone(),
+        _ => published.as_array().cloned().unwrap_or_default(),
+    }
+}
+
+/// A variable added with Add variable: sensitive until the user makes it plain text.
+pub fn new_variable() -> Value {
+    json!({"name": "", "value": "", "sensitive": true})
+}
+
+/// `updateVariable` for one committed input; false when the commit changes nothing.
+pub fn edit_row(row: &mut Value, part: &str, text: &str) -> bool {
+    match part {
+        "name" if row["valueRedacted"] != true => row["name"] = json!(text.trim()),
+        // A stored secret stays until a replacement is entered.
+        "value" if !(row["sensitive"] == true && row["valueRedacted"] == true && text.is_empty()) => {
+            if let Some(map) = row.as_object_mut() {
+                map.remove("secret");
+            }
+            row["value"] = json!(text);
+            row["valueRedacted"] = json!(false);
+        }
+        _ => return false,
+    }
+    true
+}
+
+fn valid_env_name(name: &str) -> bool {
+    let mut chars = name.chars();
+    name.len() <= 128
+        && chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// `publishRows`: the variables to save, or None while a row with content has no valid name.
+/// Untouched blank rows are left out.
+pub fn publish_environment(rows: &[Value]) -> Option<Vec<Value>> {
+    let mut out = Vec::new();
+    for row in rows {
+        let name = row["name"].as_str().unwrap_or("").trim();
+        if !valid_env_name(name) {
+            let blank = name.is_empty()
+                && row["value"] == ""
+                && row.get("secret").is_none()
+                && row["sensitive"] == true
+                && row.get("valueRedacted").is_none();
+            if !blank {
+                return None;
+            }
+            continue;
+        }
+        let mut row = row.clone();
+        row["name"] = json!(name);
+        out.push(row);
+    }
+    Some(out)
+}
+
+/// The instance with its variables replaced, as `server.updateSettings` carries it.
+pub fn environment_instance(instance: &Value, variables: Vec<Value>) -> Value {
+    let mut next = instance.clone();
+    if variables.is_empty() {
+        if let Some(map) = next.as_object_mut() {
+            map.remove("environment");
+        }
+    } else {
+        next["environment"] = json!(variables);
+    }
+    next
+}
+
+fn set_environment(s: &mut App, id: &str, rows: Vec<Value>) {
+    let driver = driver_of(s, id);
+    let current = instance_of(s, id, &driver);
+    let draft = |rows, seen| Some(EnvDraft { instance: id.to_owned(), rows, seen });
+    let Some(variables) = publish_environment(&rows) else {
+        // Not saved yet, so the typed values stay in the draft as `ProviderEnvironmentEditor` keeps them.
+        s.ui.settings.providers_ui.env_draft = draft(rows, published_environment(s, id));
+        return;
+    };
+    let next = environment_instance(&current, variables);
+    let seen = next.get("environment").map_or(json!([]), redact_environment);
+    let rows = redact_environment(&json!(rows)).as_array().cloned().unwrap_or_default();
+    s.ui.settings.providers_ui.env_draft = draft(rows, seen);
+    upsert(s, id, next, json!({}));
+}
+
+fn add_variable(s: &mut App, id: &str) {
+    // Typed text is keyed by row index, so it lands before the rows move or change input.
+    super::commit_edits(s, true);
+    let mut rows = env_rows(s, id);
+    rows.push(new_variable());
+    let seen = published_environment(s, id);
+    s.ui.settings.providers_ui.env_draft = Some(EnvDraft { instance: id.to_owned(), rows, seen });
+}
+
+fn remove_variable(s: &mut App, id: &str, index: usize) {
+    super::commit_edits(s, true);
+    let mut rows = env_rows(s, id);
+    if index < rows.len() {
+        rows.remove(index);
+        set_environment(s, id, rows);
+    }
+}
+
+fn toggle_sensitive(s: &mut App, id: &str, index: usize) {
+    super::commit_edits(s, true);
+    let mut rows = env_rows(s, id);
+    let Some(row) = rows.get_mut(index) else { return };
+    if row["valueRedacted"] == true || !row["value"].is_string() {
+        return;
+    }
+    let sensitive = row["sensitive"] != true;
+    row["sensitive"] = json!(sensitive);
+    if !sensitive || row.get("valueRedacted").is_some() {
+        row["valueRedacted"] = json!(false);
+    }
+    set_environment(s, id, rows);
 }
 
 fn select(s: &mut App, id: &str) {
@@ -484,11 +713,15 @@ fn heading(title: &str, t: &T) -> El {
 }
 
 fn text_row(s: &App, cx: &rune::Cx<App>, t: &T, id: &str, field: &str, title: &str, description: &str, placeholder: &str) -> El {
+    let secret = is_secret_field(&driver_of(s, id), field);
     c::setting_row(
         s,
         cx,
         t,
-        &json!({"key": field_key(id, field), "title": title, "description": description, "placeholder": placeholder, "width": 224}),
+        &json!({
+            "key": field_key(id, field), "title": title, "description": description,
+            "placeholder": placeholder, "width": 224, "kind": if secret { "secret" } else { "text" },
+        }),
     )
 }
 
@@ -527,6 +760,18 @@ fn runtime_fields(driver: &str, config: &Value) -> Vec<(&'static str, &'static s
         "opencode" => vec![
             binary("Path to the OpenCode binary.", "opencode"),
             ("serverUrl", "Server URL", "Leave blank to let T3 Code spawn the server when needed.", "http://127.0.0.1:4096"),
+            ("serverPassword", "Server password", "Stored separately on the host.", "Optional"),
+        ],
+        "antigravity" => vec![
+            ("apiKey", "API key", "Gemini or Vertex AI express key. Stored separately on the host.", "Optional"),
+            (
+                "gcpProject",
+                "GCP project",
+                "Required for Gemini Enterprise. Agent Platform uses it when no API key is set.",
+                "my-project-id",
+            ),
+            ("gcpLocation", "GCP location", "Region for Gemini Enterprise or Agent Platform.", "us-central1"),
+            ("binaryPath", "Binary path", "Custom ACP executable. Leave empty to select automatically.", "Automatic"),
         ],
         "grok" => vec![binary("Path to the Grok CLI binary.", "grok")],
         "fx" => vec![binary("Path to the fx binary. All fx instances on this machine share its fx login.", "fx")],
@@ -647,9 +892,150 @@ fn small_input(edit: &TextEdit, key: &str, placeholder: &str, t: &T, mono: bool)
         .single_line()
 }
 
-fn environment_row(s: &App, t: &T, id: &str, instance: &Value) -> El {
-    let ui = &s.ui.settings.providers_ui;
-    let variables = instance["environment"].as_array().cloned().unwrap_or_default();
+/// `SecretInput`: masked, never prefilled, and dropped from the edit buffer once committed.
+fn secret_input(s: &App, t: &T, key: &str, placeholder: &str, mono: bool) -> El {
+    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| TextEdit::new(String::new()).secure());
+    let (k1, k2) = (key.to_owned(), key.to_owned());
+    rune::text_input(&edit, if mono { theme::MONO_SM } else { theme::TEXT_SM })
+        .key(format!("setting-{key}"))
+        .placeholder(placeholder, t.c.muted_foreground.alpha_mul(0.72))
+        .h(28.0)
+        .px(9.0)
+        .py(4.0)
+        .radius(8.0)
+        .border(1.0, t.c.input)
+        .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
+        .color(t.c.foreground)
+        .single_line()
+        .secure()
+        .on_edit(move |s: &mut App| s.ui.settings.edits.entry(k1.clone()).or_insert_with(|| edit.clone()))
+        .on_submit(move |s: &mut App, _| {
+            if let Some(edit) = s.ui.settings.edits.remove(&k2) {
+                super::update(s, &k2, json!(edit.text.clone()));
+            }
+        })
+}
+
+/// A secret config field's control (`field.secret` in `ProviderSettingsFieldRow`).
+pub fn secret_control(s: &App, t: &T, key: &str, title: &str, placeholder: &str) -> El {
+    let Some((id, field)) = key.strip_prefix("provider::").and_then(|k| k.split_once("::")) else { return el() };
+    let driver = driver_of(s, id);
+    let instance = instance_of(s, id, &driver);
+    let saved = &instance["config"][field];
+    let configured = saved.as_str().is_some_and(|v| !v.is_empty()) || saved.is_object();
+    // Rune wraps placeholders instead of clipping them, and the full sentence doesn't fit 224px.
+    let placeholder = if configured {
+        "Stored secret"
+    } else if placeholder.is_empty() {
+        "Not set"
+    } else {
+        placeholder
+    };
+    let mut control = row()
+        .w(224.0)
+        .gap(8.0)
+        .center_y()
+        .child(secret_input(s, t, key, placeholder, false).grow(1.0).min_w(0.0).label(title.to_owned()));
+    if configured {
+        let (id, field) = (id.to_owned(), field.to_owned());
+        control = control.child(
+            kit::Button::new(format!("Clear {title}"))
+                .variant("ghost-destructive")
+                .size("icon-sm")
+                .icon(&icons::X)
+                .on_press(move |s: &mut App| clear_secret(s, &id, &field))
+                .build(t),
+        );
+    }
+    control
+}
+
+fn variable_row(s: &App, t: &T, id: &str, index: usize, v: &Value) -> El {
+    let name = v["name"].as_str().unwrap_or("");
+    let label = if name.is_empty() { (index + 1).to_string() } else { name.to_owned() };
+    let redacted = v["valueRedacted"] == true;
+    let reference = v.get("secret").filter(|r| r.is_object());
+    let key = |part: &str| field_key(id, &format!("env.{index}.{part}"));
+    let mut name_input = c::input(s, t, &key("name"), 0.0, "VARIABLE_NAME", false)
+        .font(theme::MONO_SM)
+        .grow(1.0)
+        .min_w(0.0)
+        .label(format!("Environment variable name {}", index + 1));
+    if redacted {
+        // Renaming would orphan the stored value; a new value has to be entered first.
+        name_input = name_input.disabled(true).opacity(0.64);
+    }
+    let mut top = row().w_full().gap(6.0).center_y().child(name_input);
+    if let Some(r) = reference {
+        let provider = r["provider"].as_str().unwrap_or("").to_owned();
+        top = top.child(
+            row()
+                .h(28.0)
+                .px(8.0)
+                .center_y()
+                .radius(8.0)
+                .border(1.0, t.c.input)
+                .label(format!("Environment variable value {} source: {provider}", index + 1))
+                .child(icon(&icons::KEY_ROUND, 14.0).color(t.c.muted_foreground)),
+        );
+    }
+    let remove_id = id.to_owned();
+    top = top.child(
+        kit::Button::new(format!("Remove environment variable {label}"))
+            .variant("ghost-destructive")
+            .size("icon-micro")
+            .icon(&icons::X)
+            .on_press(move |s: &mut App| remove_variable(s, &remove_id, index))
+            .build(t),
+    );
+    let value_label = format!("Environment variable value {}", index + 1);
+    let value = match reference {
+        // A secret provider reference. Rune has no secret provider definitions to check a new
+        // reference against, so it is shown as saved; switching to a typed value means removing it.
+        Some(r) => row()
+            .h(28.0)
+            .px(9.0)
+            .grow(1.0)
+            .min_w(0.0)
+            .center_y()
+            .radius(8.0)
+            .border(1.0, t.c.input)
+            .opacity(0.64)
+            .label(value_label)
+            .child(text(r["reference"].as_str().unwrap_or("").to_owned()).font(theme::MONO_SM).color(t.c.foreground).truncate()),
+        None if v["sensitive"] == true => {
+            secret_input(s, t, &key("value"), if redacted { STORED_SECRET } else { "value" }, true).grow(1.0).min_w(0.0).label(value_label)
+        }
+        None => c::input(s, t, &key("value"), 0.0, "value", false).font(theme::MONO_SM).grow(1.0).min_w(0.0).label(value_label),
+    };
+    let mut bottom = row().w_full().gap(6.0).items_start().child(value);
+    if reference.is_none() {
+        let sensitive = v["sensitive"] == true;
+        let toggle_id = id.to_owned();
+        bottom = bottom.child(
+            kit::Button::new(format!("Mark environment variable {label} as sensitive"))
+                .variant("ghost-muted")
+                .size("icon-micro")
+                .disabled(redacted)
+                .on_press(move |s: &mut App| toggle_sensitive(s, &toggle_id, index))
+                .build(t)
+                .child(icon(if sensitive { &icons::LOCK } else { &LOCK_OPEN }, 12.0).color(t.c.muted_foreground)),
+        );
+    }
+    col()
+        .key(format!("provider-env-{index}"))
+        .w_full()
+        .gap(6.0)
+        .padding(8.0)
+        .radius(theme::radius::LG)
+        .border(1.0, t.c.border)
+        .child(top)
+        .child(bottom)
+}
+
+fn environment_row(s: &App, t: &T, id: &str) -> El {
+    let rows = env_rows(s, id);
+    let add_id = id.to_owned();
     let line = row()
         .w_full()
         .gap(32.0)
@@ -672,118 +1058,26 @@ fn environment_row(s: &App, t: &T, id: &str, instance: &Value) -> El {
                 .variant("outline")
                 .size("sm")
                 .icon(&icons::PLUS)
-                .on_press(|s: &mut App| s.ui.settings.providers_ui.env_adding = true)
+                .on_press(move |s: &mut App| add_variable(s, &add_id))
                 .build(t),
         );
-    if variables.is_empty() && !ui.env_adding {
+    if rows.is_empty() {
         return line.px(16.0).py(12.0);
     }
     let mut list = col().w_full().mt(12.0).pb(8.0).gap(8.0);
-    for (index, v) in variables.iter().enumerate() {
-        let name = v["name"].as_str().unwrap_or("").to_owned();
-        let shown = if v["sensitive"] == true || v["valueRedacted"] == true || !v["value"].is_string() {
-            "Stored separately".to_owned()
-        } else {
-            v["value"].as_str().unwrap_or("").to_owned()
-        };
-        let remove_id = id.to_owned();
-        list = list.child(
-            row()
-                .w_full()
-                .gap(6.0)
-                .center_y()
-                .padding(8.0)
-                .radius(theme::radius::LG)
-                .border(1.0, t.c.border)
-                .child(text(name.clone()).font(theme::MONO_XS).color(t.c.foreground).truncate().w(176.0))
-                .child(text(shown).font(theme::MONO_XS).color(t.c.muted_foreground).truncate().grow(1.0).min_w(0.0))
-                .child(
-                    kit::Button::new(format!("Remove environment variable {}", if name.is_empty() { (index + 1).to_string() } else { name }))
-                        .variant("ghost-destructive")
-                        .size("icon-micro")
-                        .icon(&icons::X)
-                        .on_press(move |s: &mut App| {
-                            let driver = driver_of(s, &remove_id);
-                            let mut next = instance_of(s, &remove_id, &driver);
-                            let mut env = next["environment"].as_array().cloned().unwrap_or_default();
-                            if index < env.len() {
-                                env.remove(index);
-                            }
-                            if env.is_empty() {
-                                if let Some(m) = next.as_object_mut() {
-                                    m.remove("environment");
-                                }
-                            } else {
-                                next["environment"] = json!(env);
-                            }
-                            upsert(s, &remove_id, next, json!({}));
-                        })
-                        .build(t),
-                ),
-        );
+    for (index, v) in rows.iter().enumerate() {
+        list = list.child(variable_row(s, t, id, index, v));
     }
-    if ui.env_adding {
-        let commit_id = id.to_owned();
-        let commit = move |s: &mut App| {
-            let ui = &s.ui.settings.providers_ui;
-            let name = ui.env_name.text.trim().to_owned();
-            if name.is_empty() {
-                return;
-            }
-            let value = ui.env_value.text.clone();
-            let driver = driver_of(s, &commit_id);
-            let mut next = instance_of(s, &commit_id, &driver);
-            let mut env = next["environment"].as_array().cloned().unwrap_or_default();
-            env.push(json!({"name": name, "value": value, "sensitive": false}));
-            next["environment"] = json!(env);
-            upsert(s, &commit_id, next, json!({}));
-            let ui = &mut s.ui.settings.providers_ui;
-            ui.env_adding = false;
-            ui.env_name.clear();
-            ui.env_value.clear();
-        };
-        let commit_name = commit.clone();
-        list = list.child(
-            col()
-                .w_full()
-                .gap(6.0)
-                .padding(8.0)
-                .radius(theme::radius::LG)
-                .border(1.0, t.c.border)
-                .child(
-                    row()
-                        .w_full()
-                        .gap(6.0)
-                        .center_y()
-                        .child(
-                            small_input(&ui.env_name, "provider-env-name", "VARIABLE_NAME", t, true)
-                                .grow(1.0)
-                                .min_w(0.0)
-                                .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.env_name)
-                                .on_submit(move |s: &mut App, _| commit_name(s)),
-                        )
-                        .child(
-                            kit::Button::new("Remove environment variable")
-                                .variant("ghost-destructive")
-                                .size("icon-micro")
-                                .icon(&icons::X)
-                                .on_press(|s: &mut App| {
-                                    let ui = &mut s.ui.settings.providers_ui;
-                                    ui.env_adding = false;
-                                    ui.env_name.clear();
-                                    ui.env_value.clear();
-                                })
-                                .build(t),
-                        ),
-                )
-                .child(
-                    small_input(&ui.env_value, "provider-env-value", "value", t, true)
-                        .w_full()
-                        .on_edit(|s: &mut App| &mut s.ui.settings.providers_ui.env_value)
-                        .on_submit(move |s: &mut App, _| commit(s)),
-                ),
-        );
-    }
+    let saved = rows.iter().any(|r| r["valueRedacted"] == true);
+    list = list.child(
+        text(format!(
+            "Sensitive values are stored separately and never returned to the app.{}",
+            if saved { " Enter a new value to rename a saved one or make it plain text." } else { "" }
+        ))
+        .font(theme::TEXT_XS)
+        .color(t.c.muted_foreground)
+        .wrap(),
+    );
     col().w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(list)
 }
 
@@ -1265,7 +1559,7 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         };
         sections.push(flat_section(heading("Runtime", t), None, rows, t));
     }
-    sections.push(flat_section(heading("Environment", t), None, vec![environment_row(s, t, &r.id, &instance)], t));
+    sections.push(flat_section(heading("Environment", t), None, vec![environment_row(s, t, &r.id)], t));
     if DRIVERS.iter().any(|(d, _, _)| *d == r.driver) {
         sections.push(flat_section(heading("Models", t), None, vec![models_section(s, t, &r.id, &r.driver, live, &instance)], t));
     }
@@ -1524,5 +1818,59 @@ mod tests {
         assert_eq!(ids(None), ["codex", "work", "claudeAgent", "opencode", "devReplay", "legacy"]);
         // A disabled driver's default slot appears while it is the one being opened.
         assert_eq!(ids(Some("grok")), ["codex", "work", "claudeAgent", "grok", "opencode", "devReplay", "legacy"]);
+    }
+
+    #[test]
+    fn a_new_variable_is_sent_as_a_sensitive_value_and_only_its_redaction_is_kept() {
+        let mut settings = json!({"providerInstances": {"work": {"driver": "codex", "environment": [
+            {"name": "OPENAI_BASE_URL", "value": "https://proxy.internal/v1", "sensitive": false}
+        ]}}});
+        let mut rows = settings["providerInstances"]["work"]["environment"].as_array().cloned().unwrap();
+        rows.push(new_variable());
+        // A blank row is a draft, and a valued row without a valid name holds back the save.
+        assert_eq!(publish_environment(&rows).unwrap().len(), 1);
+        assert!(edit_row(&mut rows[1], "value", "sk-live-123"));
+        assert_eq!(publish_environment(&rows), None);
+        assert!(edit_row(&mut rows[1], "name", " OPENAI_API_KEY "));
+
+        let instance = environment_instance(&settings["providerInstances"]["work"], publish_environment(&rows).unwrap());
+        let payload = upsert_payload("work", instance, json!({}));
+        let sent = &payload["providerInstanceMutation"]["instance"]["environment"][1];
+        // Sensitive is what makes the server move the value into its secret store.
+        assert_eq!(sent["name"], "OPENAI_API_KEY");
+        assert_eq!(sent["sensitive"], true);
+        assert!(payload["patch"].as_object().unwrap().is_empty());
+
+        apply_extras(&mut settings, &payload);
+        assert!(!settings.to_string().contains("sk-live-123"));
+        assert_eq!(
+            settings["providerInstances"]["work"]["environment"][1],
+            json!({"name": "OPENAI_API_KEY", "value": "", "sensitive": true, "valueRedacted": true})
+        );
+        assert_eq!(settings["providerInstances"]["work"]["environment"][0]["value"], "https://proxy.internal/v1");
+    }
+
+    #[test]
+    fn stored_secrets_and_references_are_kept_until_replaced() {
+        let stored = json!({"name": "OPENAI_API_KEY", "value": "", "sensitive": true, "valueRedacted": true});
+        let mut row = stored.clone();
+        // An empty commit and a rename both leave the stored value alone.
+        assert!(!edit_row(&mut row, "value", ""));
+        assert!(!edit_row(&mut row, "name", "OTHER"));
+        assert_eq!(publish_environment(&[row.clone()]).unwrap(), vec![stored]);
+        assert!(edit_row(&mut row, "value", "sk-next"));
+        assert_eq!(row["valueRedacted"], false);
+
+        let reference = json!({"name": "TOKEN", "value": "", "sensitive": true,
+            "secret": {"provider": "onepassword", "reference": "op://vault/item/field"}});
+        assert_eq!(redact_environment(&json!([reference.clone()])), json!([reference.clone()]));
+        let mut typed = reference.clone();
+        assert!(edit_row(&mut typed, "value", "plain"));
+        assert!(typed.get("secret").is_none());
+
+        let opencode = json!({"driver": "opencode", "config": {"serverUrl": "http://127.0.0.1:4096", "serverPassword": "hunter2"}});
+        let shown = redact_instance(&opencode);
+        assert_eq!(shown["config"]["serverPassword"], SECRET_REDACTED);
+        assert_eq!(shown["config"]["serverUrl"], "http://127.0.0.1:4096");
     }
 }
