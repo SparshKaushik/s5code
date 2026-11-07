@@ -1,7 +1,8 @@
 name: Rune desktop (Linux build for headless scenes)
 
 # Builds and tests apps/desktop-rune on Linux and uploads a bundle (binary + fixtures + tools)
-# that tools/modal_render.py runs headless on Modal to render scenes for pixel comparison.
+# that tools/modal_render.py runs headless on Modal to render scenes for pixel comparison, plus
+# the Linux server binary that tools/modal_live.py runs beside the windowed app for live tests.
 
 on:
   push:
@@ -62,10 +63,64 @@ jobs:
           mkdir -p bundle/target/release
           cp target/release/s5code-rune bundle/target/release/
           cp -r fixtures tools bundle/
+          # The free Replay (dev) agent for live turns, with the recordings it plays.
+          server=../server
+          mkdir -p bundle/replay/scripts
+          cp -r "$server/scripts/dev-replay-agent.ts" "$server/scripts/dev-replay" bundle/replay/scripts/
+          for d in todo_list tool_call_read_only_on_request acp_elicitation multi_turn; do
+            mkdir -p "bundle/replay/src/orchestration-v2/testkit/fixtures/$d"
+            cp "$server/src/orchestration-v2/testkit/fixtures/$d/registry_transcript.ndjson" "bundle/replay/src/orchestration-v2/testkit/fixtures/$d/"
+          done
           tar czf "$RUNNER_TEMP/bundle.tgz" -C bundle .
 
       - uses: actions/upload-artifact@v4
         with:
           name: s5code-rune-linux-${{ github.sha }}
           path: ${{ runner.temp }}/bundle.tgz
+          retention-days: 3
+
+  # The server the app bundles, for live tests on Modal. Cached on the server's sources, so most
+  # pushes (Rune-only changes) restore it instead of rebuilding.
+  server:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Cache server binary
+        id: cache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/server/s5code-server
+          key: s5-server-linux-x64-${{ hashFiles('apps/server/src/**', 'apps/server/package.json', 'packages/*/src/**', 'packages/*/package.json', 'pnpm-lock.yaml', 'scripts/build-server-binary.ts', 'scripts/lib/**') }}
+
+      - name: Setup Vite+
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: |
+            args:
+              - --filter=t3...
+              - --filter=@t3tools/scripts...
+
+      - name: Setup Bun
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: oven-sh/setup-bun@v2
+        with:
+          # Same pin as s5-release.yml: the compiled binary embeds this Bun runtime.
+          bun-version: "1.4.4"
+
+      - name: Build server binary
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          node scripts/build-server-binary.ts --arch x64 --output-dir "$RUNNER_TEMP/build" --verbose
+          mkdir -p "$RUNNER_TEMP/server"
+          mv "$RUNNER_TEMP"/build/s5code-server-*-linux-x64 "$RUNNER_TEMP/server/s5code-server"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: s5code-server-linux-${{ github.sha }}
+          path: ${{ runner.temp }}/server/s5code-server
           retention-days: 3

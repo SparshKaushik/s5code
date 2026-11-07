@@ -1,7 +1,8 @@
 #!/bin/bash
 # Build this checkout's HEAD on GitHub Actions (rune-desktop-linux.yml) and download the bundle
 # that tools/modal_render.py renders. Commit first: CI builds what is pushed, not the worktree.
-#   tools/ci-build.sh [OUT_DIR]   -> prints OUT_DIR/bundle.tgz (exit 1 with the failing log tail)
+#   tools/ci-build.sh [OUT_DIR]   -> prints OUT_DIR/bundle.tgz (exit 1 with the failing log tail);
+#   OUT_DIR/s5code-server is the Linux server binary that tools/modal_live.py runs.
 set -euo pipefail
 out=${1:-$(mktemp -d)}
 sha=$(git rev-parse HEAD)
@@ -25,5 +26,7 @@ if ! gh run watch "$run" --exit-status --interval 20 >/dev/null 2>&1; then
 fi
 mkdir -p "$out"
 rm -f "$out/bundle.tgz"
+rm -f "$out/s5code-server"
 gh run download "$run" -n "s5code-rune-linux-$sha" -D "$out" >&2
+gh run download "$run" -n "s5code-server-linux-$sha" -D "$out" >&2
 echo "$out/bundle.tgz"

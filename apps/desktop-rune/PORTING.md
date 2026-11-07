@@ -70,6 +70,12 @@ next to each PNG) give Rune's element boxes for geometry checks. Other Rune flag
 `--chrome` draws macOS traffic lights; `--script /work/files/x.json` replays input (upload the file
 with `--files x.json`); `--at SECONDS` picks the time.
 
+Live tests run the real windowed app under Xvfb on a Modal sandbox, against the bundled server it
+starts itself, with the free Replay (dev) agent registered and a demo git repo at
+`/root/projects/demo`. `ci-build.sh` also downloads the Linux `s5code-server`. Drive it with
+xdotool through `tools/modal_live.py` (`start OUT_DIR`, `shot`, `click`, `key`, `type`, `sh`,
+`logs`, `restart [OUT_DIR]`, `stop`); see its docstring. Always `stop` when done.
+
 References (macOS desktop layout, 1440x900, DPR 1, `dNN-*.ref.png` + `.ref.json` boxes) are in
 the lead's scratchpad `refdesk/shots/`; there is no live server or web app to capture new ones.
 
