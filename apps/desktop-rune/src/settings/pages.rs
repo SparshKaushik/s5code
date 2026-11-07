@@ -95,7 +95,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         return page;
     }
     page.child(match path {
-        "providers" => super::providers::view(s, t),
+        "providers" => super::providers::view(s, cx, t),
         "devices" => super::devices::view(s, t),
         "connections" => super::connections::view(s, t),
         "access" => super::connections::access(s, t),

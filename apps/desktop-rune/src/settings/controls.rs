@@ -273,7 +273,7 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
         .w(width)
         .h(height)
         .px(pad)
-        .center_y()
+        .py((height - 20.0) / 2.0)
         .radius(8.0)
         .border(1.0, t.c.input)
         .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))

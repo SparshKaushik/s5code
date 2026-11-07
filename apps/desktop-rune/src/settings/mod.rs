@@ -66,6 +66,7 @@ pub struct Ui {
     pub models: models::Picker,
     pub snooze: snooze::Draft,
     pub profiles: browser_profiles::Ui,
+    pub providers_ui: providers::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -203,6 +204,7 @@ pub fn request(s: &mut App, method: &str, payload: Value) {
     if method == "server.updateSettings" && matches!(s.src, crate::data::Source::Live(_)) {
         let mut current = server_settings(s).clone();
         apply_patch(&mut current, &payload["patch"]);
+        providers::apply_extras(&mut current, &payload);
         s.ui.settings.optimistic_settings = Some(current);
     }
     if let Some(net) = s.src.net() {
@@ -275,14 +277,7 @@ pub fn poll(s: &mut App) -> bool {
         }
     }
     if matches!(&s.route,Route::Settings(p) if p=="providers") {
-        let id = s.ui.settings.provider.clone().or_else(|| {
-            s.state().config.as_ref()?["providers"]
-                .as_array()?
-                .first()?["instanceId"]
-                .as_str()
-                .map(str::to_owned)
-        });
-        if let Some(id) = id {
+        if let Some(id) = providers::selected_id(s) {
             wanted.push((
                 "provider.auth.subscribe".to_owned(),
                 json!({"instanceId":id}),
@@ -640,6 +635,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(content);
     let mut overlays = Vec::new();
     providers::picker(s, t, &mut overlays);
+    providers::confirm(s, t, &mut overlays);
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
@@ -801,7 +797,80 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         browser_profiles_scene(s, true, None);
         s.ui.settings.profiles.remove = Some(("profile-work".into(), "Work".into()));
     }),
+    ("settings-providers-models", |s| providers_scene(s, false, "opencode")),
+    ("settings-providers-models-light", |s| providers_scene(s, true, "opencode")),
+    ("settings-providers-claude", |s| providers_scene(s, false, "claudeAgent")),
+    ("settings-providers-claude-light", |s| providers_scene(s, true, "claudeAgent")),
+    ("settings-providers-custom-model", |s| providers_custom_model(s, false)),
+    ("settings-providers-custom-model-light", |s| providers_custom_model(s, true)),
+    ("settings-providers-delete", |s| providers_delete(s, false)),
+    ("settings-providers-delete-light", |s| providers_delete(s, true)),
+    ("settings-providers-unavailable", |s| providers_state(s, false, s5_net::Conn::Open)),
+    ("settings-providers-unavailable-light", |s| providers_state(s, true, s5_net::Conn::Open)),
+    ("settings-providers-loading", |s| providers_state(s, false, s5_net::Conn::Connecting)),
+    ("settings-providers-loading-light", |s| providers_state(s, true, s5_net::Conn::Connecting)),
+    ("settings-providers-error", |s| providers_error(s, false)),
+    ("settings-providers-error-light", |s| providers_error(s, true)),
 ];
+
+/// The providers page with model preferences and a second Codex instance staged.
+fn providers_scene(s: &mut App, light: bool, selected: &str) {
+    scene(s, "providers");
+    if light {
+        s.appearance = Appearance::Light;
+    }
+    stage_settings(
+        s,
+        json!({
+            "favorites": [
+                {"provider": "opencode", "model": "opencode/big-pickle"},
+                {"provider": "opencode", "model": "opencode/beam-free"}
+            ],
+            "providerModelPreferences": {
+                "opencode": {"hiddenModels": ["opencode/flint-40b-free", "opencode/crouton-alpha-free"], "modelOrder": []}
+            },
+            "providerInstances": {
+                "codex_work": {
+                    "driver": "codex",
+                    "displayName": "Codex (work)",
+                    "config": {"homePath": "~/.codex-work"},
+                    "environment": [{"name": "OPENAI_BASE_URL", "value": "https://proxy.internal/v1", "sensitive": false}]
+                },
+                "claudeAgent": {"driver": "claudeAgent", "config": {"customModels": ["claude-sonnet-5-preview"]}}
+            }
+        }),
+    );
+    s.ui.settings.provider = Some(selected.into());
+}
+
+fn providers_custom_model(s: &mut App, light: bool) {
+    providers_scene(s, light, "claudeAgent");
+    let ui = &mut s.ui.settings.providers_ui;
+    ui.adding = true;
+    ui.custom = rune::TextEdit::new("claude-sonnet-5-preview".to_owned());
+    ui.error = Some("That custom model is already saved.".into());
+}
+
+fn providers_delete(s: &mut App, light: bool) {
+    providers_scene(s, light, "codex_work");
+    s.ui.settings.providers_ui.confirm = Some(("codex_work".into(), false));
+}
+
+/// No configuration for the environment: `conn` picks loading, unavailable, or the error.
+fn providers_state(s: &mut App, light: bool, conn: s5_net::Conn) {
+    scene(s, "providers");
+    if light {
+        s.appearance = Appearance::Light;
+    }
+    if let crate::data::Source::Fixture(st) = &mut s.src {
+        st.config = None;
+        st.conn = conn;
+    }
+}
+
+fn providers_error(s: &mut App, light: bool) {
+    providers_state(s, light, s5_net::Conn::Closed("WebSocket closed before the connection was established (1006)".into()));
+}
 
 /// Scenes stage server settings as the optimistic copy a live write would leave.
 fn stage_settings(s: &mut App, patch: Value) {
@@ -864,7 +933,10 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         return false;
     }
     if matches!(e.key, rune::Key::Escape) {
-        if s.ui.settings.models.open.take().is_some() || browser_profiles::escape(s) {
+        if s.ui.settings.models.open.take().is_some()
+            || browser_profiles::escape(s)
+            || s.ui.settings.providers_ui.confirm.take().is_some()
+        {
             return true;
         }
         if s.ui.settings.open_select.take().is_some() {
