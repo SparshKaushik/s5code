@@ -807,7 +807,7 @@ static HIGHLIGHT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
 
 /// Runs on the picked element: what web's pick preload reports (`PickedElementPayload`), plus
 /// its viewport rect and document offset for the crop.
-const PICK_JS: &str = r#"function () {
+const PICK_JS: &str = r##"function () {
   const el = this;
   const esc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : s);
   const selector = (start) => {
@@ -847,7 +847,7 @@ const PICK_JS: &str = r#"function () {
     rect: { x: r.x, y: r.y, width: r.width, height: r.height },
     doc: { x: r.x + scrollX, y: r.y + scrollY },
   });
-}"#;
+}"##;
 
 /// Back and forward availability; the about:blank a tab opens on is not a place to go back to.
 fn travel(history: &[(i64, String)], index: usize) -> (bool, bool) {
