@@ -27,6 +27,8 @@ static CHEVRONS_DOWN_UP: Icon = Icon {
 };
 
 const SCOPE_KEY: &str = "panel-diff-scope";
+/// Files fetched one by one after a cut patch; past this the size-limit banner stays.
+const FILE_FETCH_LIMIT: usize = 100;
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Scope {
@@ -94,6 +96,12 @@ pub struct Ui {
     hide_tests: bool,
     tree_open: bool,
     folded_dirs: HashSet<String>,
+    /// Per-file patches requested when the whole patch passed the server's size limit.
+    file_pending: Vec<(u64, Scope)>,
+    /// The server's line counts by path, which hold even for a file it cut short.
+    counts: HashMap<String, (usize, usize)>,
+    /// Files the server still cut short on their own.
+    partial: HashSet<String>,
 }
 
 impl Default for Ui {
@@ -120,6 +128,9 @@ impl Default for Ui {
             hide_tests: false,
             tree_open: false,
             folded_dirs: HashSet::new(),
+            file_pending: vec![],
+            counts: HashMap::new(),
+            partial: HashSet::new(),
         }
     }
 }
@@ -256,6 +267,7 @@ pub fn load(app: &mut App) {
         _ => Some(("review.getDiffPreview", preview_request(&cwd, &scope, app.ui.panel.diff.base_ref.as_deref(), ignore_ws))),
     };
     app.ui.panel.diff.seen = signature(app, &scope);
+    app.ui.panel.diff.file_pending.clear();
     if matches!(scope, Scope::Branch) && app.ui.panel.diff.refs_cwd != cwd {
         load_refs(app, &cwd);
     }
@@ -371,14 +383,16 @@ pub fn poll(app: &mut App) -> bool {
             ui.touched = false;
         }
         ui.shown = Some(scope.clone());
+        let mut missing = vec![];
+        ui.counts.clear();
+        ui.partial.clear();
         match reply {
             Ok(v) => {
                 ui.error = None;
-                let (patch, source) = match scope {
-                    Scope::Turn(_) => (v["diff"].as_str().unwrap_or("").to_string(), Source::default()),
+                let (patch, mut source, meta) = match scope {
+                    Scope::Turn(_) => (v["diff"].as_str().unwrap_or("").to_string(), Source::default(), vec![]),
                     _ => {
-                        let kind = source_kind(&scope);
-                        let src = v["sources"].as_array().and_then(|s| s.iter().find(|s| s["kind"] == kind)).cloned().unwrap_or(Value::Null);
+                        let src = git_source(&v, &scope);
                         let opt = |k: &str| src[k].as_str().filter(|v| !v.is_empty()).map(str::to_string);
                         let source = Source {
                             head: opt("headRef"),
@@ -386,10 +400,17 @@ pub fn poll(app: &mut App) -> bool {
                             subject: opt("commitSubject"),
                             truncated: src["truncated"].as_bool().unwrap_or(false) || v["incomplete"].as_bool().unwrap_or(false),
                         };
-                        (src["diff"].as_str().unwrap_or("").to_string(), source)
+                        (src["diff"].as_str().unwrap_or("").to_string(), source, file_stats(&src))
                     }
                 };
                 let mut files = rune_kit::diff::parse(&patch);
+                if source.truncated && !meta.is_empty() {
+                    missing = incomplete(&files, &meta);
+                    files.retain(|f| !missing.iter().any(|m| m.path == f.path()));
+                    source.truncated = missing.len() > FILE_FETCH_LIMIT;
+                    missing.truncate(FILE_FETCH_LIMIT);
+                }
+                ui.counts = meta.into_iter().map(|m| (m.path, (m.additions, m.deletions))).collect();
                 files.sort_by(|a, b| a.path().cmp(b.path()));
                 ui.files = files;
                 ui.source = source;
@@ -401,7 +422,32 @@ pub fn poll(app: &mut App) -> bool {
             }
         }
         apply(app);
+        fetch_files(app, &scope, missing);
         return true;
+    }
+    for (id, scope) in app.ui.panel.diff.file_pending.clone() {
+        let Some(reply) = take(app, id) else { continue };
+        let ui = &mut app.ui.panel.diff;
+        ui.file_pending.retain(|(v, _)| *v != id);
+        changed = true;
+        if scope != ui.scope {
+            continue;
+        }
+        match reply {
+            Ok(v) => {
+                let src = git_source(&v, &scope);
+                for file in rune_kit::diff::parse(src["diff"].as_str().unwrap_or("")) {
+                    if src["truncated"].as_bool().unwrap_or(false) {
+                        ui.partial.insert(file.path().to_string());
+                    }
+                    ui.files.retain(|f| f.path() != file.path());
+                    ui.files.push(file);
+                }
+                ui.files.sort_by(|a, b| a.path().cmp(b.path()));
+            }
+            Err(_) => ui.source.truncated = true,
+        }
+        apply(app);
     }
     if visible(app) && app.ui.panel.diff.pending.is_none() && app.ui.panel.diff.shown.is_some() {
         let scope = app.ui.panel.diff.scope.clone();
@@ -420,6 +466,59 @@ fn commit_list(v: &Value) -> Vec<Commit> {
         .flatten()
         .map(|c| Commit { sha: data::s(c, "sha").to_string(), subject: data::s(c, "subject").to_string(), at: data::iso_ms(data::s(c, "committedAt")).unwrap_or(0) })
         .collect()
+}
+
+/// The source a git scope reads, as web picks it by kind.
+fn git_source(v: &Value, scope: &Scope) -> Value {
+    let kind = source_kind(scope);
+    v["sources"].as_array().and_then(|s| s.iter().find(|s| s["kind"] == kind)).cloned().unwrap_or(Value::Null)
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct FileStat {
+    path: String,
+    previous: Option<String>,
+    additions: usize,
+    deletions: usize,
+}
+
+fn file_stats(src: &Value) -> Vec<FileStat> {
+    src["files"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|f| FileStat {
+            path: data::s(f, "path").to_string(),
+            previous: f["previousPath"].as_str().map(str::to_string),
+            additions: f["additions"].as_u64().unwrap_or(0) as usize,
+            deletions: f["deletions"].as_u64().unwrap_or(0) as usize,
+        })
+        .filter(|f| !f.path.is_empty())
+        .collect()
+}
+
+/// The files a cut patch lacks or holds only part of, by the server's counts.
+fn incomplete(files: &[FileDiff], meta: &[FileStat]) -> Vec<FileStat> {
+    meta.iter()
+        .filter(|m| !files.iter().any(|f| f.path() == m.path && f.additions() == m.additions && f.deletions() == m.deletions))
+        .cloned()
+        .collect()
+}
+
+/// Asks for each file's own patch, as web's lazy per-file loads do (`input.file`).
+fn fetch_files(app: &mut App, scope: &Scope, files: Vec<FileStat>) {
+    let Some((_, cwd)) = super::context(app) else { return };
+    let ignore_ws = setting(app, "diffIgnoreWhitespace", true);
+    let base = app.ui.panel.diff.base_ref.clone();
+    let mut ids = vec![];
+    if let Some(net) = app.src.net() {
+        for f in files {
+            let mut req = preview_request(&cwd, scope, base.as_deref(), ignore_ws);
+            req["file"] = json!({ "path": f.path, "previousPath": f.previous, "sourceKind": source_kind(scope) });
+            ids.push((net.request("review.getDiffPreview", req), scope.clone()));
+        }
+    }
+    app.ui.panel.diff.file_pending.extend(ids);
 }
 
 /// `isTestFile` from `changedFileKind.ts`: tests and their mocks, never generated files.
@@ -668,11 +767,17 @@ fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
         .build(&kit::theme(t), layer)
 }
 
+/// A file's line counts: the server's when it gave them, else the patch's.
+fn counts(ui: &Ui, f: &FileDiff) -> (usize, usize) {
+    ui.counts.get(f.path()).copied().unwrap_or((f.additions(), f.deletions()))
+}
+
 fn header(app: &App, t: &T) -> El {
     let ui = &app.ui.panel.diff;
     let turns = turns(app);
     let label = scope_label(ui, &turns);
     let fg = t.c.contrast_secondary_foreground;
+    let commit = matches!(ui.scope, Scope::Commit(_));
     let scope = row()
         .key(SCOPE_KEY)
         .h(24.0)
@@ -680,8 +785,6 @@ fn header(app: &App, t: &T) -> El {
         .gap(4.0)
         .radius(8.0)
         .center_y()
-        .min_w(0.0)
-        .shrink()
         .fill(t.c.secondary)
         .hover(t.c.secondary.alpha_mul(0.9))
         .cursor(Cursor::Pointer)
@@ -690,13 +793,14 @@ fn header(app: &App, t: &T) -> El {
         .role("button")
         .label(format!("Diff scope: {label}"))
         .expanded(ui.menu_open)
-        .child(text(label).font(theme::XS_MEDIUM).color(fg).single_line().truncate())
+        .child(if commit { text(label).font(theme::XS_MEDIUM).color(fg).single_line().truncate().min_w(0.0).shrink() } else { text(label).font(theme::XS_MEDIUM).color(fg).single_line() })
         .child(icon(&icons::CHEVRON_DOWN, 14.0).color(fg).opacity(0.7))
         .on_press(|s: &mut App| {
             let ui = &mut s.ui.panel.diff;
             ui.menu_open = !ui.menu_open;
             ui.sub = None;
         });
+    let scope = if commit { scope.min_w(0.0).shrink() } else { scope };
     let mut left = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(scope);
     if let Scope::Commit(sha) = &ui.scope {
         left = left.child(text(short(sha).to_string()).font(theme::MONO_XS).color(t.c.muted_foreground));
@@ -718,7 +822,7 @@ fn header(app: &App, t: &T) -> El {
     let files = st.files();
     let mut right = row().gap(4.0).center_y().shrink();
     if !files.is_empty() {
-        let (add, del) = files.iter().fold((0, 0), |(a, d), f| (a + f.additions(), d + f.deletions()));
+        let (add, del) = files.iter().map(|f| counts(ui, f)).fold((0, 0), |(a, d), (fa, fd)| (a + fa, d + fd));
         right = right.child(
             row()
                 .mr(4.0)
@@ -888,6 +992,9 @@ fn body(app: &App, t: &T) -> El {
         };
         return super::notice(t, label);
     }
+    if ui.state.files().is_empty() && !ui.file_pending.is_empty() {
+        return super::notice(t, "Loading changes...");
+    }
     if ui.state.files().is_empty() && !ui.source.truncated {
         return super::notice(t, "No net changes in this selection.");
     }
@@ -986,7 +1093,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
         .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Turns) } else { None };
         }))
-        .item(MenuItem::new("Commits").submenu(commit_entries, sub == Some(Sub::Commits)).on_submenu_change(|s: &mut App, on| {
+        .item(MenuItem::new("Commits").submenu(commit_entries, sub == Some(Sub::Commits)).submenu_min_width(320.0).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Commits) } else { None };
             if on {
                 load_commits(s);
@@ -1057,6 +1164,18 @@ mod tests {
         assert_eq!(turn_of(&Scope::Turn(Some(1)), &turns), Some(1));
         assert_eq!(turn_of(&Scope::Turn(Some(9)), &turns), Some(2));
         assert_eq!(turn_of(&Scope::Branch, &turns), None);
+    }
+
+    #[test]
+    fn a_cut_patch_refetches_the_files_it_lacks_or_cut_short() {
+        let patch = "diff --git a/a.ts b/a.ts\n--- a/a.ts\n+++ b/a.ts\n@@ -1 +1,2 @@\n-x\n+y\n+z\ndiff --git a/b.ts b/b.ts\nnew file mode 100644\n--- /dev/null\n+++ b/b.ts\n@@ -0,0 +1,3 @@\n+1\n";
+        let files = rune_kit::diff::parse(patch);
+        let stat = |path: &str, additions, deletions| FileStat { path: path.into(), previous: None, additions, deletions };
+        let meta = vec![stat("a.ts", 2, 1), stat("b.ts", 3, 0), stat("c.ts", 4, 0)];
+        let paths: Vec<String> = incomplete(&files, &meta).into_iter().map(|f| f.path).collect();
+        assert_eq!(paths, vec!["b.ts", "c.ts"]);
+        let src = json!({ "files": [{ "path": "n.ts", "previousPath": "o.ts", "additions": 1, "deletions": 2 }] });
+        assert_eq!(file_stats(&src), vec![FileStat { path: "n.ts".into(), previous: Some("o.ts".into()), additions: 1, deletions: 2 }]);
     }
 
     #[test]

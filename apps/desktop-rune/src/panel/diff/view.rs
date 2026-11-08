@@ -510,9 +510,14 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
         .child(toggle)
         .child(icon(mark, 16.0).color(mark_color).key("mark"))
         .child(name)
-        .child(copy)
-        .child(el().key("space").grow(1.0).a11y_hidden());
-    let (adds, dels) = (file.additions(), file.deletions());
+        .child(copy);
+    let ui = &s.ui.panel.diff;
+    if ui.partial.contains(file.path()) {
+        let note = "This file is too large to show in full. Counts include all changes.";
+        inner = inner.child(micro(l, "partial", note, &icons::INFO, 12.0, l.muted));
+    }
+    inner = inner.child(el().key("space").grow(1.0).a11y_hidden());
+    let (adds, dels) = super::counts(ui, file);
     if adds > 0 {
         inner = inner.child(text(format!("+{adds}")).font(l.count).color(l.add.count).key("adds"));
     }
