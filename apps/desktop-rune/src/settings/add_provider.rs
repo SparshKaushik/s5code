@@ -121,6 +121,17 @@ fn resolved_id(w: &Wizard, existing: &[String]) -> String {
     }
 }
 
+/// The ID field's model, re-derived from the label while untyped. A focused one is left alone:
+/// rune reads it mid-keystroke, before `on_change` marks the ID typed.
+fn id_entry(w: &mut Wizard, driver: &'static str, derived: String) -> &mut TextEdit {
+    let typed = w.id_typed.contains(driver);
+    let edit = w.id.entry(driver).or_insert_with(|| TextEdit::new(derived.clone()));
+    if !typed && !edit.focused && edit.text != derived {
+        *edit = TextEdit::new(derived);
+    }
+    edit
+}
+
 fn instance_id(s: &App) -> String {
     resolved_id(&s.ui.settings.add_provider, &existing(s))
 }
@@ -319,13 +330,7 @@ fn identity(s: &App, t: &T) -> El {
                 .placeholder(format!("{driver}_work"))
                 .on_edit(move |s: &mut App| {
                     let derived = instance_id(s);
-                    let w = wizard(s);
-                    let typed = w.id_typed.contains(driver);
-                    let edit = w.id.entry(driver).or_insert_with(|| TextEdit::new(derived.clone()));
-                    if !typed && edit.text != derived {
-                        *edit = TextEdit::new(derived);
-                    }
-                    edit
+                    id_entry(wizard(s), driver, derived)
                 })
                 .on_change(move |s: &mut App, _| {
                     wizard(s).id_typed.insert(driver);
@@ -455,7 +460,13 @@ mod tests {
         w.label.insert("opencode", TextEdit::new("Work Team"));
         w.id.insert("opencode", TextEdit::new("opencode"));
         assert_eq!(resolved_id(&w, &existing), "opencode_work_team");
+        assert_eq!(id_entry(&mut w, "opencode", "opencode_work_team".into()).text, "opencode_work_team");
+        // A keystroke into the focused field survives the accessor read before `on_change`.
+        let edit = id_entry(&mut w, "opencode", "opencode_work_team".into());
+        *edit = TextEdit::new("9");
+        edit.focused = true;
+        assert_eq!(id_entry(&mut w, "opencode", "opencode_work_team".into()).text, "9");
         w.id_typed.insert("opencode");
-        assert_eq!(resolved_id(&w, &existing), "opencode");
+        assert_eq!(resolved_id(&w, &existing), "9");
     }
 }
