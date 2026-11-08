@@ -61,6 +61,11 @@ impl ClientSettings {
     }
 }
 
+/// A file kept beside the client settings, such as the composer drafts.
+pub fn sibling_path(name: &str) -> PathBuf {
+    config_path().with_file_name(name)
+}
+
 fn config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("S5_CLIENT_SETTINGS") {
         return path.into();

@@ -33,6 +33,8 @@ pub struct Entry {
     pub name: String,
     /// The folder's path; None for a file.
     pub dir: Option<String>,
+    /// The file's path as the checkpoint lists it; empty for a folder.
+    pub path: String,
     pub additions: u64,
     pub deletions: u64,
 }
@@ -40,7 +42,7 @@ pub struct Entry {
 #[derive(Default)]
 struct Dir {
     dirs: Vec<(String, Dir)>,
-    files: Vec<(String, u64, u64)>,
+    files: Vec<(String, String, u64, u64)>,
     stat: (u64, u64),
 }
 
@@ -66,7 +68,7 @@ pub fn tree(files: &[Value], open: &dyn Fn(&str) -> bool) -> Vec<Entry> {
             dir = &mut dir.dirs[at].1;
             dir.stat = (dir.stat.0 + stat.0, dir.stat.1 + stat.1);
         }
-        dir.files.push((name.to_string(), stat.0, stat.1));
+        dir.files.push((name.to_string(), s(f, "path").to_owned(), stat.0, stat.1));
     }
     fn walk(dir: &Dir, prefix: &str, depth: usize, open: &dyn Fn(&str) -> bool, out: &mut Vec<Entry>) {
         let mut dirs: Vec<&(String, Dir)> = dir.dirs.iter().collect();
@@ -79,15 +81,15 @@ pub fn tree(files: &[Value], open: &dyn Fn(&str) -> bool) -> Vec<Entry> {
             }
             let path = if prefix.is_empty() { label.clone() } else { format!("{prefix}/{label}") };
             let expanded = open(&path);
-            out.push(Entry { depth, name: label, dir: Some(path.clone()), additions: sub.stat.0, deletions: sub.stat.1 });
+            out.push(Entry { depth, name: label, dir: Some(path.clone()), path: String::new(), additions: sub.stat.0, deletions: sub.stat.1 });
             if expanded {
                 walk(sub, &path, depth + 1, open, out);
             }
         }
-        let mut files: Vec<&(String, u64, u64)> = dir.files.iter().collect();
+        let mut files: Vec<&(String, String, u64, u64)> = dir.files.iter().collect();
         files.sort_by_key(|(n, ..)| n.to_lowercase());
-        for (name, add, del) in files {
-            out.push(Entry { depth, name: name.clone(), dir: None, additions: *add, deletions: *del });
+        for (name, path, add, del) in files {
+            out.push(Entry { depth, name: name.clone(), dir: None, path: path.clone(), additions: *add, deletions: *del });
         }
     }
     let mut out = Vec::new();
@@ -146,10 +148,11 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
             }
             None => {
                 let line = if nested || entry.depth > 0 { line.child(rune::el().size(14.0, 14.0)) } else { line };
+                let (checkpoint, path) = (checkpoint.clone(), entry.path.clone());
                 line.label(entry.name.clone())
                     .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground.alpha_mul(0.7)))
                     .child(text(entry.name).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground.alpha_mul(0.85)).truncate().shrink().min_w(0.0))
-                    .on_press(open_diff.clone())
+                    .on_press(move |app: &mut App| crate::panel::open_diff_at(app, checkpoint.clone(), &path))
             }
         };
         if entry.additions + entry.deletions > 0 {
@@ -197,6 +200,8 @@ mod tests {
         let open = tree(files, &|p| p == "src/chat");
         let names: Vec<_> = open.iter().map(|e| (e.depth, e.name.as_str())).collect();
         assert_eq!(names, [(0, "src/chat"), (1, "a.rs"), (1, "b.rs"), (0, "README.md")]);
+        // A file row opens the diff at its full path.
+        assert_eq!(open[1].path, "src/chat/a.rs");
     }
 
     #[test]

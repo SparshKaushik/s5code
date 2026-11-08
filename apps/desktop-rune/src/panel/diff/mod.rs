@@ -104,6 +104,8 @@ pub struct Ui {
     counts: HashMap<String, (usize, usize)>,
     /// Files the server still cut short on their own.
     partial: HashSet<String>,
+    /// A file to open and scroll to once the chosen scope's patch shows (a changed-files row).
+    pub reveal: Option<String>,
 }
 
 impl Default for Ui {
@@ -134,6 +136,7 @@ impl Default for Ui {
             file_pending: vec![],
             counts: HashMap::new(),
             partial: HashSet::new(),
+            reveal: None,
         }
     }
 }
@@ -348,6 +351,20 @@ fn take(app: &mut App, id: u64) -> Option<Result<Value, Value>> {
 
 fn message(e: &Value) -> String {
     e["message"].as_str().map(str::to_string).unwrap_or_else(|| e.to_string())
+}
+
+/// Opens and scrolls to the file `reveal` names once its scope's patch is shown.
+pub fn reveal(app: &mut App, tx: &mut rune::Tx) -> bool {
+    let ui = &mut app.ui.panel.diff;
+    if ui.reveal.is_none() || ui.pending.is_some() || ui.shown.as_ref() != Some(&ui.scope) {
+        return false;
+    }
+    let path = ui.reveal.take().unwrap_or_default();
+    let Some(i) = ui.state.files().iter().position(|f| f.path() == path) else { return false };
+    ui.touched = true;
+    ui.state.set_collapsed(i, false);
+    ui.state.scroll_to_file(i, tx);
+    true
 }
 
 fn visible(app: &App) -> bool {

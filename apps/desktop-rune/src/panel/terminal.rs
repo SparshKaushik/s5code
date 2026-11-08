@@ -99,6 +99,17 @@ impl Session {
     }
 }
 
+/// The selection as a terminal context chip in the thread's composer (ThreadTerminalDrawer).
+fn add_to_chat(s: &mut App, thread: &str, id: &str) {
+    let Some(session) = s.ui.panel.terminal.get(thread, id) else { return };
+    let (Some(text), Some((start, end))) = (session.vt.selection_text(), session.vt.selection_lines()) else { return };
+    let label = session.title();
+    for session in &mut s.ui.panel.terminal.sessions {
+        session.input.focused = false;
+    }
+    crate::chat::composer::add_terminal_context(s, thread, id, &label, start, end, &text);
+}
+
 pub fn label_for(id: &str) -> String {
     match number(id) {
         Some(n) => format!("Terminal {n}"),
@@ -1026,6 +1037,16 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         })
     };
     let entries = vec![
+        kit::MenuEntry::item({
+            // Not `item`: the caret goes to the composer, not back to the terminal.
+            let (thread, id) = (menu.thread.clone(), menu.id.clone());
+            kit::MenuItem::new("Add to chat")
+                .on_select_tx(move |s: &mut App, _: &mut Tx| {
+                    s.ui.panel.terminal.menu = None;
+                    add_to_chat(s, &thread, &id);
+                })
+                .disabled(!selection)
+        }),
         kit::MenuEntry::item(item("Copy", |s, tx, th, id| copy_selection(s, tx, th, id, false)).disabled(!selection)),
         kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id))),
         kit::MenuEntry::item(item("Select all", |s, _, th, id| {

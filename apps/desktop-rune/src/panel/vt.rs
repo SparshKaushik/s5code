@@ -508,6 +508,15 @@ impl Vt {
         (!text.is_empty()).then(|| text.to_string())
     }
 
+    /// The selection's first and last line, 1-based from the top of the scrollback, as xterm's
+    /// `getSelectionPosition` rows.
+    pub fn selection_lines(&self) -> Option<(usize, usize)> {
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let history = self.term.grid().history_size() as i32;
+        let line = |l: Line| (l.0 + history + 1).max(1) as usize;
+        Some((line(range.start.line), line(range.end.line).max(line(range.start.line))))
+    }
+
     /// The link under a visible cell: an OSC 8 hyperlink, else a URL or path in the text of
     /// the (soft-wrapped) line around it.
     pub fn link_at(&self, col: usize, row: usize) -> Option<Link> {
