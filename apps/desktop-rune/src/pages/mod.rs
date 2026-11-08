@@ -1,6 +1,8 @@
 //! The sidebar footer's utility pages: `/pull-requests`, which replaces the main column, and
 //! `/usage`, a route modal over the frame like settings.
 
+pub mod avatars;
+pub mod pr_detail;
 pub mod pull_requests;
 pub mod usage;
 
@@ -12,17 +14,41 @@ use crate::{App, Appearance, Route};
 #[derive(Default)]
 pub struct Ui {
     pub pull_requests: pull_requests::Ui,
+    pub detail: pr_detail::Ui,
+    pub avatars: avatars::Avatars,
     pub usage: usage::Ui,
     /// The last thread or draft shown, where the footer's Back returns from a utility page.
     pub main_route: Option<Route>,
 }
 
 pub fn poll(s: &mut App) -> bool {
-    pull_requests::poll(s) | usage::poll(s)
+    let changed = pull_requests::poll(s) | pr_detail::poll(s) | usage::poll(s);
+    want_avatars(s);
+    changed
+}
+
+/// Starts the avatars the pull requests page shows, the open detail's first.
+fn want_avatars(s: &mut App) {
+    if !matches!(s.frame_route(), Route::PullRequests) {
+        return;
+    }
+    let waker = s.ui.panel.waker.as_ref();
+    let pages = &mut s.ui.pages;
+    let entries = pages.pull_requests.result.as_ref().and_then(|r| r["entries"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
+    let (detail, activity) = (pages.detail.detail.as_ref(), pages.detail.activity.as_ref());
+    let list = |v: Option<&Value>, key: &str| v.and_then(|v| v[key].as_array()).into_iter().flatten();
+    let actors = detail
+        .map(|d| &d["author"])
+        .into_iter()
+        .chain(list(detail, "reviewers"))
+        .chain(list(activity, "comments").map(|c| &c["author"]))
+        .chain(list(activity, "reviewThreads").flat_map(|t| t["comments"].as_array().into_iter().flatten()).map(|c| &c["author"]))
+        .chain(entries.iter().map(|e| &e["author"]));
+    pages.avatars.want(avatars::urls(actors), waker);
 }
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    usage::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
+    usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
 }
 
 /// A bundled recording next to the shell fixtures (`fixtures/pull-requests.json`, `usage.json`).
@@ -48,6 +74,16 @@ fn open_prs(s: &mut App, entries: impl Fn(&mut Value)) {
     u.requested = Some(pull_requests::input(u));
 }
 
+/// The list with its first row open in the detail, loaded from `pull-request-detail.json`.
+fn open_detail(s: &mut App, tab: usize, then: impl Fn(&mut pr_detail::Ui)) {
+    open_prs(s, |_| {});
+    let first = s.ui.pages.pull_requests.result.as_ref().and_then(|r| r["entries"][0]["url"].as_str().map(str::to_string));
+    s.ui.pages.pull_requests.selected = first;
+    s.ui.pages.detail.tab = tab;
+    pr_detail::poll(s);
+    then(&mut s.ui.pages.detail);
+}
+
 /// Usage over "Replay showcase", with the recorded limits patched onto codex and Claude.
 fn open_usage(s: &mut App, metric: &'static str) {
     crate::scene_clock(s);
@@ -71,7 +107,10 @@ fn open_usage(s: &mut App, metric: &'static str) {
     let u = &mut s.ui.pages.usage;
     u.metric = metric;
     u.summary = recording.get("summary").cloned();
-    u.requested = Some(usage::input(u, s.now_ms));
+    // Scenes render the same in any machine's zone.
+    u.zone_name = "UTC".into();
+    u.zone = crate::data::Zone::Fixed(0);
+    u.requested = Some(usage::input(u, s.now_ms, &json!([])));
 }
 
 fn light(s: &mut App) {
@@ -107,6 +146,40 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_prs(s, |_| {});
         light(s);
     }),
+    ("pull-requests-no-projects", |s| {
+        open_prs(s, |r| r["entries"] = json!([]));
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.projects.clear();
+        }
+    }),
+    ("pull-requests-detail", |s| open_detail(s, 0, |_| {})),
+    ("pull-requests-detail-timeline", |s| open_detail(s, 1, |_| {})),
+    ("pull-requests-detail-code", |s| {
+        open_detail(s, 2, |_| {});
+        s.ui.pages.detail.expanded.insert("apps/desktop-rune/src/pages/usage.rs".into());
+    }),
+    ("pull-requests-detail-checks", |s| {
+        open_detail(s, 0, |_| {});
+        s.ui.pages.detail.checks_open = true;
+        s.ui.pages.detail.description_closed = true;
+    }),
+    ("pull-requests-detail-menu", |s| open_detail(s, 0, |u| u.menu = true)),
+    ("pull-requests-detail-merged", |s| {
+        open_detail(s, 0, |_| {});
+        if let Some(d) = &mut s.ui.pages.detail.detail {
+            d["state"] = json!("merged");
+        }
+    }),
+    ("pull-requests-detail-error", |s| {
+        open_detail(s, 0, |_| {});
+        let u = &mut s.ui.pages.detail;
+        u.detail = None;
+        u.error = Some("Pull request #2481 not found. It may be an issue rather than a pull request, or this account can't see it.".into());
+    }),
+    ("pull-requests-detail-light", |s| {
+        open_detail(s, 0, |_| {});
+        light(s);
+    }),
     ("usage-limits", |s| open_usage(s, "limits")),
     ("usage-cost", |s| open_usage(s, "cost")),
     ("usage-tokens", |s| open_usage(s, "tokens")),
@@ -137,5 +210,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-cost-light", |s| {
         open_usage(s, "cost");
         light(s);
+    }),
+    ("usage-model", |s| {
+        open_usage(s, "cost");
+        s.ui.pages.usage.model = Some("claude\0\0claude-opus-5-5".into());
     }),
 ];

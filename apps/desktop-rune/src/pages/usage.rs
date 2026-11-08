@@ -8,7 +8,7 @@ use rune::{Color, El, LineCap, Path, ScrollSpec, Shape, Tx, canvas, col, el, ico
 use serde_json::{Value, json};
 
 use crate::chat::composer::provider_icon;
-use crate::data::{iso_ms, s as field};
+use crate::data::{Zone, iso_ms, s as field};
 use crate::icons as i;
 use crate::kit::{self, Menu, MenuItem, Placement, ToggleGroup};
 use crate::theme::{self, AlphaMul, T, radius};
@@ -28,12 +28,104 @@ pub struct Ui {
     /// The chart column under the pointer and the pointer in the plot (`hoverIndex`).
     pub hover: Option<(usize, f32, f32)>,
     plot_w: f32,
+    /// The IANA zone sent as `timeZone`, and the zone its labels are read in.
+    pub zone_name: String,
+    pub zone: Zone,
+    /// The breakdown row open in the model dialog (`kind\0apiProvider\0model`).
+    pub model: Option<String>,
+    pub model_hover: Option<(usize, f32, f32)>,
+    model_plot_w: f32,
 }
 
 impl Default for Ui {
     fn default() -> Self {
-        Ui { metric: "limits", window_days: 30, summary: None, error: None, pending: None, requested: None, hidden: Vec::new(), menu: None, by_period: false, hover: None, plot_w: 0.0 }
+        let (zone_name, zone) = local_zone();
+        Ui {
+            metric: "limits",
+            window_days: 30,
+            summary: None,
+            error: None,
+            pending: None,
+            requested: None,
+            hidden: Vec::new(),
+            menu: None,
+            by_period: false,
+            hover: None,
+            plot_w: 0.0,
+            zone_name,
+            zone,
+            model: None,
+            model_hover: None,
+            model_plot_w: 0.0,
+        }
     }
+}
+
+/// The machine's IANA zone, as the web's `Intl` resolves it. A zone without a name falls back to
+/// UTC for both the request and the labels, so the two always agree.
+fn local_zone() -> (String, Zone) {
+    let link = std::fs::read_link("/etc/localtime").ok().map(|p| p.to_string_lossy().into_owned());
+    let file = std::fs::read_to_string("/etc/timezone").ok();
+    match zone_name(std::env::var("TZ").ok(), link, file) {
+        Some(name) => (name, Zone::Local),
+        None => ("UTC".into(), Zone::Fixed(0)),
+    }
+}
+
+fn zone_name(tz: Option<String>, link: Option<String>, file: Option<String>) -> Option<String> {
+    let from_path = |p: &str| p.split_once("zoneinfo/").map(|(_, name)| name.to_string()).filter(|n| !n.is_empty());
+    let named = |n: &str| n.contains('/') || matches!(n, "UTC" | "GMT" | "UCT" | "Zulu");
+    if let Some(tz) = tz.as_deref().map(|t| t.trim_start_matches(':')).filter(|t| !t.is_empty()) {
+        // localtime reads TZ first, so a POSIX rule there wins over the system zone too.
+        return if tz.starts_with('/') { from_path(tz) } else { named(tz).then(|| tz.to_string()) };
+    }
+    link.as_deref().and_then(from_path).or_else(|| file.map(|f| f.trim().to_string()).filter(|f| named(f)))
+}
+
+/// How hour labels read: in which zone, on a 12- or 24-hour clock, relative to when.
+#[derive(Clone, Copy, Default)]
+struct Clock {
+    zone: Zone,
+    hour12: bool,
+    now: i64,
+}
+
+impl Clock {
+    fn hour(self, at: i64) -> String {
+        let h = self.zone.wall(at).rem_euclid(DAY) / HOUR;
+        match (self.hour12, h) {
+            (false, h) => format!("{h:02}:00"),
+            (true, 0) => "12 AM".into(),
+            (true, 12) => "12 PM".into(),
+            (true, h) => format!("{} {}", h % 12, if h < 12 { "AM" } else { "PM" }),
+        }
+    }
+
+    /// formatDateTimeShort: "Nov 7, 3 PM".
+    fn date_hour(self, at: i64) -> String {
+        format!("{}, {}", day_short(&day_of(self.zone.wall(at))), self.hour(at))
+    }
+
+    /// formatRelativeHourShort: "3 PM today", "3 PM yesterday", else the date.
+    fn relative(self, at: i64) -> String {
+        let day = |ms: i64| self.zone.wall(ms).div_euclid(DAY);
+        match day(self.now) - day(at) {
+            0 => format!("{} today", self.hour(at)),
+            1 => format!("{} yesterday", self.hour(at)),
+            _ => self.date_hour(at),
+        }
+    }
+}
+
+fn clock(s: &App) -> Clock {
+    let u = &s.ui.pages.usage;
+    let format = s.client_settings.values.get("timestampFormat").and_then(Value::as_str).unwrap_or("locale");
+    let until = u.requested.as_ref().and_then(|r| r["untilTime"].as_str()).and_then(iso_ms).unwrap_or(s.now_ms);
+    Clock { zone: u.zone, hour12: format != "24-hour", now: until }
+}
+
+fn model_aliases(s: &App) -> Value {
+    s.client_settings.values.get("usageModelTags").cloned().filter(Value::is_array).unwrap_or_else(|| json!([]))
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -184,15 +276,21 @@ fn duration(ms: i64) -> String {
 
 // ---- data -------------------------------------------------------------------------------
 
-/// `server.getUsageSummary`'s input for the chosen window, in UTC.
-pub(super) fn input(u: &Ui, now: i64) -> Value {
-    let today = day_of(now);
+/// `server.getUsageSummary`'s input for the chosen window (makeWindow): calendar days in the
+/// viewer's zone, or the rolling 24 hours to the current minute.
+pub(super) fn input(u: &Ui, now: i64, aliases: &Value) -> Value {
+    let day = |at: i64| day_of(u.zone.wall(at));
     if u.window_days == 1 {
         let until = now - now.rem_euclid(MINUTE);
         let since = until - DAY;
-        return json!({"sinceDay": day_of(since), "untilDay": today, "timeZone": "UTC", "modelAliases": [], "resolution": "hour", "sinceTime": iso_of(since), "untilTime": iso_of(until)});
+        return json!({"sinceDay": day(since), "untilDay": day(until), "timeZone": u.zone_name, "modelAliases": aliases, "resolution": "hour", "sinceTime": iso_of(since), "untilTime": iso_of(until)});
     }
-    json!({"sinceDay": day_of(now - (u.window_days - 1) * DAY), "untilDay": today, "timeZone": "UTC", "modelAliases": [], "resolution": "day"})
+    json!({"sinceDay": day_of(u.zone.wall(now) - (u.window_days - 1) * DAY), "untilDay": day(now), "timeZone": u.zone_name, "modelAliases": aliases, "resolution": "day"})
+}
+
+/// What a fetched summary answers; the rolling hour bounds alone don't refetch.
+fn window_key(input: &Value) -> Value {
+    json!([input["sinceDay"], input["resolution"], input["timeZone"], input["modelAliases"]])
 }
 
 pub fn poll(s: &mut App) -> bool {
@@ -214,10 +312,9 @@ pub fn poll(s: &mut App) -> bool {
         }
         changed = true;
     }
-    let wanted = input(&s.ui.pages.usage, s.now_ms);
-    let window = (wanted["sinceDay"].clone(), wanted["resolution"].clone());
-    let current = s.ui.pages.usage.requested.as_ref().map(|r| (r["sinceDay"].clone(), r["resolution"].clone()));
-    if current.as_ref() != Some(&window) {
+    let wanted = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
+    let current = s.ui.pages.usage.requested.as_ref().map(window_key);
+    if current != Some(window_key(&wanted)) {
         s.ui.pages.usage.requested = Some(wanted.clone());
         match s.src.net() {
             Some(net) => {
@@ -253,7 +350,8 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
     if !matches!(s.route, Route::Usage) || !matches!(e.key, rune::Key::Escape) {
         return false;
     }
-    if ui(s).menu.take().is_none() {
+    let u = ui(s);
+    if u.model.take().is_none() && u.menu.take().is_none() {
         close(s);
     }
     true
@@ -280,13 +378,18 @@ struct Merged {
     category: [f64; 5],
     fast: f64,
     ultrafast: f64,
+    unpriced_tokens: f64,
+    hourly: bool,
+    clock: Clock,
     providers: Vec<(&'static str, Totals, i64)>,
     models: Vec<(String, Totals)>,
     periods: Vec<String>,
     by_period: HashMap<String, HashMap<&'static str, Totals>>,
 }
 
-fn merge(summary: &Value, hidden: &[&str]) -> Merged {
+/// Totals over `summary`'s visible providers, or over one breakdown row's buckets when `model`
+/// names one. `window` is the request, whose rolling hours the hourly periods follow.
+fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option<&str>) -> Merged {
     let mut m = Merged::default();
     let mut models: HashMap<String, Totals> = HashMap::new();
     let mut providers: HashMap<&'static str, Totals> = HashMap::new();
@@ -294,6 +397,10 @@ fn merge(summary: &Value, hidden: &[&str]) -> Merged {
     for b in summary["buckets"].as_array().into_iter().flatten() {
         let Some(&(kind, _, _)) = PROVIDERS.iter().find(|p| p.0 == field(b, "provider")) else { continue };
         if hidden.contains(&kind) {
+            continue;
+        }
+        let model_key = format!("{kind}\0{}\0{}", field(b, "apiProvider"), field(b, "model"));
+        if model.is_some_and(|k| k != model_key) {
             continue;
         }
         let n = |k: &str| b["totals"][k].as_f64().unwrap_or(0.0);
@@ -307,7 +414,11 @@ fn merge(summary: &Value, hidden: &[&str]) -> Merged {
         m.output += output;
         m.savings += b["cacheSavingsUsd"].as_f64().unwrap_or(0.0);
         m.records += b["records"].as_f64().unwrap_or(0.0);
-        m.unpriced += b["unpricedRecords"].as_f64().unwrap_or(0.0);
+        let (records, unpriced) = (b["records"].as_f64().unwrap_or(0.0), b["unpricedRecords"].as_f64().unwrap_or(0.0));
+        m.unpriced += unpriced;
+        if records > 0.0 {
+            m.unpriced_tokens += total.tokens * unpriced / records;
+        }
         let cat = &b["categoryCostUsd"];
         let split: Vec<f64> = ["input", "cacheRead", "cacheWrite", "output"].iter().map(|k| cat[*k].as_f64().unwrap_or(0.0)).collect();
         for (slot, v) in split.iter().enumerate() {
@@ -321,8 +432,8 @@ fn merge(summary: &Value, hidden: &[&str]) -> Merged {
             t.tokens += total.tokens;
         };
         add(providers.entry(kind).or_default());
-        add(models.entry(format!("{kind}\0{}\0{}", field(b, "apiProvider"), field(b, "model"))).or_default());
-        let period = if hourly { field(b, "hourStart").get(..13).unwrap_or("").to_string() } else { field(b, "day").to_string() };
+        add(models.entry(model_key).or_default());
+        let period = if hourly { iso_ms(field(b, "hourStart")).map(iso_of).unwrap_or_default() } else { field(b, "day").to_string() };
         add(m.by_period.entry(period).or_default().entry(kind).or_default());
     }
     let mut sessions: HashMap<&str, i64> = HashMap::new();
@@ -332,18 +443,24 @@ fn merge(summary: &Value, hidden: &[&str]) -> Merged {
     m.providers = PROVIDERS.iter().filter_map(|p| providers.get(p.0).map(|t| (p.0, *t, sessions.get(p.0).copied().unwrap_or(0)))).collect();
     m.models = models.into_iter().collect();
     m.models.sort_by(|a, b| b.1.cost.total_cmp(&a.1.cost).then(b.1.tokens.total_cmp(&a.1.tokens)));
-    if hourly {
+    let bounds = window.filter(|w| w["resolution"] == "hour").and_then(|w| Some((iso_ms(w["sinceTime"].as_str()?)?, iso_ms(w["untilTime"].as_str()?)?)));
+    m.hourly = hourly || bounds.is_some();
+    if let Some((since, until)) = bounds {
+        // enumerateHourStarts: rolling buckets start on the window's minute, not the hour.
+        m.periods = (0..).map(|k| since + k * HOUR).take_while(|at| *at < until).map(iso_of).collect();
+    } else if hourly {
         let until = summary["buckets"].as_array().into_iter().flatten().filter_map(|b| iso_ms(field(b, "hourStart"))).max().unwrap_or(0);
-        m.periods = (0..24).rev().map(|k| iso_of(until - k * HOUR).get(..13).unwrap_or("").to_string()).collect();
+        m.periods = (0..24).rev().map(|k| iso_of(until - k * HOUR)).collect();
     } else if let (Some(a), Some(b)) = (day_ms(field(summary, "sinceDay")), day_ms(field(summary, "untilDay"))) {
         m.periods = (0..=((b - a) / DAY)).map(|k| day_of(a + k * DAY)).collect();
     }
     m
 }
 
-fn period_label(period: &str) -> String {
-    match period.split_once('T') {
-        Some((_, hour)) => format!("{hour}:00"),
+/// A period's axis and table label: its local hour, or its day.
+fn period_label(period: &str, clock: Clock) -> String {
+    match iso_ms(period).filter(|_| period.contains('T')) {
+        Some(at) => clock.hour(at),
         None => day_short(period),
     }
 }
@@ -367,6 +484,9 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     } else {
         skeleton(t, page)
     };
+    if let (Some(key), Some(summary), false) = (&u.model, &u.summary, u.metric == "limits") {
+        model_dialog(s, t, summary, key, &mut overlays);
+    }
     let body = kit::scroll_area(
         "usage-scroll",
         col().key("usage-scroll").grow(1.0).min_h(0.0).w_full().items_center().scroll(ScrollSpec { stick_bottom: false }).child(page),
@@ -465,7 +585,12 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         );
     let limits = u.metric == "limits";
     if !limits && let Some(summary) = &u.summary {
-        let label = if u.window_days == 1 { "Past 24 hours".to_string() } else { format!("{} to {}", day_short(field(summary, "sinceDay")), day_short(field(summary, "untilDay"))) };
+        let bounds = u.requested.as_ref().filter(|r| r["resolution"] == "hour").and_then(|r| Some((iso_ms(r["sinceTime"].as_str()?)?, iso_ms(r["untilTime"].as_str()?)?)));
+        let label = match bounds {
+            Some((since, until)) => format!("{} to {}", clock(s).date_hour(since), clock(s).date_hour(until)),
+            None if u.window_days == 1 => "Past 24 hours".to_string(),
+            None => format!("{} to {}", day_short(field(summary, "sinceDay")), day_short(field(summary, "untilDay"))),
+        };
         bar = bar.child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground).ml(8.0));
     }
     bar = bar.child(spacer());
@@ -753,7 +878,8 @@ fn segment(t: &T, cx: &mut rune::Cx<App>, key: &str, account: &Account, w: &Valu
 fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
     let u = &s.ui.pages.usage;
     let tokens_view = u.metric == "tokens";
-    let m = merge(summary, &u.hidden);
+    let mut m = merge(summary, &u.hidden, u.requested.as_ref(), None);
+    m.clock = clock(s);
     let value = |x: Totals| if tokens_view { x.tokens } else { x.cost };
     let fmt = |v: f64| if tokens_view { tokens(v) } else { usd(v) };
     let tnum = |style: rune::tok::TextStyle| style.features("'tnum' 1");
@@ -800,14 +926,14 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
         );
     }
     left = left.child(rows);
-    let hourly = u.window_days == 1;
+    let hourly = m.hourly;
     let chart_title = match (hourly, tokens_view) {
         (false, false) => "Daily cost",
         (false, true) => "Daily processed tokens",
         (true, false) => "Hourly cost",
         (true, true) => "Hourly processed tokens",
     };
-    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, u.hover, u.plot_w));
+    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, u.hover, u.plot_w, false));
     let top = row().w_full().gap(24.0).child(left).child(right);
 
     let metric = |label: &str, v: String| {
@@ -843,6 +969,68 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
         page = page.child(shares);
     }
     page.child(breakdown(s, t, &m))
+}
+
+/// UsageModelDialog: one breakdown row's totals, trend and splits.
+fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<El>) {
+    let u = &s.ui.pages.usage;
+    let all = merge(summary, &u.hidden, u.requested.as_ref(), None);
+    let mut m = merge(summary, &u.hidden, u.requested.as_ref(), Some(key));
+    m.clock = clock(s);
+    let mut parts = key.split('\0');
+    let (kind, _api, model) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    let (label, _) = presentation(kind);
+    let unknown = m.records > 0.0 && m.unpriced >= m.records;
+    let description = if unknown { label.to_string() } else { format!("{label} · {} of cost", percent(m.cost / all.cost.max(f64::MIN_POSITIVE))) };
+    let priced = m.tokens - m.unpriced_tokens;
+    let input = m.uncached + m.cached + m.creation;
+    let mut stats = vec![("Cost", if unknown { "Unpriced".to_string() } else { usd(m.cost) }), ("Tokens", tokens(m.tokens))];
+    if priced > 0.0 && !unknown {
+        stats.push(("Per 1M tokens", usd(m.cost / priced * 1_000_000.0)));
+    }
+    if input > 0.0 {
+        stats.push(("Cache hit", percent(m.cached / input)));
+    }
+    let mut grid = row().w_full().gap(24.0);
+    for (name, value) in stats {
+        grid = grid.child(
+            col()
+                .grow(1.0)
+                .w(0.0)
+                .min_w(0.0)
+                .gap(2.0)
+                .child(text(name).font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(text(value).font(theme::weight(theme::TEXT_2XL, theme::SEMIBOLD).features("'tnum' 1")).color(t.c.foreground)),
+        );
+    }
+    // Unpriced cost is unknown, not zero, so its trend shows tokens.
+    let tokens_view = unknown || u.metric == "tokens";
+    let shade = |k: f32| mix(t.c.foreground, t.c.background, k);
+    let mut shares = row().w_full().gap(40.0);
+    if !unknown {
+        let cost_parts = [("Input", m.category[0], shade(0.6)), ("Cache read", m.category[1], shade(0.3)), ("Cache write", m.category[2], shade(0.72)), ("Output", m.category[3], shade(1.0)), ("Other", m.category[4], shade(0.44))];
+        shares = shares.child(share_bar(t, "Cost by type", &cost_parts, usd));
+    }
+    shares = shares.child(share_bar(t, "Tokens by type", &[("Input", m.uncached, shade(0.6)), ("Cache read", m.cached, shade(0.3)), ("Cache write", m.creation, shade(0.72)), ("Output", m.output, shade(1.0))], tokens));
+    let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, u.model_hover, u.model_plot_w, true)).child(shares);
+    if m.fast + m.ultrafast > 0.0 {
+        let standard = (m.cost - m.fast - m.ultrafast).max(0.0);
+        body = body.child(row().w_full().child(share_bar(t, "Cost by speed", &[("Standard", standard, shade(0.34)), ("Fast", m.fast, shade(0.66)), ("Ultrafast", m.ultrafast, shade(1.0))], usd)));
+    }
+    if m.unpriced_tokens > 0.0 {
+        body = body.child(text(format!("{} tokens have no known price", tokens(m.unpriced_tokens))).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    }
+    kit::Dialog::new("usage-model", model)
+        .description(description)
+        .child(body)
+        .width(768.0)
+        .open(true)
+        .on_close(|s: &mut App| {
+            let u = ui(s);
+            u.model = None;
+            u.model_hover = None;
+        })
+        .build(t, overlays);
 }
 
 fn h2(t: &T, label: &str) -> El {
@@ -948,7 +1136,11 @@ fn chart_tooltip(t: &T, m: &Merged, index: usize, (x, y): (f32, f32), plot: (f32
     let muted = t.c.muted_foreground;
     let num = theme::TEXT_XS.features("'tnum' 1");
     let mut total = 0.0;
-    let mut body = col().child(text(period_label(&period)).font(theme::TEXT_XS).color(muted).mb(4.0));
+    let title = match iso_ms(&period).filter(|_| m.hourly) {
+        Some(at) => m.clock.relative(at),
+        None => period_label(&period, m.clock),
+    };
+    let mut body = col().child(text(title).font(theme::TEXT_XS).color(muted).mb(4.0));
     for (kind, _, _) in &m.providers {
         let v = values.and_then(|p| p.get(kind)).map(fmt).unwrap_or(0.0);
         total += v;
@@ -988,7 +1180,12 @@ fn chart_tooltip(t: &T, m: &Merged, index: usize, (x, y): (f32, f32), plot: (f32
         .shadow(4.0, 12.0, Color::BLACK.alpha(if t.dark { 0.32 } else { 0.1 }))
 }
 
-fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>, plot_w: f32) -> El {
+/// The hover slot a chart writes: the page's, or the model dialog's (`dialog`).
+fn slot(u: &mut Ui, dialog: bool) -> (&mut Option<(usize, f32, f32)>, &mut f32) {
+    if dialog { (&mut u.model_hover, &mut u.model_plot_w) } else { (&mut u.hover, &mut u.plot_w) }
+}
+
+fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>, plot_w: f32, dialog: bool) -> El {
     let value = |x: &Totals| if tokens_view { x.tokens } else { x.cost };
     let peak = m.by_period.values().flat_map(|p| p.values()).map(value).fold(0.0, f64::max);
     let (max, ticks) = nice_scale(peak);
@@ -1035,29 +1232,31 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>,
     }
     let n = m.periods.len();
     let mut plot = el()
-        .key("usage-plot")
+        .key(if dialog { "usage-model-plot" } else { "usage-plot" })
         .grow(1.0)
         .min_w(0.0)
         .h(plot_h)
         .child(canvas(shape.view_box(VIEW_W, VIEW_H)).w_full().h(plot_h))
-        .on_layout(|s: &mut App, r| {
-            if (ui(s).plot_w - r[2]).abs() > 0.5 {
-                ui(s).plot_w = r[2];
+        .on_layout(move |s: &mut App, r| {
+            let (_, w) = slot(ui(s), dialog);
+            if (*w - r[2]).abs() > 0.5 {
+                *w = r[2];
             }
         })
         .on_pointer_move_local(move |s: &mut App, p, _| {
-            let w = ui(s).plot_w;
-            ui(s).hover = hovered_column(p.x, w, n).map(|index| (index, p.x.clamp(0.0, w), p.y.clamp(0.0, plot_h)));
+            let (hover, w) = slot(ui(s), dialog);
+            let w = *w;
+            *hover = hovered_column(p.x, w, n).map(|index| (index, p.x.clamp(0.0, w), p.y.clamp(0.0, plot_h)));
         })
-        .on_hover_change(|s: &mut App, on, _| {
+        .on_hover_change(move |s: &mut App, on, _| {
             if !on {
-                ui(s).hover = None;
+                *slot(ui(s), dialog).0 = None;
             }
         });
     if let Some((index, x, y)) = hover {
         plot = plot.child(chart_tooltip(t, m, index, (x, y), (plot_w, plot_h), &value, tokens_view));
     }
-    let label = |n: usize| m.periods.get(n).map(|p| period_label(p).to_uppercase()).unwrap_or_default();
+    let label = |n: usize| m.periods.get(n).map(|p| period_label(p, m.clock).to_uppercase()).unwrap_or_default();
     let x_labels = row()
         .w_full()
         .pl(64.0)
@@ -1115,12 +1314,20 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
         }
         let unpriced = totals.cost == 0.0 && totals.tokens > 0.0;
         let cost = if unpriced { "Unpriced".to_string() } else { usd(totals.cost) };
+        let open = key.clone();
         table = table
             .child(
                 row()
+                    .key(format!("usage-model-{n}"))
                     .w_full()
                     .py(10.0)
                     .center_y()
+                    .radius(radius::MD)
+                    .hover(t.c.accent.alpha_mul(0.5))
+                    .cursor(rune::Cursor::Pointer)
+                    .role("button")
+                    .label(format!("{model} details"))
+                    .on_press(move |s: &mut App| ui(s).model = Some(open.clone()))
                     .child(row().pl(8.0).pr(12.0).w(40.0).child(text((n + 1).to_string()).font(theme::TEXT_XS.features("'tnum' 1")).color(muted)))
                     .child(
                         col()
@@ -1144,7 +1351,7 @@ fn period_table(t: &T, m: &Merged) -> El {
     let muted = t.c.muted_foreground;
     let num = theme::TEXT_SM.features("'tnum' 1");
     let kinds: Vec<&str> = m.providers.iter().map(|p| p.0).collect();
-    let mut header = row().w_full().py(8.0).center_y().child(row().grow(1.0).pl(8.0).child(text("Day").font(head).color(muted)));
+    let mut header = row().w_full().py(8.0).center_y().child(row().grow(1.0).pl(8.0).child(text(if m.hourly { "Hour" } else { "Day" }).font(head).color(muted)));
     for kind in &kinds {
         header = header.child(cell(presentation(kind).0.to_string(), 120.0, head, muted));
     }
@@ -1153,7 +1360,7 @@ fn period_table(t: &T, m: &Merged) -> El {
     for p in m.periods.iter().rev() {
         let row_totals = m.by_period.get(p);
         let get = |k: &str| row_totals.and_then(|x| x.get(k)).copied().unwrap_or_default();
-        let mut line = row().w_full().py(8.0).center_y().child(row().grow(1.0).pl(8.0).child(text(period_label(p)).font(theme::TEXT_SM).color(t.c.foreground)));
+        let mut line = row().w_full().py(8.0).center_y().child(row().grow(1.0).pl(8.0).child(text(period_label(p, m.clock)).font(theme::TEXT_SM).color(t.c.foreground)));
         let mut sum = Totals::default();
         for kind in &kinds {
             let x = get(kind);
@@ -1214,7 +1421,72 @@ fn skeleton(t: &T, page: El) -> El {
 
 #[cfg(test)]
 mod tests {
-    use super::hovered_column;
+    use super::*;
+
+    const IST: Zone = Zone::Fixed(330 * MINUTE);
+
+    fn ui_in(zone: Zone, window_days: i64) -> Ui {
+        Ui { zone_name: "Asia/Kolkata".into(), zone, window_days, ..Ui::default() }
+    }
+
+    #[test]
+    fn windows_are_calendar_days_and_rolling_hours_in_the_viewers_zone() {
+        // 2026-11-07T20:00:30Z is 01:30 on Nov 8 in Kolkata.
+        let now = iso_ms("2026-11-07T20:00:30.000Z").unwrap();
+        let tags = json!([{"provider": "codex", "apiProvider": "", "model": "m", "pricedAs": "gpt-5"}]);
+        let days = input(&ui_in(IST, 7), now, &tags);
+        assert_eq!(days, json!({"sinceDay": "2026-11-02", "untilDay": "2026-11-08", "timeZone": "Asia/Kolkata", "modelAliases": tags, "resolution": "day"}));
+        let hours = input(&ui_in(IST, 1), now, &json!([]));
+        assert_eq!(
+            hours,
+            json!({"sinceDay": "2026-11-07", "untilDay": "2026-11-08", "timeZone": "Asia/Kolkata", "modelAliases": [], "resolution": "hour", "sinceTime": "2026-11-06T20:00:00.000Z", "untilTime": "2026-11-07T20:00:00.000Z"})
+        );
+        // The minute ticking over keeps the fetched window; a new tag refetches.
+        let later = input(&ui_in(IST, 1), now + 5 * MINUTE, &json!([]));
+        assert_eq!(window_key(&later), window_key(&hours));
+        assert_ne!(window_key(&input(&ui_in(IST, 1), now, &tags)), window_key(&hours));
+    }
+
+    #[test]
+    fn hour_labels_read_the_local_clock() {
+        let at = iso_ms("2026-11-07T09:37:00.000Z").unwrap();
+        let c = Clock { zone: IST, hour12: true, now: iso_ms("2026-11-07T20:00:00.000Z").unwrap() };
+        assert_eq!(c.hour(at), "3 PM");
+        assert_eq!(Clock { hour12: false, ..c }.hour(at), "15:00");
+        assert_eq!(c.hour(iso_ms("2026-11-07T18:30:00.000Z").unwrap()), "12 AM");
+        assert_eq!(c.date_hour(at), "Nov 7, 3 PM");
+        // 20:00Z is already Nov 8 in Kolkata, so Nov 7's hours are yesterday's.
+        assert_eq!(c.relative(at), "3 PM yesterday");
+        assert_eq!(c.relative(iso_ms("2026-11-07T19:00:00.000Z").unwrap()), "12 AM today");
+        assert_eq!(c.relative(iso_ms("2026-11-05T09:37:00.000Z").unwrap()), "Nov 5, 3 PM");
+    }
+
+    #[test]
+    fn hourly_buckets_land_on_the_windows_rolling_hours() {
+        let window = json!({"resolution": "hour", "sinceTime": "2026-11-06T20:07:00.000Z", "untilTime": "2026-11-07T20:07:00.000Z"});
+        let bucket = |hour: &str, cost: f64| json!({"day": "2026-11-07", "hourStart": hour, "provider": "codex", "model": "m", "apiProvider": "", "totals": {"outputTokens": 10}, "costUsd": cost, "records": 2, "unpricedRecords": 1});
+        let summary = json!({"buckets": [bucket("2026-11-07T19:07:00.000Z", 1.5), bucket("2026-11-06T20:07:00Z", 0.5)], "sources": []});
+        let m = merge(&summary, &[], Some(&window), None);
+        assert!(m.hourly);
+        assert_eq!(m.periods.len(), 24);
+        assert_eq!((m.periods[0].as_str(), m.periods[23].as_str()), ("2026-11-06T20:07:00.000Z", "2026-11-07T19:07:00.000Z"));
+        assert_eq!(m.by_period[&m.periods[23]]["codex"].cost, 1.5);
+        assert_eq!(m.by_period[&m.periods[0]]["codex"].cost, 0.5);
+        assert_eq!(m.unpriced_tokens, 10.0);
+        assert!(merge(&summary, &[], Some(&window), Some("codex\0\0other")).models.is_empty());
+    }
+
+    #[test]
+    fn the_zone_name_comes_from_tz_then_the_localtime_link() {
+        let link = Some("/usr/share/zoneinfo/Asia/Kolkata".to_string());
+        assert_eq!(zone_name(None, link.clone(), None).as_deref(), Some("Asia/Kolkata"));
+        assert_eq!(zone_name(Some(":America/New_York".into()), link.clone(), None).as_deref(), Some("America/New_York"));
+        assert_eq!(zone_name(Some("/usr/share/zoneinfo/Europe/Berlin".into()), None, None).as_deref(), Some("Europe/Berlin"));
+        assert_eq!(zone_name(Some("IST-5:30".into()), link, None), None);
+        assert_eq!(zone_name(None, Some("/var/db/timezone/zoneinfo/Europe/Paris".into()), None).as_deref(), Some("Europe/Paris"));
+        assert_eq!(zone_name(None, None, Some("Etc/UTC\n".into())).as_deref(), Some("Etc/UTC"));
+        assert_eq!(zone_name(None, None, None), None);
+    }
 
     #[test]
     fn the_pointer_picks_the_nearest_period_point() {
