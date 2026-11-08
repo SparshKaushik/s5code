@@ -379,20 +379,22 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
         if surface == Surface::Files && files::pending(app) {
             glyph = glyph.child(el().absolute(8., 8.).size(5., 5.).radius(2.5).fill(t.c.muted_foreground));
         }
+        // The hover fill sits on the X's own layer: a `hover` element is the hover group of what
+        // it contains, which would keep the glyph swap from following the tab's hover.
         let close_button = el()
             .size(16., 16.)
-            .radius(4.)
-            .hover(t.c.muted)
             .role("button")
             .label(format!("Close {title}"))
             .on_press(move |s: &mut App| close(s, surface))
             .child(glyph)
             .child(
-                icon(&icons::X, 12.)
-                    .absolute(2., 2.)
-                    .size(12., 12.)
-                    .color(fg)
-                    .group_opacity(0., 1.),
+                el().absolute(0., 0.)
+                    .size(16., 16.)
+                    .radius(4.)
+                    .center()
+                    .hover(t.c.muted)
+                    .group_opacity(0., 1.)
+                    .child(icon(&icons::X, 12.).size(12., 12.).color(fg)),
             );
         tabs = tabs.child(
             row()
