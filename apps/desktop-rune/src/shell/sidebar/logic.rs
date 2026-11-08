@@ -993,10 +993,27 @@ impl Undos {
     }
 }
 
+/// `planForwardNavigation`'s pick: the first card after `current`, wrapping, that is not parked
+/// and is not parking with it. `None` when `current` is not on the board or nothing qualifies.
+pub fn next_card<'a>(order: &'a [String], parked: &HashSet<String>, parking: &HashSet<String>, current: &str) -> Option<&'a str> {
+    let at = order.iter().position(|id| id == current)?;
+    order[at + 1..].iter().chain(&order[..at]).map(String::as_str).find(|id| *id != current && !parked.contains(*id) && !parking.contains(*id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn next_card_wraps_past_parked_and_co_parking_cards() {
+        let order: Vec<String> = ["a", "b", "c", "d"].map(String::from).to_vec();
+        let set = |ids: &[&str]| ids.iter().map(|i| i.to_string()).collect::<HashSet<_>>();
+        assert_eq!(next_card(&order, &set(&[]), &set(&[]), "b"), Some("c"));
+        assert_eq!(next_card(&order, &set(&["c"]), &set(&["d"]), "b"), Some("a"), "wraps to the start");
+        assert_eq!(next_card(&order, &set(&["a", "c"]), &set(&["d"]), "b"), None);
+        assert_eq!(next_card(&order, &set(&[]), &set(&[]), "z"), None);
+    }
 
     #[test]
     fn undo_groups_the_newest_action_and_restores_pin_then_snooze() {

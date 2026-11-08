@@ -162,7 +162,8 @@ fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El
             }
         })
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
-            s.ui.shell.sidebar.menu = Some(super::menu::Menu::new(mid.clone(), at.x, at.y));
+            let bulk = s.ui.shell.sidebar.selected.contains(&mid);
+            s.ui.shell.sidebar.menu = Some(if bulk { super::menu::Menu::bulk(mid.clone(), at.x, at.y) } else { super::menu::Menu::new(mid.clone(), at.x, at.y) });
         })
         .on_double_press({
             let id = th.id.clone();

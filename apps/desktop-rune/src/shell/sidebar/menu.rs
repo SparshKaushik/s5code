@@ -27,16 +27,22 @@ pub struct Menu {
     pub sub: Option<Sub>,
     /// Just the snooze presets (the row's hover clock button).
     pub snooze_only: bool,
+    /// The multi-selection's menu, opened on a selected row.
+    pub bulk: bool,
 }
 
 impl Menu {
     pub fn new(thread: String, x: f32, y: f32) -> Menu {
-        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false }
+        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false, bulk: false }
+    }
+
+    pub fn bulk(thread: String, x: f32, y: f32) -> Menu {
+        Menu { bulk: true, ..Menu::new(thread, x, y) }
     }
 
     pub fn snooze_for(thread: String) -> Menu {
         let anchor = Some(format!("sb-snooze-{thread}"));
-        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true }
+        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true, bulk: false }
     }
 }
 
@@ -112,19 +118,98 @@ pub fn snooze_presets(now: i64, zone: Zone) -> Vec<(String, i64)> {
     out
 }
 
-fn snooze_entries(id: &str, now: i64) -> Vec<MenuEntry> {
+fn snooze_entries(ids: &[String], now: i64) -> Vec<MenuEntry> {
     let mut out: Vec<MenuEntry> = snooze_presets(now, Zone::Local)
         .into_iter()
         .map(|(label, until)| {
-            let id = id.to_string();
+            let ids = ids.to_vec();
             MenuEntry::item(item(label, move |s, _| {
-                super::snooze(s, &id, until);
                 close(s);
+                super::snooze_many(s, &ids, until);
             }))
         })
         .collect();
     out.push(MenuEntry::Separator);
-    out.push(MenuEntry::item(todo("Custom…")));
+    let ids = ids.to_vec();
+    out.push(MenuEntry::item(item("Custom…", move |s, _| {
+        close(s);
+        super::custom_snooze(s, ids.clone());
+    })));
+    out
+}
+
+/// The selection, in board order, as `handleMultiSelectContextMenu` reads it.
+fn selection(s: &App, model: &Model) -> Vec<String> {
+    model.ordered_ids().into_iter().filter(|id| s.ui.shell.sidebar.selected.contains(id)).collect()
+}
+
+/// `handleMultiSelectContextMenu`'s items for the selected rows.
+fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
+    let ids = selection(s, model);
+    let threads: Vec<&Thread> = ids.iter().filter_map(|id| model.thread(id)).collect();
+    if sub == Some(Sub::Snooze) {
+        return snooze_entries(&ids, model.now);
+    }
+    let count = ids.len();
+    let open = s.ui.shell.sidebar.menu.as_ref().and_then(|m| m.sub);
+    let leaf = |i: MenuItem| MenuEntry::item(i.on_hover(|s: &mut App| set_sub(s, None)));
+    let mut out = Vec::new();
+    let pinned: Vec<String> = threads.iter().filter(|t| t.pinned).map(|t| t.id.clone()).collect();
+    if !pinned.is_empty() {
+        out.push(leaf(item(format!("Unpin ({})", pinned.len()), move |s, _| {
+            close(s);
+            for id in &pinned {
+                super::unpin(s, id);
+            }
+            s.ui.shell.sidebar.selected.clear();
+        })));
+    }
+    let settle = format!("Settle ({count})");
+    out.push(leaf(if threads.iter().all(|t| t.settled) {
+        todo(settle)
+    } else {
+        let ids = ids.clone();
+        item(settle, move |s, _| {
+            close(s);
+            super::settle_many(s, &ids);
+        })
+    }));
+    if threads.iter().all(|t| t.can_snooze() && !t.snoozed(model.now)) {
+        out.push(MenuEntry::item(
+            MenuItem::new(format!("Snooze ({count})"))
+                .submenu(bulk_entries(s, model, Some(Sub::Snooze)), open == Some(Sub::Snooze))
+                .on_submenu_change(|s: &mut App, on| set_sub(s, on.then_some(Sub::Snooze))),
+        ));
+    }
+    let shells = &s.state().threads;
+    let regenerating = |id: &str| shells.iter().any(|t| t["id"] == id && !t["titleRegeneration"].is_null());
+    let fresh: Vec<String> = ids.iter().filter(|id| !regenerating(id.as_str())).cloned().collect();
+    out.push(leaf(if fresh.is_empty() {
+        todo(format!("Regenerating… ({count})"))
+    } else {
+        item(format!("Regenerate titles ({})", fresh.len()), move |s, _| {
+            close(s);
+            for id in &fresh {
+                super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }));
+            }
+            s.ui.shell.sidebar.selected.clear();
+        })
+    }));
+    let unread = ids.clone();
+    out.push(leaf(item(format!("Mark unread ({count})"), move |s, _| {
+        close(s);
+        for id in &unread {
+            super::dispatch(s, "thread.mark-unread", id, serde_json::json!({}));
+        }
+        s.ui.shell.sidebar.selected.clear();
+    })));
+    out.push(leaf(
+        item(format!("Delete ({count})"), move |s, _| {
+            close(s);
+            super::request_delete_many(s, ids.clone());
+        })
+        .variant("destructive"),
+    ));
     out
 }
 
@@ -156,7 +241,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     };
     let shell = s.state().threads.iter().find(|t| t["id"] == th.id.as_str());
     match sub {
-        Some(Sub::Snooze) => return snooze_entries(&th.id, model.now),
+        Some(Sub::Snooze) => return snooze_entries(std::slice::from_ref(&th.id), model.now),
         Some(Sub::AutoSettle) => {
             let enabled = shell.is_none_or(|t| t["autoSettleDisabledAt"].is_null());
             return [("Enabled", true), ("Disabled", false)]
@@ -211,7 +296,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         })));
     }
     if th.pinned {
-        out.push(leaf(item("Unpin thread", with(super::unpin)).icon(&icons::PIN_OFF)));
+        out.push(leaf(item("Unpin thread", with(super::request_unpin)).icon(&icons::PIN_OFF)));
     } else {
         out.push(leaf(item("Pin thread", with(|s, id| super::pin(s, id, None))).icon(&icons::PIN)));
     }
@@ -257,7 +342,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         .icon(&icons::SETTINGS),
     ));
     out.push(MenuEntry::Separator);
-    let archive = if th.running() { todo("Archive thread") } else { item("Archive thread", with(super::archive)) };
+    let archive = if th.running() { todo("Archive thread") } else { item("Archive thread", with(super::request_archive)) };
     out.push(leaf(archive.icon(&icons::ARCHIVE)));
     out.push(leaf(item("Delete", with(super::request_delete)).icon(&icons::TRASH_2).variant("destructive")));
     out
@@ -266,7 +351,8 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
 /// Mounts the menu: at the pointer for a context invocation, under the clock button for snooze.
 pub fn view(s: &App, _cx: &mut Cx<App>, model: &Model, th: &Thread, m: &Menu, t: &T) -> Vec<El> {
     let root = if m.snooze_only { Some(Sub::Snooze) } else { None };
-    let mut menu = kit::Menu::new("sb-menu").native(true).width(198.0).entries(entries(s, model, th, root)).open(true).on_close(close);
+    let entries = if m.bulk { bulk_entries(s, model, None) } else { entries(s, model, th, root) };
+    let mut menu = kit::Menu::new("sb-menu").native(true).width(198.0).entries(entries).open(true).on_close(close);
     menu = match &m.anchor {
         Some(key) => menu.anchor(key.clone()).placement(kit::Placement::BottomStart).gutter(4.0),
         None => menu.at(m.at.0, m.at.1),
