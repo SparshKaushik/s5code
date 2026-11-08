@@ -1037,10 +1037,10 @@ fn comment_card(s: &App, t: &T, c: &Value, replies: &[Value]) -> El {
         .radius(radius::LG)
         .border(1.0, t.c.border.alpha_mul(0.6))
         .clip_rounded(radius::LG)
-        .child(row().w_full().px(12.0).py(10.0).fill(t.c.muted.alpha_mul(0.25)).child(head_line(c, path)));
+        .child(row().w_full().px(12.0).py(8.0).fill(t.c.muted.alpha_mul(0.4)).child(head_line(c, path)));
     let body = field(c, "body").trim();
     if !body.is_empty() {
-        card = card.child(col().w_full().px(12.0).py(12.0).child(markdown(t, body)));
+        card = card.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))).child(col().w_full().px(12.0).py(10.0).child(markdown(t, body)));
     }
     if !replies.is_empty() {
         let mut thread = col().w_full().gap(12.0);
