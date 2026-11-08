@@ -780,7 +780,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
-    browser_profiles::overlays(s, t, &mut overlays);
+    browser_profiles::overlays(s, t, cx.env().scale, &mut overlays);
     scope::menu(s, t, &mut overlays);
     if let Some(editor) = keybindings::editor(s, t) {
         overlays.push(crate::kit::motion::layer().center().child(crate::kit::motion::popup(editor)));

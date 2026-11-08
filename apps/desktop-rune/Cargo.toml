@@ -20,6 +20,8 @@ tungstenite = { version = "0.24", default-features = false, features = ["handsha
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 alacritty_terminal = { version = "0.26", default-features = false }
+# Already in the tree through rustls; PBKDF2 and SHA-256 for browser cookie import.
+ring = "0.17"
 
 [profile.dev.package."*"]
 debug = false
