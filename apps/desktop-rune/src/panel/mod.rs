@@ -3,6 +3,7 @@ pub mod browser;
 mod diff;
 pub mod drawer;
 mod files;
+mod preview;
 mod terminal;
 mod vt;
 
@@ -10,12 +11,12 @@ use crate::{
     App, Route, data, icons, kit,
     theme::{self, AlphaMul, T},
 };
-use rune::{Cx, El, Key, KeyEvent, Phase, TextEdit, Tx, Waker, col, el, icon, row, text};
+use rune::{Cx, El, Key, KeyEvent, Phase, Tx, Waker, col, el, icon, row, text};
 use serde_json::Value;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
-    Browser,
+    Browser(browser::TabId),
     Terminal,
     Files,
     Diff,
@@ -23,7 +24,7 @@ pub enum Surface {
 impl Surface {
     fn title(self) -> &'static str {
         match self {
-            Self::Browser => "Browser",
+            Self::Browser(_) => "Browser",
             Self::Terminal => "Terminal",
             Self::Files => "Files",
             Self::Diff => "Diff",
@@ -31,7 +32,7 @@ impl Surface {
     }
     fn glyph(self) -> &'static rune::Icon {
         match self {
-            Self::Browser => &icons::GLOBE,
+            Self::Browser(_) => &icons::GLOBE,
             Self::Terminal => &icons::SQUARE_TERMINAL,
             Self::Files => &icons::FILES,
             Self::Diff => &icons::FILE_DIFF,
@@ -46,9 +47,8 @@ pub struct Ui {
     files: files::Ui,
     terminal: terminal::Ui,
     drawer: drawer::Ui,
-    browser: browser::Browser,
-    url: TextEdit,
-    browser_started: bool,
+    browser: preview::Ui,
+    add_menu: bool,
     thread: String,
     pub waker: Option<Waker>,
 }
@@ -63,8 +63,7 @@ impl Default for Ui {
             terminal: Default::default(),
             drawer: Default::default(),
             browser: Default::default(),
-            url: TextEdit::new(""),
-            browser_started: false,
+            add_menu: false,
             thread: String::new(),
             waker: None,
         }
@@ -85,6 +84,22 @@ fn context(app: &App) -> Option<(String, String)> {
         .filter(|v| !v.is_empty())
         .unwrap_or(data::s(project, "workspaceRoot"));
     Some((id.clone(), cwd.to_string()))
+}
+/// The launcher's entries; Browser always opens a new tab, as web's.
+const LAUNCH: [(Surface, &str); 4] = [
+    (Surface::Browser(0), "B"),
+    (Surface::Terminal, "T"),
+    (Surface::Files, "F"),
+    (Surface::Diff, "D"),
+];
+fn add(app: &mut App, surface: Surface) {
+    match surface {
+        Surface::Browser(_) => {
+            let tab = preview::open(app);
+            activate(app, Surface::Browser(tab));
+        }
+        _ => activate(app, surface),
+    }
 }
 fn activate(app: &mut App, surface: Surface) {
     app.ui.shell.panel_open = true;
@@ -111,6 +126,7 @@ fn close(app: &mut App, surface: Surface) {
     match surface {
         Surface::Terminal => drawer::close_panel(app),
         Surface::Files => files::flush(app),
+        Surface::Browser(tab) => preview::close(app, tab),
         _ => {}
     }
     remove_surface(app, surface);
@@ -177,7 +193,11 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
     }
 
-    let changed = diff::poll(app) | files::poll(app, tx) | terminal::poll(app, tx) | drawer::poll(app);
+    let changed = diff::poll(app)
+        | files::poll(app, tx)
+        | terminal::poll(app, tx)
+        | drawer::poll(app)
+        | preview::poll(app);
     changed | context_changed
 }
 pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
@@ -240,15 +260,9 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         && !e.mods.alt
     {
         if let Key::Text(v) = &e.key {
-            let surface = match v.to_lowercase().as_str() {
-                "b" => Some(Surface::Browser),
-                "t" => Some(Surface::Terminal),
-                "f" => Some(Surface::Files),
-                "d" => Some(Surface::Diff),
-                _ => None,
-            };
-            if let Some(surface) = surface {
-                activate(app, surface);
+            let key = v.to_uppercase();
+            if let Some(&(surface, _)) = LAUNCH.iter().find(|(_, k)| *k == key) {
+                add(app, surface);
                 return true;
             }
         }
@@ -274,13 +288,8 @@ fn picker(app: &App, t: &T) -> El {
             .color(t.c.contrast_foreground)
             .mb(10.),
     );
-    for (surface, key) in [
-        (Surface::Browser, "B"),
-        (Surface::Terminal, "T"),
-        (Surface::Files, "F"),
-        (Surface::Diff, "D"),
-    ] {
-        let available = surface == Surface::Browser || context(app).is_some();
+    for (surface, key) in LAUNCH {
+        let available = matches!(surface, Surface::Browser(_)) || context(app).is_some();
         list = list.child(
             row()
                 .h(32.)
@@ -305,7 +314,7 @@ fn picker(app: &App, t: &T) -> El {
                         .grow(1.),
                 )
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
-                .on_press(move |s: &mut App| activate(s, surface)),
+                .on_press(move |s: &mut App| add(s, surface)),
         );
     }
     for (title, glyph, key) in [
@@ -353,62 +362,72 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
         .panel
         .width
         .min(cx.layout_with("shell", |r| r[2] * 0.7).unwrap_or(1000.));
-    let mut tabs = row().h(51.).gap(2.).px(8.).center_y().role("tablist");
+    // Web's RightPanelTabs: 24pt tabs whose surface icon turns into the close button on hover.
+    let mut tabs = row().h(51.).gap(4.).pl(8.).pr(12.).center_y().role("tablist");
     for &surface in &app.ui.panel.surfaces {
+        let active = app.ui.panel.active == Some(surface);
+        let title = match surface {
+            Surface::Browser(tab) => preview::title(app, tab),
+            _ => surface.title().to_string(),
+        };
+        let fg = if active { t.c.contrast_foreground } else { t.c.muted_foreground };
+        let mut glyph = el()
+            .absolute(2., 2.)
+            .size(12., 12.)
+            .group_opacity(1., 0.)
+            .child(icon(surface.glyph(), 12.).size(12., 12.).color(fg));
+        if surface == Surface::Files && files::pending(app) {
+            glyph = glyph.child(el().absolute(8., 8.).size(5., 5.).radius(2.5).fill(t.c.muted_foreground));
+        }
+        let close_button = el()
+            .size(16., 16.)
+            .radius(4.)
+            .hover(t.c.muted)
+            .role("button")
+            .label(format!("Close {title}"))
+            .on_press(move |s: &mut App| close(s, surface))
+            .child(glyph)
+            .child(
+                icon(&icons::X, 12.)
+                    .absolute(2., 2.)
+                    .size(12., 12.)
+                    .color(fg)
+                    .group_opacity(0., 1.),
+            );
         tabs = tabs.child(
             row()
-                .h(32.)
-                .px(8.)
-                .gap(6.)
+                .h(24.)
+                .max_w(144.)
+                .pl(6.)
+                .pr(8.)
+                .gap(2.)
                 .radius(6.)
-                .fill(if app.ui.panel.active == Some(surface) {
-                    t.c.accent.alpha_mul(0.4)
-                } else {
-                    rune::Color::TRANSPARENT
-                })
+                .center_y()
+                .fill(if active { t.c.accent } else { rune::Color::TRANSPARENT })
+                .hover(if active { t.c.accent } else { t.c.accent.alpha_mul(0.6) })
+                .hover_group()
+                .role("tab")
+                .label(title.clone())
+                .focusable(true)
+                .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                .child(close_button)
                 .child(
-                    row()
-                        .gap(6.)
-                        .center_y()
-                        .role("tab")
-                        .label(surface.title())
-                        .focusable(true)
-                        .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
-                        .child({
-                            let glyph = el().size(14., 14.).child(
-                                icon(surface.glyph(), 16.)
-                                    .size(14., 14.)
-                                    .color(t.c.muted_foreground),
-                            );
-                            if surface == Surface::Files && files::pending(app) {
-                                glyph.child(
-                                    el().absolute(10., 10.)
-                                        .size(6., 6.)
-                                        .radius(3.)
-                                        .fill(t.c.muted_foreground),
-                                )
-                            } else {
-                                glyph
-                            }
-                        })
-                        .child(
-                            text(surface.title())
-                                .font(theme::TEXT_XS)
-                                .color(t.c.contrast_foreground),
-                        ),
-                )
-                .child(
-                    action(t, "Close surface", &icons::X)
-                        .on_press(move |s: &mut App| close(s, surface))
-                        .build(t),
+                    text(title)
+                        .font(theme::TEXT_XS)
+                        .color(fg)
+                        .group_color(t.c.contrast_foreground)
+                        .truncate()
+                        .shrink(),
                 ),
         );
     }
     tabs = tabs
         .child(
-            action(t, "Add panel surface", &icons::PLUS)
-                .on_press(|s: &mut App| s.ui.panel.active = None)
-                .build(t),
+            el().key("panel-add").child(
+                action(t, "Add panel surface", &icons::PLUS)
+                    .on_press(|s: &mut App| s.ui.panel.add_menu ^= true)
+                    .build(t),
+            ),
         )
         .child(el().grow(1.))
         .child(
@@ -424,7 +443,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
             .grow(1.)
             .min_h(0.)
             .child(drawer::surface(app, t, drawer::Owner::Panel, width - 1.)),
-        Some(Surface::Browser) => browser_view(app, t),
+        Some(Surface::Browser(tab)) => preview::view(app, t, tab, cx.env().scale),
     };
     row()
         .key("right-panel")
@@ -455,153 +474,6 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .child(content),
         )
 }
-fn navigate(app: &mut App) {
-    let input = app.ui.panel.url.text.trim().to_string();
-    if input.is_empty() {
-        return;
-    }
-    let url = if input.contains("://") {
-        input
-    } else {
-        format!("http://{input}")
-    };
-    if !app.ui.panel.browser_started {
-        let Some(waker) = app.ui.panel.waker.clone() else {
-            return;
-        };
-        app.ui.panel.browser.start(waker);
-        app.ui.panel.browser_started = true;
-    }
-    app.ui.panel.browser.send(browser::Cmd::Navigate(url));
-    app.ui.panel.browser.send(browser::Cmd::Resize {
-        w: (app.ui.panel.width - 1.) as u32,
-        h: 800,
-        scale: 1.,
-    });
-}
-fn browser_view(app: &App, t: &T) -> El {
-    let status = app.ui.panel.browser.status.lock().unwrap().clone();
-    let chrome = row()
-        .h(28.)
-        .px(8.)
-        .gap(2.)
-        .center_y()
-        .child(
-            action(t, "Back", &icons::ARROW_LEFT)
-                .disabled(!status.can_back)
-                .on_press(|s: &mut App| s.ui.panel.browser.send(browser::Cmd::Back))
-                .build(t),
-        )
-        .child(
-            action(t, "Forward", &icons::ARROW_RIGHT)
-                .disabled(!status.can_forward)
-                .on_press(|s: &mut App| s.ui.panel.browser.send(browser::Cmd::Forward))
-                .build(t),
-        )
-        .child(
-            action(t, "Refresh", &icons::REFRESH_CW)
-                .disabled(!app.ui.panel.browser_started)
-                .on_press(|s: &mut App| s.ui.panel.browser.send(browser::Cmd::Reload))
-                .build(t),
-        )
-        .child(
-            el().grow(1.).min_w(0.).child(
-                kit::Input::new(&app.ui.panel.url)
-                    .placeholder("Search or enter URL")
-                    .size("compact")
-                    .on_edit(|s: &mut App| &mut s.ui.panel.url)
-                    .on_submit(|s: &mut App, _| navigate(s))
-                    .build(t),
-            ),
-        );
-    let chrome = chrome
-        .child(
-            action(t, "Annotate preview", &icons::MOUSE_POINTER_CLICK)
-                .disabled(true)
-                .build(t),
-        )
-        .child(
-            action(t, "Capture screenshot", &icons::CAMERA)
-                .disabled(true)
-                .build(t),
-        )
-        .child(
-            action(t, "Float preview over chat", &icons::PICTURE_IN_PICTURE_2)
-                .disabled(true)
-                .build(t),
-        )
-        .child(
-            action(t, "Preview menu", &icons::ELLIPSIS_VERTICAL)
-                .disabled(true)
-                .build(t),
-        );
-    let content = if status.frames == 0 {
-        col().w_full().px(48.).pt(60.).gap(0.)
-            .child(el().size(36.,36.).radius(6.).fill(t.c.card).border(1.,t.c.border).center().child(icon(&icons::GLOBE,18.).size(18.,18.).color(t.c.muted_foreground)))
-            .child(text("No preview yet").font(theme::weight(theme::TEXT_XL,600.)).color(t.c.contrast_foreground).mt(42.))
-            .child(text(status.error.as_deref().unwrap_or("Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.")).font(theme::TEXT_SM).color(t.c.muted_foreground).w_full().wrap().align(rune::Align::Center).mt(28.)).center_y()
-    } else {
-        el().grow(1.)
-            .min_h(0.)
-            .w_full()
-            .pixels(&app.ui.panel.browser.pixels)
-            .focusable(true)
-            .key("browser-page")
-            .on_layout(|s: &mut App, r| {
-                s.ui.panel.browser.send(browser::Cmd::Resize {
-                    w: r[2].max(1.) as u32,
-                    h: r[3].max(1.) as u32,
-                    scale: 1.,
-                })
-            })
-            .on_drag(|s: &mut App, d, _| {
-                s.ui.panel.browser.send(browser::Cmd::Mouse {
-                    kind: match d.phase {
-                        Phase::Down => "mousePressed",
-                        Phase::Up => "mouseReleased",
-                        _ => "mouseMoved",
-                    },
-                    x: d.x,
-                    y: d.y,
-                    clicks: d.clicks,
-                })
-            })
-            .on_pointer_move_local(|s: &mut App, p, _| {
-                s.ui.panel.browser.send(browser::Cmd::Mouse {
-                    kind: "mouseMoved",
-                    x: p.x,
-                    y: p.y,
-                    clicks: 0,
-                })
-            })
-            .on_wheel(|s: &mut App, w, _| {
-                s.ui.panel.browser.send(browser::Cmd::Wheel {
-                    x: w.x,
-                    y: w.y,
-                    dx: w.dx,
-                    dy: w.dy,
-                });
-                true
-            })
-            .on_key(|s: &mut App, e, _| {
-                let cmd = match &e.key {
-                    Key::Text(v) => browser::Cmd::Text(v.clone()),
-                    Key::Enter => browser::Cmd::Key("Enter"),
-                    Key::Backspace => browser::Cmd::Key("Backspace"),
-                    Key::Tab => browser::Cmd::Key("Tab"),
-                    Key::Left => browser::Cmd::Key("ArrowLeft"),
-                    Key::Right => browser::Cmd::Key("ArrowRight"),
-                    Key::Up => browser::Cmd::Key("ArrowUp"),
-                    Key::Down => browser::Cmd::Key("ArrowDown"),
-                    Key::Escape => browser::Cmd::Key("Escape"),
-                    _ => return false,
-                };
-                s.ui.panel.browser.send(cmd);
-                true
-            })
-    };
-    col().grow(1.).min_h(0.).child(chrome).child(content)
-}
 fn scene(app: &mut App, surface: Option<Surface>) {
     (crate::shell::SCENES[1].1)(app);
     app.ui.shell.panel_open = true;
@@ -611,7 +483,10 @@ fn scene(app: &mut App, surface: Option<Surface>) {
 }
 pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-picker", |s| scene(s, None)),
-    ("panel-browser", |s| scene(s, Some(Surface::Browser))),
+    ("panel-browser", |s| {
+        scene(s, None);
+        add(s, Surface::Browser(0));
+    }),
     ("panel-diff-empty", |s| scene(s, Some(Surface::Diff))),
     ("panel-diff", |s| {
         scene(s, Some(Surface::Diff));
@@ -705,7 +580,43 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
         vec![]
     };
     drawer::overlays(app, t, &mut out);
+    if app.ui.shell.panel_open {
+        preview::overlays(app, t, &mut out);
+        if app.ui.panel.add_menu {
+            add_menu(app, t, &mut out);
+        }
+    }
     out
+}
+
+/// The tab strip's + menu (web's add-surface menu).
+fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
+    let mut menu = kit::Menu::new("panel-add-menu")
+        .anchor("panel-add")
+        .placement(kit::Placement::BottomStart)
+        .open(true)
+        .on_close(|s: &mut App| s.ui.panel.add_menu = false);
+    for (surface, key) in LAUNCH {
+        let available = matches!(surface, Surface::Browser(_)) || context(app).is_some();
+        menu = menu.item(
+            kit::MenuItem::new(surface.title())
+                .icon(surface.glyph())
+                .shortcut(key)
+                .disabled(!available)
+                .on_select(move |s: &mut App| {
+                    s.ui.panel.add_menu = false;
+                    add(s, surface);
+                }),
+        );
+    }
+    for (title, glyph, key) in [
+        ("Pull request", &icons::GIT_PULL_REQUEST_ARROW, "P"),
+        ("Linked pull requests", &icons::LINK, "L"),
+        ("Device", &icons::SMARTPHONE, "M"),
+    ] {
+        menu = menu.item(kit::MenuItem::new(title).icon(glyph).shortcut(key).disabled(true));
+    }
+    menu.overlay(&kit::theme(t), out);
 }
 
 #[cfg(test)]
