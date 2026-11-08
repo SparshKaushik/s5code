@@ -623,6 +623,9 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     if app.ui.shell.panel_open {
+        if app.ui.panel.active == Some(Surface::Files) {
+            files::overlays(app, t, &mut out);
+        }
         preview::overlays(app, t, &mut out);
         if app.ui.panel.add_menu {
             add_menu(app, t, &mut out);

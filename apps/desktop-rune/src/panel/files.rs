@@ -5,12 +5,15 @@ use crate::{
 use rune::{El, Key, KeyEvent, ScrollSpec, TextEdit, TextStyle, Tx, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     time::{Duration, Instant},
 };
 
 /// The web's `FileSaveCoordinator` debounce.
 const DEBOUNCE: Duration = Duration::from_millis(500);
+/// The web's `PROJECT_PATH_SEARCH_DEBOUNCE_MS`-style pause before a search goes out.
+const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+const SEARCH_LIMIT: usize = 200;
 const CODE: TextStyle = theme::mono(TextStyle::new(13., 400.).lh(20.));
 
 /// A write in flight (`id`), or queued behind one to the same file (`None`).
@@ -22,9 +25,20 @@ struct Write {
 }
 
 pub struct Ui {
-    entries: Vec<Value>,
-    directory: String,
-    listing: Option<u64>,
+    /// Each loaded folder's entries (`projects.listEntries`), by folder path ("" is the root).
+    dirs: HashMap<String, Vec<Value>>,
+    /// Folder listings in flight.
+    listings: Vec<(u64, String)>,
+    expanded: HashSet<String>,
+    /// Expand all: folders that load while it is on open too.
+    expand_all: bool,
+    query: TextEdit,
+    search_due: Option<Instant>,
+    searching: Option<(u64, String)>,
+    /// `projects.searchEntries` for the query: matches and whether more exist.
+    found: Option<(String, Vec<Value>, bool)>,
+    /// A row's right-click menu: the path and where it opened.
+    menu: Option<(String, (f32, f32))>,
     selected: String,
     cwd: String,
     reading: Option<u64>,
@@ -46,9 +60,15 @@ pub struct Ui {
 impl Default for Ui {
     fn default() -> Self {
         Self {
-            entries: vec![],
-            directory: String::new(),
-            listing: None,
+            dirs: HashMap::new(),
+            listings: vec![],
+            expanded: HashSet::new(),
+            expand_all: false,
+            query: TextEdit::new(""),
+            search_due: None,
+            searching: None,
+            found: None,
+            menu: None,
             selected: String::new(),
             cwd: String::new(),
             reading: None,
@@ -67,19 +87,143 @@ impl Default for Ui {
     }
 }
 
+/// Lists one folder's entries into the tree.
 pub fn load(app: &mut App, directory: String) {
     let Some((_, cwd)) = super::context(app) else {
         return;
     };
-    let request = app.src.net().map(|n| {
-        n.request(
-            "projects.listEntries",
-            json!({"cwd":cwd,"directoryPath":directory}),
-        )
-    });
-    app.ui.panel.files.directory = directory;
-    app.ui.panel.files.listing = request;
+    let ui = &mut app.ui.panel.files;
+    if ui.listings.iter().any(|(_, d)| *d == directory) {
+        return;
+    }
+    if let Some(id) = app.src.net().map(|n| n.request("projects.listEntries", json!({"cwd":cwd,"directoryPath":directory}))) {
+        app.ui.panel.files.listings.push((id, directory));
+    }
     app.ui.panel.files.error = None;
+}
+
+/// Opens or closes a folder, listing it the first time.
+fn toggle_dir(app: &mut App, path: String) {
+    let ui = &mut app.ui.panel.files;
+    if ui.expanded.remove(&path) {
+        ui.expand_all = false;
+        return;
+    }
+    ui.expanded.insert(path.clone());
+    if !ui.dirs.contains_key(&path) {
+        load(app, path);
+    }
+}
+
+/// `toggleAllDirectories`: collapses when every known folder is open, else opens them all.
+fn toggle_all(app: &mut App) {
+    let ui = &mut app.ui.panel.files;
+    let known = known_dirs(&ui.dirs);
+    if ui.expand_all || known.iter().all(|d| ui.expanded.contains(d)) {
+        ui.expand_all = false;
+        ui.expanded.clear();
+        return;
+    }
+    ui.expand_all = true;
+    let missing: Vec<String> = known.iter().filter(|d| !ui.dirs.contains_key(*d)).cloned().collect();
+    ui.expanded.extend(known);
+    for dir in missing {
+        load(app, dir);
+    }
+}
+
+fn known_dirs(dirs: &HashMap<String, Vec<Value>>) -> Vec<String> {
+    dirs.values().flatten().filter(|e| e["kind"] == "directory").map(|e| data::s(e, "path").to_string()).collect()
+}
+
+/// One visible tree row.
+#[derive(Debug, PartialEq)]
+struct Row {
+    path: String,
+    depth: usize,
+    dir: bool,
+    open: bool,
+}
+
+/// The tree's visible rows: folders first, then names, descending into open, loaded folders.
+fn rows(dirs: &HashMap<String, Vec<Value>>, expanded: &dyn Fn(&str) -> bool) -> Vec<Row> {
+    fn walk(dirs: &HashMap<String, Vec<Value>>, expanded: &dyn Fn(&str) -> bool, dir: &str, depth: usize, out: &mut Vec<Row>) {
+        let Some(entries) = dirs.get(dir) else { return };
+        let mut entries: Vec<(&str, bool)> = entries.iter().map(|e| (data::s(e, "path"), e["kind"] == "directory")).collect();
+        entries.sort_by_key(|(path, dir)| (!dir, name(path).to_lowercase()));
+        for (path, is_dir) in entries {
+            let open = is_dir && expanded(path);
+            out.push(Row { path: path.to_string(), depth, dir: is_dir, open });
+            if open {
+                walk(dirs, expanded, path, depth + 1, out);
+            }
+        }
+    }
+    let mut out = vec![];
+    walk(dirs, expanded, "", 0, &mut out);
+    out
+}
+
+/// Search matches as a tree (`buildTreeEntries`): each match under its folders, all open.
+fn search_tree(found: &[Value]) -> HashMap<String, Vec<Value>> {
+    let mut dirs: HashMap<String, Vec<Value>> = HashMap::new();
+    let mut seen = HashSet::new();
+    let mut add = |path: &str, kind: &str, dirs: &mut HashMap<String, Vec<Value>>| {
+        if seen.insert(path.to_string()) {
+            let parent = path.rsplit_once('/').map_or("", |(p, _)| p).to_string();
+            dirs.entry(parent).or_default().push(json!({"path": path, "kind": kind}));
+        }
+    };
+    for entry in found {
+        let path = data::s(entry, "path");
+        let mut at = 0;
+        while let Some(i) = path[at..].find('/') {
+            add(&path[..at + i], "directory", &mut dirs);
+            at += i + 1;
+        }
+        add(path, if entry["kind"] == "directory" { "directory" } else { "file" }, &mut dirs);
+    }
+    dirs
+}
+
+fn name(path: &str) -> &str {
+    path.rsplit('/').next().unwrap_or(path)
+}
+
+/// `serializeComposerFileLink`: `[name](path)` with the label escaped and the path encoded.
+fn file_link(path: &str) -> String {
+    let label = name(path).replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+    let mut dest = String::new();
+    for b in path.bytes() {
+        match b {
+            b'(' | b')' | b'#' | b'?' | b'\\' => dest.push_str(&format!("%{b:02X}")),
+            b if b.is_ascii_alphanumeric() || b"-_.!~*';:@&=+$,/".contains(&b) => dest.push(b as char),
+            b => dest.push_str(&format!("%{b:02X}")),
+        }
+    }
+    format!("[{label}]({dest})")
+}
+
+fn search_changed(app: &mut App, tx: &mut Tx) {
+    let ui = &mut app.ui.panel.files;
+    if ui.query.text.trim().is_empty() {
+        ui.search_due = None;
+        ui.found = None;
+    } else {
+        ui.search_due = Some(Instant::now() + SEARCH_DEBOUNCE);
+        tx.wake_after(SEARCH_DEBOUNCE);
+    }
+}
+
+fn search(app: &mut App) {
+    let Some((_, cwd)) = super::context(app) else {
+        return;
+    };
+    let query: String = app.ui.panel.files.query.text.trim().chars().take(256).collect();
+    let request = app.src.net().map(|n| n.request("projects.searchEntries", json!({"cwd":cwd,"query":query,"limit":SEARCH_LIMIT})));
+    let ui = &mut app.ui.panel.files;
+    ui.search_due = None;
+    ui.searching = request.map(|id| (id, query));
 }
 
 fn read(app: &mut App, path: String) {
@@ -100,14 +244,22 @@ fn read(app: &mut App, path: String) {
     show(ui, String::new(), false);
 }
 
-/// Opens `path` (relative to the thread's workspace) in the Files surface, listing its folder.
+/// Opens `path` (relative to the thread's workspace) in the Files surface, opening its folders
+/// in the tree (`loadFileAncestors`).
 pub fn open(app: &mut App, path: String) {
-    let folder = path
-        .rsplit_once('/')
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_default();
-    if app.ui.panel.files.directory != folder || app.ui.panel.files.entries.is_empty() {
-        load(app, folder);
+    let mut at = 0;
+    let mut folders = vec![String::new()];
+    while let Some(i) = path[at..].find('/') {
+        folders.push(path[..at + i].to_string());
+        at += i + 1;
+    }
+    for folder in folders {
+        if !folder.is_empty() {
+            app.ui.panel.files.expanded.insert(folder.clone());
+        }
+        if !app.ui.panel.files.dirs.contains_key(&folder) {
+            load(app, folder);
+        }
     }
     read(app, path);
 }
@@ -202,17 +354,44 @@ pub fn pending(app: &App) -> bool {
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = false;
-    let ui = &mut app.ui.panel.files;
-    if let Some(id) = ui.listing
-        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
-    {
-        ui.listing = None;
+    for (id, dir) in app.ui.panel.files.listings.clone() {
+        let Some(reply) = app.src.net().and_then(|n| n.take_reply(id)) else { continue };
+        let ui = &mut app.ui.panel.files;
+        ui.listings.retain(|(v, _)| *v != id);
         match reply {
-            Ok(v) => ui.entries = v["entries"].as_array().cloned().unwrap_or_default(),
+            Ok(v) => {
+                let entries = v["entries"].as_array().cloned().unwrap_or_default();
+                let more: Vec<String> = if ui.expand_all {
+                    entries.iter().filter(|e| e["kind"] == "directory").map(|e| data::s(e, "path").to_string()).collect()
+                } else {
+                    vec![]
+                };
+                ui.dirs.insert(dir, entries);
+                ui.expanded.extend(more.iter().cloned());
+                let unloaded: Vec<String> = more.into_iter().filter(|d| !ui.dirs.contains_key(d)).collect();
+                for dir in unloaded {
+                    load(app, dir);
+                }
+            }
             Err(e) => ui.error = Some(e.to_string()),
         }
         changed = true;
     }
+    if let Some((id, query)) = app.ui.panel.files.searching.clone()
+        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
+    {
+        let ui = &mut app.ui.panel.files;
+        ui.searching = None;
+        match reply {
+            Ok(v) => ui.found = Some((query, v["entries"].as_array().cloned().unwrap_or_default(), v["truncated"] == true)),
+            Err(e) => ui.error = Some(e.to_string()),
+        }
+        changed = true;
+    }
+    if app.ui.panel.files.searching.is_none() && app.ui.panel.files.search_due.is_some_and(|due| Instant::now() >= due) {
+        search(app);
+    }
+    let ui = &mut app.ui.panel.files;
     if let Some(id) = ui.reading
         && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
     {
@@ -278,20 +457,16 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     changed
 }
 
-/// Up from an open file shows its folder; from a folder, the folder's parent.
-fn up(ui: &Ui) -> String {
-    if !ui.selected.is_empty() {
-        return ui.directory.clone();
-    }
-    ui.directory
-        .rsplit_once('/')
-        .map(|(p, _)| p.to_string())
-        .unwrap_or_default()
-}
-
-/// Relists the folder and re-reads the open file (`onRefreshSelectedFile`), keeping a draft.
+/// Relists the loaded folders, searches again and re-reads the open file
+/// (`onRefreshSelectedFile`), keeping a draft.
 fn refresh(s: &mut App) {
-    load(s, s.ui.panel.files.directory.clone());
+    let dirs: Vec<String> = s.ui.panel.files.dirs.keys().cloned().collect();
+    for dir in if dirs.is_empty() { vec![String::new()] } else { dirs } {
+        load(s, dir);
+    }
+    if !s.ui.panel.files.query.text.trim().is_empty() {
+        search(s);
+    }
     let ui = &s.ui.panel.files;
     if !ui.selected.is_empty() && ui.writes.is_empty() && ui.editor.text == ui.saved {
         let path = ui.selected.clone();
@@ -347,96 +522,159 @@ fn editor(ui: &Ui, t: &T) -> El {
     )
 }
 
+fn header(ui: &Ui, t: &T) -> El {
+    let button = |label: &str, glyph: &'static rune::Icon| kit::Button::new(label).icon(glyph).variant("ghost-muted").size("icon-xs");
+    let reload = button("Refresh workspace files", &icons::REFRESH_CW).on_press(refresh).build(t).help("Refresh files");
+    let header = row().h(40.).px(8.).gap(4.).center_y();
+    if !ui.selected.is_empty() {
+        return header
+            .child(button("Back to files", &icons::ARROW_LEFT).on_press(close_file).build(t).help("Back to files"))
+            .child(text(&ui.selected).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate_middle().grow(1.).shrink().min_w(0.))
+            .child(reload);
+    }
+    let search = text_input(&ui.query, theme::TEXT_SM)
+        .key("files-search")
+        .label("Search files")
+        .h(28.)
+        .px(8.)
+        .grow(1.)
+        .min_w(0.)
+        .radius(6.)
+        .color(t.c.foreground)
+        .placeholder("Search files", t.c.muted_foreground)
+        .on_edit(|s: &mut App| &mut s.ui.panel.files.query)
+        .on_input_change(search_changed)
+        .on_input_key(|s: &mut App, e: &KeyEvent, tx: &mut Tx| {
+            if e.key != Key::Escape {
+                return false;
+            }
+            let ui = &mut s.ui.panel.files;
+            ui.query = TextEdit::new("");
+            search_changed(s, tx);
+            true
+        });
+    let mut header = header.child(reload).child(search);
+    let known = known_dirs(&ui.dirs);
+    if !known.is_empty() {
+        let all_open = ui.expand_all || known.iter().all(|d| ui.expanded.contains(d));
+        let (label, glyph) = if all_open { ("Collapse all folders", &icons::CHEVRONS_DOWN_UP) } else { ("Expand all folders", &icons::CHEVRONS_UP_DOWN) };
+        header = header.child(button(label, glyph).on_press(toggle_all).build(t).help(label));
+    }
+    header
+}
+
+fn tree(ui: &Ui, t: &T) -> El {
+    let status = |label: &str| row().px(12.).py(4.).child(text(label.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    let mut list = col().w_full().py(4.);
+    let query = ui.query.text.trim();
+    let (visible, loading) = if query.is_empty() {
+        (rows(&ui.dirs, &|p| ui.expanded.contains(p)), !ui.dirs.contains_key(""))
+    } else {
+        match &ui.found {
+            Some((_, found, truncated)) => {
+                if *truncated {
+                    list = list.child(status("More matches available. Refine your search."));
+                }
+                (rows(&search_tree(found), &|_| true), ui.searching.is_some() || ui.search_due.is_some())
+            }
+            None => (vec![], true),
+        }
+    };
+    if loading {
+        list = list.child(status("Loading files\u{2026}"));
+    } else if visible.is_empty() && !query.is_empty() {
+        list = list.child(status("No matching files."));
+    }
+    for r in visible {
+        let selected = !r.dir && r.path == ui.selected;
+        let glyph = match (r.dir, r.open) {
+            (true, true) => &icons::FOLDER_OPEN,
+            (true, false) => &icons::FOLDER,
+            _ => &icons::FILE,
+        };
+        let mut line = row()
+            .key(format!("files-row-{}", r.path))
+            .w_full()
+            .h(26.)
+            .pl(8. + r.depth as f32 * 12.)
+            .pr(8.)
+            .gap(6.)
+            .center_y()
+            .cursor(rune::Cursor::Pointer)
+            .focusable(true)
+            .role(if r.dir { "button" } else { "link" })
+            .label(&r.path)
+            .hover(t.c.accent)
+            .child(if r.dir {
+                icon(if r.open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.).size(12., 12.).color(t.c.muted_foreground)
+            } else {
+                el().size(12., 12.)
+            })
+            .child(icon(glyph, 14.).size(14., 14.).color(t.c.muted_foreground))
+            .child(text(name(&r.path).to_string()).font(theme::TEXT_XS).color(t.c.contrast_foreground).single_line().truncate().grow(1.).min_w(0.));
+        if selected {
+            line = line.fill(t.c.accent);
+        }
+        let (path, menu_path) = (r.path.clone(), r.path.clone());
+        let dir = r.dir;
+        line = line
+            .on_press(move |s: &mut App| if dir { toggle_dir(s, path.clone()) } else { read(s, path.clone()) })
+            .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| {
+                s.ui.panel.files.menu = Some((menu_path.clone(), (at.x, at.y)));
+            });
+        list = list.child(line);
+    }
+    scroll(list)
+}
+
+/// A row's right-click menu: Copy mention, Add to chat.
+pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
+    let Some((path, (x, y))) = app.ui.panel.files.menu.clone() else {
+        return;
+    };
+    let link = file_link(&path);
+    let (copy_link, chat_link, copied) = (link.clone(), link, path.clone());
+    let entries = vec![
+        kit::MenuEntry::item(kit::MenuItem::new("Copy mention").on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            s.ui.panel.files.menu = None;
+            tx.copy(copy_link.clone());
+            crate::shell::palette::toast(s, "Mention copied", Some(&copied));
+        })),
+        kit::MenuEntry::item(kit::MenuItem::new("Add to chat").on_select(move |s: &mut App| {
+            s.ui.panel.files.menu = None;
+            crate::chat::composer::append_to_draft(s, &format!("{chat_link} "));
+        })),
+    ];
+    kit::Menu::new("files-menu")
+        .native(true)
+        .width(198.)
+        .entries(entries)
+        .open(true)
+        .at(x, y)
+        .on_close(|s: &mut App| s.ui.panel.files.menu = None)
+        .overlay(&kit::theme(t), out);
+}
+
 pub fn view(app: &App, t: &T) -> El {
     let ui = &app.ui.panel.files;
-    let header = row()
-        .h(40.)
-        .px(8.)
-        .gap(6.)
-        .center_y()
-        .child(
-            kit::Button::new("Parent folder")
-                .icon(&icons::ARROW_UP)
-                .variant("ghost-muted")
-                .size("icon-xs")
-                .on_press(|s: &mut App| {
-                    let path = up(&s.ui.panel.files);
-                    close_file(s);
-                    load(s, path);
-                })
-                .build(t),
-        )
-        .child(
-            text(if ui.selected.is_empty() {
-                if ui.directory.is_empty() {
-                    "Files"
-                } else {
-                    &ui.directory
-                }
-            } else {
-                &ui.selected
-            })
-            .font(theme::TEXT_XS)
-            .color(t.c.contrast_foreground)
-            .grow(1.),
-        )
-        .child(
-            kit::Button::new("Refresh files")
-                .icon(&icons::REFRESH_CW)
-                .variant("ghost-muted")
-                .size("icon-xs")
-                .on_press(refresh)
-                .build(t),
-        );
+    let header = header(ui, t);
     let content = if let Some(error) = &ui.error {
-        scroll(super::notice(t, error))
+        scroll(
+            row()
+                .w_full()
+                .padding(16.)
+                .cursor(rune::Cursor::Pointer)
+                .role("button")
+                .on_press(|s: &mut App| {
+                    s.ui.panel.files.error = None;
+                    refresh(s);
+                })
+                .child(text(format!("{error} Click to retry.")).font(theme::TEXT_XS).color(t.c.destructive).wrap().grow(1.)),
+        )
     } else if !ui.selected.is_empty() {
         editor(ui, t)
     } else {
-        let mut list = col().w_full().padding(8.).gap(2.);
-        for entry in &ui.entries {
-            let path = data::s(entry, "path").to_string();
-            let directory = entry["kind"] == "directory";
-            list = list.child(
-                row()
-                    .w_full()
-                    .h(28.)
-                    .px(8.)
-                    .gap(8.)
-                    .center_y()
-                    .radius(4.)
-                    .hover(t.c.accent)
-                    .focusable(true)
-                    .role("button")
-                    .label(&path)
-                    .child(
-                        icon(
-                            if directory {
-                                &icons::FOLDER
-                            } else {
-                                &icons::FILE
-                            },
-                            14.,
-                        )
-                        .size(14., 14.)
-                        .color(t.c.muted_foreground),
-                    )
-                    .child(
-                        text(path.rsplit('/').next().unwrap_or(&path))
-                            .font(theme::TEXT_XS)
-                            .color(t.c.contrast_foreground),
-                    )
-                    .on_press(move |s: &mut App| {
-                        if directory {
-                            close_file(s);
-                            load(s, path.clone())
-                        } else {
-                            read(s, path.clone())
-                        }
-                    }),
-            );
-        }
-        scroll(list)
+        tree(ui, t)
     };
     let mut surface = col()
         .grow(1.)
@@ -475,7 +713,7 @@ fn scroll(content: El) -> El {
 
 pub fn fixture(app: &mut App) {
     let v: Value = serde_json::from_str(include_str!("../../fixtures/panel/files.json")).unwrap();
-    app.ui.panel.files.entries = v["entries"].as_array().unwrap().clone();
+    app.ui.panel.files.dirs.insert(String::new(), v["entries"].as_array().unwrap().clone());
 }
 
 /// A recorded file open in the editor; `edit` types into it, `error` fails its save.
@@ -484,7 +722,6 @@ pub fn edit_fixture(app: &mut App, edit: Option<&str>, error: bool) {
     let v: Value =
         serde_json::from_str(include_str!("../../fixtures/panel/file-edit.json")).unwrap();
     let ui = &mut app.ui.panel.files;
-    ui.directory = "src".into();
     ui.selected = data::s(&v, "relativePath").into();
     ui.cwd = "/repo".into();
     show(ui, data::s(&v, "contents").into(), v["truncated"] == true);
@@ -518,15 +755,31 @@ mod tests {
     }
 
     #[test]
-    fn up_from_a_file_shows_its_folder() {
-        let mut ui = Ui::default();
-        ui.directory = "src/lib".into();
-        ui.selected = "src/lib/a.ts".into();
-        assert_eq!(up(&ui), "src/lib");
-        ui.selected.clear();
-        assert_eq!(up(&ui), "src");
-        ui.directory = "src".into();
-        assert_eq!(up(&ui), "");
+    fn the_tree_lists_folders_first_and_search_shows_matches_under_their_folders() {
+        let entries = |v: Value| v.as_array().unwrap().clone();
+        let mut dirs = HashMap::new();
+        dirs.insert(String::new(), entries(json!([{"path":"b.ts","kind":"file"},{"path":"src","kind":"directory"},{"path":"A.md","kind":"file"},{"path":"lib","kind":"directory"}])));
+        dirs.insert("src".to_string(), entries(json!([{"path":"src/main.rs","kind":"file"}])));
+        let view = |open: &[&str]| -> Vec<(String, usize)> { rows(&dirs, &|p| open.iter().any(|o| *o == p)).into_iter().map(|r| (r.path, r.depth)).collect() };
+        let at = |p: &str, d: usize| (p.to_string(), d);
+        assert_eq!(view(&[]), [at("lib", 0), at("src", 0), at("A.md", 0), at("b.ts", 0)]);
+        // An open folder that hasn't loaded shows no children yet.
+        assert_eq!(view(&["src", "lib"]), [at("lib", 0), at("src", 0), at("src/main.rs", 1), at("A.md", 0), at("b.ts", 0)]);
+        assert_eq!(known_dirs(&dirs).len(), 2);
+
+        let found = search_tree(&entries(json!([{"path":"src/a/x.rs","kind":"file"},{"path":"src/b.rs","kind":"file"}])));
+        let rows: Vec<(String, usize, bool)> = rows(&found, &|_| true).into_iter().map(|r| (r.path, r.depth, r.dir)).collect();
+        assert_eq!(
+            rows,
+            [("src".into(), 0, true), ("src/a".into(), 1, true), ("src/a/x.rs".into(), 2, false), ("src/b.rs".into(), 1, false)]
+        );
+    }
+
+    #[test]
+    fn mentions_match_the_web_file_link() {
+        assert_eq!(file_link("src/main.rs"), "[main.rs](src/main.rs)");
+        assert_eq!(file_link("docs/a b (1)#?.md"), "[a b (1)#?.md](docs/a%20b%20%281%29%23%3F.md)");
+        assert_eq!(file_link("x/[n]é.md"), "[\\[n\\]é.md](x/%5Bn%5D%C3%A9.md)");
     }
 
     #[test]

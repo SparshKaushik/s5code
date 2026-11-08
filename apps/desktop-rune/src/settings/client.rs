@@ -39,6 +39,11 @@ impl ClientSettings {
         settings
     }
 
+    /// A file beside the settings for client UI state (the web's other localStorage keys).
+    pub fn sibling(&self, name: &str) -> PathBuf {
+        self.path.with_file_name(name)
+    }
+
     pub fn save(&mut self) {
         // Preserve an unreadable file so a later setting change cannot destroy it.
         if self.error.is_some() {

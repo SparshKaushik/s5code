@@ -32,6 +32,8 @@ pub struct Ui {
     branch_query: TextEdit,
     /// The highlighted branch picker row.
     branch_active: usize,
+    /// A branch row's right-click menu: the branch and where it opened.
+    branch_copy: Option<(String, (f32, f32))>,
     pending: Option<(u64, Pending)>,
     /// Where each new-thread draft runs (BranchToolbar's env mode), by draft key.
     drafts: HashMap<String, DraftRun>,
@@ -727,8 +729,14 @@ fn branch_picker(s: &App, t: &T, list: El) -> El {
             .cursor(Cursor::Pointer)
             .label(label.clone())
             .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
-            .on_hover(move |s: &mut App| s.ui.chat.details.branch_active = i)
-            .on_press(move |s: &mut App| pick_item(s, item.clone()));
+            .on_hover(move |s: &mut App| s.ui.chat.details.branch_active = i);
+        if let Item::Ref(r) = &item {
+            let name = refs[*r].name.clone();
+            line = line.on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| {
+                s.ui.chat.details.branch_copy = Some((name.clone(), (at.x, at.y)));
+            });
+        }
+        let mut line = line.on_press(move |s: &mut App| pick_item(s, item.clone()));
         if let Some(badge) = badge {
             line = line.child(text(badge).font(theme::TEXT_3XS).color(muted.alpha_mul(0.45)));
         }
@@ -773,6 +781,21 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     let mut out = vec![];
     git::overlays(s, t, &mut out);
     scripts::overlays(s, t, &mut out);
+    if let Some((name, (x, y))) = s.ui.chat.details.branch_copy.clone() {
+        let copy = crate::kit::MenuItem::new("Copy branch name").icon(&icons::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            s.ui.chat.details.branch_copy = None;
+            tx.copy(name.clone());
+            palette::toast(s, "Branch name copied", Some(&name));
+        });
+        crate::kit::Menu::new("details-branch-copy")
+            .native(true)
+            .width(198.0)
+            .entries(vec![crate::kit::MenuEntry::item(copy)])
+            .open(true)
+            .at(x, y)
+            .on_close(|s: &mut App| s.ui.chat.details.branch_copy = None)
+            .overlay(&crate::kit::theme(t), &mut out);
+    }
     out
 }
 
