@@ -73,7 +73,7 @@ pub fn view(s: &App, t: &T) -> El {
         ))
 }
 /// A `SettingsRow`: copy on the left, control on the right, `px-4 py-3` like every settings row.
-fn about_row(t: &T, title: &str, description: &str, control: El) -> El {
+pub fn about_row(t: &T, title: &str, description: &str, control: El) -> El {
     row()
         .w_full()
         .px(16.0)

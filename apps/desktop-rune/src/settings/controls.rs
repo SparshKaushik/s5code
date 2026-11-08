@@ -252,6 +252,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         })
     });
     let environment_wide = s.ui.settings.project.is_some()
+        && !key.starts_with("project::")
         && !s.client_settings.values.contains_key(key)
         && !super::scope::project_key(key);
     let ctrl = if environment_wide {
@@ -358,7 +359,8 @@ pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
 }
 
 /// Web `SettingsSection` `headerAction`: buttons trail the title, `gap-2` apart.
-pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t: &T) -> El {
+/// The `SettingsSection` card alone (web `hideTitle`).
+pub fn card(children: Vec<El>, t: &T) -> El {
     let mut group = col()
         .w_full()
         .padding(1.0)
@@ -371,6 +373,10 @@ pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t:
         }
         group = group.child(child);
     }
+    group
+}
+
+pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t: &T) -> El {
     col()
         .w_full()
         .gap(10.0)
@@ -389,7 +395,7 @@ pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t:
                 )
                 .children(actions),
         )
-        .child(group)
+        .child(card(children, t))
 }
 
 fn slider(s: &App, t: &T, key: &str, title: &str) -> El {

@@ -45,6 +45,8 @@ pub struct Ui {
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
     pub delete_thread: Option<(String, String)>,
+    /// The project the Danger section is confirming removal of: id and title.
+    pub delete_project: Option<(String, String)>,
     pub provider_picker: bool,
     pub provider: Option<String>,
     pub project: Option<String>,
@@ -774,6 +776,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
+    projects::confirm_remove(s, t, &mut overlays);
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
@@ -1123,6 +1126,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         if s.ui.settings.update_version.take().is_some()
             || s.ui.settings.theme_editor.take().is_some()
             || s.ui.settings.delete_thread.take().is_some()
+            || s.ui.settings.delete_project.take().is_some()
             || s.ui.settings.delete_task.take().is_some()
         {
             return true;

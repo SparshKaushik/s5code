@@ -137,7 +137,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "access" => super::connections::access(s, t),
         "scheduled-tasks" => super::tasks::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
-        "projects" => super::projects::view(s, t),
+        "projects" => super::projects::view(s, cx, t),
         "archived" => super::projects::archived(s, t),
         "about" => super::about::view(s, t),
         _ => unavailable(path, t),
