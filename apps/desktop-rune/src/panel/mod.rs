@@ -99,6 +99,14 @@ fn context(app: &App) -> Option<(String, String)> {
         .unwrap_or(data::s(project, "workspaceRoot"));
     Some((id.clone(), cwd.to_string()))
 }
+/// The Files surface's root: the thread's workspace, or on a new-thread draft its project's.
+fn workspace(app: &App) -> Option<String> {
+    if let Some((_, cwd)) = context(app) {
+        return Some(cwd);
+    }
+    let Route::Home { .. } = &app.route else { return None };
+    crate::chat::home::draft_project(app).map(|p| data::s(p, "workspaceRoot").to_string()).filter(|cwd| !cwd.is_empty())
+}
 /// The launcher's entries; Browser always opens a new tab, as web's.
 const LAUNCH: [(Surface, &str); 4] = [
     (Surface::Browser(0), "B"),
@@ -160,12 +168,16 @@ fn remove_surface(app: &mut App, surface: Surface) {
 }
 /// Opens a workspace file in the Files surface (the palette's "Go to file").
 pub fn open_file(app: &mut App, path: String) {
+    open_file_at(app, path, None);
+}
+/// Opens `path` in the Files surface and centres 1-based `line` once it loads.
+pub fn open_file_at(app: &mut App, path: String, line: Option<usize>) {
     app.ui.shell.panel_open = true;
     if !app.ui.panel.surfaces.contains(&Surface::Files) {
         app.ui.panel.surfaces.push(Surface::Files);
     }
     app.ui.panel.active = Some(Surface::Files);
-    files::open(app, path);
+    files::open(app, path, line);
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
@@ -734,6 +746,17 @@ mod tests {
         assert!(app.ui.panel.active == Some(Surface::Browser(1)) && app.ui.shell.panel_open);
         assert_eq!(app.ui.panel.browser.pip, Some(1));
         assert!(!switch_thread(&mut app));
+    }
+
+    #[test]
+    fn a_new_thread_draft_roots_the_files_surface_at_its_project() {
+        let mut app = App::new();
+        let project = app.state().projects[0].clone();
+        app.navigate(Route::Home { project_id: Some(data::s(&project, "id").to_string()) });
+        assert_eq!(context(&app), None);
+        assert_eq!(workspace(&app).as_deref(), Some(data::s(&project, "workspaceRoot")));
+        app.navigate(Route::PullRequests);
+        assert_eq!(workspace(&app), None);
     }
 
     #[test]

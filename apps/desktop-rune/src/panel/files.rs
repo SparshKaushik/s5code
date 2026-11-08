@@ -42,6 +42,8 @@ pub struct Ui {
     unsaved: HashMap<(String, String), String>,
     save_error: Option<String>,
     error: Option<String>,
+    /// The search match to mark and centre in the open file.
+    line: Option<usize>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -63,12 +65,13 @@ impl Default for Ui {
             unsaved: HashMap::new(),
             save_error: None,
             error: None,
+            line: None,
         }
     }
 }
 
 pub fn load(app: &mut App, directory: String) {
-    let Some((_, cwd)) = super::context(app) else {
+    let Some(cwd) = super::workspace(app) else {
         return;
     };
     let request = app.src.net().map(|n| {
@@ -84,7 +87,7 @@ pub fn load(app: &mut App, directory: String) {
 
 fn read(app: &mut App, path: String) {
     flush(app);
-    let Some((_, cwd)) = super::context(app) else {
+    let Some(cwd) = super::workspace(app) else {
         return;
     };
     let request = app
@@ -93,6 +96,7 @@ fn read(app: &mut App, path: String) {
         .map(|n| n.request("projects.readFile", json!({"cwd":cwd,"relativePath":path})));
     let ui = &mut app.ui.panel.files;
     ui.selected = path;
+    ui.line = None;
     ui.cwd = cwd;
     ui.reading = request;
     ui.error = None;
@@ -100,8 +104,9 @@ fn read(app: &mut App, path: String) {
     show(ui, String::new(), false);
 }
 
-/// Opens `path` (relative to the thread's workspace) in the Files surface, listing its folder.
-pub fn open(app: &mut App, path: String) {
+/// Opens `path` (relative to the workspace) in the Files surface, listing its folder, and marks
+/// 1-based `line` once it loads.
+pub fn open(app: &mut App, path: String, line: Option<usize>) {
     let folder = path
         .rsplit_once('/')
         .map(|(p, _)| p.to_string())
@@ -110,12 +115,26 @@ pub fn open(app: &mut App, path: String) {
         load(app, folder);
     }
     read(app, path);
+    app.ui.panel.files.line = line;
+}
+
+/// The bytes of 1-based `line` in `text`, without its newline.
+fn line_range(text: &str, line: usize) -> Option<std::ops::Range<usize>> {
+    let mut start = 0;
+    for (i, l) in text.split('\n').enumerate() {
+        if i + 1 == line {
+            return Some(start..start + l.len());
+        }
+        start += l.len() + 1;
+    }
+    None
 }
 
 fn close_file(app: &mut App) {
     flush(app);
     let ui = &mut app.ui.panel.files;
     ui.selected.clear();
+    ui.line = None;
     ui.reading = None;
     ui.save_error = None;
     show(ui, String::new(), false);
@@ -220,6 +239,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         match reply {
             Ok(v) => {
                 show(ui, data::s(&v, "contents").into(), v["truncated"] == true);
+                if ui.line.is_some() {
+                    tx.scroll_center("file-line");
+                }
                 if ui.editor.text != ui.saved {
                     ui.due = Some(Instant::now() + DEBOUNCE);
                     tx.wake_after(DEBOUNCE);
@@ -313,6 +335,7 @@ fn editor(ui: &Ui, t: &T) -> El {
         .spans(&rune_kit::syntax::highlight(lang, &ui.editor.text), 0);
     let cell = rune::text::advance("MMMMMMMMMM", CODE) / 10.;
     let width = (ui.columns + 2) as f32 * cell;
+    let mark = ui.line.and_then(|n| line_range(&ui.editor.text, n)).map(|range| rune::TextHighlight::new(range, t.c.primary.alpha_mul(0.25)).key("file-line"));
     let code = if ui.truncated {
         text(&ui.editor.text)
             .font(CODE)
@@ -333,6 +356,7 @@ fn editor(ui: &Ui, t: &T) -> El {
             })
             .on_input_key(on_key)
     };
+    let code = code.text_highlights(mark);
     el().grow(1.).min_h(0.).min_w(0.).scroll_xy().child(
         row()
             .py(8.)
@@ -515,6 +539,16 @@ mod tests {
         let mut ui = Ui::default();
         show(&mut ui, (0..10).map(|_| "x\n").collect(), false);
         assert!(ui.numbers.starts_with(" 1\n 2\n"), "{:?}", ui.numbers);
+    }
+
+    #[test]
+    fn a_search_match_marks_its_whole_line() {
+        let text = "one\ntwo words\n\nlast";
+        assert_eq!(line_range(text, 1), Some(0..3));
+        assert_eq!(&text[line_range(text, 2).unwrap()], "two words");
+        assert_eq!(line_range(text, 3), Some(14..14));
+        assert_eq!(&text[line_range(text, 4).unwrap()], "last");
+        assert_eq!(line_range(text, 5), None);
     }
 
     #[test]
