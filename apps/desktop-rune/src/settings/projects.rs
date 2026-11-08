@@ -13,10 +13,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
             .as_ref()
             .and_then(|id| s.state().projects.iter().find(|p| p["id"] == *id));
     let Some(project) = selected else {
-        return text("Choose a project to manage its name, icon, checkouts and actions.")
-            .px(16.0)
-            .font(theme::TEXT_SM)
-            .color(t.c.muted_foreground);
+        return chooser(s, t);
     };
     let id = crate::data::s(project, "id").to_owned();
     let title = crate::data::s(project, "title").to_owned();
@@ -118,6 +115,56 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
 }
 
 /// Subagents and side chats live inside their parent's view (`isListedThreadLineage`).
+/// Web's unscoped Projects page: every project as a row that picks it in the scope sentence.
+fn chooser(s: &App, t: &T) -> El {
+    let rows: Vec<El> = s
+        .state()
+        .projects
+        .iter()
+        .map(|project| {
+            let id = crate::data::s(project, "id").to_owned();
+            let title = crate::data::s(project, "title").to_owned();
+            row()
+                .w_full()
+                .px(16.0)
+                .py(12.0)
+                .gap(12.0)
+                .center_y()
+                .focusable(true)
+                .role("button")
+                .label(title.clone())
+                .child(crate::shell::sidebar::monogram(t, &title, false))
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(2.0)
+                        .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground))
+                        .child(
+                            text(crate::data::s(project, "workspaceRoot").to_owned())
+                                .font(theme::TEXT_XS)
+                                .color(t.c.muted_foreground),
+                        ),
+                )
+                .child(rune::icon(&crate::icons::CHEVRON_RIGHT, 16.0).color(t.c.muted_foreground))
+                .on_press(move |s: &mut App| {
+                    super::commit_edits(s, true);
+                    s.ui.settings.project = Some(id.clone());
+                })
+        })
+        .collect();
+    let mut page = col().w_full().gap(16.0).child(
+        text("Choose a project to manage its name, icon, checkouts and actions.")
+            .px(16.0)
+            .font(theme::TEXT_SM)
+            .color(t.c.muted_foreground),
+    );
+    if !rows.is_empty() {
+        page = page.child(c::card(rows, t));
+    }
+    page
+}
+
 fn listed(thread: &Value) -> bool {
     thread["lineage"]["relationshipToParent"] != "subagent" && thread["lineage"]["sideChat"] != true
 }
