@@ -116,7 +116,7 @@ fn commit_rename(s: &mut App) {
 
 const CRUMB: TextStyle = theme::SM_MEDIUM;
 
-pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
+pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let project = composer::ctx(s).project;
     let scratch = project.is_some_and(|p| crate::shell::palette::actions::is_scratch_project(s, p));
     let project = if scratch { "No project".to_string() } else { project.map(|p| data::s(p, "title").to_string()).unwrap_or_default() };
@@ -158,15 +158,19 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
     };
     crumbs = crumbs.child(title_el);
 
-    let details_on = !s.ui.chat.details.hidden;
-    let toggles = row()
-        .gap(4.0)
-        .center_y()
-        .child(toggle(t, &icons::SQUARE_MENU, "Toggle thread details panel", details_on).on_press(|s: &mut App| {
-            let d = &mut s.ui.chat.details;
-            d.hidden = !d.hidden;
-            d.menu = None;
-        }))
+    let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
+    let fits = crate::chat::details::lane(w, h, false).card;
+    let details_on = crate::chat::details::shown(s, w, h) != crate::chat::details::Shown::None;
+    let mut toggles = row().gap(4.0).center_y();
+    // No project, no card (the web shows its no-projects page there instead of a thread).
+    if composer::ctx(s).project.is_some() {
+        toggles = toggles.child(
+            toggle(t, &icons::SQUARE_MENU, "Toggle thread details panel", details_on)
+                .key("topbar-details")
+                .on_press(move |s: &mut App| crate::chat::details::toggle(s, fits)),
+        );
+    }
+    let toggles = toggles
         .child(toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open).on_press(|s: &mut App| {
             crate::panel::toggle_terminal(s);
         }))

@@ -25,11 +25,14 @@ pub struct Ui {
     pub hidden: Vec<&'static str>,
     pub menu: Option<&'static str>,
     pub by_period: bool,
+    /// The chart column under the pointer and the pointer in the plot (`hoverIndex`).
+    pub hover: Option<(usize, f32, f32)>,
+    plot_w: f32,
 }
 
 impl Default for Ui {
     fn default() -> Self {
-        Ui { metric: "limits", window_days: 30, summary: None, error: None, pending: None, requested: None, hidden: Vec::new(), menu: None, by_period: false }
+        Ui { metric: "limits", window_days: 30, summary: None, error: None, pending: None, requested: None, hidden: Vec::new(), menu: None, by_period: false, hover: None, plot_w: 0.0 }
     }
 }
 
@@ -810,7 +813,7 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
         (true, false) => "Hourly cost",
         (true, true) => "Hourly processed tokens",
     };
-    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view));
+    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, u.hover, u.plot_w));
     let top = row().w_full().gap(24.0).child(left).child(right);
 
     let metric = |label: &str, v: String| {
@@ -937,7 +940,61 @@ fn curve(pts: &[[f32; 2]]) -> Path {
     path
 }
 
-fn chart(t: &T, m: &Merged, tokens_view: bool) -> El {
+/// The column a pointer `x` across a plot `w` wide hovers, of `n` evenly spaced periods.
+fn hovered_column(x: f32, w: f32, n: usize) -> Option<usize> {
+    (n > 0 && w > 0.0).then(|| ((x.clamp(0.0, w) / w * (n - 1) as f32).round() as usize).min(n - 1))
+}
+
+/// UsageChartTooltip: the hovered period, each provider's value, and the total, beside the
+/// pointer and flipped to stay inside the plot.
+fn chart_tooltip(t: &T, m: &Merged, index: usize, (x, y): (f32, f32), plot: (f32, f32), fmt: &dyn Fn(&Totals) -> f64, tokens_view: bool) -> El {
+    let format = |v: f64| if tokens_view { tokens(v) } else { usd(v) };
+    let period = m.periods.get(index).cloned().unwrap_or_default();
+    let values = m.by_period.get(&period);
+    let muted = t.c.muted_foreground;
+    let num = theme::TEXT_XS.features("'tnum' 1");
+    let mut total = 0.0;
+    let mut body = col().child(text(period_label(&period)).font(theme::TEXT_XS).color(muted).mb(4.0));
+    for (kind, _, _) in &m.providers {
+        let v = values.and_then(|p| p.get(kind)).map(fmt).unwrap_or(0.0);
+        total += v;
+        let (label, driver) = presentation(kind);
+        body = body.child(
+            row()
+                .gap(12.0)
+                .center_y()
+                .child(row().gap(6.0).center_y().child(provider_icon(t, driver, 12.0)).child(text(label).font(theme::TEXT_XS).color(muted)))
+                .child(spacer())
+                .child(text(format(v)).font(num).color(t.c.foreground)),
+        );
+    }
+    body = body.child(
+        row()
+            .mt(4.0)
+            .pt(4.0)
+            .gap(12.0)
+            .center_y()
+            .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border))
+            .child(text("Total").font(theme::TEXT_XS).color(muted))
+            .child(spacer())
+            .child(text(format(total)).font(num).color(t.c.foreground)),
+    );
+    // The tooltip isn't measured before it's placed, so flip on its estimated size.
+    let (w, h) = (176.0, 46.0 + 18.0 * m.providers.len() as f32);
+    let gap = 12.0;
+    let left = if x + gap + w <= plot.0 { x + gap } else { x - gap - w };
+    let top = if y + gap + h <= plot.1 { y + gap } else { y - gap - h };
+    body.absolute(left.clamp(0.0, (plot.0 - w).max(0.0)), top.clamp(0.0, (plot.1 - h).max(0.0)))
+        .w(w)
+        .px(10.0)
+        .py(8.0)
+        .radius(radius::XL)
+        .fill(t.c.popover.alpha_mul(0.92))
+        .border(1.0, t.c.border.alpha_mul(0.5))
+        .shadow(4.0, 12.0, Color::BLACK.alpha(if t.dark { 0.32 } else { 0.1 }))
+}
+
+fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>, plot_w: f32) -> El {
     let value = |x: &Totals| if tokens_view { x.tokens } else { x.cost };
     let peak = m.by_period.values().flat_map(|p| p.values()).map(value).fold(0.0, f64::max);
     let (max, ticks) = nice_scale(peak);
@@ -977,7 +1034,35 @@ fn chart(t: &T, m: &Merged, tokens_view: bool) -> El {
     for (line, c) in &lines {
         shape = shape.stroke_path(line, 2.0, LineCap::Round, *c);
     }
-    let plot = canvas(shape.view_box(VIEW_W, VIEW_H)).grow(1.0).min_w(0.0).h(plot_h);
+    let hover = hover.filter(|h| h.0 < m.periods.len());
+    if let Some((index, ..)) = hover {
+        let x = index as f32 * step;
+        shape = shape.line([x, PLOT_TOP], [x, VIEW_H], 1.0, LineCap::Butt, t.c.muted_foreground);
+    }
+    let n = m.periods.len();
+    let mut plot = el()
+        .key("usage-plot")
+        .grow(1.0)
+        .min_w(0.0)
+        .h(plot_h)
+        .child(canvas(shape.view_box(VIEW_W, VIEW_H)).w_full().h(plot_h))
+        .on_layout(|s: &mut App, r| {
+            if (ui(s).plot_w - r[2]).abs() > 0.5 {
+                ui(s).plot_w = r[2];
+            }
+        })
+        .on_pointer_move_local(move |s: &mut App, p, _| {
+            let w = ui(s).plot_w;
+            ui(s).hover = hovered_column(p.x, w, n).map(|index| (index, p.x.clamp(0.0, w), p.y.clamp(0.0, plot_h)));
+        })
+        .on_hover_change(|s: &mut App, on, _| {
+            if !on {
+                ui(s).hover = None;
+            }
+        });
+    if let Some((index, x, y)) = hover {
+        plot = plot.child(chart_tooltip(t, m, index, (x, y), (plot_w, plot_h), &value, tokens_view));
+    }
     let label = |n: usize| m.periods.get(n).map(|p| period_label(p).to_uppercase()).unwrap_or_default();
     let x_labels = row()
         .w_full()
@@ -1131,4 +1216,19 @@ fn skeleton(t: &T, page: El) -> El {
                 .child(row().w_full().center_y().child(h2(t, "Breakdown")).child(spacer()).child(el().w(112.0).h(28.0).radius(radius::LG).fill(bar)))
                 .child(el().w_full().h(176.0).radius(radius::SM).fill(bar)),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::hovered_column;
+
+    #[test]
+    fn the_pointer_picks_the_nearest_period_point() {
+        assert_eq!(hovered_column(0.0, 300.0, 4), Some(0));
+        assert_eq!(hovered_column(149.0, 300.0, 4), Some(1));
+        assert_eq!(hovered_column(151.0, 300.0, 4), Some(2));
+        assert_eq!(hovered_column(900.0, 300.0, 4), Some(3));
+        assert_eq!(hovered_column(-5.0, 300.0, 1), Some(0));
+        assert_eq!(hovered_column(10.0, 300.0, 0), None);
+    }
 }

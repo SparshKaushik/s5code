@@ -29,7 +29,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         return main;
     }
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
-    let lane = details::lane(w, h, s.ui.chat.details.hidden);
+    let shown = details::shown(s, w, h);
+    let lane = details::lane(w, h, shown != details::Shown::Inline);
     // Under the settings modal the frame keeps showing the route settings was opened from.
     let body = match s.frame_route() {
         Route::Thread(id) if !timeline::is_empty(s, id) => timeline::view(s, cx, t, id, &lane),
@@ -44,7 +45,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(body)
         .children(home::banner(s, t, &lane))
         .child(composer::view(s, cx, t, &lane))
-        .children(details::view(s, cx, t, &lane, w))
+        .children(details::view(s, cx, t, shown, w))
         .children(details::menu(s, t))
         .children(composer::overlays(s, cx, t));
     main.child(topbar::view(s, cx, t))

@@ -676,7 +676,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("details-card", on_replay_showcase),
     ("details-hidden", |s| {
         on_replay_showcase(s);
-        s.ui.chat.details.hidden = true;
+        crate::chat::details::toggle(s, true);
     }),
 ];
 
