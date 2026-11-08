@@ -13,6 +13,15 @@ use serde_json::{Value, json};
 
 /// The web terminal's blink period; it blinks only while focused.
 const BLINK: Duration = Duration::from_millis(500);
+/// Blinks on the compositor's wall clock, so an idle focused terminal repaints its cursor a few
+/// times a second without rebuilding the view.
+const BLINK_CYCLE: rune::Cycle = rune::Cycle {
+    period: 1.,
+    phase: 0.,
+    stops: &[(0., 1.), (0.5, 1.), (0.5001, 0.), (1., 0.)],
+    still: 1.,
+    fps: 4.,
+};
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 const PADDING: f32 = 4.;
 
@@ -27,7 +36,8 @@ pub struct Session {
     /// Hidden field that owns keyboard focus, IME and paste for this terminal.
     pub input: TextEdit,
     blink_origin: Instant,
-    cursor_on: bool,
+    /// The cursor is handed to [`BLINK_CYCLE`]; it stays solid for a beat after input.
+    cursor_blinks: bool,
     button: Option<MouseButton>,
     /// What the primary button's press is doing until it lifts.
     press: Option<Press>,
@@ -54,7 +64,7 @@ impl Session {
             label: String::new(),
             input: TextEdit::new(""),
             blink_origin: Instant::now(),
-            cursor_on: true,
+            cursor_blinks: false,
             button: None,
             press: None,
             hover: None,
@@ -77,7 +87,7 @@ impl Session {
 
     fn wake_cursor(&mut self) {
         self.blink_origin = Instant::now();
-        self.cursor_on = true;
+        self.cursor_blinks = false;
     }
 }
 
@@ -328,17 +338,13 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         let blinking = session.input.focused
             && session.vt.cursor_blinks()
             && !session.vt.scrolled_back();
-        let on = if blinking {
-            let elapsed = session.blink_origin.elapsed();
-            let phase = elapsed.as_millis() / BLINK.as_millis();
-            let remaining = BLINK.as_millis() - elapsed.as_millis() % BLINK.as_millis();
-            tx.wake_after(Duration::from_millis(remaining as u64));
-            phase % 2 == 0
-        } else {
-            true
-        };
-        if on != session.cursor_on {
-            session.cursor_on = on;
+        let elapsed = session.blink_origin.elapsed();
+        if blinking && elapsed < BLINK {
+            tx.wake_after(BLINK - elapsed);
+        }
+        let blinks = blinking && elapsed >= BLINK;
+        if blinks != session.cursor_blinks {
+            session.cursor_blinks = blinks;
             changed = true;
         }
         if let Some(at) = session.notify_at {
@@ -755,7 +761,8 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
         }
     }
     let focused = session.input.focused;
-    if let Some(c) = cursor.filter(|_| session.cursor_on) {
+    let blink = |e: El| if session.cursor_blinks { e.cycle(BLINK_CYCLE) } else { e };
+    if let Some(c) = cursor {
         let (cx, cy) = (x(c.col), y(c.row));
         let color = t.c.terminal_cursor;
         let mark = match (focused, c.kind) {
@@ -773,18 +780,18 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
                 .size(m.cell_w, m.cell_h)
                 .fill(color),
         };
-        grid = grid.child(mark);
+        grid = grid.child(blink(mark));
         if let (true, vt::CursorKind::Block, Some(glyph)) = (focused, c.kind, &c.glyph) {
             let mut font = m.font;
             if glyph.bold {
                 font = theme::weight(font, 700.);
             }
-            grid = grid.child(
+            grid = grid.child(blink(
                 text(glyph.text.clone())
                     .font(font)
                     .color(t.c.terminal_background)
                     .absolute(cx, cy),
-            );
+            ));
         }
     }
     let (cursor_col, cursor_row) = session.vt.cursor_point();
