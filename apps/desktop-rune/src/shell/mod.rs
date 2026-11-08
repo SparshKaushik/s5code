@@ -3,6 +3,7 @@
 pub mod sidebar;
 pub mod palette;
 pub mod quit;
+mod workspace;
 
 use rune::{Cx, El, KeyEvent, Tx, row};
 
@@ -37,7 +38,7 @@ fn open_titled(s: &mut App, title: &str) {
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     sidebar::release_undo_key(s, e);
-    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
+    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {

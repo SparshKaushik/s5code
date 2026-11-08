@@ -28,7 +28,7 @@ pub fn monogram(t: &T, name: &str, dim: bool) -> El {
 }
 
 /// The favicon's SVG scaled to `size` (its 16-unit viewBox drawn smaller).
-fn monogram_at(t: &T, name: &str, dim: bool, size: f32) -> El {
+pub(super) fn monogram_at(t: &T, name: &str, dim: bool, size: f32) -> El {
     let k = size / 16.0;
     let glyphs = logic::monogram(name);
     let color = if dim { t.sb.sidebar_muted_foreground } else { hue(logic::project_color(name), t.dark) };
@@ -148,11 +148,12 @@ fn place(li: El, rc: &RowCtx) -> El {
 
 /// The press/drag/menu wiring every row shares: a click opens (Cmd toggles, Shift extends the
 /// selection), a drag past `DRAG_DISTANCE` moves it, a secondary press opens the menu.
-fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El {
+fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>) -> El {
     let (id, hid, mid) = (th.id.clone(), th.id.clone(), th.id.clone());
     e.key(format!("sb-row-{}", th.id))
         .cursor(Cursor::Pointer)
         .focusable(true)
+        .focus_ring(2.0, -2.0, t.sb.ring)
         .on_hover_change(move |s: &mut App, on, _: &mut Tx| {
             let ui = &mut s.ui.shell.sidebar;
             if on {
@@ -362,7 +363,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         t.sb.foreground
     };
 
-    let mut line1 = row().h(20.0).gap(6.0).center_y().child(monogram(t, model.project(th), false));
+    let mut line1 = row().h(20.0).gap(6.0).center_y().child(super::favicon::mark(s, t, &th.project_id, model.project(th), false, 16.0));
     if th.pinned {
         line1 = line1.child(icon(if hovered { &i::PIN_OFF } else { &i::PIN }, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
     }
@@ -404,11 +405,16 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     match (&th.branch, &th.pr) {
         (branch, pr) if branch.is_some() || pr.is_some() => {
             body = body.child(line2);
-            let lead = match branch {
-                Some(branch) => text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink(),
-                None => spacer(),
-            };
-            let mut meta = row().mt(2.0).gap(6.0).center_y().child(lead);
+            let mut meta = row().mt(2.0).gap(6.0).center_y();
+            if let Some(branch) = branch {
+                // `ThreadWorktreeIndicator`: a worktree thread marks its branch.
+                if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
+                    meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
+                }
+                meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
+            } else {
+                meta = meta.child(spacer());
+            }
             if let Some(pr) = pr {
                 meta = meta.child(pr_badge(t, &th.id, pr));
             }
@@ -429,7 +435,7 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         e = e.opacity(0.7);
     }
     let over = rc.over.map(str::to_string);
-    place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, th, rc.section, over)), rc)
+    place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
 
 /// `PullRequestBadge`: the state glyph in its tone, then the number, "+N" or a stack's layer count.
@@ -504,7 +510,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         .px(10.0)
         .gap(10.0)
         .center_y()
-        .child(monogram(t, model.project(th), !(hovered || (active && !settled))))
+        .child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0))
         .child(title(s, th, t, theme::TEXT_SM, title_color));
     if th.pinned {
         r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
@@ -535,7 +541,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
     let e = surface(r.w_full(), t, active, selected, hovered, rc.dragging.is_some());
     let over = rc.over.map(str::to_string);
-    place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, th, rc.section, over)), rc)
+    place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
 }
 
 fn marker_key(m: Marker) -> String {

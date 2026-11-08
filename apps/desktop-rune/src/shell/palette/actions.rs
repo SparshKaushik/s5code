@@ -132,6 +132,10 @@ pub fn tail_items(s: &App) -> Vec<Item> {
     files.shortcut = shortcut_label(s, "filePicker.toggle");
     files.fields = keywords(&["go to file", "open file", "file picker", "find file", "quick open"]);
     out.push(files);
+    let mut content = item("Search project contents", "Actions", &icons::TEXT_SEARCH, "", Action::Content);
+    content.shortcut = shortcut_label(s, "projectSearch.toggle");
+    content.fields = keywords(&["search project", "find in files", "grep", "content search", "text search"]);
+    out.push(content);
     if super::add_project::new_projects_root(s).is_some() {
         let mut new = item("New project", "Actions", &icons::FOLDER_GIT_2, "", Action::NewProject);
         new.fields = keywords(&["new project", "create project", "empty", "repository", "repo", "git init"]);
@@ -385,7 +389,7 @@ pub fn link_dialog(s: &App, t: &T, layer: &mut Vec<El>) {
 
 // File picker.
 
-fn files_context(s: &App) -> Option<(String, String)> {
+pub(super) fn files_context(s: &App) -> Option<(String, String)> {
     let thread = thread(s)?;
     let project = s.state().projects.iter().find(|p| p["id"] == thread["projectId"])?;
     let cwd = thread["worktreePath"].as_str().filter(|v| !v.is_empty()).unwrap_or(data::s(project, "workspaceRoot"));

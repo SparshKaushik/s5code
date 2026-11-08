@@ -267,6 +267,7 @@ fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn
         Key::Command('}') => "]".to_string(),
         Key::Command(c) => c.to_string(),
         Key::Text(v) => v.clone(),
+        Key::Function(n) => format!("f{n}"),
         _ => String::new(),
     };
     bindings

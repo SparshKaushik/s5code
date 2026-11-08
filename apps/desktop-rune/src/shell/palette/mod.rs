@@ -8,6 +8,7 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 pub(crate) mod actions;
 pub(crate) mod add_project;
+mod content;
 mod scenes;
 pub use scenes::SCENES;
 
@@ -35,6 +36,7 @@ pub struct Ui {
     picked: bool,
     add: add_project::State,
     act: actions::State,
+    content: content::State,
 }
 struct Notice {
     title: String,
@@ -69,6 +71,7 @@ enum Action {
     LinkPr(String),
     ShowPrs,
     Files,
+    Content,
     OpenFile(String),
     ProjectSettings(String),
 }
@@ -80,6 +83,8 @@ enum Trailing {
     Check(bool),
     /// The theme or appearance in use: "Current" in muted text.
     Current,
+    /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
+    Pin(String, bool),
 }
 struct SearchTerm {
     value: String,
@@ -350,6 +355,9 @@ fn items(s: &App) -> Vec<Item> {
     if ui.page == "files" {
         return actions::file_items(s);
     }
+    if ui.page == content::PAGE {
+        return content::items(s);
+    }
     let mut out = vec![];
     if ui.page == "add-project" {
         out = add_project::source_items(s);
@@ -360,6 +368,7 @@ fn items(s: &App) -> Vec<Item> {
     if ui.page == "appearance" {
         out.extend(appearance_items(s));
     }
+    let (actions_only, typed) = actions_filter(ui);
     if ui.page.is_empty() {
         let project = match &s.route {
             Route::Thread(id) => s
@@ -461,7 +470,10 @@ fn items(s: &App) -> Vec<Item> {
             settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "workspace", "checkout", "remove"]);
             out.push(settings);
         }
-        let browsing = ui.query.text.trim().is_empty();
+        if !actions_only && !typed.trim().is_empty() {
+            out.extend(suggestions(s, &out, &normalize_query(typed)));
+        }
+        let browsing = typed.trim().is_empty();
         let open_thread = match &s.route {
             Route::Thread(id) => Some(id.as_str()),
             _ => None,
@@ -483,7 +495,7 @@ fn items(s: &App) -> Vec<Item> {
         for v in threads.into_iter().take(limit) {
             out.push(item(
                 data::s(v, "title"),
-                if ui.query.text.trim().is_empty() {
+                if browsing {
                     "Recent Threads"
                 } else {
                     "Threads"
@@ -516,7 +528,7 @@ fn items(s: &App) -> Vec<Item> {
                         .push(SearchTerm::weighted(data::s(pr, "title"), 0.5));
                     row.references.push(data::s(pr, "url").into());
                 }
-                row.pick = active_pick(v, &normalize_query(&ui.query.text), s.now_ms);
+                row.pick = active_pick(v, &normalize_query(typed), s.now_ms);
                 row.usage = usage_boost(v, s.now_ms);
 
                 let minutes =
@@ -533,7 +545,8 @@ fn items(s: &App) -> Vec<Item> {
             }
         }
     }
-    if ui.page == "projects" || (!ui.query.text.trim().is_empty() && ui.page.is_empty()) {
+    if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
+        let can_pin = actions::can_organize_projects(s);
         for p in &s.state().projects {
             out.push(item(
                 data::s(p, "title"),
@@ -548,9 +561,12 @@ fn items(s: &App) -> Vec<Item> {
                     Action::OpenProject(data::s(p, "id").into())
                 },
             ));
+            if can_pin && let Some(row) = out.last_mut() {
+                row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());
+            }
         }
     }
-    if !ui.query.text.trim().is_empty() && ui.page.is_empty() {
+    if !typed.trim().is_empty() && ui.page.is_empty() {
         for (label, page) in [
             ("General", "general"),
             ("Appearance", "appearance"),
@@ -567,7 +583,10 @@ fn items(s: &App) -> Vec<Item> {
             ));
         }
     }
-    let query = normalize_query(&ui.query.text);
+    if actions_only {
+        out.retain(|v| v.group == "Actions");
+    }
+    let query = normalize_query(typed);
     if !query.is_empty() {
         let rank = |v: &Item, typos: bool| -> Option<(f32, bool, f32)> {
             let thread = matches!(v.action, Action::Navigate(Route::Thread(_)));
@@ -702,7 +721,7 @@ fn items(s: &App) -> Vec<Item> {
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
             .collect();
-        if ui.message_query == query && ui.page.is_empty() {
+        if ui.message_query == query && ui.page.is_empty() && !actions_only {
             let mut hits: Vec<_> = ui.message_matches.iter().collect();
             let subject = |hit: &serde_json::Value| {
                 s.state()
@@ -758,6 +777,53 @@ fn items(s: &App) -> Vec<Item> {
         }
     }
     out
+}
+/// A root query starting with ">" searches actions only, by the text after it.
+fn actions_filter(ui: &Ui) -> (bool, &str) {
+    match ui.query.text.strip_prefix('>') {
+        Some(rest) if ui.page.is_empty() => (true, rest),
+        _ => (false, ui.query.text.as_str()),
+    }
+}
+/// `buildNestedSearchItems`: submenu options join the root search as "New thread in demo" or
+/// "Change theme: Dracula", unless the query only names the submenu.
+fn suggestions(s: &App, top: &[Item], query: &str) -> Vec<Item> {
+    let mut out = vec![];
+    for parent in top {
+        let Action::Page(page) = &parent.action else { continue };
+        let children = match *page {
+            "projects" => s
+                .state()
+                .projects
+                .iter()
+                .map(|p| item(data::s(p, "title"), "", &icons::FOLDER_GIT_2, "", Action::Navigate(Route::Home { project_id: Some(data::s(p, "id").into()) })))
+                .collect(),
+            "themes" => theme_items(s),
+            "appearance" => appearance_items(s),
+            _ => continue,
+        };
+        let Some(prefix) = suggestion_prefix(&parent.title, query) else { continue };
+        for mut child in children {
+            let title = format!("{prefix}{}", child.title);
+            if top.iter().any(|v| v.title == title) {
+                continue;
+            }
+            child.title = title;
+            child.group = "Suggestions";
+            child.fields = vec![];
+            out.push(child);
+        }
+    }
+    out
+}
+/// "New thread in..." prefixes "New thread in ", "Change theme" prefixes "Change theme: ";
+/// none when the query only names the submenu.
+fn suggestion_prefix(title: &str, query: &str) -> Option<String> {
+    let stem = title.strip_suffix("...").or_else(|| title.strip_suffix('…')).unwrap_or(title);
+    if fold(stem).starts_with(query) {
+        return None;
+    }
+    Some(if stem == title { format!("{stem}: ") } else { format!("{} ", stem.trim_end()) })
 }
 fn filler(token: &str) -> bool {
     [
@@ -923,11 +989,13 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     s.ui.shell.palette.picked = false;
     add_project::sync_browse(s);
     actions::files_changed(s, tx);
+    content::changed(s, tx);
     s.ui.shell.palette.selected = 0;
     s.ui.shell.palette.search_due = None;
     s.ui.shell.palette.message_matches.clear();
     s.ui.shell.palette.message_query = query.clone();
     if !s.ui.shell.palette.page.is_empty()
+        || s.ui.shell.palette.query.text.starts_with('>')
         || !query.split_whitespace().any(|v| {
             v.chars().count() >= 3
                 || (v.chars().count() == 2
@@ -944,6 +1012,7 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
 pub fn poll(s: &mut App) -> bool {
     let mut changed = add_project::poll(s);
     changed |= actions::poll(s);
+    changed |= content::poll(s);
     let acknowledgements = std::mem::take(&mut s.ui.shell.palette.acknowledgements);
     for id in acknowledgements {
         if s.src.net().and_then(|net| net.take_reply(id)).is_none() {
@@ -1241,6 +1310,11 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             actions::open_files(s);
             return tx.wake_after(std::time::Duration::from_millis(1));
         }
+        Action::Content => {
+            push_page(s, content::PAGE, "");
+            content::open(s);
+            return tx.wake_after(std::time::Duration::from_millis(1));
+        }
         Action::Triage => actions::triage(s),
         Action::NewWithoutProject => actions::new_without_project(s),
         Action::Find => actions::find(s),
@@ -1394,6 +1468,15 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
+    if crate::panel::shortcut(s, e, "projectSearch.toggle") {
+        if s.ui.shell.palette.open && s.ui.shell.palette.page == content::PAGE {
+            s.ui.shell.palette.open = false;
+        } else {
+            reset(s, true);
+            execute(s, Action::Content, tx);
+        }
+        return true;
+    }
     if crate::panel::shortcut(s, e, "theme.select") {
         reset(s, true);
         push_page(s, "themes", "");
@@ -1479,6 +1562,8 @@ fn placeholder(s: &App) -> String {
     let ui = &s.ui.shell.palette;
     if ui.page == "files" {
         "Search files…".into()
+    } else if ui.page == content::PAGE {
+        content::placeholder(s)
     } else if ui.page == "add-new" {
         "Project name".into()
     } else if add_project::repository_step(s) {
@@ -1600,6 +1685,9 @@ fn empty_text(s: &App) -> Option<String> {
     if ui.page == "files" {
         return Some(ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into()));
     }
+    if ui.page == content::PAGE {
+        return Some(content::empty(s));
+    }
     if add_project::repository_step(s) {
         let url = ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none());
         return Some(if url {
@@ -1620,7 +1708,10 @@ fn empty_text(s: &App) -> Option<String> {
         }
         .into());
     }
-    add_project::page_is_flow(&ui.page).then(|| "No matching commands, projects, or threads.".into())
+    if actions_filter(ui).0 {
+        return Some("No matching actions.".into());
+    }
+    (ui.page.is_empty() || add_project::page_is_flow(&ui.page)).then(|| "No matching commands, projects, or threads.".into())
 }
 fn note(label: String, t: &T) -> El {
     row().w_full().px(16.).py(12.).child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground))
@@ -1628,7 +1719,7 @@ fn note(label: String, t: &T) -> El {
 fn footer(s: &App, rows: &[Item], t: &T) -> El {
     let ui = &s.ui.shell.palette;
     let picked_row = if ui.picked { rows.get(ui.selected) } else { None };
-    let action = if ui.page == "files" {
+    let action = if ui.page == "files" || ui.page == content::PAGE {
         Some("Open file")
     } else if ui.page == "add-new" {
         Some(match picked_row.map(|v| &v.action) {
@@ -1768,6 +1859,21 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         }
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
+        Trailing::Pin(project, pinned) if *pinned || selected => {
+            let (project, pinned) = (project.clone(), *pinned);
+            let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
+            entry = entry.child(
+                kit::Button::new(label.clone())
+                    .icon(&icons::PIN)
+                    .size("icon-xs")
+                    .variant("ghost-muted")
+                    .on_press(move |s: &mut App| actions::pin_project(s, &project, !pinned))
+                    .build(t)
+                    .key(format!("palette-pin-{i}"))
+                    .help(label),
+            );
+        }
+        Trailing::Pin(..) => {}
     }
     entry
 }
@@ -1817,7 +1923,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     } else {
         icon(&icons::SEARCH, 16.).color(t.c.contrast_icon_muted)
     };
-    let submit = submit_button(s, t);
+    let submit = submit_button(s, t).or_else(|| content::options(s, t));
     let mut head = row()
         .w_full()
         .h(48.)
@@ -1832,7 +1938,17 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     }
     let mut list = col().w_full().padding(8.);
     let mut group = "";
+    let mut file = None;
     for (i, v) in rows.iter().enumerate() {
+        if v.group == content::GROUP {
+            if file != v.description.as_deref() {
+                file = v.description.as_deref();
+                let count = rows[i..].iter().take_while(|r| r.description == v.description).count();
+                list = list.child(content::header(file.unwrap_or(""), count, t));
+            }
+            list = list.child(content::match_row(i, v, ui.selected == i, t));
+            continue;
+        }
         if group != v.group {
             group = v.group;
             let heading = if group == actions::FILES_GROUP { actions::heading(s) } else { group.to_string() };
@@ -1864,7 +1980,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
             None => kit::empty("No results found.", "", t),
         });
     }
-    let tall = ui.page == "files";
+    let tall = ui.page == "files" || ui.page == content::PAGE;
     let list = kit::scroll_area(
         "palette-results",
         list.max_h(if tall { 400. } else { 330. }).scroll(ScrollSpec { stick_bottom: false }),
@@ -1882,7 +1998,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
         .backdrop_blur(16.)
         .border(1., t.c.contrast_foreground.alpha_mul(0.1))
         .child(head);
-    if let Some(summary) = summary(s, t) {
+    if let Some(summary) = summary(s, t).or_else(|| content::status(s, t)) {
         panel = panel.child(summary);
     }
     let panel = panel
@@ -1906,6 +2022,14 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn submenu_suggestions_name_the_submenu_unless_the_query_only_names_it() {
+        assert_eq!(suggestion_prefix("New thread in...", "demo").as_deref(), Some("New thread in "));
+        assert_eq!(suggestion_prefix("Change theme", "dracula").as_deref(), Some("Change theme: "));
+        assert_eq!(suggestion_prefix("New thread in…", "new thread"), None);
+        assert_eq!(suggestion_prefix("Change theme", "change"), None);
+    }
+
     #[test]
     fn shortcut_labels_spell_modifiers_out_off_mac() {
         let k = serde_json::json!({ "key": "n", "modKey": true, "shiftKey": true });
