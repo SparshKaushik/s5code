@@ -6,7 +6,7 @@ use crate::{
 use rune::{Cx, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, icon, row, text, text_input};
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
-mod actions;
+pub(crate) mod actions;
 mod add_project;
 mod scenes;
 pub use scenes::SCENES;
@@ -61,6 +61,7 @@ enum Action {
     Browse(String),
     TogglePublish,
     Triage,
+    NewWithoutProject,
     Find,
     CopyThread,
     LinkPr(String),
@@ -364,13 +365,15 @@ fn items(s: &App) -> Vec<Item> {
             "",
             Action::Page("projects"),
         ));
-        out.push(item(
-            "New thread without a project",
-            "Actions",
-            &icons::MESSAGE_SQUARE_DASHED,
-            &shortcut_label(s, "chat.newWithoutProject"),
-            Action::Navigate(Route::Home { project_id: None }),
-        ));
+        if actions::scratch_available(s) {
+            out.push(item(
+                "New thread without a project",
+                "Actions",
+                &icons::MESSAGE_SQUARE_DASHED,
+                &shortcut_label(s, "chat.newWithoutProject"),
+                Action::NewWithoutProject,
+            ));
+        }
         out.extend(actions::thread_items(s));
         if let Route::Thread(id) = &s.route {
             out.push(item(
@@ -1189,6 +1192,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             return tx.wake_after(std::time::Duration::from_millis(1));
         }
         Action::Triage => actions::triage(s),
+        Action::NewWithoutProject => actions::new_without_project(s),
         Action::Find => actions::find(s),
         Action::CopyThread => {
             actions::copy_thread(s, tx);

@@ -12,6 +12,13 @@ pub struct State {
     pub link: Option<LinkDialog>,
     pub files: Files,
     triage: Option<Triage>,
+    scratch: Option<Scratch>,
+}
+/// `openScratch`: the request, then the project id until the project reaches the store, since
+/// a draft sends to the project it resolves.
+enum Scratch {
+    Request(u64),
+    Await(String, i64),
 }
 pub struct LinkDialog {
     pub thread: String,
@@ -74,6 +81,10 @@ fn hosted_segment(id: &str) -> String {
     out
 }
 /// `hostedThreadLink`: opens the thread from anywhere.
+/// `hostedThreadLink` for a thread on this server.
+pub fn thread_link(s: &App, thread: &str) -> String {
+    hosted_thread_link(data::s(&config(s)["environment"], "environmentId"), thread)
+}
 fn hosted_thread_link(environment: &str, thread: &str) -> String {
     format!("https://app.s5code.touchtech.club/threads/{}/{}", hosted_segment(environment), hosted_segment(thread))
 }
@@ -131,6 +142,27 @@ pub fn tail_items(s: &App) -> Vec<Item> {
     ]);
     out.push(add);
     out
+}
+
+/// `availableScratchWorkspaceRoot`: the server can host threads without a project.
+pub fn scratch_available(s: &App) -> bool {
+    config(s)["scratchWorkspaceRoot"].as_str().is_some_and(|root| !root.is_empty())
+}
+
+/// `isScratchProject`: the project rooted at the server's scratch workspace.
+pub fn is_scratch_project(s: &App, project: &Value) -> bool {
+    let root = |p: &str| p.trim_end_matches(['/', '\\']).to_owned();
+    let scratch = data::s(config(s), "scratchWorkspaceRoot");
+    !scratch.is_empty() && root(data::s(project, "workspaceRoot")) == root(scratch)
+}
+
+/// `startScratchThread`: opens the server's Scratch project, then a new thread draft in it.
+pub fn new_without_project(s: &mut App) {
+    if s.ui.shell.palette.act.scratch.is_none()
+        && let Some(net) = s.src.net()
+    {
+        s.ui.shell.palette.act.scratch = Some(Scratch::Request(net.request("projects.ensureScratch", json!({}))));
+    }
 }
 
 pub fn triage(s: &mut App) {
@@ -459,6 +491,26 @@ pub fn poll(s: &mut App) -> bool {
             }
         }
         changed = true;
+    }
+    const SCRATCH_FAILED: &str = "Could not start without a project";
+    match s.ui.shell.palette.act.scratch.take() {
+        Some(Scratch::Request(id)) => match s.src.net().and_then(|net| net.take_reply(id)) {
+            None => s.ui.shell.palette.act.scratch = Some(Scratch::Request(id)),
+            Some(Ok(v)) => s.ui.shell.palette.act.scratch = Some(Scratch::Await(data::s(&v, "projectId").to_owned(), data::now_ms() + 10_000)),
+            Some(Err(e)) => {
+                toast(s, SCRATCH_FAILED, Some(&super::error_message(&e, "An error occurred.")));
+                changed = true;
+            }
+        },
+        Some(Scratch::Await(id, _)) if crate::chat::composer::project_by_id(s, &id).is_some() => {
+            crate::shell::sidebar::go(s, Route::Home { project_id: Some(id) });
+            changed = true;
+        }
+        Some(Scratch::Await(_, deadline)) if data::now_ms() >= deadline => {
+            toast(s, SCRATCH_FAILED, Some("The scratch project did not load."));
+            changed = true;
+        }
+        pending => s.ui.shell.palette.act.scratch = pending,
     }
     match s.ui.shell.palette.act.triage.take() {
         Some(Triage::Prepare(id)) => match s.src.net().and_then(|net| net.take_reply(id)) {

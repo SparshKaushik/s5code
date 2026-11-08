@@ -117,11 +117,14 @@ fn commit_rename(s: &mut App) {
 const CRUMB: TextStyle = theme::SM_MEDIUM;
 
 pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> El {
-    let project = composer::ctx(s).project.map(|p| data::s(p, "title").to_string()).unwrap_or_default();
+    let project = composer::ctx(s).project;
+    let scratch = project.is_some_and(|p| crate::shell::palette::actions::is_scratch_project(s, p));
+    let project = if scratch { "No project".to_string() } else { project.map(|p| data::s(p, "title").to_string()).unwrap_or_default() };
     let mut crumbs = row().gap(12.0).center_y().shrink().min_w(0.0);
     if !project.is_empty() {
+        let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { monogram(t, &project, 14.0) };
         crumbs = crumbs
-            .child(row().gap(6.0).center_y().child(monogram(t, &project, 14.0)).child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate()))
+            .child(row().gap(6.0).center_y().child(mark).child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate()))
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
     let title_el = match &s.ui.chat.topbar.rename {
