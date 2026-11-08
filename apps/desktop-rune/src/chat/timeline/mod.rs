@@ -147,7 +147,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     }
     if matches!(
         kind,
-        "error" | "notification" | "system_notice" | "fork" | "handoff" | "run_interrupt_request" | "run_interrupt_result" | "secret_request" | "link_request"
+        "error" | "notification" | "system_notice" | "fork" | "handoff" | "secret_request" | "link_request"
     ) {
         let detail = [
             s(&item["failure"], "message"),

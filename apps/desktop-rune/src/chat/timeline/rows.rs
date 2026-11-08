@@ -60,8 +60,6 @@ fn escapes_fold(kind: &str) -> bool {
             | "subagent"
             | "fork"
             | "handoff"
-            | "run_interrupt_request"
-            | "run_interrupt_result"
             | "secret_request"
             | "link_request"
     )
@@ -167,7 +165,8 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
         let kind = s(item, "type");
         let run_id = s(item, "runId");
         let live = !run_id.is_empty() && active(run_id);
-        if live && kind != "user_message" && working.insert(run_id) {
+        // Notices that open a run (a fork's context) sit above its prompt, not under "Working".
+        if live && kind != "user_message" && !escapes_fold(kind) && working.insert(run_id) {
             rows.push(working_row(runs[run_id], now));
         }
         if let Some(request) = pending.get(s(item, "requestId")) {
@@ -344,6 +343,7 @@ mod tests {
     #[test]
     fn a_live_turn_has_one_working_row_after_its_prompt_and_folds_once_it_ends() {
         let items = json!([
+            {"id":"fc","type":"notification","runId":"r","ordinal":0},
             {"id":"u","type":"user_message","runId":"r","ordinal":1},
             {"id":"t1","type":"command_execution","runId":"r","ordinal":2},
             {"id":"a1","type":"assistant_message","runId":"r","ordinal":3},
@@ -359,10 +359,10 @@ mod tests {
                 _ => "?".to_owned(),
             })
             .collect();
-        assert_eq!(ids, ["u", "Working for 5s", "t1", "a1", "t2", "a2"]);
+        assert_eq!(ids, ["fc", "u", "Working for 5s", "t1", "a1", "t2", "a2"]);
         let done = json!({"runs":[{"id":"r","status":"completed","startedAt":"1970-01-01T00:00:00Z","completedAt":"1970-01-01T00:00:09Z"}],"turnItems":items});
         let rows = derive(&done, 60000);
-        assert!(matches!(rows.as_slice(), [Row::User(_), Row::Work { id, label, items }, Row::Assistant(a)]
+        assert!(matches!(rows.as_slice(), [Row::Item(_), Row::User(_), Row::Work { id, label, items }, Row::Assistant(a)]
             if id == "work:r" && label == "Worked for 9s" && items.len() == 3 && s(a, "id") == "a2"));
         let stopped = json!({"runs":[{"id":"r","status":"interrupted"}],"turnItems":[
             {"id":"u","type":"user_message","runId":"r","ordinal":1},
