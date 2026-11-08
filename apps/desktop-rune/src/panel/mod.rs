@@ -1,5 +1,6 @@
 //! Workspace surfaces; wire payloads stay identical to the web client's RPCs.
 pub mod browser;
+mod closed;
 mod diff;
 pub mod drawer;
 mod files;
@@ -51,6 +52,7 @@ pub struct Ui {
     browser: preview::Ui,
     add_menu: bool,
     thread: String,
+    closed: closed::Store,
     pub waker: Option<Waker>,
 }
 impl Default for Ui {
@@ -66,6 +68,7 @@ impl Default for Ui {
             browser: Default::default(),
             add_menu: false,
             thread: String::new(),
+            closed: Default::default(),
             waker: None,
         }
     }
@@ -131,6 +134,15 @@ pub fn terminal_active(app: &App) -> bool {
     app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)
 }
 fn close(app: &mut App, surface: Surface) {
+    let view = match surface {
+        Surface::Files => Some(closed::View::Files(files::selected(app))),
+        Surface::Diff => Some(closed::View::Diff),
+        Surface::Browser(tab) => preview::url(app, tab).map(closed::View::Browser),
+        Surface::Terminal => None,
+    };
+    if let (Some(view), Some((thread, _))) = (view, context(app)) {
+        app.ui.panel.closed.record(closed::Closed { thread, view });
+    }
     match surface {
         Surface::Terminal => drawer::close_panel(app),
         Surface::Files => files::flush(app),
@@ -138,6 +150,39 @@ fn close(app: &mut App, surface: Surface) {
         _ => {}
     }
     remove_surface(app, surface);
+}
+/// `view.reopenClosed`: the newest closed view still worth reopening, on its thread.
+fn reopen_closed(app: &mut App) -> bool {
+    let mut store = std::mem::take(&mut app.ui.panel.closed);
+    let current = context(app).map(|(id, _)| id);
+    let next = store.next(
+        |thread| app.state().threads.iter().any(|v| v["id"] == thread),
+        |c| {
+            app.ui.shell.panel_open
+                && current.as_deref() == Some(c.thread.as_str())
+                && match &c.view {
+                    closed::View::Diff => app.ui.panel.surfaces.contains(&Surface::Diff),
+                    closed::View::Files(path) => app.ui.panel.surfaces.contains(&Surface::Files) && files::selected(app) == *path,
+                    closed::View::Browser(_) => false,
+                }
+        },
+    );
+    app.ui.panel.closed = store;
+    let Some(c) = next else { return false };
+    if current.as_deref() != Some(c.thread.as_str()) {
+        app.navigate(Route::Thread(c.thread.clone()));
+        // Switch the panel's thread now, so the next poll doesn't reset what reopens here.
+        app.ui.panel.thread = c.thread;
+        diff::reset(app);
+        files::reset(app);
+    }
+    match c.view {
+        closed::View::Diff => activate(app, Surface::Diff),
+        closed::View::Files(path) if path.is_empty() => activate(app, Surface::Files),
+        closed::View::Files(path) => open_file(app, path),
+        closed::View::Browser(url) => open_preview(app, &url),
+    }
+    true
 }
 fn remove_surface(app: &mut App, surface: Surface) {
     app.ui.panel.surfaces.retain(|v| *v != surface);
@@ -267,6 +312,9 @@ fn when_context(app: &App, name: &str) -> bool {
     }
 }
 pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if !app.ui.panel.closed.is_empty() && !tx.key_repeat() && shortcut(app, e, "view.reopenClosed") {
+        return reopen_closed(app);
+    }
     if shortcut(app, e, "rightPanel.toggle") {
         app.ui.shell.panel_open = !app.ui.shell.panel_open;
         return true;
@@ -285,6 +333,17 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if shortcut(app, e, "terminal.toggle") {
         toggle_terminal(app);
+        return true;
+    }
+    if context(app).is_some() && shortcut(app, e, "preview.toggle") {
+        // `togglePreviewPanel`: close a showing browser, else show the last tab or a new one.
+        if app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))) {
+            app.ui.shell.panel_open = false;
+        } else if let Some(tab) = app.ui.panel.surfaces.iter().rev().find(|v| matches!(v, Surface::Browser(_))).copied() {
+            activate(app, tab);
+        } else {
+            add(app, Surface::Browser(0));
+        }
         return true;
     }
     if context(app).is_some() && shortcut(app, e, "diff.toggle") {

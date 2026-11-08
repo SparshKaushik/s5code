@@ -2,6 +2,7 @@
 
 pub mod sidebar;
 pub mod palette;
+pub mod quit;
 
 use rune::{Cx, El, KeyEvent, Tx, row};
 
@@ -13,6 +14,7 @@ pub struct Ui {
     pub sidebar: sidebar::Ui,
     pub palette: palette::Ui,
     pub panel_open: bool,
+    pub quit: quit::QuitHold,
 }
 
 /// The references open on an empty "New thread" (d01) and on "Replay showcase" (d02).
@@ -69,5 +71,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     }
     overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
-    rune_kit::root(body, overlays)
+    overlays.extend(quit::overlay(s, t));
+    rune_kit::root(body, overlays).on_key_up(quit::on_key_up)
 }

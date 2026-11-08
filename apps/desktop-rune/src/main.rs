@@ -140,6 +140,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);
     changed |= pages::poll(s);
+    changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();
@@ -152,7 +153,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
+    shell::quit::on_key(s, e, tx) || settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {

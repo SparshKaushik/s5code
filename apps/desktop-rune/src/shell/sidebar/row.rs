@@ -174,6 +174,7 @@ fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El
             move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
                 match e.key {
                     rune::Key::Enter => super::open_thread(s, &id),
+                    rune::Key::Text(ref k) if k == " " => super::open_thread(s, &id),
                     rune::Key::Function(2) => super::start_rename(s, &id),
                     _ => return false,
                 }
@@ -782,7 +783,8 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
         return el().key("sb-scroll").w_full().grow(1.0).shrink().child(empty);
     }
 
-    let mut content = col().key("sb-list").w_full().min_h(viewport).px(8.0).py(8.0);
+    // `sidebarTree`: Up/Down, Home and End move focus between rows without opening them.
+    let mut content = col().key("sb-list").role("list").label("Threads").focus_group().w_full().min_h(viewport).px(8.0).py(8.0);
     let mut first = true;
     for (n, it) in items.iter().enumerate() {
         let shift = shifts.as_ref().map_or(Some(0.0), |v| v[n]);
