@@ -8,6 +8,7 @@ mod controls;
 mod devices;
 mod keybindings;
 mod models;
+mod host_logos;
 mod icon_index;
 mod pages;
 mod project_icon;
@@ -79,6 +80,7 @@ pub struct Ui {
     pub snooze: snooze::Draft,
     pub profiles: browser_profiles::Ui,
     pub providers_ui: providers::Ui,
+    pub source_control: source_control::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -115,8 +117,37 @@ fn apply_patch(settings: &mut Value, patch: &Value) {
                     settings[key][id] = entry.clone();
                 }
             }
+        } else if key == "sourceControlHosts" {
+            merge_host_settings(&mut settings[key], next);
         } else {
             settings[key] = next.clone();
+        }
+    }
+}
+
+/// `applyServerSettingsPatch` for `sourceControlHosts`: fields merge per host kind, and a
+/// non-empty `tokens` map merges per lower-cased hostname.
+fn merge_host_settings(saved: &mut Value, patch: &Value) {
+    if !saved.is_object() {
+        *saved = json!({});
+    }
+    for (kind, fields) in patch.as_object().into_iter().flatten() {
+        let saved = &mut saved[kind];
+        if !saved.is_object() {
+            *saved = json!({});
+        }
+        for (field, next) in fields.as_object().into_iter().flatten() {
+            match next.as_object().filter(|tokens| field == "tokens" && !tokens.is_empty()) {
+                Some(tokens) => {
+                    let previous = saved["tokens"].as_object().cloned().unwrap_or_default();
+                    let mut merged = serde_json::Map::new();
+                    for (host, token) in previous.iter().chain(tokens) {
+                        merged.insert(host.trim().to_lowercase(), token.clone());
+                    }
+                    saved["tokens"] = Value::Object(merged);
+                }
+                None => saved[field.as_str()] = next.clone(),
+            }
         }
     }
 }
@@ -182,6 +213,9 @@ pub fn value(s: &App, key: &str) -> Value {
     if let Some(key) = key.strip_prefix("profile::") {
         return browser_profiles::value(s, key);
     }
+    if let Some(key) = key.strip_prefix("schost::") {
+        return source_control::value(s, key);
+    }
     if let Some(key) = key.strip_prefix("provider::") {
         if let Some((id, field)) = key.split_once("::") {
             return providers::field_value(s, id, field);
@@ -228,6 +262,10 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
     if let Some(key) = key.strip_prefix("profile::") {
         browser_profiles::rename(s, key, value);
+        return;
+    }
+    if let Some(key) = key.strip_prefix("schost::") {
+        source_control::update(s, key, value);
         return;
     }
     if let Some(key) = key.strip_prefix("provider::") {
@@ -459,6 +497,9 @@ pub fn poll(s: &mut App) -> bool {
                     }
                     if matches!(method.as_str(), "peerLinks.link" | "peerLinks.unlink") {
                         request(s, "peerLinks.list", json!({}));
+                    }
+                    if method == "server.updateSettings" && std::mem::take(&mut s.ui.settings.source_control.rescan) {
+                        source_control::scan(s);
                     }
                     if method == "thread action" {
                         request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
@@ -1311,6 +1352,26 @@ mod patch_tests {
             settings["projectSettingsOverrides"]["p"],
             json!({"future":true,"defaultAutoPull":true,"responseStreamingMode":"paragraph"})
         );
+    }
+    #[test]
+    fn host_settings_merge_per_kind_and_tokens_per_host() {
+        let mut settings = json!({"sourceControlHosts": {
+            "github": {"tokens": {"github.com": "a", "ghe.example": "b"}, "hosts": {"github.com": {"enabled": false}}},
+            "gitcafe": {"token": "c"}
+        }});
+        apply_patch(&mut settings, &json!({"sourceControlHosts": {"github": {"tokens": {"GHE.example ": ""}}}}));
+        apply_patch(&mut settings, &json!({"sourceControlHosts": {"bitbucket": {"email": "me@example.com"}}}));
+        assert_eq!(
+            settings["sourceControlHosts"],
+            json!({
+                "github": {"tokens": {"github.com": "a", "ghe.example": ""}, "hosts": {"github.com": {"enabled": false}}},
+                "gitcafe": {"token": "c"},
+                "bitbucket": {"email": "me@example.com"}
+            })
+        );
+        // An empty token map clears them all, and `hosts` is replaced whole.
+        apply_patch(&mut settings, &json!({"sourceControlHosts": {"github": {"tokens": {}, "hosts": {}}}}));
+        assert_eq!(settings["sourceControlHosts"]["github"], json!({"tokens": {}, "hosts": {}}));
     }
     #[test]
     fn visiting_a_page_never_commits_an_untouched_field() {

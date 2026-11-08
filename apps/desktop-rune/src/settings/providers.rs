@@ -919,7 +919,7 @@ fn small_input(edit: &TextEdit, key: &str, placeholder: &str, t: &T, mono: bool)
 }
 
 /// `SecretInput`: masked, never prefilled, and dropped from the edit buffer once committed.
-fn secret_input(s: &App, t: &T, key: &str, placeholder: &str, mono: bool) -> El {
+pub(super) fn secret_input(s: &App, t: &T, key: &str, placeholder: &str, mono: bool) -> El {
     let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| TextEdit::new(String::new()).secure());
     let (k1, k2) = (key.to_owned(), key.to_owned());
     rune::text_input(&edit, if mono { theme::MONO_SM } else { theme::TEXT_SM })

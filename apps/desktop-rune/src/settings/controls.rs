@@ -48,6 +48,8 @@ pub fn select_width(key: &str) -> f32 {
         k if k.starts_with("snooze::unit::") => 112.0,
         // Web `w-22`: the font size trigger beside its family field.
         k if k.starts_with("fontSize") => 88.0,
+        // Web `w-64`: a source control host's account picker.
+        k if k.starts_with("schost::") => 256.0,
         _ => 160.0,
     }
 }

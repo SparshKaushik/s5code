@@ -4,7 +4,7 @@
 use crate::theme::{AlphaMul, T};
 use crate::{App, icons, kit};
 use rune::{Color, Cursor, El, Phase, TextEdit, col, el, row};
-use serde_json::{Value, json};
+use serde_json::json;
 
 const FALLBACK: &str = "#2563eb";
 const PLANE_W: f32 = 224.0;
@@ -63,7 +63,7 @@ pub fn hsv_to_hex(h: f32, s: f32, v: f32) -> String {
 }
 
 fn color(hex: &str) -> Color {
-    rune::hex(hex).unwrap_or(Color::BLACK)
+    rune::color::hex(hex).unwrap_or(Color::BLACK)
 }
 
 fn commit(s: &mut App, id: &str, value: &str) {
@@ -140,7 +140,6 @@ fn panel(s: &App, t: &T, d: &Draft) -> El {
         .role("slider")
         .label("Accent color")
         .size(PLANE_W, PLANE_H)
-        .clip()
         .cursor(Cursor::Crosshair)
         .fill(color(&hsv_to_hex(h, 1.0, 1.0)))
         .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).linear_gradient(std::f32::consts::FRAC_PI_2, [(0.0, white), (1.0, white.alpha(0.0))]))
