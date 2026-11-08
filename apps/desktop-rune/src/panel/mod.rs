@@ -121,9 +121,9 @@ pub fn open_changes(app: &mut App) {
 }
 /// Shows `url` in the browser surface (a project script's `autoOpenPreview`).
 pub fn open_preview(app: &mut App, url: &str) {
-    activate(app, Surface::Browser);
-    app.ui.panel.url = rune::TextEdit::new(url);
-    navigate(app);
+    let tab = preview::open(app);
+    activate(app, Surface::Browser(tab));
+    preview::navigate(app, tab, url);
 }
 /// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
 pub fn terminal_active(app: &App) -> bool {

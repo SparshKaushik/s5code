@@ -108,7 +108,7 @@ fn send(app: &mut App, cmd: Cmd) {
     app.ui.panel.browser.browser.send(cmd);
 }
 
-fn navigate(app: &mut App, tab: TabId, input: &str) {
+pub fn navigate(app: &mut App, tab: TabId, input: &str) {
     let engine = crate::settings::value(app, "browserSearchEngine");
     let custom = crate::settings::value(app, "browserCustomSearchUrl");
     let template = search_template(engine.as_str().unwrap_or(""), custom.as_str().unwrap_or(""));
