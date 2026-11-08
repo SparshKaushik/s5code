@@ -237,7 +237,12 @@ pub fn field_value(s: &App, id: &str, field: &str) -> Value {
         return json!("");
     }
     let entry = &server_settings(s)["providerInstances"][id];
-    if field == "displayName" || field == "enabled" { entry[field].clone() } else { entry["config"][field].clone() }
+    if top_level(field) { entry[field].clone() } else { entry["config"][field].clone() }
+}
+
+/// Fields that sit on the instance itself rather than in its driver `config`.
+fn top_level(field: &str) -> bool {
+    matches!(field, "displayName" | "enabled" | "accentColor")
 }
 
 /// The instance after one field changes; empty text clears the field (`clearWhenEmpty: "omit"`).
@@ -247,7 +252,7 @@ pub fn config_patch(settings: &Value, id: &str, driver: &str, field: &str, value
         entry = json!({"driver": driver});
     }
     let empty = value.as_str().is_some_and(|v| v.trim().is_empty()) && field != "agentId";
-    let target = if field == "displayName" || field == "enabled" {
+    let target = if top_level(field) {
         &mut entry
     } else {
         if !entry["config"].is_object() {
@@ -723,6 +728,25 @@ fn text_row(s: &App, cx: &rune::Cx<App>, t: &T, id: &str, field: &str, title: &s
             "placeholder": placeholder, "width": 224, "kind": if secret { "secret" } else { "text" },
         }),
     )
+}
+
+/// Web's "Display name" row: the accent colour swatch, then the name field (`w-56`).
+fn display_name_row(s: &App, t: &T, id: &str, name: &str, placeholder: &str) -> El {
+    row()
+        .key(format!("row-{}", field_key(id, "displayName")))
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(col().grow(1.0).min_w(0.0).child(text("Display name").font(theme::SM_MEDIUM).color(t.c.foreground)))
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(super::accent::trigger(s, t, id, name))
+                .child(c::input(s, t, &field_key(id, "displayName"), 224.0, placeholder, false)),
+        )
 }
 
 /// `ProviderSettingsForm`'s text fields per driver: field, title, description, placeholder.
@@ -1534,7 +1558,7 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         Some(header_action(s, t, r, live, enabled)),
         vec![
             status_row(t, live, enabled),
-            text_row(s, cx, t, &r.id, "displayName", "Display name", "", label(&r.driver)),
+            display_name_row(s, t, &r.id, &name, label(&r.driver)),
         ],
         t,
     )];
@@ -1794,6 +1818,13 @@ mod tests {
         // An emptied field is dropped rather than saved as "".
         let cleared = config_patch(&settings, "custom", "codex", "homePath", json!("  "));
         assert_eq!(cleared["providerInstances"]["custom"]["config"], json!({"future":true}));
+        // The accent colour sits on the instance, and clearing it omits the key.
+        let accent = config_patch(&settings, "custom", "codex", "accentColor", json!("#2563eb"));
+        assert_eq!(accent["providerInstances"]["custom"]["accentColor"], "#2563eb");
+        assert!(accent["providerInstances"]["custom"]["config"].get("accentColor").is_none());
+        let settings = accent;
+        let cleared = config_patch(&settings, "custom", "codex", "accentColor", json!(""));
+        assert!(cleared["providerInstances"]["custom"].get("accentColor").is_none());
     }
 
     #[test]

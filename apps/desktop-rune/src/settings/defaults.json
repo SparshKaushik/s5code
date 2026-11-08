@@ -41,6 +41,7 @@
   "fontFamilySans": "",
   "fontFamilyTerminal": "",
   "fontSmoothing": true,
+  "typographyAdvanced": false,
   "onboardingCompletedAt": null,
   "persistComposerContextStrip": false,
   "favorites": [],

@@ -16,7 +16,7 @@ use std::collections::HashSet;
 use crate::shell::palette;
 
 mod git;
-mod scripts;
+pub mod scripts;
 
 #[derive(Default)]
 pub struct Ui {

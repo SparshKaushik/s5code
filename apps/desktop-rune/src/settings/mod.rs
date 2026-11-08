@@ -1,4 +1,5 @@
 mod about;
+mod accent;
 pub(crate) mod auth;
 mod balance;
 pub mod client;
@@ -7,10 +8,13 @@ mod controls;
 mod devices;
 mod keybindings;
 mod models;
+mod icon_index;
 mod pages;
+mod project_icon;
 mod projects;
 mod providers;
 mod scope;
+mod search;
 mod snooze;
 mod source_control;
 mod browser_profiles;
@@ -47,6 +51,8 @@ pub struct Ui {
     pub delete_thread: Option<(String, String)>,
     /// The project the Danger section is confirming removal of: id and title.
     pub delete_project: Option<(String, String)>,
+    pub icon_picker: Option<project_icon::Draft>,
+    pub accent: Option<accent::Draft>,
     pub provider_picker: bool,
     pub provider: Option<String>,
     pub project: Option<String>,
@@ -55,6 +61,8 @@ pub struct Ui {
     pub scope_open: bool,
     pub open_select: Option<String>,
     pub search: TextEdit,
+    /// The highlighted search result (web's `activeResultIndex`).
+    pub search_active: usize,
     pub edits: HashMap<String, TextEdit>,
     pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
@@ -398,6 +406,8 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
         s.ui.settings.advanced.clear();
+        accent::close(s);
+        s.ui.settings.icon_picker = None;
     }
     let mut wanted = Vec::new();
     if let Route::Settings(path) = &s.route {
@@ -567,6 +577,86 @@ fn nav_icon(path: &str) -> &'static rune::Icon {
     }
 }
 
+/// Web's search results in place of the page list: icon, title, and the page it lives on.
+fn search_results(s: &App, t: &T, query: &str) -> El {
+    let results = search::search(query);
+    if results.is_empty() {
+        return el()
+            .w_full()
+            .py(24.0)
+            .center()
+            .role("status")
+            .child(text("No settings found").font(theme::TEXT_XS).color(t.sb.muted_foreground));
+    }
+    let active = s.ui.settings.search_active.min(results.len() - 1);
+    let mut list = col().gap(4.0).w_full().role("listbox").label("Settings search results");
+    for (index, item) in results.into_iter().enumerate() {
+        let target = item.to.clone();
+        list = list.child(
+            row()
+                .key(format!("settings-result-{index}"))
+                .w_full()
+                .min_h(40.0)
+                .px(8.0)
+                .py(4.0)
+                .gap(8.0)
+                .items_start()
+                .radius(8.0)
+                .fill(if index == active { t.sb.sidebar_row_active } else { t.c.sidebar })
+                .hover(t.sb.sidebar_row_hover)
+                .role("option")
+                .label(item.title.clone())
+                .on_hover(move |s: &mut App| s.ui.settings.search_active = index)
+                .on_press(move |s: &mut App| open_result(s, &target))
+                .child(rune::icon(nav_icon(&item.to), 16.0).color(t.sb.sidebar_icon_color).mt(2.0))
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .child(text(item.title.clone()).font(theme::SM_MEDIUM).color(t.sb.foreground).truncate())
+                        .child(
+                            text(label(&item.to).to_owned())
+                                .font(theme::TEXT_2XS)
+                                .color(t.sb.muted_foreground.alpha_mul(0.75))
+                                .truncate(),
+                        ),
+                ),
+        );
+    }
+    list
+}
+
+fn open_result(s: &mut App, page: &str) {
+    commit_edits(s, true);
+    s.ui.settings.search.clear();
+    s.ui.settings.search_active = 0;
+    s.ui.settings.open_select = None;
+    s.navigate(Route::Settings(page.to_owned()));
+}
+
+/// Arrow keys move through the results and Enter opens the active one, as web's combobox does.
+fn search_key(s: &mut App, e: &rune::KeyEvent) -> bool {
+    if !s.ui.settings.search.focused {
+        return false;
+    }
+    let results = search::search(&s.ui.settings.search.text);
+    if results.is_empty() {
+        return false;
+    }
+    let last = results.len() - 1;
+    let active = s.ui.settings.search_active.min(last);
+    match e.key {
+        rune::Key::Down => s.ui.settings.search_active = (active + 1).min(last),
+        rune::Key::Up => s.ui.settings.search_active = active.saturating_sub(1),
+        rune::Key::Enter => {
+            let page = results[active].to.clone();
+            open_result(s, &page);
+        }
+        _ => return false,
+    }
+    true
+}
+
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let Route::Settings(path) = &s.route else {
         return el();
@@ -592,8 +682,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .fill(t.c.sidebar)
         .color(t.sb.muted_foreground)
         .caret(t.sb.foreground, t.c.primary.alpha_mul(0.3))
-        .on_edit(|s: &mut App| &mut s.ui.settings.search)
-        .on_input_key(|s: &mut App, e, _| clear_search_on_escape(&mut s.ui.settings.search, e));
+        .on_edit(|s: &mut App| {
+            s.ui.settings.search_active = 0;
+            &mut s.ui.settings.search
+        })
+        .on_input_key(|s: &mut App, e, _| clear_search_on_escape(&mut s.ui.settings.search, e) || search_key(s, e));
     let search_row = row()
             .h(32.0)
             .px(8.0)
@@ -612,8 +705,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                             .color(t.sb.muted_foreground),
                     ),
             );
-    let query = s.ui.settings.search.text.to_lowercase();
-    for (heading, items) in NAV.iter() {
+    let query = s.ui.settings.search.text.clone();
+    if !search::normalize(&query).is_empty() {
+        nav = nav.child(search_results(s, t, &query));
+    }
+    for (heading, items) in NAV.iter().filter(|_| search::normalize(&query).is_empty()) {
         let mut group = col().gap(4.0).w_full();
         if !heading.is_empty() {
             group = group.child(
@@ -625,9 +721,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             );
         }
         for (target, title) in *items {
-            if !query.is_empty() && !title.to_lowercase().contains(&query) {
-                continue;
-            }
             let icon = nav_icon(target);
             let target = target.to_string();
             let active = path == target;
@@ -772,11 +865,16 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(content);
     let mut overlays = Vec::new();
     providers::picker(s, t, &mut overlays);
+    accent::popover(s, t, &mut overlays);
     providers::confirm(s, t, &mut overlays);
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
     projects::confirm_remove(s, t, &mut overlays);
+    project_icon::dialog(s, t, &mut overlays);
+    if crate::chat::details::scripts::settings_editor_open(s) {
+        crate::chat::details::scripts::overlays(s, t, &mut overlays);
+    }
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
@@ -1089,8 +1187,17 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
     if !matches!(s.route, Route::Settings(_)) {
         return false;
     }
+    if crate::chat::details::scripts::settings_editor_open(s) {
+        // The action editor captures its shortcut; Escape closes it before Settings.
+        return match e.key {
+            rune::Key::Escape => crate::chat::details::scripts::escape(s),
+            _ => crate::chat::details::scripts::on_key(s, e),
+        };
+    }
     if matches!(e.key, rune::Key::Escape) {
         if s.ui.settings.models.open.take().is_some()
+            || s.ui.settings.icon_picker.take().is_some()
+            || accent::close(s)
             || browser_profiles::escape(s)
             || s.ui.settings.providers_ui.confirm.take().is_some()
         {
