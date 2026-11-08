@@ -366,7 +366,8 @@ fn send(s: &mut App, alternate: bool) {
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let message_id = s5_net::uuid();
-    let (thread_id, payload, launch) = match route {
+    let context = crate::panel::take_message_context(s, &text);
+    let (thread_id, mut payload, launch) = match route {
         Route::Thread(id) => {
             let mut cmd = json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
@@ -387,7 +388,10 @@ fn send(s: &mut App, alternate: bool) {
         _ => {
             let Some(project_id) = project_id else { return };
             let thread_id = format!("thread:project:{project_id}:{}", s5_net::uuid());
-            let workspace = crate::chat::home::take_workspace(s, &project_id);
+            let preset = crate::chat::home::take_workspace(s, &project_id);
+            let draft_run = crate::chat::details::take_draft_workspace(s);
+            // A sidebar "new thread on branch" preset wins over the details card's env mode.
+            let workspace = if preset == json!({"type": "root"}) { draft_run.unwrap_or(preset) } else { preset };
             let params = json!({
                 "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project_id,
                 "title": "New thread", "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
@@ -397,6 +401,10 @@ fn send(s: &mut App, alternate: bool) {
             (thread_id, params, true)
         }
     };
+    if let Some(context) = context {
+        let message = if launch { &mut payload["initialMessage"] } else { &mut payload };
+        message["context"] = context;
+    }
     let launch = launch.then(|| thread_id.clone());
     let Some(net) = s.src.net() else { return };
     let composer = &mut s.ui.chat.composer;

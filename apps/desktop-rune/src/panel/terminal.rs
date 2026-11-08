@@ -153,9 +153,15 @@ pub struct Ui {
     palette: std::cell::Cell<Option<Palette>>,
     /// Edits for a field whose session closed under it.
     spare: TextEdit,
+    /// Selections added to a draft (`terminalContextRecord`), sent once the message references them.
+    contexts: Vec<Value>,
 }
 
 impl Ui {
+    /// A terminal holds keyboard focus (`terminalFocus`).
+    pub fn focused(&self) -> bool {
+        self.sessions.iter().any(|s| s.input.focused)
+    }
     pub fn get(&self, thread: &str, id: &str) -> Option<&Session> {
         self.sessions
             .iter()
@@ -528,6 +534,51 @@ fn copy_selection(app: &mut App, tx: &mut Tx, thread: &str, id: &str, clear: boo
     if clear {
         session.vt.clear_selection();
     }
+}
+
+const CONTEXT_HREF: &str = "t3-context://v1/terminal/";
+
+/// `sanitizeComposerContextLabel`: brackets, backslashes and breaks become spaces.
+fn context_label(label: &str) -> String {
+    let cleaned = label.replace(['[', ']', '\\', '\r', '\n'], " ");
+    let cleaned: String = cleaned.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+    if cleaned.is_empty() { "terminal".into() } else { cleaned }
+}
+
+/// The selection as a terminal context record and the inline reference that cites it.
+fn selection_context(session: &Session, context_id: &str) -> Option<(Value, String)> {
+    let text = session.vt.selection_text()?.replace("\r\n", "\n").trim_matches('\n').to_string();
+    let (start, end) = session.vt.selection_lines()?;
+    if text.is_empty() {
+        return None;
+    }
+    let terminal = session.title();
+    let range = if start == end { format!("line {start}") } else { format!("lines {start}-{end}") };
+    let label = context_label(&format!("{terminal} {range}"));
+    let text: String = text.chars().take(64_000).collect();
+    let record = json!({
+        "version": 1, "contextId": context_id, "kind": "terminal", "label": label,
+        "terminalId": session.id, "terminalLabel": terminal, "lineStart": start, "lineEnd": end, "text": text,
+    });
+    Some((record, format!("[{label}]({CONTEXT_HREF}{context_id})")))
+}
+
+/// "Add to chat": cites the selection in the thread's draft, as the drawer's selection action does.
+fn add_to_chat(app: &mut App, thread: &str, id: &str) {
+    let context_id = format!("terminal_{}", s5_net::uuid());
+    let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else { return };
+    let Some((record, reference)) = selection_context(session, &context_id) else { return };
+    session.vt.clear_selection();
+    app.ui.panel.terminal.contexts.push(record);
+    crate::chat::composer::append_to_draft(app, &reference);
+}
+
+/// The message `context` for the terminal selections `text` cites (`buildMessageContext`).
+pub fn take_message_context(app: &mut App, text: &str) -> Option<Value> {
+    let cited = |r: &Value| text.contains(&format!("({CONTEXT_HREF}{})", r["contextId"].as_str().unwrap_or_default()));
+    let (records, rest): (Vec<Value>, Vec<Value>) = std::mem::take(&mut app.ui.panel.terminal.contexts).into_iter().partition(|r| cited(r));
+    app.ui.panel.terminal.contexts = rest;
+    (!records.is_empty()).then(|| json!({"version": 1, "records": records}))
 }
 
 fn paste_clipboard(tx: &mut Tx, thread: &str, id: &str) {
@@ -1006,7 +1057,7 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
     }
 }
 
-/// The terminal's right-click menu: Copy, Paste, Select all, Jump to latest.
+/// The terminal's right-click menu: Add to chat, Copy, Paste, Select all, Jump to latest.
 pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     let Some(menu) = &app.ui.panel.terminal.menu else {
         return;
@@ -1026,6 +1077,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         })
     };
     let entries = vec![
+        kit::MenuEntry::item(item("Add to chat", |s, _, th, id| add_to_chat(s, th, id)).disabled(!selection)),
         kit::MenuEntry::item(item("Copy", |s, tx, th, id| copy_selection(s, tx, th, id, false)).disabled(!selection)),
         kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id))),
         kit::MenuEntry::item(item("Select all", |s, _, th, id| {
@@ -1090,6 +1142,28 @@ mod tests {
         rt.pointer_up(x(8.), y);
         rt.frame(0.);
         assert_eq!(selection(&rt), None, "a click clears the selection");
+    }
+
+    #[test]
+    fn a_selection_added_to_chat_is_cited_and_sent_once() {
+        let mut session = Session::new("t", "term-1");
+        session.vt.feed("$ ls\r\nsrc  tests\r\n$ ");
+        assert!(selection_context(&session, "terminal_x").is_none(), "nothing selected");
+        session.vt.select_start(0, 0, false, SelectBy::Line);
+        session.vt.select_to(0, 1, true);
+        let (record, reference) = selection_context(&session, "terminal_x").unwrap();
+        assert_eq!(reference, "[Terminal 1 lines 1-2](t3-context://v1/terminal/terminal_x)");
+        assert_eq!(
+            record,
+            json!({"version": 1, "contextId": "terminal_x", "kind": "terminal", "label": "Terminal 1 lines 1-2", "terminalId": "term-1", "terminalLabel": "Terminal 1", "lineStart": 1, "lineEnd": 2, "text": "$ ls\nsrc  tests"})
+        );
+        assert_eq!(context_label("a [b]\\c\n"), "a b c");
+        let mut app = App::new();
+        app.ui.panel.terminal.contexts = vec![record.clone(), json!({"contextId": "terminal_y"})];
+        assert_eq!(take_message_context(&mut app, "no reference"), None);
+        assert_eq!(take_message_context(&mut app, &format!("see {reference}")), Some(json!({"version": 1, "records": [record]})));
+        assert_eq!(take_message_context(&mut app, &format!("see {reference}")), None, "taken once sent");
+        assert_eq!(app.ui.panel.terminal.contexts.len(), 1);
     }
 
     #[test]

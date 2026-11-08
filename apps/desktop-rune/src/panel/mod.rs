@@ -6,6 +6,7 @@ mod files;
 mod preview;
 mod terminal;
 mod vt;
+pub use terminal::take_message_context;
 
 use crate::{
     App, Route, data, icons, kit,
@@ -206,34 +207,61 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         | preview::poll(app);
     changed | context_changed
 }
+/// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key
+/// matches and whose `when` holds wins, so `mod+d` splits a focused terminal and toggles the
+/// diff elsewhere.
 pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
-    app.state()
-        .config
-        .as_ref()
-        .and_then(|v| v["keybindings"].as_array())
-        .is_some_and(|bindings| {
-            bindings.iter().any(|v| {
-                let k = &v["shortcut"];
-                let yes = |name: &str| k[name].as_bool().unwrap_or(false);
-                let key = match &e.key {
-                    Key::Command(c) => c.to_string(),
-                    Key::Text(v) => v.clone(),
-                    _ => String::new(),
-                };
-                v["command"] == command
-                    && k["key"]
-                        .as_str()
-                        .is_some_and(|v| v.eq_ignore_ascii_case(&key))
-                    && e.mods.cmd
-                        == (yes("modKey")
-                            || yes("metaKey")
-                            || (!cfg!(target_os = "macos") && yes("ctrlKey")))
-                    && e.mods.ctrl
-                        == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
-                    && e.mods.shift == yes("shiftKey")
-                    && e.mods.alt == yes("altKey")
-            })
+    let Some(bindings) = app.state().config.as_ref().and_then(|v| v["keybindings"].as_array()) else { return false };
+    resolve(bindings, e, &|name: &str| when_context(app, name)) == Some(command)
+}
+
+fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn(&str) -> bool) -> Option<&'a str> {
+    let key = match &e.key {
+        Key::Command(c) => c.to_string(),
+        Key::Text(v) => v.clone(),
+        _ => String::new(),
+    };
+    bindings
+        .iter()
+        .rev()
+        .find(|v| {
+            let k = &v["shortcut"];
+            let yes = |name: &str| k[name].as_bool().unwrap_or(false);
+            (v["whenAst"].is_null() || when(&v["whenAst"], context))
+                && k["key"].as_str().is_some_and(|v| v.eq_ignore_ascii_case(&key))
+                && e.mods.cmd == (yes("modKey") || yes("metaKey") || (!cfg!(target_os = "macos") && yes("ctrlKey")))
+                && e.mods.ctrl == (yes("ctrlKey") || (!cfg!(target_os = "macos") && yes("modKey")))
+                && e.mods.shift == yes("shiftKey")
+                && e.mods.alt == yes("altKey")
         })
+        .and_then(|v| v["command"].as_str())
+}
+
+/// `evaluateWhenNode`: unknown identifiers are false.
+fn when(node: &serde_json::Value, context: &dyn Fn(&str) -> bool) -> bool {
+    match node["type"].as_str() {
+        Some("identifier") => match node["name"].as_str() {
+            Some("true") => true,
+            Some("false") | None => false,
+            Some(name) => context(name),
+        },
+        Some("not") => !when(&node["node"], context),
+        Some("and") => when(&node["left"], context) && when(&node["right"], context),
+        Some("or") => when(&node["left"], context) || when(&node["right"], context),
+        _ => false,
+    }
+}
+
+/// The `ShortcutMatchContext` keys this window can answer.
+fn when_context(app: &App, name: &str) -> bool {
+    match name {
+        "isDesktop" => true,
+        "terminalFocus" => app.ui.panel.terminal.focused(),
+        "terminalOpen" => terminal_active(app) || context(app).is_some_and(|(thread, _)| app.ui.panel.drawer.is_open(&thread)),
+        "rightPanelOpen" => app.ui.shell.panel_open,
+        "previewOpen" => app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))),
+        _ => false,
+    }
 }
 pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if shortcut(app, e, "rightPanel.toggle") {
@@ -254,6 +282,14 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
     if shortcut(app, e, "terminal.toggle") {
         toggle_terminal(app);
+        return true;
+    }
+    if context(app).is_some() && shortcut(app, e, "diff.toggle") {
+        if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
+            app.ui.shell.panel_open = false;
+        } else {
+            activate(app, Surface::Diff);
+        }
         return true;
     }
     if app.ui.shell.panel_open
@@ -445,7 +481,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
         );
     let content = match app.ui.panel.active {
         None => picker(app, t),
-        Some(Surface::Diff) => diff::view(app, t),
+        Some(Surface::Diff) => diff::view(app, t, cx.layout_with("panel-diff-refs", |r| r[2])),
         Some(Surface::Files) => files::view(app, t),
         Some(Surface::Terminal) => col()
             .grow(1.)
@@ -643,5 +679,35 @@ mod tests {
         assert!(shortcut(&app, &event, "terminal.toggle"));
         event.mods.shift = true;
         assert!(!shortcut(&app, &event, "terminal.toggle"));
+    }
+
+    #[test]
+    fn when_clauses_pick_between_bindings_on_one_key() {
+        let mut app = App::new();
+        let mut state = data::empty_state();
+        let id = |name: &str| serde_json::json!({"type": "identifier", "name": name});
+        let not = |node| serde_json::json!({"type": "not", "node": node});
+        let d = serde_json::json!({"key": "d", "modKey": true});
+        state.config = Some(serde_json::json!({"keybindings": [
+            {"command": "terminal.split", "shortcut": d, "whenAst": id("terminalFocus")},
+            {"command": "diff.toggle", "shortcut": d, "whenAst": not(id("terminalFocus"))},
+            {"command": "rightPanel.new", "shortcut": {"key": "t", "modKey": true}, "whenAst": {"type": "and", "left": id("rightPanelOpen"), "right": not(id("terminalFocus"))}},
+        ]}));
+        app.src = data::Source::Fixture(state);
+        let press = |key: char| {
+            let mut event = KeyEvent::from(Key::Command(key));
+            event.mods.cmd = true;
+            event.mods.ctrl = !cfg!(target_os = "macos");
+            event
+        };
+        assert!(shortcut(&app, &press('d'), "diff.toggle"));
+        assert!(!shortcut(&app, &press('d'), "terminal.split"), "terminalFocus is false without a focused terminal");
+        assert!(!shortcut(&app, &press('t'), "rightPanel.new"), "the panel is closed");
+        app.ui.shell.panel_open = true;
+        assert!(shortcut(&app, &press('t'), "rightPanel.new"));
+        let context = |name: &str| name == "terminalFocus";
+        let bindings = app.state().config.as_ref().unwrap()["keybindings"].as_array().unwrap().clone();
+        assert_eq!(resolve(&bindings, &press('d'), &context), Some("terminal.split"));
+        assert!(when(&id("true"), &context) && !when(&id("unknown"), &context));
     }
 }

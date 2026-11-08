@@ -12,7 +12,7 @@ use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::App;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use crate::shell::palette;
 
 mod git;
@@ -25,18 +25,69 @@ pub struct Ui {
     /// The thread whose card is open as a popover, when the lane is too narrow for it inline.
     popover: Option<String>,
     pub menu: Option<Menu>,
-    /// Local branches from `vcs.listRefs`, loaded when the branch menu opens.
-    refs: Vec<String>,
+    /// Refs from `vcs.listRefs`, loaded when the branch menu opens; `None` while loading.
+    refs: Option<Vec<Ref>>,
+    /// More refs than the first page: `(listed, total)` ("Showing N of M refs").
+    refs_more: Option<(usize, u64)>,
     branch_query: TextEdit,
+    /// The highlighted branch picker row.
+    branch_active: usize,
     pending: Option<(u64, Pending)>,
+    /// Where each new-thread draft runs (BranchToolbar's env mode), by draft key.
+    drafts: HashMap<String, DraftRun>,
     pub git: git::State,
     pub scripts: scripts::State,
 }
 
 enum Pending {
     List,
-    /// A switch or create; its reply moves the thread onto the branch.
-    Branch(String),
+    /// A switch or create; its reply moves the thread onto the branch, in that worktree.
+    Branch(String, Option<String>),
+}
+
+/// A row of `vcs.listRefs` (VcsRef).
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Ref {
+    pub name: String,
+    pub remote: bool,
+    pub current: bool,
+    pub default: bool,
+    pub worktree: Option<String>,
+}
+
+impl Ref {
+    fn from(v: &Value) -> Self {
+        Ref {
+            name: data::s(v, "name").to_string(),
+            remote: v["isRemote"] == true,
+            current: v["current"] == true,
+            default: v["isDefault"] == true,
+            worktree: v["worktreePath"].as_str().filter(|p| !p.is_empty()).map(str::to_string),
+        }
+    }
+
+    /// `BranchPickerRefItem`'s badge.
+    fn badge(&self, project_cwd: &str) -> Option<&'static str> {
+        if self.current {
+            Some("current")
+        } else if self.worktree.as_deref().is_some_and(|w| w != project_cwd) {
+            Some("worktree")
+        } else if self.remote {
+            Some("remote")
+        } else if self.default {
+            Some("default")
+        } else {
+            None
+        }
+    }
+}
+
+/// A draft's run context: a new worktree from `base` (else the checkout's branch), or the checkout.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct DraftRun {
+    pub worktree: bool,
+    pub base: Option<String>,
+    pub from_origin: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -45,6 +96,7 @@ pub enum Menu {
     Git,
     Branch,
     Scripts,
+    RunContext,
 }
 
 pub const GAP: f32 = 12.0;
@@ -128,6 +180,7 @@ pub fn watch(s: &mut App) {
     {
         net.watch_vcs(&cwd);
     }
+    scripts::load_file(s, false);
 }
 
 /// A card row: icon, label, then trailing content. `split` leaves room for a 32-point chevron.
@@ -189,58 +242,193 @@ fn toggle_menu(s: &mut App, menu: Menu) {
         git::refresh(s);
         return;
     }
+    if ui.menu == Some(Menu::Scripts) {
+        scripts::load_file(s, true);
+        return;
+    }
     if ui.menu == Some(Menu::Branch) {
         ui.branch_query = TextEdit::new("");
         ui.branch_query.focused = true;
+        ui.branch_active = 0;
+        ui.refs = None;
+        ui.refs_more = None;
         if let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) {
-            let id = net.request("vcs.listRefs", json!({"cwd": cwd, "refKind": "local", "limit": 100}));
+            let id = net.request("vcs.listRefs", json!({"cwd": cwd, "limit": REF_LIMIT}));
             s.ui.chat.details.pending = Some((id, Pending::List));
         }
     }
 }
 
-/// The branch menu's rows for `query`: matches, then "Create" when no branch has that name.
-fn branch_items(refs: &[String], query: &str) -> Vec<(String, String)> {
+const REF_LIMIT: u64 = 100;
+
+/// A branch picker row: a ref, or creating one named by the search.
+#[derive(Clone, Debug, PartialEq)]
+enum Item {
+    Ref(usize),
+    Create(String),
+}
+
+/// The branch picker's rows for `query` (`shouldIncludeBranchPickerItem`): refs containing the
+/// query or its sanitized form, then "Create new ref" when `can_create` and no ref has that name.
+fn branch_items(refs: &[Ref], query: &str, can_create: bool) -> Vec<Item> {
     let query = query.trim();
     let needle = query.to_lowercase();
-    let mut items: Vec<_> = refs.iter().filter(|r| r.to_lowercase().contains(&needle)).map(|r| (r.clone(), r.clone())).collect();
+    let sanitized = sanitize_ref_name(&needle);
+    let mut items: Vec<Item> = refs
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| {
+            let name = r.name.to_lowercase();
+            needle.is_empty() || name.contains(&needle) || (!sanitized.is_empty() && sanitized != needle && name.contains(&sanitized))
+        })
+        .map(|(i, _)| Item::Ref(i))
+        .collect();
     let name = sanitize_ref_name(query);
-    if !name.is_empty() && !refs.contains(&name) {
-        items.push((format!("{CREATE}{name}"), format!("Create new branch \"{query}\"")));
+    if can_create && !name.is_empty() && !refs.iter().any(|r| r.name == name) {
+        items.push(Item::Create(name));
     }
     items
 }
-const CREATE: &str = "\0create:";
 
 /// `sanitizeNewRefName`: whitespace runs become `-`.
 fn sanitize_ref_name(raw: &str) -> String {
     raw.split_whitespace().collect::<Vec<_>>().join("-")
 }
 
-/// Switches to, or creates and switches to, a branch (BranchToolbarBranchSelector).
-fn pick_branch(s: &mut App, id: &str) {
-    s.ui.chat.details.menu = None;
-    let Some(cwd) = cwd(s) else { return };
-    let Some(net) = s.src.net() else { return };
-    let request = match id.strip_prefix(CREATE) {
-        Some(name) => net.request("vcs.createRef", json!({"cwd": cwd, "refName": name, "switchRef": true})),
-        None => net.request("vcs.switchRef", json!({"cwd": cwd, "refName": id})),
-    };
-    let name = id.strip_prefix(CREATE).unwrap_or(id).to_string();
-    s.ui.chat.details.pending = Some((request, Pending::Branch(name)));
+/// `deriveLocalBranchNameFromRemoteRef`: `origin/feature/x` checks out as `feature/x`.
+fn local_name(remote: &str) -> String {
+    match remote.find('/') {
+        Some(i) if i > 0 && i + 1 < remote.len() => remote[i + 1..].to_string(),
+        _ => remote.to_string(),
+    }
 }
 
-fn on_branch_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
-    match &e.key {
-        Key::Escape => s.ui.chat.details.menu = None,
-        Key::Enter => {
-            let ui = &s.ui.chat.details;
-            let query = ui.branch_query.text.trim();
-            let items = branch_items(&ui.refs, query);
-            let exact = items.iter().find(|(id, _)| id == query).or(items.first()).map(|(id, _)| id.clone());
-            if let Some(id) = exact {
-                pick_branch(s, &id);
+fn draft_default(s: &App) -> DraftRun {
+    DraftRun { worktree: crate::settings::server_settings(s)["defaultThreadEnvMode"] == "worktree", ..DraftRun::default() }
+}
+
+/// Where the open draft runs; a thread's run context is fixed.
+fn draft_run(s: &App) -> Option<DraftRun> {
+    if composer::ctx(s).thread.is_some() {
+        return None;
+    }
+    let key = composer::draft_key(s.frame_route());
+    Some(s.ui.chat.details.drafts.get(&key).cloned().unwrap_or_else(|| draft_default(s)))
+}
+
+fn draft_run_mut(s: &mut App) -> &mut DraftRun {
+    let fallback = draft_default(s);
+    let key = composer::draft_key(s.frame_route());
+    s.ui.chat.details.drafts.entry(key).or_insert(fallback)
+}
+
+/// The branch picker chooses the new worktree's base instead of switching the checkout.
+fn selecting_base(s: &App) -> bool {
+    draft_run(s).is_some_and(|r| r.worktree)
+}
+
+/// The base a draft's new worktree starts from: its pick, else the checkout's branch.
+fn worktree_base(s: &App, run: &DraftRun) -> Option<String> {
+    run.base.clone().or_else(|| vcs(s).and_then(|v| v["local"]["refName"].as_str()).map(str::to_string))
+}
+
+/// Takes the sending draft's run context: a new worktree (`prepareWorktree`) as the launch's
+/// `workspaceStrategy`, or `None` to run in the checkout.
+pub fn take_draft_workspace(s: &mut App) -> Option<Value> {
+    let run = draft_run(s)?;
+    let key = composer::draft_key(s.frame_route());
+    s.ui.chat.details.drafts.remove(&key);
+    if !run.worktree {
+        return None;
+    }
+    let mut strategy = json!({"type": "worktree", "baseRef": worktree_base(s, &run)?});
+    if run.from_origin {
+        strategy["startFromOrigin"] = json!(true);
+    }
+    Some(strategy)
+}
+
+fn set_env_mode(s: &mut App, worktree: bool) {
+    s.ui.chat.details.menu = None;
+    let run = draft_run_mut(s);
+    if run.worktree != worktree {
+        run.worktree = worktree;
+        run.base = None;
+    }
+}
+
+fn pick_item(s: &mut App, item: Item) {
+    s.ui.chat.details.menu = None;
+    match item {
+        Item::Create(name) => create_ref(s, &name),
+        Item::Ref(i) => {
+            if let Some(r) = s.ui.chat.details.refs.as_ref().and_then(|v| v.get(i)).cloned() {
+                select_ref(s, &r);
             }
+        }
+    }
+}
+
+/// `selectBranch`: a worktree base for a worktree draft; a ref checked out in a worktree moves
+/// the thread there; anything else is switched to in the thread's checkout.
+fn select_ref(s: &mut App, r: &Ref) {
+    if selecting_base(s) {
+        draft_run_mut(s).base = Some(r.name.clone());
+        return;
+    }
+    let c = composer::ctx(s);
+    let project_cwd = c.project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
+    let active = c.thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty()).map(str::to_string);
+    if let Some(path) = &r.worktree {
+        let own = path == &project_cwd || path.starts_with(&format!("{}/", project_cwd.trim_end_matches('/')));
+        set_thread_branch(s, &r.name, (!own).then(|| path.clone()));
+        return;
+    }
+    let next = if r.default { None } else { active };
+    let checkout = next.clone().unwrap_or(project_cwd);
+    let name = if r.remote { local_name(&r.name) } else { r.name.clone() };
+    if let Some(net) = s.src.net() {
+        let id = net.request("vcs.switchRef", json!({"cwd": checkout, "refName": r.name}));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(name, next)));
+    }
+}
+
+fn create_ref(s: &mut App, name: &str) {
+    let Some(cwd) = cwd(s) else { return };
+    let worktree = composer::ctx(s).thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty()).map(str::to_string);
+    if let Some(net) = s.src.net() {
+        let id = net.request("vcs.createRef", json!({"cwd": cwd, "refName": name, "switchRef": true}));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(name.to_string(), worktree)));
+    }
+}
+
+fn set_thread_branch(s: &mut App, branch: &str, worktree: Option<String>) {
+    let thread = composer::ctx(s).thread.map(|t| data::s(t, "id").to_string());
+    if let (Some(thread), Some(net)) = (thread, s.src.net()) {
+        net.dispatch(json!({"type": "thread.metadata.update", "threadId": thread, "branch": branch, "worktreePath": worktree}));
+    }
+}
+
+fn visible_items(s: &App) -> Vec<Item> {
+    let ui = &s.ui.chat.details;
+    branch_items(ui.refs.as_deref().unwrap_or(&[]), &ui.branch_query.text, !selecting_base(s))
+}
+
+fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    let items = visible_items(s);
+    let ui = &mut s.ui.chat.details;
+    match &e.key {
+        Key::Escape => ui.menu = None,
+        Key::Enter => {
+            if let Some(item) = items.get(ui.branch_active.min(items.len().saturating_sub(1))).cloned() {
+                pick_item(s, item);
+            }
+        }
+        Key::Down | Key::Up if !items.is_empty() => {
+            let n = items.len() as isize;
+            let delta = if e.key == Key::Down { 1 } else { -1 };
+            ui.branch_active = (ui.branch_active.min(items.len() - 1) as isize + delta).rem_euclid(n) as usize;
+            tx.scroll_into_view(format!("details-branch-item-{}", ui.branch_active));
         }
         _ => return false,
     }
@@ -258,19 +446,21 @@ fn poll_branch(s: &mut App) -> bool {
     let Some((_, pending)) = s.ui.chat.details.pending.take() else { return false };
     match (pending, reply) {
         (Pending::List, Ok(v)) => {
-            s.ui.chat.details.refs = v["refs"].as_array().into_iter().flatten().filter(|r| r["isRemote"] != true).map(|r| data::s(r, "name").to_string()).collect();
+            let refs: Vec<Ref> = v["refs"].as_array().into_iter().flatten().map(Ref::from).collect();
+            let ui = &mut s.ui.chat.details;
+            ui.refs_more = (!v["nextCursor"].is_null()).then(|| (refs.len(), v["totalCount"].as_u64().unwrap_or(0)));
+            ui.refs = Some(refs);
         }
-        (Pending::Branch(name), Ok(v)) => {
+        (Pending::Branch(name, worktree), Ok(v)) => {
             let branch = v["refName"].as_str().unwrap_or(&name).to_string();
-            let c = composer::ctx(s);
-            let thread = c.thread.map(|t| data::s(t, "id").to_string());
-            let worktree = c.thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty()).map(str::to_string);
-            if let (Some(thread), Some(net)) = (thread, s.src.net()) {
-                net.dispatch(json!({"type": "thread.metadata.update", "threadId": thread, "branch": branch, "worktreePath": worktree}));
-            }
+            set_thread_branch(s, &branch, worktree);
+            git::refresh(s);
         }
-        (Pending::List, Err(e)) => palette::toast(s, "Failed to load branches.", Some(&palette::error_message(&e, "An error occurred."))),
-        (Pending::Branch(_), Err(e)) => palette::toast(s, "Failed to switch ref.", Some(&palette::error_message(&e, "An error occurred."))),
+        (Pending::List, Err(e)) => {
+            s.ui.chat.details.refs = Some(vec![]);
+            palette::toast(s, "Failed to load branches.", Some(&palette::error_message(&e, "An error occurred.")));
+        }
+        (Pending::Branch(..), Err(e)) => palette::toast(s, "Failed to switch ref.", Some(&palette::error_message(&e, "An error occurred."))),
     }
     true
 }
@@ -300,6 +490,30 @@ fn editors(s: &App) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
+fn env_label(s: &App) -> String {
+    s.state().config.as_ref().map(|c| data::s(&c["environment"], "label").to_string()).unwrap_or_default()
+}
+
+/// The branch selector row: the label middle-truncates, as `MiddleTruncate` does.
+fn branch_row(t: &T, label: &str, fg: Color, muted: Color) -> El {
+    row()
+        .key("details-branch")
+        .w_full()
+        .h(32.0)
+        .pl(11.0)
+        .pr(8.0)
+        .gap(10.0)
+        .center_y()
+        .radius(theme::layout::CONTROL_RADIUS)
+        .hover(t.c.accent)
+        .cursor(Cursor::Pointer)
+        .role("combobox")
+        .label(label.to_string())
+        .child(icon(&icons::GIT_BRANCH, 16.0).color(muted))
+        .child(text(label.to_string()).font(ROW).color(fg).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
+        .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted))
+}
+
 pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<El> {
     let card = card(s, t)?;
     match shown {
@@ -315,10 +529,12 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<E
 fn card(s: &App, t: &T) -> Option<El> {
     let muted = t.c.muted_foreground;
     let fg = t.c.foreground.alpha_mul(0.8);
-    let env = s.state().config.as_ref().map(|c| data::s(&c["environment"], "label").to_string()).unwrap_or_default();
+    let env = env_label(s);
     let thread = composer::ctx(s).thread;
+    let run = draft_run(s);
+    let new_worktree = run.as_ref().is_some_and(|r| r.worktree);
     let worktree = thread.is_some_and(|t| !data::s(t, "worktreePath").is_empty());
-    let mode = if worktree { "Worktree" } else { "Local checkout" };
+    let mode = if new_worktree { "New worktree" } else if worktree { "Worktree" } else if thread.is_some() { "Local checkout" } else { "Current checkout" };
     // A draft can still choose where it runs, so its row is the env mode picker.
     let draft = thread.is_none();
     let mut run_context = row()
@@ -331,9 +547,16 @@ fn card(s: &App, t: &T) -> Option<El> {
         .label(format!("Run context: {env}, {mode}"))
         .child(icon(&icons::SERVER, 18.0).color(muted))
         .child(text(env).font(ROW).color(if draft { fg } else { muted }).truncate().grow(1.0).shrink().min_w(0.0))
-        .child(icon(if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(mode));
+        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(mode));
     if draft {
-        run_context = run_context.radius(theme::layout::CONTROL_RADIUS).hover(t.c.accent).cursor(Cursor::Pointer).role("button").child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted).ml(9.0));
+        run_context = run_context
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .expanded(s.ui.chat.details.menu == Some(Menu::RunContext))
+            .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted).ml(9.0))
+            .on_press(|s: &mut App| toggle_menu(s, Menu::RunContext));
     }
     let editor = split(
         t,
@@ -360,7 +583,17 @@ fn card(s: &App, t: &T) -> Option<El> {
         .child(general);
 
     if let Some(v) = vcs(s).map(|v| &v["local"]).filter(|v| v["isRepo"] == true) {
-        let branch = data::s(v, "refName").to_string();
+        let current = data::s(v, "refName").to_string();
+        // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
+        let branch = match run.as_ref().filter(|r| r.worktree) {
+            Some(r) => match worktree_base(s, r) {
+                Some(base) if r.from_origin => format!("From {base} (remote)"),
+                Some(base) => format!("From {base}"),
+                None => "Select ref".into(),
+            },
+            None if current.is_empty() => "Select ref".into(),
+            None => current,
+        };
         let mut section = col()
             .w_full()
             .px(8.0)
@@ -368,11 +601,8 @@ fn card(s: &App, t: &T) -> Option<El> {
             .pb(10.0)
             .child(el().absolute(0.0, 0.0).w_full().h(1.0).fill(t.c.border.alpha_mul(0.65)))
             .child(
-                action(t, "details-branch", icon(&icons::GIT_BRANCH, 16.0).color(muted), &branch, fg)
-                    .w_full()
-                    .pr(8.0)
-                    .role("combobox")
-                    .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted))
+                branch_row(t, &branch, fg, muted)
+                    .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
         if let Some(git) = git::view(s, t, v, draft) {
@@ -403,54 +633,139 @@ fn card(s: &App, t: &T) -> Option<El> {
 pub fn menu(s: &App, t: &T) -> Option<El> {
     let which = s.ui.chat.details.menu?;
     let close = |s: &mut App| s.ui.chat.details.menu = None;
-    let rows = match which {
-        Menu::Git => Some(("details-git-menu", git::menu_rows(s, t))),
-        Menu::Scripts => Some(("details-scripts-menu", scripts::menu_rows(s, t))),
-        _ => None,
-    };
-    if let Some((anchor, rows)) = rows {
-        let list = col().key("details-menu").w(WIDTH - 18.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
-        return Some(list.children(rows).anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, close));
-    }
-    let (anchor, items): (&str, Vec<(String, String)>) = match which {
+    let surface = || col().key("details-menu").w(WIDTH - 18.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
+    let (anchor, list) = match which {
+        Menu::Git => ("details-git-menu", surface().children(git::menu_rows(s, t))),
+        Menu::Scripts => ("details-scripts-menu", surface().children(scripts::menu_rows(s, t))),
+        Menu::Branch => ("details-branch", branch_picker(s, t, surface())),
+        Menu::RunContext => ("details-env", surface().children(run_context_rows(s, t))),
         Menu::Editor => {
-            let list = editors(s);
-            ("details-editor-menu", if list.is_empty() { vec![(String::new(), "No editors found".into())] } else { list })
+            let editors = editors(s);
+            let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
+            if editors.is_empty() {
+                list = list.child(row().h(32.0).px(8.0).center_y().child(text("No editors found").font(theme::TEXT_SM).color(t.c.muted_foreground)));
+            }
+            for (id, label) in editors {
+                list = list.child(menu_row(t, None, &label, Some(move |s: &mut App| {
+                    s.ui.chat.details.menu = None;
+                    open_in_editor(s, Some(id.clone()));
+                }), None));
+            }
+            ("details-editor-menu", list)
         }
-        Menu::Git | Menu::Scripts => return None,
-        Menu::Branch => ("details-branch", branch_items(&s.ui.chat.details.refs, &s.ui.chat.details.branch_query.text)),
     };
-    let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
-    if which == Menu::Branch {
-        list = list.w(260.0).child(
-            text_input(&s.ui.chat.details.branch_query, theme::TEXT_SM)
+    Some(list.anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, close))
+}
+
+fn group_label(t: &T, label: &str) -> El {
+    row().px(8.0).py(6.0).child(text(label.to_string()).font(theme::XS_MEDIUM).color(t.c.muted_foreground))
+}
+
+fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_press: impl Fn(&mut App) + 'static) -> El {
+    let mark = if checked { icon(&icons::CHECK, 16.0).color(t.c.foreground) } else { el().size(16.0, 16.0) };
+    menu_row(t, Some(icon(glyph, 16.0).color(t.c.muted_foreground)), label, Some(on_press), None).child(mark)
+}
+
+/// RunContextSelector: where the draft runs (this environment) and in which workspace.
+fn run_context_rows(s: &App, t: &T) -> Vec<El> {
+    let worktree = draft_run(s).is_some_and(|r| r.worktree);
+    vec![
+        group_label(t, "Run on"),
+        radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None),
+        el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
+        group_label(t, "Workspace"),
+        radio_row(t, &icons::FOLDER, "Current checkout", !worktree, |s: &mut App| set_env_mode(s, false)),
+        radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
+    ]
+}
+
+/// BranchPicker: a ref search, a capped list with badges, and "Create new ref" for a new name.
+fn branch_picker(s: &App, t: &T, list: El) -> El {
+    let ui = &s.ui.chat.details;
+    let muted = t.c.muted_foreground;
+    let project_cwd = composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
+    let search = row()
+        .w_full()
+        .h(32.0)
+        .px(8.0)
+        .gap(8.0)
+        .center_y()
+        .child(icon(&icons::SEARCH, 16.0).color(muted.alpha_mul(0.8)))
+        .child(
+            text_input(&ui.branch_query, theme::TEXT_SM)
                 .key("details-branch-search")
-                .w_full()
-                .h(32.0)
-                .px(8.0)
+                .grow(1.0)
+                .min_w(0.0)
                 .font(theme::TEXT_SM)
                 .color(t.c.foreground)
-                .placeholder("Search branches…", t.c.muted_foreground)
+                .placeholder("Search refs...", muted)
                 .on_input_key(on_branch_key)
                 .on_edit(|s: &mut App| &mut s.ui.chat.details.branch_query),
         );
+    let mut list = list.child(search).child(el().w_full().h(1.0).my(4.0).fill(t.c.border));
+    let status = |label: &str| row().h(32.0).px(8.0).center_y().child(text(label.to_string()).font(theme::TEXT_SM).color(muted));
+    let Some(refs) = ui.refs.as_deref() else { return list.child(status("Loading refs...")) };
+    let items = visible_items(s);
+    if items.is_empty() {
+        list = list.child(status("No refs found."));
     }
-    for (id, label) in items {
-        let enabled = !id.is_empty();
-        let mut item = row().h(32.0).px(8.0).center_y().radius(radius::MD).child(text(label).font(theme::TEXT_SM).color(if enabled { t.c.foreground } else { t.c.muted_foreground }));
-        if enabled {
-            item = item.hover(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| {
-                s.ui.chat.details.menu = None;
-                match which {
-                    Menu::Editor => open_in_editor(s, Some(id.clone())),
-                    Menu::Branch => pick_branch(s, &id),
-                    Menu::Git | Menu::Scripts => {}
-                }
-            });
+    let active = ui.branch_active.min(items.len().saturating_sub(1));
+    let mut rows = col().w_full();
+    for (i, item) in items.into_iter().enumerate() {
+        let (label, badge) = match &item {
+            Item::Ref(r) => (refs[*r].name.clone(), refs[*r].badge(&project_cwd)),
+            Item::Create(name) => (format!("Create new ref \"{name}\""), None),
+        };
+        let mut line = row()
+            .key(format!("details-branch-item-{i}"))
+            .w_full()
+            .h(28.0)
+            .px(8.0)
+            .gap(8.0)
+            .center_y()
+            .radius(radius::MD)
+            .cursor(Cursor::Pointer)
+            .label(label.clone())
+            .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).single_line().truncate_middle().grow(1.0).shrink().min_w(0.0))
+            .on_hover(move |s: &mut App| s.ui.chat.details.branch_active = i)
+            .on_press(move |s: &mut App| pick_item(s, item.clone()));
+        if let Some(badge) = badge {
+            line = line.child(text(badge).font(theme::TEXT_3XS).color(muted.alpha_mul(0.45)));
         }
-        list = list.child(item);
+        if i == active {
+            line = line.fill(t.c.accent);
+        }
+        rows = rows.child(line);
     }
-    Some(list.anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, |s: &mut App| s.ui.chat.details.menu = None))
+    list = list.child(rows.max_h(224.0).scroll(rune::ScrollSpec { stick_bottom: false }));
+    if let Some((shown, total)) = ui.refs_more {
+        list = list.child(row().px(8.0).py(6.0).child(text(format!("Showing {shown} of {total} refs")).font(theme::TEXT_XS).color(muted)));
+    }
+    if selecting_base(s) {
+        let on = draft_run(s).is_some_and(|r| r.from_origin);
+        list = list.child(el().w_full().h(1.0).my(4.0).fill(t.c.border)).child(
+            row()
+                .w_full()
+                .h(32.0)
+                .px(8.0)
+                .gap(8.0)
+                .center_y()
+                .child(icon(&icons::REFRESH_CW, 14.0).color(muted))
+                .child(text("Start from remote").font(theme::TEXT_SM).color(t.c.foreground).grow(1.0))
+                .child(
+                    crate::kit::Switch::new(on)
+                        .size("sm")
+                        .label("Start from remote")
+                        .hide_label()
+                        .on_toggle(|s: &mut App| {
+                            let run = draft_run_mut(s);
+                            run.from_origin = !run.from_origin;
+                        })
+                        .build(&crate::kit::theme(t)),
+                ),
+        );
+    }
+    list
 }
 
 /// The git and script dialogs, drawn over the whole window.
@@ -472,7 +787,8 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{CREATE, Shown, branch_items, lane, shown, toggle};
+    use super::{DraftRun, Item, Ref, Shown, branch_items, lane, local_name, shown, take_draft_workspace, toggle};
+    use serde_json::json;
     use crate::{App, Route, data};
 
     #[test]
@@ -496,16 +812,27 @@ mod tests {
     }
 
     #[test]
-    fn branch_menu_offers_create_for_a_new_name() {
-        let refs = vec!["main".to_string(), "feature/x".to_string()];
-        assert_eq!(branch_items(&refs, "").len(), 2);
-        assert_eq!(
-            branch_items(&refs, "FEAT"),
-            vec![("feature/x".into(), "feature/x".into()), (format!("{CREATE}FEAT"), "Create new branch \"FEAT\"".into())]
-        );
-        assert_eq!(branch_items(&refs, "main").len(), 1);
-        let created = branch_items(&refs, " my branch ");
-        assert_eq!(created, vec![(format!("{CREATE}my-branch"), "Create new branch \"my branch\"".into())]);
+    fn branch_picker_filters_refs_and_offers_create_for_a_new_name() {
+        let r = |name: &str| Ref { name: name.into(), ..Ref::default() };
+        let refs = vec![r("main"), r("feature/my-branch"), r("origin/main")];
+        assert_eq!(branch_items(&refs, "", true), vec![Item::Ref(0), Item::Ref(1), Item::Ref(2)]);
+        assert_eq!(branch_items(&refs, "MAIN", true), vec![Item::Ref(0), Item::Ref(2), Item::Create("MAIN".into())]);
+        assert_eq!(branch_items(&refs, "main", true), vec![Item::Ref(0), Item::Ref(2)], "an existing name is not offered");
+        assert_eq!(branch_items(&refs, " my branch ", true), vec![Item::Ref(1), Item::Create("my-branch".into())], "matches the sanitized query");
+        assert_eq!(branch_items(&refs, "new", false), vec![], "no create while picking a worktree base");
+        assert_eq!(local_name("origin/feature/x"), "feature/x");
+        assert_eq!(local_name("main"), "main");
+    }
+
+    #[test]
+    fn a_draft_set_to_new_worktree_launches_one_from_its_base() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
+        s.navigate(Route::Home { project_id: Some(project) });
+        assert_eq!(take_draft_workspace(&mut s), None, "the checkout by default");
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true };
+        assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
+        assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
     }
 
     #[test]

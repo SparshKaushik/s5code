@@ -21,6 +21,9 @@ pub struct State {
     /// The last script run per project (`lastInvokedScriptByProjectId`).
     last: HashMap<String, String>,
     pending: Option<Pending>,
+    /// `t3.json` scripts by checkout (`useT3ProjectFileScripts`); empty when missing or invalid.
+    files: HashMap<String, Vec<Value>>,
+    reading: Option<(u64, String)>,
 }
 
 #[derive(Default)]
@@ -196,6 +199,68 @@ fn release(mut script: Value, setup: bool, settle: bool) -> Value {
     script
 }
 
+/// `parseT3ProjectFile`'s scripts: an unparseable file offers none.
+fn parse_file(contents: &str) -> Vec<Value> {
+    let Ok(file) = serde_json::from_str::<Value>(contents) else { return vec![] };
+    let named = |v: &Value| !data::s(v, "name").trim().is_empty() && !data::s(v, "command").trim().is_empty();
+    file["scripts"].as_array().into_iter().flatten().filter(|v| named(v)).cloned().collect()
+}
+
+/// `importableScripts`: file scripts whose command and name (any case) no script already has.
+fn importable(scripts: &[Value], file: &[Value]) -> Vec<Value> {
+    let taken = |f: &Value| scripts.iter().any(|v| v["command"] == f["command"] || data::s(v, "name").to_lowercase() == data::s(f, "name").to_lowercase());
+    file.iter().filter(|f| !taken(f)).cloned().collect()
+}
+
+/// The script an import adds (`importFileScript`), shaped as `build` saves one.
+fn imported(id: &str, f: &Value) -> Value {
+    let setup = f["runOnWorktreeCreate"] == true;
+    let icon = Some(data::s(f, "icon")).filter(|i| !i.is_empty()).unwrap_or("play");
+    let mut script = json!({"id": id, "name": data::s(f, "name").trim(), "command": data::s(f, "command").trim(), "icon": icon, "runOnWorktreeCreate": setup});
+    if setup && f["async"] == false {
+        script["async"] = json!(false);
+    }
+    if f["runOnSettle"] == true {
+        script["runOnSettle"] = json!(true);
+    }
+    if let Some(url) = f["previewUrl"].as_str().map(str::trim).filter(|u| !u.is_empty()) {
+        script["previewUrl"] = json!(url);
+        script["autoOpenPreview"] = json!(f["autoOpenPreview"] == true);
+    }
+    script
+}
+
+/// Reads the checkout's `t3.json` once (`force` rereads it, as opening the menu does).
+pub fn load_file(s: &mut App, force: bool) {
+    let Some(cwd) = super::cwd(s) else { return };
+    let ui = &s.ui.chat.details.scripts;
+    if ui.reading.is_some() || (!force && ui.files.contains_key(&cwd)) {
+        return;
+    }
+    let Some(net) = s.src.net() else { return };
+    let id = net.request("projects.readFile", json!({"cwd": cwd, "relativePath": "t3.json", "allowMissing": true}));
+    s.ui.chat.details.scripts.reading = Some((id, cwd));
+}
+
+fn file_scripts(s: &App) -> Vec<Value> {
+    super::cwd(s).and_then(|cwd| s.ui.chat.details.scripts.files.get(&cwd).cloned()).unwrap_or_default()
+}
+
+fn import(s: &mut App, file: &Value) {
+    s.ui.chat.details.menu = None;
+    if s.ui.chat.details.scripts.pending.is_some() {
+        return;
+    }
+    let scripts = scripts(s);
+    let ids: Vec<String> = scripts.iter().map(|v| data::s(v, "id").to_string()).collect();
+    let id = next_id(data::s(file, "name"), &ids);
+    let saved = imported(&id, file);
+    let (setup, settle) = (saved["runOnWorktreeCreate"] == true, saved["runOnSettle"] == true);
+    let mut next: Vec<Value> = scripts.into_iter().map(|v| release(v, setup, settle)).collect();
+    next.push(saved);
+    persist(s, next, command_for(&id), None, None);
+}
+
 fn project(s: &App) -> Option<Value> {
     composer::ctx(s).project.cloned()
 }
@@ -324,6 +389,19 @@ fn delete(s: &mut App) {
 }
 
 pub fn poll(s: &mut App) -> bool {
+    poll_file(s) | poll_save(s)
+}
+
+fn poll_file(s: &mut App) -> bool {
+    let Some(id) = s.ui.chat.details.scripts.reading.as_ref().map(|r| r.0) else { return false };
+    let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
+    let Some((_, cwd)) = s.ui.chat.details.scripts.reading.take() else { return false };
+    let list = reply.ok().filter(|v| v["truncated"] != true).map(|v| parse_file(data::s(&v, "contents"))).unwrap_or_default();
+    s.ui.chat.details.scripts.files.insert(cwd, list);
+    true
+}
+
+fn poll_save(s: &mut App) -> bool {
     let Some(id) = s.ui.chat.details.scripts.pending.as_ref().map(|p| p.waiting) else { return false };
     let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
     let Some(mut pending) = s.ui.chat.details.scripts.pending.take() else { return false };
@@ -333,6 +411,8 @@ pub fn poll(s: &mut App) -> bool {
             palette::toast(s, "Could not delete action", Some(&message));
         } else if let Some(editor) = s.ui.chat.details.scripts.editor.as_mut() {
             editor.error = Some(message);
+        } else {
+            palette::toast(s, "Failed to import action.", Some(&message));
         }
         return true;
     }
@@ -409,6 +489,10 @@ pub fn view(s: &App, t: &T) -> El {
     let muted = t.c.muted_foreground;
     let scripts = scripts(s);
     let Some(script) = preferred(s, &scripts) else {
+        if !importable(&scripts, &file_scripts(s)).is_empty() {
+            let main = super::action(t, "details-script-actions", icon(&icons::WRENCH, 16.0).color(muted), "Actions", fg).on_press(|s: &mut App| super::toggle_menu(s, super::Menu::Scripts));
+            return super::split(t, "details-scripts-menu", main, "Choose project action", super::Menu::Scripts);
+        }
         return super::action(t, "details-script", icon(&icons::PLUS, 14.0).color(fg), "Add project script", fg).gap(12.0).w_full().on_press(|s: &mut App| open_editor(s, None));
     };
     let name = data::s(script, "name");
@@ -446,6 +530,19 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
         let run_script = script.clone();
         let row = super::menu_row(t, Some(glyph), &menu_label(&script), can_run.then_some(move |s: &mut App| run(s, &run_script)), None);
         rows.push(row.child(trailing.child(gear)));
+    }
+    let imports = importable(&scripts(s), &file_scripts(s));
+    if !imports.is_empty() {
+        if !rows.is_empty() {
+            rows.push(el().w_full().h(1.0).my(4.0).fill(t.c.border));
+        }
+        rows.push(super::group_label(t, "From t3.json"));
+        for file in imports {
+            let glyph = icon(icon_for(data::s(&file, "icon")), 16.0).color(t.c.muted_foreground);
+            let name = data::s(&file, "name").to_string();
+            let row = super::menu_row(t, Some(glyph), &name, Some(move |s: &mut App| import(s, &file)), None);
+            rows.push(row.child(icon(&icons::DOWNLOAD, 14.0).color(t.c.muted_foreground).label("Import")));
+        }
     }
     rows.push(super::menu_row(t, Some(icon(&icons::PLUS, 16.0).color(t.c.muted_foreground)), "Add project script", Some(|s: &mut App| open_editor(s, None)), None));
     rows
@@ -649,5 +746,21 @@ mod tests {
         assert_eq!(release(other, false, true)["runOnSettle"], false);
         let e = Editor { name: TextEdit::new("Dev"), command: TextEdit::new("bun dev"), icon: "play".into(), setup: true, wait: true, ..Editor::default() };
         assert_eq!(build("dev", &e), json!({"id": "dev", "name": "Dev", "command": "bun dev", "icon": "play", "runOnWorktreeCreate": true, "async": false}));
+    }
+
+    #[test]
+    fn t3_json_offers_only_new_scripts_for_import() {
+        let file = parse_file(r#"{"scripts": [{"name": "Dev", "command": "bun dev"}, {"name": "test", "command": "bun test"}, {"name": "Lint", "command": "bun lint"}, {"name": " ", "command": "x"}]}"#);
+        assert_eq!(file.len(), 3, "a blank name is not a script");
+        assert!(parse_file("{not json").is_empty());
+        let scripts = vec![json!({"id": "t", "name": "Test", "command": "vitest"}), json!({"id": "l", "name": "Check", "command": "bun lint"})];
+        let offered = importable(&scripts, &file);
+        let names: Vec<&str> = offered.iter().map(|v| data::s(v, "name")).collect();
+        assert_eq!(names, vec!["Dev"], "same name in any case, or same command, is already there");
+        let setup = json!({"name": "Setup", "command": "bun i", "runOnWorktreeCreate": true, "async": false, "previewUrl": "http://localhost:3000"});
+        assert_eq!(
+            imported("setup", &setup),
+            json!({"id": "setup", "name": "Setup", "command": "bun i", "icon": "play", "runOnWorktreeCreate": true, "async": false, "previewUrl": "http://localhost:3000", "autoOpenPreview": false})
+        );
     }
 }

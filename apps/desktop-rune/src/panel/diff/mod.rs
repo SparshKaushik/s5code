@@ -781,7 +781,8 @@ fn counts(ui: &Ui, f: &FileDiff) -> (usize, usize) {
     ui.counts.get(f.path()).copied().unwrap_or((f.additions(), f.deletions()))
 }
 
-fn header(app: &App, t: &T) -> El {
+/// `refs_w`: the refs area's width last frame, for the `@max-[20rem]/diff-refs` query.
+fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
     let ui = &app.ui.panel.diff;
     let turns = turns(app);
     let label = scope_label(ui, &turns);
@@ -810,23 +811,31 @@ fn header(app: &App, t: &T) -> El {
             ui.sub = None;
         });
     let scope = if commit { scope.min_w(0.0).shrink() } else { scope };
-    let mut left = row().grow(1.0).min_w(0.0).shrink().gap(12.0).center_y().child(scope);
+    let mut left = row().key("panel-diff-refs").grow(1.0).min_w(0.0).shrink().gap(12.0).center_y().child(scope);
     if let Scope::Commit(sha) = &ui.scope {
         left = left.child(text(short(sha).to_string()).font(theme::MONO_XS).color(t.c.muted_foreground));
     }
     let git_ok = is_repo(app) != Some(false);
     if ui.scope == Scope::Branch && git_ok {
         let head = ui.source.head.clone().or_else(|| super::context(app).and_then(|(_, cwd)| app.state().vcs.get(&cwd).and_then(|v| v["local"]["refName"].as_str().map(str::to_string)))).unwrap_or_else(|| "HEAD".into());
-        left = left.child(
-            row()
-                .min_w(0.0)
-                .shrink()
-                .gap(8.0)
-                .center_y()
-                .child(text(head).font(theme::TEXT_XS).color(t.c.muted_foreground).single_line().truncate().max_w(192.0).min_w(0.0).shrink())
-                .child(icon(&icons::ARROW_RIGHT, 14.0).color(t.c.muted_foreground).opacity(0.7))
-                .child(refs_combo(app, t, &mut vec![])),
-        );
+        let base = ui.source.base.clone().or(ui.base_ref.clone()).unwrap_or_else(|| "Automatic".into());
+        let mut refs = row().min_w(0.0).shrink().gap(8.0).center_y().label(format!("Comparing {head} against {base}"));
+        // Too narrow for both refs: keep the target readable and drop the head, the thread's own branch.
+        refs = if refs_w.is_some_and(|w| w < 320.0) {
+            refs.child(text("vs").font(theme::TEXT_XS).color(t.c.muted_foreground).help(format!("{head} → {base}")))
+        } else {
+            refs.child(
+                row()
+                    .min_w(48.0)
+                    .shrink()
+                    .gap(8.0)
+                    .center_y()
+                    .help(format!("{head} → {base}"))
+                    .child(text(head).font(theme::TEXT_XS).color(t.c.muted_foreground).single_line().truncate().max_w(192.0).min_w(0.0).shrink())
+                    .child(icon(&icons::ARROW_RIGHT, 14.0).color(t.c.muted_foreground).opacity(0.7)),
+            )
+        };
+        left = left.child(refs.child(refs_combo(app, t, &mut vec![])));
     }
     let st = &ui.state;
     let files = st.files();
@@ -1034,11 +1043,11 @@ fn diff_body(app: &App, t: &T) -> El {
     out.child(main)
 }
 
-pub fn view(app: &App, t: &T) -> El {
+pub fn view(app: &App, t: &T, refs_w: Option<f32>) -> El {
     col()
         .grow(1.0)
         .min_h(0.0)
-        .child(header(app, t))
+        .child(header(app, t, refs_w))
         .child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.6)))
         .child(body(app, t))
 }

@@ -508,6 +508,15 @@ impl Vt {
         (!text.is_empty()).then(|| text.to_string())
     }
 
+    /// The selection's 1-based rows counted from the top of the scrollback, as xterm's
+    /// `getSelectionPosition` gives them to "Add to chat".
+    pub fn selection_lines(&self) -> Option<(usize, usize)> {
+        let range = self.term.selection.as_ref()?.to_range(&self.term)?;
+        let top = self.term.grid().topmost_line().0;
+        let start = (range.start.line.0 - top) as usize + 1;
+        Some((start, ((range.end.line.0 - top) as usize + 1).max(start)))
+    }
+
     /// The link under a visible cell: an OSC 8 hyperlink, else a URL or path in the text of
     /// the (soft-wrapped) line around it.
     pub fn link_at(&self, col: usize, row: usize) -> Option<Link> {
@@ -870,6 +879,19 @@ mod tests {
         // A press without travel selects nothing.
         vt.select_start(3, 0, false, SelectBy::Cell);
         assert_eq!(vt.selection_text(), None);
+    }
+
+    #[test]
+    fn selection_lines_count_from_the_top_of_the_scrollback() {
+        let mut vt = Vt::new(20, 3);
+        vt.feed("a\r\nb\r\nc\r\nd\r\ne");
+        assert_eq!(vt.selection_lines(), None);
+        vt.select_start(0, 0, false, SelectBy::Cell);
+        vt.select_to(0, 1, true);
+        assert_eq!(vt.selection_text().as_deref(), Some("c\nd"));
+        assert_eq!(vt.selection_lines(), Some((3, 4)));
+        vt.select_start(0, 2, false, SelectBy::Line);
+        assert_eq!(vt.selection_lines(), Some((5, 5)));
     }
 
     #[test]
