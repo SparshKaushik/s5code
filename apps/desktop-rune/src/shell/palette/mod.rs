@@ -52,7 +52,9 @@ struct Restart {
 enum Action {
     Navigate(Route),
     Page(&'static str),
-    Theme(Appearance),
+    Appearance(&'static str),
+    Theme(String),
+    PinProject(String, bool),
     Restart(String),
     OpenProject(String),
     AddProject,
@@ -76,6 +78,8 @@ enum Trailing {
     /// Not ready: a "Setup Required" button that explains why.
     Setup(String),
     Check(bool),
+    /// The theme or appearance in use: "Current" in muted text.
+    Current,
 }
 struct SearchTerm {
     value: String,
@@ -154,7 +158,7 @@ fn item(
         pick: (0, false),
         references: vec![],
         fields: match &action {
-            Action::Theme(_) => vec![],
+            Action::Theme(_) | Action::Appearance(_) => vec![],
             Action::Restart(_) => [
                 "restart", "reset", "reload", "agent", "session", "skills", "plugins", "mcp",
             ]
@@ -181,6 +185,38 @@ fn item(
     }
 }
 
+/// "Change theme": every theme in the library, the one the current mode uses marked Current.
+fn theme_items(s: &App) -> Vec<Item> {
+    // Under System the palette cannot see the OS mode; the halves normally agree.
+    let dark = s.appearance != Appearance::Light;
+    let current = s.client_settings.values.get(if dark { "themeDark" } else { "themeLight" }).and_then(serde_json::Value::as_str).unwrap_or("t3-code").to_owned();
+    crate::settings::themes::library(s)
+        .iter()
+        .map(|v| {
+            let id = data::s(v, "id").to_owned();
+            let mut row = item(data::s(v, "label"), "Change theme", &icons::PALETTE, "", Action::Theme(id.clone()));
+            row.fields = keywords(&[data::s(v, "label"), "theme", "appearance"]);
+            if id == current {
+                row.trailing = Trailing::Current;
+            }
+            row
+        })
+        .collect()
+}
+/// "Change appearance": System, Light and Dark, the saved mode marked Current.
+fn appearance_items(s: &App) -> Vec<Item> {
+    [("system", "System", &icons::MONITOR, Appearance::System), ("light", "Light", &icons::SUN, Appearance::Light), ("dark", "Dark", &icons::MOON, Appearance::Dark)]
+        .into_iter()
+        .map(|(mode, label, glyph, appearance)| {
+            let mut row = item(label, "Change appearance", glyph, "", Action::Appearance(mode));
+            row.fields = keywords(&[label, "appearance", "mode"]);
+            if s.appearance == appearance {
+                row.trailing = Trailing::Current;
+            }
+            row
+        })
+        .collect()
+}
 fn keywords(terms: &[&str]) -> Vec<SearchTerm> {
     terms.iter().map(|v| SearchTerm::keyword(*v)).collect()
 }
@@ -316,23 +352,10 @@ fn items(s: &App) -> Vec<Item> {
         out = add_project::source_items(s);
     }
     if ui.page == "themes" {
-        out.extend(
-            [
-                ("System", Appearance::System),
-                ("Light", Appearance::Light),
-                ("Dark", Appearance::Dark),
-            ]
-            .into_iter()
-            .map(|(label, mode)| {
-                item(
-                    label,
-                    "Change theme",
-                    &icons::PALETTE,
-                    "",
-                    Action::Theme(mode),
-                )
-            }),
-        );
+        out.extend(theme_items(s));
+    }
+    if ui.page == "appearance" {
+        out.extend(appearance_items(s));
     }
     if ui.page.is_empty() {
         let project = match &s.route {
@@ -385,6 +408,12 @@ fn items(s: &App) -> Vec<Item> {
             ));
         }
         out.extend(actions::tail_items(s));
+        let mut themes = item("Change theme", "Actions", &icons::PALETTE, &shortcut_label(s, "theme.select"), Action::Page("themes"));
+        themes.fields = keywords(&["change theme", "appearance", "colors", "palette"]);
+        out.push(themes);
+        let mut appearance = item("Change appearance", "Actions", &icons::MONITOR, &shortcut_label(s, "appearance.cycle"), Action::Page("appearance"));
+        appearance.fields = keywords(&["change appearance", "light", "dark", "system", "mode", "toggle"]);
+        out.push(appearance);
         if crate::pages::pull_requests::supported(s) {
             let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
             prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
@@ -400,6 +429,21 @@ fn items(s: &App) -> Vec<Item> {
             "",
             Action::Navigate(Route::Settings("general".into())),
         ));
+        if let Some(p) = project.and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
+            && actions::can_organize_projects(s)
+        {
+            let pinned = !p["pinnedAt"].is_null();
+            let mut pin = item(
+                if pinned { "Unpin project" } else { "Pin project" },
+                "Actions",
+                if pinned { &icons::PIN_OFF } else { &icons::PIN },
+                "",
+                Action::PinProject(data::s(p, "id").into(), !pinned),
+            );
+            pin.description = Some(data::s(p, "title").into());
+            pin.fields = keywords(&["pin", "unpin", "project", "favorite"]);
+            out.push(pin);
+        }
         // The current project, else the first, as the web's contextual project group.
         if let Some(p) = project
             .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
@@ -410,23 +454,22 @@ fn items(s: &App) -> Vec<Item> {
             settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "workspace", "checkout", "remove"]);
             out.push(settings);
         }
-        out.push(item(
-            "Change theme",
-            "Actions",
-            &icons::PALETTE,
-            "",
-            Action::Page("themes"),
-        ));
+        let browsing = ui.query.text.trim().is_empty();
+        let open_thread = match &s.route {
+            Route::Thread(id) => Some(id.as_str()),
+            _ => None,
+        };
+        // RECENT_THREAD_LIMIT; the open thread is not a place to go back to.
         let mut threads: Vec<_> = s
             .state()
             .threads
             .iter()
-            .filter(|v| v["archivedAt"].is_null())
+            .filter(|v| v["archivedAt"].is_null() && !(browsing && open_thread == Some(data::s(v, "id"))))
             .collect();
         threads.sort_by_key(|v| std::cmp::Reverse(recent_use(v)));
 
-        let limit = if ui.query.text.trim().is_empty() {
-            20
+        let limit = if browsing {
+            12
         } else {
             threads.len()
         };
@@ -1225,7 +1268,12 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             s.ui.settings.project = Some(project);
             crate::shell::sidebar::go(s, Route::Settings("projects".into()))
         }
-        Action::Theme(mode) => s.appearance = mode,
+        Action::Appearance(mode) => crate::settings::update(s, "appearance", serde_json::json!(mode)),
+        Action::Theme(id) => {
+            crate::settings::update(s, "themeLight", serde_json::json!(id));
+            crate::settings::update(s, "themeDark", serde_json::json!(id));
+        }
+        Action::PinProject(project, pinned) => actions::pin_project(s, &project, pinned),
         Action::OpenProject(project) => {
             let thread = s
                 .state()
@@ -1337,6 +1385,21 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             reset(s, true);
             execute(s, Action::Files, tx);
         }
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "theme.select") {
+        reset(s, true);
+        push_page(s, "themes", "");
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "appearance.cycle") {
+        let (mode, label) = match s.appearance {
+            Appearance::System => ("light", "Light"),
+            Appearance::Light => ("dark", "Dark"),
+            Appearance::Dark => ("system", "System"),
+        };
+        crate::settings::update(s, "appearance", json!(mode));
+        toast(s, &format!("Appearance: {label}"), None);
         return true;
     }
     if crate::panel::shortcut(s, e, "thread.copyReference") && actions::copy_thread(s, tx) {
@@ -1694,6 +1757,7 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
             )
         }
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
+        Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
     }
     entry
 }
@@ -1895,7 +1959,7 @@ mod tests {
         assert_eq!(thread_query("pull request #123"), "123");
         assert_eq!(thread_query("t3/fix-menu"), "fix-menu");
         let mut app = App::new();
-        app.ui.shell.palette.page = "themes".into();
+        app.ui.shell.palette.page = "appearance".into();
         app.ui.shell.palette.query = TextEdit::new("dark");
         let rows = items(&app);
         assert_eq!(rows.len(), 1);

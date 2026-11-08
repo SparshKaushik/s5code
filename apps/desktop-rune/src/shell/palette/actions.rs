@@ -180,9 +180,19 @@ pub fn triage(s: &mut App) {
 fn triage_failed(s: &mut App, message: &str) {
     toast(s, "Could not start triage", Some(&format!("{message} Run npx t3 triage in a terminal on that machine instead.")));
 }
-/// Rune has no in-thread find yet, so the action reports that instead of opening a bar.
+/// `chat.find`: the thread's find bar.
 pub fn find(s: &mut App) {
-    toast(s, "Thread search is unavailable here.", Some("Use the web or desktop app to search inside a thread."));
+    crate::chat::timeline::find::open(s);
+}
+/// Older servers drop project pin and archive (`canOrganizeProjectGroup`).
+pub fn can_organize_projects(s: &App) -> bool {
+    config(s)["environment"]["capabilities"]["projectOrganization"] == true
+}
+/// `toggleProjectGroupPin`: `project.update` with the new pin state.
+pub fn pin_project(s: &mut App, project: &str, pinned: bool) {
+    if let Some(net) = s.src.net() {
+        net.request("projects.mutate", json!({"type": "project.update", "commandId": s5_net::uuid(), "projectId": project, "pinned": pinned}));
+    }
 }
 pub fn copy_thread(s: &mut App, tx: &mut Tx) -> bool {
     let Some(thread) = thread(s) else { return false };
