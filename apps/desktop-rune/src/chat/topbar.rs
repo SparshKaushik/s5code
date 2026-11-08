@@ -84,6 +84,12 @@ fn title(s: &App) -> String {
     }
 }
 
+fn open_menu(s: &mut App, at: Option<(f32, f32)>) {
+    if let Route::Thread(id) = s.frame_route().clone() {
+        crate::shell::sidebar::open_header_menu(s, id, at);
+    }
+}
+
 pub fn start_rename(s: &mut App) {
     if !matches!(s.frame_route(), Route::Thread(_)) {
         return;
@@ -146,15 +152,26 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 }
                 false
             }),
-        None => text(title(s))
+        // ChatHeader: the title opens the thread's action menu, a double-click renames, and a
+        // right-click opens the menu where it lands.
+        None => row()
             .key("topbar-title")
-            .font(CRUMB)
-            .color(t.c.foreground)
-            .truncate()
+            .gap(4.0)
+            .center_y()
             .shrink()
-            .help_when_truncated(title(s))
-            .on_double_press(start_rename)
-            .on_secondary_press(|s: &mut App, _, _| start_rename(s)),
+            .min_w(0.0)
+            .hover_group()
+            .cursor(rune::Cursor::Pointer)
+            .role("button")
+            .label("Thread actions")
+            .child(text(title(s)).font(CRUMB).color(t.c.foreground).truncate().shrink().help_when_truncated(title(s)))
+            .child(rune::icon(&icons::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground).group_opacity(0.0, 1.0))
+            .on_press(|s: &mut App| open_menu(s, None))
+            .on_double_press(|s: &mut App| {
+                s.ui.shell.sidebar.menu = None;
+                start_rename(s);
+            })
+            .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| open_menu(s, Some((at.x, at.y)))),
     };
     crumbs = crumbs.child(title_el);
 

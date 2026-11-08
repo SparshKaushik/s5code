@@ -778,11 +778,31 @@ fn search_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     true
 }
 
+/// The thread menu from the chat header: under the title, or at a right-click point.
+pub fn open_header_menu(s: &mut App, thread: String, at: Option<(f32, f32)>) {
+    let mut m = match at {
+        Some((x, y)) => menu::Menu::new(thread, x, y),
+        None => menu::Menu { anchor: Some("topbar-title".into()), ..menu::Menu::new(thread, 0.0, 0.0) },
+    };
+    m.header = true;
+    s.ui.shell.sidebar.menu = Some(m);
+}
+
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let ui = &s.ui.shell.sidebar;
     let inset = cx.titlebar_inset();
     if ui.collapsed {
         overlays.push(chrome::floating_toggle(t, inset));
+        // The header's thread menu and its delete confirmation work with the sidebar hidden.
+        if ui.menu.is_some() || ui.delete.is_some() {
+            let model = Model::build(s);
+            if let Some(m) = &ui.menu
+                && let Some(th) = model.thread(&m.thread)
+            {
+                overlays.extend(menu::view(s, cx, &model, th, m, t));
+            }
+            delete_dialog(s, &model, t, overlays);
+        }
         return el().key("sidebar").w(0.0).h_full();
     }
     let model = Model::build(s);
