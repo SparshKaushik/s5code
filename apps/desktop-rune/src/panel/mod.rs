@@ -6,7 +6,6 @@ mod files;
 mod preview;
 mod terminal;
 mod vt;
-pub use terminal::take_message_context;
 
 use crate::{
     App, Route, data, icons, kit,
@@ -217,6 +216,12 @@ fn switch_thread(app: &mut App) -> bool {
     app.ui.shell.panel_open = next.open;
     true
 }
+
+/// The turn's diff, opened and scrolled to `path` once it loads (a changed-files row).
+pub fn open_diff_at(app: &mut App, checkpoint: Value, path: &str) {
+    open_diff(app, checkpoint);
+    app.ui.panel.diff.reveal = Some(path.to_owned());
+}
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut context_changed = false;
     if matches!(app.src, crate::data::Source::Live(_)) {
@@ -241,6 +246,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
 
     let changed = diff::poll(app)
+        | diff::reveal(app, tx)
         | files::poll(app, tx)
         | terminal::poll(app, tx)
         | drawer::poll(app)

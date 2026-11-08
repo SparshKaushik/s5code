@@ -1,5 +1,5 @@
 //! The model picker (ModelPickerPopover): a provider rail, the selected provider's models with
-//! ⌘-digit hints, the effort column, and the permissions footer. It opens above the model chip.
+//! jump-shortcut hints, the effort column, and the permissions footer. It opens above the model chip.
 
 use rune::{Align, Cursor, Cx, El, Key, KeyEvent, Side, TextEdit, Tx, col, el, icon, row, spacer, text, text_input};
 use serde_json::Value;
@@ -197,14 +197,16 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
             .child(provider_icon(t, &driver, 16.0))
             .child(label)
             .child(spacer());
-        if n < 9 {
+        // The configured jump shortcut (modelJumpLabelsByKey): Ctrl+1 off macOS, none when unbound.
+        let jump = if n < 9 { crate::shell::palette::shortcut_label(s, &format!("modelPicker.jump.{}", n + 1)) } else { String::new() };
+        if !jump.is_empty() {
             r = r.child(
                 el().h(20.0)
                     .px(4.0)
                     .center()
                     .radius(radius::SM)
                     .fill(t.c.foreground.alpha_mul(0.07))
-                    .child(text(format!("⌘{}", n + 1)).font(theme::XS_MEDIUM).color(t.c.muted_foreground)),
+                    .child(text(jump).font(theme::XS_MEDIUM).color(t.c.muted_foreground)),
             );
         }
         if p.active == Some(n) {
@@ -298,6 +300,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         .w(554.0)
         .radius(radius::LG)
         .fill(t.c.popover.alpha_mul(0.836))
+        .backdrop_blur(16.0)
         .border(1.0, t.c.border)
         .shadow(8.0, 24.0, rune::Color::BLACK.alpha(if t.dark { 0.4 } else { 0.12 }))
         .clip_rounded(radius::LG)
