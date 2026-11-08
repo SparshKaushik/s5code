@@ -650,13 +650,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     browser_profiles::overlays(s, t, &mut overlays);
     scope::menu(s, t, &mut overlays);
     if let Some(editor) = keybindings::editor(s, t) {
-        overlays.push(
-            el().absolute(0.0, 0.0)
-                .w_full()
-                .h_full()
-                .center()
-                .child(editor),
-        );
+        overlays.push(crate::kit::motion::layer().center().child(crate::kit::motion::popup(editor)));
     }
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
@@ -678,16 +672,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         controls::select_menu(s, t, key, options, controls::select_width(key), &mut overlays);
     }
     rune_kit::root(
-        el().absolute(0.0, 0.0)
-            .w_full()
-            .h_full()
-            .padding(40.0)
-            .center()
-            .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.60 }))
-            .backdrop_blur(4.0)
-            .child(modal),
+        crate::kit::motion::scrim(t).padding(40.0).center().child(crate::kit::motion::popup(modal)),
         overlays,
     )
+    .transition(rune::Transition::none())
     .absolute(0.0, 0.0)
 }
 

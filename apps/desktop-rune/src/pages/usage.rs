@@ -388,16 +388,10 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .child(header)
         .child(body);
     rune_kit::root(
-        el().absolute(0.0, 0.0)
-            .w_full()
-            .h_full()
-            .padding(40.0)
-            .center()
-            .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.60 }))
-            .backdrop_blur(4.0)
-            .child(modal),
+        crate::kit::motion::scrim(t).padding(40.0).center().child(crate::kit::motion::popup(modal)),
         overlays,
     )
+    .transition(rune::Transition::none())
     .absolute(0.0, 0.0)
 }
 

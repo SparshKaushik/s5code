@@ -18,8 +18,7 @@ impl Toast {
         self
     }
     pub fn build(self, k: &Kit) -> El {
-        self.0
-            .build(k)
+        super::motion::popup(self.0.build(k))
             .w(356.)
             .padding(16.)
             .radius(8.)
@@ -52,6 +51,7 @@ impl ToastRegion {
             .key("toast-region")
             .role("region")
             .label("Notifications")
+            .transition(rune::Transition::none())
             .pin(
                 None,
                 if self.top { Some(24.) } else { None },

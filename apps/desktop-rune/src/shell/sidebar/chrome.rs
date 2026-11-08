@@ -54,6 +54,7 @@ pub fn floating_toggle(t: &T, inset: f32) -> El {
     let left = brand_left(inset);
     icon_button(t, "sb-expand", &brand::PANEL_LEFT, layout::TITLEBAR_CONTROL, 16.0, t.c.muted_foreground, false)
         .absolute(left, 12.0)
+        .transition(rune::Transition::none())
         .on_press(|s: &mut App| s.ui.shell.sidebar.collapsed = false)
 }
 

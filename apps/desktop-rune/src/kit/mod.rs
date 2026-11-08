@@ -32,6 +32,7 @@ pub use dialog::Dialog;
 pub use input::Input;
 pub use slider::Slider;
 pub mod gallery;
+pub mod motion;
 use crate::{
     App,
     theme::{self, AlphaMul, T},
@@ -96,6 +97,9 @@ pub fn theme(t: &T) -> rune_kit::Kit {
     k.radius.xl = 16.;
     k.glyph.check = &crate::icons::CHECK;
     k.glyph.close = &crate::icons::X;
+    k.motion.control = motion::COLOR;
+    k.motion.overlay = motion::COLOR;
+    k.motion.disclosure = motion::COLOR;
     k
 }
 /// Text input sizes follow the web's desktop breakpoint; native editing/IME stays in Rune.

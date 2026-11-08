@@ -1796,7 +1796,6 @@ fn palette(s: &App, t: &T) -> Vec<El> {
         .key("command-palette")
         .role("dialog")
         .label("Command palette")
-        .transition(rune::Transition::scale(0.98).combined(rune::Transition::opacity()))
         .w(576.)
         .max_h(if tall { 490. } else { 420. })
         .radius(16.)
@@ -1813,12 +1812,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
         .child(footer(s, &rows, t))
         .modal(true, |s: &mut App| s.ui.shell.palette.open = false);
     vec![
-        el().key("palette-backdrop")
-            .absolute(0., 0.)
-            .w_full()
-            .h_full()
-            .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.6 }))
-            .backdrop_blur(4.),
+        kit::motion::scrim(t).key("palette-backdrop"),
         col()
             .key("palette-layer")
             .absolute(0., 0.)
@@ -1826,7 +1820,8 @@ fn palette(s: &App, t: &T) -> Vec<El> {
             .h_full()
             .pt(90.)
             .items_center()
-            .child(panel),
+            .transition(rune::Transition::none())
+            .child(kit::motion::popup(panel)),
     ]
 }
 
