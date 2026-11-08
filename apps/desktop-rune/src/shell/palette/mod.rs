@@ -125,6 +125,8 @@ struct Item {
     trailing: Trailing,
     brand: Option<usize>,
     highlight: Option<(Vec<(usize, usize)>, Vec<(usize, usize)>)>,
+    /// Title bytes from here on are semibold ("New thread in **demo**").
+    strong_from: Option<usize>,
     timestamp: Option<String>,
     fields: Vec<SearchTerm>,
     pick: (i64, bool),
@@ -154,6 +156,7 @@ fn item(
         },
         brand: None,
         highlight: None,
+        strong_from: None,
         timestamp: None,
         pick: (0, false),
         references: vec![],
@@ -368,10 +371,12 @@ fn items(s: &App) -> Vec<Item> {
             Route::Home { project_id } => project_id.as_deref(),
             _ => None,
         };
-        if let Some(p) =
-            project.and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
+        // The open project, else the most recent one, as the web's preferred picker entry.
+        if let Some(p) = project
+            .and_then(|id| s.state().projects.iter().find(|v| data::s(v, "id") == id))
+            .or_else(|| crate::chat::home::draft_project(s))
         {
-            out.push(item(
+            let mut row = item(
                 format!("New thread in {}", data::s(p, "title")),
                 "Actions",
                 &icons::SQUARE_PEN,
@@ -379,7 +384,9 @@ fn items(s: &App) -> Vec<Item> {
                 Action::Navigate(Route::Home {
                     project_id: Some(data::s(p, "id").into()),
                 }),
-            ));
+            );
+            row.strong_from = Some("New thread in ".len());
+            out.push(row);
         }
         out.push(item(
             "New thread in...",
@@ -1692,7 +1699,10 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
     let muted = t.c.contrast_muted_foreground;
     let title = match &v.highlight {
         Some((ranges, _)) => actions::highlighted(&v.title, ranges, theme::TEXT_SM, muted, t.c.contrast_foreground),
-        None => text(v.title.clone()).font(theme::TEXT_SM).color(t.c.contrast_foreground).truncate(),
+        None => match v.strong_from {
+            Some(at) => actions::highlighted(&v.title, &[(at, v.title.len())], theme::TEXT_SM, t.c.contrast_foreground, t.c.contrast_foreground),
+            None => text(v.title.clone()).font(theme::TEXT_SM).color(t.c.contrast_foreground).truncate(),
+        },
     };
     let mut label = col().grow(1.).shrink().child(title);
     if let Some(subtitle) = &v.subtitle {
