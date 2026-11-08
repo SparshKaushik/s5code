@@ -10,6 +10,7 @@ use crate::{
     theme::{self, AlphaMul, T},
 };
 use rune::{Color, Cx, El, KeyEvent, Phase, col, el, icon, row, text};
+use serde_json::{Map, Value, json};
 
 pub const DEFAULT_HEIGHT: f32 = 280.;
 const MIN_HEIGHT: f32 = 180.;
@@ -109,6 +110,50 @@ impl Groups {
     }
 }
 
+impl Groups {
+    fn to_json(&self) -> Value {
+        let groups: Vec<Value> = self
+            .groups
+            .iter()
+            .map(|g| {
+                let mut v = json!({"id": g.id, "terminalIds": g.ids});
+                if g.vertical {
+                    v["splitDirection"] = json!("vertical");
+                }
+                v
+            })
+            .collect();
+        json!({"terminalGroups": groups, "activeTerminalId": self.active})
+    }
+    /// `normalizeTerminalGroups`: an id lives in one group, groups hold one to four, and the
+    /// active id falls back to the first.
+    fn from_json(v: &Value) -> Groups {
+        let mut out = Groups::default();
+        let mut seen = std::collections::HashSet::new();
+        for g in v["terminalGroups"].as_array().into_iter().flatten() {
+            let ids: Vec<String> = g["terminalIds"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|id| !id.is_empty() && seen.insert(id.to_string()))
+                .take(MAX_PER_GROUP)
+                .map(String::from)
+                .collect();
+            let Some(first) = ids.first() else { continue };
+            let mut id = g["id"].as_str().map(str::trim).filter(|v| !v.is_empty()).map(String::from).unwrap_or_else(|| format!("group-{first}"));
+            while out.groups.iter().any(|g| g.id == id) {
+                id.push('-');
+            }
+            out.groups.push(Group { id, ids, vertical: g["splitDirection"] == "vertical" });
+        }
+        let active = v["activeTerminalId"].as_str().unwrap_or_default();
+        out.active = if out.ids().any(|v| v == active) { active.into() } else { out.ids().next().cloned().unwrap_or_default() };
+        out
+    }
+}
+
 pub struct Thread {
     pub open: bool,
     pub height: f32,
@@ -137,6 +182,96 @@ pub struct Ui {
     pub panel: HashMap<String, Groups>,
     /// The terminal waiting on the close confirm.
     confirm: Option<(Owner, String, String)>,
+    /// What `terminal-state.json` holds, once read (the web's `t3code:terminal-state:v1`).
+    saved: Option<Value>,
+    /// A height drag in progress: saved when it ends, not on every frame.
+    resizing: bool,
+}
+
+const STATE_FILE: &str = "terminal-state.json";
+
+impl Ui {
+    fn to_json(&self) -> Value {
+        let threads: Map<String, Value> = self
+            .threads
+            .iter()
+            .filter(|(_, t)| !t.groups.is_empty())
+            .map(|(id, t)| {
+                let mut v = t.groups.to_json();
+                v["terminalOpen"] = json!(t.open);
+                v["terminalHeight"] = json!(t.height);
+                (id.clone(), v)
+            })
+            .collect();
+        let panel: Map<String, Value> =
+            self.panel.iter().filter(|(_, g)| !g.is_empty()).map(|(id, g)| (id.clone(), g.to_json())).collect();
+        json!({"version": 1, "terminalUiStateByThreadKey": threads, "panelTerminalsByThreadKey": panel})
+    }
+    fn restore(&mut self, v: &Value) {
+        for (id, t) in v["terminalUiStateByThreadKey"].as_object().into_iter().flatten() {
+            let groups = Groups::from_json(t);
+            if !groups.is_empty() {
+                let height = t["terminalHeight"].as_f64().map_or(DEFAULT_HEIGHT, |h| h as f32).max(MIN_HEIGHT);
+                self.threads.insert(id.clone(), Thread { open: t["terminalOpen"] == true, height, groups });
+            }
+        }
+        for (id, g) in v["panelTerminalsByThreadKey"].as_object().into_iter().flatten() {
+            let groups = Groups::from_json(g);
+            if !groups.is_empty() {
+                self.panel.insert(id.clone(), groups);
+            }
+        }
+    }
+}
+
+/// Reads the saved layouts once, then writes them whenever they change (a drag, once it ends).
+fn persist(app: &mut App) {
+    if cfg!(test) {
+        return;
+    }
+    let path = app.client_settings.sibling(STATE_FILE);
+    let ui = &mut app.ui.panel.drawer;
+    if ui.saved.is_none() {
+        if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+            ui.restore(&v);
+        }
+        ui.saved = Some(ui.to_json());
+        return;
+    }
+    if ui.resizing {
+        return;
+    }
+    let next = ui.to_json();
+    if ui.saved.as_ref() == Some(&next) {
+        return;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    let written = serde_json::to_vec(&next).ok().is_some_and(|bytes| {
+        path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok())
+            && std::fs::write(&temporary, bytes).is_ok()
+            && std::fs::rename(&temporary, &path).is_ok()
+    });
+    if written {
+        ui.saved = Some(next);
+    }
+}
+
+/// A restored layout has no sessions yet: an open drawer attaches its terminals again.
+fn reattach(app: &mut App) {
+    if app.src.net().is_none() {
+        return;
+    }
+    let Some(thread) = current_thread(app) else {
+        return;
+    };
+    let Some(state) = app.ui.panel.drawer.threads.get(&thread).filter(|t| t.open) else {
+        return;
+    };
+    let missing: Vec<String> =
+        state.groups.ids().filter(|id| app.ui.panel.terminal.get(&thread, id).is_none()).cloned().collect();
+    for id in missing {
+        start(app, &thread, &id, false);
+    }
 }
 
 impl Ui {
@@ -402,6 +537,8 @@ pub fn shortcut(app: &mut App, thread: &str, id: &str, e: &KeyEvent) -> bool {
 
 /// Keeps the topbar toggle in step with the drawer of the thread on screen.
 pub fn poll(app: &mut App) -> bool {
+    persist(app);
+    reattach(app);
     let before = app.ui.chat.topbar.terminal_open;
     sync_topbar(app);
     before != app.ui.chat.topbar.terminal_open
@@ -743,6 +880,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> Option<El> {
                         if !d.cancelled() {
                             state.height = (d.data - d.dy).clamp(MIN_HEIGHT, max);
                         }
+                        s.ui.panel.drawer.resizing = d.phase != Phase::Up && !d.cancelled();
                     }),
             ),
     )
@@ -815,6 +953,45 @@ pub fn fixture(app: &mut App, owner: Owner, groups: &[(&[(&str, &str)], bool)], 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn layouts_survive_a_restart_and_bad_state_is_normalized() {
+        let mut ui = Ui::default();
+        let thread = ui.threads.entry("t1".into()).or_default();
+        thread.open = true;
+        thread.height = 333.;
+        thread.groups.add("term-1");
+        thread.groups.split("term-2", true);
+        thread.groups.add("term-3");
+        thread.groups.activate("term-2");
+        ui.panel.entry("t2".into()).or_default().add("term-1");
+        ui.threads.entry("empty".into()).or_default();
+
+        let saved = ui.to_json();
+        assert!(saved["terminalUiStateByThreadKey"].get("empty").is_none(), "{saved}");
+        let mut back = Ui::default();
+        back.restore(&saved);
+        let t1 = &back.threads["t1"];
+        assert!(t1.open && t1.height == 333.);
+        assert_eq!(t1.groups, ui.threads["t1"].groups);
+        assert!(t1.groups.groups[0].vertical);
+        assert_eq!(back.panel["t2"], ui.panel["t2"]);
+
+        let mut odd = Ui::default();
+        odd.restore(&json!({"terminalUiStateByThreadKey": {"t": {
+            "terminalGroups": [
+                {"id": "g", "terminalIds": ["a", " a ", "b", "c", "d", "e"]},
+                {"id": "g", "terminalIds": ["b", "f"]},
+                {"id": "", "terminalIds": []},
+            ],
+            "activeTerminalId": "gone",
+        }}}));
+        let t = &odd.threads["t"];
+        assert_eq!(ids(&t.groups), [vec!["a", "b", "c", "d"], vec!["f"]]);
+        assert_eq!(t.groups.groups[1].id, "g-");
+        assert_eq!(t.groups.active, "a");
+        assert!(!t.open && t.height == DEFAULT_HEIGHT);
+    }
 
     fn ids(g: &Groups) -> Vec<Vec<&str>> {
         g.groups

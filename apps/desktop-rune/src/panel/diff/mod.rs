@@ -91,7 +91,8 @@ pub struct Ui {
     sub: Option<Sub>,
     commits: Option<Result<(Vec<Commit>, bool), String>>,
     commits_pending: Option<u64>,
-    refs: Vec<(String, bool)>,
+    /// Each ref's name, and its remote's name (`Some("")` when the server named none) if remote.
+    refs: Vec<(String, Option<String>)>,
     refs_pending: Vec<u64>,
     refs_cwd: String,
     refs_combo: kit::ComboboxState,
@@ -389,7 +390,8 @@ pub fn poll(app: &mut App) -> bool {
                 for r in v["refs"].as_array().into_iter().flatten() {
                     let name = data::s(r, "name").to_string();
                     if !name.is_empty() && !ui.refs.iter().any(|(n, _)| *n == name) {
-                        ui.refs.push((name, r["isRemote"].as_bool().unwrap_or(false)));
+                        let remote = r["isRemote"].as_bool().unwrap_or(false).then(|| data::s(r, "remoteName").to_string());
+                        ui.refs.push((name, remote));
                     }
                 }
             }
@@ -748,20 +750,99 @@ fn layout_group(app: &App, t: &T) -> El {
         .child(item("panel-diff-split", "Split diff", &icons::COLUMNS_2, DiffMode::Split))
 }
 
+/// One base-ref row per branch (`buildBaseRefChoices`): a local branch paired with its remote
+/// twin, `origin` first, then the remotes no local branch claimed.
+#[derive(Debug, PartialEq)]
+struct BaseChoice {
+    label: String,
+    local: Option<String>,
+    remote: Option<String>,
+}
+
+impl BaseChoice {
+    /// The ref the row picks: the remote twin only while it is the chosen base.
+    fn value(&self, base: Option<&str>) -> String {
+        match (&self.remote, base) {
+            (Some(remote), Some(base)) if remote == base => remote.clone(),
+            _ => self.local.clone().or(self.remote.clone()).unwrap_or_default(),
+        }
+    }
+}
+
+/// `head` is left out of the local branches, so its remote twin lists as remote-only.
+fn base_choices(refs: &[(String, Option<String>)], head: Option<&str>) -> Vec<BaseChoice> {
+    let branch = |name: &str, remote: &str| {
+        if remote.is_empty() { name.to_string() } else { name.strip_prefix(&format!("{remote}/")).unwrap_or(name).to_string() }
+    };
+    let remotes: Vec<(&String, &String)> = refs.iter().filter_map(|(n, r)| r.as_ref().map(|r| (n, r))).collect();
+    let mut used = HashSet::new();
+    let mut choices: Vec<BaseChoice> = refs
+        .iter()
+        .filter(|(n, r)| r.is_none() && Some(n.as_str()) != head)
+        .map(|(local, _)| {
+            let matches: Vec<&(&String, &String)> = remotes.iter().filter(|(n, r)| !used.contains(*n) && branch(n, r) == *local).collect();
+            let remote = matches.iter().find(|(_, r)| r.as_str() == "origin").or(matches.first()).map(|(n, _)| (*n).clone());
+            if let Some(remote) = &remote {
+                used.insert(remote.clone());
+            }
+            BaseChoice { label: local.clone(), local: Some(local.clone()), remote }
+        })
+        .collect();
+    choices.extend(remotes.iter().filter(|(n, _)| !used.contains(*n)).map(|(n, _)| BaseChoice {
+        label: (*n).clone(),
+        local: None,
+        remote: Some((*n).clone()),
+    }));
+    choices
+}
+
 fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
     let ui = &app.ui.panel.diff;
-    let head = ui.source.head.clone();
+    let choices = base_choices(&ui.refs, ui.source.head.as_deref());
     let mut options = vec![kit::ComboboxOption::new("", "Automatic")];
-    for (name, remote) in &ui.refs {
-        if Some(name) == head.as_ref() {
-            continue;
+    let mut pairs = HashMap::new();
+    for choice in &choices {
+        let value = choice.value(ui.base_ref.as_deref());
+        if let (Some(local), Some(remote)) = (&choice.local, &choice.remote) {
+            pairs.insert(value.clone(), (choice.label.clone(), local.clone(), remote.clone()));
+        } else if choice.remote.is_some() {
+            pairs.insert(value.clone(), (choice.label.clone(), String::new(), String::new()));
         }
-        let mut o = kit::ComboboxOption::new(name.clone(), name.clone());
-        if *remote {
-            o.detail = "remote".into();
-        }
-        options.push(o);
+        options.push(kit::ComboboxOption::new(value, choice.label.clone()));
     }
+    let k = kit::theme(t);
+    let muted = t.c.muted_foreground;
+    let trailing = move |o: &kit::ComboboxOption| {
+        let (label, local, remote) = pairs.get(&o.id)?.clone();
+        if local.is_empty() {
+            return Some(row().w(32.).center_y().justify_end().child(icon(&icons::CHECK, 12.).color(muted)).help("Remote only").label("Remote only"));
+        }
+        let checked = o.id == remote;
+        let switch = kit::Switch::new(checked)
+            .label(format!("Use remote version of {label}"))
+            .hide_label()
+            .size("sm")
+            .on_toggle(move |s: &mut App| {
+                let ui = &mut s.ui.panel.diff;
+                ui.base_ref = Some(if checked { local.clone() } else { remote.clone() });
+                ui.commits = None;
+                load(s);
+            })
+            .build(&k);
+        Some(row().w(32.).center_y().justify_end().child(switch))
+    };
+    let column = |label: &str| text(label.to_uppercase()).font(rune::TextStyle { tracking: 0.25, ..theme::weight(theme::TEXT_3XS, theme::MEDIUM) }).color(muted);
+    // Lines "Remote" up with the trailing column, which sits before the row's 14px check.
+    let columns = row()
+        .w_full()
+        .pl(12.)
+        .pr(34.)
+        .pt(8.)
+        .pb(6.)
+        .center_y()
+        .child(column("Branch").grow(1.))
+        .child(row().w(32.).justify_end().child(column("Remote")));
+    let columns = col().w_full().child(columns).child(el().w_full().h(1.).fill(t.c.border.alpha_mul(0.7)));
     let base = ui.source.base.clone().or(ui.base_ref.clone()).unwrap_or_else(|| "Automatic".into());
     let trigger = row()
         .h(24.0)
@@ -784,6 +865,8 @@ fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
         .empty_message("No matching refs.")
         .width(288.0)
         .trigger(trigger)
+        .trailing(trailing)
+        .header(columns)
         .on_choose(|s: &mut App, id, _| {
             s.ui.panel.diff.refs_combo.close();
             s.ui.panel.diff.base_ref = (!id.is_empty()).then(|| id.to_string());
@@ -1173,6 +1256,30 @@ fn sync_settings(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn base_refs_pair_each_branch_with_its_origin_twin() {
+        let local = |n: &str| -> (String, Option<String>) { (n.to_string(), None) };
+        let remote = |n: &str, r: &str| (n.to_string(), Some(r.to_string()));
+        let refs = [local("main"), remote("upstream/main", "upstream"), remote("origin/main", "origin"), remote("origin/release", "origin"), local("wip")];
+        let choices = base_choices(&refs, None);
+        let rows: Vec<(&str, Option<&str>, Option<&str>)> = choices.iter().map(|c| (c.label.as_str(), c.local.as_deref(), c.remote.as_deref())).collect();
+        assert_eq!(
+            rows,
+            [
+                ("main", Some("main"), Some("origin/main")),
+                ("wip", Some("wip"), None),
+                ("upstream/main", None, Some("upstream/main")),
+                ("origin/release", None, Some("origin/release")),
+            ]
+        );
+        assert_eq!(choices[0].value(None), "main");
+        assert_eq!(choices[0].value(Some("origin/main")), "origin/main");
+        assert_eq!(choices[3].value(Some("main")), "origin/release");
+        // The thread's own branch isn't a base; its remote twin still is.
+        let labels: Vec<String> = base_choices(&refs, Some("main")).into_iter().map(|c| c.label).collect();
+        assert_eq!(labels, ["wip", "upstream/main", "origin/main", "origin/release"]);
+    }
 
     #[test]
     fn git_scopes_ask_for_their_source_like_web() {
