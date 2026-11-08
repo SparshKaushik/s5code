@@ -660,6 +660,7 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 model: (model.len() == 2).then(|| (model[0].clone(), model[1].clone())),
                 runtime_mode: text(&d["runtimeMode"]),
                 interaction_mode: text(&d["interactionMode"]),
+                context: Vec::new(),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
             },
         );
