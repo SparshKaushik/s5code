@@ -2,10 +2,11 @@
 //! default badge and each profile's options menu, the Add profile menu, and the remove and
 //! clear confirmations.
 //!
-//! Profiles are client settings. Rune's browser runs on a throwaway per-process profile, so the
-//! only profile data to clear is a server browser's (`preview.clearProfile`). Importing cookies
-//! reads another browser on this machine through the Electron preview bridge; Rune has no such
-//! bridge, so "Import from" lists no browsers.
+//! Profiles are client settings. Rune's browser keeps one Default profile in the T3 home
+//! (`userdata/browser/rune-default`), cleared from the preview menu, so the data cleared here is
+//! a server browser's (`preview.clearProfile`). Importing cookies reads another browser on this
+//! machine through the Electron preview bridge; Rune has no such bridge, so "Import from" lists
+//! no browsers.
 
 use rune::{El, col, row, text};
 use serde_json::{Value, json};

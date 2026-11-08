@@ -10,6 +10,8 @@ pub enum MenuEntry {
     Item(Box<MenuItem>),
     Separator,
     Label(String),
+    /// Custom inline content, such as a row of zoom buttons.
+    Row(El),
 }
 impl MenuEntry {
     pub fn item(item: MenuItem) -> Self {
@@ -392,6 +394,10 @@ impl Menu {
         self.entries.push(MenuEntry::Separator);
         self
     }
+    pub fn row(mut self, value: El) -> Self {
+        self.entries.push(MenuEntry::Row(value));
+        self
+    }
     pub fn group_label(mut self, value: impl Into<String>) -> Self {
         self.entries.push(MenuEntry::Label(value.into()));
         self
@@ -468,6 +474,7 @@ impl Menu {
                     .px(8.)
                     .py(6.)
                     .child(text(label).font(theme::XS_MEDIUM).color(k.c.text_muted)),
+                MenuEntry::Row(content) => row().key(format!("row{i}")).child(content),
             });
         }
         let frame = col()
