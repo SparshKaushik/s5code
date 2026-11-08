@@ -251,7 +251,7 @@ fn has_panel(kind: &str) -> bool {
     credentials(kind).is_some() || !fields(kind).is_empty()
 }
 
-fn saved(s: &App, kind: &str) -> &Value {
+fn saved<'a>(s: &'a App, kind: &str) -> &'a Value {
     &server_settings(s)["sourceControlHosts"][kind]
 }
 

@@ -26,6 +26,10 @@ pub fn normalize(value: &str) -> Option<String> {
 }
 
 fn stored(s: &App, id: &str) -> Option<String> {
+    if id == super::add_provider::DRAFT_ID {
+        let wizard = &s.ui.settings.add_provider;
+        return wizard.accent.get(super::add_provider::driver(wizard)).and_then(|a| normalize(a));
+    }
     super::server_settings(s)["providerInstances"][id]["accentColor"].as_str().and_then(normalize)
 }
 
@@ -67,6 +71,12 @@ fn color(hex: &str) -> Color {
 }
 
 fn commit(s: &mut App, id: &str, value: &str) {
+    if id == super::add_provider::DRAFT_ID {
+        let wizard = &mut s.ui.settings.add_provider;
+        let driver = super::add_provider::driver(wizard);
+        wizard.accent.insert(driver, normalize(value).unwrap_or_default());
+        return;
+    }
     super::providers::update(s, id, "accentColor", json!(normalize(value).unwrap_or_default()));
 }
 

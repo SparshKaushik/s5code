@@ -48,14 +48,14 @@ static JJ_14: Icon = Icon { name: "sc-jj-14", view: 1024.0, body: "<path d=\"M28
 
 fn layers(kind: &str) -> Option<&'static [(&'static Icon, Option<&'static str>)]> {
     Some(match kind {
-        "git" => &[(&GIT_0, Some("#DE4C36"))],
-        "github" => &[(&GITHUB_0, None)],
-        "gitlab" => &[(&GITLAB_0, Some("#E24329")), (&GITLAB_1, Some("#FC6D26")), (&GITLAB_2, Some("#FCA326"))],
-        "bitbucket" => &[(&BITBUCKET_0, Some("#2684FF")), (&BITBUCKET_1, Some("#0A5FD8"))],
-        "azure-devops" => &[(&AZURE_DEVOPS_0, Some("#2052cb")), (&AZURE_DEVOPS_1, Some("#2764e7")), (&AZURE_DEVOPS_2, Some("#367af2")), (&AZURE_DEVOPS_3, Some("#0fafff"))],
-        "forgejo" => &[(&FORGEJO_0, Some("#ff6600")), (&FORGEJO_1, Some("#d40000"))],
-        "gitcafe" => &[(&GITCAFE_0, Some("#a78bfa"))],
-        "jj" => &[(&JJ_0, Some("#a7bcd9")), (&JJ_1, Some("#42acde")), (&JJ_2, Some("#2f9fdf")), (&JJ_3, Some("#0e254f")), (&JJ_4, Some("#71beea")), (&JJ_5, Some("#309fdf")), (&JJ_6, Some("#e9f2f1")), (&JJ_7, Some("#0e254f")), (&JJ_8, Some("#42acde")), (&JJ_9, Some("#2f9fdf")), (&JJ_10, Some("#0e254f")), (&JJ_11, Some("#71beea")), (&JJ_12, Some("#309fdf")), (&JJ_13, Some("#e9f2f1")), (&JJ_14, Some("#0e254f"))],
+        "git" => { static L: &[(&Icon, Option<&str>)] = &[(&GIT_0, Some("#DE4C36"))]; L }
+        "github" => { static L: &[(&Icon, Option<&str>)] = &[(&GITHUB_0, None)]; L }
+        "gitlab" => { static L: &[(&Icon, Option<&str>)] = &[(&GITLAB_0, Some("#E24329")), (&GITLAB_1, Some("#FC6D26")), (&GITLAB_2, Some("#FCA326"))]; L }
+        "bitbucket" => { static L: &[(&Icon, Option<&str>)] = &[(&BITBUCKET_0, Some("#2684FF")), (&BITBUCKET_1, Some("#0A5FD8"))]; L }
+        "azure-devops" => { static L: &[(&Icon, Option<&str>)] = &[(&AZURE_DEVOPS_0, Some("#2052cb")), (&AZURE_DEVOPS_1, Some("#2764e7")), (&AZURE_DEVOPS_2, Some("#367af2")), (&AZURE_DEVOPS_3, Some("#0fafff"))]; L }
+        "forgejo" => { static L: &[(&Icon, Option<&str>)] = &[(&FORGEJO_0, Some("#ff6600")), (&FORGEJO_1, Some("#d40000"))]; L }
+        "gitcafe" => { static L: &[(&Icon, Option<&str>)] = &[(&GITCAFE_0, Some("#a78bfa"))]; L }
+        "jj" => { static L: &[(&Icon, Option<&str>)] = &[(&JJ_0, Some("#a7bcd9")), (&JJ_1, Some("#42acde")), (&JJ_2, Some("#2f9fdf")), (&JJ_3, Some("#0e254f")), (&JJ_4, Some("#71beea")), (&JJ_5, Some("#309fdf")), (&JJ_6, Some("#e9f2f1")), (&JJ_7, Some("#0e254f")), (&JJ_8, Some("#42acde")), (&JJ_9, Some("#2f9fdf")), (&JJ_10, Some("#0e254f")), (&JJ_11, Some("#71beea")), (&JJ_12, Some("#309fdf")), (&JJ_13, Some("#e9f2f1")), (&JJ_14, Some("#0e254f"))]; L }
         _ => return None,
     })
 }

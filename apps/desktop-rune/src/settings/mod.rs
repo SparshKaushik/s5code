@@ -1,5 +1,7 @@
 mod about;
 mod accent;
+mod add_provider;
+mod provider_update;
 pub(crate) mod auth;
 mod balance;
 pub mod client;
@@ -55,6 +57,8 @@ pub struct Ui {
     pub icon_picker: Option<project_icon::Draft>,
     pub accent: Option<accent::Draft>,
     pub provider_picker: bool,
+    pub add_provider: add_provider::Wizard,
+    pub provider_advisory: Option<String>,
     pub provider: Option<String>,
     pub project: Option<String>,
     pub environment_only: bool,
@@ -905,8 +909,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(el().w(1.0).h_full().fill(t.c.border))
         .child(content);
     let mut overlays = Vec::new();
-    providers::picker(s, t, &mut overlays);
+    add_provider::dialog(s, t, &mut overlays);
     accent::popover(s, t, &mut overlays);
+    provider_update::popover(s, t, &mut overlays);
     providers::confirm(s, t, &mut overlays);
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
