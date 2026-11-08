@@ -1398,7 +1398,7 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             Appearance::Light => ("dark", "Dark"),
             Appearance::Dark => ("system", "System"),
         };
-        crate::settings::update(s, "appearance", json!(mode));
+        crate::settings::update(s, "appearance", serde_json::json!(mode));
         toast(s, &format!("Appearance: {label}"), None);
         return true;
     }
