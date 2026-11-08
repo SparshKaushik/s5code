@@ -85,13 +85,13 @@ mod tests {
             terms: terms.iter().map(|t| normalize(t)).collect(),
             secondary,
         };
-        let items = [
+        let fixture = [
             item("Thread notifications", "general", &["alerts sound"], false),
             item("In-app notifications", "general", &["toast"], false),
             item("Notifications", "general", &[], true),
             item("Font smoothing", "appearance", &["notifications text"], false),
         ];
-        let titles = |q: &str| rank(&items, q).iter().map(|i| i.title.as_str()).collect::<Vec<_>>();
+        let titles = |q: &str| rank(&fixture, q).iter().map(|i| i.title.as_str()).collect::<Vec<_>>();
         assert_eq!(titles("notifications"), ["Thread notifications", "In-app notifications", "Font smoothing", "Notifications"]);
         assert_eq!(titles("  ALERTS   thread "), ["Thread notifications"]);
         assert_eq!(titles("appearance smoothing"), ["Font smoothing"]);
@@ -99,6 +99,6 @@ mod tests {
         assert!(titles("   ").is_empty());
         // The real index loads and only lists pages this client has.
         assert!(search("contrast").iter().any(|i| i.to == "appearance"));
-        assert!(items().iter().all(|i| i.to != "diagnostics"));
+        assert!(super::items().iter().all(|i| i.to != "diagnostics"));
     }
 }
