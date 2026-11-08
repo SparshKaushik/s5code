@@ -73,11 +73,14 @@ pub struct Status {
     pub zoom: f32,
     pub device: Option<(u32, u32)>,
     pub picking: bool,
+    /// While picking, the CSS-pixel `[x, y, w, h]` of the element under the pointer. The headless
+    /// shell never paints Chrome's inspect overlay, so the panel draws this box itself.
+    pub hover: Option<[f32; 4]>,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None }
     }
 }
 
@@ -217,6 +220,7 @@ enum Reply {
     PickNode(TabId),
     PickInfo(TabId),
     PickShot(TabId, Value),
+    Hover(TabId),
 }
 
 #[derive(Default)]
@@ -248,6 +252,9 @@ struct Worker {
     scale: f32,
     scheme: &'static str,
     pressed: bool,
+    /// A hover lookup is in flight; the latest pointer position waits for it.
+    hovering: bool,
+    hover_next: Option<(TabId, f32, f32)>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
 }
@@ -282,6 +289,8 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         scale,
         scheme: "",
         pressed: false,
+        hovering: false,
+        hover_next: None,
         shared,
         waker,
     };
@@ -363,6 +372,16 @@ impl Worker {
         self.call(tab, "Page.startScreencast", json!({ "format": "jpeg", "quality": 92, "maxWidth": mw, "maxHeight": mh }), None);
         // Screencast only sends a frame when the page changes; paint the current one now.
         self.call(tab, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 92 }), Some(Reply::Frame(tab)));
+    }
+
+    fn hover(&mut self) {
+        if self.hovering {
+            return;
+        }
+        let Some((tab, x, y)) = self.hover_next.take() else { return };
+        self.hovering = true;
+        let expression = format!("(() => {{ const e = document.elementFromPoint({x}, {y}); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }})()");
+        self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Hover(tab)));
     }
 
     fn history(&mut self, tab: TabId) {
@@ -458,6 +477,10 @@ impl Worker {
                 t.zoom = zoom;
                 self.update(tab, |s| s.zoom = zoom);
                 self.metrics(tab);
+                // A metrics change alone sends no screencast frame.
+                if self.shown == Some(tab) {
+                    self.screencast(tab);
+                }
             }
             Cmd::Device(tab, device) => {
                 let Some(t) = self.tabs.get_mut(&tab) else { return };
@@ -469,7 +492,13 @@ impl Worker {
                 }
             }
             Cmd::Pick(tab, on) => {
-                self.update(tab, |s| s.picking = on);
+                self.update(tab, |s| {
+                    s.picking = on;
+                    s.hover = None;
+                });
+                // A lookup lost with a closed tab must not block the next session's.
+                self.hovering = false;
+                self.hover_next = None;
                 if on {
                     self.call(tab, "DOM.enable", json!({}), None);
                     self.call(tab, "Overlay.enable", json!({}), None);
@@ -500,6 +529,10 @@ impl Worker {
                 let button = if kind != "mouseMoved" || self.pressed { "left" } else { "none" };
                 let buttons = if self.pressed { 1 } else { 0 };
                 self.call(tab, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x / zoom, "y": y / zoom, "button": button, "buttons": buttons, "clickCount": if kind == "mouseMoved" { 0 } else { clicks.max(1) } }), None);
+                if kind == "mouseMoved" && self.shared.lock().unwrap().tabs.get(&tab).is_some_and(|s| s.picking) {
+                    self.hover_next = Some((tab, x / zoom, y / zoom));
+                    self.hover();
+                }
             }
             Cmd::Wheel { x, y, dx, dy } => {
                 let Some(tab) = self.shown else { return };
@@ -689,6 +722,12 @@ impl Worker {
                 });
             }
             Reply::Frame(tab) => self.paint(tab, r["data"].as_str()),
+            Reply::Hover(tab) => {
+                self.hovering = false;
+                let rect = serde_json::from_value::<[f32; 4]>(r["result"]["value"].clone()).ok().filter(|r| r[2] > 0. && r[3] > 0.);
+                self.update(tab, |s| s.hover = rect.filter(|_| s.picking));
+                self.hover();
+            }
             Reply::PickNode(tab) => match r["object"]["objectId"].as_str() {
                 Some(object) => {
                     let params = json!({ "objectId": object, "functionDeclaration": PICK_JS, "returnByValue": true });

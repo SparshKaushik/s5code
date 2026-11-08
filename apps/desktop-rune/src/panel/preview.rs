@@ -587,7 +587,7 @@ fn commit_device(app: &mut App, tab: TabId, height_edited: bool) {
         _ => (cw, ch),
     };
     let (w, h) = if valid_size(w, h) { (w, h) } else { (cw, ch) };
-    let preset = d.preset.filter(|&i| (PRESETS[i].1, PRESETS[i].2) == (w, h));
+    let preset = d.preset.filter(|&i| [(PRESETS[i].1, PRESETS[i].2), (PRESETS[i].2, PRESETS[i].1)].contains(&(w, h)));
     set_device(app, tab, w, h, preset);
 }
 
@@ -746,10 +746,12 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     } else if idle(&status) {
         empty(app, t, tab)
     } else if let Some(size) = status.device {
-        let (w, h, _) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
-        col().grow(1.).min_h(0.).w_full().center().child(page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7)))
+        let (w, h, scale) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+        let page = page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7));
+        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))))
     } else {
-        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full()
+        let hover = hover_box(t, &status, status.zoom.max(0.25), ui.area);
+        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover)
     };
     let zoom_pill = (ui.zoom_until != 0 && !idle(&status)).then(|| {
         row()
@@ -843,7 +845,11 @@ fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32
             d.lock = if d.lock.is_some() { None } else { Some(w as f32 / h as f32) };
         },
     ))
-    .child(action("Rotate viewport", &ROTATE_ICON).on_press(move |s: &mut App| set_device(s, tab, h, w, None)).build(t))
+    .child(action("Rotate viewport", &ROTATE_ICON).on_press(move |s: &mut App| {
+        // As web, a rotated preset stays selected and a locked ratio turns with it.
+        let preset = device(s, tab).preset;
+        set_device(s, tab, h, w, preset);
+    }).build(t))
     .child(el().grow(1.))
     .child(action("Close device toolbar", &icons::X).on_press(move |s: &mut App| send(s, Cmd::Device(tab, None))).build(t));
     col().w_full().fill(t.c.background.alpha_mul(0.95)).child(bar).child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
@@ -915,6 +921,19 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
             .child(el().pin(None, Some(10.), Some(10.), None).size(8., 8.).radius(4.).fill(t.c.foreground.alpha_mul(0.25)).group_opacity(1., 0.))
             .child(pill),
     );
+}
+
+/// The picker's box around the element under the pointer, as web's annotation overlay draws it.
+fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El> {
+    let [x, y, w, h] = hover_rect(status.hover.filter(|_| status.picking)?, scale, page)?;
+    Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(2.).fill(t.c.primary.alpha_mul(0.15)).border(1.5, t.c.primary))
+}
+
+/// A CSS-pixel rect in page points, cut to the page.
+fn hover_rect([x, y, w, h]: [f32; 4], scale: f32, (pw, ph): (f32, f32)) -> Option<[f32; 4]> {
+    let (left, top) = ((x * scale).max(0.), (y * scale).max(0.));
+    let (right, bottom) = (((x + w) * scale).min(pw), ((y + h) * scale).min(ph));
+    (right > left && bottom > top).then(|| [left, top, right - left, bottom - top])
 }
 
 /// The page's pixels, forwarding input; `k` maps this element's points to page-area points.
@@ -1208,7 +1227,8 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         let mut menu = kit::Menu::new("browser-presets")
             .anchor("browser-device-preset")
             .placement(kit::Placement::BottomStart)
-            .min_width(240.)
+            // Web's select popup sizes to its widest row, "Samsung Galaxy S20 Ultra  412 × 915".
+            .min_width(300.)
             .open(true)
             .on_close(|s: &mut App| s.ui.panel.browser.presets = false)
             .item(kit::MenuItem::new("Responsive").radio(selected.is_none()).on_select(move |s: &mut App| {
@@ -1329,6 +1349,14 @@ mod tests {
         for input in ["mailto:a@b.c", "javascript:alert(1)", "file:///etc/hosts", "  "] {
             assert_eq!(resolve(input, ddg), None, "{input}");
         }
+    }
+
+    #[test]
+    fn the_picker_box_scales_into_the_page_and_stays_inside_it() {
+        assert_eq!(hover_rect([10., 20., 30., 40.], 1.25, (500., 500.)), Some([12.5, 25., 37.5, 50.]));
+        // A tall body is cut to the page.
+        assert_eq!(hover_rect([0., 0., 431., 2600.], 1.25, (539., 800.)), Some([0., 0., 538.75, 800.]));
+        assert_eq!(hover_rect([0., 900., 10., 10.], 1., (500., 800.)), None);
     }
 
     #[test]
