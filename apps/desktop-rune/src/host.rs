@@ -55,7 +55,7 @@ fn bundled_binary() -> Option<PathBuf> {
 }
 
 /// Same base directory the Electron app and `npx t3` use, so both see one database.
-fn t3_home() -> PathBuf {
+pub(crate) fn t3_home() -> PathBuf {
     match std::env::var("T3CODE_HOME").map(|v| v.trim().to_string()) {
         Ok(v) if !v.is_empty() => PathBuf::from(v),
         _ => PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".s5code"),
