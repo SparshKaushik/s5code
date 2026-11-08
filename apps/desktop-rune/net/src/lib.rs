@@ -53,7 +53,9 @@ pub struct State {
 /// A finished one-shot request: `Ok(value)` for `Exit Success`, `Err(cause)` for a failure.
 pub type Reply = Result<Value, Value>;
 
+mod pairing;
 mod projection;
+pub use pairing::{fetch_descriptor, resolve_pairing};
 mod transport;
 use serde_json::json;
 use std::sync::{

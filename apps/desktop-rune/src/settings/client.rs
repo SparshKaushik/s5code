@@ -61,7 +61,7 @@ impl ClientSettings {
     }
 }
 
-fn config_path() -> PathBuf {
+pub(crate) fn config_path() -> PathBuf {
     if let Some(path) = std::env::var_os("S5_CLIENT_SETTINGS") {
         return path.into();
     }
