@@ -489,17 +489,18 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     content = content.child(attachments::view(app, attachment, t));
                 }
                 if !s(item, "text").is_empty() {
+                    let body = crate::chat::composer::display_text(s(item, "text"));
                     content = content.child(
                         col()
                             .padding(12.0)
                             .radius(16.0)
                             .fill(t.c.message_surface)
                             .child(
-                                text(s(item, "text"))
+                                text(body.to_string())
                                     .font(theme::TEXT_SM.lh(22.75))
                                     .color(t.c.message_foreground)
                                     .selectable(true)
-                                    .text_highlights(marks.as_ref().map_or_else(Vec::new, |m| m.plain(s(item, "text")))),
+                                    .text_highlights(marks.as_ref().map_or_else(Vec::new, |m| m.plain(&body))),
                             ),
                     );
                 }

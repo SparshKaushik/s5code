@@ -1,13 +1,13 @@
 //! The Browser surface, web's inline `PreviewView`: each tab's chrome row over its page, the
 //! empty state, or the unreachable page. `browser` owns Chrome; this owns what the panel shows.
-use std::collections::HashMap;
+use std::{collections::HashMap, time::Duration};
 
-use rune::{El, Key, Phase, Pixels, ScrollSpec, Span, TextEdit, Tx, col, el, icon, rich, row, text, text_input};
-use serde_json::json;
+use rune::{Color, El, Key, KeyEvent, Phase, Pixels, ScrollSpec, Span, TextEdit, Tx, col, el, icon, rich, row, text, text_input};
+use serde_json::{Value, json};
 
 use super::browser::{self, Cmd, Status, TabId};
 use crate::{
-    App, data, icons, kit,
+    App, Route, data, icons, kit,
     theme::{self, AlphaMul, T},
 };
 
@@ -16,6 +16,33 @@ const ZOOM_LEVELS: [f32; 17] = [0.25, 0.33, 0.5, 0.67, 0.75, 0.8, 0.9, 1., 1.1, 
 const NON_WEB_SCHEMES: [&str; 14] = [
     "about", "blob", "chrome", "data", "file", "ftp", "javascript", "mailto", "sms", "ssh", "tel", "view-source", "ws", "wss",
 ];
+/// `PREVIEW_VIEWPORT_PRESETS`: Chrome DevTools' emulated devices, in its order.
+const PRESETS: [(&str, u32, u32); 17] = [
+    ("iPhone SE", 375, 667),
+    ("iPhone XR", 414, 896),
+    ("iPhone 12 Pro", 390, 844),
+    ("iPhone 14 Pro Max", 430, 932),
+    ("Pixel 7", 412, 915),
+    ("Samsung Galaxy S8+", 360, 740),
+    ("Samsung Galaxy S20 Ultra", 412, 915),
+    ("iPad Mini", 768, 1024),
+    ("iPad Air", 820, 1180),
+    ("iPad Pro", 1024, 1366),
+    ("Surface Pro 7", 912, 1368),
+    ("Surface Duo", 540, 720),
+    ("Galaxy Z Fold 5", 344, 882),
+    ("Asus Zenbook Fold", 853, 1280),
+    ("Samsung Galaxy A51/71", 412, 914),
+    ("Nest Hub", 1024, 600),
+    ("Nest Hub Max", 1280, 800),
+];
+const DEVICE_TOOLBAR_H: f32 = 38.;
+/// Web's `ScreenRotationIcon`, with its rotated square drawn as a path.
+static ROTATE_ICON: rune::Icon = rune::Icon {
+    name: "screen-rotation",
+    view: 24.0,
+    body: "<path d=\"M12 5.28 L18.72 12 L12 18.72 L5.28 12 Z\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M12.5 2a10 10 0 0 1 8.4 5.4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M20.8 3.5v4h-4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M11.5 22a10 10 0 0 1-8.4-5.4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M3.2 20.5v-4h4\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
+};
 static ERROR_ICON: rune::Icon = rune::Icon {
     name: "preview-unreachable",
     view: 64.0,
@@ -27,6 +54,28 @@ struct Tab {
     /// The address bar draft; it follows the page's URL while unfocused.
     bar: TextEdit,
     focused: bool,
+    device: Device,
+}
+
+impl Tab {
+    fn new(pixels: Pixels) -> Tab {
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default() }
+    }
+}
+
+/// The device toolbar's drafts; the size Chrome emulates is `Status::device`.
+struct Device {
+    w: TextEdit,
+    h: TextEdit,
+    /// The locked width / height ratio.
+    lock: Option<f32>,
+    preset: Option<usize>,
+}
+
+impl Default for Device {
+    fn default() -> Device {
+        Device { w: TextEdit::new(""), h: TextEdit::new(""), lock: None, preset: None }
+    }
 }
 
 struct Recent {
@@ -48,6 +97,13 @@ pub struct Ui {
     details: bool,
     recents: Vec<Recent>,
     watching: bool,
+    /// The tab floating over the chat (web's mini player).
+    pub(super) pip: Option<TabId>,
+    /// The page area's last size, in points.
+    area: (f32, f32),
+    presets: bool,
+    /// When the zoom pill hides, as web's `ZoomIndicator` does 1.5 s after a change.
+    zoom_until: i64,
 }
 
 /// A new tab on a blank page; Chrome starts with the first one.
@@ -62,9 +118,20 @@ pub fn open(app: &mut App) -> TabId {
     ui.next += 1;
     let tab = ui.next;
     let pixels = Pixels::new();
-    ui.tabs.insert(tab, Tab { pixels: pixels.clone(), bar: TextEdit::new(""), focused: false });
+    ui.tabs.insert(tab, Tab::new(pixels.clone()));
     ui.browser.send(Cmd::Open(tab, pixels));
     tab
+}
+
+/// A window the page opened (`window.open`, `target=_blank`), shown as a tab, as web does.
+fn adopt(app: &mut App, target: String) {
+    let ui = &mut app.ui.panel.browser;
+    ui.next += 1;
+    let tab = ui.next;
+    let pixels = Pixels::new();
+    ui.tabs.insert(tab, Tab::new(pixels.clone()));
+    ui.browser.send(Cmd::Adopt(tab, pixels, target));
+    super::activate(app, super::Surface::Browser(tab));
 }
 
 pub fn close(app: &mut App, tab: TabId) {
@@ -73,6 +140,9 @@ pub fn close(app: &mut App, tab: TabId) {
     ui.browser.send(Cmd::Close(tab));
     if ui.shown == Some(tab) {
         ui.shown = None;
+    }
+    if ui.pip == Some(tab) {
+        ui.pip = None;
     }
 }
 
@@ -101,7 +171,11 @@ fn host(url: &str) -> Option<&str> {
 }
 
 fn bar(app: &mut App, tab: TabId) -> &mut TextEdit {
-    &mut app.ui.panel.browser.tabs.entry(tab).or_insert_with(|| Tab { pixels: Pixels::new(), bar: TextEdit::new(""), focused: false }).bar
+    &mut app.ui.panel.browser.tabs.entry(tab).or_insert_with(|| Tab::new(Pixels::new())).bar
+}
+
+fn device(app: &mut App, tab: TabId) -> &mut Device {
+    &mut app.ui.panel.browser.tabs.entry(tab).or_insert_with(|| Tab::new(Pixels::new())).device
 }
 
 fn send(app: &mut App, cmd: Cmd) {
@@ -254,14 +328,25 @@ fn friendly(description: &str) -> &str {
     }
 }
 
-fn shown(app: &App) -> Option<TabId> {
+fn panel_tab(app: &App) -> Option<TabId> {
     match app.ui.panel.active {
         Some(super::Surface::Browser(tab)) if app.ui.shell.panel_open => Some(tab),
         _ => None,
     }
 }
 
-pub fn poll(app: &mut App) -> bool {
+/// The floating tab, unless the panel shows that same tab.
+fn pip_tab(app: &App) -> Option<TabId> {
+    let tab = app.ui.panel.browser.pip?;
+    (matches!(app.frame_route(), Route::Thread(_)) && panel_tab(app) != Some(tab) && app.ui.panel.browser.tabs.contains_key(&tab)).then_some(tab)
+}
+
+/// The one tab Chrome screencasts: the panel's, else the floating one.
+fn shown(app: &App) -> Option<TabId> {
+    panel_tab(app).or_else(|| pip_tab(app))
+}
+
+pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let want = shown(app);
     let live = matches!(app.src, data::Source::Live(_));
     let watch = live && !app.ui.panel.browser.tabs.is_empty();
@@ -312,15 +397,111 @@ pub fn poll(app: &mut App) -> bool {
             }
         }
     }
+    if ui.zoom_until != 0 {
+        if now >= ui.zoom_until {
+            ui.zoom_until = 0;
+            changed = true;
+        } else {
+            tx.wake_after(Duration::from_millis((ui.zoom_until - now) as u64));
+        }
+    }
     for event in events {
         match event {
             browser::Event::Screenshot(Ok(path)) => {
                 crate::shell::palette::toast(app, "Screenshot saved", Some(&path.display().to_string()))
             }
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
+            browser::Event::Popup { target } => adopt(app, target),
+            browser::Event::Picked { element, image, .. } => attach(app, &element, image),
+            browser::Event::DevTools(Ok(url)) => {
+                if let Err(e) = tx.open_url(&url) {
+                    crate::shell::palette::toast(app, "Unable to open DevTools", Some(&e.to_string()));
+                }
+            }
+            browser::Event::DevTools(Err(e)) => crate::shell::palette::toast(app, "Unable to open DevTools", Some(&e)),
         }
     }
     changed
+}
+
+/// A picked element goes to the composer as web's preview annotation, its crop as an image.
+fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>) {
+    let id = s5_net::uuid();
+    let image = image.and_then(|bytes| {
+        let dir = crate::host::t3_home().join("userdata").join("browser-artifacts");
+        std::fs::create_dir_all(&dir).ok()?;
+        let path = dir.join(format!("browser-element-{}-{}.png", base36(data::now_ms().max(0) as u64), &id.replace('-', "")[..8]));
+        std::fs::write(&path, bytes).ok()?;
+        Some(path.display().to_string())
+    });
+    let record = annotation(&id, element);
+    let detail = record["elements"][0]["selector"].as_str().or(record["elements"][0]["tagName"].as_str()).unwrap_or_default().to_string();
+    crate::chat::composer::add_context(app, record, image);
+    crate::shell::palette::toast(app, "Element added to the composer", Some(&detail));
+}
+
+/// `previewAnnotationContextRecord` for one picked element and no comment.
+fn annotation(id: &str, element: &Value) -> Value {
+    let bounded = |v: &Value, max: usize| v.as_str().map(|s| s.chars().take(max).collect::<String>());
+    let page_url = bounded(&element["pageUrl"], 2048).unwrap_or_default();
+    let page_title = bounded(&element["pageTitle"], 2048).filter(|t| !t.trim().is_empty());
+    let label = page_title.as_deref().unwrap_or("Preview annotation").replace(['[', ']', '\\', '\r', '\n'], " ");
+    let label: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
+    let details = json!({
+        "pageUrl": page_url,
+        "pageTitle": page_title,
+        "tagName": bounded(&element["tagName"], 255).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "element".into()),
+        "selector": bounded(&element["selector"], 2048),
+        "htmlPreview": bounded(&element["htmlPreview"], 8000).unwrap_or_default(),
+        "componentName": bounded(&element["componentName"], 2048),
+        "source": null,
+        "styles": bounded(&element["styles"], 8000).unwrap_or_default(),
+    });
+    json!({
+        "version": 1,
+        "contextId": format!("preview-annotation_{id}"),
+        "kind": "preview-annotation",
+        "label": label,
+        "annotationId": id,
+        "pageUrl": page_url,
+        "pageTitle": page_title,
+        "comment": "",
+        "targetSummary": "1 selected element",
+        "styleChanges": [],
+        "elements": [details],
+        "elementIds": ["element-1"],
+        "styleChangeDetails": [],
+    })
+}
+
+/// The preview shortcuts: `preview.toggle` anywhere, the rest while the browser has focus.
+pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    if super::shortcut(app, e, "preview.toggle") {
+        if panel_tab(app).is_some() {
+            app.ui.shell.panel_open = false;
+        } else {
+            match app.ui.panel.surfaces.iter().rev().find(|v| matches!(v, super::Surface::Browser(_))).copied() {
+                Some(surface) => super::activate(app, surface),
+                None => super::add(app, super::Surface::Browser(0)),
+            }
+        }
+        return true;
+    }
+    let Some(tab) = panel_tab(app).filter(|_| tx.focused().is_some_and(|k| k.contains("browser-"))) else { return false };
+    if super::shortcut(app, e, "preview.refresh") {
+        send(app, Cmd::Reload { tab, hard: false });
+    } else if super::shortcut(app, e, "preview.focusUrl") {
+        bar(app, tab).focused = true;
+    } else if super::shortcut(app, e, "preview.zoomIn") {
+        zoom(app, tab, 1);
+    } else if super::shortcut(app, e, "preview.zoomOut") {
+        zoom(app, tab, -1);
+    } else if super::shortcut(app, e, "preview.resetZoom") {
+        zoom(app, tab, 0);
+    } else {
+        return false;
+    }
+    true
 }
 
 fn screenshot(app: &mut App, tab: TabId) {
@@ -356,10 +537,70 @@ fn zoom(app: &mut App, tab: TabId, step: i32) {
     let index = ZOOM_LEVELS.iter().position(|z| (z - current).abs() < 0.001).unwrap_or(7) as i32;
     let next = if step == 0 { 1. } else { ZOOM_LEVELS[(index + step).clamp(0, ZOOM_LEVELS.len() as i32 - 1) as usize] };
     send(app, Cmd::Zoom(tab, next));
+    app.ui.panel.browser.zoom_until = data::now_ms() + 1500;
+}
+
+/// Web's device limits: 240 to 3840 points a side and at most a 4K screen's area.
+fn valid_size(w: u32, h: u32) -> bool {
+    (240..=3840).contains(&w) && (240..=3840).contains(&h) && w * h <= 3840 * 2160
+}
+
+/// Fits a size inside the device limits, shrinking the height first.
+fn clamp_size(w: u32, h: u32) -> (u32, u32) {
+    let w = w.clamp(240, 3840);
+    (w, h.clamp(240, 3840).min(3840 * 2160 / w))
+}
+
+fn toggle_device(app: &mut App, tab: TabId) {
+    let on = app.ui.panel.browser.browser.status(tab).device.is_some();
+    if on {
+        send(app, Cmd::Device(tab, None));
+        return;
+    }
+    // Responsive starts at the page's own size, under the toolbar it opens.
+    let (w, h) = app.ui.panel.browser.area;
+    let (w, h) = if w >= 1. { clamp_size(w.round() as u32, (h - DEVICE_TOOLBAR_H).max(1.).round() as u32) } else { (1024, 768) };
+    *device(app, tab) = Device::default();
+    set_device(app, tab, w, h, None);
+}
+
+fn set_device(app: &mut App, tab: TabId, w: u32, h: u32, preset: Option<usize>) {
+    let d = device(app, tab);
+    d.w.replace_text(w.to_string());
+    d.h.replace_text(h.to_string());
+    d.preset = preset;
+    if d.lock.is_some() {
+        d.lock = Some(w as f32 / h as f32);
+    }
+    send(app, Cmd::Device(tab, Some((w, h))));
+}
+
+/// Applies the typed size; with the ratio locked, the edited side drives the other.
+fn commit_device(app: &mut App, tab: TabId, height_edited: bool) {
+    let Some((cw, ch)) = app.ui.panel.browser.browser.status(tab).device else { return };
+    let d = device(app, tab);
+    let parse = |e: &TextEdit| e.text.trim().parse::<u32>().ok();
+    let (w, h) = match (parse(&d.w), parse(&d.h), d.lock) {
+        (Some(w), _, Some(ratio)) if !height_edited => (w, (w as f32 / ratio).round() as u32),
+        (_, Some(h), Some(ratio)) if height_edited => ((h as f32 * ratio).round() as u32, h),
+        (Some(w), Some(h), _) => (w, h),
+        _ => (cw, ch),
+    };
+    let (w, h) = if valid_size(w, h) { (w, h) } else { (cw, ch) };
+    let preset = d.preset.filter(|&i| [(PRESETS[i].1, PRESETS[i].2), (PRESETS[i].2, PRESETS[i].1)].contains(&(w, h)));
+    set_device(app, tab, w, h, preset);
 }
 
 fn action(label: &str, glyph: &'static rune::Icon) -> kit::Button {
     kit::Button::new(label).icon(glyph).variant("ghost").size("icon-xs")
+}
+
+/// A toggle action: secondary with a primary glyph while on, as web's pressed buttons.
+fn toggle(t: &T, label: &str, glyph: &'static rune::Icon, on: bool, disabled: bool, f: impl Fn(&mut App) + 'static) -> El {
+    if !on {
+        return action(label, glyph).disabled(disabled).on_press(f).build(t);
+    }
+    kit::Button::new(label).variant("secondary").size("icon-xs").disabled(disabled).on_press(f).build(t).child(icon(glyph, 14.).color(t.c.primary).a11y_hidden())
 }
 
 /// The chrome row and content for one tab; `scale` is the window's backing scale.
@@ -371,6 +612,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
         return super::notice(t, "This browser tab is closed.");
     };
     let focused = state.bar.focused;
+    let live = !idle(&status) && status.failure.is_none();
     let address = text_input(&state.bar, theme::TEXT_SM)
         .key(format!("browser-url-{tab}"))
         .single_line()
@@ -405,6 +647,25 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             tx.blur();
             true
         });
+    // Web's address addon: "Open in system browser" shows while the bar is hovered.
+    let external = (!focused && !idle(&status)).then(|| {
+        let url = status.url.clone();
+        el().pin(None, Some(2.), Some(2.), None).group_opacity(0., 1.).child(action("Open in system browser", &icons::EXTERNAL_LINK).build(t).on_press_tx(
+            move |s: &mut App, tx: &mut Tx| {
+                if let Err(e) = tx.open_url(&url) {
+                    crate::shell::palette::toast(s, "Could not open this address", Some(&e.to_string()));
+                }
+            },
+        ))
+    });
+    // A child added after `build` misses the disabled button's dimming.
+    let refresh_off = !started || idle(&status);
+    let refresh_color = if refresh_off { t.c.contrast_foreground.alpha_mul(0.64) } else { t.c.contrast_foreground };
+    let mut refresh_glyph = icon(&icons::REFRESH_CW, 14.).color(refresh_color).a11y_hidden();
+    if status.loading {
+        refresh_glyph = refresh_glyph.looping(rune::LoopSpec::rotation(1.));
+    }
+    let pip = ui.pip == Some(tab);
     let chrome = row()
         .w_full()
         .h(28.)
@@ -429,24 +690,44 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                         .build(t),
                 )
                 .child(
-                    action(if status.loading { "Stop" } else { "Refresh" }, &icons::REFRESH_CW)
-                        .disabled(!started || idle(&status))
+                    kit::Button::new(if status.loading { "Stop" } else { "Refresh" })
+                        .variant("ghost")
+                        .size("icon-xs")
+                        .disabled(refresh_off)
                         .on_press(move |s: &mut App| {
                             let loading = s.ui.panel.browser.browser.status(tab).loading;
                             send(s, if loading { Cmd::Stop(tab) } else { Cmd::Reload { tab, hard: false } })
                         })
-                        .build(t),
+                        .build(t)
+                        .child(refresh_glyph),
                 ),
         )
-        .child(el().grow(1.).min_w(0.).child(address))
-        .child(action("Annotate preview", &icons::MOUSE_POINTER_CLICK).disabled(true).build(t))
+        .child(row().grow(1.).min_w(0.).hover_group().child(address).children(external))
+        .child(toggle(
+            t,
+            if status.picking { "Cancel annotation" } else { "Annotate preview" },
+            &icons::MOUSE_POINTER_CLICK,
+            status.picking,
+            !status.painted || !live,
+            move |s: &mut App| {
+                let on = !s.ui.panel.browser.browser.status(tab).picking;
+                send(s, Cmd::Pick(tab, on));
+            },
+        ))
         .child(
             action("Screenshot", &icons::CAMERA)
-                .disabled(!status.painted || idle(&status) || status.failure.is_some())
+                .disabled(!status.painted || !live)
                 .on_press(move |s: &mut App| screenshot(s, tab))
                 .build(t),
         )
-        .child(action("Float preview over chat", &icons::PICTURE_IN_PICTURE_2).disabled(true).build(t))
+        .child(toggle(
+            t,
+            if pip { "Close floating preview" } else { "Float preview over chat" },
+            &icons::PICTURE_IN_PICTURE_2,
+            pip,
+            idle(&status),
+            move |s: &mut App| float(s, tab),
+        ))
         .child(
             el().key("browser-menu").child(
                 action("Preview menu", &icons::ELLIPSIS_VERTICAL)
@@ -456,7 +737,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             ),
         );
     let chrome = col().w_full().child(chrome).child(if status.loading {
-        el().absolute(0., 26.).w_full().h(2.).fill(t.c.primary)
+        el().absolute(0., 26.).w_full().h(2.).radius(1.).fill(t.c.primary).shadow(0., 6., t.c.ring)
     } else {
         el()
     });
@@ -467,10 +748,30 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
         unreachable(t, tab, failure, ui.details)
     } else if idle(&status) {
         empty(app, t, tab)
+    } else if let Some(size) = status.device {
+        let (w, h, scale) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+        let page = page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7));
+        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))))
     } else {
-        page(&state.pixels)
+        let hover = hover_box(t, &status, status.zoom.max(0.25), ui.area);
+        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover)
     };
-    col().grow(1.).min_h(0.).child(chrome).child(
+    let zoom_pill = (ui.zoom_until != 0 && !idle(&status)).then(|| {
+        row()
+            .pin(None, Some(12.), Some(12.), None)
+            .px(10.)
+            .py(4.)
+            .radius(999.)
+            .border(1., t.c.border.alpha_mul(0.7))
+            .fill(t.c.popover.alpha_mul(0.95))
+            .shadow(2., 8., Color::BLACK.alpha(0.12))
+            .child(text(format!("{}%", (status.zoom * 100.).round())).font(theme::XS_MEDIUM).color(t.c.contrast_foreground))
+    });
+    let mut body = col().grow(1.).min_h(0.).child(chrome);
+    if let Some(size) = status.device.filter(|_| live) {
+        body = body.child(device_toolbar(t, tab, state, size, ui.area.0));
+    }
+    body.child(
         // A new key when the scale changes re-reports the layout, so Chrome re-renders at it.
         col()
             .key(format!("browser-viewport-{scale}"))
@@ -478,20 +779,172 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             .min_h(0.)
             .w_full()
             .on_layout(move |s: &mut App, r| {
+                s.ui.panel.browser.area = (r[2], r[3]);
                 send(s, Cmd::Viewport { w: r[2].max(1.), h: r[3].max(1.), scale })
             })
-            .child(content),
+            .child(content)
+            .children(zoom_pill),
     )
 }
 
-fn page(pixels: &Pixels) -> El {
-    el().grow(1.)
-        .min_h(0.)
-        .w_full()
-        .pixels(pixels)
+/// Web's `BrowserDeviceToolbar`: preset, width × height, aspect lock, rotate and close.
+fn device_toolbar(t: &T, tab: TabId, state: &Tab, (w, h): (u32, u32), width: f32) -> El {
+    let d = &state.device;
+    let size_input = |edit: &TextEdit, axis: &'static str, height: bool| {
+        text_input(edit, theme::MONO_XS)
+            .key(format!("browser-device-{axis}-{tab}"))
+            .single_line()
+            .role("textbox")
+            .label(format!("Viewport {axis}"))
+            .w(if width >= 360. { 56. } else { 52. })
+            .h(24.)
+            .px(6.)
+            .radius(6.)
+            .fill(t.c.input.alpha_mul(0.32))
+            .border(1., t.c.contrast_input)
+            .color(t.c.contrast_foreground)
+            .caret(t.c.contrast_foreground, t.c.primary.alpha_mul(0.3))
+            .on_edit(move |s: &mut App| if height { &mut device(s, tab).h } else { &mut device(s, tab).w })
+            .on_submit(move |s: &mut App, tx: &mut Tx| {
+                commit_device(s, tab, height);
+                tx.blur();
+            })
+    };
+    let preset = d.preset.map_or("Responsive", |i| PRESETS[i].0);
+    let locked = d.lock.is_some();
+    let mut bar = row().w_full().h(DEVICE_TOOLBAR_H - 1.).px(6.).gap(2.).center_y();
+    if width >= 560. {
+        bar = bar.child(text("Dimensions").font(theme::weight(theme::TEXT_2XS, theme::MEDIUM)).color(t.c.muted_foreground).mr(2.));
+    }
+    bar = bar.child(
+        el().key("browser-device-preset").child(
+            row()
+                .w(if width >= 440. { 144. } else { 96. })
+                .h(24.)
+                .px(7.)
+                .gap(4.)
+                .center_y()
+                .radius(8.)
+                .hover(t.c.accent)
+                .focusable(true)
+                .role("button")
+                .label("Browser device preset")
+                .on_press(|s: &mut App| s.ui.panel.browser.presets ^= true)
+                .child(text(preset).font(theme::XS_MEDIUM).color(t.c.contrast_foreground).truncate().grow(1.).min_w(0.))
+                .child(icon(&icons::CHEVRON_DOWN, 14.).color(t.c.muted_foreground)),
+        ),
+    )
+    .child(size_input(&d.w, "width", false))
+    .child(text("×").font(theme::TEXT_XS).color(t.c.muted_foreground))
+    .child(size_input(&d.h, "height", true))
+    .child(toggle(
+        t,
+        if locked { "Unlock viewport aspect ratio" } else { "Lock viewport aspect ratio" },
+        if locked { &icons::LINK_2 } else { &icons::UNLINK_2 },
+        locked,
+        false,
+        move |s: &mut App| {
+            let d = device(s, tab);
+            d.lock = if d.lock.is_some() { None } else { Some(w as f32 / h as f32) };
+        },
+    ))
+    .child(action("Rotate viewport", &ROTATE_ICON).on_press(move |s: &mut App| {
+        // As web, a rotated preset stays selected and a locked ratio turns with it.
+        let preset = device(s, tab).preset;
+        set_device(s, tab, h, w, preset);
+    }).build(t))
+    .child(el().grow(1.))
+    .child(action("Close device toolbar", &icons::X).on_press(move |s: &mut App| send(s, Cmd::Device(tab, None))).build(t));
+    col().w_full().fill(t.c.background.alpha_mul(0.95)).child(bar).child(el().h(1.).w_full().fill(t.c.border.alpha_mul(0.7)))
+}
+
+/// Floats the tab over the chat and closes the panel, or puts it back.
+fn float(app: &mut App, tab: TabId) {
+    let ui = &mut app.ui.panel.browser;
+    if ui.pip == Some(tab) {
+        ui.pip = None;
+        return;
+    }
+    ui.pip = Some(tab);
+    ui.menu = false;
+    app.ui.shell.panel_open = false;
+}
+
+/// Web's `ThreadPreviewMiniPlayer`: the floating tab, 320 points wide at most, at the top right
+/// of the chat, with its open-in-panel and close actions on hover.
+pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
+    let Some(tab) = pip_tab(app) else { return };
+    let ui = &app.ui.panel.browser;
+    let Some(state) = ui.tabs.get(&tab) else { return };
+    let status = ui.browser.status(tab);
+    let (sw, sh) = match status.device {
+        Some(size) => {
+            let (w, h, _) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+            (w, h)
+        }
+        None => ui.area,
+    };
+    let (sw, sh) = if sw < 1. || sh < 1. { (16., 10.) } else { (sw, sh) };
+    let w = 320f32.min(320. * sw / sh);
+    let h = w * sh / sw;
+    let right = 12. + if app.ui.shell.panel_open { app.ui.panel.width + 1. } else { 0. };
+    let pill = row()
+        .pin(None, Some(6.), Some(6.), None)
+        .h(32.)
+        .padding(3.)
+        .gap(2.)
+        .center_y()
+        .radius(8.)
+        .border(1., t.c.border.alpha_mul(0.8))
+        .fill(t.c.popover.alpha_mul(0.92))
+        .shadow(4., 16., Color::BLACK.alpha(0.2))
+        .group_opacity(0., 1.)
+        .child(
+            action("Open preview in right panel", &icons::PANEL_RIGHT)
+                .on_press(move |s: &mut App| {
+                    s.ui.panel.browser.pip = None;
+                    super::activate(s, super::Surface::Browser(tab));
+                })
+                .build(t),
+        )
+        .child(action("Close floating preview", &icons::X).on_press(|s: &mut App| s.ui.panel.browser.pip = None).build(t));
+    out.push(
+        el().key("browser-pip")
+            .pin(None, Some(theme::layout::TOPBAR_H + 12.), Some(right), None)
+            .size(w, h)
+            .radius(12.)
+            .clip_rounded(12.)
+            .fill(t.c.background)
+            .border(1., t.c.border.alpha_mul(0.8))
+            .shadow(8., 24., Color::BLACK.alpha(0.25))
+            .hover_group()
+            .role("region")
+            .label("Floating preview")
+            .child(page(&state.pixels, "browser-pip-page", sw / w).size(w, h))
+            .child(el().pin(None, Some(10.), Some(10.), None).size(8., 8.).radius(4.).fill(t.c.foreground.alpha_mul(0.25)).group_opacity(1., 0.))
+            .child(pill),
+    );
+}
+
+/// The picker's box around the element under the pointer, as web's annotation overlay draws it.
+fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El> {
+    let [x, y, w, h] = hover_rect(status.hover.filter(|_| status.picking)?, scale, page)?;
+    Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
+}
+
+/// A CSS-pixel rect in page points, cut to the page.
+fn hover_rect([x, y, w, h]: [f32; 4], scale: f32, (pw, ph): (f32, f32)) -> Option<[f32; 4]> {
+    let (left, top) = ((x * scale).max(0.), (y * scale).max(0.));
+    let (right, bottom) = (((x + w) * scale).min(pw), ((y + h) * scale).min(ph));
+    (right > left && bottom > top).then(|| [left, top, right - left, bottom - top])
+}
+
+/// The page's pixels, forwarding input; `k` maps this element's points to page-area points.
+fn page(pixels: &Pixels, key: &str, k: f32) -> El {
+    el().pixels(pixels)
         .focusable(true)
-        .key("browser-page")
-        .on_drag(|s: &mut App, d, _| {
+        .key(key.to_string())
+        .on_drag(move |s: &mut App, d, _| {
             send(
                 s,
                 Cmd::Mouse {
@@ -500,20 +953,26 @@ fn page(pixels: &Pixels) -> El {
                         Phase::Up => "mouseReleased",
                         _ => "mouseMoved",
                     },
-                    x: d.x,
-                    y: d.y,
+                    x: d.x * k,
+                    y: d.y * k,
                     clicks: d.clicks,
                 },
             )
         })
-        .on_pointer_move_local(|s: &mut App, p, _| send(s, Cmd::Mouse { kind: "mouseMoved", x: p.x, y: p.y, clicks: 0 }))
-        .on_wheel(|s: &mut App, w, _| {
-            send(s, Cmd::Wheel { x: w.x, y: w.y, dx: w.dx, dy: w.dy });
+        .on_pointer_move_local(move |s: &mut App, p, _| send(s, Cmd::Mouse { kind: "mouseMoved", x: p.x * k, y: p.y * k, clicks: 0 }))
+        .on_wheel(move |s: &mut App, w, _| {
+            send(s, Cmd::Wheel { x: w.x * k, y: w.y * k, dx: w.dx, dy: w.dy });
             true
         })
         .on_key(|s: &mut App, e, _| {
             if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) {
                 return false;
+            }
+            // Escape leaves element picking, as web's annotation mode.
+            let picking = s.ui.panel.browser.shown.filter(|&tab| s.ui.panel.browser.browser.status(tab).picking);
+            if let (Some(tab), Key::Escape) = (picking, &e.key) {
+                send(s, Cmd::Pick(tab, false));
+                return true;
             }
             let cmd = match &e.key {
                 Key::Text(v) => Cmd::Text(v.clone()),
@@ -761,11 +1220,36 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
     )
 }
 
-/// `PreviewMoreMenu`.
+/// `PreviewMoreMenu` and the device preset list.
 pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     let ui = &app.ui.panel.browser;
-    let Some(tab) = shown(app).filter(|_| ui.menu) else { return };
+    let Some(tab) = panel_tab(app) else { return };
     let status = ui.browser.status(tab);
+    if ui.presets && status.device.is_some() {
+        let selected = ui.tabs.get(&tab).and_then(|v| v.device.preset);
+        let mut menu = kit::Menu::new("browser-presets")
+            .anchor("browser-device-preset")
+            .placement(kit::Placement::BottomStart)
+            // Web's select popup sizes to its widest row, "Samsung Galaxy S20 Ultra  412 × 915".
+            .min_width(300.)
+            .open(true)
+            .on_close(|s: &mut App| s.ui.panel.browser.presets = false)
+            .item(kit::MenuItem::new("Responsive").radio(selected.is_none()).on_select(move |s: &mut App| {
+                s.ui.panel.browser.presets = false;
+                device(s, tab).preset = None;
+            }))
+            .group_label("Standard");
+        for (i, (label, w, h)) in PRESETS.iter().copied().enumerate() {
+            menu = menu.item(kit::MenuItem::new(label).shortcut(format!("{w} × {h}")).radio(selected == Some(i)).on_select(move |s: &mut App| {
+                s.ui.panel.browser.presets = false;
+                set_device(s, tab, w, h, Some(i));
+            }));
+        }
+        menu.overlay(&kit::theme(t), out);
+    }
+    if !ui.menu {
+        return;
+    }
     let scheme = ui.scheme;
     let radio = |label: &'static str, value: &'static str| {
         kit::MenuEntry::item(kit::MenuItem::new(label).radio(scheme == value).on_select(move |s: &mut App| {
@@ -774,7 +1258,33 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
             send(s, Cmd::ColorScheme(value));
         }))
     };
-    let zoom_label = format!("{}%", (status.zoom * 100.).round());
+    let blank = idle(&status);
+    let zoom_button = |label: &str, glyph: &'static rune::Icon, variant: &str, disabled: bool, step: i32| {
+        kit::Button::new(label).icon(glyph).variant(variant).size("icon-xs").disabled(disabled).on_press(move |s: &mut App| zoom(s, tab, step)).build(t)
+    };
+    let zoom_row = row()
+        .w_full()
+        .h(32.)
+        .pl(8.)
+        .pr(4.)
+        .center_y()
+        .child(text("Zoom").font(theme::TEXT_SM).color(t.c.contrast_foreground).grow(1.))
+        .child(
+            row()
+                .gap(4.)
+                .center_y()
+                .child(zoom_button("Zoom out", &icons::MINUS, "outline", blank || status.zoom <= 0.25, -1))
+                .child(
+                    text(format!("{}%", (status.zoom * 100.).round()))
+                        .font(theme::TEXT_XS)
+                        .color(t.c.muted_foreground)
+                        .align(rune::Align::Center)
+                        .w(48.),
+                )
+                .child(zoom_button("Zoom in", &icons::PLUS, "outline", blank || status.zoom >= 5., 1))
+                .child(zoom_button("Reset zoom", &icons::ROTATE_CCW, "ghost", blank, 0)),
+        );
+    let close = |s: &mut App| s.ui.panel.browser.menu = false;
     kit::Menu::new("browser-more")
         .anchor("browser-menu")
         .placement(kit::Placement::BottomEnd)
@@ -784,29 +1294,37 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
             s.ui.panel.browser.menu = false;
             s.ui.panel.browser.appearance = false;
         })
-        .item(kit::MenuItem::new("Hard reload").icon(&icons::ROTATE_CW).disabled(idle(&status)).on_select(move |s: &mut App| {
-            s.ui.panel.browser.menu = false;
+        .item(kit::MenuItem::new("Hard reload").disabled(blank).on_select(move |s: &mut App| {
+            close(s);
             send(s, Cmd::Reload { tab, hard: true });
         }))
+        .item(kit::MenuItem::new("Open DevTools").disabled(blank).on_select(move |s: &mut App| {
+            close(s);
+            send(s, Cmd::DevTools(tab));
+        }))
+        .item(
+            kit::MenuItem::new(if status.device.is_some() { "Hide device toolbar" } else { "Show device toolbar" })
+                .disabled(blank)
+                .on_select(move |s: &mut App| {
+                    close(s);
+                    toggle_device(s, tab);
+                }),
+        )
         .item(
             kit::MenuItem::new("Appearance")
-                .icon(&icons::SUN)
                 .submenu(vec![radio("System", ""), radio("Light", "light"), radio("Dark", "dark")], ui.appearance)
                 .on_submenu_change(|s: &mut App, open| s.ui.panel.browser.appearance = open),
         )
         .separator()
-        .group_label(format!("Zoom · {zoom_label}"))
-        .item(kit::MenuItem::new("Zoom in").icon(&icons::PLUS).disabled(status.zoom >= 5.).on_select(move |s: &mut App| zoom(s, tab, 1)))
-        .item(kit::MenuItem::new("Zoom out").icon(&icons::MINUS).disabled(status.zoom <= 0.25).on_select(move |s: &mut App| zoom(s, tab, -1)))
-        .item(kit::MenuItem::new("Reset zoom").disabled((status.zoom - 1.).abs() < 0.001).on_select(move |s: &mut App| zoom(s, tab, 0)))
+        .row(zoom_row)
         .separator()
-        .group_label("Profile")
-        .item(kit::MenuItem::new("Clear cookies").on_select(|s: &mut App| {
-            s.ui.panel.browser.menu = false;
+        .group_label("Profile: Default")
+        .item(kit::MenuItem::new("Clear cookies").on_select(move |s: &mut App| {
+            close(s);
             send(s, Cmd::ClearCookies);
         }))
-        .item(kit::MenuItem::new("Clear cache").on_select(|s: &mut App| {
-            s.ui.panel.browser.menu = false;
+        .item(kit::MenuItem::new("Clear cache").on_select(move |s: &mut App| {
+            close(s);
             send(s, Cmd::ClearCache);
         }))
         .overlay(&kit::theme(t), out);
@@ -834,6 +1352,40 @@ mod tests {
         for input in ["mailto:a@b.c", "javascript:alert(1)", "file:///etc/hosts", "  "] {
             assert_eq!(resolve(input, ddg), None, "{input}");
         }
+    }
+
+    #[test]
+    fn the_picker_box_scales_into_the_page_and_stays_inside_it() {
+        assert_eq!(hover_rect([10., 20., 30., 40.], 1.25, (500., 500.)), Some([12.5, 25., 37.5, 50.]));
+        // A tall body is cut to the page.
+        assert_eq!(hover_rect([0., 0., 431., 2600.], 1.25, (539., 800.)), Some([0., 0., 538.75, 800.]));
+        assert_eq!(hover_rect([0., 900., 10., 10.], 1., (500., 800.)), None);
+    }
+
+    #[test]
+    fn device_sizes_stay_inside_web_limits() {
+        assert!(valid_size(375, 667) && valid_size(3840, 2160) && !valid_size(3840, 2161) && !valid_size(200, 800));
+        assert_eq!(clamp_size(100, 5000), (240, 3840));
+        assert_eq!(clamp_size(3840, 3840), (3840, 2160));
+    }
+
+    #[test]
+    fn a_picked_element_becomes_a_preview_annotation() {
+        let element = json!({
+            "pageUrl": "http://localhost:5173/", "pageTitle": " Demo [home]\n", "tagName": "button", "selector": "#go",
+            "htmlPreview": "<button id=\"go\">Sign in</button>", "componentName": null, "source": null, "styles": "color: red",
+            "rect": { "x": 1 }, "doc": { "x": 1 },
+        });
+        let record = annotation("abc", &element);
+        assert_eq!(record["contextId"], "preview-annotation_abc");
+        assert_eq!(record["label"], "Demo home");
+        assert_eq!(record["targetSummary"], "1 selected element");
+        let details = &record["elements"][0];
+        assert_eq!(details["selector"], "#go");
+        assert!(details.get("rect").is_none() && details["source"].is_null());
+        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }));
+        assert_eq!(untitled["label"], "Preview annotation");
+        assert!(untitled["pageTitle"].is_null());
     }
 
     #[test]

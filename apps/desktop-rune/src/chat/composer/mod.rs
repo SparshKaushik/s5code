@@ -32,11 +32,13 @@ pub struct Draft {
     pub model: Option<(String, String)>,
     pub runtime_mode: Option<String>,
     pub interaction_mode: Option<String>,
+    /// Context records (`ComposerContextRecord`, such as a picked preview element) to send.
+    pub context: Vec<Value>,
 }
 
 impl Default for Draft {
     fn default() -> Draft {
-        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None }
+        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, context: Vec::new() }
     }
 }
 
@@ -348,9 +350,11 @@ fn send(s: &mut App, alternate: bool) {
     let mut text = d.edit.text.trim().to_string();
     // A file that can no longer be read keeps the draft as it is.
     let Some(uploads) = d.attachments.iter().map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
+    let context = d.context.clone();
     let mut plan_ref = None;
     if text.is_empty()
         && uploads.is_empty()
+        && context.is_empty()
         && let (Some((plan_id, markdown)), Route::Thread(id)) = (plan::follow_up(s), s.frame_route().clone())
     {
         // resolvePlanFollowUpSubmission: implementing leaves plan mode.
@@ -358,16 +362,21 @@ fn send(s: &mut App, alternate: bool) {
         plan_ref = Some(json!({"threadId": id, "planId": plan_id}));
         set_interaction_mode(s, "default");
     }
-    if text.is_empty() && uploads.is_empty() {
+    if text.is_empty() && uploads.is_empty() && context.is_empty() {
         return;
     }
+    let text = with_context_references(&context, &text);
     let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let message_id = s5_net::uuid();
-    let context = crate::panel::take_message_context(s, &text);
-    let (thread_id, mut payload, launch) = match route {
+    // Draft chips (browser picks) plus terminal selections the text cites.
+    let mut context = context;
+    if let Some(cited) = crate::panel::take_message_context(s, &text) {
+        context.extend(cited["records"].as_array().cloned().unwrap_or_default());
+    }
+    let (thread_id, payload, launch) = match route {
         Route::Thread(id) => {
             let mut cmd = json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
@@ -383,6 +392,9 @@ fn send(s: &mut App, alternate: bool) {
             if let Some(plan_ref) = plan_ref {
                 cmd["sourcePlanRef"] = plan_ref;
             }
+            if !context.is_empty() {
+                cmd["context"] = json!({"version": 1, "records": context});
+            }
             (id, cmd, false)
         }
         _ => {
@@ -392,19 +404,18 @@ fn send(s: &mut App, alternate: bool) {
             let draft_run = crate::chat::details::take_draft_workspace(s);
             // A sidebar "new thread on branch" preset wins over the details card's env mode.
             let workspace = if preset == json!({"type": "root"}) { draft_run.unwrap_or(preset) } else { preset };
-            let params = json!({
+            let mut params = json!({
                 "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project_id,
                 "title": "New thread", "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
                 "interactionMode": interaction, "workspaceStrategy": workspace,
                 "initialMessage": {"messageId": message_id, "text": text, "attachments": []},
             });
+            if !context.is_empty() {
+                params["initialMessage"]["context"] = json!({"version": 1, "records": context});
+            }
             (thread_id, params, true)
         }
     };
-    if let Some(context) = context {
-        let message = if launch { &mut payload["initialMessage"] } else { &mut payload };
-        message["context"] = context;
-    }
     let launch = launch.then(|| thread_id.clone());
     let Some(net) = s.src.net() else { return };
     let composer = &mut s.ui.chat.composer;
@@ -485,6 +496,7 @@ fn sent(s: &mut App) {
     } else {
         d.edit.clear();
         d.attachments.clear();
+        d.context.clear();
     }
 }
 
@@ -665,8 +677,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     if !t.dark {
         body = body.shadow(1.0, 2.0, Color::BLACK.alpha(0.05));
     }
-    if !d.attachments.is_empty() {
-        body = body.child(attachment_chips(t, &d.attachments));
+    if !d.attachments.is_empty() || !d.context.is_empty() {
+        body = body.child(attachment_chips(t, &d.attachments, &d.context));
     }
     let body = body.child(editor).child(footer(s, t));
 
@@ -743,7 +755,7 @@ fn primary_action(s: &App, t: &T) -> El {
     if let Some(action) = plan::action(s, t, typed) {
         return action;
     }
-    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
+    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty() || !d.context.is_empty());
     if running(s) && !sendable {
         return stop_button(t);
     }
@@ -780,8 +792,42 @@ fn send_button(s: &App, t: &T, sendable: bool) -> El {
     b
 }
 
-fn attachment_chips(t: &T, paths: &[String]) -> El {
+fn attachment_chips(t: &T, paths: &[String], context: &[Value]) -> El {
     let mut chips = row().flex_wrap().gap(6.0).px(12.0).pt(12.0);
+    for (i, record) in context.iter().enumerate() {
+        let element = &record["elements"][0];
+        let tag = data::s(element, "tagName");
+        let name = if tag.is_empty() { data::s(record, "label").to_string() } else { format!("<{tag}> {}", data::s(record, "label")) };
+        chips = chips.child(
+            row()
+                .key(format!("composer-context-{i}"))
+                .h(28.0)
+                .pl(8.0)
+                .pr(4.0)
+                .gap(6.0)
+                .center_y()
+                .radius(theme::layout::CONTROL_RADIUS)
+                .fill(t.c.foreground.alpha_mul(0.06))
+                .help(data::s(element, "selector").to_string())
+                .child(icon(&icons::MOUSE_POINTER_CLICK, 14.0).color(t.c.muted_foreground))
+                .child(text(name).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(220.0))
+                .child(
+                    el().size(20.0, 20.0)
+                        .center()
+                        .radius(radius::SM)
+                        .hover(t.c.accent)
+                        .cursor(Cursor::Pointer)
+                        .label("Remove context")
+                        .child(icon(&icons::X, 12.0).color(t.c.muted_foreground))
+                        .on_press(move |s: &mut App| {
+                            let d = draft_mut(s);
+                            if i < d.context.len() {
+                                d.context.remove(i);
+                            }
+                        }),
+                ),
+        );
+    }
     for (i, path) in paths.iter().enumerate() {
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         chips = chips.child(
@@ -887,6 +933,44 @@ pub fn set_focus(s: &mut App, focused: bool) {
     if let Some(q) = question::editor(s) {
         question::editor_edit(s, &q.key).focused = focused;
     }
+}
+
+/// Queues a context record (and its image, sent as an attachment) on the open route's draft.
+pub fn add_context(s: &mut App, record: Value, image: Option<String>) {
+    let d = draft_mut(s);
+    d.context.push(record);
+    d.attachments.extend(image);
+    d.edit.focused = true;
+}
+
+/// `formatComposerContextReference` links ahead of the typed text, as web's chips sit inline.
+fn with_context_references(context: &[Value], text: &str) -> String {
+    let mut out: Vec<String> = context
+        .iter()
+        .map(|r| format!("[{}](t3-context://v1/{}/{})", data::s(r, "label"), data::s(r, "kind"), data::s(r, "contextId")))
+        .collect();
+    if !text.is_empty() {
+        out.push(text.to_string());
+    }
+    out.join(" ")
+}
+
+/// A sent message as web shows it: each context reference link reads as its label.
+pub fn display_text(text: &str) -> std::borrow::Cow<'_, str> {
+    if !text.contains("](t3-context://") {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::new();
+    let mut rest = text;
+    while let Some(mid) = rest.find("](t3-context://") {
+        let (Some(open), Some(close)) = (rest[..mid].rfind('['), rest[mid..].find(')')) else { break };
+        let start = if rest[..open].ends_with('!') { open - 1 } else { open };
+        out.push_str(&rest[..start]);
+        out.push_str(&rest[open + 1..mid]);
+        rest = &rest[mid + close + 1..];
+    }
+    out.push_str(rest);
+    std::borrow::Cow::Owned(out)
 }
 
 /// Puts `text` back into the open route's draft after what is already there.
@@ -1001,6 +1085,19 @@ mod tests {
         assert!(s.ui.chat.composer.drafts[&id].edit.focused);
         s.navigate(Route::Home { project_id: None });
         assert!(s.ui.chat.composer.drafts["home"].edit.focused);
+    }
+
+    #[test]
+    fn context_records_lead_the_message_as_reference_links() {
+        let record = json!({"kind": "preview-annotation", "contextId": "preview-annotation_1", "label": "Demo"});
+        assert_eq!(
+            with_context_references(&[record.clone()], "make it blue"),
+            "[Demo](t3-context://v1/preview-annotation/preview-annotation_1) make it blue"
+        );
+        assert_eq!(with_context_references(&[record], ""), "[Demo](t3-context://v1/preview-annotation/preview-annotation_1)");
+        assert_eq!(with_context_references(&[], "hi"), "hi");
+        assert_eq!(display_text("[Demo](t3-context://v1/preview-annotation/a_1) make it ![x](t3-context://v1/image/b) blue"), "Demo make it x blue");
+        assert_eq!(display_text("[plain](https://a.b)"), "[plain](https://a.b)");
     }
 
     #[test]
