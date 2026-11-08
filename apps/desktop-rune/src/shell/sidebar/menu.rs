@@ -287,8 +287,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         out.push(leaf(item("Find in thread", |s, _| {
             close(s);
             crate::chat::timeline::find::open(s);
-        })
-        .icon(&icons::SEARCH)));
+        })));
         out.push(MenuEntry::Separator);
     }
     if let Some(branch) = th.branch.clone() {
