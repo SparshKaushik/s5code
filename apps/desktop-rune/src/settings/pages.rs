@@ -1,6 +1,6 @@
 use super::controls as c;
 use crate::App;
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use rune::{Cx, El, col, row, text};
 use serde_json::Value;
 use std::sync::OnceLock;
@@ -102,11 +102,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .into_iter()
                 .flatten()
                 .filter(|spec| !(project && spec["key"] == "fallbackModelSelection"))
-                // Web shows the day count and the PR exemption only while auto-settle is on.
-                .filter(|spec| {
-                    !matches!(spec["key"].as_str(), Some("sidebarAutoSettleAfterDays" | "sidebarAutoSettleKeepPullRequests"))
-                        || !super::value(s, "sidebarAutoSettleAfterDays").is_null()
-                })
+                .filter(|spec| c::visible(s, spec))
                 .map(|spec| c::setting_row(s, cx, t, spec));
             // `AdvancedSettings`: a fold at the end of the previous section's card.
             if title == "Advanced" {
@@ -124,6 +120,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         for (title, children) in groups {
             if !children.is_empty() {
                 page = page.child(c::section(title, children, t));
+            }
+            // Web's server scan sits between Repositories and Writing & review.
+            if path == "source-control" && title == "Repositories" {
+                for section in super::source_control::view(s, t) {
+                    page = page.child(section);
+                }
             }
         }
         return page;

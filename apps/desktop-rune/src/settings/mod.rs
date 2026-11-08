@@ -12,6 +12,7 @@ mod projects;
 mod providers;
 mod scope;
 mod snooze;
+mod source_control;
 mod browser_profiles;
 mod tasks;
 mod themes;
@@ -114,9 +115,48 @@ fn apply_patch(settings: &mut Value, patch: &Value) {
 const AUTO_SETTLE_SWITCH: &str = "autoSettleInactive";
 const AUTO_SETTLE_DAYS: &str = "sidebarAutoSettleAfterDays";
 
+/// Rows for one field of an object setting, written as `parent.field`.
+pub fn nested(key: &str) -> Option<(&'static str, &str)> {
+    ["storageCleanup", "sourceControlWritingStyle"].into_iter().find_map(|parent| {
+        key.strip_prefix(parent)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .map(|field| (parent, field))
+    })
+}
+
+/// An object setting with every field present, so a row can patch one field and send the
+/// whole object (the optimistic copy is a shallow merge).
+pub fn nested_object(s: &App, parent: &str) -> Value {
+    complete_object(parent, value(s, parent))
+}
+
+fn complete_object(parent: &str, stored: Value) -> Value {
+    let mut object = scope::defaults()[parent].clone();
+    if !object.is_object() {
+        object = json!({});
+    }
+    match stored {
+        Value::Object(stored) => {
+            for (field, v) in stored {
+                object[field.as_str()] = v;
+            }
+        }
+        // The legacy writing style was one instructions string (`LegacySourceControlWritingStyle`).
+        Value::String(instructions) => {
+            object["mode"] = json!(if instructions.is_empty() { "repo_conventions" } else { "custom" });
+            object["customInstructions"] = json!(instructions);
+        }
+        _ => {}
+    }
+    object
+}
+
 pub fn value(s: &App, key: &str) -> Value {
     if key == AUTO_SETTLE_SWITCH {
         return json!(!value(s, AUTO_SETTLE_DAYS).is_null());
+    }
+    if let Some((parent, field)) = nested(key) {
+        return nested_object(s, parent)[field].clone();
     }
     if let Some(key) = key.strip_prefix("project::") {
         if let Some((id, field)) = key.split_once("::") {
@@ -137,9 +177,6 @@ pub fn value(s: &App, key: &str) -> Value {
             return providers::field_value(s, id, field);
         }
     }
-    if let Some(field) = key.strip_prefix("storageCleanup.") {
-        return server_settings(s)["storageCleanup"][field].clone();
-    }
     if scope::project_key(key) {
         if let Some(project) = &s.ui.settings.project {
             if let Some(v) = server_settings(s)["projectSettingsOverrides"][project].get(key) {
@@ -159,6 +196,11 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     if key == AUTO_SETTLE_SWITCH {
         let days = scope::defaults()[AUTO_SETTLE_DAYS].clone();
         return update(s, AUTO_SETTLE_DAYS, if value == true { days } else { Value::Null });
+    }
+    if let Some((parent, field)) = nested(key) {
+        let mut object = nested_object(s, parent);
+        object[field] = value;
+        return update(s, parent, object);
     }
     if let Some(key) = key.strip_prefix("project::") {
         if let Some((id, field)) = key.split_once("::") {
@@ -193,12 +235,7 @@ pub fn update(s: &mut App, key: &str, value: Value) {
             s.client_settings.save();
         }
     } else {
-        let patch = if let Some(field) = key.strip_prefix("storageCleanup.") {
-            // The whole object, so the optimistic copy (a shallow merge) keeps the other rules.
-            let mut cleanup = server_settings(s)["storageCleanup"].clone();
-            cleanup[field] = value;
-            json!({ "storageCleanup": cleanup })
-        } else if let Some(project) =
+        let patch = if let Some(project) =
             s.ui.settings
                 .project
                 .as_ref()
@@ -255,7 +292,8 @@ pub fn parse_input(key: &str, current: &Value, text: &str) -> Option<Value> {
     if current.is_number() {
         return serde_json::from_str(text.trim()).ok().filter(Value::is_number);
     }
-    Some(json!(text))
+    // Every text setting is a `TrimmedString`.
+    Some(json!(text.trim()))
 }
 
 /// Commits one field's text if the user changed it. The runtime reaches every field's `on_edit`
@@ -351,6 +389,9 @@ pub fn poll(s: &mut App) -> bool {
         }
         if page.as_deref() == Some("archived") {
             request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
+        }
+        if page.as_deref() == Some("source-control") {
+            source_control::scan(s);
         }
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
@@ -1182,6 +1223,22 @@ mod patch_tests {
         assert_eq!(parse_input("sidebarAutoSettleAfterDays", &json!(3), "91"), None);
         assert_eq!(parse_input("sidebarAutoSettleAfterDays", &json!(3), "2.5"), None);
         assert_eq!(parse_input("branchNamePrefix", &json!("t3"), "me"), Some(json!("me")));
+        assert_eq!(parse_input("reviewGuideInstructions", &json!(""), "  Skip tests\n"), Some(json!("Skip tests")));
+    }
+    #[test]
+    fn a_nested_row_patches_its_whole_parent_object() {
+        assert_eq!(nested("sourceControlWritingStyle.mode"), Some(("sourceControlWritingStyle", "mode")));
+        assert_eq!(nested("storageCleanup.enabled"), Some(("storageCleanup", "enabled")));
+        assert_eq!(nested("sourceControlWritingStyleX"), None);
+        // The server may store the legacy instructions string or omit default fields.
+        assert_eq!(
+            complete_object("sourceControlWritingStyle", json!("Be brief")),
+            json!({"mode":"custom","customInstructions":"Be brief","followChangeRequestTemplates":true})
+        );
+        assert_eq!(
+            complete_object("sourceControlWritingStyle", json!({"mode":"conventional_commits"})),
+            json!({"mode":"conventional_commits","customInstructions":"","followChangeRequestTemplates":true})
+        );
     }
     #[test]
     fn failures_read_as_sentences_not_cause_json() {
