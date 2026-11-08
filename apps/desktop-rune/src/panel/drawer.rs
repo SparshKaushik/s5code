@@ -368,6 +368,10 @@ pub fn session_ended(app: &mut App, thread: &str, id: &str) {
 
 /// Chords a focused terminal handles before the program sees the key (`when: terminalFocus`).
 pub fn shortcut(app: &mut App, thread: &str, id: &str, e: &KeyEvent) -> bool {
+    // The details card's menus don't take focus, so Escape must close them from here.
+    if e.key == rune::Key::Escape && app.ui.chat.details.menu.take().is_some() {
+        return true;
+    }
     let owner = app
         .ui
         .panel
