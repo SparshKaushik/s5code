@@ -6,6 +6,7 @@ mod files;
 mod preview;
 mod terminal;
 mod vt;
+pub use terminal::take_message_context;
 
 use crate::{
     App, Route, data, icons, kit,

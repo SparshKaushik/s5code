@@ -225,7 +225,7 @@ fn send(s: &mut App) {
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let message_id = s5_net::uuid();
-    let context = crate::panel::terminal::take_message_context(s, &text);
+    let context = crate::panel::take_message_context(s, &text);
     let (thread_id, mut payload, launch) = match route {
         Route::Thread(id) => {
             let mut cmd = json!({
