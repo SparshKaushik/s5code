@@ -287,6 +287,7 @@ fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
         tx,
         rx,
         replies: HashMap::new(),
+        chunks: HashMap::new(),
         next_id: 0,
         resources: HashMap::new(),
         resource_events: HashMap::new(),

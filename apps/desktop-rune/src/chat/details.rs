@@ -129,7 +129,6 @@ fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
 
 /// A card menu row: icon, label, and the reason it is disabled as its tooltip.
 fn menu_row(t: &T, glyph: Option<El>, label: &str, on_press: Option<impl Fn(&mut App) + 'static>, help: Option<String>) -> El {
-    let enabled = on_press.is_some();
     let mut item = row().w_full().h(32.0).px(8.0).gap(8.0).center_y().radius(radius::MD).label(label.to_string());
     if let Some(glyph) = glyph {
         item = item.child(glyph);
