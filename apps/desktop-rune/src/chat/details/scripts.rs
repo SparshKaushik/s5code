@@ -2,7 +2,7 @@
 //! menu, the add/edit dialog with shortcut capture, delete, and running in the terminal drawer.
 use std::collections::HashMap;
 
-use rune::{Cursor, El, Icon, Key, KeyEvent, TextEdit, col, el, icon, row, text};
+use rune::{Align, Cursor, El, Icon, Side, Key, KeyEvent, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 use crate::chat::composer;
@@ -490,7 +490,7 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
         .key("script-icon");
     let name = kit::Input::new(&e.name).placeholder("Test").disabled(saving).on_edit(|s: &mut App| &mut editor_mut(s).name).on_submit(|s: &mut App, _| save(s)).build(t).single_line().grow(1.0).shrink().min_w(0.0);
     let mut fields = col().w_full().gap(16.0).child(col().w_full().gap(6.0).child(field_label("Name")).child(row().w_full().gap(8.0).center_y().child(picker).child(name)));
-    if e.icons_open {
+    let icon_menu = e.icons_open.then(|| {
         let mut grid = col().gap(8.0);
         for pair in ICONS.chunks(3) {
             let mut line = row().gap(8.0);
@@ -520,8 +520,10 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
             }
             grid = grid.child(line);
         }
-        fields = fields.child(el().padding(8.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, rune::Color::BLACK.alpha(0.2)).child(grid));
-    }
+        el().key("script-icons").padding(8.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, rune::Color::BLACK.alpha(0.2)).child(grid)
+            .anchored("script-icon", Side::Bottom, Align::Start, 4.0)
+            .modal(true, |s: &mut App| editor_mut(s).icons_open = false)
+    });
     let capturing = e.capturing && !(e.name.focused || e.command.focused || e.preview.focused);
     let keybinding = row()
         .key("script-keybinding")
@@ -544,7 +546,7 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
         .child(col().w_full().gap(6.0).child(field_label("Keybinding")).child(keybinding).child(help(
             "Press a shortcut. Use Backspace to clear. Shortcuts are environment-wide. Projects using the same action share its shortcut.",
         )))
-        .child(col().w_full().gap(6.0).child(field_label("Command")).child(kit::TextArea::new(&e.command).placeholder("bun test").rows(3).on_edit(|s: &mut App| &mut editor_mut(s).command).build(&k)))
+        .child(col().w_full().gap(6.0).child(field_label("Command")).child(kit::TextArea::new(&e.command).placeholder("bun test").rows(3).on_edit(|s: &mut App| &mut editor_mut(s).command).build(&k).w_full()))
         .child(
             col()
                 .w_full()
@@ -576,6 +578,7 @@ pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
         .child(footer)
         .on_close(close)
         .build(t, out);
+    out.extend(icon_menu);
     if ui.confirm_delete {
         let name = e.name.text.trim().to_string();
         kit::Dialog::new("script-delete", format!("Delete action \"{name}\"?"))

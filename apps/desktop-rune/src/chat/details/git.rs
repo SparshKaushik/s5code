@@ -739,7 +739,8 @@ fn commit_dialog(s: &App, t: &T, out: &mut Vec<El>) {
             .placeholder("Leave empty to auto-generate")
             .rows(3)
             .on_edit(|s: &mut App| &mut s.ui.chat.details.git.commit.get_or_insert_with(Commit::default).message)
-            .build(&k),
+            .build(&k)
+            .w_full(),
     );
     let footer = row()
         .w_full()

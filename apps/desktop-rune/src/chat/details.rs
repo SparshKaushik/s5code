@@ -414,8 +414,12 @@ pub fn overlays(s: &App, t: &T) -> Vec<El> {
     out
 }
 
-/// Shortcut capture in the script editor, then `script.{id}.run` shortcuts.
+/// Escape closes an open menu even when the terminal has focus; then script editor shortcut
+/// capture and `script.{id}.run` shortcuts.
 pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
+    if e.key == Key::Escape && s.ui.chat.details.menu.take().is_some() {
+        return true;
+    }
     scripts::on_key(s, e)
 }
 
