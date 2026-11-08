@@ -1671,14 +1671,15 @@ mod tests {
             "htmlPreview": "<button id=\"go\">Sign in</button>", "componentName": null, "source": null, "styles": "color: red",
             "rect": { "x": 1 }, "doc": { "x": 1 },
         });
-        let record = annotation("abc", &element);
+        let record = annotation("abc", &element, "Make it blue");
         assert_eq!(record["contextId"], "preview-annotation_abc");
+        assert_eq!(record["comment"], "Make it blue");
         assert_eq!(record["label"], "Demo home");
         assert_eq!(record["targetSummary"], "1 selected element");
         let details = &record["elements"][0];
         assert_eq!(details["selector"], "#go");
         assert!(details.get("rect").is_none() && details["source"].is_null());
-        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }));
+        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }), "");
         assert_eq!(untitled["label"], "Preview annotation");
         assert!(untitled["pageTitle"].is_null());
     }
