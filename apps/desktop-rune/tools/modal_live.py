@@ -132,6 +132,9 @@ def main(argv: list[str]):
         out_dir = rest[0]
         if os.path.exists(STATE):
             sys.exit(f"{STATE} exists: `stop` the running sandbox first")
+        for f in ("bundle.tgz", "s5code-server"):
+            if not os.path.isfile(os.path.join(out_dir, f)):
+                sys.exit(f"{out_dir}/{f} missing: did tools/ci-build.sh succeed?")
         app = modal.App.lookup("s5code-rune-live", create_if_missing=True)
         sb = modal.Sandbox.create("sleep", "infinity", app=app, image=image, cpu=4, memory=8192,
                                   timeout=3 * 3600, idle_timeout=20 * 60)
