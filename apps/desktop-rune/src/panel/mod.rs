@@ -309,6 +309,7 @@ fn when_context(app: &App, name: &str) -> bool {
         "terminalOpen" => terminal_active(app) || context(app).is_some_and(|(thread, _)| app.ui.panel.drawer.is_open(&thread)),
         "rightPanelOpen" => app.ui.shell.panel_open,
         "previewOpen" => app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))),
+        "usagePageOpen" => matches!(app.route, crate::Route::Usage),
         _ => false,
     }
 }
