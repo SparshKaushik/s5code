@@ -68,6 +68,44 @@ pub fn draft_project(s: &App) -> Option<&Value> {
         .max_by(|a, b| activity(a).cmp(&activity(b)).then_with(|| data::s(b, "title").cmp(data::s(a, "title"))))
 }
 
+/// `IndexDraftLanding` shows `NoProjectsHero` once every shell has loaded and no project is left.
+pub fn no_projects(s: &App) -> bool {
+    let st = s.state();
+    st.shell_ready && matches!(s.frame_route(), Route::Home { .. }) && st.projects.iter().all(|p| !p["archivedAt"].is_null())
+}
+
+/// NoProjectsHero: the first-run prompt to add a project, or to start without one.
+pub fn hero(s: &App, t: &T) -> El {
+    use crate::shell::palette::{self, actions};
+    let scratch = actions::scratch_available(s);
+    let add = crate::kit::Button::new("Add project").size("sm").icon(&icons::PLUS).on_press(palette::open_add_project).build(t);
+    let mut buttons = row().pt(24.0).gap(8.0).justify_center().child(add);
+    if scratch {
+        buttons = buttons.child(
+            crate::kit::Button::new("Start without a project").size("sm").variant("outline").icon(&icons::MESSAGE_SQUARE_DASHED).on_press(actions::new_without_project).build(t),
+        );
+    }
+    let description = if scratch { "Add a project, or start without one." } else { "Add a project to start your first thread." };
+    col()
+        .key("home")
+        .w_full()
+        .grow(1.0)
+        .min_h(0.0)
+        .center()
+        .px(48.0)
+        .py(48.0)
+        .child(
+            col()
+                .max_w(512.0)
+                .px(32.0)
+                .py(48.0)
+                .items_center()
+                .child(text("What should we work on?").font(theme::weight(theme::TEXT_3XL, theme::SEMIBOLD)).color(t.c.foreground))
+                .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).pt(4.0))
+                .child(buttons),
+        )
+}
+
 /// The empty conversation (MessagesTimeline's empty state): a prompt centred in the lane.
 pub fn view(cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);

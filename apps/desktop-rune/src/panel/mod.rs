@@ -216,6 +216,9 @@ pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
                 let k = &v["shortcut"];
                 let yes = |name: &str| k[name].as_bool().unwrap_or(false);
                 let key = match &e.key {
+                    // Shift turns "[" into "{" on the key event; bindings name the unshifted key.
+                    Key::Command('{') => "[".to_string(),
+                    Key::Command('}') => "]".to_string(),
                     Key::Command(c) => c.to_string(),
                     Key::Text(v) => v.clone(),
                     _ => String::new(),
