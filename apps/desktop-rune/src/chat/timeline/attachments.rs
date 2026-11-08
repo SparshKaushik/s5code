@@ -13,6 +13,8 @@ pub struct Assets {
     pending: HashMap<String, u64>,
     ready: HashMap<String, (String, Pixels)>,
     failed: std::collections::HashSet<String>,
+    /// The image the lightbox shows, by attachment id.
+    pub open: Option<String>,
 }
 
 pub fn poll(app: &mut App) -> bool {
@@ -135,13 +137,79 @@ pub fn view(app: &App, attachment: &Value, t: &T) -> El {
     };
     if let Some((url, _)) = asset {
         let url = url.clone();
+        let image = s(attachment, "mimeType").starts_with("image/");
+        let id = id.to_owned();
         content = content
             .focusable(true)
             .role("button")
-            .label(format!("Open {name}"))
-            .on_press_tx(move |_: &mut App, tx| {
-                let _ = tx.open_url(&url);
+            .cursor(rune::Cursor::Pointer)
+            .label(format!("{} {name}", if image { "Preview" } else { "Open" }))
+            .on_press_tx(move |app: &mut App, tx| {
+                if image {
+                    app.ui.chat.timeline.assets.open = Some(id.clone());
+                } else {
+                    let _ = tx.open_url(&url);
+                }
             });
     }
     content
+}
+
+fn close(app: &mut App) {
+    app.ui.chat.timeline.assets.open = None;
+}
+
+/// Escape closes the lightbox.
+pub fn on_key(app: &mut App, e: &rune::KeyEvent) -> bool {
+    if e.key == rune::Key::Escape && app.ui.chat.timeline.assets.open.is_some() {
+        close(app);
+        return true;
+    }
+    false
+}
+
+/// The open image over the chat (ImageLightbox): click outside, X or Escape closes it.
+pub fn lightbox(app: &App) -> Option<El> {
+    let id = app.ui.chat.timeline.assets.open.as_ref()?;
+    let (url, pixels) = app.ui.chat.timeline.assets.ready.get(id)?;
+    let url = url.clone();
+    let button = |key: &str, glyph: &'static rune::Icon, label: &str| {
+        el().key(key.to_owned())
+            .size(32.0, 32.0)
+            .center()
+            .radius(theme::radius::FULL)
+            .fill(rune::Color::BLACK.alpha(0.5))
+            .hover(rune::Color::BLACK.alpha(0.7))
+            .cursor(rune::Cursor::Pointer)
+            .role("button")
+            .label(label.to_owned())
+            .help(label.to_owned())
+            .child(icon(glyph, 16.0).color(rune::Color::WHITE))
+    };
+    Some(
+        el().key("image-lightbox")
+            .absolute(0.0, 0.0)
+            .w_full()
+            .h_full()
+            .padding(48.0)
+            .center()
+            .fill(rune::Color::BLACK.alpha(0.8))
+            .child(
+                el().w_full()
+                    .h_full()
+                    .role("dialog")
+                    .label("Image preview")
+                    .modal(true, close)
+                    .child(el().w_full().h_full().pixels_fit(pixels, rune::SurfaceFit::Fit))
+                    .child(
+                row()
+                    .pin(None, Some(0.0), Some(0.0), None)
+                    .gap(8.0)
+                    .child(button("image-lightbox-open", &icons::EXTERNAL_LINK, "Open in browser").on_press_tx(move |_: &mut App, tx| {
+                        let _ = tx.open_url(&url);
+                    }))
+                    .child(button("image-lightbox-close", &icons::X, "Close").on_press(close)),
+                    ),
+            ),
+    )
 }

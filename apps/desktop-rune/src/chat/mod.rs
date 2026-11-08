@@ -8,7 +8,7 @@ pub mod home;
 pub mod timeline;
 pub mod topbar;
 
-use rune::{Cx, El, col};
+use rune::{Cx, El, KeyEvent, Tx, col};
 
 use crate::theme::T;
 use crate::{App, Route};
@@ -46,9 +46,20 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .children(home::banner(s, t, &lane))
         .child(composer::view(s, cx, t, &lane))
         .children(details::view(s, cx, t, shown, w))
+        .children({
+            let bw = details::WIDTH.min(w - 2.0 * details::GAP);
+            timeline::find::bar(s, t, w - bw - details::GAP, details::GAP, bw)
+        })
         .children(details::menu(s, t))
-        .children(composer::overlays(s, cx, t));
+        .children(composer::overlays(s, cx, t))
+        .children(timeline::actions::overlays(s, t))
+        .children(timeline::attachments::lightbox(s));
     main.child(topbar::view(s, cx, t))
         .child(stack)
         .children(crate::panel::drawer::view(s, cx, t))
+}
+
+/// Chat keys no focused control took: find in thread, then a question's 1-9 shortcuts.
+pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    timeline::attachments::on_key(s, e) || timeline::find::on_key(s, e, tx) || timeline::question::on_key(s, e, tx)
 }

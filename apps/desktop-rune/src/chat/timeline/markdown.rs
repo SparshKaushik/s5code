@@ -1,3 +1,4 @@
+use super::find::Marks;
 use super::{copy_button, language_icons};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
@@ -44,7 +45,11 @@ fn code_background(t: &T) -> rune::Color {
     }
 }
 
-fn prose(app: &App, source: &str, t: &T) -> El {
+fn marks_for(marks: Option<&Marks>, src: &str) -> Vec<(Vec<std::ops::Range<usize>>, rune_kit::markdown::Highlight)> {
+    marks.map_or_else(Vec::new, |m| m.markdown(src))
+}
+
+fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
     let mut out = col().w_full().gap(10.4);
     for (index, block) in source
         .trim()
@@ -57,31 +62,32 @@ fn prose(app: &App, source: &str, t: &T) -> El {
             block_style =
                 block_style.heading_font(3, theme::weight(theme::TEXT_SM.lh(18.2), 600.0));
         }
-        let mut content = Markdown::new(block)
-            .selectable(true)
-            .on_link_tx(|_: &mut App, url, tx| {
-                let _ = tx.open_url(url);
-            })
-            .render(&block_style);
-        if index > 0 && block.starts_with('#') {
-            content = col().pt(9.6).child(content);
-        }
-        if block
+        let is_table = block
             .lines()
             .nth(1)
-            .is_some_and(|line| line.contains("---") && line.contains('|'))
-        {
-            content = table(app, block, t);
-        }
+            .is_some_and(|line| line.contains("---") && line.contains('|'));
+        let content = if is_table {
+            table(app, block, t, marks)
+        } else {
+            let content = Markdown::new(block)
+                .selectable(true)
+                .highlights(marks_for(marks, block))
+                .on_link_tx(|_: &mut App, url, tx| {
+                    let _ = tx.open_url(url);
+                })
+                .render(&block_style);
+            if index > 0 && block.starts_with('#') { col().pt(9.6).child(content) } else { content }
+        };
         out = out.child(content);
     }
     out
 }
 
-fn table(app: &App, source: &str, t: &T) -> El {
+fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
     if source.contains("\\|") || source.lines().nth(1).is_some_and(|line| line.contains(':')) {
         return Markdown::new(source)
             .selectable(true)
+            .highlights(marks_for(marks, source))
             .on_link_tx(|_: &mut App, url, tx| {
                 let _ = tx.open_url(url);
             })
@@ -145,6 +151,7 @@ fn table(app: &App, source: &str, t: &T) -> El {
                     .py(if i == 0 { 8.8 } else { 7.2 })
                     .child(
                         Markdown::new(*cell)
+                            .highlights(marks_for(marks, cell))
                             .on_link_tx(|_: &mut App, url, tx| {
                                 let _ = tx.open_url(url);
                             })
@@ -180,10 +187,18 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
     let version = (source, t.dark, colors, unwrapped, copied);
-    rune::memo(format!("md-{id}"), version, || build(app, source, id, t))
+    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None))
 }
 
-fn build(app: &App, source: &str, id: &str, t: &T) -> El {
+/// [`view`] with find-in-thread matches painted; rows with marks build fresh while the bar is open.
+pub fn view_marked(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
+    match marks {
+        None => view(app, source, id, t),
+        Some(_) => build(app, source, id, t, marks),
+    }
+}
+
+fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
     let mut out = col().w_full().gap(10.4);
     let lines: Vec<_> = source.split_inclusive('\n').collect();
     let mut start = 0;
@@ -200,7 +215,7 @@ fn build(app: &App, source: &str, id: &str, t: &T) -> El {
             continue;
         };
         if i > start {
-            out = out.child(prose(app, &lines[start..i].concat(), t));
+            out = out.child(prose(app, &lines[start..i].concat(), t, marks));
         }
         let language = line
             .trim_start_matches(marker)
@@ -251,8 +266,9 @@ fn build(app: &App, source: &str, id: &str, t: &T) -> El {
             )
             .child(copy_button(app, &code, t));
         let fenced = format!("```{language}\n{code}\n```");
-        let code_view = Markdown::new(fenced)
+        let code_view = Markdown::new(fenced.clone())
             .selectable(true)
+            .highlights(marks_for(marks, &fenced))
             .scroll_wide(!wrap)
             .render(
                 &style(t)
@@ -282,7 +298,7 @@ fn build(app: &App, source: &str, id: &str, t: &T) -> El {
         start = i;
     }
     if start < lines.len() {
-        out = out.child(prose(app, &lines[start..].concat(), t));
+        out = out.child(prose(app, &lines[start..].concat(), t, marks));
     }
     if source.is_empty() {
         out = out.child(icon(&icons::ELLIPSIS, 16.0).color(t.c.muted_foreground));

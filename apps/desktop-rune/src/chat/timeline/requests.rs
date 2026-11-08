@@ -13,6 +13,19 @@ pub fn command(thread: &str, request: &str, fields: Value) -> Value {
 }
 use std::collections::HashMap;
 
+/// One question's answer (pendingUserInput.ts resolvePendingUserInputAnswer): its own typed
+/// answer when it takes one, else the picked option (a string) or options (an array).
+pub fn resolve(question: &Value, selected: Option<&Vec<String>>, custom: Option<&str>) -> Option<Value> {
+    if question["allowCustomAnswer"].as_bool() != Some(false)
+        && let Some(answer) = custom.map(str::trim).filter(|a| !a.is_empty())
+    {
+        return Some(Value::String(answer.to_owned()));
+    }
+    let values = selected.filter(|v| !v.is_empty())?;
+    Some(if question["multiSelect"].as_bool() == Some(true) { json!(values) } else { json!(values[0]) })
+}
+
+/// The answers resolved so far, keyed by question id.
 pub fn answers(
     item: &Value,
     selected: &HashMap<String, Vec<String>>,
@@ -21,21 +34,8 @@ pub fn answers(
     let mut result = Map::new();
     for question in array(item, "questions") {
         let id = s(question, "id");
-        if question["allowCustomAnswer"].as_bool() != Some(false) {
-            if let Some(answer) = custom(id).filter(|a| !a.trim().is_empty()) {
-                result.insert(id.to_owned(), Value::String(answer.trim().to_owned()));
-                continue;
-            }
-        }
-        if let Some(values) = selected.get(id).filter(|v| !v.is_empty()) {
-            result.insert(
-                id.to_owned(),
-                if question["multiSelect"].as_bool() == Some(true) {
-                    serde_json::json!(values)
-                } else {
-                    serde_json::json!(values[0])
-                },
-            );
+        if let Some(answer) = resolve(question, selected.get(id), custom(id).as_deref()) {
+            result.insert(id.to_owned(), answer);
         }
     }
     Value::Object(result)
@@ -79,5 +79,8 @@ mod tests {
             answers,
             json!({"single":"one","multi":["one","two"],"custom":"typed","fixed":"option"})
         );
+        let blank = resolve(&json!({"id":"q"}), Some(&vec!["opt".to_owned()]), Some("   "));
+        assert_eq!(blank, Some(json!("opt")), "a blank typed answer falls back to the option");
+        assert_eq!(resolve(&json!({"id":"q","multiSelect":true}), Some(&vec![]), None), None);
     }
 }

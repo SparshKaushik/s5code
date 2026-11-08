@@ -272,7 +272,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<E
     let card = card(s, t)?;
     match shown {
         Shown::None => None,
-        Shown::Inline => Some(card.absolute(w - WIDTH - GAP, GAP)),
+        Shown::Inline => Some(card.absolute(w - WIDTH - GAP, GAP + super::timeline::find::offset(s))),
         Shown::Popover => Some(card.anchored("topbar-details", Side::Bottom, Align::End, 4.0).modal(true, |s: &mut App| {
             s.ui.chat.details.popover = None;
             s.ui.chat.details.menu = None;
