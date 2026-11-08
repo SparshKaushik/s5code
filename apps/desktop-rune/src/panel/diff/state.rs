@@ -394,7 +394,6 @@ impl DiffState {
                 self.shift = ev.mods.shift;
                 false
             }
-            _ if tx.focused().is_some() && !ev.is_command('c') => false,
             Key::Text(t) if !ev.mods.cmd && !ev.mods.ctrl && !ev.mods.alt => match t.as_str() {
                 "j" => self.next_hunk(true, tx),
                 "k" => self.next_hunk(false, tx),

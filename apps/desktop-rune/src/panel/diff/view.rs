@@ -200,7 +200,7 @@ pub fn build(s: &App, look: Rc<Look>) -> El {
         .on_visible_rows(|s: &mut App, rows| st_mut(s).set_visible_rows(rows));
     let scroll = col().key("scroll").w_full().grow(1.0).min_h(0.0).scroll(ScrollSpec { stick_bottom: false });
     let scroll = if wrap { scroll } else { scroll.scroll_xy() };
-    let mut root = col().key("panel-diff-view").grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list));
+    let mut root = col().key("panel-diff-view").focusable(true).grow(1.0).min_w(0.0).min_h(0.0).self_stretch().fill(look.bg).child(scroll.child(list));
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }

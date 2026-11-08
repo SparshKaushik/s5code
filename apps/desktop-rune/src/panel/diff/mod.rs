@@ -85,6 +85,8 @@ pub struct Ui {
     seen: u64,
     /// The user folded or opened a file, so reloads keep their choice over the default.
     touched: bool,
+    /// Those choices by path, kept while a file is out of the list (hidden, or its patch loading).
+    folds: HashMap<String, bool>,
     menu_open: bool,
     sub: Option<Sub>,
     commits: Option<Result<(Vec<Commit>, bool), String>>,
@@ -117,6 +119,7 @@ impl Default for Ui {
             error: None,
             seen: 0,
             touched: false,
+            folds: HashMap::new(),
             menu_open: false,
             sub: None,
             commits: None,
@@ -170,6 +173,7 @@ fn choose(app: &mut App, scope: Scope) {
     if ui.scope != scope {
         ui.scope = scope;
         ui.touched = false;
+        ui.folds.clear();
     }
 }
 
@@ -324,14 +328,18 @@ fn apply(app: &mut App) {
     let default_collapsed = setting(app, "diffFilesCollapsed", true);
     let ui = &mut app.ui.panel.diff;
     let files: Vec<FileDiff> = ui.files.iter().filter(|f| !ui.hide_tests || !is_test_file(f.path())).cloned().collect();
-    let collapsed = if ui.touched {
-        ui.state.collapsed_paths()
-    } else if default_collapsed {
-        files.iter().map(|f| f.path().to_string()).collect()
-    } else {
-        vec![]
-    };
+    let collapsed = collapsed_for(&mut ui.folds, &ui.state, ui.touched, &files, default_collapsed);
     ui.state.set_files(files, &collapsed);
+}
+
+fn collapsed_for(folds: &mut HashMap<String, bool>, shown: &DiffState, touched: bool, files: &[FileDiff], default: bool) -> Vec<String> {
+    if touched {
+        let collapsed = shown.collapsed_paths();
+        for f in shown.files() {
+            folds.insert(f.path().to_string(), collapsed.iter().any(|p| p == f.path()));
+        }
+    }
+    files.iter().map(|f| f.path()).filter(|p| folds.get(*p).copied().unwrap_or(default)).map(str::to_string).collect()
 }
 
 fn take(app: &mut App, id: u64) -> Option<Result<Value, Value>> {
@@ -381,6 +389,7 @@ pub fn poll(app: &mut App) -> bool {
         }
         if ui.shown.as_ref() != Some(&scope) {
             ui.touched = false;
+            ui.folds.clear();
         }
         ui.shown = Some(scope.clone());
         let mut missing = vec![];
@@ -801,7 +810,7 @@ fn header(app: &App, t: &T) -> El {
             ui.sub = None;
         });
     let scope = if commit { scope.min_w(0.0).shrink() } else { scope };
-    let mut left = row().grow(1.0).min_w(0.0).gap(12.0).center_y().child(scope);
+    let mut left = row().grow(1.0).min_w(0.0).shrink().gap(12.0).center_y().child(scope);
     if let Scope::Commit(sha) = &ui.scope {
         left = left.child(text(short(sha).to_string()).font(theme::MONO_XS).color(t.c.muted_foreground));
     }
@@ -811,6 +820,7 @@ fn header(app: &App, t: &T) -> El {
         left = left.child(
             row()
                 .min_w(0.0)
+                .shrink()
                 .gap(8.0)
                 .center_y()
                 .child(text(head).font(theme::TEXT_XS).color(t.c.muted_foreground).single_line().truncate().max_w(192.0).min_w(0.0).shrink())
@@ -820,7 +830,7 @@ fn header(app: &App, t: &T) -> El {
     }
     let st = &ui.state;
     let files = st.files();
-    let mut right = row().gap(4.0).center_y().shrink();
+    let mut right = row().gap(4.0).center_y();
     if !files.is_empty() {
         let (add, del) = files.iter().map(|f| counts(ui, f)).fold((0, 0), |(a, d), (fa, fd)| (a + fa, d + fd));
         right = right.child(
@@ -1176,6 +1186,23 @@ mod tests {
         assert_eq!(paths, vec!["b.ts", "c.ts"]);
         let src = json!({ "files": [{ "path": "n.ts", "previousPath": "o.ts", "additions": 1, "deletions": 2 }] });
         assert_eq!(file_stats(&src), vec![FileStat { path: "n.ts".into(), previous: Some("o.ts".into()), additions: 1, deletions: 2 }]);
+    }
+
+    #[test]
+    fn a_file_keeps_its_fold_while_out_of_the_list_and_newcomers_take_the_default() {
+        let patch = |paths: &[&str]| rune_kit::diff::parse(&paths.iter().map(|p| format!("diff --git a/{p} b/{p}\n--- a/{p}\n+++ b/{p}\n@@ -1 +1 @@\n-x\n+y\n")).collect::<String>());
+        let mut folds = HashMap::new();
+        let mut state = DiffState::new(vec![]);
+        let ab = patch(&["a.ts", "b.ts"]);
+        let collapsed = collapsed_for(&mut folds, &state, false, &ab, true);
+        state.set_files(ab, &collapsed);
+        assert_eq!(state.collapsed_paths(), vec!["a.ts", "b.ts"]);
+        state.set_collapsed(0, false);
+        let b = patch(&["b.ts"]);
+        let collapsed = collapsed_for(&mut folds, &state, true, &b, true);
+        state.set_files(b, &collapsed);
+        let abc = patch(&["a.ts", "b.ts", "c.ts"]);
+        assert_eq!(collapsed_for(&mut folds, &state, true, &abc, true), vec!["b.ts", "c.ts"]);
     }
 
     #[test]
