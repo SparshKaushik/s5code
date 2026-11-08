@@ -36,6 +36,11 @@ pub struct Session {
     exit_noted: bool,
     /// When the PTY hears the settled grid (`notifyResize` in the web's ghostty surface).
     notify_at: Option<Instant>,
+    /// A foreground process holds the shell (`hasRunningSubprocess`).
+    pub running: bool,
+    attached: bool,
+    /// Input typed once the attach snapshot lands, for a project script run in a new terminal.
+    queued: Option<String>,
 }
 
 impl Session {
@@ -56,6 +61,9 @@ impl Session {
             ended: false,
             exit_noted: false,
             notify_at: None,
+            running: false,
+            attached: false,
+            queued: None,
         }
     }
 
@@ -137,6 +145,15 @@ pub fn ensure(app: &mut App, thread: &str, id: &str, cwd: &str, worktree: Option
         session.payload = Some(payload);
     }
     app.ui.panel.terminal.sessions.push(session);
+}
+
+/// Types `data` into the terminal, attaching it first when needed (`runProjectScript`).
+pub fn run(app: &mut App, thread: &str, id: &str, cwd: &str, worktree: Option<&str>, data: String) {
+    ensure(app, thread, id, cwd, worktree);
+    match app.ui.panel.terminal.get_mut(thread, id) {
+        Some(session) if !session.attached => session.queued = Some(data),
+        _ => send(app, thread, id, data),
+    }
 }
 
 /// No `resume`, like the web's first attach: the server answers a resumed attach to an id it
@@ -281,6 +298,11 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             {
                 refit.push((session.thread.clone(), session.id.clone(), cols, rows));
             }
+            if session.attached
+                && let Some(queued) = session.queued.take()
+            {
+                writes.push((session.thread.clone(), session.id.clone(), queued));
+            }
         }
         if session.vt.sync_pending() {
             changed |= session.vt.flush_sync(false);
@@ -390,9 +412,12 @@ fn apply(session: &mut Session, event: &Value) {
             session.sequence = snapshot["sequence"].as_u64();
             session.exit_noted = false;
             session.ended = false;
+            session.running = snapshot["hasRunningSubprocess"] == true;
+            session.attached = true;
             note_exit(session);
         }
         "activity" => {
+            session.running = event["hasRunningSubprocess"] == true;
             if let (Some(cols), Some(rows)) = (event["cols"].as_u64(), event["rows"].as_u64()) {
                 session.vt.resize(cols as usize, rows as usize);
             }

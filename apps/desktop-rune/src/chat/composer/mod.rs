@@ -220,10 +220,11 @@ fn send(s: &mut App) {
         _ => {
             let Some(project_id) = project_id else { return };
             let thread_id = format!("thread:project:{project_id}:{}", s5_net::uuid());
+            let workspace = crate::chat::home::take_workspace(s, &project_id);
             let params = json!({
                 "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project_id,
                 "title": "New thread", "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
-                "interactionMode": interaction, "workspaceStrategy": {"type": "root"},
+                "interactionMode": interaction, "workspaceStrategy": workspace,
                 "initialMessage": {"messageId": message_id, "text": text, "attachments": []},
             });
             (thread_id, params, true)

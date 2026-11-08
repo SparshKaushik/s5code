@@ -1,5 +1,5 @@
 mod about;
-mod auth;
+pub(crate) mod auth;
 mod balance;
 pub mod client;
 mod connections;

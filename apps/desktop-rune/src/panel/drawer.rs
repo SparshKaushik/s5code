@@ -240,6 +240,31 @@ pub fn new_terminal(app: &mut App, owner: Owner) {
     sync_topbar(app);
 }
 
+/// Types `input` into an idle drawer terminal, the active one first, else a new one
+/// (`findReusableProjectScriptTerminal`); panel-owned terminals are never reused.
+pub fn run(app: &mut App, cwd: &str, worktree: Option<&str>, input: String) {
+    let Some(thread) = current_thread(app) else {
+        return;
+    };
+    let ui = &app.ui.panel;
+    let panel: Vec<&String> = ui.drawer.panel.get(&thread).map(|g| g.ids().collect()).unwrap_or_default();
+    let idle = |id: &&String| !panel.contains(id) && !ui.terminal.get(&thread, id).is_some_and(|s| s.running);
+    let reusable = ui.drawer.threads.get(&thread).and_then(|t| {
+        let ids: Vec<&String> = t.groups.ids().filter(idle).collect();
+        ids.iter().find(|id| ***id == t.groups.active).or(ids.first()).map(|id| id.to_string())
+    });
+    let id = reusable.unwrap_or_else(|| allocate(app, &thread));
+    let state = app.ui.panel.drawer.threads.entry(thread.clone()).or_default();
+    state.open = true;
+    if !state.groups.ids().any(|v| *v == id) {
+        state.groups.add(&id);
+    }
+    state.groups.activate(&id);
+    terminal::run(app, &thread, &id, cwd, worktree, input);
+    terminal::focus(app, &thread, &id);
+    sync_topbar(app);
+}
+
 pub fn split(app: &mut App, owner: Owner, vertical: bool) {
     let Some(thread) = current_thread(app) else {
         return;

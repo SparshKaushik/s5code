@@ -35,7 +35,7 @@ fn open_titled(s: &mut App, title: &str) {
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     sidebar::release_undo_key(s, e);
-    palette::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
+    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
@@ -50,6 +50,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         Route::Usage => rune::col().key("main").grow(1.0).h_full().fill(t.c.background),
         _ => chat::view(s, cx, t),
     };
+    overlays.extend(chat::details::overlays(s, t));
     let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main);
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
