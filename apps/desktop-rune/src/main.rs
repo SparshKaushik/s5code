@@ -210,7 +210,9 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", (1440.0, 900.0), App::new, view)
     };
-    RuneApp::new(spec).run();
+    let app = RuneApp::new(spec);
+    notify::set_window(app.handle());
+    app.run();
     panel::browser::shutdown();
     host::shutdown();
 }
