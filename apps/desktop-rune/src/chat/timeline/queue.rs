@@ -269,7 +269,7 @@ pub fn view(app: &App, thread_id: &str, t: &T, max_w: f32) -> Option<El> {
 mod tests {
     use super::*;
 
-    fn runs(w: &Workflow) -> Vec<&str> {
+    fn runs<'a>(w: &Workflow<'a>) -> Vec<&'a str> {
         w.queued.iter().map(|q| q.run).collect()
     }
 

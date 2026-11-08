@@ -181,9 +181,7 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
             }
         } else if LIFECYCLE.contains(&kind) {
         } else if kind == "checkpoint" {
-            if !array(item, "files").is_empty() {
-                rows.push(Row::Item(item));
-            }
+            // Its files show on the changed-files card under the run's last reply.
         } else if kind == "assistant_message" && (live || terminal.get(key.as_str()) == Some(&s(item, "id"))) {
             rows.push(Row::Assistant(item));
         } else if live || escapes_fold(kind) || interrupted.contains(run_id) {

@@ -122,7 +122,15 @@ pub fn card(app: &App, item: &Value, t: &T) -> El {
         .border(1.0, t.c.border.alpha_mul(0.8))
         .fill(t.c.card.alpha_mul(0.7))
         .child(head)
-        .child(super::markdown::view(app, &body, &id, t));
+        .child({
+            let shown = col().w_full().child(super::markdown::view(app, &body, &id, t));
+            if collapsible && !expanded && !find_open {
+                // The folded preview fades into the card (ProposedPlanCard's bg-linear-to-t).
+                shown.child(el().pin(Some(0.0), None, Some(0.0), Some(0.0)).h(96.0).gradient(t.c.card.alpha(0.0), t.c.card.alpha_mul(0.95)))
+            } else {
+                shown
+            }
+        });
     if collapsible {
         let toggle_id = id.clone();
         let key = format!("plan-toggle-{id}");

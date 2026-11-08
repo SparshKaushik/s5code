@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod attachments;
+mod changed;
 pub mod find;
 mod markdown;
 
@@ -59,18 +60,6 @@ fn toggle(app: &mut App, id: &str) {
     if !app.ui.chat.timeline.expanded.remove(id) {
         app.ui.chat.timeline.expanded.insert(id.to_owned());
     }
-}
-
-fn button(label: &str, t: &T) -> El {
-    text(label)
-        .font(theme::TEXT_XS)
-        .color(t.c.muted_foreground)
-        .px(6.0)
-        .py(4.0)
-        .radius(4.0)
-        .hover(t.c.muted)
-        .focusable(true)
-        .role("button")
 }
 
 /// How long a copy button shows its check (ANCHORED_COPY_TOAST_TIMEOUT_MS).
@@ -200,34 +189,6 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                 }),
             )
             .child(notice);
-    }
-    if kind == "checkpoint" {
-        let files = array(item, "files");
-        let checkpoint = item.clone();
-        let additions: u64 = files.iter().filter_map(|f| f["additions"].as_u64()).sum();
-        let deletions: u64 = files.iter().filter_map(|f| f["deletions"].as_u64()).sum();
-        return row()
-            .focusable(true)
-            .role("button")
-            .label("View changes")
-            .radius(6.0)
-            .hover(t.c.muted)
-            .on_press(move |app: &mut App| crate::panel::open_diff(app, checkpoint.clone()))
-            .gap(6.0)
-            .px(4.0)
-            .py(6.0)
-            .child(icon(&icons::FILES, 14.0).color(t.c.muted_foreground))
-            .child(
-                text(format!(
-                    "{} file{} changed  +{} −{}",
-                    files.len(),
-                    if files.len() == 1 { "" } else { "s" },
-                    additions,
-                    deletions
-                ))
-                .font(theme::TEXT_XS)
-                .color(t.c.muted_foreground),
-            );
     }
     if kind == "proposed_plan" {
         return plan::card(app, item, t);
@@ -509,6 +470,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     let rows = rows::derive(&view.projection, app.now_ms);
     let targets = rows::revert_targets(&view.projection);
+    let changes = changed::by_reply(&view.projection);
     let keys: Vec<String> = rows.iter().enumerate().map(|(i, r)| row_key(r, i)).collect();
     let mut marks = find::Marks::for_rows(app, &rows, t.dark).into_iter();
     let mut stack = col()
@@ -567,6 +529,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     .px(4.0)
                     .gap(6.0)
                     .child(markdown::view_marked(app, s(item, "text"), s(item, "id"), t, marks.as_ref()))
+                    .children(changes.get(s(item, "id")).map(|c| changed::card(app, c, t)))
                     .child(row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0))),
             ),
             Row::Working { id, label } => (
