@@ -157,11 +157,12 @@ pub fn shutdown() {
 }
 
 /// Starts Chrome and returns its browser-level DevTools URL.
-fn launch() -> Result<(Child, String), String> {
+fn launch(scale: f32) -> Result<(Child, String), String> {
     let profile = std::env::temp_dir().join(format!("s5-rune-chrome-{}", std::process::id()));
     let mut child = Command::new(chrome_path())
         .args(["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"])
         .arg(format!("--user-data-dir={}", profile.display()))
+        .arg(format!("--force-device-scale-factor={scale}"))
         .arg("about:blank")
         .stderr(Stdio::piped())
         .stdout(Stdio::null())
@@ -211,6 +212,8 @@ struct Worker {
     sessions: HashMap<String, TabId>,
     shown: Option<TabId>,
     viewport: (f32, f32, f32),
+    /// The device scale Chrome started with.
+    scale: f32,
     scheme: &'static str,
     pressed: bool,
     shared: Arc<Mutex<Shared>>,
@@ -218,7 +221,18 @@ struct Worker {
 }
 
 fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<(), String> {
-    let (child, url) = launch()?;
+    // The headless shell paints frames at the device scale it starts with, whatever scale a page
+    // emulates, so it waits for the window's.
+    let mut early = Vec::new();
+    let scale = loop {
+        let cmd = rx.recv().map_err(|_| "The window closed".to_string())?;
+        let scale = if let Cmd::Viewport { scale, .. } = &cmd { Some(*scale) } else { None };
+        early.push(cmd);
+        if let Some(scale) = scale {
+            break scale;
+        }
+    };
+    let (child, url) = launch(scale)?;
     *CHROME.lock().unwrap() = Some(child);
     let host = url.trim_start_matches("ws://").split('/').next().unwrap_or_default().to_string();
     let stream = TcpStream::connect(&host).map_err(|e| e.to_string())?;
@@ -232,12 +246,16 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         sessions: HashMap::new(),
         shown: None,
         viewport: (0., 0., 1.),
+        scale,
         scheme: "",
         pressed: false,
         shared,
         waker,
     };
     w.send(None, "Target.setDiscoverTargets", json!({ "discover": true }), None);
+    for cmd in early {
+        w.command(cmd);
+    }
     loop {
         while let Ok(cmd) = rx.try_recv() {
             w.command(cmd);
@@ -289,22 +307,22 @@ impl Worker {
     }
 
     fn metrics(&mut self, tab: TabId) {
-        let (w, h, scale) = self.viewport;
+        let (w, h, _) = self.viewport;
         let zoom = self.tabs.get(&tab).map_or(1., |t| t.zoom);
         if w < 1. || h < 1. {
             return;
         }
-        let (width, height, dsf) = metrics(w, h, scale, zoom);
-        self.call(tab, "Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": dsf, "mobile": false }), None);
+        let (width, height) = metrics(w, h, zoom);
+        self.call(tab, "Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": self.scale, "mobile": false }), None);
     }
 
     fn screencast(&mut self, tab: TabId) {
-        let (w, h, scale) = self.viewport;
+        let (w, h, _) = self.viewport;
         if w < 1. || h < 1. {
             return;
         }
         self.call(tab, "Page.stopScreencast", json!({}), None);
-        let (mw, mh) = ((w * scale).round() as u32, (h * scale).round() as u32);
+        let (mw, mh) = ((w * self.scale).round() as u32, (h * self.scale).round() as u32);
         self.call(tab, "Page.startScreencast", json!({ "format": "jpeg", "quality": 92, "maxWidth": mw, "maxHeight": mh }), None);
         // Screencast only sends a frame when the page changes; paint the current one now.
         self.call(tab, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 92 }), Some(Reply::Frame(tab)));
@@ -551,9 +569,14 @@ impl Worker {
                 t.history = r["entries"].as_array().into_iter().flatten().map(|e| (e["id"].as_i64().unwrap_or(0), e["url"].as_str().unwrap_or_default().to_string())).collect();
                 t.index = r["currentIndex"].as_u64().unwrap_or(0) as usize;
                 let (can_back, can_forward) = travel(&t.history, t.index);
+                // The headless shell reports a target's title once, as its URL, before <title> parses.
+                let title = r["entries"][t.index]["title"].as_str().map(str::to_owned);
                 self.update(tab, |s| {
                     s.can_back = can_back;
                     s.can_forward = can_forward;
+                    if let Some(title) = title {
+                        s.title = title;
+                    }
                 });
             }
             Reply::Frame(tab) => self.paint(tab, r["data"].as_str()),
@@ -594,12 +617,11 @@ impl Worker {
     }
 }
 
-/// The CSS viewport and device scale for a page area of `w` x `h` points: zoom shrinks the CSS
-/// viewport and raises the scale by the same factor, so the device pixels always match the
-/// window's backing pixels.
-fn metrics(w: f32, h: f32, scale: f32, zoom: f32) -> (u32, u32, f32) {
+/// The CSS viewport for a page area of `w` x `h` points. Zoom only shrinks it: emulating any
+/// scale but the one Chrome started with makes the headless shell crop or blur its frames.
+fn metrics(w: f32, h: f32, zoom: f32) -> (u32, u32) {
     let zoom = zoom.max(0.25);
-    (((w / zoom).round() as u32).max(1), ((h / zoom).round() as u32).max(1), scale * zoom)
+    (((w / zoom).round() as u32).max(1), ((h / zoom).round() as u32).max(1))
 }
 
 /// Back and forward availability; the about:blank a tab opens on is not a place to go back to.
@@ -644,11 +666,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn retina_viewport_renders_at_backing_pixels() {
-        assert_eq!(metrics(540., 820., 2., 1.), (540, 820, 2.));
-        let (w, h, dsf) = metrics(540., 820., 2., 1.25);
-        assert_eq!((w, h), (432, 656));
-        assert!(((w as f32) * dsf - 1080.).abs() < 1.);
+    fn zoom_shrinks_the_css_viewport() {
+        assert_eq!(metrics(540., 820., 1.), (540, 820));
+        assert_eq!(metrics(540., 820., 1.25), (432, 656));
     }
 
     #[test]
