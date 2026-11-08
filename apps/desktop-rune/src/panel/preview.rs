@@ -430,13 +430,17 @@ fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>) {
     let image = image.and_then(|bytes| {
         let dir = crate::host::t3_home().join("userdata").join("browser-artifacts");
         std::fs::create_dir_all(&dir).ok()?;
-        let path = dir.join(format!("browser-element-{}-{}.png", base36(data::now_ms().max(0) as u64), &id.replace('-', "")[..8]));
+        // Web's sent bubble finds an annotation's crop by this name (TimelineUserMessageRow).
+        let path = dir.join(format!("preview-annotation-{id}.png"));
         std::fs::write(&path, bytes).ok()?;
         Some(path.display().to_string())
     });
     let record = annotation(&id, element);
     let detail = record["elements"][0]["selector"].as_str().or(record["elements"][0]["tagName"].as_str()).unwrap_or_default().to_string();
-    crate::chat::composer::add_picked_context(app, record, image);
+    crate::chat::composer::add_context(app, record);
+    if let Some(image) = image {
+        crate::chat::composer::attach_path(app, image);
+    }
     crate::shell::palette::toast(app, "Element added to the composer", Some(&detail));
 }
 

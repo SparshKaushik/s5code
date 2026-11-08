@@ -485,7 +485,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         let (_, body) = match r {
             Row::User(item) => {
                 let mut content = col().gap(8.0);
-                for attachment in array(item, "attachments") {
+                // A picked element's crop shows in its chip's details, not as an image (TimelineUserMessageRow).
+                for attachment in array(item, "attachments").iter().filter(|a| !s(a, "name").starts_with("preview-annotation-")) {
                     content = content.child(attachments::view(app, attachment, t));
                 }
                 if !s(item, "text").is_empty() {
