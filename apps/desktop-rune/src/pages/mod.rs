@@ -36,7 +36,9 @@ fn want_avatars(s: &mut App) {
     let pages = &mut s.ui.pages;
     let entries = pages.pull_requests.result.as_ref().and_then(|r| r["entries"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
     let (detail, activity) = (pages.detail.detail.as_ref(), pages.detail.activity.as_ref());
-    let list = |v: Option<&Value>, key: &str| v.and_then(|v| v[key].as_array()).into_iter().flatten();
+    fn list<'a>(v: Option<&'a Value>, key: &str) -> impl Iterator<Item = &'a Value> {
+        v.and_then(|v| v[key].as_array()).into_iter().flatten()
+    }
     let actors = detail
         .map(|d| &d["author"])
         .into_iter()
