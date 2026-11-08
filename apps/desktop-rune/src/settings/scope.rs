@@ -7,7 +7,12 @@ use rune::{El, row, text};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
+/// Rows that stand for another setting (the auto-settle switch writes the day count).
+fn setting_of(key: &str) -> &str {
+    if key == "autoSettleInactive" { "sidebarAutoSettleAfterDays" } else { key }
+}
 pub fn project_key(key: &str) -> bool {
+    let key = setting_of(key);
     static KEYS: OnceLock<Vec<String>> = OnceLock::new();
     KEYS.get_or_init(|| serde_json::from_str(include_str!("project-keys.json")).unwrap())
         .iter()
@@ -31,6 +36,7 @@ pub fn override_patch(settings: &Value, project: &str, key: &str, next: Option<V
 }
 pub fn reset(s: &mut App, key: &str) {
     s.ui.settings.edits.remove(key);
+    let key = setting_of(key);
     if key == "snoozePresets" {
         return super::snooze::reset(s);
     }
@@ -52,6 +58,7 @@ pub fn customized(s: &App, key: &str) -> bool {
     if key == "browserProfiles" {
         return false;
     }
+    let key = setting_of(key);
     if let Some(project) = s.ui.settings.project.as_ref().filter(|_| project_key(key)) {
         return super::server_settings(s)["projectSettingsOverrides"][project]
             .get(key)

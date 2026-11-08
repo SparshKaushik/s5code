@@ -44,9 +44,8 @@ pub fn view(s: &App, t: &T) -> El {
                                 .or_insert_with(|| edit.clone())
                         })
                         .on_submit(move |s: &mut App, _: &mut rune::Tx| {
-                            let text = s.ui.settings.edits.get(&submit).map(|e| json!(e.text));
-                            if let Some(text) = text.filter(|v| *v != super::value(s, &submit)) {
-                                super::update(s, &submit, text);
+                            if let Some(text) = s.ui.settings.edits.get(&submit).map(|e| e.text.clone()) {
+                                super::commit_text(s, &submit, &text);
                             }
                         })
                         .build(t)

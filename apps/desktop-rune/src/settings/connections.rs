@@ -1,9 +1,9 @@
 use super::{controls as c, http, request};
 use crate::{
     App,
-    theme::{self, T},
+    theme::{self, AlphaMul, T},
 };
-use rune::{El, col, row, text};
+use rune::{El, col, el, row, text};
 use serde_json::{Value, json};
 
 pub fn view(s: &App, t: &T) -> El {
@@ -141,52 +141,69 @@ pub fn access(s: &App, t: &T) -> El {
             .flatten()
     }) {
         let id = client["sessionId"].clone();
-        clients.push(
-            row()
-                .w_full()
-                .padding(16.0)
-                .gap(12.0)
-                .center_y()
-                .child(
-                    col()
-                        .grow(1.0)
-                        .gap(4.0)
-                        .child(
-                            text(
-                                client["client"]["label"]
-                                    .as_str()
-                                    .or(client["client"]["deviceType"].as_str())
-                                    .unwrap_or("Client")
-                                    .to_owned(),
-                            )
-                            .font(theme::SM_MEDIUM)
-                            .color(t.c.foreground),
-                        )
-                        .child(
-                            text(if client["current"] == true {
-                                "This client"
-                            } else if client["connected"] == true {
-                                "Connected"
-                            } else {
-                                "Disconnected"
-                            })
+        let current = client["current"] == true;
+        let live = current || client["connected"] == true;
+        let info = &client["client"];
+        let joined = [info["os"].as_str(), info["browser"].as_str()].into_iter().flatten().collect::<Vec<_>>().join(" · ");
+        let label = info["label"]
+            .as_str()
+            .map(str::to_owned)
+            .or((!joined.is_empty()).then_some(joined))
+            .unwrap_or_else(|| client["subject"].as_str().unwrap_or("Client").to_owned());
+        let device = info["deviceType"].as_str().filter(|d| *d != "unknown").map(|d| {
+            let mut chars = d.chars();
+            chars.next().map(|c| c.to_uppercase().chain(chars).collect::<String>()).unwrap_or_default()
+        });
+        let bits: Vec<String> = [device, info["os"].as_str().map(str::to_owned), info["browser"].as_str().map(str::to_owned), info["ipAddress"].as_str().map(str::to_owned)]
+            .into_iter()
+            .flatten()
+            .collect();
+        let mut heading = row()
+            .min_h(20.0)
+            .gap(6.0)
+            .center_y()
+            .child(el().size(6.0, 6.0).radius(3.0).fill(if live { t.c.success } else { t.c.muted_foreground.alpha_mul(0.3) }))
+            .child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground));
+        // Web's `ConnectedClientListRow`: the current session gets a chip, never a Revoke button.
+        if current {
+            heading = heading.child(
+                el().px(4.0)
+                    .py(2.0)
+                    .radius(6.0)
+                    .border(1.0, t.c.border.alpha_mul(0.5))
+                    .fill(t.c.muted.alpha_mul(0.5))
+                    .child(text("This device").font(theme::TEXT_3XS).color(t.c.muted_foreground.alpha_mul(0.8))),
+            );
+        }
+        let mut entry = row()
+            .w_full()
+            .padding(16.0)
+            .gap(12.0)
+            .center_y()
+            .child(
+                col()
+                    .grow(1.0)
+                    .min_w(0.0)
+                    .gap(4.0)
+                    .child(heading)
+                    .child(
+                        text(if bits.is_empty() { if live { "Connected".to_owned() } else { "Not connected".to_owned() } } else { bits.join(" · ") })
                             .font(theme::TEXT_XS)
                             .color(t.c.muted_foreground),
-                        ),
-                )
-                .child(
-                    c::button("Revoke", t)
-                        .disabled(client["current"] == true)
-                        .on_press(move |s: &mut App| {
-                            http(
-                                s,
-                                "POST",
-                                "/api/auth/clients/revoke",
-                                json!({"sessionId":id}),
-                            )
-                        }),
-                ),
-        );
+                    ),
+            );
+        if !current {
+            entry = entry.child(
+                crate::kit::Button::new("Revoke")
+                    .variant("destructive-outline")
+                    .size("xs")
+                    .on_press(move |s: &mut App| {
+                        http(s, "POST", "/api/auth/clients/revoke", json!({"sessionId":id}))
+                    })
+                    .build(t),
+            );
+        }
+        clients.push(entry);
     }
     if clients.is_empty() {
         clients.push(

@@ -101,8 +101,9 @@ impl Dialog {
             .radius(16.)
             .padding(24.)
             .gap(24.)
-            .fill(t.c.background.alpha_mul(0.96))
-            .backdrop_blur(16.)
+            // dialog-glass follows Appearance > Glass opacity: 96% at the default 80%, solid at 100%.
+            .fill(t.c.background.alpha_mul(1.0 - 0.2 * (1.0 - super::menu::glass_opacity())))
+            .backdrop_blur(if super::menu::glass_opacity() >= 1.0 { 0. } else { 16. })
             .border(1., t.c.contrast_foreground.alpha_mul(0.1))
             .transition(Transition::scale(0.98).combined(Transition::opacity()))
             .child(

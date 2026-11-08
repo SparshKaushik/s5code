@@ -148,7 +148,8 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );
-    if super::scope::customized(s, key) {
+    // Web resets the auto-settle day count from its switch row only.
+    if key != "sidebarAutoSettleAfterDays" && super::scope::customized(s, key) {
         let owned = key.to_owned();
         heading = heading.child(
             crate::kit::Button::new(format!("Reset {title}"))
@@ -258,15 +259,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
 /// A settings text field: edits stay local until Enter or blur commit them through `update`.
 pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_size: bool) -> El {
     let current = value(s, key);
-    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| {
-        rune::TextEdit::new(current.as_str().map(str::to_owned).unwrap_or_else(|| {
-            if current.is_null() {
-                String::new()
-            } else {
-                current.to_string()
-            }
-        }))
-    });
+    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| rune::TextEdit::new(super::input_text(&current)));
     let (k1, k2) = (key.to_owned(), key.to_owned());
     let (height, pad) = if default_size { (32.0, 11.0) } else { (28.0, 9.0) };
     rune::text_input(&edit, theme::TEXT_SM)
@@ -290,16 +283,8 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
                 .or_insert_with(|| edit.clone())
         })
         .on_submit(move |s: &mut App, _| {
-            if let Some(edit) = s.ui.settings.edits.get(&k2) {
-                let raw = edit.text.clone();
-                let v = if value(s, &k2).is_number() {
-                    serde_json::from_str(&raw).ok().filter(Value::is_number)
-                } else {
-                    Some(json!(raw))
-                };
-                if let Some(v) = v {
-                    update(s, &k2, v);
-                }
+            if let Some(text) = s.ui.settings.edits.get(&k2).map(|e| e.text.clone()) {
+                super::commit_text(s, &k2, &text);
             }
         })
 }
