@@ -29,6 +29,7 @@ pub struct MenuItem {
     danger: bool,
     state: State,
     sub: Option<(Vec<MenuEntry>, bool)>,
+    sub_width: f32,
     sub_keys: Option<Box<dyn FnOnce(El) -> El>>,
     acts: Acts,
 }
@@ -46,6 +47,7 @@ impl MenuItem {
             danger: false,
             state: State::Rest,
             sub: None,
+            sub_width: 160.,
             sub_keys: None,
             acts: Acts::default(),
         }
@@ -101,6 +103,11 @@ impl MenuItem {
     }
     pub fn submenu(mut self, entries: Vec<MenuEntry>, open: bool) -> Self {
         self.sub = Some((entries, open));
+        self
+    }
+    /// The submenu's least width; truncating labels otherwise let it shrink to the default.
+    pub fn submenu_min_width(mut self, width: f32) -> Self {
+        self.sub_width = width;
         self
     }
     pub(super) fn transform(mut self, f: Box<dyn FnOnce(El) -> El>) -> Self {
@@ -304,6 +311,7 @@ impl MenuItem {
             if open {
                 let sub = Menu::new(format!("{key}-sub"))
                     .entries(entries)
+                    .min_width(self.sub_width)
                     .native(native);
                 let sub = if native { sub.width(198.) } else { sub };
                 let mut deeper = vec![];

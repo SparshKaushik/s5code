@@ -101,6 +101,7 @@ fn activate(app: &mut App, surface: Surface) {
 }
 /// The thread details card's "Changes" row (`openChangesFromThreadPanel`).
 pub fn open_changes(app: &mut App) {
+    diff::open_changes(app);
     activate(app, Surface::Diff);
 }
 /// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
@@ -147,12 +148,11 @@ pub fn open_diff(app: &mut App, checkpoint: Value) {
     } else {
         checkpoint
     };
-    app.ui.panel.diff.to = checkpoint["checkpointTurnCount"]
+    let turn = checkpoint["checkpointTurnCount"]
         .as_u64()
         .or(checkpoint["appRunOrdinal"].as_u64())
         .unwrap_or(1);
-    app.ui.panel.diff.from = app.ui.panel.diff.to.saturating_sub(1);
-    diff::select_checkpoint(app);
+    diff::open_turn(app, turn);
     activate(app, Surface::Diff);
 }
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
@@ -161,7 +161,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         let thread = context(app).map(|(id, _)| id).unwrap_or_default();
         if app.ui.panel.thread != thread {
             app.ui.panel.thread = thread;
-            app.ui.panel.diff = diff::Ui::default();
+            diff::reset(app);
             files::reset(app);
             if app.ui.shell.panel_open {
                 match app.ui.panel.active {
@@ -620,10 +620,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("panel-diff-split", |s| {
         scene(s, Some(Surface::Diff));
         diff::fixture(s);
-        s.ui.panel
-            .diff
-            .state
-            .set_mode(rune_kit::diff::DiffMode::Split);
+        s.ui.panel.diff.state.set_mode(diff::DiffMode::Split);
     }),
     ("panel-files", |s| {
         scene(s, Some(Surface::Files));
