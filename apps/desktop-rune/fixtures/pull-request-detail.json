@@ -1,0 +1,249 @@
+{
+ "detail": {
+  "provider": "github",
+  "capabilities": {
+   "diff": true,
+   "comment": true,
+   "actions": [
+    "merge",
+    "ready",
+    "draft",
+    "close",
+    "reopen",
+    "delete-branch",
+    "update-branch",
+    "enable-auto-merge",
+    "disable-auto-merge"
+   ],
+   "mergeMethods": [
+    "squash",
+    "merge",
+    "rebase"
+   ],
+   "deleteBranch": true,
+   "review": {
+    "approve": true,
+    "requestChanges": true,
+    "comment": true
+   },
+   "reviewers": {
+    "request": true,
+    "listCandidates": true
+   },
+   "labels": true
+  },
+  "viewerPermissions": {
+   "actions": [
+    "merge",
+    "ready",
+    "draft",
+    "close",
+    "reopen",
+    "delete-branch",
+    "update-branch",
+    "enable-auto-merge",
+    "disable-auto-merge"
+   ],
+   "comment": true,
+   "review": true,
+   "requestReviewers": true
+  },
+  "projectId": "7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f",
+  "projectTitle": "s5code",
+  "workspaceRoot": "/home/sparsh/s5code",
+  "repository": "s5labs/s5code",
+  "number": 2481,
+  "title": "feat(desktop-rune): port the pull requests and usage pages",
+  "body": "Ports the sidebar footer's two utility pages to Rune.\n\n## What changed\n\n- `/pull-requests` lists every project's pull requests, grouped by involvement and ranked by merge readiness.\n- `/usage` shows cost and tokens per provider and model, with the provider limits beside them.\n\n## How to test\n\n1. Open **Pull requests** from the sidebar footer.\n2. Pick a row; the detail opens beside the list.\n\nCloses #2410.",
+  "url": "https://github.com/s5labs/s5code/pull/2481",
+  "author": {
+   "login": "sparsh",
+   "name": "Sparsh Kaushik",
+   "avatarUrl": null
+  },
+  "state": "open",
+  "isDraft": false,
+  "mergeability": "mergeable",
+  "additions": 1842,
+  "deletions": 37,
+  "changedFiles": 3,
+  "headBranch": "feat/rune-pull-requests-usage-pages",
+  "headRepositoryNameWithOwner": "s5labs/s5code",
+  "headSha": "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b",
+  "baseBranch": "main",
+  "createdAt": "2026-11-06T07:05:18.000Z",
+  "updatedAt": "2026-11-06T09:53:18.000Z",
+  "observedAt": "2026-11-06T10:00:00.000Z",
+  "mergedAt": null,
+  "closedAt": null,
+  "reviewers": [
+   {
+    "login": "juliusmarminge",
+    "name": "Julius Marminge",
+    "avatarUrl": null
+   }
+  ],
+  "labels": [
+   {
+    "name": "desktop",
+    "color": "1d76db"
+   }
+  ],
+  "checks": [
+   {
+    "name": "Format, lint, typecheck",
+    "status": "success",
+    "description": "Successful in 3m",
+    "url": "https://github.com/s5labs/s5code/actions/runs/1",
+    "required": true
+   },
+   {
+    "name": "Test",
+    "status": "success",
+    "description": "Successful in 7m",
+    "url": "https://github.com/s5labs/s5code/actions/runs/2",
+    "required": true
+   },
+   {
+    "name": "Rune desktop build",
+    "status": "pending",
+    "description": "In progress",
+    "url": "https://github.com/s5labs/s5code/actions/runs/3"
+   },
+   {
+    "name": "Macroscope",
+    "status": "skipped",
+    "description": null,
+    "url": null
+   }
+  ],
+  "mergeCapabilities": {
+   "merge": true,
+   "squash": true,
+   "rebase": true
+  },
+  "viewer": {
+   "login": "sparsh"
+  },
+  "behindBy": 0,
+  "autoMergeEnabled": false,
+  "autoMergeMethod": null,
+  "maintainerCanModify": true
+ },
+ "activity": {
+  "author": {
+   "login": "sparsh",
+   "name": "Sparsh Kaushik",
+   "avatarUrl": null
+  },
+  "reviewers": [
+   {
+    "login": "juliusmarminge",
+    "name": "Julius Marminge",
+    "avatarUrl": null
+   }
+  ],
+  "comments": [
+   {
+    "id": "c1",
+    "kind": "issue-comment",
+    "author": {
+     "login": "macroscopeapp",
+     "name": "Macroscope",
+     "avatarUrl": null,
+     "isBot": true
+    },
+    "body": "**Review summary.** Two pages ported; no blocking issues found.\n\n- The usage chart labels hourly buckets in UTC.",
+    "createdAt": "2026-11-06T07:20:00.000Z",
+    "url": "https://github.com/s5labs/s5code/pull/2481#issuecomment-1",
+    "path": null,
+    "reviewState": null
+   },
+   {
+    "id": "r1",
+    "kind": "review",
+    "author": {
+     "login": "juliusmarminge",
+     "name": "Julius Marminge",
+     "avatarUrl": null
+    },
+    "body": "Looks close. One question on the hourly labels.",
+    "createdAt": "2026-11-06T09:10:00.000Z",
+    "url": "https://github.com/s5labs/s5code/pull/2481#pullrequestreview-1",
+    "path": null,
+    "reviewState": "COMMENTED"
+   },
+   {
+    "id": "c2",
+    "kind": "issue-comment",
+    "author": {
+     "login": "sparsh",
+     "name": "Sparsh Kaushik",
+     "avatarUrl": null
+    },
+    "body": "Fixed in the latest push: hours now follow the local zone.",
+    "createdAt": "2026-11-06T09:50:00.000Z",
+    "url": "https://github.com/s5labs/s5code/pull/2481#issuecomment-2",
+    "path": null,
+    "reviewState": null
+   }
+  ],
+  "commentCount": 3,
+  "commentsTruncated": false,
+  "reviewThreads": [
+   {
+    "id": "t1",
+    "path": "apps/desktop-rune/src/pages/usage.rs",
+    "line": 212,
+    "side": "RIGHT",
+    "isResolved": false,
+    "isOutdated": false,
+    "comments": [
+     {
+      "id": "tc1",
+      "author": {
+       "login": "juliusmarminge",
+       "name": "Julius Marminge",
+       "avatarUrl": null
+      },
+      "body": "Should this use the viewer's zone rather than UTC?",
+      "createdAt": "2026-11-06T09:11:00.000Z",
+      "url": "https://github.com/s5labs/s5code/pull/2481#discussion_r1"
+     },
+     {
+      "id": "tc2",
+      "author": {
+       "login": "sparsh",
+       "name": "Sparsh Kaushik",
+       "avatarUrl": null
+      },
+      "body": "Yes, switched to the local IANA zone.",
+      "createdAt": "2026-11-06T09:49:00.000Z",
+      "url": "https://github.com/s5labs/s5code/pull/2481#discussion_r2"
+     }
+    ]
+   }
+  ],
+  "commits": [
+   {
+    "oid": "1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b",
+    "messageHeadline": "feat(desktop-rune): port the pull requests page",
+    "committedDate": "2026-11-06T06:58:00.000Z",
+    "additions": 1210,
+    "deletions": 12
+   },
+   {
+    "oid": "5f3c2a9d81e04b7a6c1d2e3f4a5b6c7d8e9f0a1b",
+    "messageHeadline": "fix(desktop-rune): hourly usage labels follow the local zone",
+    "committedDate": "2026-11-06T09:48:00.000Z",
+    "additions": 632,
+    "deletions": 25
+   }
+  ]
+ },
+ "diff": {
+  "patch": "diff --git a/apps/desktop-rune/src/pages/mod.rs b/apps/desktop-rune/src/pages/mod.rs\nnew file mode 100644\nindex 0000000..3b18e51\n--- /dev/null\n+++ b/apps/desktop-rune/src/pages/mod.rs\n@@ -0,0 +1,6 @@\n+//! The sidebar footer's utility pages.\n+\n+pub mod pull_requests;\n+pub mod usage;\n+\n+use rune::{KeyEvent, Tx};\ndiff --git a/apps/desktop-rune/src/pages/usage.rs b/apps/desktop-rune/src/pages/usage.rs\nindex 9c1e2f0..a41d7b2 100644\n--- a/apps/desktop-rune/src/pages/usage.rs\n+++ b/apps/desktop-rune/src/pages/usage.rs\n@@ -208,7 +208,8 @@ fn period_label(m: &Merged, n: usize) -> String {\n     let start = m.periods[n];\n     if m.hourly {\n-        format!(\"{:02}:00\", start / 3_600_000 % 24)\n+        let wall = m.zone.wall(start);\n+        hour_label(wall, m.hour12)\n     } else {\n         day_short(start)\n     }\n }\ndiff --git a/apps/desktop-rune/src/main.rs b/apps/desktop-rune/src/main.rs\nindex 4d5e6f7..8a9b0c1 100644\n--- a/apps/desktop-rune/src/main.rs\n+++ b/apps/desktop-rune/src/main.rs\n@@ -40,4 +40,6 @@ pub enum Route {\n     Thread(String),\n     Settings(String),\n+    /// `/pull-requests`, which replaces the main column.\n+    PullRequests,\n     Usage,\n }\n",
+  "truncated": false,
+  "nextCursor": null
+ }
+}

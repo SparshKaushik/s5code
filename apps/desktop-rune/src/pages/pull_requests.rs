@@ -398,7 +398,12 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     {
         context_menu(t, e, *x, *y, overlays);
     }
-    col().key("main").grow(1.0).shrink().min_w(0.0).h_full().fill(t.c.background).child(header).child(body)
+    let list = col().key("pr-list").grow(1.0).shrink().min_w(0.0).h_full().fill(t.c.background).child(header).child(body);
+    let mut main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background).child(list);
+    if u.selected.is_some() {
+        main = main.child(el().w(1.0).h_full().shrink().fill(t.c.border)).child(super::pr_detail::view(s, t, overlays));
+    }
+    main
 }
 
 /// `Button` with the outline look the toolbar and states use throughout.
@@ -708,7 +713,6 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
         );
     }
     let login = e["author"]["login"].as_str().unwrap_or("ghost").to_string();
-    let initial = login.chars().next().map(|c| c.to_uppercase().to_string()).unwrap_or_default();
     let meta = theme::TEXT_2XS;
     let mut line2 = row()
         .w_full()
@@ -721,7 +725,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
                 .center_y()
                 .shrink()
                 .max_w(160.0)
-                .child(el().size(14.0, 14.0).radius(radius::FULL).fill(t.c.muted).center().child(text(initial).font(theme::weight(theme::TEXT_3XS, theme::MEDIUM).lh(14.0)).color(t.c.muted_foreground)))
+                .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t))
                 .child(text(login).font(meta).color(t.c.muted_foreground).truncate().shrink()),
         )
         .child(text(field(e, "repository").to_string()).font(meta).color(t.c.muted_foreground).truncate().shrink());
@@ -888,6 +892,10 @@ fn empty(s: &App, t: &T, result: &Value) -> El {
     let u = &s.ui.pages.pull_requests;
     let query = u.query.text.trim();
     let any = result["entries"].as_array().is_some_and(|e| !e.is_empty());
+    if s.state().projects.iter().all(|p| !p["archivedAt"].is_null()) {
+        let add = Button("Add project", Some(&i::PLUS)).sm().on_press(crate::shell::palette::open_add_project).build(t);
+        return state_block(t, media(t, &i::FOLDER_PLUS), "No projects in this workspace", "Add a project, and the pull requests from its repository appear here.", row().child(add));
+    }
     let (title, description) = if !query.is_empty() {
         (format!("Nothing matches “{query}”"), "The hosts were searched for it. Try fewer words, or search by number, author or branch.")
     } else if any || u.filters.count() > 0 {
