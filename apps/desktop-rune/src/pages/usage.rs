@@ -357,9 +357,9 @@ pub fn poll(s: &mut App) -> bool {
                 u.answered = u.requested.clone();
                 u.error = None;
             }
-            Err(e) => {
+            Err(_) => {
                 u.summary = None;
-                u.error = Some(e["message"].as_str().unwrap_or("Could not read usage.").to_string());
+                u.error = Some("This environment could not report usage.".into());
             }
         }
         changed = true;

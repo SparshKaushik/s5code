@@ -352,7 +352,7 @@ pub fn poll(s: &mut App) -> bool {
                 u.result = Some(result);
                 u.error = None;
             }
-            Err(e) => u.error = Some(e["message"].as_str().unwrap_or("Could not load pull requests.").to_string()),
+            Err(e) => u.error = Some(error_text(&e, "The environment request failed.")),
         }
         changed = true;
     }
@@ -959,7 +959,9 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
             sub_item("Project", &i::FOLDER, "project", project_entries),
         ]);
 
-    let hosts: Vec<(String, String, Option<String>)> = u.hosts.iter().map(|p| (field(p, "host").to_string(), host_label(&u.hosts, p), unavailable_host(p))).collect();
+    let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
+    let entries = if u.hosts.is_empty() { &expected } else { &u.hosts };
+    let hosts: Vec<(String, String, Option<String>)> = entries.iter().map(|p| (field(p, "host").to_string(), host_label(entries, p), unavailable_host(p))).collect();
     let host_label = u.filters.host.as_ref().map(|h| hosts.iter().find(|x| &x.0 == h).map(|x| x.1.clone()).unwrap_or_else(|| h.clone())).unwrap_or_else(|| "All".into());
     let mut host = Menu::new("pr-host")
         .trigger(kit::Button::new(host_label).variant("outline").icon(&i::PLUG_2).on_press(toggle("host")).build(t))
@@ -1017,6 +1019,47 @@ fn host_label(hosts: &[Value], p: &Value) -> String {
         "gitcafe" => "GitCafe".into(),
         "forgejo" => "Forgejo".into(),
         _ => field(p, "host").to_string(),
+    }
+}
+
+/// usePullRequestListView's expectedHosts: each project remote's host, until a list names them.
+fn expected_hosts(projects: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for p in projects {
+        let identity = &p["repositoryIdentity"];
+        let Some(kind) = identity["provider"].as_str() else { continue };
+        let host = identity["canonicalKey"].as_str().and_then(|k| k.split('/').next()).map(str::trim).filter(|h| !h.is_empty());
+        let host = host.map(str::to_lowercase).unwrap_or_else(|| kind.to_string());
+        if !out.iter().any(|h| h["host"] == host.as_str()) {
+            out.push(json!({"host": host, "kind": kind}));
+        }
+    }
+    out
+}
+
+/// formatEnvironmentQueryError. The pull request errors' messages are getters web derives from
+/// their fields, so the wire carries only the tag and fields.
+pub(super) fn error_text(cause: &Value, fallback: &str) -> String {
+    fn tagged(v: &Value) -> Option<&Value> {
+        match v {
+            Value::Object(m) if m.get("_tag").and_then(Value::as_str).is_some_and(|t| t.starts_with("PullRequest")) => Some(v),
+            Value::Object(m) => m.values().find_map(tagged),
+            Value::Array(rows) => rows.iter().find_map(tagged),
+            _ => None,
+        }
+    }
+    match tagged(cause) {
+        Some(e) if field(e, "_tag") == "PullRequestUnavailableError" => match e["requirement"].as_str().map(str::trim).filter(|r| !r.is_empty()) {
+            Some(requirement) => requirement.to_string(),
+            None => match field(e, "reason") {
+                "cli-missing" => "The tool this host is read through is not installed or set up.",
+                "cli-unauthenticated" => "This host has no working credentials.",
+                _ => "Change requests cannot be browsed for this project's host yet.",
+            }
+            .to_string(),
+        },
+        Some(e) if field(e, "_tag") == "PullRequestOperationError" => format!("Pull request operation {} failed: {}", field(e, "operation"), field(e, "detail")),
+        _ => crate::shell::palette::error_message(cause, fallback),
     }
 }
 
@@ -1513,5 +1556,24 @@ mod tests {
         assert_eq!(host_label(&two, &two[1]), "ghe.acme.dev");
         assert_eq!(unavailable_host(&json!({"configured": false, "detail": null})).as_deref(), Some("This host could not be read."));
         assert_eq!(grouped(1234567), "1,234,567");
+        let projects = [
+            json!({"repositoryIdentity": {"provider": "github", "canonicalKey": "GitHub.com/s5labs/demo"}}),
+            json!({"repositoryIdentity": {"provider": "github", "canonicalKey": "github.com/s5labs/other"}}),
+            json!({"repositoryIdentity": null}),
+        ];
+        assert_eq!(expected_hosts(&projects), vec![json!({"host": "github.com", "kind": "github"})]);
+    }
+
+    #[test]
+    fn failures_read_like_the_error_classes_web_decodes() {
+        let fail = |error: Value| json!([{"_tag": "Fail", "error": error}]);
+        let unauthenticated = fail(json!({"_tag": "PullRequestUnavailableError", "reason": "cli-unauthenticated", "provider": "github"}));
+        assert_eq!(error_text(&unauthenticated, "x"), "This host has no working credentials.");
+        let named = fail(json!({"_tag": "PullRequestUnavailableError", "reason": "cli-missing", "requirement": "Set GH_TOKEN."}));
+        assert_eq!(error_text(&named, "x"), "Set GH_TOKEN.");
+        let operation = fail(json!({"_tag": "PullRequestOperationError", "operation": "list", "detail": "rate limited"}));
+        assert_eq!(error_text(&operation, "x"), "Pull request operation list failed: rate limited");
+        assert_eq!(error_text(&json!({"message": "offline"}), "x"), "offline");
+        assert_eq!(error_text(&json!([{"_tag": "Die"}]), "The environment request failed."), "The environment request failed.");
     }
 }

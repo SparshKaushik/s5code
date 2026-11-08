@@ -126,7 +126,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests", |s| open_prs(s, |_| {})),
     ("pull-requests-empty", |s| open_prs(s, |r| r["entries"] = json!([]))),
     ("pull-requests-filtered", |s| {
-        open_prs(s, |_| {});
+        open_prs(s, |r| r["entries"] = json!([]));
         let u = &mut s.ui.pages.pull_requests;
         u.query.replace_text("no such branch");
         pull_requests::submit(u);
