@@ -64,6 +64,70 @@ pub struct Thread {
     pub active_key: Option<String>,
     /// `Some(i64::MIN)` for an unparseable visit, which reads as "long ago".
     pub last_visited_at: Option<i64>,
+    pub pr: Option<PrBadge>,
+}
+
+/// The row's pull request badge (`ThreadPullRequestBadgeControl`).
+#[derive(Clone, Debug, PartialEq)]
+pub struct PrBadge {
+    /// "open", "draft", "closed", "merged", or "pending" before a snapshot arrives.
+    pub state: &'static str,
+    pub stack: bool,
+    /// The number, "+N" for several links, or the layer count of a stack.
+    pub text: String,
+    pub url: Option<String>,
+    /// Several links open the right panel's list instead of one pull request.
+    pub opens_list: bool,
+}
+
+fn link_state(link: &Value) -> &'static str {
+    let snap = &link["snapshot"];
+    match snap["state"].as_str() {
+        Some("open") if snap["isDraft"] == true => "draft",
+        Some("open") => "open",
+        Some("merged") => "merged",
+        Some("closed") => "closed",
+        _ => "pending",
+    }
+}
+
+/// `resolveThreadPullRequestBadge` plus the presentation the row draws for it.
+pub fn pr_badge(v: &Value) -> Option<PrBadge> {
+    let visible: Vec<&Value> = v["pullRequests"].as_array().into_iter().flatten().filter(|l| l["source"] != "stack-dismissed").collect();
+    if visible.is_empty() {
+        let linked = [&v["linkedPullRequest"], &v["branchPullRequest"]].into_iter().find(|l| l["number"].is_u64())?;
+        let state = match linked["state"].as_str() {
+            Some("open") | Some("closed") | Some("merged") => link_state(&serde_json::json!({ "snapshot": linked })),
+            _ => "pending",
+        };
+        return Some(PrBadge { state, stack: false, text: linked["number"].to_string(), url: opt_str(&linked["url"]), opens_list: false });
+    }
+    let states: Vec<&str> = visible.iter().map(|l| l["snapshot"]["state"].as_str().unwrap_or("open")).collect();
+    let aggregate = if visible.iter().all(|l| link_state(l) == "draft") {
+        "draft"
+    } else if states.contains(&"open") {
+        "open"
+    } else if states.iter().all(|s| *s == "merged") {
+        "merged"
+    } else {
+        "closed"
+    };
+    let stack_id = |l: &Value| l["stack"]["id"].as_str().map(str::to_owned);
+    if visible.len() > 1 && stack_id(visible[0]).is_some() && visible.iter().all(|l| stack_id(*l) == stack_id(visible[0])) {
+        return Some(PrBadge { state: aggregate, stack: true, text: visible.len().to_string(), url: None, opens_list: true });
+    }
+    // `resolveThreadCurrentPullRequestLink`: the only open link, else the latest one.
+    let open: Vec<&&Value> = visible.iter().filter(|l| matches!(link_state(l), "open" | "draft" | "pending")).collect();
+    let current = if open.len() == 1 {
+        *open[0]
+    } else {
+        visible.iter().copied().max_by_key(|l| l["snapshot"]["updatedAt"].as_str().or(l["linkedAt"].as_str()).unwrap_or("").to_owned())?
+    };
+    let url = opt_str(&current["url"]);
+    if visible.len() > 1 {
+        return Some(PrBadge { state: aggregate, stack: false, text: format!("+{}", visible.len()), url, opens_list: true });
+    }
+    Some(PrBadge { state: link_state(current), stack: false, text: current["number"].to_string(), url, opens_list: false })
 }
 
 fn opt_ts(v: &Value) -> Option<i64> {
@@ -118,6 +182,7 @@ impl Thread {
             provider: v["providerInstanceId"].as_str().or(v["modelSelection"]["instanceId"].as_str()).unwrap_or_default().into(),
             branch: opt_str(&v["branch"]),
             worktree: opt_str(&v["worktreePath"]),
+            pr: pr_badge(v),
             created_at: opt_ts(&v["createdAt"]).unwrap_or(0),
             updated_at,
             latest_user_message_at: opt_ts(&v["latestUserMessageAt"]),
@@ -1004,6 +1069,21 @@ pub fn next_card<'a>(order: &'a [String], parked: &HashSet<String>, parking: &Ha
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn pr_badge_reads_one_link_several_links_and_a_stack() {
+        let link = |n: u64, state: &str, stack: Option<&str>| json!({ "number": n, "url": format!("https://x/pull/{n}"), "source": "agent", "linkedAt": "2026-01-01T00:00:00Z", "snapshot": { "state": state, "isDraft": false }, "stack": stack.map(|id| json!({ "id": id })) });
+        let one = pr_badge(&json!({ "pullRequests": [link(7, "merged", None)] })).unwrap();
+        assert_eq!((one.state, one.text.as_str(), one.opens_list), ("merged", "7", false));
+        let two = pr_badge(&json!({ "pullRequests": [link(7, "merged", None), link(8, "open", None)] })).unwrap();
+        assert_eq!((two.state, two.text.as_str(), two.url.as_deref()), ("open", "+2", Some("https://x/pull/8")));
+        let stack = pr_badge(&json!({ "pullRequests": [link(1, "closed", Some("s")), link(2, "merged", Some("s"))] })).unwrap();
+        assert_eq!((stack.state, stack.stack, stack.text.as_str()), ("closed", true, "2"));
+        let dismissed = json!({ "pullRequests": [{ "source": "stack-dismissed", "number": 3 }] });
+        assert_eq!(pr_badge(&dismissed), None);
+        let branch = pr_badge(&json!({ "branchPullRequest": { "number": 9, "url": "u" } })).unwrap();
+        assert_eq!((branch.state, branch.text.as_str()), ("pending", "9"));
+    }
 
     #[test]
     fn next_card_wraps_past_parked_and_co_parking_cards() {
