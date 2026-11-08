@@ -8,6 +8,7 @@ pub mod client;
 mod connections;
 mod controls;
 mod devices;
+pub mod fonts;
 mod keybindings;
 mod models;
 mod host_logos;
@@ -59,6 +60,8 @@ pub struct Ui {
     pub provider_picker: bool,
     pub add_provider: add_provider::Wizard,
     pub provider_advisory: Option<String>,
+    /// The sans and mono families last handed to Rune.
+    pub fonts_applied: Option<(String, String)>,
     pub provider: Option<String>,
     pub project: Option<String>,
     pub environment_only: bool,

@@ -300,11 +300,16 @@ fn font(s: &App, t: &T, key: &str, title: &str, spec: &Value) -> El {
     let (min, max) = (spec["min"].as_u64().unwrap_or(10), spec["max"].as_u64().unwrap_or(20));
     let options: Vec<(Value, String)> = (min..=max).map(|px| (json!(px), format!("{px} px"))).collect();
     let placeholder = font_placeholder(&value(s, "fontFamilySans"), spec["placeholder"].as_str().unwrap_or(""));
-    row()
+    let control = row()
         .gap(8.0)
         .center_y()
         .child(input(s, t, key, 176.0, &placeholder, false))
-        .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)))
+        .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)));
+    let hint = matches!(key, "fontFamilySans" | "fontFamilyCode").then(|| super::fonts::pending(value(s, key).as_str().unwrap_or(""))).flatten();
+    match hint {
+        Some(hint) => col().gap(4.0).items_end().child(control).child(text(hint).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+        None => control,
+    }
 }
 
 /// The default family a font field falls back to: the platform's sans or monospace face, or
