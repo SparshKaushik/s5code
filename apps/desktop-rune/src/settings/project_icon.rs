@@ -340,6 +340,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let mut body = col().w_full().gap(16.0).child(
         kit::SegmentedControl::new(&["Icons", "Emoji", "Monogram"], Some(d.mode))
             .label("Icon type")
+            .fit()
             .on_pick(|s: &mut App, i, _| draft(s).mode = i)
             .build(&kit::theme(t)),
     );

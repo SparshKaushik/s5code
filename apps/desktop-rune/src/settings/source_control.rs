@@ -382,25 +382,29 @@ fn token_form(s: &App, t: &T, kind: &str, label: &str, cr: &Credentials) -> El {
     let token = ui.token.text.trim().to_owned();
     let url_host = if host.is_empty() { cr.public_host.to_owned() } else { host.clone() };
     let url = format!("https://{url_host}/settings/personal-access-tokens/new");
-    let intro = row()
+    // Web's `max-w-2xl` paragraph; the link follows it instead of flowing inline.
+    let intro = col()
         .w_full()
-        .gap(6.0)
-        .items_end()
-        .flex_wrap()
-        .child(small(
-            format!(
-                "A token saved here is used before {} and the {} login, so {label} works without the {}. Give it {}.",
-                cr.env, cr.cli, cr.cli_label, cr.access
-            ),
-            t,
-        ))
+        .gap(2.0)
+        .child(
+            small(
+                format!(
+                    "A token saved here is used before {} and the {} login, so {label} works without the {}. Give it {}.",
+                    cr.env, cr.cli, cr.cli_label, cr.access
+                ),
+                t,
+            )
+            .w_full()
+            .max_w(672.0),
+        )
         .child(
             crate::kit::Button::new("Create a token")
                 .variant("link")
                 .size("xs")
                 .icon(&icons::EXTERNAL_LINK)
                 .on_press(move |s: &mut App| super::auth::open_url(s, &url))
-                .build(t),
+                .build(t)
+                .self_start(),
         );
     let host_input = crate::kit::Input::new(&host_edit)
         .size("sm")

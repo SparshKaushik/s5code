@@ -5,7 +5,7 @@ use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons, kit};
 use rune::{El, TextEdit, col, el, row, text};
 use serde_json::{Map, Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// The id the accent picker uses while it edits the wizard's draft.
 pub const DRAFT_ID: &str = "+add-provider";
@@ -33,6 +33,8 @@ pub struct Wizard {
     /// Per driver, like web's `identityByDriver` / `configByDriver`.
     label: HashMap<&'static str, TextEdit>,
     id: HashMap<&'static str, TextEdit>,
+    /// Drivers whose instance id the user typed (web `instanceIdOverride`); others follow the label.
+    id_typed: HashSet<&'static str>,
     pub accent: HashMap<&'static str, String>,
     config: HashMap<String, TextEdit>,
     attempted: bool,
@@ -111,13 +113,16 @@ fn label_text(w: &Wizard) -> String {
     w.label.get(driver).map_or_else(|| driver_label(driver).to_owned(), |e| e.text.clone())
 }
 
-fn instance_id(s: &App) -> String {
-    let w = &s.ui.settings.add_provider;
+fn resolved_id(w: &Wizard, existing: &[String]) -> String {
     let driver = driver(w);
-    match w.id.get(driver) {
+    match w.id.get(driver).filter(|_| w.id_typed.contains(driver)) {
         Some(edit) => edit.text.clone(),
-        None => available_id(driver, &label_text(w), &existing(s)),
+        None => available_id(driver, &label_text(w), existing),
     }
+}
+
+fn instance_id(s: &App) -> String {
+    resolved_id(&s.ui.settings.add_provider, &existing(s))
 }
 
 fn config_key(driver: &str, field: &str) -> String {
@@ -214,12 +219,12 @@ fn steps(s: &App, t: &T) -> El {
 
 fn option_grid(s: &App, t: &T, featured: bool) -> El {
     let selected = driver(&s.ui.settings.add_provider);
-    let mut grid = row().w_full().flex_wrap().gap(0.0).role("radiogroup");
+    let mut cards = vec![];
     for &(kind, label, _, badge) in DRIVERS.iter().filter(|d| d.2 == featured) {
         let checked = kind == selected;
         let mut option = row()
             .key(format!("add-provider-{kind}"))
-            .w_frac(0.5)
+            .w_full()
             .gap(12.0)
             .px(12.0)
             .py(12.0)
@@ -242,12 +247,25 @@ fn option_grid(s: &App, t: &T, featured: bool) -> El {
                 .border(2.0, t.c.primary)
                 .child(el().size(20.0, 20.0).radius(10.0).fill(t.c.primary).center().child(rune::icon(&icons::CHECK, 14.0).color(t.c.primary_foreground)));
         } else {
-            option = option.fill(if t.dark { t.c.foreground.alpha_mul(0.03) } else { t.c.card }).hover(t.c.muted);
+            option = option
+                .fill(if t.dark { t.c.foreground.alpha_mul(0.03) } else { t.c.card })
+                .border(1.0, if t.dark { t.c.foreground.alpha_mul(0.05) } else { rune::Color::BLACK.alpha_mul(0.05) })
+                .hover(t.c.muted);
         }
         if let Some(badge) = badge {
             option = option.child(kit::badge(badge, "warning", "sm", t));
         }
-        grid = grid.child(option);
+        cards.push(option);
+    }
+    // Web's `grid sm:grid-cols-2` inside a `gap-3` radio group: two equal columns.
+    let mut grid = col().w_full().gap(12.0).role("radiogroup");
+    let mut cards = cards.into_iter();
+    while let Some(first) = cards.next() {
+        let mut pair = row().w_full().child(row().w_frac(0.5).pr(6.0).child(first));
+        if let Some(second) = cards.next() {
+            pair = pair.child(row().w_frac(0.5).pl(6.0).child(second));
+        }
+        grid = grid.child(pair);
     }
     grid
 }
@@ -266,8 +284,8 @@ fn field_row(t: &T, title: &str, description: &str, error: Option<String>, contr
     row().w_full().py(12.0).gap(32.0).center_y().child(copy).child(control)
 }
 
-fn input(t: &T, edit: &TextEdit, placeholder: &str, edit_of: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static) -> El {
-    kit::Input::new(edit).size("sm").placeholder(placeholder.to_owned()).on_edit(edit_of).build(t).w(224.0).single_line()
+fn input(t: &T, key: String, edit: &TextEdit, placeholder: &str, edit_of: impl for<'a> Fn(&'a mut App) -> &'a mut TextEdit + 'static) -> El {
+    kit::Input::new(edit).size("sm").placeholder(placeholder.to_owned()).on_edit(edit_of).build(t).key(key).w(224.0).single_line()
 }
 
 fn identity(s: &App, t: &T) -> El {
@@ -276,7 +294,7 @@ fn identity(s: &App, t: &T) -> El {
     let label = TextEdit::new(label_text(w));
     let label_edit = w.label.get(driver).cloned().unwrap_or(label);
     let id = instance_id(s);
-    let id_edit = w.id.get(driver).cloned().unwrap_or_else(|| TextEdit::new(id.clone()));
+    let id_edit = w.id.get(driver).filter(|e| w.id_typed.contains(driver) || e.text == id).cloned().unwrap_or_else(|| TextEdit::new(id.clone()));
     let error = validate_id(&id, &existing(s)).filter(|_| w.attempted);
     col()
         .w_full()
@@ -285,7 +303,7 @@ fn identity(s: &App, t: &T) -> El {
             "Label",
             "Shown in the provider list.",
             None,
-            input(t, &label_edit, "e.g. Work", move |s: &mut App| {
+            input(t, format!("add-provider-label-{driver}"), &label_edit, "e.g. Work", move |s: &mut App| {
                 let initial = label_text(&s.ui.settings.add_provider);
                 wizard(s).label.entry(driver).or_insert_with(|| TextEdit::new(initial))
             })
@@ -296,11 +314,27 @@ fn identity(s: &App, t: &T) -> El {
             "Instance ID",
             "Letters, digits, '-', or '_'.",
             error,
-            input(t, &id_edit, &format!("{driver}_work"), move |s: &mut App| {
-                let initial = instance_id(s);
-                wizard(s).id.entry(driver).or_insert_with(|| TextEdit::new(initial))
-            })
-            .label("Instance ID"),
+            kit::Input::new(&id_edit)
+                .size("sm")
+                .placeholder(format!("{driver}_work"))
+                .on_edit(move |s: &mut App| {
+                    let derived = instance_id(s);
+                    let w = wizard(s);
+                    let typed = w.id_typed.contains(driver);
+                    let edit = w.id.entry(driver).or_insert_with(|| TextEdit::new(derived.clone()));
+                    if !typed && edit.text != derived {
+                        *edit = TextEdit::new(derived);
+                    }
+                    edit
+                })
+                .on_change(move |s: &mut App, _| {
+                    wizard(s).id_typed.insert(driver);
+                })
+                .build(t)
+                .key(format!("add-provider-id-{driver}"))
+                .w(224.0)
+                .single_line()
+                .label("Instance ID"),
         ))
         .child(field_row(
             t,
@@ -323,7 +357,7 @@ fn config(s: &App, t: &T) -> El {
         let key = config_key(driver, field);
         let edit = w.config.get(&key).cloned().unwrap_or_default();
         let owned = key.clone();
-        let mut control = input(t, &edit, placeholder, move |s: &mut App| wizard(s).config.entry(owned.clone()).or_default()).label(title);
+        let mut control = input(t, format!("add-provider-config-{key}"), &edit, placeholder, move |s: &mut App| wizard(s).config.entry(owned.clone()).or_default()).label(title);
         if providers::is_secret_field(driver, field) {
             control = control.secure();
         }
@@ -415,5 +449,13 @@ mod tests {
         assert_eq!(validate_id("codex_work", &existing).as_deref(), Some("An instance named 'codex_work' already exists."));
         assert_eq!(validate_id("codex-work_9", &existing), None);
         assert!(validate_id(&"a".repeat(65), &existing).is_some());
+
+        // The id follows the label until the user types one (web `instanceIdOverride`).
+        let mut w = Wizard { driver: Some("opencode"), ..Wizard::default() };
+        w.label.insert("opencode", TextEdit::new("Work Team"));
+        w.id.insert("opencode", TextEdit::new("opencode"));
+        assert_eq!(resolved_id(&w, &existing), "opencode_work_team");
+        w.id_typed.insert("opencode");
+        assert_eq!(resolved_id(&w, &existing), "opencode");
     }
 }
