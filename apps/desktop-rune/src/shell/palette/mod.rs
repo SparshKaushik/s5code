@@ -67,6 +67,7 @@ enum Action {
     LinkPr(String),
     ShowPrs,
     Files,
+    ContentSearch,
     OpenFile(String),
     ProjectSettings(String),
 }
@@ -143,7 +144,7 @@ fn item(
         subtitle: None,
         description: None,
         disabled: false,
-        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::NewProject | Action::Files) {
+        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::NewProject | Action::Files | Action::ContentSearch) {
             Trailing::Chevron
         } else {
             Trailing::None
@@ -1194,6 +1195,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         Action::Triage => actions::triage(s),
         Action::NewWithoutProject => actions::new_without_project(s),
         Action::Find => actions::find(s),
+        Action::ContentSearch => crate::search::open(s),
         Action::CopyThread => {
             actions::copy_thread(s, tx);
         }

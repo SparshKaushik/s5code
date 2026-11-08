@@ -130,6 +130,10 @@ pub fn tail_items(s: &App) -> Vec<Item> {
     files.shortcut = shortcut_label(s, "filePicker.toggle");
     files.fields = keywords(&["go to file", "open file", "file picker", "find file", "quick open"]);
     out.push(files);
+    let mut contents = item("Search project contents", "Actions", &icons::TEXT_SEARCH, "", Action::ContentSearch);
+    contents.shortcut = shortcut_label(s, "projectSearch.toggle");
+    contents.fields = keywords(&["search project", "find in files", "grep", "content search", "text search"]);
+    out.push(contents);
     if super::add_project::new_projects_root(s).is_some() {
         let mut new = item("New project", "Actions", &icons::FOLDER_GIT_2, "", Action::NewProject);
         new.fields = keywords(&["new project", "create project", "empty", "repository", "repo", "git init"]);

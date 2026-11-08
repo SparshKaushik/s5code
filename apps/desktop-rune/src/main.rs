@@ -9,8 +9,11 @@ mod data;
 mod host;
 mod icons;
 mod kit;
+mod notify;
+mod onboarding;
 mod pages;
 mod panel;
+mod search;
 mod settings;
 mod shell;
 mod theme;
@@ -54,6 +57,8 @@ pub struct Ui {
     pub panel: panel::Ui,
     pub settings: settings::Ui,
     pub pages: pages::Ui,
+    pub notify: notify::Ui,
+    pub search: search::Ui,
 }
 
 pub struct App {
@@ -141,6 +146,8 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::sidebar::poll(s);
     changed |= pages::poll(s);
     changed |= chat::details::poll(s);
+    changed |= notify::poll(s);
+    changed |= search::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
@@ -152,7 +159,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
+    search::on_key(s, e, tx) || settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
