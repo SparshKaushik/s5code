@@ -27,16 +27,19 @@ pub struct Menu {
     pub sub: Option<Sub>,
     /// Just the snooze presets (the row's hover clock button).
     pub snooze_only: bool,
+    /// Opened from the chat header (ChatHeader's useThreadActionMenu): adds "Find in thread"
+    /// and renames in the header.
+    pub header: bool,
 }
 
 impl Menu {
     pub fn new(thread: String, x: f32, y: f32) -> Menu {
-        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false }
+        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false, header: false }
     }
 
     pub fn snooze_for(thread: String) -> Menu {
         let anchor = Some(format!("sb-snooze-{thread}"));
-        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true }
+        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true, header: false }
     }
 }
 
@@ -203,6 +206,15 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         )
     };
     let mut out = Vec::new();
+    let header = s.ui.shell.sidebar.menu.as_ref().is_some_and(|m| m.header);
+    if header {
+        out.push(leaf(item("Find in thread", |s, _| {
+            close(s);
+            crate::chat::timeline::find::open(s);
+        })
+        .icon(&icons::SEARCH)));
+        out.push(MenuEntry::Separator);
+    }
     if let Some(branch) = th.branch.clone() {
         let (project, worktree) = (th.project_id.clone(), th.worktree.clone());
         out.push(leaf(item(format!("New thread on {branch}"), move |s, _| {
@@ -228,7 +240,15 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         out.push(leaf(todo("Snooze").icon(&icons::CLOCK)));
     }
     out.push(MenuEntry::Separator);
-    out.push(leaf(item("Rename thread", with(super::start_rename)).icon(&icons::PENCIL)));
+    let rename = if header {
+        item("Rename thread", |s, _| {
+            close(s);
+            crate::chat::topbar::start_rename(s);
+        })
+    } else {
+        item("Rename thread", with(super::start_rename))
+    };
+    out.push(leaf(rename.icon(&icons::PENCIL)));
     out.push(leaf(
         item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))).icon(&icons::REFRESH_CW),
     ));

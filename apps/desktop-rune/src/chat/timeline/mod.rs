@@ -6,6 +6,7 @@ mod markdown;
 mod language_icons;
 pub mod plan;
 pub mod question;
+pub mod queue;
 mod subagent;
 mod requests;
 mod rows;
@@ -41,6 +42,7 @@ pub struct Ui {
     copied: Option<(String, i64)>,
     pub find: find::Find,
     pub actions: actions::State,
+    pub plan: plan::State,
 }
 
 /// A row's stable key in the virtual list; find scrolls to marks inside it.
@@ -234,6 +236,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         return subagent::view(app, item, t);
     }
     let glyph = match kind {
+        "approval_request" | "user_input_request" => &icons::MESSAGE_CIRCLE,
         "reasoning" => &icons::BRAIN,
         "command_execution" => &icons::TERMINAL,
         "file_change" => &icons::SQUARE_PEN,
@@ -244,6 +247,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     let path_label = rows::workspace_path(s(item, "fileName"), workspace_root(app).as_deref());
     let thought = s(item, "text").split_whitespace().collect::<Vec<_>>().join(" ");
     let todo = (kind == "todo_list").then(|| rows::todo_label(item));
+    let fallback = rows::label(item);
     let title = if let Some(label) = &todo {
         label.as_str()
     } else if kind == "reasoning" && !thought.is_empty() {
@@ -255,9 +259,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     } else if kind == "file_change" {
         path_label.as_str()
     } else {
-        s(item, "title")
+        fallback.as_str()
     };
-    let title = if title.is_empty() { kind } else { title };
     let mut out = col().w_full().gap(4.0);
     out = out.child(
         row()
@@ -380,7 +383,7 @@ fn send(app: &mut App, request: &str, command: Value) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app);
+    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -398,95 +401,100 @@ pub fn poll(app: &mut App) -> bool {
     changed
 }
 
+/// An approval's icon and name by request kind (TimelinePendingApprovalRow APPROVAL_PRESENTATION).
+fn approval_presentation(kind: &str) -> (&'static rune::Icon, &'static str) {
+    match kind {
+        "file-change" => (&icons::SQUARE_PEN, "File change approval"),
+        "file-read" => (&icons::EYE, "File read approval"),
+        "permission" => (&icons::WRENCH, "App permission approval"),
+        "mcp-elicitation" => (&icons::HAMMER, "App access approval"),
+        _ => (&icons::TERMINAL, "Command approval"),
+    }
+}
+
+/// An inline text action (InlineButton): medium xs, foreground or muted.
+fn inline_button(label: &str, strong: bool, t: &T) -> El {
+    let color = if strong { t.c.foreground } else { t.c.muted_foreground };
+    text(label)
+        .font(theme::XS_MEDIUM)
+        .color(color)
+        .focusable(true)
+        .role("button")
+        .cursor(rune::Cursor::Pointer)
+}
+
 fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value>, t: &T) -> El {
     let item = item.unwrap_or(request);
     let request_id = s(request, "id");
     let live = s(&request["responseCapability"], "type") == "live";
-    let mut card = col().gap(4.0).w_full();
-    let detail = ["prompt", "detail", "command", "input", "title"]
+    let kind = [s(item, "requestKind"), s(request, "kind")].into_iter().find(|k| !k.is_empty()).unwrap_or("command");
+    let (glyph, name) = approval_presentation(kind);
+    let detail = ["prompt", "detail", "command", "input"]
         .iter()
-        .map(|k| &item[*k])
-        .find(|v| !v.is_null())
-        .cloned()
-        .unwrap_or(Value::Null);
+        .find_map(|k| item[*k].as_str().filter(|v| !v.trim().is_empty()).map(str::to_owned).or_else(|| (!item[*k].is_null() && !item[*k].is_string()).then(|| item[*k].to_string())))
+        .unwrap_or_else(|| name.to_owned());
+    let mut card = col().gap(4.0).w_full().px(4.0).py(4.0).label(name);
     card = card.child(
         row()
+            .w_full()
             .gap(12.0)
-            .child(icon(&icons::TERMINAL, 16.0).color(t.c.muted_foreground))
-            .child(
-                text(
-                    detail
-                        .as_str()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| detail.to_string()),
-                )
-                .font(theme::MONO_XS.lh(20.0))
-                .color(t.c.foreground),
-            ),
+            .child(icon(glyph, 16.0).color(t.c.icon_muted))
+            .child(text(detail).font(theme::MONO_XS.lh(20.0)).color(t.c.foreground).selectable(true).grow(1.0).shrink().min_w(0.0)),
     );
+    let mut notes = col().pl(28.0).pb(4.0).gap(4.0);
+    for key in ["appName", "reason"] {
+        if let Some(v) = item[key].as_str().filter(|v| !v.is_empty()) {
+            notes = notes.child(text(v).font(theme::TEXT_XS).color(t.c.muted_foreground).selectable(true));
+        }
+    }
+    let responding = responding(app, request_id);
     if live {
         let more_key = format!("approval-more-{request_id}");
         let more = app.ui.chat.timeline.expanded.contains(&more_key);
         let mut actions = row()
+            .flex_wrap()
             .gap(8.0)
-            .pl(28.0)
-            .child(icon(&icons::SHIELD, 12.0).color(t.c.muted_foreground))
-            .child(
-                text("Waiting for approval ·")
-                    .font(theme::TEXT_XS)
-                    .color(t.c.muted_foreground),
-            );
-        let options: Vec<_> = if array(item, "options").is_empty() {
-            vec![
-                ("Decline", "decline"),
-                ("Approve", "accept"),
-                ("Always allow this session", "acceptForSession"),
-                ("Cancel", "cancel"),
-            ]
-        } else {
-            array(item, "options")
+            .center_y()
+            .child(row().gap(4.0).center_y().child(icon(&icons::SHIELD, 12.0).color(t.c.warning)).child(text("Waiting for approval").font(theme::TEXT_XS).color(t.c.warning)))
+            .child(text("·").font(theme::TEXT_XS).color(t.c.muted_foreground));
+        let options: Vec<(String, String)> = if array(item, "options").is_empty() {
+            [("Cancel", "cancel"), ("Decline", "decline"), ("Always allow this session", "acceptForSession"), ("Approve", "accept")]
                 .iter()
-                .map(|o| (s(o, "label"), s(o, "decision")))
+                .map(|(l, d)| (l.to_string(), d.to_string()))
                 .collect()
+        } else {
+            array(item, "options").iter().map(|o| (s(o, "label").to_owned(), s(o, "decision").to_owned())).collect()
         };
-        let has_more = options
-            .iter()
-            .any(|(_, d)| !matches!(*d, "accept" | "decline"));
-        for (label, decision) in options {
-            if !more && !matches!(decision, "accept" | "decline") {
-                continue;
+        let primary = |d: &str| matches!(d, "accept" | "decline");
+        let has_more = options.iter().any(|(_, d)| !primary(d));
+        let ordered = options.iter().filter(|(_, d)| primary(d)).chain(options.iter().filter(|(_, d)| more && !primary(d)));
+        for (label, decision) in ordered {
+            let (thread, r, decision) = (thread_id.to_owned(), request_id.to_owned(), decision.clone());
+            let mut b = inline_button(label, decision == "accept", t);
+            if !responding {
+                b = b.on_press(move |app: &mut App| respond(app, &thread, &r, json!({"decision":decision})));
             }
-            let decision = decision.to_owned();
-            let (thread, r) = (thread_id.to_owned(), request_id.to_owned());
-            actions = actions.child(button(label, t).on_press(move |app: &mut App| {
-                respond(app, &thread, &r, json!({"decision":decision}))
-            }));
+            actions = actions.child(b.opacity(if responding { 0.64 } else { 1.0 }));
         }
         if has_more {
             actions = actions.child(
-                button(if more { "Less" } else { "More" }, t)
+                inline_button(if more { "Less" } else { "More" }, false, t)
+                    .label("More approval options")
                     .on_press(move |app: &mut App| toggle(app, &more_key)),
             );
         }
-        card = card.child(actions);
+        notes = notes.child(actions);
     } else {
-        card = card.child(
+        notes = notes.child(
             text("Provider process is gone. Interrupt or restart the run to respond.")
                 .font(theme::TEXT_XS)
-                .color(t.c.muted_foreground),
-        );
-    }
-    if app.ui.chat.timeline.responding.contains_key(request_id) {
-        card = card.child(
-            text("Responding…")
-                .font(theme::TEXT_XS)
-                .color(t.c.muted_foreground),
+                .color(t.c.warning),
         );
     }
     if let Some(error) = app.ui.chat.timeline.response_errors.get(request_id) {
-        card = card.child(text(error).font(theme::TEXT_XS).color(t.c.destructive));
+        notes = notes.child(text(error).font(theme::TEXT_XS).color(t.c.destructive));
     }
-    card
+    card.child(notes)
 }
 
 /// A loaded thread with nothing to show yet; the chat column shows the empty prompt instead.
@@ -654,6 +662,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                 .py(3.0)
                 .child(body),
         );
+    }
+    if let Some(queue) = queue::view(app, thread_id, t, lane.width) {
+        stack = stack.child(col().key("timeline-row-queue").w_full().py(3.0).child(queue));
     }
     if let Some(error) = actions::error(app, t) {
         stack = stack.child(col().key("timeline-row-action-error").w_full().py(3.0).child(error));

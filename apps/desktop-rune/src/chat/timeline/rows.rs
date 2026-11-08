@@ -132,6 +132,8 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
         .collect();
     let runs: HashMap<_, _> = array(p, "runs").iter().map(|r| (s(r, "id"), r)).collect();
     let active = |run_id: &str| runs.get(run_id).is_some_and(|r| run_active(r));
+    let shadowed = shadowed_by_approval(&items, &pending);
+    items.retain(|i| !hidden(i) && !shadowed.contains(s(i, "id")));
     // A stopped turn stays unfolded, as the web leaves interrupted runs open.
     let interrupted: HashSet<&str> = items
         .iter()
@@ -228,6 +230,65 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
         }
     }
     rows
+}
+
+/// Items the web timeline leaves out (session-logic.ts deriveTimelineEntries): workspace
+/// preparation (shown by its own card), and prompts still waiting in the queue (shown in the
+/// queue under the timeline).
+fn hidden(item: &Value) -> bool {
+    let kind = s(item, "type");
+    (kind == "command_execution" && s(item, "input") == "Preparing workspace" && item["deferredWork"].is_null())
+        || (kind == "error" && s(item, "status") == "cancelled" && s(&item["failure"], "code") == "workspace_preparation_failed")
+        || (kind == "user_message" && s(item, "inputIntent") == "queued_turn" && s(item, "status") == "pending")
+}
+
+/// A tool waiting on approval shows once, as its approval row: the unfinished tool item the
+/// pending request was raised for (the same native item) stays out, as the web's neutral
+/// in-progress entries do.
+fn shadowed_by_approval<'a>(items: &[&'a Value], pending: &HashMap<&str, &Value>) -> HashSet<&'a str> {
+    fn native(item: &Value) -> Option<&str> {
+        item["nativeItemRef"]["nativeId"].as_str().filter(|n| !n.is_empty())
+    }
+    let mut asked = HashSet::new();
+    for &item in items {
+        if s(item, "type") == "approval_request" && pending.contains_key(s(item, "requestId")) {
+            asked.extend(native(item));
+        }
+    }
+    let mut out = HashSet::new();
+    for &item in items {
+        let tool = !matches!(s(item, "type"), "approval_request" | "user_input_request");
+        let open = matches!(s(item, "status"), "pending" | "running" | "waiting");
+        if tool && open && native(item).is_some_and(|n| asked.contains(n)) {
+            out.insert(s(item, "id"));
+        }
+    }
+    out
+}
+
+/// A work row's label when it has no better one (session-logic.ts projectedWorkEntry).
+pub fn label(item: &Value) -> String {
+    if let Some(title) = item["title"].as_str().map(str::trim).filter(|t| !t.is_empty()) {
+        return title.to_owned();
+    }
+    let kind = s(item, "type");
+    match kind {
+        "thread_created" => "Created thread".into(),
+        "reasoning" => "Thinking".into(),
+        "command_execution" => "Ran command".into(),
+        "file_change" => match array(item, "changes").len() {
+            n if n > 1 => format!("Changed {n} files"),
+            _ => format!("Changed {}", s(item, "fileName")),
+        },
+        "file_search" => "Searched files".into(),
+        "web_search" => "Searched the web".into(),
+        "checkpoint" => "Checkpoint captured".into(),
+        "dynamic_tool" => item["toolName"].as_str().filter(|n| !n.is_empty()).unwrap_or("Tool call").into(),
+        "approval_request" => "Approval requested".into(),
+        "user_input_request" if !item["questionAnswer"].is_null() => "Answered questions".into(),
+        "user_input_request" => "Input requested".into(),
+        _ => kind.replace('_', " "),
+    }
 }
 
 fn working_row(run: &Value, now: i64) -> Row<'static> {
@@ -392,6 +453,36 @@ mod tests {
         assert_eq!(t.get("u2"), Some(&("s".to_owned(), "c1".to_owned())));
         // A steer is not a turn start; the running turn can't be rewound; r2's checkpoint failed.
         assert_eq!(t.len(), 2);
+    }
+
+    #[test]
+    fn approval_shadows_its_tool_and_queued_prompts_and_workspace_prep_stay_out() {
+        let native = |n: &str| json!({"driver":"acpRegistry","nativeId":n});
+        let p = json!({"runtimeRequests":[{"id":"q","status":"pending"}],"turnItems":[
+            {"id":"prep","type":"command_execution","input":"Preparing workspace","status":"completed","ordinal":1},
+            {"id":"tool","type":"command_execution","input":"printf x","status":"pending","nativeItemRef":native("w"),"ordinal":2},
+            {"id":"other","type":"command_execution","input":"ls","status":"pending","nativeItemRef":native("v"),"ordinal":3},
+            {"id":"a","type":"approval_request","requestId":"q","nativeItemRef":native("w"),"status":"waiting","ordinal":4},
+            {"id":"later","type":"user_message","inputIntent":"queued_turn","status":"pending","ordinal":5}]});
+        let ids: Vec<_> = derive(&p, 0)
+            .iter()
+            .map(|r| match r {
+                Row::Request { item: Some(i), .. } => s(i, "id").to_owned(),
+                Row::Work { items, .. } => items.iter().map(|i| s(i, "id")).collect::<Vec<_>>().join("+"),
+                _ => "?".to_owned(),
+            })
+            .collect();
+        assert_eq!(ids, ["other", "a"]);
+    }
+
+    #[test]
+    fn work_rows_without_a_title_read_like_the_web() {
+        assert_eq!(label(&json!({"type":"approval_request","title":null})), "Approval requested");
+        assert_eq!(label(&json!({"type":"approval_request","title":"  Run it "})), "Run it");
+        assert_eq!(label(&json!({"type":"file_change","fileName":"a.ts"})), "Changed a.ts");
+        assert_eq!(label(&json!({"type":"file_change","changes":[{},{}]})), "Changed 2 files");
+        assert_eq!(label(&json!({"type":"dynamic_tool","toolName":null})), "Tool call");
+        assert_eq!(label(&json!({"type":"mcp_tool_call"})), "mcp tool call");
     }
 
     #[test]

@@ -53,6 +53,10 @@ pub struct Ui {
     /// Messages waiting on `assets.persistChatAttachments`: the request, the command or launch
     /// payload, and the thread a launch starts.
     uploads: Vec<(u64, Value, Option<String>)>,
+    /// The queued run being rewritten in the composer: thread and run.
+    editing: Option<(String, String)>,
+    /// The prompt Up last recalled: the draft it went into, the message, and the text.
+    recalled: Option<(String, String, String)>,
 }
 
 /// The draft key for a route: the thread id, or `home` for the new-thread draft.
@@ -63,13 +67,139 @@ pub fn draft_key(route: &Route) -> String {
     }
 }
 
+/// The draft being typed: a queued message under edit keeps its own (`queued-edit:` target),
+/// so the thread draft survives the edit.
+fn active_key(s: &App) -> String {
+    match (s.frame_route(), &s.ui.chat.composer.editing) {
+        (Route::Thread(id), Some((thread, run))) if id == thread => format!("queued-edit:{thread}:{run}"),
+        (route, _) => draft_key(route),
+    }
+}
+
 fn draft<'a>(s: &'a App) -> Option<&'a Draft> {
-    s.ui.chat.composer.drafts.get(&draft_key(s.frame_route()))
+    s.ui.chat.composer.drafts.get(&active_key(s))
 }
 
 fn draft_mut(s: &mut App) -> &mut Draft {
-    let key = draft_key(s.frame_route());
+    let key = active_key(s);
     s.ui.chat.composer.drafts.entry(key).or_default()
+}
+
+/// The queued run the open thread's composer is rewriting.
+pub fn editing_run(s: &App) -> Option<&str> {
+    match (s.frame_route(), &s.ui.chat.composer.editing) {
+        (Route::Thread(id), Some((thread, run))) if id == thread => Some(run.as_str()),
+        _ => None,
+    }
+}
+
+pub fn edit_queued(s: &mut App, thread: &str, run: &str, text: &str) {
+    s.ui.chat.composer.editing = Some((thread.to_owned(), run.to_owned()));
+    let d = draft_mut(s);
+    d.edit = TextEdit::new(text);
+    d.edit.set_caret(text.len());
+    d.edit.focused = true;
+}
+
+pub fn cancel_queued_edit(s: &mut App) {
+    if editing_run(s).is_some() {
+        let key = active_key(s);
+        s.ui.chat.composer.drafts.remove(&key);
+        s.ui.chat.composer.editing = None;
+        draft_mut(s).edit.focused = true;
+    }
+}
+
+/// How a message sent now is delivered (resolveComposerDispatchMode): an idle thread starts a
+/// turn; a running one steers or queues per `followUpBehavior`, and the alternate key flips it.
+/// A turn that cannot take steering, such as a compaction, always queues.
+fn dispatch_mode(running: bool, can_steer: bool, follow_up: &str, alternate: bool) -> &'static str {
+    if !running {
+        return "auto";
+    }
+    if !can_steer {
+        return "queue";
+    }
+    let queue_default = follow_up == "queue";
+    if queue_default != alternate { "queue" } else { "steer" }
+}
+
+fn mode_for(s: &App, alternate: bool) -> &'static str {
+    let can_steer = !ctx(s)
+        .thread
+        .and_then(|t| s.state().thread_views.get(data::s(t, "id")))
+        .is_some_and(|v| crate::chat::timeline::queue::workflow(&v.projection).skips_compaction);
+    let follow_up = crate::settings::value(s, "followUpBehavior");
+    dispatch_mode(running(s), can_steer, follow_up.as_str().unwrap_or("steer"), alternate)
+}
+
+/// Prompts Up can recall (buildComposerPromptHistoryEntries): what the user typed themselves,
+/// oldest first, with consecutive repeats folded into the newest.
+fn history_entries(messages: &[Value]) -> Vec<(&str, String)> {
+    let mut out: Vec<(&str, String)> = Vec::new();
+    for m in messages {
+        let own = data::s(m, "role") == "user"
+            && m["context"]["guest"].is_null()
+            && m["scheduledTaskId"].is_null()
+            && data::s(m, "createdBy") != "agent";
+        if !own {
+            continue;
+        }
+        let text = data::s(m, "text").trim();
+        let text = text.strip_prefix("Ultrathink:\n").unwrap_or(text).trim();
+        if text.is_empty() || text.starts_with(plan::IMPLEMENTATION_PREFIX.trim_end()) {
+            continue;
+        }
+        match out.last_mut() {
+            Some(last) if last.1 == text => last.0 = data::s(m, "id"),
+            _ => out.push((data::s(m, "id"), text.to_owned())),
+        }
+    }
+    out
+}
+
+/// One Up (backward) or Down step (stepComposerPromptHistory): the recalled message and text,
+/// `Some((None, ""))` to step past the newest back to an empty prompt, or None to leave the key.
+fn step_history(entries: &[(&str, String)], recalled: Option<(&str, &str)>, current: &str, backward: bool) -> Option<(Option<String>, String)> {
+    let active = recalled.filter(|(_, text)| *text == current).and_then(|(id, text)| {
+        entries.iter().position(|(e, _)| *e == id).or_else(|| entries.iter().rposition(|(_, p)| p == text))
+    });
+    let pick = |i: usize| entries.get(i).map(|(id, p)| (Some(id.to_string()), p.clone()));
+    match (backward, active) {
+        (true, None) if !current.is_empty() => None,
+        (true, None) => entries.len().checked_sub(1).and_then(pick),
+        (true, Some(i)) => i.checked_sub(1).and_then(pick),
+        (false, None) => None,
+        (false, Some(i)) => pick(i + 1).or(Some((None, String::new()))),
+    }
+}
+
+fn recall(s: &mut App, backward: bool) -> bool {
+    let Some(thread) = ctx(s).thread.map(|t| data::s(t, "id").to_owned()) else { return false };
+    if editing_run(s).is_some() || has_attachments(s) {
+        return false;
+    }
+    let key = active_key(s);
+    let current = draft(s).map(|d| d.edit.text.clone()).unwrap_or_default();
+    let caret = draft(s).map(|d| d.edit.range());
+    // Only from the caret's edge, so arrows still move through a multi-line prompt.
+    let at_edge = caret.is_none_or(|(start, end)| {
+        if backward { !current[..start].contains('\n') } else { !current[end..].contains('\n') }
+    });
+    if !at_edge {
+        return false;
+    }
+    let Some(view) = s.state().thread_views.get(&thread) else { return false };
+    let entries = history_entries(rows_messages(&view.projection));
+    let recalled = s.ui.chat.composer.recalled.as_ref().filter(|(k, ..)| *k == key).map(|(_, id, text)| (id.as_str(), text.as_str()));
+    let Some((id, prompt)) = step_history(&entries, recalled, &current, backward) else { return false };
+    s.ui.chat.composer.recalled = id.map(|id| (key, id, prompt.clone()));
+    set_text(s, &prompt);
+    true
+}
+
+fn rows_messages(p: &Value) -> &[Value] {
+    p["messages"].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
 /// What the composer is writing into: a thread, or the home draft and its project.
@@ -194,14 +324,26 @@ fn set_interaction_mode(s: &mut App, mode: &str) {
 
 /// Submits the composer: sends the draft, or with a plan ready and nothing typed, implements it.
 pub fn submit(s: &mut App) {
-    send(s);
+    send(s, false);
 }
 
 pub fn has_attachments(s: &App) -> bool {
     draft(s).is_some_and(|d| !d.attachments.is_empty())
 }
 
-fn send(s: &mut App) {
+fn send(s: &mut App, alternate: bool) {
+    if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
+        let text = draft(s).map(|d| d.edit.text.trim().to_owned()).unwrap_or_default();
+        if text.is_empty() {
+            return;
+        }
+        if let Some(net) = s.src.net() {
+            net.dispatch(json!({"type": "queued-run.edit", "commandId": s5_net::uuid(), "threadId": thread, "runId": run, "text": text}));
+        }
+        cancel_queued_edit(s);
+        return;
+    }
+    let mode = mode_for(s, alternate);
     let Some(d) = draft(s) else { return };
     let mut text = d.edit.text.trim().to_string();
     // A file that can no longer be read keeps the draft as it is.
@@ -220,7 +362,6 @@ fn send(s: &mut App) {
         return;
     }
     let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
-    let running = running(s);
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
@@ -230,9 +371,11 @@ fn send(s: &mut App) {
             let mut cmd = json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
                 "threadId": id, "messageId": message_id, "text": text, "attachments": [],
-                "deliveryIntent": if running { "steer" } else { "auto" },
-                "dispatchMode": {"type": "start_immediately"},
+                "dispatchMode": {"type": if mode == "queue" { "queue_after_active" } else { "start_immediately" }},
             });
+            if mode != "queue" {
+                cmd["deliveryIntent"] = json!(mode);
+            }
             if let Some(m) = model {
                 cmd["modelSelection"] = m;
             }
@@ -273,6 +416,28 @@ fn send(s: &mut App) {
 const IMAGE_TYPES: [(&str, &str); 5] =
     [("png", "image/png"), ("jpg", "image/jpeg"), ("jpeg", "image/jpeg"), ("gif", "image/gif"), ("webp", "image/webp")];
 const MAX_IMAGE_BYTES: usize = 10 * 1024 * 1024;
+const IMAGE_EXTENSIONS: [&str; 5] = ["png", "jpg", "jpeg", "gif", "webp"];
+
+/// Pasted images join the draft's attachments (ChatComposer onPaste): copied image files as they
+/// are, raw image data as a temporary PNG. Text, and a queued-message edit, paste as usual.
+fn on_paste(s: &mut App, content: &rune::ClipboardContent, _: &mut Tx) -> bool {
+    if editing_run(s).is_some() {
+        return false;
+    }
+    let image_ext = |p: &std::path::Path| p.extension().and_then(|e| e.to_str()).is_some_and(|e| IMAGE_EXTENSIONS.contains(&e.to_ascii_lowercase().as_str()));
+    let files: Vec<String> = content.files().iter().filter(|p| image_ext(p)).map(|p| p.display().to_string()).collect();
+    if !files.is_empty() {
+        draft_mut(s).attachments.extend(files);
+        return true;
+    }
+    let Some(image) = content.image().filter(|_| content.text().trim().is_empty()) else { return false };
+    let path = std::env::temp_dir().join(format!("pasted-image-{}.png", s5_net::uuid()));
+    if std::fs::write(&path, image.png()).is_err() {
+        return false;
+    }
+    draft_mut(s).attachments.push(path.display().to_string());
+    true
+}
 
 /// An image file as `assets.persistChatAttachments` takes it, inlined as a data URL.
 fn upload(path: &str) -> Option<Value> {
@@ -396,7 +561,38 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             _ => {}
         }
     }
+    let thread = ctx(s).thread.map(|t| data::s(t, "id").to_owned());
+    let plain = !e.mods.shift && !e.mods.cmd && !e.mods.alt && !e.mods.ctrl && !e.mods.logo;
+    let answering = question::editor(s).is_some();
     match e.key {
+        Key::Enter if e.mods.cmd && e.mods.shift => {
+            if let Some(thread) = thread {
+                crate::chat::timeline::queue::steer_next(s, &thread);
+            }
+            true
+        }
+        Key::Enter if !answering && (e.mods.cmd || plain) => {
+            let text = draft(s).map(|d| d.edit.text.as_str()).unwrap_or("");
+            let shortcut = crate::settings::value(s, "sendShortcut");
+            let shortcut = shortcut.as_str().unwrap_or("enter");
+            let needs_mod = shortcut == "mod-enter" || (shortcut == "mod-enter-multiline" && text.contains('\n'));
+            if plain && needs_mod {
+                draft_mut(s).edit.insert("\n");
+            } else {
+                // Mod+Enter while a turn runs is the alternate follow-up (steer <-> queue).
+                send(s, e.mods.cmd);
+            }
+            true
+        }
+        Key::Up if e.mods.alt && !e.mods.shift && !answering => match thread {
+            Some(thread) => crate::chat::timeline::queue::edit_latest(s, &thread),
+            None => false,
+        },
+        Key::Up | Key::Down if plain && !answering => recall(s, e.key == Key::Up),
+        Key::Escape if editing_run(s).is_some() => {
+            cancel_queued_edit(s);
+            true
+        }
         Key::Tab if e.mods.shift => {
             if supports_plan(s) {
                 toggle_plan(s);
@@ -439,8 +635,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
             .placeholder(PLACEHOLDER, t.c.placeholder)
             .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
             .on_edit(|s: &mut App| &mut draft_mut(s).edit)
-            .on_submit(|s: &mut App, _| send(s))
+            .on_submit(|s: &mut App, _| send(s, false))
             .on_input_key(on_key)
+            .on_input_paste(on_paste)
             .on_input_change(|s: &mut App, _| {
                 s.ui.chat.composer.menu_active = 0;
                 menu::refresh(s);
@@ -448,7 +645,15 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     };
     let editor = col().w_full().px(16.0).pt(16.0).child(auto_grow(field, 2, 8));
 
-    let mut body = col().key("composer").w_full().radius(radius::XL2).fill(composer_fill(t)).border(1.0, composer_outline(t)).padding(1.0).pb(11.0);
+    let mut body = col()
+        .key("composer")
+        .on_drop_files(|s: &mut App, files: &[std::path::PathBuf], _: &mut Tx| {
+            if editing_run(s).is_none() {
+                draft_mut(s).attachments.extend(files.iter().map(|p| p.display().to_string()));
+            }
+        })
+        .accepts_extensions(&IMAGE_EXTENSIONS)
+        .w_full().radius(radius::XL2).fill(composer_fill(t)).border(1.0, composer_outline(t)).padding(1.0).pb(11.0);
     if !t.dark {
         body = body.shadow(1.0, 2.0, Color::BLACK.alpha(0.05));
     }
@@ -553,11 +758,16 @@ fn stop_button(t: &T) -> El {
 }
 
 fn send_button(s: &App, t: &T, sendable: bool) -> El {
-    let label = if running(s) { "Steer message" } else { "Submit message" };
+    let label = match (editing_run(s).is_some(), mode_for(s, false)) {
+        (true, _) => "Update queued message",
+        (_, "queue") => "Queue message",
+        (_, "steer") => "Steer message",
+        _ => "Submit message",
+    };
     let (bg, fg) = if sendable { (t.c.message_action, t.c.message_action_foreground) } else { (t.c.foreground.alpha_mul(0.12), t.c.muted_foreground) };
     let mut b = el().key("composer-send").size(32.0, 32.0).center().radius(radius::FULL).fill(bg).label(label).child(icon(&icons::ARROW_UP, 14.0).color(fg));
     if sendable {
-        b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(label).on_press(send);
+        b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(label).on_press(|s: &mut App| send(s, false));
     }
     b
 }
@@ -806,5 +1016,40 @@ mod tests {
         let d = draft(&s).unwrap();
         assert!(d.edit.text.is_empty());
         assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
+    }
+
+    #[test]
+    fn follow_ups_steer_or_queue_and_the_alternate_key_flips_them() {
+        assert_eq!(dispatch_mode(false, true, "queue", true), "auto");
+        assert_eq!(dispatch_mode(true, true, "steer", false), "steer");
+        assert_eq!(dispatch_mode(true, true, "steer", true), "queue");
+        assert_eq!(dispatch_mode(true, true, "queue", false), "queue");
+        assert_eq!(dispatch_mode(true, true, "queue", true), "steer");
+        assert_eq!(dispatch_mode(true, false, "steer", true), "queue");
+    }
+
+    #[test]
+    fn up_recalls_typed_prompts_newest_first_and_down_returns_to_empty() {
+        let messages = json!([
+            {"id": "1", "role": "user", "text": "first"},
+            {"id": "2", "role": "assistant", "text": "reply"},
+            {"id": "3", "role": "user", "text": "Ultrathink:\nsecond"},
+            {"id": "4", "role": "user", "text": "second"},
+            {"id": "5", "role": "user", "text": "from a task", "scheduledTaskId": "task"},
+            {"id": "6", "role": "user", "text": "PLEASE IMPLEMENT THIS PLAN:\n# Plan"},
+            {"id": "7", "role": "user", "text": "agent", "createdBy": "agent"},
+        ]);
+        let entries = history_entries(messages.as_array().unwrap());
+        assert_eq!(entries, [("1", "first".to_owned()), ("4", "second".to_owned())]);
+        assert_eq!(step_history(&entries, None, "typed", true), None);
+        let up = step_history(&entries, None, "", true).unwrap();
+        assert_eq!(up, (Some("4".to_owned()), "second".to_owned()));
+        let up = step_history(&entries, Some(("4", "second")), "second", true).unwrap();
+        assert_eq!(up, (Some("1".to_owned()), "first".to_owned()));
+        assert_eq!(step_history(&entries, Some(("1", "first")), "first", true), None);
+        assert_eq!(step_history(&entries, Some(("1", "first")), "first", false).unwrap().1, "second");
+        assert_eq!(step_history(&entries, Some(("4", "second")), "second", false), Some((None, String::new())));
+        // An edited recall is the user's own text again.
+        assert_eq!(step_history(&entries, Some(("4", "second")), "second!", true), None);
     }
 }
