@@ -5,6 +5,7 @@ pub mod avatars;
 pub mod pr_detail;
 pub mod pull_requests;
 pub mod usage;
+pub mod usage_prices;
 
 use rune::{KeyEvent, Tx};
 use serde_json::{Value, json};
@@ -22,7 +23,7 @@ pub struct Ui {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_detail::poll(s) | usage::poll(s);
+    let changed = pull_requests::poll(s) | pr_detail::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }
@@ -113,6 +114,8 @@ fn open_usage(s: &mut App, metric: &'static str) {
     u.zone_name = "UTC".into();
     u.zone = crate::data::Zone::Fixed(0);
     u.requested = Some(usage::input(u, s.now_ms, &json!([])));
+    u.answered = u.requested.clone();
+    u.preferences_read = true;
 }
 
 fn light(s: &mut App) {
@@ -216,5 +219,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-model", |s| {
         open_usage(s, "cost");
         s.ui.pages.usage.model = Some("claude\0\0claude-opus-5-5".into());
+    }),
+    ("usage-prices", |s| {
+        open_usage(s, "cost");
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(config) = state.config.as_mut()
+        {
+            config["settings"]["usagePriceOverrides"] = json!({"glm-4.6": {"inputCostPerMillionTokens": 0.6, "outputCostPerMillionTokens": 2.2, "cacheReadCostPerMillionTokens": 0.11}});
+            config["settings"]["usageModelAliases"] = json!({"claude-opus-5-5-preview": "claude-opus-5-5"});
+            config["environment"]["capabilities"]["usageModelAliases"] = json!(true);
+        }
+        usage_prices::open(s, Some("kimi-k2-thinking"));
     }),
 ];
