@@ -1,8 +1,10 @@
+pub mod actions;
 mod attachments;
 pub mod find;
 mod markdown;
 
 mod language_icons;
+pub mod plan;
 pub mod question;
 mod requests;
 mod rows;
@@ -37,6 +39,7 @@ pub struct Ui {
     /// The text a copy button last copied, and when.
     copied: Option<(String, i64)>,
     pub find: find::Find,
+    pub actions: actions::State,
 }
 
 /// A row's stable key in the virtual list; find scrolls to marks inside it.
@@ -221,16 +224,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             );
     }
     if kind == "proposed_plan" {
-        return col()
-            .padding(12.0)
-            .border(1.0, t.c.border)
-            .radius(8.0)
-            .child(
-                text("Proposed plan")
-                    .font(theme::SM_MEDIUM)
-                    .color(t.c.foreground),
-            )
-            .child(markdown::view(app, s(item, "markdown"), &id, t));
+        return plan::card(app, item, t);
     }
     let glyph = match kind {
         "reasoning" => &icons::BRAIN,
@@ -379,7 +373,7 @@ fn send(app: &mut App, request: &str, command: Value) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = attachments::poll(app) | question::poll(app);
+    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -499,6 +493,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     };
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     let rows = rows::derive(&view.projection, app.now_ms);
+    let targets = rows::revert_targets(&view.projection);
     let keys: Vec<String> = rows.iter().enumerate().map(|(i, r)| row_key(r, i)).collect();
     let mut marks = find::Marks::for_rows(app, &rows, t.dark).into_iter();
     let mut stack = col()
@@ -544,7 +539,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                             row()
                                 .w_full()
                                 .justify_end()
-                                .child(copy_button(app, s(item, "text"), t).group_opacity(0.0, 1.0)),
+                                .pr(4.0)
+                                .child(actions::user(app, thread_id, item, &targets, t).group_opacity(0.0, 1.0)),
                         ),
                 )
             }
@@ -556,7 +552,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     .px(4.0)
                     .gap(6.0)
                     .child(markdown::view_marked(app, s(item, "text"), s(item, "id"), t, marks.as_ref()))
-                    .child(row().child(copy_button(app, s(item, "text"), t).group_opacity(0.0, 1.0))),
+                    .child(row().child(actions::assistant(app, thread_id, item, t).group_opacity(0.0, 1.0))),
             ),
             Row::Working { id, label } => (
                 id,
@@ -651,6 +647,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                 .py(3.0)
                 .child(body),
         );
+    }
+    if let Some(error) = actions::error(app, t) {
+        stack = stack.child(col().key("timeline-row-action-error").w_full().py(3.0).child(error));
     }
     col()
         .key(format!("timeline-{thread_id}"))

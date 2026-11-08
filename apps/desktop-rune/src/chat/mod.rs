@@ -50,7 +50,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             timeline::find::bar(s, t, w - bw - details::GAP, details::GAP, bw)
         })
         .children(details::menu(s, t))
-        .children(composer::overlays(s, cx, t));
+        .children(composer::overlays(s, cx, t))
+        .children(timeline::actions::overlays(s, t));
     main.child(topbar::view(s, cx, t))
         .child(stack)
         .children(crate::panel::drawer::view(s, cx, t))

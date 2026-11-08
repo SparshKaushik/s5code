@@ -21,11 +21,11 @@ pub struct Active<'a> {
     pub item: &'a Value,
 }
 
-impl Active<'_> {
-    pub fn id(&self) -> &str {
+impl<'a> Active<'a> {
+    pub fn id(&self) -> &'a str {
         s(self.request, "id")
     }
-    fn questions(&self) -> &[Value] {
+    fn questions(&self) -> &'a [Value] {
         array(self.item, "questions")
     }
     fn can_respond(&self) -> bool {
@@ -352,7 +352,7 @@ pub fn panel(app: &App, t: &T) -> Option<El> {
         .pb(4.0)
         .child(col().w_full().pt(8.0).child(super::markdown::view(app, s(q, "question"), &format!("question-{request}"), t)))
         .child(options.ml(-8.0))
-        .children(app.ui.chat.timeline.response_errors.get(request).map(|error| text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).pt(8.0)));
+        .children(app.ui.chat.timeline.response_errors.get(&request).map(|error| text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).pt(8.0)));
     drawer = drawer.child(col().w_full().max_h(384.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body));
     Some(drawer)
 }

@@ -13,7 +13,7 @@ use rune::{Color, Cursor, Cx, El, Key, KeyEvent, TextEdit, Tx, auto_grow, col, e
 use serde_json::{Value, json};
 
 use crate::chat::details::Lane;
-use crate::chat::timeline::question;
+use crate::chat::timeline::{plan, question};
 use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
@@ -191,14 +191,33 @@ fn set_interaction_mode(s: &mut App, mode: &str) {
     }
 }
 
+/// Submits the composer: sends the draft, or with a plan ready and nothing typed, implements it.
+pub fn submit(s: &mut App) {
+    send(s);
+}
+
+pub fn has_attachments(s: &App) -> bool {
+    draft(s).is_some_and(|d| !d.attachments.is_empty())
+}
+
 fn send(s: &mut App) {
     let Some(d) = draft(s) else { return };
-    let text = d.edit.text.trim().to_string();
-    if text.is_empty() && d.attachments.is_empty() {
-        return;
-    }
+    let mut text = d.edit.text.trim().to_string();
     // A file that can no longer be read keeps the draft as it is.
     let Some(uploads) = d.attachments.iter().map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
+    let mut plan_ref = None;
+    if text.is_empty()
+        && uploads.is_empty()
+        && let (Some((plan_id, markdown)), Route::Thread(id)) = (plan::follow_up(s), s.frame_route().clone())
+    {
+        // resolvePlanFollowUpSubmission: implementing leaves plan mode.
+        text = format!("{}{}", plan::IMPLEMENTATION_PREFIX, markdown.trim());
+        plan_ref = Some(json!({"threadId": id, "planId": plan_id}));
+        set_interaction_mode(s, "default");
+    }
+    if text.is_empty() && uploads.is_empty() {
+        return;
+    }
     let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
     let running = running(s);
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
@@ -215,6 +234,9 @@ fn send(s: &mut App) {
             });
             if let Some(m) = model {
                 cmd["modelSelection"] = m;
+            }
+            if let Some(plan_ref) = plan_ref {
+                cmd["sourcePlanRef"] = plan_ref;
             }
             (id, cmd, false)
         }
@@ -441,6 +463,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     // A pending question sits directly above the composer, as on the web.
     if let Some(panel) = crate::chat::timeline::composer_requests(s, t) {
         stack = stack.child(panel.mx(22.0).mb(-17.0));
+    } else if let Some(banner) = plan::banner(s, t) {
+        stack = stack.child(banner.mx(22.0).mb(-17.0));
     }
     stack.child(body)
 }
@@ -499,6 +523,10 @@ fn primary_action(s: &App, t: &T) -> El {
         if let Some(actions) = question::actions(s, t, stop) {
             return actions;
         }
+    }
+    let typed = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty());
+    if let Some(action) = plan::action(s, t, typed) {
+        return action;
     }
     let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable {

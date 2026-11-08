@@ -53,6 +53,50 @@ fn escapes_fold(kind: &str) -> bool {
     matches!(kind, "error" | "notification" | "system_notice" | "proposed_plan" | "compaction")
 }
 
+/// Where "Edit from here" rewinds each prompt to, by user message item id: the ready checkpoint
+/// after the run before it, or the thread's start checkpoint for the first run
+/// (deriveRevertTurnCountByUserMessageId + findRevertCheckpoint). Inherited history, steers and
+/// the turn still running have none.
+pub fn revert_targets(p: &Value) -> HashMap<String, (String, String)> {
+    let ready: Vec<&Value> = array(p, "checkpoints").iter().filter(|c| s(c, "status") == "ready").collect();
+    let start = ready.iter().rfind(|c| c["ordinalWithinScope"] == 0 && c["appRunOrdinal"].is_null());
+    let after = |run: &str| ready.iter().rfind(|c| s(c, "runId") == run);
+    let runs: HashMap<_, _> = array(p, "runs").iter().map(|r| (s(r, "id"), r)).collect();
+    let entries: Vec<(&Value, bool)> = if p["visibleTurnItems"].is_array() {
+        let mut visible: Vec<_> = array(p, "visibleTurnItems").iter().collect();
+        visible.sort_by_key(|v| v["position"].as_i64().unwrap_or(0));
+        visible.into_iter().map(|v| (&v["item"], s(v, "visibility") == "inherited")).collect()
+    } else {
+        let mut items: Vec<_> = array(p, "turnItems").iter().collect();
+        items.sort_by_key(|v| v["ordinal"].as_i64().unwrap_or(0));
+        items.into_iter().map(|i| (i, false)).collect()
+    };
+    let mut target: HashMap<&str, Option<&&Value>> = HashMap::new();
+    let mut previous: Option<&str> = None;
+    let mut out = HashMap::new();
+    for (item, inherited) in entries {
+        let kind = s(item, "type");
+        let run = s(item, "runId");
+        if inherited || run.is_empty() || !matches!(kind, "user_message" | "assistant_message" | "notification") {
+            continue;
+        }
+        if !target.contains_key(run) {
+            target.insert(run, match previous { None => start, Some(prev) => after(prev) });
+            previous = Some(run);
+        }
+        if kind != "user_message"
+            || !matches!(s(item, "inputIntent"), "turn_start" | "queued_turn" | "")
+            || runs.get(run).is_some_and(|r| run_active(r))
+        {
+            continue;
+        }
+        if let Some(Some(c)) = target.get(run) {
+            out.insert(s(item, "id").to_owned(), (s(c, "scopeId").to_owned(), s(c, "id").to_owned()));
+        }
+    }
+    out
+}
+
 pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
     let mut items: Vec<&Value> = if p["visibleTurnItems"].is_array() {
         let mut visible: Vec<_> = array(p, "visibleTurnItems").iter().collect();
@@ -310,6 +354,30 @@ mod tests {
             {"id":"x","type":"run_interrupt_request","runId":"r","ordinal":3}]});
         assert!(matches!(derive(&stopped, 0).as_slice(), [Row::User(_), Row::Item(_)]));
     }
+    #[test]
+    fn prompts_rewind_to_the_checkpoint_before_their_run() {
+        let p = json!({
+            "runs": [{"id":"r1","status":"completed"},{"id":"r2","status":"completed"},{"id":"r3","status":"running"}],
+            "checkpoints": [
+                {"id":"c0","scopeId":"s","runId":null,"status":"ready","ordinalWithinScope":0,"appRunOrdinal":null},
+                {"id":"c1","scopeId":"s","runId":"r1","status":"ready","ordinalWithinScope":1,"appRunOrdinal":1},
+                {"id":"c2","scopeId":"s","runId":"r2","status":"error","ordinalWithinScope":2,"appRunOrdinal":2}
+            ],
+            "turnItems": [
+                {"type":"user_message","id":"u1","runId":"r1","inputIntent":"turn_start","ordinal":1},
+                {"type":"assistant_message","id":"a1","runId":"r1","ordinal":2},
+                {"type":"user_message","id":"u2","runId":"r2","inputIntent":"turn_start","ordinal":3},
+                {"type":"user_message","id":"s2","runId":"r2","inputIntent":"steer","ordinal":4},
+                {"type":"user_message","id":"u3","runId":"r3","inputIntent":"turn_start","ordinal":5}
+            ]
+        });
+        let t = revert_targets(&p);
+        assert_eq!(t.get("u1"), Some(&("s".to_owned(), "c0".to_owned())));
+        assert_eq!(t.get("u2"), Some(&("s".to_owned(), "c1".to_owned())));
+        // A steer is not a turn start; the running turn can't be rewound; r2's checkpoint failed.
+        assert_eq!(t.len(), 2);
+    }
+
     #[test]
     fn paths_read_relative_to_the_workspace_folder() {
         let root = Some("/root/projects/demo/");
