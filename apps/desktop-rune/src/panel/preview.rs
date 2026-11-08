@@ -377,8 +377,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
         .role("textbox")
         .label("Search or enter URL")
         .placeholder("Search or enter URL", t.c.contrast_placeholder)
-        .grow(1.)
-        .min_w(0.)
+        .w_full()
         .h(28.)
         .px(9.)
         .py(4.)
@@ -438,7 +437,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                         .build(t),
                 ),
         )
-        .child(address)
+        .child(el().grow(1.).min_w(0.).child(address))
         .child(action("Annotate preview", &icons::MOUSE_POINTER_CLICK).disabled(true).build(t))
         .child(
             action("Screenshot", &icons::CAMERA)

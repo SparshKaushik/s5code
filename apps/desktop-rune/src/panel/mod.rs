@@ -594,6 +594,7 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
     let mut menu = kit::Menu::new("panel-add-menu")
         .anchor("panel-add")
         .placement(kit::Placement::BottomStart)
+        .min_width(224.)
         .open(true)
         .on_close(|s: &mut App| s.ui.panel.add_menu = false);
     for (surface, key) in LAUNCH {
