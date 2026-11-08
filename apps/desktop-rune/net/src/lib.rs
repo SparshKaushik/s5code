@@ -67,6 +67,7 @@ pub struct Net {
     tx: Sender<Command>,
     rx: Receiver<Incoming>,
     replies: HashMap<u64, Reply>,
+    chunks: HashMap<u64, Vec<Value>>,
     next_id: u64,
     resources: HashMap<Route, Value>,
     resource_events: HashMap<Route, Vec<Value>>,
@@ -109,6 +110,7 @@ impl Net {
             tx,
             rx,
             replies: HashMap::new(),
+            chunks: HashMap::new(),
             next_id: 0,
             resources: HashMap::new(),
             resource_events: HashMap::new(),
@@ -151,6 +153,10 @@ impl Net {
                 }
                 Incoming::Reply(id, reply) => {
                     self.replies.insert(id, reply);
+                }
+                Incoming::Chunk(id, values) => {
+                    self.chunks.entry(id).or_default().extend(values);
+                    changed = true;
                 }
             }
         }
@@ -276,6 +282,10 @@ impl Net {
     }
     pub fn take_reply(&mut self, id: u64) -> Option<Reply> {
         self.replies.remove(&id)
+    }
+    /// Stream items a pending [`Net::request`] has received so far; its reply arrives on `Exit`.
+    pub fn take_chunks(&mut self, id: u64) -> Vec<Value> {
+        self.chunks.remove(&id).unwrap_or_default()
     }
     pub fn dispatch(&mut self, mut command: Value) -> u64 {
         if command.get("commandId").is_none() {

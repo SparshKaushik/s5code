@@ -203,6 +203,13 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         )
     };
     let mut out = Vec::new();
+    if let Some(branch) = th.branch.clone() {
+        let (project, worktree) = (th.project_id.clone(), th.worktree.clone());
+        out.push(leaf(item(format!("New thread on {branch}"), move |s, _| {
+            close(s);
+            crate::chat::home::start_on_branch(s, &project, &branch, worktree.as_deref());
+        })));
+    }
     if th.pinned {
         out.push(leaf(item("Unpin thread", with(super::unpin)).icon(&icons::PIN_OFF)));
     } else {

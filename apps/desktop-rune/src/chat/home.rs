@@ -16,6 +16,30 @@ use crate::{App, Route};
 pub struct Ui {
     /// Provider instances whose status banner the user dismissed.
     pub dismissed: Vec<String>,
+    /// The checkout a "New thread on {branch}" draft launches in: `(project id, workspaceStrategy)`.
+    pub workspace: Option<(String, Value)>,
+}
+
+/// "New thread on {branch}": a draft in `project` that launches on the thread's branch and checkout.
+pub fn start_on_branch(s: &mut App, project: &str, branch: &str, worktree: Option<&str>) {
+    s.ui.chat.home.workspace = Some((project.to_string(), workspace_strategy(branch, worktree)));
+    crate::shell::sidebar::go(s, Route::Home { project_id: Some(project.to_string()) });
+}
+
+/// `workspaceStrategy` for a draft on `branch`, in its worktree when it has one.
+pub fn workspace_strategy(branch: &str, worktree: Option<&str>) -> Value {
+    match worktree.filter(|w| !w.is_empty()) {
+        Some(path) => json!({"type": "existing_worktree", "worktreePath": path, "branch": branch}),
+        None => json!({"type": "root", "branch": branch}),
+    }
+}
+
+/// Takes the draft's launch strategy for `project`: its branch preset, else the project root.
+pub fn take_workspace(s: &mut App, project: &str) -> Value {
+    match s.ui.chat.home.workspace.take() {
+        Some((id, strategy)) if id == project => strategy,
+        _ => json!({"type": "root"}),
+    }
 }
 
 /// The project the draft belongs to: the route's, else the one with the latest activity.

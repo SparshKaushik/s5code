@@ -638,6 +638,7 @@ pub fn new_thread(s: &mut App) {
 
 /// `chat.newLocal`: a new thread in the current project, else the first open one.
 pub fn new_local(s: &mut App) {
+    s.ui.chat.home.workspace = None;
     let current = match &s.route {
         Route::Thread(id) => s.state().threads.iter().find(|t| t["id"] == *id).map(|t| crate::data::s(t, "projectId").to_string()),
         Route::Home { project_id } => project_id.clone(),

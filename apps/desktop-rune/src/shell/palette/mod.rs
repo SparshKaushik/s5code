@@ -7,7 +7,7 @@ use rune::{Cx, El, Key, KeyEvent, ScrollSpec, TextEdit, Tx, col, el, icon, row, 
 use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 pub(crate) mod actions;
-mod add_project;
+pub(crate) mod add_project;
 mod scenes;
 pub use scenes::SCENES;
 
@@ -242,7 +242,7 @@ pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
     });
 }
 /// The first `message` in an Effect cause, else the reply's own text.
-fn error_message(error: &serde_json::Value, fallback: &str) -> String {
+pub(crate) fn error_message(error: &serde_json::Value, fallback: &str) -> String {
     fn find(v: &serde_json::Value) -> Option<&str> {
         match v {
             serde_json::Value::Object(map) => map

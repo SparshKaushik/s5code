@@ -13,6 +13,10 @@ use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::App;
 use std::collections::HashSet;
+use crate::shell::palette;
+
+mod git;
+mod scripts;
 
 #[derive(Default)]
 pub struct Ui {
@@ -25,6 +29,8 @@ pub struct Ui {
     refs: Vec<String>,
     branch_query: TextEdit,
     pending: Option<(u64, Pending)>,
+    pub git: git::State,
+    pub scripts: scripts::State,
 }
 
 enum Pending {
@@ -38,6 +44,7 @@ pub enum Menu {
     Editor,
     Git,
     Branch,
+    Scripts,
 }
 
 pub const GAP: f32 = 12.0;
@@ -159,9 +166,29 @@ fn split(t: &T, key: &str, main: El, label: &str, menu: Menu) -> El {
         )
 }
 
+/// A card menu row: icon, label, and the reason it is disabled as its tooltip.
+fn menu_row(t: &T, glyph: Option<El>, label: &str, on_press: Option<impl Fn(&mut App) + 'static>, help: Option<String>) -> El {
+    let mut item = row().w_full().h(32.0).px(8.0).gap(8.0).center_y().radius(radius::MD).label(label.to_string());
+    if let Some(glyph) = glyph {
+        item = item.child(glyph);
+    }
+    item = item.child(text(label.to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0));
+    if let Some(help) = help {
+        item = item.help(help);
+    }
+    match on_press {
+        Some(f) => item.hover(t.c.accent).cursor(Cursor::Pointer).on_press(f),
+        None => item.opacity(0.5),
+    }
+}
+
 fn toggle_menu(s: &mut App, menu: Menu) {
     let ui = &mut s.ui.chat.details;
     ui.menu = if ui.menu == Some(menu) { None } else { Some(menu) };
+    if ui.menu == Some(Menu::Git) {
+        git::refresh(s);
+        return;
+    }
     if ui.menu == Some(Menu::Branch) {
         ui.branch_query = TextEdit::new("");
         ui.branch_query.focused = true;
@@ -221,6 +248,11 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
+    let changed = git::poll(s) | scripts::poll(s);
+    poll_branch(s) || changed
+}
+
+fn poll_branch(s: &mut App) -> bool {
     let Some(id) = s.ui.chat.details.pending.as_ref().map(|p| p.0) else { return false };
     let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
     let Some((_, pending)) = s.ui.chat.details.pending.take() else { return false };
@@ -237,8 +269,8 @@ pub fn poll(s: &mut App) -> bool {
                 net.dispatch(json!({"type": "thread.metadata.update", "threadId": thread, "branch": branch, "worktreePath": worktree}));
             }
         }
-        (Pending::List, Err(e)) => crate::shell::palette::toast(s, "Failed to load branches.", e["message"].as_str()),
-        (Pending::Branch(_), Err(e)) => crate::shell::palette::toast(s, "Failed to switch ref.", e["message"].as_str()),
+        (Pending::List, Err(e)) => palette::toast(s, "Failed to load branches.", Some(&palette::error_message(&e, "An error occurred."))),
+        (Pending::Branch(_), Err(e)) => palette::toast(s, "Failed to switch ref.", Some(&palette::error_message(&e, "An error occurred."))),
     }
     true
 }
@@ -314,7 +346,7 @@ fn card(s: &App, t: &T) -> Option<El> {
         "Choose editor",
         Menu::Editor,
     );
-    let script = action(t, "details-script", icon(&icons::PLUS, 14.0).color(fg), "Add project script", fg).gap(12.0).w_full();
+    let script = scripts::view(s, t);
     let general = col().w_full().padding(8.0).pb(10.0).child(run_context).child(editor).child(script);
 
     let mut card = col()
@@ -343,17 +375,11 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .child(icon(&icons::CHEVRON_DOWN, 16.0).color(muted))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
+        if let Some(git) = git::view(s, t, v, draft) {
+            section = section.child(git);
+        }
         if draft {
             return Some(card.child(section));
-        }
-        if v["hasPrimaryRemote"] != true {
-            section = section.child(split(
-                t,
-                "details-git-menu",
-                action(t, "details-publish", icon(&icons::CLOUD_UPLOAD, 16.0).color(muted), "Publish repository", fg),
-                "Git action options",
-                Menu::Git,
-            ));
         }
         let (add, del) = (v["workingTree"]["insertions"].as_u64().unwrap_or(0), v["workingTree"]["deletions"].as_u64().unwrap_or(0));
         let stat = theme::mono(theme::XS_MEDIUM);
@@ -376,12 +402,22 @@ fn card(s: &App, t: &T) -> Option<El> {
 /// The open card menu, anchored under its trigger. Attach after the card so it draws above.
 pub fn menu(s: &App, t: &T) -> Option<El> {
     let which = s.ui.chat.details.menu?;
+    let close = |s: &mut App| s.ui.chat.details.menu = None;
+    let rows = match which {
+        Menu::Git => Some(("details-git-menu", git::menu_rows(s, t))),
+        Menu::Scripts => Some(("details-scripts-menu", scripts::menu_rows(s, t))),
+        _ => None,
+    };
+    if let Some((anchor, rows)) = rows {
+        let list = col().key("details-menu").w(WIDTH - 18.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
+        return Some(list.children(rows).anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, close));
+    }
     let (anchor, items): (&str, Vec<(String, String)>) = match which {
         Menu::Editor => {
             let list = editors(s);
             ("details-editor-menu", if list.is_empty() { vec![(String::new(), "No editors found".into())] } else { list })
         }
-        Menu::Git => ("details-git-menu", vec![("publish".into(), "Publish repository".into()), ("commit".into(), "Commit".into())]),
+        Menu::Git | Menu::Scripts => return None,
         Menu::Branch => ("details-branch", branch_items(&s.ui.chat.details.refs, &s.ui.chat.details.branch_query.text)),
     };
     let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
@@ -408,13 +444,30 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
                 match which {
                     Menu::Editor => open_in_editor(s, Some(id.clone())),
                     Menu::Branch => pick_branch(s, &id),
-                    Menu::Git => {}
+                    Menu::Git | Menu::Scripts => {}
                 }
             });
         }
         list = list.child(item);
     }
     Some(list.anchored(anchor, Side::Bottom, Align::End, 4.0).modal(true, |s: &mut App| s.ui.chat.details.menu = None))
+}
+
+/// The git and script dialogs, drawn over the whole window.
+pub fn overlays(s: &App, t: &T) -> Vec<El> {
+    let mut out = vec![];
+    git::overlays(s, t, &mut out);
+    scripts::overlays(s, t, &mut out);
+    out
+}
+
+/// Escape closes an open menu even when the terminal has focus; then script editor shortcut
+/// capture and `script.{id}.run` shortcuts.
+pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
+    if e.key == Key::Escape && s.ui.chat.details.menu.take().is_some() {
+        return true;
+    }
+    scripts::on_key(s, e)
 }
 
 #[cfg(test)]

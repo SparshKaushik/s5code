@@ -27,6 +27,8 @@ pub(crate) enum Incoming {
     Connection(Conn),
     Item(Route, Value),
     Reply(u64, Reply),
+    /// Items a streaming request (`git.runStackedAction`) emits before its `Exit`.
+    Chunk(u64, Vec<Value>),
 }
 struct Subscription {
     id: u64,
@@ -228,7 +230,11 @@ pub(crate) fn run(
                                             .to_string(),
                                     ))
                                     .map_err(|e| e.to_string())?;
-                                if let Some((route, sub)) =
+                                if pending.contains(&id) {
+                                    if let Some(values) = frame["values"].as_array() {
+                                        emit(Incoming::Chunk(id, values.clone()));
+                                    }
+                                } else if let Some((route, sub)) =
                                     subs.iter_mut().find(|(_, s)| s.id == id)
                                 {
                                     if let Some(values) = frame["values"].as_array() {
@@ -456,6 +462,35 @@ mod socket_tests {
                 incoming.recv_timeout(Duration::from_secs(5)).unwrap()
             {
                 assert_eq!(result.unwrap(), json!({"ok":true}));
+                break;
+            }
+        }
+        // A streaming request's chunks reach the caller before its Exit.
+        tx.send(Command::Request(3, "git.runStackedAction".into(), json!({})))
+            .unwrap();
+        assert_eq!(read(&mut ws)["id"], 3);
+        ws.send(Message::Text(
+            json!({"_tag":"Chunk","requestId":"3","values":[{"kind":"action_started"}]}).to_string(),
+        ))
+        .unwrap();
+        assert_eq!(read(&mut ws), json!({"_tag":"Ack","requestId":"3"}));
+        loop {
+            if let Incoming::Chunk(3, values) =
+                incoming.recv_timeout(Duration::from_secs(5)).unwrap()
+            {
+                assert_eq!(values, vec![json!({"kind":"action_started"})]);
+                break;
+            }
+        }
+        ws.send(Message::Text(
+            json!({"_tag":"Exit","requestId":"3","exit":{"_tag":"Success","value":null}}).to_string(),
+        ))
+        .unwrap();
+        loop {
+            if let Incoming::Reply(3, result) =
+                incoming.recv_timeout(Duration::from_secs(5)).unwrap()
+            {
+                assert!(result.is_ok());
                 break;
             }
         }
