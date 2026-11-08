@@ -588,9 +588,9 @@ mod tests {
     #[test]
     fn mixes_in_srgb_like_css_color_mix() {
         let (black, white) = (Color { r: 0.0, g: 0.0, b: 0.0, a: 1.0 }, Color { r: 1.0, g: 1.0, b: 1.0, a: 1.0 });
-        // color-mix(in srgb, black 50%, white) is #808080, not linear 50% grey.
+        // color-mix(in srgb, black 50%, white) is 0.5 encoded (~#808080), not linear 50% grey.
         let grey = mix(black, white, 0.5);
-        assert!((grey.r - 0.2158).abs() < 0.001, "{}", grey.r);
+        assert!((grey.r - 0.2140).abs() < 0.001, "{}", grey.r);
         assert_eq!(mix(black, white, 1.0).r, 0.0);
     }
 
