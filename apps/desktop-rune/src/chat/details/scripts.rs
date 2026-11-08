@@ -754,7 +754,8 @@ mod tests {
         assert_eq!(file.len(), 3, "a blank name is not a script");
         assert!(parse_file("{not json").is_empty());
         let scripts = vec![json!({"id": "t", "name": "Test", "command": "vitest"}), json!({"id": "l", "name": "Check", "command": "bun lint"})];
-        let names: Vec<&str> = importable(&scripts, &file).iter().map(|v| data::s(v, "name")).collect();
+        let offered = importable(&scripts, &file);
+        let names: Vec<&str> = offered.iter().map(|v| data::s(v, "name")).collect();
         assert_eq!(names, vec!["Dev"], "same name in any case, or same command, is already there");
         let setup = json!({"name": "Setup", "command": "bun i", "runOnWorktreeCreate": true, "async": false, "previewUrl": "http://localhost:3000"});
         assert_eq!(
