@@ -152,7 +152,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx)
+    settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {

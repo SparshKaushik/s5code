@@ -272,7 +272,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El
     let mut card = col()
         .key("thread-details")
         .w(WIDTH)
-        .absolute(w - WIDTH - GAP, GAP)
+        .absolute(w - WIDTH - GAP, GAP + super::timeline::find::offset(s))
         .radius(radius::XL2)
         .fill(t.c.popover.alpha_mul(0.836))
         .border(1.0, if t.dark { Color::WHITE.alpha(0.1) } else { Color::BLACK.alpha(0.08) })

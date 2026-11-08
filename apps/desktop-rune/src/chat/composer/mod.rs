@@ -13,6 +13,7 @@ use rune::{Color, Cursor, Cx, El, Key, KeyEvent, TextEdit, Tx, auto_grow, col, e
 use serde_json::{Value, json};
 
 use crate::chat::details::Lane;
+use crate::chat::timeline::question;
 use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
@@ -347,7 +348,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.chat.composer.picker.open {
         return false;
     }
-    if let Some(m) = menu::open_menu(s) {
+    if let Some(m) = menu::open_menu(s).filter(|_| question::active(s).is_none()) {
         let count = menu::items(s, &m).len();
         let active = &mut s.ui.chat.composer.menu_active;
         match e.key {
@@ -393,19 +394,34 @@ fn supports_plan(s: &App) -> bool {
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     let empty = Draft::default();
     let d = draft(s).unwrap_or(&empty);
-    let field = text_input(&d.edit, theme::TEXT_SM.lh(22.75))
-        .key("composer-editor")
-        .w_full()
-        .color(t.c.foreground)
-        .placeholder(PLACEHOLDER, t.c.placeholder)
-        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
-        .on_edit(|s: &mut App| &mut draft_mut(s).edit)
-        .on_submit(|s: &mut App, _| send(s))
-        .on_input_key(on_key)
-        .on_input_change(|s: &mut App, _| {
-            s.ui.chat.composer.menu_active = 0;
-            menu::refresh(s);
-        });
+    // A pending question takes the editor for its own answer (ChatComposer's pending input).
+    let field = if let Some(q) = question::editor(s) {
+        let key = q.key.clone();
+        text_input(&q.edit, theme::TEXT_SM.lh(22.75))
+            .key("composer-editor")
+            .w_full()
+            .color(t.c.foreground)
+            .placeholder(q.placeholder, t.c.placeholder)
+            .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+            .on_edit(move |s: &mut App| question::editor_edit(s, &key))
+            .on_submit(|s: &mut App, _| question::advance(s))
+            .on_input_key(on_key)
+            .on_input_change(|s: &mut App, _| question::on_editor_change(s))
+    } else {
+        text_input(&d.edit, theme::TEXT_SM.lh(22.75))
+            .key("composer-editor")
+            .w_full()
+            .color(t.c.foreground)
+            .placeholder(PLACEHOLDER, t.c.placeholder)
+            .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+            .on_edit(|s: &mut App| &mut draft_mut(s).edit)
+            .on_submit(|s: &mut App, _| send(s))
+            .on_input_key(on_key)
+            .on_input_change(|s: &mut App, _| {
+                s.ui.chat.composer.menu_active = 0;
+                menu::refresh(s);
+            })
+    };
     let editor = col().w_full().px(16.0).pt(16.0).child(auto_grow(field, 2, 8));
 
     let mut body = col().key("composer").w_full().radius(radius::XL2).fill(composer_fill(t)).border(1.0, composer_outline(t)).padding(1.0).pb(11.0);
@@ -417,14 +433,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     let body = body.child(editor).child(footer(s, t));
 
-    let menu = menu::view(s, cx, t);
+    let menu = if question::active(s).is_some() { None } else { menu::view(s, cx, t) };
     let mut stack = col().key("composer-lane").w(lane.width).pin(Some(lane.left), None, None, Some(BOTTOM));
     if let Some(menu) = menu {
         stack = stack.child(menu.mx(22.0).mb(-17.0));
     }
     // A pending question sits directly above the composer, as on the web.
-    if let crate::Route::Thread(id) = s.frame_route() {
-        stack = stack.child(crate::chat::timeline::composer_requests(s, t, id));
+    if let Some(panel) = crate::chat::timeline::composer_requests(s, t) {
+        stack = stack.child(panel.mx(22.0).mb(-17.0));
     }
     stack.child(body)
 }
@@ -444,7 +460,7 @@ fn composer_outline(t: &T) -> Color {
 
 fn footer(s: &App, t: &T) -> El {
     let mut left = row().gap(4.0).center_y().child(
-        icon_button(t, &icons::PAPERCLIP, "Attach files", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx)),
+        icon_button(t, &icons::PAPERCLIP, "Attach images", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx)),
     );
     if interaction_mode(s) == "plan" {
         left = left.child(
@@ -478,21 +494,35 @@ fn footer(s: &App, t: &T) -> El {
 }
 
 fn primary_action(s: &App, t: &T) -> El {
+    if question::active(s).is_some() {
+        let stop = running(s).then(|| stop_button(t));
+        if let Some(actions) = question::actions(s, t, stop) {
+            return actions;
+        }
+    }
     let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable {
-        return el()
-            .key("composer-stop")
-            .size(32.0, 32.0)
-            .center()
-            .radius(radius::FULL)
-            .fill(t.c.destructive.alpha_mul(0.9))
-            .hover(t.c.destructive)
-            .cursor(Cursor::Pointer)
-            .label("Stop generation")
-            .help("Interrupt")
-            .child(el().size(8.0, 8.0).radius(1.5).fill(Color::WHITE))
-            .on_press(stop);
+        return stop_button(t);
     }
+    send_button(s, t, sendable)
+}
+
+fn stop_button(t: &T) -> El {
+    el()
+        .key("composer-stop")
+        .size(32.0, 32.0)
+        .center()
+        .radius(radius::FULL)
+        .fill(t.c.destructive.alpha_mul(0.9))
+        .hover(t.c.destructive)
+        .cursor(Cursor::Pointer)
+        .label("Stop generation")
+        .help("Interrupt")
+        .child(el().size(8.0, 8.0).radius(1.5).fill(Color::WHITE))
+        .on_press(stop)
+}
+
+fn send_button(s: &App, t: &T, sendable: bool) -> El {
     let label = if running(s) { "Steer message" } else { "Submit message" };
     let (bg, fg) = if sendable { (t.c.message_action, t.c.message_action_foreground) } else { (t.c.foreground.alpha_mul(0.12), t.c.muted_foreground) };
     let mut b = el().key("composer-send").size(32.0, 32.0).center().radius(radius::FULL).fill(bg).label(label).child(icon(&icons::ARROW_UP, 14.0).color(fg));
@@ -601,6 +631,22 @@ pub fn provider_icon(t: &T, driver: &str, size: f32) -> El {
         }
         _ => icon(&icons::BOT, size).color(t.c.muted_foreground),
     }
+}
+
+/// Gives the open route's composer the caret, or takes it away (the find bar holds it).
+pub fn set_focus(s: &mut App, focused: bool) {
+    draft_mut(s).edit.focused = focused;
+    if let Some(q) = question::editor(s) {
+        question::editor_edit(s, &q.key).focused = focused;
+    }
+}
+
+/// Puts `text` back into the open route's draft after what is already there.
+pub fn append_to_draft(s: &mut App, text: &str) {
+    let d = draft_mut(s);
+    let next = if d.edit.text.trim().is_empty() { text.to_owned() } else { format!("{}\n\n{text}", d.edit.text.trim_end()) };
+    d.edit.replace_text(&next);
+    d.edit.set_caret(next.len());
 }
 
 fn set_text(s: &mut App, text: &str) {

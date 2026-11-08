@@ -1,7 +1,9 @@
 mod attachments;
+pub mod find;
 mod markdown;
 
 mod language_icons;
+pub mod question;
 mod requests;
 mod rows;
 mod scenes;
@@ -25,10 +27,26 @@ pub struct Ui {
     pub expanded: HashSet<String>,
     pub question_index: HashMap<String, usize>,
     pub wrapped: HashSet<String>,
+    /// Typed answers to pending questions, by `request/question`.
     pub custom_answers: HashMap<String, rune::TextEdit>,
     pub answers: HashMap<String, HashMap<String, Vec<String>>>,
+    /// Questions whose panel is folded to its header, by `request/question`.
+    pub collapsed_questions: HashSet<String>,
+    /// A picked single choice waiting to move on: request, question index, due time.
+    pub auto_advance: Option<(String, usize, i64)>,
     /// The text a copy button last copied, and when.
     copied: Option<(String, i64)>,
+    pub find: find::Find,
+}
+
+/// A row's stable key in the virtual list; find scrolls to marks inside it.
+pub(super) fn row_key(row: &Row, index: usize) -> String {
+    let key = match row {
+        Row::User(item) | Row::Assistant(item) | Row::Item(item) => s(item, "id"),
+        Row::Working { id, .. } | Row::Work { id, .. } => id.as_str(),
+        Row::Request { request, .. } => s(request, "id"),
+    };
+    format!("timeline-row-{key}-{index}")
 }
 
 fn toggle(app: &mut App, id: &str) {
@@ -73,6 +91,18 @@ pub(super) fn copy_button(app: &App, content: &str, t: &T) -> El {
             app.ui.chat.timeline.copied = Some((content.clone(), crate::data::now_ms()));
             tx.wake_after(std::time::Duration::from_millis(COPIED_MS as u64));
         })
+}
+
+/// The open thread's working directory: its worktree, else its project's root.
+pub(super) fn workspace_root(app: &App) -> Option<String> {
+    let crate::Route::Thread(id) = app.frame_route() else { return None };
+    let state = app.state();
+    let thread = state.threads.iter().find(|t| s(t, "id") == id)?;
+    if let Some(path) = thread["worktreePath"].as_str().filter(|p| !p.is_empty()) {
+        return Some(path.to_owned());
+    }
+    let project = state.projects.iter().find(|p| s(p, "id") == s(thread, "projectId"))?;
+    project["workspaceRoot"].as_str().map(str::to_owned)
 }
 
 fn item_view(app: &App, item: &Value, t: &T) -> El {
@@ -209,15 +239,20 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         "todo_list" => &icons::LIST_TODO,
         _ => &icons::WRENCH,
     };
+    let head_key = format!("item-head-{id}");
+    let path_label = rows::workspace_path(s(item, "fileName"), workspace_root(app).as_deref());
+    let thought = s(item, "text").split_whitespace().collect::<Vec<_>>().join(" ");
     let todo = (kind == "todo_list").then(|| rows::todo_label(item));
     let title = if let Some(label) = &todo {
         label.as_str()
+    } else if kind == "reasoning" && !thought.is_empty() {
+        thought.as_str()
     } else if kind == "reasoning" {
         "Thought"
     } else if kind == "command_execution" && !s(item, "input").is_empty() {
         s(item, "input")
     } else if kind == "file_change" {
-        s(item, "fileName")
+        path_label.as_str()
     } else {
         s(item, "title")
     };
@@ -234,12 +269,17 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             .focusable(true)
             .role("button")
             .label(title)
-            .on_press(move |app: &mut App| toggle(app, &id))
+            .key(head_key.clone())
+            .on_press_tx(move |app: &mut App, tx| {
+                tx.keep_on_screen(head_key.clone());
+                toggle(app, &id)
+            })
             .child(icon(glyph, 16.0).color(t.c.muted_foreground))
             .child(
                 text(title)
                     .font(theme::TEXT_SM)
                     .color(t.c.muted_foreground)
+                    .truncate()
                     .grow(1.0)
                     .min_w(0.0),
             )
@@ -287,6 +327,9 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             ["input", "output", "fileName"]
                 .iter()
                 .filter_map(|k| {
+                    if *k == "fileName" && !s(item, "fileName").is_empty() {
+                        return Some(path_label.clone());
+                    }
                     let v = &item[*k];
                     if v.is_null() {
                         None
@@ -312,11 +355,19 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
 }
 
 fn respond(app: &mut App, thread: &str, request: &str, fields: Value) {
-    if app.ui.chat.timeline.responding.contains_key(request) {
+    send(app, request, requests::command(thread, request, fields));
+}
+
+fn responding(app: &App, request: &str) -> bool {
+    app.ui.chat.timeline.responding.contains_key(request)
+}
+
+/// Dispatches a command answering `request`, once at a time.
+fn send(app: &mut App, request: &str, command: Value) {
+    if responding(app, request) {
         return;
     }
     if let Some(net) = app.src.net() {
-        let command = requests::command(thread, request, fields);
         let rpc = net.dispatch(command);
         app.ui
             .chat
@@ -328,7 +379,7 @@ fn respond(app: &mut App, thread: &str, request: &str, fields: Value) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = attachments::poll(app);
+    let mut changed = attachments::poll(app) | question::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -350,246 +401,79 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
     let item = item.unwrap_or(request);
     let request_id = s(request, "id");
     let live = s(&request["responseCapability"], "type") == "live";
-    let question = s(request, "kind") == "user_input" || s(item, "type") == "user_input_request";
-    let can_answer = s(&request["responseCapability"], "type") != "not_resumable";
     let mut card = col().gap(4.0).w_full();
-    if question {
-        card = card
-            .padding(16.0)
-            .radius(16.0)
-            .fill(t.c.secondary)
-            .border(1.0, t.c.border);
-    }
-    if question {
-        let questions = array(item, "questions");
-        let index = app
-            .ui
-            .chat
-            .timeline
-            .question_index
-            .get(request_id)
-            .copied()
-            .unwrap_or(0)
-            .min(questions.len().saturating_sub(1));
-        card = card.child(
-            text(format!(
-                "{} · {}/{}",
-                questions
-                    .get(index)
-                    .map(|q| s(q, "header"))
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or("Question"),
-                index + 1,
-                questions.len()
-            ))
-            .font(theme::SM_MEDIUM)
-            .color(t.c.foreground),
-        );
-        for q in questions.iter().skip(index).take(1) {
-            let qid = s(q, "id");
-            card = card.child(
-                text(s(q, "question"))
-                    .font(theme::TEXT_SM)
-                    .color(t.c.foreground),
-            );
-            for option in array(q, "options") {
-                let label = s(option, "label");
-                let value = option["value"].as_str().unwrap_or(label);
-                let selected = app
-                    .ui
-                    .chat
-                    .timeline
-                    .answers
-                    .get(request_id)
-                    .and_then(|a| a.get(qid))
-                    .is_some_and(|a| a.iter().any(|a| a == value));
-                let multiple = q["multiSelect"].as_bool().unwrap_or(false);
-                let (r, q, l) = (request_id.to_owned(), qid.to_owned(), value.to_owned());
-                card = card.child(
-                    button(&format!("{} {label}", if selected { "●" } else { "○" }), t)
-                        .w_full()
-                        .py(6.0)
-                        .on_press(move |app: &mut App| {
-                            let values = app
-                                .ui
-                                .chat
-                                .timeline
-                                .answers
-                                .entry(r.clone())
-                                .or_default()
-                                .entry(q.clone())
-                                .or_default();
-                            if multiple {
-                                if let Some(i) = values.iter().position(|v| v == &l) {
-                                    values.remove(i);
-                                } else {
-                                    values.push(l.clone());
-                                }
-                            } else {
-                                *values = vec![l.clone()];
-                            }
-                        }),
-                );
-                if !s(option, "description").is_empty() && s(option, "description") != label {
-                    card = card.child(
-                        text(s(option, "description"))
-                            .font(theme::TEXT_XS)
-                            .color(t.c.muted_foreground),
-                    );
-                }
-            }
-            if q["allowCustomAnswer"].as_bool() != Some(false) || array(q, "options").is_empty() {
-                let key = format!("{request_id}/{qid}");
-                let edit = app
-                    .ui
-                    .chat
-                    .timeline
-                    .custom_answers
-                    .get(&key)
-                    .cloned()
-                    .unwrap_or_default();
-                card = card.child(
-                    rune::text_input(&edit, theme::TEXT_SM)
-                        .w_full()
-                        .min_h(36.0)
-                        .padding(8.0)
-                        .radius(6.0)
-                        .border(1.0, t.c.border)
-                        .color(t.c.foreground)
-                        .placeholder("Type your answer…", t.c.muted_foreground)
-                        .on_edit(move |app: &mut App| {
-                            app.ui
-                                .chat
-                                .timeline
-                                .custom_answers
-                                .entry(key.clone())
-                                .or_default()
-                        }),
-                );
-            }
-        }
-        let (thread, r) = (thread_id.to_owned(), request_id.to_owned());
-        let question_item = item.clone();
-        if can_answer && index + 1 < questions.len() {
-            let r = r.clone();
-            card = card.child(button("Next", t).on_press(move |app: &mut App| {
-                app.ui
-                    .chat
-                    .timeline
-                    .question_index
-                    .insert(r.clone(), index + 1);
-            }));
-        } else if can_answer {
-            card = card.child(button("Submit answers", t).on_press(move |app: &mut App| {
-                let selected = app
-                    .ui
-                    .chat
-                    .timeline
-                    .answers
-                    .get(&r)
-                    .cloned()
-                    .unwrap_or_default();
-                let answers = requests::answers(&question_item, &selected, |qid| {
-                    app.ui
-                        .chat
-                        .timeline
-                        .custom_answers
-                        .get(&format!("{r}/{qid}"))
-                        .map(|e| e.text.clone())
-                });
-                respond(app, &thread, &r, json!({"answers":answers}));
-            }));
-        } else {
-            card = card.child(
-                text("Provider process is gone. Interrupt or restart the run to respond.")
+    let detail = ["prompt", "detail", "command", "input", "title"]
+        .iter()
+        .map(|k| &item[*k])
+        .find(|v| !v.is_null())
+        .cloned()
+        .unwrap_or(Value::Null);
+    card = card.child(
+        row()
+            .gap(12.0)
+            .child(icon(&icons::TERMINAL, 16.0).color(t.c.muted_foreground))
+            .child(
+                text(
+                    detail
+                        .as_str()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| detail.to_string()),
+                )
+                .font(theme::MONO_XS.lh(20.0))
+                .color(t.c.foreground),
+            ),
+    );
+    if live {
+        let more_key = format!("approval-more-{request_id}");
+        let more = app.ui.chat.timeline.expanded.contains(&more_key);
+        let mut actions = row()
+            .gap(8.0)
+            .pl(28.0)
+            .child(icon(&icons::SHIELD, 12.0).color(t.c.muted_foreground))
+            .child(
+                text("Waiting for approval ·")
                     .font(theme::TEXT_XS)
                     .color(t.c.muted_foreground),
             );
-        }
-        if index > 0 {
-            let r = request_id.to_owned();
-            card = card.child(button("Previous", t).on_press(move |app: &mut App| {
-                app.ui
-                    .chat
-                    .timeline
-                    .question_index
-                    .insert(r.clone(), index - 1);
-            }));
-        }
-    } else {
-        let detail = ["prompt", "detail", "command", "input", "title"]
-            .iter()
-            .map(|k| &item[*k])
-            .find(|v| !v.is_null())
-            .cloned()
-            .unwrap_or(Value::Null);
-        card = card.child(
-            row()
-                .gap(12.0)
-                .child(icon(&icons::TERMINAL, 16.0).color(t.c.muted_foreground))
-                .child(
-                    text(
-                        detail
-                            .as_str()
-                            .map(str::to_owned)
-                            .unwrap_or_else(|| detail.to_string()),
-                    )
-                    .font(theme::MONO_XS.lh(20.0))
-                    .color(t.c.foreground),
-                ),
-        );
-        if live {
-            let more_key = format!("approval-more-{request_id}");
-            let more = app.ui.chat.timeline.expanded.contains(&more_key);
-            let mut actions = row()
-                .gap(8.0)
-                .pl(28.0)
-                .child(icon(&icons::SHIELD, 12.0).color(t.c.muted_foreground))
-                .child(
-                    text("Waiting for approval ·")
-                        .font(theme::TEXT_XS)
-                        .color(t.c.muted_foreground),
-                );
-            let options: Vec<_> = if array(item, "options").is_empty() {
-                vec![
-                    ("Decline", "decline"),
-                    ("Approve", "accept"),
-                    ("Always allow this session", "acceptForSession"),
-                    ("Cancel", "cancel"),
-                ]
-            } else {
-                array(item, "options")
-                    .iter()
-                    .map(|o| (s(o, "label"), s(o, "decision")))
-                    .collect()
-            };
-            let has_more = options
+        let options: Vec<_> = if array(item, "options").is_empty() {
+            vec![
+                ("Decline", "decline"),
+                ("Approve", "accept"),
+                ("Always allow this session", "acceptForSession"),
+                ("Cancel", "cancel"),
+            ]
+        } else {
+            array(item, "options")
                 .iter()
-                .any(|(_, d)| !matches!(*d, "accept" | "decline"));
-            for (label, decision) in options {
-                if !more && !matches!(decision, "accept" | "decline") {
-                    continue;
-                }
-                let decision = decision.to_owned();
-                let (thread, r) = (thread_id.to_owned(), request_id.to_owned());
-                actions = actions.child(button(label, t).on_press(move |app: &mut App| {
-                    respond(app, &thread, &r, json!({"decision":decision}))
-                }));
+                .map(|o| (s(o, "label"), s(o, "decision")))
+                .collect()
+        };
+        let has_more = options
+            .iter()
+            .any(|(_, d)| !matches!(*d, "accept" | "decline"));
+        for (label, decision) in options {
+            if !more && !matches!(decision, "accept" | "decline") {
+                continue;
             }
-            if has_more {
-                actions = actions.child(
-                    button(if more { "Less" } else { "More" }, t)
-                        .on_press(move |app: &mut App| toggle(app, &more_key)),
-                );
-            }
-            card = card.child(actions);
-        } else {
-            card = card.child(
-                text("Provider process is gone. Interrupt or restart the run to respond.")
-                    .font(theme::TEXT_XS)
-                    .color(t.c.muted_foreground),
+            let decision = decision.to_owned();
+            let (thread, r) = (thread_id.to_owned(), request_id.to_owned());
+            actions = actions.child(button(label, t).on_press(move |app: &mut App| {
+                respond(app, &thread, &r, json!({"decision":decision}))
+            }));
+        }
+        if has_more {
+            actions = actions.child(
+                button(if more { "Less" } else { "More" }, t)
+                    .on_press(move |app: &mut App| toggle(app, &more_key)),
             );
         }
+        card = card.child(actions);
+    } else {
+        card = card.child(
+            text("Provider process is gone. Interrupt or restart the run to respond.")
+                .font(theme::TEXT_XS)
+                .color(t.c.muted_foreground),
+        );
     }
     if app.ui.chat.timeline.responding.contains_key(request_id) {
         card = card.child(
@@ -615,6 +499,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
     };
     let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
     let rows = rows::derive(&view.projection, app.now_ms);
+    let keys: Vec<String> = rows.iter().enumerate().map(|(i, r)| row_key(r, i)).collect();
+    let mut marks = find::Marks::for_rows(app, &rows, t.dark).into_iter();
     let mut stack = col()
         .w(lane.width)
         .growth(GrowthSpec::default())
@@ -623,7 +509,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         // padding but not the viewport's, so the clearance lives here.
         .pb(composer_h + crate::chat::composer::BOTTOM + 21.0);
     for (index, r) in rows.into_iter().enumerate() {
-        let (key, body) = match r {
+        let marks = marks.next().flatten();
+        let (_, body) = match r {
             Row::User(item) => {
                 let mut content = col().gap(8.0);
                 for attachment in array(item, "attachments") {
@@ -639,7 +526,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                                 text(s(item, "text"))
                                     .font(theme::TEXT_SM.lh(22.75))
                                     .color(t.c.message_foreground)
-                                    .selectable(true),
+                                    .selectable(true)
+                                    .text_highlights(marks.as_ref().map_or_else(Vec::new, |m| m.plain(s(item, "text")))),
                             ),
                     );
                 }
@@ -667,14 +555,31 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     .hover_group()
                     .px(4.0)
                     .gap(6.0)
-                    .child(markdown::view(app, s(item, "text"), s(item, "id"), t))
+                    .child(markdown::view_marked(app, s(item, "text"), s(item, "id"), t, marks.as_ref()))
                     .child(row().child(copy_button(app, s(item, "text"), t).group_opacity(0.0, 1.0))),
+            ),
+            Row::Working { id, label } => (
+                id,
+                col()
+                    .w_full()
+                    .pt(4.0)
+                    .pb(8.0)
+                    .child(
+                        row()
+                            .h(24.0)
+                            .px(4.0)
+                            .center_y()
+                            .child(text(label).font(theme::TEXT_SM.lh(22.75)).color(t.c.muted_foreground)),
+                    )
+                    .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6))),
             ),
             Row::Work { id, label, items } => {
                 let expanded = app.ui.chat.timeline.expanded.contains(&id);
                 let toggle_id = id.clone();
+                let head_key = format!("fold-head-{id}");
                 let mut body = col().w_full().gap(6.0).child(
                     row()
+                        .key(head_key.clone())
                         .w_full()
                         .py(4.0)
                         .px(4.0)
@@ -682,7 +587,11 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         .focusable(true)
                         .role("button")
                         .label(&label)
-                        .on_press(move |app: &mut App| toggle(app, &toggle_id))
+                        // Expanding at the bottom of a stuck list would push the header up.
+                        .on_press_tx(move |app: &mut App, tx| {
+                            tx.keep_on_screen(head_key.clone());
+                            toggle(app, &toggle_id)
+                        })
                         .child(
                             text(label)
                                 .font(theme::TEXT_SM.lh(22.75))
@@ -737,7 +646,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         };
         stack = stack.child(
             col()
-                .key(format!("timeline-row-{key}-{index}"))
+                .key(keys[index].clone())
                 .w_full()
                 .py(3.0)
                 .child(body),
@@ -756,21 +665,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         .child(stack)
 }
 
-/// Question panels belong above the composer; approval details also remain inline.
-pub fn composer_requests(app: &App, t: &T, thread_id: &str) -> El {
-    let Some(view) = app.state().thread_views.get(thread_id) else {
-        return el();
-    };
-    let mut out = col().w_full();
-    for row in rows::derive(&view.projection, app.now_ms) {
-        if let Row::Request { request, item } = row {
-            if s(request, "kind") == "user_input"
-                || item.is_some_and(|i| s(i, "type") == "user_input_request")
-            {
-                out = out.child(request_view(app, thread_id, request, item, t));
-                break;
-            }
-        }
-    }
-    out
+/// A pending question's panel, docked on top of the composer.
+pub fn composer_requests(app: &App, t: &T) -> Option<El> {
+    question::panel(app, t)
 }
