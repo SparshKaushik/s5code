@@ -19,10 +19,14 @@ const STALL: Duration = Duration::from_secs(4);
 pub struct Ui {
     started: Option<Instant>,
     stalled: bool,
+    /// The shell arrived once. Like the web's gate, later reconnects never bring the gate back.
+    settled: bool,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum Recovery {
+    /// The gate's pending state, which renders nothing rather than an empty workspace.
+    Pending,
     /// The bundled server gave up (`host::Event::Failed`); its supervisor has returned.
     Failed(String),
     /// Still no shell after the timeout. The host restarts the server and Net reconnects on
@@ -34,7 +38,8 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     let ready = s.src.state().shell_ready;
     let ui = &mut s.ui.onboarding;
     let started = *ui.started.get_or_insert_with(Instant::now);
-    if ready || ui.stalled {
+    ui.settled |= ready;
+    if ui.settled || ui.stalled {
         return false;
     }
     let elapsed = started.elapsed();
@@ -48,12 +53,13 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
 
 pub fn recovery(s: &App) -> Option<Recovery> {
     let st = s.state();
-    if st.shell_ready {
+    if st.shell_ready || s.ui.onboarding.settled {
         return None;
     }
     match (&s.src, &st.conn) {
         (Source::Fixture(_), Conn::Closed(reason)) => Some(Recovery::Failed(reason.clone())),
-        _ => s.ui.onboarding.stalled.then_some(Recovery::Stalled),
+        _ if s.ui.onboarding.stalled => Some(Recovery::Stalled),
+        _ => Some(Recovery::Pending),
     }
 }
 
@@ -69,7 +75,9 @@ fn retry(s: &mut App) {
 
 /// `FirstRunRecovery`, over the whole window as the web's gate renders it instead of the app.
 pub fn recovery_view(recovery: Recovery, t: &T) -> El {
+    let page = col().key("first-run-recovery").role("main").w_full().h_full().fill(t.c.background).child(el().w_full().h(layout::TOPBAR_H).window_drag());
     let (title, description, action) = match &recovery {
+        Recovery::Pending => return page,
         Recovery::Failed(reason) => ("Could not start the server", reason.as_str(), true),
         Recovery::Stalled => ("Still connecting", "T3 Code could not confirm this workspace.", false),
     };
@@ -87,14 +95,7 @@ pub fn recovery_view(recovery: Recovery, t: &T) -> El {
     } else {
         body.child(row().pt(20.0).child(kit::Spinner::new().size("sm").tone("muted").build(&kit::theme(t))))
     };
-    col()
-        .key("first-run-recovery")
-        .role("main")
-        .w_full()
-        .h_full()
-        .fill(t.c.background)
-        .child(el().w_full().h(layout::TOPBAR_H).window_drag())
-        .child(col().w_full().grow(1.0).min_h(0.0).px(24.0).center().child(body))
+    page.child(col().w_full().grow(1.0).min_h(0.0).px(24.0).center().child(body))
 }
 
 /// The draft route with nothing to draft in: the shell is in and every project is archived or gone.
@@ -173,7 +174,7 @@ mod tests {
     fn recovery_reports_a_failed_host_at_once_and_a_missing_shell_only_after_the_timeout() {
         let mut s = App::new();
         s.src = crate::data::Source::Fixture(crate::data::empty_state());
-        assert_eq!(recovery(&s), None, "a starting server is not a failure yet");
+        assert_eq!(recovery(&s), Some(Recovery::Pending), "a starting server is not a failure yet");
         s.ui.onboarding.stalled = true;
         assert_eq!(recovery(&s), Some(Recovery::Stalled));
         if let crate::data::Source::Fixture(state) = &mut s.src {
@@ -184,5 +185,10 @@ mod tests {
             state.shell_ready = true;
         }
         assert_eq!(recovery(&s), None);
+        s.ui.onboarding.settled = true;
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.shell_ready = false;
+        }
+        assert_eq!(recovery(&s), None, "a reconnect after the shell arrived keeps the app");
     }
 }
