@@ -690,7 +690,8 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
         .h_full()
         .fill(t.c.terminal_background)
         .clip_rounded(0.)
-        .role("textbox")
+        // Not "textbox": Rune hands a textbox's presses to its one field, starving `on_drag`.
+        .role("group")
         .label("Terminal");
     let Some(session) = app.ui.panel.terminal.get(thread, id) else {
         return grid;
@@ -1036,6 +1037,35 @@ pub fn fixture(app: &mut App, thread: &str, id: &str, recorded: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presses_on_the_grid_select_by_drag_and_a_click_clears() {
+        fn view(s: &App, _: &mut rune::Cx<App>) -> El {
+            el().size(600., 300.).child(viewport(s, &theme::theme(true), "t", "term-1"))
+        }
+        let mut app = App::new();
+        fixture(
+            &mut app,
+            "t",
+            "term-1",
+            r#"{"type":"snapshot","snapshot":{"history":"hello brave world","cols":40,"rows":10,"sequence":1,"status":"running"}}"#,
+        );
+        let m = metrics(&app);
+        let mut rt = rune::Runtime::new(app, view, (600., 300.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let (x, y) = (|col: f32| PADDING + col * m.cell_w, PADDING + m.cell_h * 0.5);
+        let selection = |rt: &rune::Runtime<App>| rt.state.ui.panel.terminal.get("t", "term-1").unwrap().vt.selection_text();
+        rt.pointer_down(x(0.2), y);
+        rt.pointer_move(x(2.), y);
+        rt.pointer_move(x(4.8), y);
+        rt.pointer_up(x(4.8), y);
+        rt.frame(0.);
+        assert_eq!(selection(&rt).as_deref(), Some("hello"));
+        rt.pointer_down(x(8.), y);
+        rt.pointer_up(x(8.), y);
+        rt.frame(0.);
+        assert_eq!(selection(&rt), None, "a click clears the selection");
+    }
 
     #[test]
     fn snapshot_then_ordered_events_and_resume() {
