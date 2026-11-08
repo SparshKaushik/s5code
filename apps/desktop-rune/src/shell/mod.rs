@@ -50,7 +50,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         Route::Usage => rune::col().key("main").grow(1.0).h_full().fill(t.c.background),
         _ => chat::view(s, cx, t),
     };
-    let mut body = row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main);
+    // Everything under the frame is content: switching or loading a thread lands at once.
+    let mut body = crate::kit::motion::content(row().key("shell").w_full().h_full().fill(t.c.background).child(sidebar).child(main));
     if s.ui.shell.panel_open {
         body = body.child(panel::view(s, cx, t));
     }

@@ -263,7 +263,7 @@ pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
         .child(text(th.title.clone()).font(theme::XS_MEDIUM.lh(15.0)).color(t.c.foreground).truncate())
         .child(rows);
     let surface = crate::kit::menu::glass(body.key("sb-card"), &k, false).radius(6.0);
-    overlays.push(rune_kit::popover::anchored(&k, surface, &format!("sb-row-{id}"), rune_kit::Placement::RightStart, 4.0));
+    overlays.push(crate::kit::motion::popup(rune_kit::popover::anchored(&k, surface, &format!("sb-row-{id}"), rune_kit::Placement::RightStart, 4.0)));
 }
 
 fn click(s: &mut App, id: &str, mods: rune::Mods) {

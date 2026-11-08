@@ -1,9 +1,9 @@
-//! Web dialog glass and 200 ms scale/fade; Rune owns modal focus trapping and dismissal.
+//! Web dialog glass with the kit's popup motion; Rune owns modal focus trapping and dismissal.
 use crate::{
     kit::Button,
     theme::{self, AlphaMul, T},
 };
-use rune::{El, Transition, col, el, row, text};
+use rune::{El, col, row, text};
 pub struct Dialog {
     key: String,
     title: String,
@@ -101,10 +101,9 @@ impl Dialog {
             .radius(16.)
             .padding(24.)
             .gap(24.)
+            // 96% opaque over the scrim: a backdrop blur here costs a pass and shows nothing.
             .fill(t.c.background.alpha_mul(0.96))
-            .backdrop_blur(16.)
             .border(1., t.c.contrast_foreground.alpha_mul(0.1))
-            .transition(Transition::scale(0.98).combined(Transition::opacity()))
             .child(
                 row()
                     .w_full()
@@ -114,22 +113,13 @@ impl Dialog {
                     .child(dismiss),
             )
             .children(self.body);
+        layer.push(super::motion::scrim(t).key(format!("{}-backdrop", self.key)));
         layer.push(
-            el().key(format!("{}-backdrop", self.key))
-                .absolute(0., 0.)
-                .w_full()
-                .h_full()
-                .fill(t.c.background.alpha_mul(if t.dark { 0.64 } else { 0.60 }))
-                .backdrop_blur(4.),
-        );
-        layer.push(
-            el().key(format!("{}-layer", self.key))
-                .absolute(0., 0.)
-                .w_full()
-                .h_full()
+            super::motion::layer()
+                .key(format!("{}-layer", self.key))
                 .padding(16.)
                 .center()
-                .child(close(panel).modal_click_outside(self.outside)),
+                .child(super::motion::popup(close(panel).modal_click_outside(self.outside))),
         );
     }
 }

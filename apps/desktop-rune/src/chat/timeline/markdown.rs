@@ -166,7 +166,24 @@ fn table(app: &App, source: &str, t: &T) -> El {
     )
 }
 
+/// Parsing and highlighting a message is the costliest part of a timeline build, and the view
+/// rebuilds at least once a second (relative times), so each message builds once per version.
 pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
+    let ui = &app.ui.chat.timeline;
+    let fence = format!("{id}-fence-");
+    let mut unwrapped: Vec<&String> = ui.wrapped.iter().filter(|k| k.starts_with(&fence)).collect();
+    unwrapped.sort();
+    let copied = ui.copied.as_ref().is_some_and(|(c, _)| source.contains(c.as_str()) && super::copied(app, c));
+    let c = &t.c;
+    let colors = format!(
+        "{:?}",
+        (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
+    );
+    let version = (source, t.dark, colors, unwrapped, copied);
+    rune::memo(format!("md-{id}"), version, || build(app, source, id, t))
+}
+
+fn build(app: &App, source: &str, id: &str, t: &T) -> El {
     let mut out = col().w_full().gap(10.4);
     let lines: Vec<_> = source.split_inclusive('\n').collect();
     let mut start = 0;

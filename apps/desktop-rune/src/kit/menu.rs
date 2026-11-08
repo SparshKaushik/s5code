@@ -312,13 +312,13 @@ impl MenuItem {
                     surface = keys(surface);
                 }
 
-                layer.push(rune_kit::popover::anchored(
+                layer.push(super::motion::popup(rune_kit::popover::anchored(
                     k,
                     surface.mt(-5.),
                     &key,
                     Placement::RightStart,
                     0.,
-                ));
+                )));
                 layer.extend(deeper);
             }
         }
@@ -506,7 +506,7 @@ impl Menu {
             layer.push(scrim);
             surface = modal(surface);
         }
-        layer.push(rune_kit::popover::anchored(k, surface, &anchor, place, gap));
+        layer.push(super::motion::popup(rune_kit::popover::anchored(k, surface, &anchor, place, gap)));
         layer.extend(subs);
         trigger
     }

@@ -60,7 +60,11 @@ impl Tooltip {
             .max_width(320.)
             .font(theme::TEXT_XS.lh(16.5))
             .ink(k.c.text_base);
-        self.0.render(&style, layer).self_start()
+        let from = layer.len();
+        let trigger = self.0.render(&style, layer).self_start();
+        let added: Vec<El> = layer.drain(from..).map(super::motion::popup).collect();
+        layer.extend(added);
+        trigger
     }
 }
 
@@ -188,13 +192,13 @@ impl Popover {
             layer.push(scrim);
             content = modal(content);
         }
-        layer.push(rune_kit::popover::anchored(
+        layer.push(super::motion::popup(rune_kit::popover::anchored(
             k,
             content,
             &key,
             self.placement,
             self.gutter,
-        ));
+        )));
         trigger
     }
 }
