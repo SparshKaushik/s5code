@@ -75,6 +75,12 @@ fn ghost(t: &T, key: String, glyph: &'static rune::Icon, label: &str) -> El {
         .child(icon(glyph, 12.0).color(t.c.muted_foreground))
 }
 
+/// The first of `keys` the item carries: turn items date themselves with startedAt and
+/// completedAt, conversation messages with createdAt and updatedAt.
+fn first_time<'a>(item: &'a Value, keys: &[&str]) -> &'a str {
+    keys.iter().map(|k| s(item, k)).find(|v| !v.is_empty()).unwrap_or_default()
+}
+
 fn stamp(app: &App, iso: &str, t: &T) -> El {
     text(timestamp(iso, app.now_ms)).font(theme::TEXT_XS).color(t.c.muted_foreground)
 }
@@ -100,7 +106,7 @@ pub fn user(app: &App, thread: &str, item: &Value, targets: &HashMap<String, (St
         }));
     }
     buttons = buttons.child(super::copy_button(app, s(item, "text"), t));
-    row().gap(8.0).center_y().child(stamp(app, s(item, "createdAt"), t)).child(buttons)
+    row().gap(8.0).center_y().child(stamp(app, first_time(item, &["createdAt", "startedAt", "completedAt"]), t)).child(buttons)
 }
 
 /// The row under a finished reply: copy, fork, timestamp.
@@ -118,8 +124,7 @@ pub fn assistant(app: &App, thread: &str, item: &Value, t: &T) -> El {
         out = out.child(if busy { fork.opacity(0.64) } else { fork.on_press(move |app: &mut App| fork_from(app, &thread, &run)) });
     }
     if !streaming {
-        let at = if s(item, "updatedAt").is_empty() { s(item, "createdAt") } else { s(item, "updatedAt") };
-        out = out.child(stamp(app, at, t));
+        out = out.child(stamp(app, first_time(item, &["updatedAt", "completedAt", "createdAt", "startedAt"]), t));
     }
     out
 }

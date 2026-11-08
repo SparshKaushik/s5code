@@ -1,11 +1,12 @@
 pub mod actions;
-mod attachments;
+pub mod attachments;
 pub mod find;
 mod markdown;
 
 mod language_icons;
 pub mod plan;
 pub mod question;
+mod subagent;
 mod requests;
 mod rows;
 mod scenes;
@@ -144,7 +145,10 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             .child(text(label).font(theme::TEXT_XS).color(color))
             .child(el().grow(1.0).h(1.0).fill(t.c.border.alpha_mul(0.7)));
     }
-    if matches!(kind, "error" | "notification" | "system_notice") {
+    if matches!(
+        kind,
+        "error" | "notification" | "system_notice" | "fork" | "handoff" | "run_interrupt_request" | "run_interrupt_result" | "secret_request" | "link_request"
+    ) {
         let detail = [
             s(&item["failure"], "message"),
             s(item, "message"),
@@ -225,6 +229,9 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     }
     if kind == "proposed_plan" {
         return plan::card(app, item, t);
+    }
+    if kind == "subagent" {
+        return subagent::view(app, item, t);
     }
     let glyph = match kind {
         "reasoning" => &icons::BRAIN,

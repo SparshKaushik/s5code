@@ -50,7 +50,21 @@ fn run_active(run: &Value) -> bool {
 /// Items that stay in the timeline even inside a finished turn (MessagesTimeline.logic.ts
 /// deriveTurnFolds keeps compactions, notifications and resource cards out of the fold).
 fn escapes_fold(kind: &str) -> bool {
-    matches!(kind, "error" | "notification" | "system_notice" | "proposed_plan" | "compaction")
+    matches!(
+        kind,
+        "error"
+            | "notification"
+            | "system_notice"
+            | "proposed_plan"
+            | "compaction"
+            | "subagent"
+            | "fork"
+            | "handoff"
+            | "run_interrupt_request"
+            | "run_interrupt_result"
+            | "secret_request"
+            | "link_request"
+    )
 }
 
 /// Where "Edit from here" rewinds each prompt to, by user message item id: the ready checkpoint
@@ -288,13 +302,15 @@ mod tests {
         let p = json!({"runtimeRequests":[{"id":"q","status":"pending"}],"turnItems":[
             {"id":"t","type":"reasoning","ordinal":1},
             {"id":"a","type":"approval_request","requestId":"q","ordinal":2},
-            {"id":"e","type":"error","ordinal":3},{"id":"compact","type":"compaction","ordinal":4}]});
+            {"id":"e","type":"error","ordinal":3},{"id":"compact","type":"compaction","ordinal":4},
+            {"id":"f","type":"fork","title":"Forked from conversation","ordinal":5}]});
         let rows = derive(&p, 0);
         assert!(matches!(
             rows.as_slice(),
             [
                 Row::Work { .. },
                 Row::Request { .. },
+                Row::Item(_),
                 Row::Item(_),
                 Row::Item(_)
             ]

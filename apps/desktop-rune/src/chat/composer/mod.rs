@@ -3,6 +3,7 @@
 //! Drafts are kept per thread (and one for the home draft), as the web composer draft store does.
 //! `menu` is the @-mention and slash drawer, `picker` the model picker popover.
 
+mod context;
 mod menu;
 mod picker;
 pub mod provider_icons;
@@ -460,11 +461,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     if let Some(menu) = menu {
         stack = stack.child(menu.mx(22.0).mb(-17.0));
     }
-    // A pending question sits directly above the composer, as on the web.
-    if let Some(panel) = crate::chat::timeline::composer_requests(s, t) {
-        stack = stack.child(panel.mx(22.0).mb(-17.0));
-    } else if let Some(banner) = plan::banner(s, t) {
-        stack = stack.child(banner.mx(22.0).mb(-17.0));
+    // A pending question sits directly above the composer, as on the web. The inset is padding
+    // on a wrapper: a full-width child with margins would shift rather than shrink.
+    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t));
+    if let Some(docked) = docked {
+        stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(docked));
     }
     stack.child(body)
 }
@@ -513,7 +514,7 @@ fn footer(s: &App, t: &T) -> El {
                 .on_press(|s: &mut App| picker::toggle(s)),
         );
     }
-    right = right.child(primary_action(s, t));
+    right = right.children(context::meter(s, t)).child(primary_action(s, t));
     row().w_full().px(8.0).pt(10.0).center_y().child(left).child(spacer()).child(right)
 }
 
