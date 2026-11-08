@@ -42,6 +42,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if s.ui.shell.palette.gallery.is_some() {
         return crate::kit::gallery::view(s, cx, t);
     }
+    if let Some(recovery) = crate::onboarding::recovery(s) {
+        return rune_kit::root(crate::onboarding::recovery_view(recovery, t), Vec::new());
+    }
     let mut overlays = Vec::new();
     let sidebar = sidebar::view(s, cx, t, &mut overlays);
     let main = match s.frame_route() {

@@ -59,6 +59,7 @@ pub struct Ui {
     pub pages: pages::Ui,
     pub notify: notify::Ui,
     pub search: search::Ui,
+    pub onboarding: onboarding::Ui,
 }
 
 pub struct App {
@@ -146,7 +147,8 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::sidebar::poll(s);
     changed |= pages::poll(s);
     changed |= chat::details::poll(s);
-    changed |= notify::poll(s);
+    changed |= notify::poll(s, tx);
+    changed |= onboarding::poll(s, tx);
     changed |= search::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();

@@ -6,7 +6,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use rune::{Color, Cursor, El, col, el, icon, row, text};
+use rune::{Color, Cursor, El, Tx, col, el, icon, row, text};
 
 use crate::data;
 use crate::shell::sidebar::logic::{self, Status, Thread};
@@ -143,12 +143,19 @@ fn sync_badge(s: &mut App) {
     }
 }
 
-pub fn poll(s: &mut App) -> bool {
+pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     let now = data::now_ms();
+    let changed = observe(s, now);
     let before = s.ui.notify.toasts.len();
     s.ui.notify.toasts.retain(|t| t.until > now);
-    let mut changed = before != s.ui.notify.toasts.len();
+    // Nothing else may wake the loop while a toast is up, so its timeout schedules its own poll.
+    if let Some(until) = s.ui.notify.toasts.iter().map(|t| t.until).min() {
+        tx.wake_after(std::time::Duration::from_millis((until - now).max(1) as u64));
+    }
+    changed || before != s.ui.notify.toasts.len()
+}
 
+fn observe(s: &mut App, now: i64) -> bool {
     let mode = mode(s).to_string();
     if s.ui.notify.applied_mode.as_deref() != Some(mode.as_str()) {
         s.ui.notify.applied_mode = Some(mode.clone());
@@ -159,11 +166,11 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.notify.previous.clear();
         s.ui.notify.gate = Gate::default();
         s.ui.notify.sequence = None;
-        return changed;
+        return false;
     }
     let st = s.state();
     if !matches!(s.src, data::Source::Live(_)) || !st.shell_ready || s.ui.notify.sequence == Some(st.shell_sequence) {
-        return changed;
+        return false;
     }
     let sequence = st.shell_sequence;
     let rows: Vec<_> = st.threads.iter().chain(st.archived.iter()).map(|row| (observe_row(row), row["latestRunStopRequested"] == true)).collect();
@@ -183,9 +190,9 @@ pub fn poll(s: &mut App) -> bool {
     }
     ui.gate.retain(&next.keys().cloned().collect());
     ui.previous = next;
+    let changed = !presented.is_empty();
     for (id, title, status, kind) in presented {
         present(s, &id, title, status, kind, now);
-        changed = true;
     }
     changed
 }

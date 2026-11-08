@@ -1,11 +1,101 @@
 //! First run: `NoProjectsHero`, which `/` shows instead of a draft once the shell has loaded and
-//! the workspace has no projects (routes/_chat.index.tsx). The web's setup wizard (`/welcome`)
-//! is not ported; this hero is what it leaves behind when dismissed.
+//! the workspace has no projects (routes/_chat.index.tsx), and `FirstRunRecovery`, which replaces
+//! the app while the shell never arrives. The web's setup wizard (`/welcome`) is not ported; this
+//! hero is what it leaves behind when dismissed.
 
-use rune::{El, col, el, row, text};
+use std::time::{Duration, Instant};
 
+use rune::{El, Tx, col, el, row, text};
+use s5_net::Conn;
+
+use crate::data::Source;
 use crate::theme::{self, T, layout};
 use crate::{App, Route, icons, kit};
+
+/// FirstRunGate's FIRST_RUN_DECISION_TIMEOUT_MS.
+const STALL: Duration = Duration::from_secs(4);
+
+#[derive(Default)]
+pub struct Ui {
+    started: Option<Instant>,
+    stalled: bool,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum Recovery {
+    /// The bundled server gave up (`host::Event::Failed`); its supervisor has returned.
+    Failed(String),
+    /// Still no shell after the timeout. The host restarts the server and Net reconnects on
+    /// their own, so there is nothing to reload, only to wait for.
+    Stalled,
+}
+
+pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
+    let ready = s.src.state().shell_ready;
+    let ui = &mut s.ui.onboarding;
+    let started = *ui.started.get_or_insert_with(Instant::now);
+    if ready || ui.stalled {
+        return false;
+    }
+    let elapsed = started.elapsed();
+    if elapsed < STALL {
+        tx.wake_after(STALL - elapsed);
+        return false;
+    }
+    ui.stalled = true;
+    true
+}
+
+pub fn recovery(s: &App) -> Option<Recovery> {
+    let st = s.state();
+    if st.shell_ready {
+        return None;
+    }
+    match (&s.src, &st.conn) {
+        (Source::Fixture(_), Conn::Closed(reason)) => Some(Recovery::Failed(reason.clone())),
+        _ => s.ui.onboarding.stalled.then_some(Recovery::Stalled),
+    }
+}
+
+fn retry(s: &mut App) {
+    if let Source::Fixture(state) = &mut s.src {
+        state.conn = Conn::Connecting;
+    }
+    s.ui.onboarding = Ui::default();
+    if let Some(waker) = s.ui.panel.waker.clone() {
+        crate::setup(s, waker);
+    }
+}
+
+/// `FirstRunRecovery`, over the whole window as the web's gate renders it instead of the app.
+pub fn recovery_view(recovery: Recovery, t: &T) -> El {
+    let (title, description, action) = match &recovery {
+        Recovery::Failed(reason) => ("Could not start the server", reason.as_str(), true),
+        Recovery::Stalled => ("Still connecting", "T3 Code could not confirm this workspace.", false),
+    };
+    let mut body = col()
+        .max_w(384.0)
+        .items_center()
+        .child(text(title).font(theme::weight(theme::TEXT_LG, theme::SEMIBOLD)).color(t.c.foreground))
+        .child(text(description).font(theme::TEXT_SM).color(t.c.muted_foreground).mt(8.0));
+    body = if action {
+        body.child(
+            row().pt(20.0).child(
+                kit::Button::new("Retry").size("sm").variant("outline").icon(&icons::REFRESH_CW).on_press(retry).build(t),
+            ),
+        )
+    } else {
+        body.child(row().pt(20.0).child(kit::Spinner::new().size("sm").tone("muted").build(&kit::theme(t))))
+    };
+    col()
+        .key("first-run-recovery")
+        .role("main")
+        .w_full()
+        .h_full()
+        .fill(t.c.background)
+        .child(el().w_full().h(layout::TOPBAR_H).window_drag())
+        .child(col().w_full().grow(1.0).min_h(0.0).px(24.0).center().child(body))
+}
 
 /// The draft route with nothing to draft in: the shell is in and every project is archived or gone.
 pub fn shows_hero(s: &App) -> bool {
@@ -77,5 +167,22 @@ mod tests {
             state.projects.push(json!({"id": "p2", "archivedAt": null}));
         }
         assert!(!shows_hero(&s));
+    }
+
+    #[test]
+    fn recovery_reports_a_failed_host_at_once_and_a_missing_shell_only_after_the_timeout() {
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(crate::data::empty_state());
+        assert_eq!(recovery(&s), None, "a starting server is not a failure yet");
+        s.ui.onboarding.stalled = true;
+        assert_eq!(recovery(&s), Some(Recovery::Stalled));
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.conn = Conn::Closed("No free port for the S5 Code server.".into());
+        }
+        assert_eq!(recovery(&s), Some(Recovery::Failed("No free port for the S5 Code server.".into())));
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.shell_ready = true;
+        }
+        assert_eq!(recovery(&s), None);
     }
 }
