@@ -7,11 +7,14 @@ use alacritty_terminal::{
     Term,
     event::{Event, EventListener, WindowSize},
     grid::{Dimensions, Scroll},
-    index::{Column, Line, Point},
+    index::{Column, Line, Point, Side},
+    selection::{Selection, SelectionType},
     term::{Config, TermMode, cell::Flags},
     vte::ansi::{Color, CursorShape, CursorStyle, NamedColor, Processor, Rgb, StdSyncHandler},
 };
 use rune::{Key, KeyEvent};
+
+pub mod links;
 
 pub type Rgb8 = [u8; 3];
 
@@ -125,6 +128,25 @@ pub struct Row {
     /// Non-default backgrounds: (column, cells, colour).
     pub fills: Vec<(usize, usize, Rgb8)>,
     pub runs: Vec<Run>,
+    /// Selected spans, drawn over the backgrounds: (column, cells).
+    pub selected: Vec<(usize, usize)>,
+}
+
+/// How a press starts a selection: by cell, or by word and line on double and triple clicks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelectBy {
+    Cell,
+    Word,
+    Line,
+}
+
+/// A link under the pointer: its text and the screen rows it covers, as `(row, first col, last
+/// col)` spans of the visible grid.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Link {
+    pub kind: links::Kind,
+    pub text: String,
+    pub spans: Vec<(usize, usize, usize)>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -311,6 +333,8 @@ impl Vt {
         let mut last: Option<(usize, (Rgb8, bool, bool, bool, bool))> = None;
         let mut glyph_at = None;
         let cursor_point = content.cursor.point;
+        let selection = content.selection;
+        let cursor_shape = content.cursor.shape;
         for indexed in content.display_iter {
             let row = (indexed.point.line.0 + offset) as usize;
             if row >= self.rows {
@@ -340,6 +364,12 @@ impl Vt {
                 1
             };
             let out = &mut rows[row];
+            if selection.is_some_and(|sel| sel.contains_cell(&indexed, cursor_point, cursor_shape)) {
+                match out.selected.last_mut() {
+                    Some((c, n)) if *c + *n == col => *n += cells,
+                    _ => out.selected.push((col, cells)),
+                }
+            }
             if bg != background {
                 match out.fills.last_mut() {
                     Some((c, n, color)) if *c + *n == col && *color == bg => *n += cells,
@@ -428,6 +458,147 @@ impl Vt {
                 glyph: glyph_at.filter(|g| !g.text.trim().is_empty()),
             });
         (rows, cursor)
+    }
+
+    fn grid_point(&self, col: usize, row: usize) -> Point {
+        let offset = self.term.grid().display_offset() as i32;
+        Point::new(
+            Line(row.min(self.rows - 1) as i32 - offset),
+            Column(col.min(self.cols - 1)),
+        )
+    }
+
+    /// Starts a selection at a visible cell; `right` is the cell's right half.
+    pub fn select_start(&mut self, col: usize, row: usize, right: bool, by: SelectBy) {
+        let ty = match by {
+            SelectBy::Cell => SelectionType::Simple,
+            SelectBy::Word => SelectionType::Semantic,
+            SelectBy::Line => SelectionType::Lines,
+        };
+        let side = if right { Side::Right } else { Side::Left };
+        self.term.selection = Some(Selection::new(ty, self.grid_point(col, row), side));
+    }
+
+    pub fn select_to(&mut self, col: usize, row: usize, right: bool) {
+        let point = self.grid_point(col, row);
+        let side = if right { Side::Right } else { Side::Left };
+        if let Some(selection) = self.term.selection.as_mut() {
+            selection.update(point, side);
+        }
+    }
+
+    /// Selects the scrollback and the screen (`selectAll`).
+    pub fn select_all(&mut self) {
+        let grid = self.term.grid();
+        let start = Point::new(grid.topmost_line(), Column(0));
+        let end = Point::new(grid.bottommost_line(), Column(self.cols - 1));
+        let mut selection = Selection::new(SelectionType::Simple, start, Side::Left);
+        selection.update(end, Side::Right);
+        self.term.selection = Some(selection);
+    }
+
+    pub fn clear_selection(&mut self) {
+        self.term.selection = None;
+    }
+
+    /// The selected text without trailing newlines, or None when nothing is selected.
+    pub fn selection_text(&self) -> Option<String> {
+        let text = self.term.selection_to_string()?;
+        let text = text.trim_end_matches('\n');
+        (!text.is_empty()).then(|| text.to_string())
+    }
+
+    /// The link under a visible cell: an OSC 8 hyperlink, else a URL or path in the text of
+    /// the (soft-wrapped) line around it.
+    pub fn link_at(&self, col: usize, row: usize) -> Option<Link> {
+        let grid = self.term.grid();
+        let offset = grid.display_offset() as i32;
+        let target = self.grid_point(col, row);
+        let visible = |point: Point| {
+            let row = point.line.0 + offset;
+            (row >= 0 && (row as usize) < self.rows).then_some(row as usize)
+        };
+        let spans_between = |start: Point, end: Point| {
+            (start.line.0..=end.line.0)
+                .filter_map(|line| {
+                    let row = visible(Point::new(Line(line), Column(0)))?;
+                    let first = if line == start.line.0 { start.column.0 } else { 0 };
+                    let last = if line == end.line.0 { end.column.0 } else { self.cols - 1 };
+                    Some((row, first, last))
+                })
+                .collect::<Vec<_>>()
+        };
+        let wraps = |line: i32| {
+            grid[Line(line)][Column(self.cols - 1)].flags.contains(Flags::WRAPLINE)
+        };
+        if let Some(link) = grid[target].hyperlink() {
+            let uri = link.uri().to_string();
+            let same = |point: Point| grid[point].hyperlink().is_some_and(|l| l.uri() == uri);
+            let (mut start, mut end) = (target, target);
+            loop {
+                let previous = if start.column.0 > 0 {
+                    Point::new(start.line, Column(start.column.0 - 1))
+                } else if start.line > grid.topmost_line() && wraps(start.line.0 - 1) {
+                    Point::new(Line(start.line.0 - 1), Column(self.cols - 1))
+                } else {
+                    break;
+                };
+                if !same(previous) {
+                    break;
+                }
+                start = previous;
+            }
+            loop {
+                let next = if end.column.0 + 1 < self.cols {
+                    Point::new(end.line, Column(end.column.0 + 1))
+                } else if end.line < grid.bottommost_line() && wraps(end.line.0) {
+                    Point::new(Line(end.line.0 + 1), Column(0))
+                } else {
+                    break;
+                };
+                if !same(next) {
+                    break;
+                }
+                end = next;
+            }
+            let kind = if links::is_url(&uri) { links::Kind::Url } else { links::Kind::Path };
+            return Some(Link { kind, text: uri, spans: spans_between(start, end) });
+        }
+        // The logical line: back to its first row, then on while rows soft-wrap.
+        let mut first = target.line.0;
+        while first > grid.topmost_line().0 && wraps(first - 1) {
+            first -= 1;
+        }
+        let mut text = String::new();
+        let mut points = Vec::new();
+        let mut line = first;
+        loop {
+            for col in 0..self.cols {
+                let cell = &grid[Line(line)][Column(col)];
+                if cell.flags.intersects(Flags::WIDE_CHAR_SPACER | Flags::LEADING_WIDE_CHAR_SPACER) {
+                    continue;
+                }
+                text.push(cell.c);
+                points.push(Point::new(Line(line), Column(col)));
+            }
+            if line >= grid.bottommost_line().0 || !wraps(line) {
+                break;
+            }
+            line += 1;
+        }
+        let at = points.iter().position(|p| *p == target)?;
+        let found = links::extract(&text).into_iter().find(|m| m.start <= at && at < m.end)?;
+        let end = points[found.end - 1];
+        let end = if grid[end].flags.contains(Flags::WIDE_CHAR) {
+            Point::new(end.line, Column((end.column.0 + 1).min(self.cols - 1)))
+        } else {
+            end
+        };
+        Some(Link {
+            kind: found.kind,
+            text: found.text,
+            spans: spans_between(points[found.start], end),
+        })
     }
 
     /// Plain text of the visible screen, trailing blanks trimmed; for tests and accessibility.
@@ -677,6 +848,44 @@ mod tests {
         let mut e = KeyEvent::from(key);
         f(&mut e.mods);
         e
+    }
+
+    #[test]
+    fn selection_by_cell_word_and_line_reads_back_and_paints() {
+        let mut vt = Vt::new(20, 3);
+        vt.feed("hello brave world\r\nsecond line");
+        vt.select_start(0, 0, false, SelectBy::Cell);
+        vt.select_to(4, 0, true);
+        assert_eq!(vt.selection_text().as_deref(), Some("hello"));
+        let (rows, _) = vt.frame(&palette());
+        assert_eq!(rows[0].selected, [(0, 5)]);
+        vt.select_start(7, 0, false, SelectBy::Word);
+        assert_eq!(vt.selection_text().as_deref(), Some("brave"));
+        vt.select_start(2, 1, false, SelectBy::Line);
+        assert_eq!(vt.selection_text().as_deref(), Some("second line"));
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("hello brave world\nsecond line"));
+        vt.clear_selection();
+        assert_eq!(vt.selection_text(), None);
+        // A press without travel selects nothing.
+        vt.select_start(3, 0, false, SelectBy::Cell);
+        assert_eq!(vt.selection_text(), None);
+    }
+
+    #[test]
+    fn links_span_soft_wrapped_rows_and_osc8_hyperlinks() {
+        let mut vt = Vt::new(12, 4);
+        vt.feed("see https://ex.com/ab done");
+        let link = vt.link_at(1, 1).expect("the wrapped URL continues on row 1");
+        assert_eq!(link.text, "https://ex.com/ab");
+        assert_eq!(link.kind, links::Kind::Url);
+        assert_eq!(link.spans, [(0, 4, 11), (1, 0, 8)]);
+        assert_eq!(vt.link_at(0, 0), None);
+        let mut vt = Vt::new(20, 2);
+        vt.feed("\x1b]8;;https://t3.codes\x1b\\docs\x1b]8;;\x1b\\ here");
+        let link = vt.link_at(2, 0).unwrap();
+        assert_eq!((link.text.as_str(), link.spans.as_slice()), ("https://t3.codes", &[(0, 0, 3)][..]));
+        assert_eq!(vt.link_at(6, 0), None);
     }
 
     #[test]
