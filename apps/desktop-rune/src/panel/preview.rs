@@ -406,6 +406,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             true
         });
     let chrome = row()
+        .w_full()
         .h(28.)
         .px(8.)
         .gap(4.)
@@ -454,7 +455,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                     .build(t),
             ),
         );
-    let chrome = el().w_full().child(chrome).child(if status.loading {
+    let chrome = col().w_full().child(chrome).child(if status.loading {
         el().absolute(0., 26.).w_full().h(2.).fill(t.c.primary)
     } else {
         el()
