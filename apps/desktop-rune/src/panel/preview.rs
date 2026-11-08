@@ -658,7 +658,10 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             },
         ))
     });
-    let mut refresh_glyph = icon(&icons::REFRESH_CW, 14.).color(t.c.contrast_foreground).a11y_hidden();
+    // A child added after `build` misses the disabled button's dimming.
+    let refresh_off = !started || idle(&status);
+    let refresh_color = if refresh_off { t.c.contrast_foreground.alpha_mul(0.64) } else { t.c.contrast_foreground };
+    let mut refresh_glyph = icon(&icons::REFRESH_CW, 14.).color(refresh_color).a11y_hidden();
     if status.loading {
         refresh_glyph = refresh_glyph.looping(rune::LoopSpec::rotation(1.));
     }
@@ -690,7 +693,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                     kit::Button::new(if status.loading { "Stop" } else { "Refresh" })
                         .variant("ghost")
                         .size("icon-xs")
-                        .disabled(!started || idle(&status))
+                        .disabled(refresh_off)
                         .on_press(move |s: &mut App| {
                             let loading = s.ui.panel.browser.browser.status(tab).loading;
                             send(s, if loading { Cmd::Stop(tab) } else { Cmd::Reload { tab, hard: false } })
@@ -926,7 +929,7 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
 /// The picker's box around the element under the pointer, as web's annotation overlay draws it.
 fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El> {
     let [x, y, w, h] = hover_rect(status.hover.filter(|_| status.picking)?, scale, page)?;
-    Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(2.).fill(t.c.primary.alpha_mul(0.15)).border(1.5, t.c.primary))
+    Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
 }
 
 /// A CSS-pixel rect in page points, cut to the page.
