@@ -115,6 +115,61 @@ pub fn now_ms() -> i64 {
     std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
 }
 
+/// Where wall-clock labels are read: the machine's time zone, as the web's local `Date`
+/// getters, or a fixed offset in tests.
+#[derive(Clone, Copy, Debug, Default)]
+pub enum Zone {
+    #[default]
+    Local,
+    Fixed(i64),
+}
+
+impl Zone {
+    /// `at` as wall-clock milliseconds: whole days start at local midnight.
+    pub fn wall(self, at: i64) -> i64 {
+        at + self.offset(at)
+    }
+
+    /// The instant a wall-clock time names, using the offset in force then (across DST too).
+    pub fn instant(self, wall: i64) -> i64 {
+        wall - self.offset(wall - self.offset(wall))
+    }
+
+    fn offset(self, at: i64) -> i64 {
+        match self {
+            Zone::Fixed(offset) => offset,
+            Zone::Local => local_offset_ms(at),
+        }
+    }
+}
+
+#[cfg(unix)]
+fn local_offset_ms(at: i64) -> i64 {
+    // `struct tm` on glibc and macOS: nine ints, then `tm_gmtoff` and `tm_zone`.
+    #[repr(C)]
+    struct Tm {
+        ints: [std::ffi::c_int; 9],
+        gmtoff: std::ffi::c_long,
+        zone: *const std::ffi::c_char,
+    }
+    unsafe extern "C" {
+        fn tzset();
+        fn localtime_r(time: *const i64, out: *mut Tm) -> *mut Tm;
+    }
+    static TZSET: std::sync::Once = std::sync::Once::new();
+    TZSET.call_once(|| unsafe { tzset() });
+    let secs = at.div_euclid(1000);
+    let mut tm = Tm { ints: [0; 9], gmtoff: 0, zone: std::ptr::null() };
+    // SAFETY: both pointers are valid for the call; `localtime_r` writes only `tm`.
+    let ok = unsafe { !localtime_r(&secs, &mut tm).is_null() };
+    if ok { tm.gmtoff as i64 * 1000 } else { 0 }
+}
+
+#[cfg(not(unix))]
+fn local_offset_ms(_at: i64) -> i64 {
+    0
+}
+
 #[cfg(test)]
 mod tests {
     use super::iso_ms;

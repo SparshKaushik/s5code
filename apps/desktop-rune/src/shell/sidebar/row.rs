@@ -422,7 +422,8 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, th, rc.section, over)), rc)
 }
 
-fn wake_label(at: i64, now: i64) -> String {
+fn wake_label(at: i64, now: i64, zone: crate::data::Zone) -> String {
+    let (at, now) = (zone.wall(at), zone.wall(now));
     let day = |ms: i64| ms.div_euclid(86_400_000);
     let mins = at.rem_euclid(86_400_000) / 60_000;
     let (h, m) = (mins / 60, mins % 60);
@@ -474,7 +475,7 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     } else {
         let rest = if rc.section == Section::Snoozed {
             let at = th.snoozed_until.unwrap_or(model.now);
-            row().gap(4.0).center_y().child(icon(&i::ALARM_CLOCK, 12.0).color(t.sb.info_foreground)).child(text(wake_label(at, model.now)).font(theme::TEXT_XS).color(t.sb.info_foreground))
+            row().gap(4.0).center_y().child(icon(&i::ALARM_CLOCK, 12.0).color(t.sb.info_foreground)).child(text(wake_label(at, model.now, crate::data::Zone::Local)).font(theme::TEXT_XS).color(t.sb.info_foreground))
         } else {
             let at = if settled { th.settled_time() } else { th.card_time() };
             row().child(text(logic::relative_label(at, model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))

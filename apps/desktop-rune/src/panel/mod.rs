@@ -704,6 +704,7 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     } else {
         vec![]
     };
+    terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     out
 }

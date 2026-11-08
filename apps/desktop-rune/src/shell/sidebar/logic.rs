@@ -964,6 +964,12 @@ impl Undos {
         self.claimed && self.group_len(now) > 0
     }
 
+    /// Whether `thread.undo` runs: always outside text fields, and inside one only while the
+    /// visible notice still claims the key (`editableFocus` in `AppSidebarLayout`).
+    pub fn takes_key(&self, now: i64, editable: bool, notice_shown: bool) -> bool {
+        self.group_len(now) > 0 && (!editable || (notice_shown && self.claimed))
+    }
+
     fn group_len(&self, now: i64) -> usize {
         if now >= self.expires {
             return 0;
@@ -1005,8 +1011,14 @@ mod tests {
         u.push(UndoAction::Archived, "c", vec![UndoStep::Unarchive], 1_000);
         assert_eq!(u.notice(1_000), Some((UndoAction::Archived, 2)));
         assert!(u.claims_key(1_000));
+        assert!(u.takes_key(1_000, true, true));
+        assert!(!u.takes_key(1_000, true, false));
         u.release();
         assert!(!u.claims_key(1_000));
+        // After another key, text fields get mod+z back, but elsewhere it still undoes.
+        assert!(!u.takes_key(1_000, true, true));
+        assert!(u.takes_key(1_000, false, false));
+        assert!(!u.takes_key(UNDO_MS + 1_000, false, true));
         let ids: Vec<_> = u.take(1_000).into_iter().map(|(id, _)| id).collect();
         assert_eq!(ids, ["b", "c"]);
         assert_eq!(u.notice(1_000), Some((UndoAction::Unpinned, 1)));

@@ -12,11 +12,14 @@ use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::App;
+use std::collections::HashSet;
 
 #[derive(Default)]
 pub struct Ui {
-    /// The user closed the card from the topbar toggle.
-    pub hidden: bool,
+    /// Threads (by draft key) whose inline card the user closed (`inlineOpen: false`).
+    closed: HashSet<String>,
+    /// The thread whose card is open as a popover, when the lane is too narrow for it inline.
+    popover: Option<String>,
     pub menu: Option<Menu>,
     /// Local branches from `vcs.listRefs`, loaded when the branch menu opens.
     refs: Vec<String>,
@@ -42,6 +45,42 @@ pub const WIDTH: f32 = theme::layout::THREAD_DETAILS_W;
 const CLEARANCE: f32 = 32.0;
 const LANE_PADDING: f32 = 48.0;
 const MIN_CHAT: f32 = 640.0;
+
+/// How the card shows (`detailsCardMode` and `selectThreadPanelOpen`): inline beside the lane
+/// when it fits and the thread hasn't closed it, else as a popover under the topbar toggle
+/// once opened there. With no project there is no thread to describe.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum Shown {
+    None,
+    Inline,
+    Popover,
+}
+
+pub fn shown(s: &App, w: f32, h: f32) -> Shown {
+    if composer::ctx(s).project.is_none() {
+        return Shown::None;
+    }
+    let key = composer::draft_key(s.frame_route());
+    match lane(w, h, false).card {
+        true if !s.ui.chat.details.closed.contains(&key) => Shown::Inline,
+        false if s.ui.chat.details.popover.as_ref() == Some(&key) => Shown::Popover,
+        _ => Shown::None,
+    }
+}
+
+/// The topbar toggle: flips the inline card for this thread, or its popover when it can't fit.
+pub fn toggle(s: &mut App, fits: bool) {
+    let key = composer::draft_key(s.frame_route());
+    let d = &mut s.ui.chat.details;
+    d.menu = None;
+    if fits {
+        if !d.closed.remove(&key) {
+            d.closed.insert(key);
+        }
+    } else {
+        d.popover = if d.popover.as_ref() == Some(&key) { None } else { Some(key) };
+    }
+}
 
 /// Where the chat column sits in a chat area `w` by `h`, and whether the card shows.
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -229,10 +268,19 @@ fn editors(s: &App) -> Vec<(String, String)> {
         .unwrap_or_default()
 }
 
-pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El> {
-    if !lane.card {
-        return None;
+pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<El> {
+    let card = card(s, t)?;
+    match shown {
+        Shown::None => None,
+        Shown::Inline => Some(card.absolute(w - WIDTH - GAP, GAP)),
+        Shown::Popover => Some(card.anchored("topbar-details", Side::Bottom, Align::End, 4.0).modal(true, |s: &mut App| {
+            s.ui.chat.details.popover = None;
+            s.ui.chat.details.menu = None;
+        })),
     }
+}
+
+fn card(s: &App, t: &T) -> Option<El> {
     let muted = t.c.muted_foreground;
     let fg = t.c.foreground.alpha_mul(0.8);
     let env = s.state().config.as_ref().map(|c| data::s(&c["environment"], "label").to_string()).unwrap_or_default();
@@ -272,7 +320,6 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, lane: &Lane, w: f32) -> Option<El
     let mut card = col()
         .key("thread-details")
         .w(WIDTH)
-        .absolute(w - WIDTH - GAP, GAP)
         .radius(radius::XL2)
         .fill(t.c.popover.alpha_mul(0.836))
         .border(1.0, if t.dark { Color::WHITE.alpha(0.1) } else { Color::BLACK.alpha(0.08) })
@@ -372,7 +419,28 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
 
 #[cfg(test)]
 mod tests {
-    use super::{CREATE, branch_items, lane};
+    use super::{CREATE, Shown, branch_items, lane, shown, toggle};
+    use crate::{App, Route, data};
+
+    #[test]
+    fn visibility_is_per_thread_and_a_narrow_lane_opens_a_popover() {
+        let mut s = App::new();
+        let ids: Vec<String> = s.state().threads.iter().filter(|t| !data::s(t, "projectId").is_empty()).map(|t| data::s(t, "id").to_string()).take(2).collect();
+        s.navigate(Route::Thread(ids[0].clone()));
+        let (wide, narrow) = ((1182.0, 848.0), (900.0, 848.0));
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline);
+        assert_eq!(shown(&s, narrow.0, narrow.1), Shown::None, "narrow: closed until toggled");
+        toggle(&mut s, true);
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::None);
+        s.navigate(Route::Thread(ids[1].clone()));
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline, "another thread keeps its card");
+        toggle(&mut s, false);
+        assert_eq!(shown(&s, narrow.0, narrow.1), Shown::Popover);
+        s.navigate(Route::Thread(ids[0].clone()));
+        assert_eq!(shown(&s, narrow.0, narrow.1), Shown::None);
+        toggle(&mut s, true);
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline);
+    }
 
     #[test]
     fn branch_menu_offers_create_for_a_new_name() {

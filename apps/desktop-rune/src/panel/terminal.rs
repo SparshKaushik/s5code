@@ -3,16 +3,25 @@
 
 use std::time::{Duration, Instant};
 
-use super::vt::{self, MouseButton, Palette, Vt, Wheel};
+use super::vt::{self, Link, MouseButton, Palette, SelectBy, Vt, Wheel, links};
 use crate::{
-    App, data,
+    App, data, kit,
     theme::{self, T},
 };
-use rune::{Color, El, KeyEvent, Phase, TextEdit, Tx, el, text, text_input};
+use rune::{Color, Cursor, El, Key, KeyEvent, Phase, TextEdit, Tx, el, text, text_input};
 use serde_json::{Value, json};
 
 /// The web terminal's blink period; it blinks only while focused.
 const BLINK: Duration = Duration::from_millis(500);
+/// Blinks on the compositor's wall clock, so an idle focused terminal repaints its cursor a few
+/// times a second without rebuilding the view.
+const BLINK_CYCLE: rune::Cycle = rune::Cycle {
+    period: 1.,
+    phase: 0.,
+    stops: &[(0., 1.), (0.5, 1.), (0.5001, 0.), (1., 0.)],
+    still: 1.,
+    fps: 4.,
+};
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 const PADDING: f32 = 4.;
 
@@ -27,8 +36,13 @@ pub struct Session {
     /// Hidden field that owns keyboard focus, IME and paste for this terminal.
     pub input: TextEdit,
     blink_origin: Instant,
-    cursor_on: bool,
+    /// The cursor is handed to [`BLINK_CYCLE`]; it stays solid for a beat after input.
+    cursor_blinks: bool,
     button: Option<MouseButton>,
+    /// What the primary button's press is doing until it lifts.
+    press: Option<Press>,
+    /// The link under the pointer, underlined and opened by a plain click.
+    pub hover: Option<Link>,
     /// The grid the viewport fits, re-sent after an attach snapshot brings the server's own.
     fit: Option<(usize, usize)>,
     /// Set once the drawer has acted on the session ending.
@@ -50,8 +64,10 @@ impl Session {
             label: String::new(),
             input: TextEdit::new(""),
             blink_origin: Instant::now(),
-            cursor_on: true,
+            cursor_blinks: false,
             button: None,
+            press: None,
+            hover: None,
             fit: None,
             ended: false,
             exit_noted: false,
@@ -71,7 +87,7 @@ impl Session {
 
     fn wake_cursor(&mut self) {
         self.blink_origin = Instant::now();
-        self.cursor_on = true;
+        self.cursor_blinks = false;
     }
 }
 
@@ -99,9 +115,28 @@ pub fn next_id<'a>(existing: impl IntoIterator<Item = &'a String>) -> String {
     format!("term-{n}")
 }
 
+/// A primary-button gesture on the grid (the ghostty surface's pointer handling).
+#[derive(Clone, Debug, PartialEq)]
+enum Press {
+    /// Reported to a program that reads the mouse.
+    Report,
+    /// On a link: a release opens it, a drag past 4 points selects instead.
+    Link(Link),
+    Select { by: SelectBy, moved: bool },
+}
+
+/// The terminal's right-click menu (`terminalContextMenuItems`), at a window point.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Menu {
+    thread: String,
+    id: String,
+    at: (f32, f32),
+}
+
 #[derive(Default)]
 pub struct Ui {
     sessions: Vec<Session>,
+    pub menu: Option<Menu>,
     pending: Vec<u64>,
     /// `terminal.close` requests, to type `exit` when one fails.
     closing: Vec<(u64, String, String)>,
@@ -303,17 +338,13 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         let blinking = session.input.focused
             && session.vt.cursor_blinks()
             && !session.vt.scrolled_back();
-        let on = if blinking {
-            let elapsed = session.blink_origin.elapsed();
-            let phase = elapsed.as_millis() / BLINK.as_millis();
-            let remaining = BLINK.as_millis() - elapsed.as_millis() % BLINK.as_millis();
-            tx.wake_after(Duration::from_millis(remaining as u64));
-            phase % 2 == 0
-        } else {
-            true
-        };
-        if on != session.cursor_on {
-            session.cursor_on = on;
+        let elapsed = session.blink_origin.elapsed();
+        if blinking && elapsed < BLINK {
+            tx.wake_after(BLINK - elapsed);
+        }
+        let blinks = blinking && elapsed >= BLINK;
+        if blinks != session.cursor_blinks {
+            session.cursor_blinks = blinks;
             changed = true;
         }
         if let Some(at) = session.notify_at {
@@ -434,15 +465,92 @@ fn note_exit(session: &mut Session) {
         .feed(&format!("\r\n\x1b[90m[terminal] {message}\x1b[0m\r\n"));
 }
 
-fn key(app: &mut App, thread: &str, id: &str, e: &KeyEvent) -> bool {
+/// The terminal's own clipboard chords (`isTerminalCopyShortcut`, `isTerminalPasteShortcut`,
+/// the surface's select-all), checked before the key reaches the program.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Clip {
+    /// Copy the selection; a plain Ctrl+C off macOS also clears it so the next one interrupts.
+    Copy { clear: bool },
+    Paste,
+    SelectAll,
+}
+
+fn clip(e: &KeyEvent, mac: bool, selection: bool) -> Option<Clip> {
+    let m = e.mods;
+    let letter = match &e.key {
+        Key::Command(c) => Some(c.to_ascii_lowercase()),
+        Key::Text(t) if m.ctrl || m.cmd => t.chars().next().map(|c| c.to_ascii_lowercase()),
+        _ => None,
+    };
+    let primary = if mac { m.cmd && !m.ctrl } else { m.ctrl && !m.logo };
+    match (letter, &e.key) {
+        (Some('c'), _) if primary && selection && !m.alt => Some(Clip::Copy { clear: !mac && !m.shift }),
+        (_, Key::Insert) if !mac && m.ctrl && !m.shift && selection => Some(Clip::Copy { clear: false }),
+        (Some('v'), _) if primary && !m.alt && (mac || m.shift) => Some(Clip::Paste),
+        (_, Key::Insert) if !mac && m.shift && !m.ctrl => Some(Clip::Paste),
+        (Some('a'), _) if primary && !m.alt && (mac != m.shift) => Some(Clip::SelectAll),
+        _ => None,
+    }
+}
+
+fn copy_selection(app: &mut App, tx: &mut Tx, thread: &str, id: &str, clear: bool) {
+    let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
+        return;
+    };
+    if let Some(text) = session.vt.selection_text() {
+        tx.copy(text);
+    }
+    if clear {
+        session.vt.clear_selection();
+    }
+}
+
+fn paste_clipboard(tx: &mut Tx, thread: &str, id: &str) {
+    let (thread, id) = (thread.to_string(), id.to_string());
+    tx.read_clipboard(move |s: &mut App, content, _| {
+        let text = content.text();
+        let Some(session) = s.ui.panel.terminal.get(&thread, &id) else {
+            return;
+        };
+        if text.is_empty() {
+            return;
+        }
+        let data = session.vt.paste(text);
+        send(s, &thread, &id, data);
+    });
+}
+
+fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool {
     if super::drawer::shortcut(app, thread, id, e) {
         return true;
     }
     let Some(session) = app.ui.panel.terminal.get(thread, id) else {
         return false;
     };
+    let selection = session.vt.selection_text().is_some();
+    match clip(e, cfg!(target_os = "macos"), selection) {
+        Some(Clip::Copy { clear }) => {
+            copy_selection(app, tx, thread, id, clear);
+            return true;
+        }
+        Some(Clip::Paste) => {
+            paste_clipboard(tx, thread, id);
+            return true;
+        }
+        Some(Clip::SelectAll) => {
+            if let Some(session) = app.ui.panel.terminal.get_mut(thread, id) {
+                session.vt.select_all();
+            }
+            return true;
+        }
+        None => {}
+    }
+    let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
+        return false;
+    };
     match session.vt.key(e) {
         Some(data) => {
+            session.vt.clear_selection();
             send(app, thread, id, data);
             true
         }
@@ -472,6 +580,12 @@ fn metrics(app: &App) -> Metrics {
 }
 
 fn cell_at(app: &App, thread: &str, id: &str, x: f32, y: f32) -> (usize, usize) {
+    let (col, row, _) = cell_side(app, thread, id, x, y);
+    (col, row)
+}
+
+/// The cell under a point and whether the point is in its right half (the selection side).
+fn cell_side(app: &App, thread: &str, id: &str, x: f32, y: f32) -> (usize, usize, bool) {
     let m = metrics(app);
     let (cols, rows) = app
         .ui
@@ -479,10 +593,86 @@ fn cell_at(app: &App, thread: &str, id: &str, x: f32, y: f32) -> (usize, usize) 
         .terminal
         .get(thread, id)
         .map_or((80, 24), |s| s.vt.size());
+    let fx = ((x - PADDING) / m.cell_w).max(0.);
+    let col = (fx.floor() as usize).min(cols - 1);
+    let right = fx >= cols as f32 || fx.fract() >= 0.5;
     (
-        (((x - PADDING) / m.cell_w).floor().max(0.) as usize).min(cols - 1),
+        col,
         (((y - PADDING) / m.cell_h).floor().max(0.) as usize).min(rows - 1),
+        right,
     )
+}
+
+/// `resolvePathLinkTarget`'s home for `~/`: the `/Users/<name>` or `/home/<name>` cwd sits in.
+fn home_of(cwd: &str) -> Option<String> {
+    let mut parts = cwd.split('/');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(""), Some(root @ ("Users" | "home")), Some(name)) if !name.is_empty() => Some(format!("/{root}/{name}")),
+        _ => None,
+    }
+}
+
+/// Where a path link points: inside the workspace (opened in the Files panel), else an
+/// absolute path for the editor. Relative paths resolve against the terminal's directory.
+#[derive(Debug, PartialEq)]
+enum PathTarget {
+    Workspace(String),
+    Outside(String),
+}
+
+fn path_target(text: &str, cwd: &str) -> PathTarget {
+    let path = links::strip_position(text);
+    let joined = if let Some(rest) = path.strip_prefix("~/") {
+        match home_of(cwd) {
+            Some(home) => format!("{home}/{rest}"),
+            None => path.to_string(),
+        }
+    } else if path.starts_with('/') {
+        path.to_string()
+    } else {
+        format!("{}/{path}", cwd.trim_end_matches('/'))
+    };
+    let mut parts: Vec<&str> = Vec::new();
+    for part in joined.split('/') {
+        match part {
+            "" | "." => {}
+            ".." => {
+                parts.pop();
+            }
+            p => parts.push(p),
+        }
+    }
+    let absolute = format!("/{}", parts.join("/"));
+    let root = format!("{}/", cwd.trim_end_matches('/'));
+    match absolute.strip_prefix(&root) {
+        Some(relative) if !relative.is_empty() && joined.starts_with('/') => PathTarget::Workspace(relative.to_string()),
+        _ => PathTarget::Outside(absolute),
+    }
+}
+
+/// Opens a clicked link: URLs in the browser, workspace files in the Files panel, other paths
+/// in the preferred editor (`handleLinkActivate`).
+fn open_link(app: &mut App, tx: &mut Tx, link: &Link) {
+    if link.kind == links::Kind::Url {
+        let _ = tx.open_url(&link.text);
+        return;
+    }
+    let Some((_, cwd)) = super::context(app) else {
+        return;
+    };
+    match path_target(&link.text, &cwd) {
+        PathTarget::Workspace(relative) => super::open_file(app, relative),
+        PathTarget::Outside(absolute) => {
+            let config = app.state().config.as_ref();
+            let editor = config
+                .and_then(|c| c["availableEditors"].as_array())
+                .and_then(|v| v.first())
+                .map(|e| e.as_str().map_or_else(|| data::s(e, "id").to_string(), str::to_string));
+            if let (Some(editor), Some(net)) = (editor, app.src.net()) {
+                net.request("shell.openInEditor", json!({"cwd": absolute, "editor": editor}));
+            }
+        }
+    }
 }
 
 /// One terminal's grid, sized to the space it's given.
@@ -500,7 +690,8 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
         .h_full()
         .fill(t.c.terminal_background)
         .clip_rounded(0.)
-        .role("textbox")
+        // Not "textbox": Rune hands a textbox's presses to its one field, starving `on_drag`.
+        .role("group")
         .label("Terminal");
     let Some(session) = app.ui.panel.terminal.get(thread, id) else {
         return grid;
@@ -522,6 +713,13 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
                 el().absolute(x(col), y(r))
                     .size(cells as f32 * m.cell_w, m.cell_h)
                     .fill(rgb(color)),
+            );
+        }
+        for &(col, cells) in &row.selected {
+            grid = grid.child(
+                el().absolute(x(col), y(r))
+                    .size(cells as f32 * m.cell_w, m.cell_h)
+                    .fill(t.c.terminal_selection_background),
             );
         }
         for run in &row.runs {
@@ -554,8 +752,18 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
             }
         }
     }
+    if let Some(link) = &session.hover {
+        for &(r, first, last) in &link.spans {
+            grid = grid.child(
+                el().absolute(x(first), y(r) + m.cell_h - 2.)
+                    .size((last + 1 - first) as f32 * m.cell_w, 1.)
+                    .fill(t.c.terminal_foreground),
+            );
+        }
+    }
     let focused = session.input.focused;
-    if let Some(c) = cursor.filter(|_| session.cursor_on) {
+    let blink = |e: El| if session.cursor_blinks { e.cycle(BLINK_CYCLE) } else { e };
+    if let Some(c) = cursor {
         let (cx, cy) = (x(c.col), y(c.row));
         let color = t.c.terminal_cursor;
         let mark = match (focused, c.kind) {
@@ -573,18 +781,18 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
                 .size(m.cell_w, m.cell_h)
                 .fill(color),
         };
-        grid = grid.child(mark);
+        grid = grid.child(blink(mark));
         if let (true, vt::CursorKind::Block, Some(glyph)) = (focused, c.kind, &c.glyph) {
             let mut font = m.font;
             if glyph.bold {
                 font = theme::weight(font, 700.);
             }
-            grid = grid.child(
+            grid = grid.child(blink(
                 text(glyph.text.clone())
                     .font(font)
                     .color(t.c.terminal_background)
                     .absolute(cx, cy),
-            );
+            ));
         }
     }
     let (cursor_col, cursor_row) = session.vt.cursor_point();
@@ -595,6 +803,15 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
     let (t5, i5) = (t1.clone(), i1.clone());
     let (t6, i6) = (t1.clone(), i1.clone());
     let (t7, i7) = (t1.clone(), i1.clone());
+    let (t8, i8) = (t1.clone(), i1.clone());
+    let (t9, i9) = (t1.clone(), i1.clone());
+    let pointer = if session.hover.is_some() {
+        Cursor::Pointer
+    } else if session.vt.reports_mouse(false) {
+        Cursor::Default
+    } else {
+        Cursor::Text
+    };
     let input = text_input(&session.input, m.font)
         .single_line()
         .key(format!("{el_key}-input"))
@@ -615,7 +832,7 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
                 None => &mut ui.spare,
             }
         })
-        .on_input_key(move |s: &mut App, e, _| key(s, &t2, &i2, e))
+        .on_input_key(move |s: &mut App, e, tx| key(s, tx, &t2, &i2, e))
         .on_input_paste(move |s: &mut App, content, _| {
             let text = content.text();
             let Some(session) = s.ui.panel.terminal.get(&t3, &i3) else {
@@ -632,48 +849,48 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
             let rows = ((r[3] - 2. * PADDING) / m.cell_h).floor().clamp(1., 500.) as usize;
             resize(s, &t4, &i4, cols, rows);
         })
-        .on_drag(move |s: &mut App, d, _| {
-            if d.phase == Phase::Down {
-                focus(s, &t5, &i5);
-                super::drawer::activate(s, &t5, &i5);
-            }
-            let (col, row) = cell_at(s, &t5, &i5, d.x, d.y);
-            let Some(session) = s.ui.panel.terminal.get_mut(&t5, &i5) else {
-                return;
-            };
-            let mods = rune::Mods::default();
-            if !session.vt.reports_mouse(false) {
-                return;
-            }
-            let report = match d.phase {
-                Phase::Down => {
-                    session.button = Some(MouseButton::Left);
-                    session.vt.mouse(MouseButton::Left, true, false, col, row, mods)
-                }
-                Phase::Move => session.vt.mouse(MouseButton::Left, true, true, col, row, mods),
-                Phase::Up => {
-                    session.button = None;
-                    session.vt.mouse(MouseButton::Left, false, false, col, row, mods)
-                }
-            };
-            if let Some(data) = report {
-                send(s, &t5, &i5, data);
-            }
-        })
+        .cursor(pointer)
+        .on_drag(move |s: &mut App, d, tx| drag(s, tx, &t5, &i5, d))
         .on_pointer_move_local(move |s: &mut App, p, _| {
             let (col, row) = cell_at(s, &t6, &i6, p.x, p.y);
-            let Some(session) = s.ui.panel.terminal.get(&t6, &i6) else {
+            let Some(session) = s.ui.panel.terminal.get_mut(&t6, &i6) else {
                 return;
             };
-            if session.button.is_some() {
+            if session.button.is_some() || session.press.is_some() {
                 return;
             }
-            if let Some(data) = session
+            let report = session
                 .vt
-                .mouse(MouseButton::None, false, true, col, row, rune::Mods::default())
-            {
+                .mouse(MouseButton::None, false, true, col, row, rune::Mods::default());
+            let hover = if session.vt.reports_mouse(false) { None } else { session.vt.link_at(col, row) };
+            if session.hover != hover {
+                session.hover = hover;
+            }
+            if let Some(data) = report {
                 send(s, &t6, &i6, data);
             }
+        })
+        .on_hover_change(move |s: &mut App, on, _| {
+            if let (false, Some(session)) = (on, s.ui.panel.terminal.get_mut(&t9, &i9)) {
+                session.hover = None;
+            }
+        })
+        .on_secondary_press_local(move |s: &mut App, p, tx| {
+            let (col, row) = cell_at(s, &t8, &i8, p.x, p.y);
+            let mods = tx.mods();
+            let Some(session) = s.ui.panel.terminal.get(&t8, &i8) else {
+                return;
+            };
+            // A program reading the mouse gets the right button; Shift brings the menu back.
+            if session.vt.reports_mouse(mods.shift || mods.ctrl || mods.cmd) {
+                let press = session.vt.mouse(MouseButton::Right, true, false, col, row, mods);
+                let release = session.vt.mouse(MouseButton::Right, false, false, col, row, mods);
+                send(s, &t8, &i8, press.unwrap_or_default() + &release.unwrap_or_default());
+                return;
+            }
+            let at = p.window();
+            focus(s, &t8, &i8);
+            s.ui.panel.terminal.menu = Some(Menu { thread: t8.clone(), id: i8.clone(), at: (at.x, at.y) });
         })
         .on_wheel(move |s: &mut App, w, _| {
             let m = metrics(s);
@@ -689,6 +906,124 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
         })
 }
 
+/// The primary button on the grid: mouse reports for programs that read the mouse (Shift,
+/// Ctrl or Cmd select instead), a plain click on a link opens it, and otherwise a press
+/// selects by cell, word (double click) or line (triple click) as it drags.
+fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
+    if d.phase == Phase::Down {
+        focus(s, thread, id);
+        super::drawer::activate(s, thread, id);
+    }
+    let (col, row, right) = cell_side(s, thread, id, d.x, d.y);
+    let (c0, r0, right0) = cell_side(s, thread, id, d.start_x, d.start_y);
+    let mods = tx.mods();
+    let mut open = None;
+    let mut report = None;
+    let Some(session) = s.ui.panel.terminal.get_mut(thread, id) else {
+        return;
+    };
+    match d.phase {
+        Phase::Down => {
+            session.press = Some(if session.vt.reports_mouse(mods.shift || mods.ctrl || mods.cmd) {
+                session.button = Some(MouseButton::Left);
+                report = session.vt.mouse(MouseButton::Left, true, false, col, row, mods);
+                Press::Report
+            } else if let (1, false, Some(link)) = (d.clicks, mods.shift, session.vt.link_at(col, row)) {
+                Press::Link(link)
+            } else {
+                let by = match d.clicks {
+                    0 | 1 => SelectBy::Cell,
+                    2 => SelectBy::Word,
+                    _ => SelectBy::Line,
+                };
+                session.hover = None;
+                session.vt.select_start(col, row, right, by);
+                Press::Select { by, moved: false }
+            });
+        }
+        Phase::Move => match session.press.clone() {
+            Some(Press::Report) => {
+                report = session.vt.mouse(MouseButton::Left, true, true, col, row, mods);
+            }
+            Some(Press::Link(_)) if d.dx.hypot(d.dy) > 4. => {
+                session.hover = None;
+                session.vt.select_start(c0, r0, right0, SelectBy::Cell);
+                session.vt.select_to(col, row, right);
+                session.press = Some(Press::Select { by: SelectBy::Cell, moved: true });
+            }
+            Some(Press::Select { by, .. }) => {
+                // Past the top or bottom edge, the view scrolls through history as it selects.
+                if d.y < 0. {
+                    session.vt.scroll_lines(1);
+                } else if d.y > d.h {
+                    session.vt.scroll_lines(-1);
+                }
+                session.vt.select_to(col, row, right);
+                session.press = Some(Press::Select { by, moved: true });
+            }
+            _ => {}
+        },
+        Phase::Up => match session.press.take() {
+            Some(Press::Report) => {
+                session.button = None;
+                report = session.vt.mouse(MouseButton::Left, false, false, col, row, mods);
+            }
+            Some(Press::Link(link)) if !d.cancelled() => open = Some(link),
+            Some(Press::Select { by: SelectBy::Cell, moved: false }) => session.vt.clear_selection(),
+            _ => {}
+        },
+    }
+    if let Some(data) = report {
+        send(s, thread, id, data);
+    }
+    if let Some(link) = open {
+        open_link(s, tx, &link);
+    }
+}
+
+/// The terminal's right-click menu: Copy, Paste, Select all, Jump to latest.
+pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
+    let Some(menu) = &app.ui.panel.terminal.menu else {
+        return;
+    };
+    let selection = app
+        .ui
+        .panel
+        .terminal
+        .get(&menu.thread, &menu.id)
+        .is_some_and(|s| s.vt.selection_text().is_some());
+    let item = |label: &str, act: fn(&mut App, &mut Tx, &str, &str)| {
+        let (thread, id) = (menu.thread.clone(), menu.id.clone());
+        kit::MenuItem::new(label).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            s.ui.panel.terminal.menu = None;
+            act(s, tx, &thread, &id);
+            focus(s, &thread, &id);
+        })
+    };
+    let entries = vec![
+        kit::MenuEntry::item(item("Copy", |s, tx, th, id| copy_selection(s, tx, th, id, false)).disabled(!selection)),
+        kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id))),
+        kit::MenuEntry::item(item("Select all", |s, _, th, id| {
+            if let Some(session) = s.ui.panel.terminal.get_mut(th, id) {
+                session.vt.select_all();
+            }
+        })),
+        kit::MenuEntry::item(item("Jump to latest", |s, _, th, id| {
+            if let Some(session) = s.ui.panel.terminal.get_mut(th, id) {
+                session.vt.scroll_to_bottom();
+            }
+        })),
+    ];
+    kit::Menu::new("terminal-menu")
+        .native(true)
+        .width(198.)
+        .entries(entries)
+        .open(true)
+        .at(menu.at.0, menu.at.1)
+        .on_close(|s: &mut App| s.ui.panel.terminal.menu = None)
+        .overlay(&kit::theme(t), out);
+}
+
 /// Loads a recorded `terminal.attach` snapshot into a session for headless scenes.
 pub fn fixture(app: &mut App, thread: &str, id: &str, recorded: &str) {
     let event: Value = serde_json::from_str(recorded).expect("terminal fixture is JSON");
@@ -702,6 +1037,35 @@ pub fn fixture(app: &mut App, thread: &str, id: &str, recorded: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn presses_on_the_grid_select_by_drag_and_a_click_clears() {
+        fn view(s: &App, _: &mut rune::Cx<App>) -> El {
+            el().size(600., 300.).child(viewport(s, &theme::theme(true), "t", "term-1"))
+        }
+        let mut app = App::new();
+        fixture(
+            &mut app,
+            "t",
+            "term-1",
+            r#"{"type":"snapshot","snapshot":{"history":"hello brave world","cols":40,"rows":10,"sequence":1,"status":"running"}}"#,
+        );
+        let m = metrics(&app);
+        let mut rt = rune::Runtime::new(app, view, (600., 300.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let (x, y) = (|col: f32| PADDING + col * m.cell_w, PADDING + m.cell_h * 0.5);
+        let selection = |rt: &rune::Runtime<App>| rt.state.ui.panel.terminal.get("t", "term-1").unwrap().vt.selection_text();
+        rt.pointer_down(x(0.2), y);
+        rt.pointer_move(x(2.), y);
+        rt.pointer_move(x(4.8), y);
+        rt.pointer_up(x(4.8), y);
+        rt.frame(0.);
+        assert_eq!(selection(&rt).as_deref(), Some("hello"));
+        rt.pointer_down(x(8.), y);
+        rt.pointer_up(x(8.), y);
+        rt.frame(0.);
+        assert_eq!(selection(&rt), None, "a click clears the selection");
+    }
 
     #[test]
     fn snapshot_then_ordered_events_and_resume() {
@@ -757,6 +1121,41 @@ mod tests {
         assert!(payload.get("resume").is_none(), "{payload}");
         assert_eq!(payload["worktreePath"], "/wt");
         assert!(attach_payload("t", "term-2", "/repo", None).get("worktreePath").is_none());
+    }
+
+    #[test]
+    fn clipboard_chords_follow_the_platform() {
+        let chord = |c: char, f: fn(&mut rune::Mods)| {
+            let mut e = KeyEvent::from(Key::Command(c));
+            f(&mut e.mods);
+            e
+        };
+        let ctrl = chord('c', |m| (m.ctrl, m.cmd) = (true, true));
+        assert_eq!(clip(&ctrl, false, true), Some(Clip::Copy { clear: true }));
+        assert_eq!(clip(&ctrl, false, false), None, "no selection: Ctrl+C interrupts");
+        let ctrl_shift = chord('C', |m| (m.ctrl, m.cmd, m.shift) = (true, true, true));
+        assert_eq!(clip(&ctrl_shift, false, true), Some(Clip::Copy { clear: false }));
+        let paste = chord('V', |m| (m.ctrl, m.cmd, m.shift) = (true, true, true));
+        assert_eq!(clip(&paste, false, false), Some(Clip::Paste));
+        let ctrl_v = chord('v', |m| (m.ctrl, m.cmd) = (true, true));
+        assert_eq!(clip(&ctrl_v, false, false), None, "Ctrl+V is the program's");
+        let cmd_c = chord('c', |m| m.cmd = true);
+        assert_eq!(clip(&cmd_c, true, true), Some(Clip::Copy { clear: false }));
+        assert_eq!(clip(&chord('v', |m| m.cmd = true), true, false), Some(Clip::Paste));
+        assert_eq!(clip(&chord('a', |m| m.cmd = true), true, false), Some(Clip::SelectAll));
+        let mac_ctrl_c = chord('c', |m| m.ctrl = true);
+        assert_eq!(clip(&mac_ctrl_c, true, true), None, "Ctrl+C on macOS interrupts");
+    }
+
+    #[test]
+    fn path_links_open_in_the_workspace_or_the_editor() {
+        let cwd = "/home/me/repo";
+        assert_eq!(path_target("src/main.rs:12:3", cwd), PathTarget::Workspace("src/main.rs".into()));
+        assert_eq!(path_target("./a/../b.ts", cwd), PathTarget::Workspace("b.ts".into()));
+        assert_eq!(path_target("/home/me/repo/x/y", cwd), PathTarget::Workspace("x/y".into()));
+        assert_eq!(path_target("~/notes.md", cwd), PathTarget::Outside("/home/me/notes.md".into()));
+        assert_eq!(path_target("../other/z", cwd), PathTarget::Outside("/home/me/other/z".into()));
+        assert_eq!(path_target("/etc/hosts", cwd), PathTarget::Outside("/etc/hosts".into()));
     }
 
     #[test]

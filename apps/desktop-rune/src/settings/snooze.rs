@@ -10,6 +10,7 @@ use std::collections::{HashMap, HashSet};
 
 use super::{controls, server_settings, update};
 use crate::theme::{self, AlphaMul, T};
+use crate::data::Zone;
 use crate::{App, icons};
 
 const DAY: i64 = 86_400_000;
@@ -66,7 +67,7 @@ fn rows(s: &App) -> Vec<Value> {
     let saved = saved(s);
     match &s.ui.settings.snooze.rows {
         Some(draft) if ids(draft) == ids(&saved) => draft.clone(),
-        _ => sort(saved, s.now_ms),
+        _ => sort(saved, s.now_ms, Zone::Local),
     }
 }
 
@@ -76,7 +77,7 @@ pub fn customized(s: &App) -> bool {
 
 pub fn reset(s: &mut App) {
     s.ui.settings.snooze.units.clear();
-    let sorted = sort(defaults(), s.now_ms);
+    let sorted = sort(defaults(), s.now_ms, Zone::Local);
     save(s, sorted);
 }
 
@@ -85,8 +86,8 @@ fn save(s: &mut App, list: Vec<Value>) {
     update(s, "snoozePresets", json!(list));
 }
 
-fn clock(ms: i64) -> String {
-    let mins = ms.rem_euclid(DAY) / 60_000;
+fn clock(wall: i64) -> String {
+    let mins = wall.rem_euclid(DAY) / 60_000;
     let (h, m) = (mins / 60, mins % 60);
     format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
 }
@@ -116,16 +117,17 @@ fn hm(time: &str) -> Option<(i64, i64)> {
     (h < 24 && m < 60).then_some((h, m))
 }
 
-/// `resolveSnoozePreset` (UTC as local, like the sidebar): `(label, whenLabel, wake)`, or none
-/// for a "today" option whose time has passed.
-fn resolve(p: &Value, now: i64) -> Option<(String, String, i64)> {
-    let today = now - now.rem_euclid(DAY);
+/// `resolveSnoozePreset` in `zone`: `(label, whenLabel, wake)`, or none for a "today" option
+/// whose time has passed.
+fn resolve(p: &Value, now: i64, zone: Zone) -> Option<(String, String, i64)> {
+    let wall_now = zone.wall(now);
+    let today = wall_now - wall_now.rem_euclid(DAY);
     let (label, wake, names_day) = if p["kind"] == "after" {
         let minutes = p["minutes"].as_i64()?;
         (format!("In {}", duration(minutes)), now + minutes * 60_000, false)
     } else {
         let day = crate::data::s(p, "day");
-        let weekday = (now.div_euclid(DAY) + 4).rem_euclid(7);
+        let weekday = (wall_now.div_euclid(DAY) + 4).rem_euclid(7);
         let ahead = match day {
             "today" => 0,
             "tomorrow" => 1,
@@ -138,7 +140,7 @@ fn resolve(p: &Value, now: i64) -> Option<(String, String, i64)> {
             }
         };
         let (h, m) = hm(crate::data::s(p, "time"))?;
-        let wake = today + ahead * DAY + (h * 60 + m) * 60_000;
+        let wake = zone.instant(today + ahead * DAY + (h * 60 + m) * 60_000);
         if wake <= now {
             return None;
         }
@@ -154,23 +156,24 @@ fn resolve(p: &Value, now: i64) -> Option<(String, String, i64)> {
         let names_day = label != "Next week";
         (label, wake, names_day)
     };
-    let when = if names_day || wake.div_euclid(DAY) == now.div_euclid(DAY) {
-        clock(wake)
+    let wall = zone.wall(wake);
+    let when = if names_day || wall.div_euclid(DAY) == wall_now.div_euclid(DAY) {
+        clock(wall)
     } else {
-        format!("{} {}", SHORT_DAYS[wake.div_euclid(DAY).rem_euclid(7) as usize], clock(wake))
+        format!("{} {}", SHORT_DAYS[wall.div_euclid(DAY).rem_euclid(7) as usize], clock(wall))
     };
     Some((label, when, wake))
 }
 
 /// `sortSnoozeRows`: soonest wake first, passed options last, ties kept in order.
-pub fn sort(mut list: Vec<Value>, now: i64) -> Vec<Value> {
-    list.sort_by_key(|p| resolve(p, now).map_or(i64::MAX, |(_, _, w)| w));
+pub fn sort(mut list: Vec<Value>, now: i64, zone: Zone) -> Vec<Value> {
+    list.sort_by_key(|p| resolve(p, now, zone).map_or(i64::MAX, |(_, _, w)| w));
     list
 }
 
 /// `resolveSnoozePresets`: the menu as it reads now, one entry per wake minute.
 fn menu(list: &[Value], now: i64) -> Vec<(String, String)> {
-    let mut entries: Vec<_> = list.iter().filter_map(|p| resolve(p, now)).collect();
+    let mut entries: Vec<_> = list.iter().filter_map(|p| resolve(p, now, Zone::Local)).collect();
     entries.sort_by_key(|(_, _, w)| w / 60_000);
     let mut seen = HashSet::new();
     entries.into_iter().filter(|(_, _, w)| seen.insert(w / 60_000)).map(|(l, w, _)| (l, w)).collect()
@@ -328,7 +331,7 @@ pub fn parts(s: &App, t: &T) -> (El, Option<El>) {
     let mut seen_wakes = HashSet::new();
     let mut body = col().w_full().gap(6.0).pt(12.0).pb(8.0);
     for (index, p) in list.iter().enumerate() {
-        let preview = match resolve(p, now) {
+        let preview = match resolve(p, now, Zone::Local) {
             None => Err("Passed for today"),
             Some(_) if seen_ids.contains(&id(p)) => Err("Duplicate of an option above"),
             Some((_, _, wake)) if seen_wakes.contains(&wake) => Err("Same time as an option above"),
@@ -400,11 +403,12 @@ mod tests {
     use super::*;
     // 2026-11-05 is a Thursday; 10:00 UTC.
     const NOW: i64 = 1_793_872_800_000;
+    const UTC: Zone = Zone::Fixed(0);
 
     #[test]
     fn labels_follow_the_day_gap() {
         assert_eq!((NOW.div_euclid(DAY) + 4).rem_euclid(7), 4);
-        let at = |day: &str, time: &str| resolve(&json!({"kind":"at","day":day,"time":time}), NOW).map(|r| r.0);
+        let at = |day: &str, time: &str| resolve(&json!({"kind":"at","day":day,"time":time}), NOW, UTC).map(|r| r.0);
         assert_eq!(at("today", "09:00"), None);
         assert_eq!(at("today", "18:00").as_deref(), Some("This evening"));
         assert_eq!(at("today", "13:00").as_deref(), Some("This afternoon"));
@@ -412,8 +416,25 @@ mod tests {
         assert_eq!(at("monday", "09:00").as_deref(), Some("Next week"));
         assert_eq!(at("thursday", "09:00").as_deref(), Some("Next Thursday"));
         assert_eq!(at("saturday", "09:00").as_deref(), Some("Saturday"));
-        let after = resolve(&json!({"kind":"after","minutes":24 * 60}), NOW).unwrap();
+        let after = resolve(&json!({"kind":"after","minutes":24 * 60}), NOW, UTC).unwrap();
         assert_eq!((after.0.as_str(), after.1.as_str()), ("In 1 day", "Fri 10:00 AM"));
+    }
+
+    #[test]
+    fn times_read_in_the_local_zone() {
+        // 10:00 UTC is 3:30 PM in India, so "today 13:00" has passed and "today 18:00" is
+        // 12:30 UTC. In Los Angeles it is still Thursday 2:00 AM, so Friday is tomorrow.
+        let ist = Zone::Fixed(330 * 60_000);
+        let at = |day: &str, time: &str, zone| resolve(&json!({"kind":"at","day":day,"time":time}), NOW, zone);
+        assert_eq!(at("today", "13:00", ist), None);
+        let evening = at("today", "18:00", ist).unwrap();
+        assert_eq!((evening.1.as_str(), evening.2), ("6:00 PM", NOW + 150 * 60_000));
+        let after = resolve(&json!({"kind":"after","minutes":60}), NOW, ist).unwrap();
+        assert_eq!(after.1, "4:30 PM");
+        let la = Zone::Fixed(-8 * 3_600_000);
+        assert_eq!(at("today", "09:00", la).unwrap().0, "This morning");
+        assert_eq!(at("friday", "09:00", la).unwrap().0, "Tomorrow");
+        assert_eq!(at("saturday", "09:00", la).unwrap().0, "Saturday");
     }
 
     #[test]
@@ -423,7 +444,7 @@ mod tests {
             json!({"kind":"after","minutes":180}),
             json!({"kind":"after","minutes":60}),
         ];
-        let sorted = sort(list, NOW);
+        let sorted = sort(list, NOW, UTC);
         assert_eq!(sorted.iter().map(id).collect::<Vec<_>>(), ["after:60", "after:180", "at:today:08:00"]);
     }
 }

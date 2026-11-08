@@ -682,7 +682,7 @@ pub fn release_undo_key(s: &mut App, e: &KeyEvent) {
 }
 
 /// Shortcuts from the server's keybindings that the web binds outside the terminal.
-fn bound_key(s: &mut App, e: &KeyEvent) -> bool {
+fn bound_key(s: &mut App, e: &KeyEvent, editable: bool) -> bool {
     if crate::panel::terminal_active(s) {
         return false;
     }
@@ -691,10 +691,15 @@ fn bound_key(s: &mut App, e: &KeyEvent) -> bool {
         Some("navigation.back") => go_back(s),
         Some("navigation.forward") => go_forward(s),
         Some("usage.open") => go(s, Route::Usage),
-        Some("chat.newWithoutProject") => go(s, Route::Home { project_id: None }),
+        // The web leaves the key alone when no server offers a scratch workspace.
+        Some("chat.newWithoutProject") if !crate::shell::palette::actions::scratch_available(s) => return false,
+        Some("chat.newWithoutProject") => crate::shell::palette::actions::new_without_project(s),
         Some("chat.newLocal") => new_local(s),
         // A collapsed sidebar hides the notice, so text fields keep their own undo.
-        Some("thread.undo") => return !s.ui.shell.sidebar.collapsed && s.ui.shell.sidebar.undos.claims_key(crate::data::now_ms()) && undo(s),
+        Some("thread.undo") => {
+            let notice_shown = !s.ui.shell.sidebar.collapsed;
+            return s.ui.shell.sidebar.undos.takes_key(crate::data::now_ms(), editable, notice_shown) && undo(s);
+        }
         Some(_) => new_thread(s),
         None => return thread_shortcut(s, e),
     }
@@ -714,7 +719,8 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.shell.sidebar.menu.is_some() {
         return menu::on_key(s, e, tx);
     }
-    if bound_key(s, e) {
+    // The window hears a key first only while nothing has focus.
+    if bound_key(s, e, tx.focused().is_some()) {
         return true;
     }
     match &e.key {
