@@ -217,6 +217,9 @@ pub(crate) fn shortcut(app: &App, e: &KeyEvent, command: &str) -> bool {
 
 fn resolve<'a>(bindings: &'a [serde_json::Value], e: &KeyEvent, context: &dyn Fn(&str) -> bool) -> Option<&'a str> {
     let key = match &e.key {
+        // Shift turns "[" into "{" on the key event; bindings name the unshifted key.
+        Key::Command('{') => "[".to_string(),
+        Key::Command('}') => "]".to_string(),
         Key::Command(c) => c.to_string(),
         Key::Text(v) => v.clone(),
         _ => String::new(),

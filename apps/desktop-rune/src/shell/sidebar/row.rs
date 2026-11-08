@@ -162,7 +162,8 @@ fn interactive(e: El, th: &Thread, section: Section, over: Option<String>) -> El
             }
         })
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
-            s.ui.shell.sidebar.menu = Some(super::menu::Menu::new(mid.clone(), at.x, at.y));
+            let bulk = s.ui.shell.sidebar.selected.contains(&mid);
+            s.ui.shell.sidebar.menu = Some(if bulk { super::menu::Menu::bulk(mid.clone(), at.x, at.y) } else { super::menu::Menu::new(mid.clone(), at.x, at.y) });
         })
         .on_double_press({
             let id = th.id.clone();
@@ -398,16 +399,24 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     let provider = provider_icon(t, model, th, row_text);
     let mut line2 = row().mt(4.0).gap(6.0).center_y().child(title(s, th, t, if receded { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color));
     let mut body = col().px(10.0).py(8.0).child(line1);
-    match &th.branch {
-        Some(branch) => {
+    // The meta line holds the branch and PR badge; with neither, its trailing icons join the title.
+    match (&th.branch, &th.pr) {
+        (branch, pr) if branch.is_some() || pr.is_some() => {
             body = body.child(line2);
-            let mut meta = row().mt(2.0).gap(6.0).center_y().child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
+            let lead = match branch {
+                Some(branch) => text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink(),
+                None => spacer(),
+            };
+            let mut meta = row().mt(2.0).gap(6.0).center_y().child(lead);
+            if let Some(pr) = pr {
+                meta = meta.child(pr_badge(t, &th.id, pr));
+            }
             if let Some(p) = provider {
                 meta = meta.child(p);
             }
             body = body.child(meta);
         }
-        None => {
+        _ => {
             if let Some(p) = provider {
                 line2 = line2.child(p);
             }
@@ -420,6 +429,37 @@ fn card(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     }
     let over = rc.over.map(str::to_string);
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full().py(2.0), &th.id).child(interactive(e, th, rc.section, over)), rc)
+}
+
+/// `PullRequestBadge`: the state glyph in its tone, then the number, "+N" or a stack's layer count.
+fn pr_badge(t: &T, thread: &str, pr: &logic::PrBadge) -> El {
+    let dark = t.dark;
+    let (glyph, tone) = match pr.state {
+        "draft" => (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 }),
+        "merged" => (&i::GIT_MERGE, if dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }),
+        "closed" => (&i::GIT_PULL_REQUEST_CLOSED, if dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }),
+        "open" => (&i::GIT_PULL_REQUEST_ARROW, if dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }),
+        _ => (&i::GIT_PULL_REQUEST_ARROW, t.sb.muted_foreground),
+    };
+    let glyph = if pr.stack { &i::LAYERS } else { glyph };
+    let (id, url, list) = (thread.to_string(), pr.url.clone(), pr.opens_list);
+    row()
+        .key(format!("sb-pr-{thread}"))
+        .gap(4.0)
+        .center_y()
+        .shrink()
+        .cursor(Cursor::Pointer)
+        .child(icon(glyph, 12.0).color(tone))
+        .child(text(pr.text.clone()).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| match (&url, list) {
+            (Some(url), false) => {
+                let _ = tx.open_url(url);
+            }
+            _ => {
+                super::open_thread(s, &id);
+                crate::shell::palette::actions::show_pull_requests(s);
+            }
+        })
 }
 
 fn wake_label(at: i64, now: i64, zone: crate::data::Zone) -> String {

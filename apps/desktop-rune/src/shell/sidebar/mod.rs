@@ -7,6 +7,7 @@ mod chrome;
 pub mod logic;
 mod menu;
 mod row;
+mod snooze;
 
 pub use self::row::monogram;
 
@@ -50,6 +51,14 @@ pub struct Patch {
     pub title: Option<String>,
 }
 
+/// A question the sidebar asks before it acts, as `dialogs.confirm` does.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Confirm {
+    Archive(String),
+    Unpin(String),
+    Delete(Vec<String>),
+}
+
 #[derive(Default)]
 pub struct Ui {
     pub collapsed: bool,
@@ -70,6 +79,10 @@ pub struct Ui {
     pub rename: Option<(String, TextEdit)>,
     /// The thread a delete confirmation is open for (`confirmThreadDelete`).
     pub delete: Option<String>,
+    /// Archive, unpin and bulk-delete confirmations (`dialogs.confirm`).
+    pub confirm: Option<Confirm>,
+    /// The Custom… snooze dialog and the threads it snoozes.
+    pub custom_snooze: Option<snooze::Custom>,
     /// The row whose hover card (`ThreadHoverCard`) is showing.
     pub card: Option<String>,
     /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
@@ -262,6 +275,12 @@ impl Model {
         items
     }
 
+    /// Every row's id in section order, collapsed shelves included (`orderedThreadKeys`).
+    pub fn ordered_ids(&self) -> Vec<String> {
+        let s = &self.sections;
+        [&s.pinned, &s.active, &s.working, &s.snoozed, &s.settled].into_iter().flatten().map(|i| self.threads[*i].id.clone()).collect()
+    }
+
     /// Thread ids in the order the list shows them, for keyboard stepping.
     pub fn visible_ids(&self, ui: &Ui) -> Vec<String> {
         self.items(ui)
@@ -419,6 +438,42 @@ pub fn unpin(s: &mut App, id: &str) {
 }
 
 pub fn settle(s: &mut App, id: &str) {
+    settle_parking(s, id, &HashSet::new());
+}
+
+/// `planForwardNavigation`, taken before `id` parks: the next card when it is the open thread.
+fn forward_after_park(s: &App, id: &str, parking: &HashSet<String>) -> Option<Route> {
+    if s.route != Route::Thread(id.to_string()) {
+        return None;
+    }
+    let model = Model::build(s);
+    let order = model.ordered_ids();
+    let parked: HashSet<String> = [&model.sections.snoozed, &model.sections.settled].into_iter().flatten().map(|i| model.threads[*i].id.clone()).collect();
+    Some(match logic::next_card(&order, &parked, parking, id) {
+        Some(next) => Route::Thread(next.to_string()),
+        None => Route::Home { project_id: model.thread(id).map(|t| t.project_id.clone()).filter(|p| !p.is_empty()) },
+    })
+}
+
+fn park_forward(s: &mut App, route: Option<Route>) {
+    match route {
+        Some(Route::Thread(next)) => open_thread(s, &next),
+        Some(route) => {
+            s.ui.chat.home.workspace = None;
+            go(s, route);
+        }
+        None => {}
+    }
+}
+
+fn settle_parking(s: &mut App, id: &str, parking: &HashSet<String>) {
+    let forward = forward_after_park(s, id, parking);
+    settle_in_place(s, id);
+    park_forward(s, forward);
+}
+
+/// Settles without moving on, as a drop onto the Settled shelf does.
+fn settle_in_place(s: &mut App, id: &str) {
     record(s, logic::UndoAction::Settled, id);
     dispatch(s, "thread.settle", id, json!({ "settledAt": iso(crate::data::now_ms()) }));
     patch(s, id, |p| {
@@ -434,8 +489,37 @@ pub fn unsettle(s: &mut App, id: &str) {
 }
 
 pub fn snooze(s: &mut App, id: &str, until: i64) {
-    record(s, logic::UndoAction::Snoozed, id);
-    set_snooze(s, id, until);
+    snooze_many(s, &[id.to_string()], until);
+}
+
+/// Snoozes every target; the open one moves on past its co-snoozing rows.
+pub fn snooze_many(s: &mut App, ids: &[String], until: i64) {
+    let parking: HashSet<String> = ids.iter().cloned().collect();
+    let forward = ids.iter().find_map(|id| forward_after_park(s, id, &parking));
+    for id in ids {
+        record(s, logic::UndoAction::Snoozed, id);
+        set_snooze(s, id, until);
+    }
+    s.ui.shell.sidebar.selected.clear();
+    park_forward(s, forward);
+}
+
+/// Settles every target that is not settled yet, as the bulk "Settle (n)".
+pub fn settle_many(s: &mut App, ids: &[String]) {
+    let parking: HashSet<String> = ids.iter().cloned().collect();
+    let model = Model::build(s);
+    let open: Vec<String> = ids.iter().filter(|id| model.thread(id).is_some_and(|t| !t.settled)).cloned().collect();
+    // The open thread parks last so its forward step sees the others already parking.
+    let (current, rest): (Vec<String>, Vec<String>) = open.into_iter().partition(|id| s.route == Route::Thread(id.clone()));
+    for id in rest.iter().chain(&current) {
+        settle_parking(s, id, &parking);
+    }
+    s.ui.shell.sidebar.selected.clear();
+}
+
+/// Opens the Custom… snooze dialog for `ids`.
+pub fn custom_snooze(s: &mut App, ids: Vec<String>) {
+    s.ui.shell.sidebar.custom_snooze = Some(snooze::Custom::new(ids, crate::data::now_ms(), crate::data::Zone::Local));
 }
 
 fn set_snooze(s: &mut App, id: &str, until: i64) {
@@ -446,6 +530,40 @@ fn set_snooze(s: &mut App, id: &str, until: i64) {
 pub fn unsnooze(s: &mut App, id: &str) {
     dispatch(s, "thread.unsnooze", id, json!({ "reason": "user" }));
     patch(s, id, |p| p.snoozed_until = Some(None));
+}
+
+/// "Archive thread": asks first when `confirmThreadArchive` is on.
+pub fn request_archive(s: &mut App, id: &str) {
+    if client_flag(s, "confirmThreadArchive") {
+        s.ui.shell.sidebar.confirm = Some(Confirm::Archive(id.to_string()));
+    } else {
+        archive(s, id);
+    }
+}
+
+/// "Unpin thread": asks first when `confirmThreadUnpin` is on.
+pub fn request_unpin(s: &mut App, id: &str) {
+    if client_flag(s, "confirmThreadUnpin") {
+        s.ui.shell.sidebar.confirm = Some(Confirm::Unpin(id.to_string()));
+    } else {
+        unpin(s, id);
+    }
+}
+
+/// "Delete (n)": asks first when `confirmThreadDelete` is on.
+pub fn request_delete_many(s: &mut App, ids: Vec<String>) {
+    if client_flag(s, "confirmThreadDelete") {
+        s.ui.shell.sidebar.confirm = Some(Confirm::Delete(ids));
+    } else {
+        delete_many(s, &ids);
+    }
+}
+
+fn delete_many(s: &mut App, ids: &[String]) {
+    for id in ids {
+        delete(s, id);
+    }
+    s.ui.shell.sidebar.selected.retain(|id| !ids.contains(id));
 }
 
 pub fn archive(s: &mut App, id: &str) {
@@ -559,6 +677,42 @@ fn delete_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
         .build(t, overlays);
 }
 
+/// Archive, unpin and bulk-delete questions, worded as `ConfirmDialogHost` splits the message.
+fn confirm_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
+    let Some(confirm) = s.ui.shell.sidebar.confirm.clone() else { return };
+    let title_of = |id: &str| model.thread(id).map(|t| t.title.clone()).unwrap_or_default();
+    let (title, description, label, destructive) = match &confirm {
+        Confirm::Archive(id) => (format!("Archive thread \"{}\"?", title_of(id)), None, "Confirm", false),
+        Confirm::Unpin(id) => (format!("Unpin thread \"{}\"?", title_of(id)), Some("This will move the thread out of your pinned section."), "Confirm", false),
+        Confirm::Delete(ids) => (
+            format!("Delete {} thread{}?", ids.len(), if ids.len() == 1 { "" } else { "s" }),
+            Some("This permanently clears conversation history for these threads."),
+            "Delete",
+            true,
+        ),
+    };
+    let cancel = crate::kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| s.ui.shell.sidebar.confirm = None).build(t);
+    let confirm_button = crate::kit::Button::new(label)
+        .variant(if destructive { "destructive" } else { "default" })
+        .on_press(move |s: &mut App| {
+            s.ui.shell.sidebar.confirm = None;
+            match &confirm {
+                Confirm::Archive(id) => archive(s, id),
+                Confirm::Unpin(id) => unpin(s, id),
+                Confirm::Delete(ids) => delete_many(s, ids),
+            }
+        })
+        .build(t);
+    let mut dialog = crate::kit::Dialog::new("sb-confirm", title).alert().width(448.0).open(true);
+    if let Some(description) = description {
+        dialog = dialog.description(description);
+    }
+    dialog
+        .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm_button))
+        .on_close(|s: &mut App| s.ui.shell.sidebar.confirm = None)
+        .build(t, overlays);
+}
+
 fn reorder(s: &mut App, kind: &str, assignments: &[(String, String)]) {
     for (id, key) in assignments {
         dispatch(s, kind, id, json!({ "orderKey": key }));
@@ -571,7 +725,7 @@ fn reorder(s: &mut App, kind: &str, assignments: &[(String, String)]) {
 pub fn apply_plan(s: &mut App, id: &str, plan: Plan) {
     match plan {
         Plan::None => {}
-        Plan::Settle => settle(s, id),
+        Plan::Settle => settle_in_place(s, id),
         Plan::Pin { key, extra, .. } => {
             pin(s, id, key);
             reorder(s, "thread.pin.reorder", &extra);
@@ -669,7 +823,7 @@ fn thread_shortcut(s: &mut App, e: &KeyEvent) -> bool {
     match (settle_key, t.settled, t.pinned) {
         (true, true, _) => unsettle(s, &t.id),
         (true, false, _) => settle(s, &t.id),
-        (false, _, true) => unpin(s, &t.id),
+        (false, _, true) => request_unpin(s, &t.id),
         (false, _, false) => pin(s, &t.id, None),
     }
     true
@@ -724,12 +878,32 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if bound_key(s, e, tx.focused().is_some()) {
         return true;
     }
+    // The server's keybindings decide; the defaults stand in until its config arrives.
+    let defaults = s.state().config.as_ref().is_none_or(|c| !c["keybindings"].is_array());
+    let bound = |cmd: &str| crate::panel::shortcut(s, e, cmd);
+    let jump = (1..=9).find(|n| bound(&format!("thread.jump.{n}"))).or(match e.key {
+        Key::Command(c @ '1'..='9') if defaults && !m.shift => Some(c as usize - '0' as usize),
+        _ => None,
+    });
+    let default_step = match e.key {
+        Key::Command('[' | '{') if defaults && m.shift => Some(-1),
+        Key::Command(']' | '}') if defaults && m.shift => Some(1),
+        _ => None,
+    };
+    let toggle = bound("sidebar.toggle") || (defaults && e.key == Key::Command('b') && !m.shift);
+    let by = if bound("thread.previous") {
+        Some(-1)
+    } else if bound("thread.next") {
+        Some(1)
+    } else {
+        default_step
+    };
     match &e.key {
-        Key::Command('b') if !m.shift => s.ui.shell.sidebar.collapsed ^= true,
-        Key::Command(c @ ('[' | ']' | '{' | '}')) if m.shift => step(s, if matches!(c, '[' | '{') { -1 } else { 1 }),
-        Key::Command(c @ '1'..='9') if !m.shift => {
+        _ if toggle => s.ui.shell.sidebar.collapsed ^= true,
+        _ if by.is_some() => step(s, by.unwrap_or(1)),
+        _ if jump.is_some() => {
             let ids = Model::build(s).visible_ids(&s.ui.shell.sidebar);
-            if let Some(id) = ids.get(*c as usize - '1' as usize) {
+            if let Some(id) = jump.and_then(|n| ids.get(n - 1)) {
                 open_thread(s, &id.clone());
             }
         }
@@ -815,6 +989,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     }
     row::hover_card(s, &model, t, overlays);
     delete_dialog(s, &model, t, overlays);
+    confirm_dialog(s, &model, t, overlays);
+    snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()

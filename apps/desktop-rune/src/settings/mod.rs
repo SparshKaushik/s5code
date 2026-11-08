@@ -15,7 +15,7 @@ mod snooze;
 mod source_control;
 mod browser_profiles;
 mod tasks;
-mod themes;
+pub(crate) mod themes;
 pub use themes::apply as apply_theme;
 
 use crate::theme::{self, AlphaMul, T};

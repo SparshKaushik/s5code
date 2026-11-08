@@ -5,7 +5,6 @@ use rune::{Cx, El, Key, KeyEvent, Tx};
 
 use super::Model;
 use super::logic::Thread;
-use crate::icons;
 use crate::kit::{self, MenuEntry, MenuItem};
 use crate::theme::T;
 use crate::data::Zone;
@@ -30,16 +29,22 @@ pub struct Menu {
     /// Opened from the chat header (ChatHeader's useThreadActionMenu): adds "Find in thread"
     /// and renames in the header.
     pub header: bool,
+    /// The multi-selection's menu, opened on a selected row.
+    pub bulk: bool,
 }
 
 impl Menu {
     pub fn new(thread: String, x: f32, y: f32) -> Menu {
-        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false, header: false }
+        Menu { thread, at: (x, y), anchor: None, sub: None, snooze_only: false, header: false, bulk: false }
+    }
+
+    pub fn bulk(thread: String, x: f32, y: f32) -> Menu {
+        Menu { bulk: true, ..Menu::new(thread, x, y) }
     }
 
     pub fn snooze_for(thread: String) -> Menu {
         let anchor = Some(format!("sb-snooze-{thread}"));
-        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true, header: false }
+        Menu { thread, at: (0.0, 0.0), anchor, sub: None, snooze_only: true, header: false, bulk: false }
     }
 }
 
@@ -115,38 +120,110 @@ pub fn snooze_presets(now: i64, zone: Zone) -> Vec<(String, i64)> {
     out
 }
 
-fn snooze_entries(id: &str, now: i64) -> Vec<MenuEntry> {
+fn snooze_entries(ids: &[String], now: i64) -> Vec<MenuEntry> {
     let mut out: Vec<MenuEntry> = snooze_presets(now, Zone::Local)
         .into_iter()
         .map(|(label, until)| {
-            let id = id.to_string();
+            let ids = ids.to_vec();
             MenuEntry::item(item(label, move |s, _| {
-                super::snooze(s, &id, until);
                 close(s);
+                super::snooze_many(s, &ids, until);
             }))
         })
         .collect();
     out.push(MenuEntry::Separator);
-    out.push(MenuEntry::item(todo("Custom…")));
+    let ids = ids.to_vec();
+    out.push(MenuEntry::item(item("Custom…", move |s, _| {
+        close(s);
+        super::custom_snooze(s, ids.clone());
+    })));
+    out
+}
+
+/// The selection, in board order, as `handleMultiSelectContextMenu` reads it.
+fn selection(s: &App, model: &Model) -> Vec<String> {
+    model.ordered_ids().into_iter().filter(|id| s.ui.shell.sidebar.selected.contains(id)).collect()
+}
+
+/// `handleMultiSelectContextMenu`'s items for the selected rows.
+fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
+    let ids = selection(s, model);
+    let threads: Vec<&Thread> = ids.iter().filter_map(|id| model.thread(id)).collect();
+    if sub == Some(Sub::Snooze) {
+        return snooze_entries(&ids, model.now);
+    }
+    let count = ids.len();
+    let open = s.ui.shell.sidebar.menu.as_ref().and_then(|m| m.sub);
+    let leaf = |i: MenuItem| MenuEntry::item(i.on_hover(|s: &mut App| set_sub(s, None)));
+    let mut out = Vec::new();
+    let pinned: Vec<String> = threads.iter().filter(|t| t.pinned).map(|t| t.id.clone()).collect();
+    if !pinned.is_empty() {
+        out.push(leaf(item(format!("Unpin ({})", pinned.len()), move |s, _| {
+            close(s);
+            for id in &pinned {
+                super::unpin(s, id);
+            }
+            s.ui.shell.sidebar.selected.clear();
+        })));
+    }
+    let settle = format!("Settle ({count})");
+    out.push(leaf(if threads.iter().all(|t| t.settled) {
+        todo(settle)
+    } else {
+        let ids = ids.clone();
+        item(settle, move |s, _| {
+            close(s);
+            super::settle_many(s, &ids);
+        })
+    }));
+    if threads.iter().all(|t| t.can_snooze() && !t.snoozed(model.now)) {
+        out.push(MenuEntry::item(
+            MenuItem::new(format!("Snooze ({count})"))
+                .submenu(bulk_entries(s, model, Some(Sub::Snooze)), open == Some(Sub::Snooze))
+                .on_submenu_change(|s: &mut App, on| set_sub(s, on.then_some(Sub::Snooze))),
+        ));
+    }
+    let shells = &s.state().threads;
+    let regenerating = |id: &str| shells.iter().any(|t| t["id"] == id && !t["titleRegeneration"].is_null());
+    let fresh: Vec<String> = ids.iter().filter(|id| !regenerating(id.as_str())).cloned().collect();
+    out.push(leaf(if fresh.is_empty() {
+        todo(format!("Regenerating… ({count})"))
+    } else {
+        item(format!("Regenerate titles ({})", fresh.len()), move |s, _| {
+            close(s);
+            for id in &fresh {
+                super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true }));
+            }
+            s.ui.shell.sidebar.selected.clear();
+        })
+    }));
+    let unread = ids.clone();
+    out.push(leaf(item(format!("Mark unread ({count})"), move |s, _| {
+        close(s);
+        for id in &unread {
+            super::dispatch(s, "thread.mark-unread", id, serde_json::json!({}));
+        }
+        s.ui.shell.sidebar.selected.clear();
+    })));
+    out.push(leaf(
+        item(format!("Delete ({count})"), move |s, _| {
+            close(s);
+            super::request_delete_many(s, ids.clone());
+        }),
+    ));
     out
 }
 
 /// A Copy entry: the value on the clipboard, then the web's success toast.
-fn copy(label: &str, glyph: &'static rune::Icon, value: String, toast: &'static str, description: String) -> MenuEntry {
+fn copy(label: &str, value: String, toast: &'static str, description: String) -> MenuEntry {
     MenuEntry::item(
         item(label, move |s, tx| {
             tx.copy(&value);
             close(s);
             crate::shell::palette::toast(s, toast, Some(&description));
-        })
-        .icon(glyph),
+        }),
     )
 }
-
-// threadActionMenu's icons that apps/web draws from contextMenuFallback, not lucide-react.
-static MAIL_OPEN: rune::Icon = rune::Icon { name: "mail-open", view: 24.0, body: "<path d=\"M21.2 8.4c.5.38.8.97.8 1.6v10a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V10a2 2 0 0 1 .8-1.6l8-6a2 2 0 0 1 2.4 0l8 6Z\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"m22 10-8.97 5.7a1.94 1.94 0 0 1-2.06 0L2 10\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
-static TIMER: rune::Icon = rune::Icon { name: "timer", view: 24.0, body: "<line x1=\"10\" x2=\"14\" y1=\"2\" y2=\"2\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><line x1=\"12\" x2=\"15\" y1=\"14\" y2=\"11\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><circle cx=\"12\" cy=\"14\" r=\"8\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
-static HASH: rune::Icon = rune::Icon { name: "hash", view: 24.0, body: "<line x1=\"4\" x2=\"20\" y1=\"9\" y2=\"9\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><line x1=\"4\" x2=\"20\" y1=\"15\" y2=\"15\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><line x1=\"10\" x2=\"8\" y1=\"3\" y2=\"21\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><line x1=\"16\" x2=\"14\" y1=\"3\" y2=\"21\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>" };
 
 fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEntry> {
     let id = th.id.clone();
@@ -159,7 +236,7 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     };
     let shell = s.state().threads.iter().find(|t| t["id"] == th.id.as_str());
     match sub {
-        Some(Sub::Snooze) => return snooze_entries(&th.id, model.now),
+        Some(Sub::Snooze) => return snooze_entries(std::slice::from_ref(&th.id), model.now),
         Some(Sub::AutoSettle) => {
             let enabled = shell.is_none_or(|t| t["autoSettleDisabledAt"].is_null());
             return [("Enabled", true), ("Disabled", false)]
@@ -182,14 +259,14 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
                 s.state().projects.iter().find(|p| p["id"] == th.project_id.as_str()).and_then(|p| p["workspaceRoot"].as_str().map(str::to_string))
             });
             if let Some(p) = path {
-                out.push(copy("Path", &icons::FOLDER, p.clone(), "Path copied", p));
+                out.push(copy("Path", p.clone(), "Path copied", p));
             }
             if let Some(b) = th.branch.clone() {
-                out.push(copy("Branch", &icons::GIT_BRANCH, b.clone(), "Branch copied", b));
+                out.push(copy("Branch", b.clone(), "Branch copied", b));
             }
             let link = crate::shell::palette::actions::thread_link(s, &th.id);
-            out.push(copy("Thread", &icons::MESSAGE_SQUARE, link, "Thread copied", th.title.clone()));
-            out.push(copy("Thread ID", &HASH, th.id.clone(), "Thread ID copied", th.id.clone()));
+            out.push(copy("Thread", link, "Thread copied", th.title.clone()));
+            out.push(copy("Thread ID", th.id.clone(), "Thread ID copied", th.id.clone()));
             return out;
         }
         None => {}
@@ -197,10 +274,9 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     let open = s.ui.shell.sidebar.menu.as_ref().and_then(|m| m.sub);
     // Leaves close a sibling's submenu as the pointer moves onto them, as AppKit menus do.
     let leaf = |i: MenuItem| MenuEntry::item(i.on_hover(|s: &mut App| set_sub(s, None)));
-    let sub_item = |label: &str, glyph: &'static rune::Icon, sub: Sub| {
+    let sub_item = |label: &str, sub: Sub| {
         MenuEntry::item(
             MenuItem::new(label)
-                .icon(glyph)
                 .submenu(entries(s, model, th, Some(sub)), open == Some(sub))
                 .on_submenu_change(move |s: &mut App, on| set_sub(s, on.then_some(sub))),
         )
@@ -223,21 +299,21 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         })));
     }
     if th.pinned {
-        out.push(leaf(item("Unpin thread", with(super::unpin)).icon(&icons::PIN_OFF)));
+        out.push(leaf(item("Unpin thread", with(super::request_unpin))));
     } else {
-        out.push(leaf(item("Pin thread", with(|s, id| super::pin(s, id, None))).icon(&icons::PIN)));
+        out.push(leaf(item("Pin thread", with(|s, id| super::pin(s, id, None)))));
     }
     if th.settled {
-        out.push(leaf(item("Un-settle thread", with(super::unsettle)).icon(&icons::CIRCLE_CHECK)));
+        out.push(leaf(item("Un-settle thread", with(super::unsettle))));
     } else {
-        out.push(leaf(item("Settle thread", with(super::settle)).icon(&icons::CIRCLE_CHECK)));
+        out.push(leaf(item("Settle thread", with(super::settle))));
     }
     if th.snoozed(model.now) {
-        out.push(leaf(item("Wake thread", with(super::unsnooze)).icon(&icons::CLOCK)));
+        out.push(leaf(item("Wake thread", with(super::unsnooze))));
     } else if th.can_snooze() {
-        out.push(sub_item("Snooze", &icons::CLOCK, Sub::Snooze));
+        out.push(sub_item("Snooze", Sub::Snooze));
     } else {
-        out.push(leaf(todo("Snooze").icon(&icons::CLOCK)));
+        out.push(leaf(todo("Snooze")));
     }
     out.push(MenuEntry::Separator);
     let rename = if header {
@@ -248,11 +324,11 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     } else {
         item("Rename thread", with(super::start_rename))
     };
-    out.push(leaf(rename.icon(&icons::PENCIL)));
+    out.push(leaf(rename));
     out.push(leaf(
-        item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))).icon(&icons::REFRESH_CW),
+        item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))),
     ));
-    out.push(leaf(item("Mark unread", with(|s, id| super::dispatch(s, "thread.mark-unread", id, serde_json::json!({})))).icon(&MAIL_OPEN)));
+    out.push(leaf(item("Mark unread", with(|s, id| super::dispatch(s, "thread.mark-unread", id, serde_json::json!({}))))));
     let project = th.project_id.clone();
     let scoped = s.ui.shell.sidebar.project_scope.contains(&project);
     let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", model.project(th)) };
@@ -261,32 +337,31 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
             let scope = &mut s.ui.shell.sidebar.project_scope;
             *scope = if scoped { Vec::new() } else { vec![project.clone()] };
             close(s);
-        })
-        .icon(&icons::FOLDER_TREE),
+        }),
     ));
-    out.push(sub_item("Auto-settle behavior", &TIMER, Sub::AutoSettle));
+    out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
     out.push(MenuEntry::Separator);
-    out.push(sub_item("Copy", &icons::COPY, Sub::Copy));
+    out.push(sub_item("Copy", Sub::Copy));
     let settings_project = th.project_id.clone();
     out.push(leaf(
         item("Project settings", move |s, _| {
             close(s);
             s.ui.settings.project = Some(settings_project.clone()).filter(|p| !p.is_empty());
             super::go(s, Route::Settings("projects".into()));
-        })
-        .icon(&icons::SETTINGS),
+        }),
     ));
     out.push(MenuEntry::Separator);
-    let archive = if th.running() { todo("Archive thread") } else { item("Archive thread", with(super::archive)) };
-    out.push(leaf(archive.icon(&icons::ARCHIVE)));
-    out.push(leaf(item("Delete", with(super::request_delete)).icon(&icons::TRASH_2).variant("destructive")));
+    let archive = if th.running() { todo("Archive thread") } else { item("Archive thread", with(super::request_archive)) };
+    out.push(leaf(archive));
+    out.push(leaf(item("Delete", with(super::request_delete))));
     out
 }
 
 /// Mounts the menu: at the pointer for a context invocation, under the clock button for snooze.
 pub fn view(s: &App, _cx: &mut Cx<App>, model: &Model, th: &Thread, m: &Menu, t: &T) -> Vec<El> {
     let root = if m.snooze_only { Some(Sub::Snooze) } else { None };
-    let mut menu = kit::Menu::new("sb-menu").native(true).width(198.0).entries(entries(s, model, th, root)).open(true).on_close(close);
+    let entries = if m.bulk { bulk_entries(s, model, None) } else { entries(s, model, th, root) };
+    let mut menu = kit::Menu::new("sb-menu").native(true).width(198.0).entries(entries).open(true).on_close(close);
     menu = match &m.anchor {
         Some(key) => menu.anchor(key.clone()).placement(kit::Placement::BottomStart).gutter(4.0),
         None => menu.at(m.at.0, m.at.1),
