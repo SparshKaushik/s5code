@@ -7,7 +7,28 @@ use rune::{El, row, text};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
+/// Rows that stand for another setting (the auto-settle switch writes the day count, a
+/// `parent.field` row writes its parent object).
+fn setting_of(key: &str) -> &str {
+    if key == "autoSettleInactive" {
+        return "sidebarAutoSettleAfterDays";
+    }
+    super::nested(key).map_or(key, |(parent, _)| parent)
+}
+
+/// The writing style's fields reset to their defaults; resetting the mode also clears the
+/// custom instructions, like web's reset button.
+fn writing_style_default(s: &App, field: &str) -> Value {
+    let defaults = &defaults()["sourceControlWritingStyle"];
+    let mut object = super::nested_object(s, "sourceControlWritingStyle");
+    object[field] = defaults[field].clone();
+    if field == "mode" {
+        object["customInstructions"] = defaults["customInstructions"].clone();
+    }
+    object
+}
 pub fn project_key(key: &str) -> bool {
+    let key = setting_of(key);
     static KEYS: OnceLock<Vec<String>> = OnceLock::new();
     KEYS.get_or_init(|| serde_json::from_str(include_str!("project-keys.json")).unwrap())
         .iter()
@@ -31,8 +52,14 @@ pub fn override_patch(settings: &Value, project: &str, key: &str, next: Option<V
 }
 pub fn reset(s: &mut App, key: &str) {
     s.ui.settings.edits.remove(key);
+    let field = key.strip_prefix("sourceControlWritingStyle.");
+    let key = setting_of(key);
     if key == "snoozePresets" {
         return super::snooze::reset(s);
+    }
+    if let Some(field) = field.filter(|_| s.ui.settings.project.is_none()) {
+        let next = writing_style_default(s, field);
+        return super::update(s, key, next);
     }
     if let Some(project) = s.ui.settings.project.clone().filter(|_| project_key(key)) {
         let patch = override_patch(super::server_settings(s), &project, key, None);
@@ -52,10 +79,15 @@ pub fn customized(s: &App, key: &str) -> bool {
     if key == "browserProfiles" {
         return false;
     }
+    let row = key;
+    let key = setting_of(key);
     if let Some(project) = s.ui.settings.project.as_ref().filter(|_| project_key(key)) {
         return super::server_settings(s)["projectSettingsOverrides"][project]
             .get(key)
             .is_some();
+    }
+    if let Some((parent, field)) = super::nested(row) {
+        return parent == "sourceControlWritingStyle" && writing_style_default(s, field) != super::nested_object(s, parent);
     }
     let clients = super::client::defaults();
     clients

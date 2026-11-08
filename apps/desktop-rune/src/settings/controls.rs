@@ -40,7 +40,7 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
 
 pub fn select_width(key: &str) -> f32 {
     match key {
-        "notificationMode" => 224.0,
+        "notificationMode" | "sourceControlWritingStyle.mode" => 224.0,
         "sidebarProjectSortOrder" => 176.0,
         // Web `w-auto`: the trigger fits the current label.
         "sendShortcut" | "followUpBehavior" => 0.0,
@@ -134,13 +134,21 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
     let dynamic = super::models::description(s, key).or_else(|| {
-        (key == "responseStreamingMode").then(|| {
-            match value(s, key).as_str() {
-                Some("turn") => "Text appears once the agent finishes its turn.",
-                _ => "Each paragraph or code block appears as soon as it is complete.",
+        let text = match (key, value(s, key).as_str()) {
+            ("responseStreamingMode", Some("turn")) => "Text appears once the agent finishes its turn.",
+            ("responseStreamingMode", _) => "Each paragraph or code block appears as soon as it is complete.",
+            ("sourceControlWritingStyle.mode", Some("conventional_commits")) => {
+                "Use Conventional Commit prefixes and keep change request text concise."
             }
-            .to_owned()
-        })
+            ("sourceControlWritingStyle.mode", Some("custom")) => {
+                "Use your instructions for change descriptions and change requests in every project."
+            }
+            ("sourceControlWritingStyle.mode", _) => {
+                "In each project, matches recent change descriptions and change request titles."
+            }
+            _ => return None,
+        };
+        Some(text.to_owned())
     });
     let description = dynamic.as_deref().unwrap_or_else(|| spec["description"].as_str().unwrap_or(""));
     let mut heading = row().gap(6.0).center_y().child(
@@ -148,7 +156,8 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );
-    if super::scope::customized(s, key) {
+    // Web resets the auto-settle day count from its switch row only.
+    if key != "sidebarAutoSettleAfterDays" && super::scope::customized(s, key) {
         let owned = key.to_owned();
         heading = heading.child(
             crate::kit::Button::new(format!("Reset {title}"))
@@ -201,6 +210,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let (ctrl, children) = match spec["kind"].as_str() {
         Some("snooze") => super::snooze::parts(s, t),
         Some("profiles") => super::browser_profiles::parts(s, t),
+        Some("textarea") => (el(), Some(textarea(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")))),
         kind => (match kind {
         Some("switch") => row()
             .w(160.0)
@@ -228,7 +238,21 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
         ),
     }, None),
     };
+    // A field that belongs under the control, like web's custom instructions under the mode.
+    let area = &spec["textarea"];
+    let children = children.or_else(|| {
+        (area["key"].is_string() && visible(s, area)).then(|| {
+            textarea(
+                s,
+                t,
+                area["key"].as_str().unwrap_or(""),
+                area["label"].as_str().unwrap_or(title),
+                area["placeholder"].as_str().unwrap_or(""),
+            )
+        })
+    });
     let environment_wide = s.ui.settings.project.is_some()
+        && !key.starts_with("project::")
         && !s.client_settings.values.contains_key(key)
         && !super::scope::project_key(key);
     let ctrl = if environment_wide {
@@ -255,18 +279,52 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     }
 }
 
+/// A row's `when` / `unless` condition, `[key, value]`: shown only while the setting equals
+/// (or doesn't equal) the value.
+pub fn visible(s: &App, spec: &Value) -> bool {
+    let holds = |condition: &Value| {
+        condition
+            .as_array()
+            .filter(|c| c.len() == 2)
+            .map(|c| value(s, c[0].as_str().unwrap_or("")) == c[1])
+    };
+    holds(&spec["when"]).unwrap_or(true) && !holds(&spec["unless"]).unwrap_or(false)
+}
+
+/// Web `Textarea` under a row: multi-line, committed when it loses focus (the settings poll's
+/// `commit_edits`), never on Enter.
+pub fn textarea(s: &App, t: &T, key: &str, label: &str, placeholder: &str) -> El {
+    let current = value(s, key);
+    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| rune::TextEdit::new(super::input_text(&current)));
+    let owned = key.to_owned();
+    let field = rune::text_input(&edit, theme::TEXT_SM)
+        .key(format!("setting-{key}"))
+        .label(label)
+        .placeholder(placeholder, t.c.muted_foreground.alpha_mul(0.72))
+        .w_full()
+        .min_h(70.0)
+        .max_h(256.0)
+        .px(11.0)
+        .py(5.0)
+        .radius(8.0)
+        .border(1.0, t.c.input)
+        .fill(t.c.input.alpha_mul(if t.dark { 0.32 } else { 0.0 }))
+        .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .focus_ring(3.0, -3.0, t.c.ring.alpha_mul(0.24))
+        .on_edit(move |s: &mut App| {
+            s.ui.settings
+                .edits
+                .entry(owned.clone())
+                .or_insert_with(|| edit.clone())
+        });
+    col().w_full().max_w(672.0).pt(12.0).pb(10.0).child(field)
+}
+
 /// A settings text field: edits stay local until Enter or blur commit them through `update`.
 pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_size: bool) -> El {
     let current = value(s, key);
-    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| {
-        rune::TextEdit::new(current.as_str().map(str::to_owned).unwrap_or_else(|| {
-            if current.is_null() {
-                String::new()
-            } else {
-                current.to_string()
-            }
-        }))
-    });
+    let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| rune::TextEdit::new(super::input_text(&current)));
     let (k1, k2) = (key.to_owned(), key.to_owned());
     let (height, pad) = if default_size { (32.0, 11.0) } else { (28.0, 9.0) };
     rune::text_input(&edit, theme::TEXT_SM)
@@ -290,16 +348,8 @@ pub fn input(s: &App, t: &T, key: &str, width: f32, placeholder: &str, default_s
                 .or_insert_with(|| edit.clone())
         })
         .on_submit(move |s: &mut App, _| {
-            if let Some(edit) = s.ui.settings.edits.get(&k2) {
-                let raw = edit.text.clone();
-                let v = if value(s, &k2).is_number() {
-                    serde_json::from_str(&raw).ok().filter(Value::is_number)
-                } else {
-                    Some(json!(raw))
-                };
-                if let Some(v) = v {
-                    update(s, &k2, v);
-                }
+            if let Some(text) = s.ui.settings.edits.get(&k2).map(|e| e.text.clone()) {
+                super::commit_text(s, &k2, &text);
             }
         })
 }
@@ -309,7 +359,8 @@ pub fn section(title: &str, children: Vec<El>, t: &T) -> El {
 }
 
 /// Web `SettingsSection` `headerAction`: buttons trail the title, `gap-2` apart.
-pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t: &T) -> El {
+/// The `SettingsSection` card alone (web `hideTitle`).
+pub fn card(children: Vec<El>, t: &T) -> El {
     let mut group = col()
         .w_full()
         .padding(1.0)
@@ -322,6 +373,10 @@ pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t:
         }
         group = group.child(child);
     }
+    group
+}
+
+pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t: &T) -> El {
     col()
         .w_full()
         .gap(10.0)
@@ -340,7 +395,7 @@ pub fn section_with_actions(title: &str, actions: Vec<El>, children: Vec<El>, t:
                 )
                 .children(actions),
         )
-        .child(group)
+        .child(card(children, t))
 }
 
 fn slider(s: &App, t: &T, key: &str, title: &str) -> El {

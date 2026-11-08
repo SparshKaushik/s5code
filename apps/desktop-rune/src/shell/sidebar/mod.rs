@@ -8,6 +8,8 @@ pub mod logic;
 mod menu;
 mod row;
 
+pub use self::row::monogram;
+
 use std::collections::{HashMap, HashSet};
 
 use rune::{Cx, El, Key, KeyEvent, TextEdit, Tx, col, el, row};

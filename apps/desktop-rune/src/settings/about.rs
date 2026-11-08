@@ -38,86 +38,57 @@ pub fn view(s: &App, t: &T) -> El {
         .gap(32.0)
         .child(c::section(
             "App",
-            vec![
-                col()
-                    .w_full()
-                    .padding(16.0)
-                    .gap(12.0)
-                    .child(
-                        text(format!("S5 Code {}", env!("CARGO_PKG_VERSION")))
-                            .font(theme::SM_MEDIUM)
-                            .color(t.c.foreground),
-                    )
-                    .child(
-                        text(format!("Native client · Server {version}"))
-                            .font(theme::TEXT_XS)
-                            .color(t.c.muted_foreground),
-                    )
-                    .child(controls)
-                    .child(
-                        text(
-                            target
-                                .map(|v| format!("Latest release: {v}"))
-                                .unwrap_or_default(),
-                        )
-                        .font(theme::TEXT_XS)
-                        .color(t.c.muted_foreground),
-                    ),
-            ],
+            vec![about_row(
+                t,
+                &format!("S5 Code {}", env!("CARGO_PKG_VERSION")),
+                &match target {
+                    Some(v) if v != version => format!("Native client · Server {version} · Latest release: {v}"),
+                    _ => format!("Native client · Server {version}"),
+                },
+                controls,
+            )],
             t,
         ))
         .child(c::section(
             "Legal",
             vec![
-                row()
-                    .w_full()
-                    .padding(16.0)
-                    .center_y()
-                    .gap(12.0)
-                    .child(
-                        col()
-                            .grow(1.0)
-                            .gap(4.0)
-                            .child(
-                                text("Privacy policy")
-                                    .font(theme::SM_MEDIUM)
-                                    .color(t.c.foreground),
-                            )
-                            .child(
-                                text("How we handle your data, including anonymous usage data.")
-                                    .font(theme::TEXT_XS)
-                                    .color(t.c.muted_foreground),
-                            ),
-                    )
-                    .child(c::button("View policy", t).on_press(|s: &mut App| {
+                about_row(
+                    t,
+                    "Privacy policy",
+                    "How we handle your data, including the anonymous usage data T3 Code collects.",
+                    c::button("View policy", t).on_press(|s: &mut App| {
                         super::auth::open_url(s, "https://t3.codes/privacy-policy")
-                    })),
-                row()
-                    .w_full()
-                    .padding(16.0)
-                    .center_y()
-                    .gap(12.0)
-                    .child(
-                        col()
-                            .grow(1.0)
-                            .gap(4.0)
-                            .child(
-                                text("Open source licenses")
-                                    .font(theme::SM_MEDIUM)
-                                    .color(t.c.foreground),
-                            )
-                            .child(
-                                text("Notices for dependencies, assets, and optional tools.")
-                                    .font(theme::TEXT_XS)
-                                    .color(t.c.muted_foreground),
-                            ),
-                    )
-                    .child(c::button("View licenses", t).on_press(|s: &mut App| {
+                    }),
+                ),
+                about_row(
+                    t,
+                    "Open source licenses",
+                    "Notices for dependencies, assets, and optional tools used by T3 Code.",
+                    c::button("View licenses", t).on_press(|s: &mut App| {
                         s.navigate(Route::Settings("open-source-licenses".into()))
-                    })),
+                    }),
+                ),
             ],
             t,
         ))
+}
+/// A `SettingsRow`: copy on the left, control on the right, `px-4 py-3` like every settings row.
+pub fn about_row(t: &T, title: &str, description: &str, control: El) -> El {
+    row()
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text(title.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text(description.to_owned()).font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()),
+        )
+        .child(control)
 }
 pub fn update_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(version) = &s.ui.settings.update_version else {

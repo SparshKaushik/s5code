@@ -101,8 +101,8 @@ impl Dialog {
             .radius(16.)
             .padding(24.)
             .gap(24.)
-            // 96% opaque over the scrim: a backdrop blur here costs a pass and shows nothing.
-            .fill(t.c.background.alpha_mul(0.96))
+            // dialog-glass follows Appearance > Glass opacity: 96% at the default 80%, solid at 100%; no blur.
+            .fill(t.c.background.alpha_mul(1.0 - 0.2 * (1.0 - super::menu::glass_opacity())))
             .border(1., t.c.contrast_foreground.alpha_mul(0.1))
             .child(
                 row()

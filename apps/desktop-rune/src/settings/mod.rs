@@ -12,6 +12,7 @@ mod projects;
 mod providers;
 mod scope;
 mod snooze;
+mod source_control;
 mod browser_profiles;
 mod tasks;
 mod themes;
@@ -44,6 +45,8 @@ pub struct Ui {
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
     pub delete_thread: Option<(String, String)>,
+    /// The project the Danger section is confirming removal of: id and title.
+    pub delete_project: Option<(String, String)>,
     pub provider_picker: bool,
     pub provider: Option<String>,
     pub project: Option<String>,
@@ -56,7 +59,8 @@ pub struct Ui {
     pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
     pub error: Option<String>,
-    pub advanced: bool,
+    /// Open `AdvancedSettings` folds by page; like web's per-fold state, leaving a page closes them.
+    pub advanced: std::collections::HashSet<String>,
     pub keybinding_editor: Option<String>,
     pub binding_when: TextEdit,
     pub shortcut: Option<String>,
@@ -109,7 +113,53 @@ fn apply_patch(settings: &mut Value, patch: &Value) {
     }
 }
 
+/// Web's "Auto-settle inactive threads" switch: on is a day count, off is `null` (never).
+const AUTO_SETTLE_SWITCH: &str = "autoSettleInactive";
+const AUTO_SETTLE_DAYS: &str = "sidebarAutoSettleAfterDays";
+
+/// Rows for one field of an object setting, written as `parent.field`.
+pub fn nested(key: &str) -> Option<(&'static str, &str)> {
+    ["storageCleanup", "sourceControlWritingStyle"].into_iter().find_map(|parent| {
+        key.strip_prefix(parent)
+            .and_then(|rest| rest.strip_prefix('.'))
+            .map(|field| (parent, field))
+    })
+}
+
+/// An object setting with every field present, so a row can patch one field and send the
+/// whole object (the optimistic copy is a shallow merge).
+pub fn nested_object(s: &App, parent: &str) -> Value {
+    complete_object(parent, value(s, parent))
+}
+
+fn complete_object(parent: &str, stored: Value) -> Value {
+    let mut object = scope::defaults()[parent].clone();
+    if !object.is_object() {
+        object = json!({});
+    }
+    match stored {
+        Value::Object(stored) => {
+            for (field, v) in stored {
+                object[field.as_str()] = v;
+            }
+        }
+        // The legacy writing style was one instructions string (`LegacySourceControlWritingStyle`).
+        Value::String(instructions) => {
+            object["mode"] = json!(if instructions.is_empty() { "repo_conventions" } else { "custom" });
+            object["customInstructions"] = json!(instructions);
+        }
+        _ => {}
+    }
+    object
+}
+
 pub fn value(s: &App, key: &str) -> Value {
+    if key == AUTO_SETTLE_SWITCH {
+        return json!(!value(s, AUTO_SETTLE_DAYS).is_null());
+    }
+    if let Some((parent, field)) = nested(key) {
+        return nested_object(s, parent)[field].clone();
+    }
     if let Some(key) = key.strip_prefix("project::") {
         if let Some((id, field)) = key.split_once("::") {
             return projects::value(s, id, field);
@@ -129,9 +179,6 @@ pub fn value(s: &App, key: &str) -> Value {
             return providers::field_value(s, id, field);
         }
     }
-    if let Some(field) = key.strip_prefix("storageCleanup.") {
-        return server_settings(s)["storageCleanup"][field].clone();
-    }
     if scope::project_key(key) {
         if let Some(project) = &s.ui.settings.project {
             if let Some(v) = server_settings(s)["projectSettingsOverrides"][project].get(key) {
@@ -148,6 +195,15 @@ pub fn value(s: &App, key: &str) -> Value {
 }
 
 pub fn update(s: &mut App, key: &str, value: Value) {
+    if key == AUTO_SETTLE_SWITCH {
+        let days = scope::defaults()[AUTO_SETTLE_DAYS].clone();
+        return update(s, AUTO_SETTLE_DAYS, if value == true { days } else { Value::Null });
+    }
+    if let Some((parent, field)) = nested(key) {
+        let mut object = nested_object(s, parent);
+        object[field] = value;
+        return update(s, parent, object);
+    }
     if let Some(key) = key.strip_prefix("project::") {
         if let Some((id, field)) = key.split_once("::") {
             projects::update(s, id, field, value);
@@ -181,12 +237,7 @@ pub fn update(s: &mut App, key: &str, value: Value) {
             s.client_settings.save();
         }
     } else {
-        let patch = if let Some(field) = key.strip_prefix("storageCleanup.") {
-            // The whole object, so the optimistic copy (a shallow merge) keeps the other rules.
-            let mut cleanup = server_settings(s)["storageCleanup"].clone();
-            cleanup[field] = value;
-            json!({ "storageCleanup": cleanup })
-        } else if let Some(project) =
+        let patch = if let Some(project) =
             s.ui.settings
                 .project
                 .as_ref()
@@ -220,6 +271,49 @@ pub fn http(s: &mut App, method: &str, path: &str, payload: Value) {
     }
 }
 
+/// What a settings field shows for a stored value: strings as-is, `null` empty, numbers as JSON.
+pub fn input_text(current: &Value) -> String {
+    match current {
+        Value::String(text) => text.clone(),
+        Value::Null => String::new(),
+        other => other.to_string(),
+    }
+}
+
+/// The value a field's text commits, matching the contracts schema for `key`; `None` keeps the
+/// stored value (e.g. an out-of-range day count, like web's `AutoSettleDaysInput`).
+pub fn parse_input(key: &str, current: &Value, text: &str) -> Option<Value> {
+    if key == "sidebarAutoSettleAfterDays" {
+        return text
+            .trim()
+            .parse::<i64>()
+            .ok()
+            .filter(|days| (1..=90).contains(days))
+            .map(Value::from);
+    }
+    if current.is_number() {
+        return serde_json::from_str(text.trim()).ok().filter(Value::is_number);
+    }
+    // Every text setting is a `TrimmedString`.
+    Some(json!(text.trim()))
+}
+
+/// Commits one field's text if the user changed it. The runtime reaches every field's `on_edit`
+/// (focus sync), so an edit entry alone doesn't mean anything was typed.
+pub fn commit_text(s: &mut App, key: &str, text: &str) -> bool {
+    let current = value(s, key);
+    if text == input_text(&current) {
+        return false;
+    }
+    match parse_input(key, &current, text).filter(|next| *next != current) {
+        Some(next) => {
+            update(s, key, next);
+            true
+        }
+        None => false,
+    }
+}
+
 pub fn commit_edits(s: &mut App, all: bool) -> bool {
     let keys: Vec<_> =
         s.ui.settings
@@ -231,20 +325,51 @@ pub fn commit_edits(s: &mut App, all: bool) -> bool {
     let mut changed = false;
     for key in keys {
         let edit = s.ui.settings.edits.remove(&key).unwrap();
-        let current = value(s, &key);
-        let next = if current.is_number() {
-            serde_json::from_str(&edit.text)
-                .ok()
-                .filter(Value::is_number)
-        } else {
-            Some(json!(edit.text))
-        };
-        if let Some(next) = next.filter(|n| *n != current) {
-            update(s, &key, next);
-            changed = true;
-        }
+        changed |= commit_text(s, &key, &edit.text);
     }
     changed
+}
+
+/// The readable message inside an Effect-RPC failure cause: a typed error's `message` (or, for
+/// `ServerSettingsError`, the sentence its `message` getter builds), never the raw cause JSON.
+fn failure_detail(cause: &Value) -> Option<String> {
+    let reasons = cause.as_array().map(Vec::as_slice).unwrap_or(std::slice::from_ref(cause));
+    reasons.iter().find_map(|reason| {
+        let error = if reason["_tag"] == "Fail" { &reason["error"] } else { reason };
+        if let Some(text) = error.as_str().filter(|t| !t.is_empty()) {
+            return (reason["_tag"] == "Fail").then(|| text.to_owned());
+        }
+        if let Some(message) = error["message"].as_str().filter(|m| !m.is_empty()) {
+            return Some(message.to_owned());
+        }
+        (error["_tag"] == "ServerSettingsError").then(|| {
+            let field = |k: &str| error[k].as_str().map(str::to_owned);
+            match error["operation"].as_str() {
+                Some("write-managed-setting") => format!(
+                    "{} is managed by {} and cannot be changed.",
+                    field("managedSetting").unwrap_or("This setting".into()),
+                    field("managedBy").unwrap_or("your organization".into())
+                ),
+                operation => format!(
+                    "Server settings {} failed{}{} at {}.",
+                    operation.unwrap_or("update"),
+                    field("providerInstanceId").map(|p| format!(" for provider {p}")).unwrap_or_default(),
+                    field("environmentVariable").map(|v| format!(" and environment variable {v}")).unwrap_or_default(),
+                    field("settingsPath").unwrap_or_default()
+                ),
+            }
+        })
+    })
+}
+
+/// Web's wording: settings saves toast "Setting not saved" / "Could not save on <env>: …".
+pub fn failure_message(method: &str, environment: &str, cause: &Value) -> String {
+    if method == "server.updateSettings" {
+        let detail = failure_detail(cause)
+            .unwrap_or_else(|| "The save failed. Try reconnecting and saving again.".into());
+        return format!("Setting not saved. Could not save on {environment}: {detail}");
+    }
+    failure_detail(cause).unwrap_or_else(|| "The request failed. Try reconnecting and trying again.".into())
 }
 
 pub fn resource<'a>(s: &'a App, method: &str, payload: Value) -> Option<&'a Value> {
@@ -267,7 +392,12 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("archived") {
             request(s, projects::ARCHIVED_SNAPSHOT, json!({}));
         }
+        if page.as_deref() == Some("source-control") {
+            source_control::scan(s);
+        }
         s.ui.settings.loaded_page = page;
+        s.ui.settings.error = None;
+        s.ui.settings.advanced.clear();
     }
     let mut wanted = Vec::new();
     if let Route::Settings(path) = &s.route {
@@ -307,6 +437,9 @@ pub fn poll(s: &mut App) -> bool {
             let method = s.ui.settings.pending.remove(&id).unwrap();
             match reply {
                 Ok(result) => {
+                    if method == "server.updateSettings" {
+                        s.ui.settings.error = None;
+                    }
                     if method == "scheduledTasks.upsert" {
                         s.ui.settings.task_editor = None;
                     }
@@ -323,7 +456,14 @@ pub fn poll(s: &mut App) -> bool {
                     s.ui.settings.results.insert(method, result);
                 }
                 Err(error) => {
-                    s.ui.settings.error = Some(error.to_string());
+                    let environment = s
+                        .state()
+                        .config
+                        .as_ref()
+                        .and_then(|c| c["environment"]["label"].as_str())
+                        .unwrap_or("this environment")
+                        .to_owned();
+                    s.ui.settings.error = Some(failure_message(&method, &environment, &error));
                 }
             }
             changed = true;
@@ -438,13 +578,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         "storage" => "maintenance",
         p => p,
     };
-    let mut nav = col()
-        .w(239.0)
-        .h_full()
-        .fill(t.c.sidebar)
-        .px(8.0)
-        .pt(8.0)
-        .gap(16.0);
+    // The search stays put while the page list under it scrolls.
+    let mut nav = col().w_full().px(8.0).pb(8.0).gap(16.0);
     let search = rune::text_input(&s.ui.settings.search, theme::SM_MEDIUM.lh(21.0))
         .key("settings-search")
         .single_line()
@@ -459,8 +594,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .caret(t.sb.foreground, t.c.primary.alpha_mul(0.3))
         .on_edit(|s: &mut App| &mut s.ui.settings.search)
         .on_input_key(|s: &mut App, e, _| clear_search_on_escape(&mut s.ui.settings.search, e));
-    nav = nav.child(
-        row()
+    let search_row = row()
             .h(32.0)
             .px(8.0)
             .gap(8.0)
@@ -477,14 +611,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                             .font(theme::XS_MEDIUM)
                             .color(t.sb.muted_foreground),
                     ),
-            ),
-    );
+            );
     let query = s.ui.settings.search.text.to_lowercase();
-    for (index, (heading, items)) in NAV.iter().enumerate() {
+    for (heading, items) in NAV.iter() {
         let mut group = col().gap(4.0).w_full();
-        if index == 0 {
-            group = group.mt(-8.0);
-        }
         if !heading.is_empty() {
             group = group.child(
                 text(*heading)
@@ -541,7 +671,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let nav = col()
         .w(239.0)
         .h_full()
-        .child(nav.scroll(rune::ScrollSpec {
+        .fill(t.c.sidebar)
+        .child(col().w_full().px(8.0).pt(8.0).pb(8.0).child(search_row))
+        .child(nav.grow(1.0).min_h(0.0).scroll(rune::ScrollSpec {
             stick_bottom: false,
         }))
         .child(el().h(1.0).w_full().fill(t.c.border));
@@ -644,6 +776,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
+    projects::confirm_remove(s, t, &mut overlays);
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
@@ -981,6 +1114,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         if s.ui.settings.update_version.take().is_some()
             || s.ui.settings.theme_editor.take().is_some()
             || s.ui.settings.delete_thread.take().is_some()
+            || s.ui.settings.delete_project.take().is_some()
             || s.ui.settings.delete_task.take().is_some()
         {
             return true;
@@ -1070,6 +1204,50 @@ mod patch_tests {
             settings["projectSettingsOverrides"]["p"],
             json!({"future":true,"defaultAutoPull":true,"responseStreamingMode":"paragraph"})
         );
+    }
+    #[test]
+    fn visiting_a_page_never_commits_an_untouched_field() {
+        // `null` (auto-settle off) shows an empty field; leaving it empty must not write "".
+        assert_eq!(input_text(&Value::Null), "");
+        assert_eq!(input_text(&json!(3)), "3");
+        assert_eq!(parse_input("sidebarAutoSettleAfterDays", &Value::Null, ""), None);
+        assert_eq!(parse_input("sidebarAutoSettleAfterDays", &Value::Null, "7"), Some(json!(7)));
+        assert_eq!(parse_input("sidebarAutoSettleAfterDays", &json!(3), "91"), None);
+        assert_eq!(parse_input("sidebarAutoSettleAfterDays", &json!(3), "2.5"), None);
+        assert_eq!(parse_input("branchNamePrefix", &json!("t3"), "me"), Some(json!("me")));
+        assert_eq!(parse_input("reviewGuideInstructions", &json!(""), "  Skip tests\n"), Some(json!("Skip tests")));
+    }
+    #[test]
+    fn a_nested_row_patches_its_whole_parent_object() {
+        assert_eq!(nested("sourceControlWritingStyle.mode"), Some(("sourceControlWritingStyle", "mode")));
+        assert_eq!(nested("storageCleanup.enabled"), Some(("storageCleanup", "enabled")));
+        assert_eq!(nested("sourceControlWritingStyleX"), None);
+        // The server may store the legacy instructions string or omit default fields.
+        assert_eq!(
+            complete_object("sourceControlWritingStyle", json!("Be brief")),
+            json!({"mode":"custom","customInstructions":"Be brief","followChangeRequestTemplates":true})
+        );
+        assert_eq!(
+            complete_object("sourceControlWritingStyle", json!({"mode":"conventional_commits"})),
+            json!({"mode":"conventional_commits","customInstructions":"","followChangeRequestTemplates":true})
+        );
+    }
+    #[test]
+    fn failures_read_as_sentences_not_cause_json() {
+        let die = json!([{"_tag":"Die","defect":"Expected \"Infinity\" at [\"patch\"]"}]);
+        assert_eq!(
+            failure_message("server.updateSettings", "Mac", &die),
+            "Setting not saved. Could not save on Mac: The save failed. Try reconnecting and saving again."
+        );
+        let managed = json!([{"_tag":"Fail","error":{"_tag":"ServerSettingsError","settingsPath":"/s.json","operation":"write-managed-setting","managedSetting":"Providers","managedBy":"Acme"}}]);
+        assert_eq!(
+            failure_message("server.updateSettings", "Mac", &managed),
+            "Setting not saved. Could not save on Mac: Providers is managed by Acme and cannot be changed."
+        );
+        let write = json!([{"_tag":"Fail","error":{"_tag":"ServerSettingsError","settingsPath":"/s.json","operation":"write"}}]);
+        assert!(failure_message("server.updateSettings", "Mac", &write).ends_with("Server settings write failed at /s.json."));
+        let typed = json!([{"_tag":"Fail","error":{"_tag":"X","message":"No such task."}}]);
+        assert_eq!(failure_message("scheduledTasks.upsert", "Mac", &typed), "No such task.");
     }
     #[test]
     fn escape_clears_a_search_before_closing() {

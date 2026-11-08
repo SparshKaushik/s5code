@@ -57,7 +57,73 @@ fn paint(p: &Value, key: &str) -> Color {
         .and_then(color)
         .unwrap_or(Color::TRANSPARENT)
 }
-pub fn apply(s: &App, mut t: T) -> T {
+pub fn apply(s: &App, t: T) -> T {
+    let percent = |key: &str, default: f64| s.client_settings.values.get(key).and_then(Value::as_f64).unwrap_or(default) as f32;
+    crate::kit::menu::set_glass_opacity(percent("glassOpacity", 80.0));
+    let mut t = apply_theme(s, t);
+    let contrast = percent("appearanceContrast", 100.0);
+    if contrast != 100.0 {
+        let target = if t.dark { rune::Color::WHITE } else { rune::Color::BLACK };
+        t.c = contrasted(t.c, contrast, target);
+        t.sb = contrasted(t.sb, contrast, target);
+    }
+    t
+}
+
+/// `color-mix(in oklab, a p, b)`.
+fn mix_oklab(a: rune::Color, b: rune::Color, p: f32) -> rune::Color {
+    let (x, y) = (a.to_oklab(), b.to_oklab());
+    rune::Color::from_oklab(std::array::from_fn(|i| x[i] * p + y[i] * (1.0 - p)))
+}
+
+/// `color-mix(in srgb, color-mix(in srgb, a p, transparent), b q)`: premultiplied, gamma-encoded.
+fn mix_border(a: rune::Color, b: rune::Color, p: f32, q: f32) -> rune::Color {
+    use rune::color::{srgb_decode, srgb_encode};
+    let (wa, wb) = (a.a * p * (1.0 - q), b.a * q);
+    let alpha = wa + wb;
+    if alpha <= 0.0 {
+        return rune::Color::TRANSPARENT;
+    }
+    let ch = |x: f32, y: f32| srgb_decode((srgb_encode(x) * wa + srgb_encode(y) * wb) / alpha);
+    rune::Color { r: ch(a.r, b.r), g: ch(a.g, b.g), b: ch(a.b, b.b), a: alpha }
+}
+
+/// Web's `--contrast-*` tokens (index.css) for an Appearance contrast other than 100%. Rune's
+/// views read the plain tokens for `text-foreground` and friends, so both are re-pointed.
+fn contrasted(c: crate::tokens::Tokens, contrast: f32, target: rune::Color) -> crate::tokens::Tokens {
+    let base = contrast.min(100.0) / 100.0;
+    let boost = (contrast - 100.0).max(0.0) / 100.0;
+    let border_boost = boost / 4.0;
+    let text = |fg: rune::Color, bg: rune::Color| mix_oklab(mix_oklab(fg, bg, base), target, 1.0 - boost);
+    let mut out = c;
+    macro_rules! contrast_text {($($field:ident / $contrast:ident on $bg:ident),* $(,)?)=>{$(
+        out.$contrast = text(c.$field, c.$bg);
+        out.$field = out.$contrast;
+    )*};}
+    contrast_text!(
+        foreground / contrast_foreground on background,
+        muted_foreground / contrast_muted_foreground on background,
+        placeholder / contrast_placeholder on background,
+        secondary_label / contrast_secondary_label on background,
+        icon_muted / contrast_icon_muted on background,
+        card_foreground / contrast_card_foreground on card,
+        popover_foreground / contrast_popover_foreground on popover,
+        accent_foreground / contrast_accent_foreground on accent,
+        secondary_foreground / contrast_secondary_foreground on secondary,
+        message_foreground / contrast_message_foreground on message_surface,
+        sidebar_foreground / contrast_sidebar_foreground on sidebar,
+        sidebar_muted_foreground / contrast_sidebar_muted_foreground on sidebar,
+    );
+    out.contrast_border = mix_border(c.border, c.foreground, base, border_boost);
+    out.contrast_input = mix_border(c.input, c.foreground, base, border_boost);
+    out.contrast_sidebar_border = mix_border(c.sidebar_border, c.sidebar_foreground, base, border_boost);
+    out.border = out.contrast_border;
+    out.input = out.contrast_input;
+    out.sidebar_border = out.contrast_sidebar_border;
+    out
+}
+
+fn apply_theme(s: &App, mut t: T) -> T {
     let key = if t.dark { "themeDark" } else { "themeLight" };
     let id = s
         .client_settings
@@ -454,8 +520,16 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
                 ),
         );
     }
+    // Web's `isEditing`: the theme is already in the library (a builtin opens as a new copy).
+    let editing = s.ui.settings.theme_editor.as_ref().is_some_and(|theme| {
+        s.client_settings
+            .values
+            .get("customThemes")
+            .and_then(Value::as_array)
+            .is_some_and(|themes| themes.iter().any(|v| v["id"] == theme["id"]))
+    });
     fields = fields.child(
-        crate::kit::Button::new("Save theme")
+        crate::kit::Button::new(if editing { "Save changes" } else { "Create theme" })
             .disabled(
                 s.ui.settings.theme_name.text.trim().is_empty()
                     || s.ui
@@ -540,7 +614,7 @@ pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
                 .build(t),
         );
     }
-    crate::kit::Dialog::new("theme-editor", "Create theme")
+    crate::kit::Dialog::new("theme-editor", if editing { "Edit theme" } else { "Create theme" })
         .open(true)
         .width(680.0)
         .on_close(|s: &mut App| s.ui.settings.theme_editor = None)
@@ -647,6 +721,24 @@ pub fn import_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         )
         .build(t, layers);
 }
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+    #[test]
+    fn contrast_follows_web_color_mix() {
+        let t = crate::theme::theme(true);
+        let same = contrasted(t.c, 100.0, rune::Color::WHITE);
+        let close = |a: rune::Color, b: rune::Color| (a.r - b.r).abs() + (a.g - b.g).abs() + (a.b - b.b).abs() + (a.a - b.a).abs() < 0.01;
+        assert!(close(same.foreground, t.c.foreground), "100% leaves text alone");
+        assert!(close(same.border, t.c.border), "100% leaves borders alone");
+        let low = contrasted(t.c, 50.0, rune::Color::WHITE);
+        assert!(low.foreground.luminance() < t.c.foreground.luminance(), "50% pulls text toward the background");
+        let high = contrasted(t.c, 200.0, rune::Color::WHITE);
+        assert!(close(high.foreground, rune::Color::WHITE), "200% is the target colour");
+        assert!(high.border.a > t.c.border.a || high.border.luminance() > t.c.border.luminance());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

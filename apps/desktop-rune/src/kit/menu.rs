@@ -551,6 +551,15 @@ fn native_colors(dark: bool) -> NativeColors {
         }
     }
 }
+/// Appearance > Glass opacity (`--glass-opacity`, percent ×100); settings set it each frame.
+static GLASS_OPACITY: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(8000);
+pub fn set_glass_opacity(percent: f32) {
+    GLASS_OPACITY.store((percent.clamp(0.0, 100.0) * 100.0) as u32, std::sync::atomic::Ordering::Relaxed);
+}
+/// The glass opacity as a fraction (0.8 by default).
+pub fn glass_opacity() -> f32 {
+    GLASS_OPACITY.load(std::sync::atomic::Ordering::Relaxed) as f32 / 10000.0
+}
 pub(crate) fn glass(e: El, k: &Kit, native: bool) -> El {
     if native {
         let c = native_colors(k.dark);
@@ -561,9 +570,11 @@ pub(crate) fn glass(e: El, k: &Kit, native: bool) -> El {
             .border(1., c.border)
             .shadow(8., 24., rune::Color::BLACK.alpha_mul(0.35));
     }
+    // dropdown-glass: popover 18% over popover at the glass opacity; 100% also drops the blur.
+    let opacity = glass_opacity();
     e.radius(8.)
-        .fill(k.c.layer_01.alpha_mul(0.836))
-        .backdrop_blur(if k.dark { 16. } else { 12. })
+        .fill(k.c.layer_01.alpha_mul(0.18 + 0.82 * opacity))
+        .backdrop_blur(if opacity >= 1.0 { 0. } else if k.dark { 16. } else { 12. })
         .border(1., k.c.text_base.alpha_mul(0.1))
         .box_shadow(Shadow {
             y: if k.dark { 18. } else { 16. },

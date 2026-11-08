@@ -1,7 +1,7 @@
 use super::controls as c;
 use crate::App;
-use crate::theme::{self, T};
-use rune::{Cx, El, col, text};
+use crate::theme::{self, AlphaMul, T};
+use rune::{Cx, El, col, row, text};
 use serde_json::Value;
 use std::sync::OnceLock;
 
@@ -33,10 +33,28 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
             .as_ref()
             .or(s.client_settings.error.as_ref())
     {
+        let (title, detail) = match error.strip_prefix("Setting not saved. ") {
+            Some(detail) => ("Setting not saved", detail),
+            None => ("Something went wrong", error.as_str()),
+        };
         page = page.child(
-            text(error.clone())
-                .font(theme::TEXT_SM)
-                .color(t.c.destructive),
+            row()
+                .w_full()
+                .px(16.0)
+                .py(12.0)
+                .gap(10.0)
+                .radius(12.0)
+                .border(1.0, t.c.destructive.alpha_mul(0.32))
+                .fill(t.c.destructive.alpha_mul(0.06))
+                .child(rune::icon(&crate::icons::CIRCLE_ALERT, 16.0).color(t.c.destructive).mt(2.0))
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(2.0)
+                        .child(text(title).font(theme::SM_MEDIUM).color(t.c.foreground))
+                        .child(text(detail.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()),
+                ),
         );
     }
     if s.ui
@@ -84,12 +102,14 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .into_iter()
                 .flatten()
                 .filter(|spec| !(project && spec["key"] == "fallbackModelSelection"))
+                .filter(|spec| c::visible(s, spec))
                 .map(|spec| c::setting_row(s, cx, t, spec));
             // `AdvancedSettings`: a fold at the end of the previous section's card.
             if title == "Advanced" {
                 if let Some((_, last)) = groups.last_mut() {
-                    last.push(advanced_trigger(s.ui.settings.advanced, t));
-                    if s.ui.settings.advanced {
+                    let open = s.ui.settings.advanced.contains(path);
+                    last.push(advanced_trigger(path, open, t));
+                    if open {
                         last.extend(rows);
                     }
                     continue;
@@ -101,6 +121,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
             if !children.is_empty() {
                 page = page.child(c::section(title, children, t));
             }
+            // Web's server scan sits between Repositories and Writing & review.
+            if path == "source-control" && title == "Repositories" {
+                for section in super::source_control::view(s, t) {
+                    page = page.child(section);
+                }
+            }
         }
         return page;
     }
@@ -111,14 +137,15 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "access" => super::connections::access(s, t),
         "scheduled-tasks" => super::tasks::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
-        "projects" => super::projects::view(s, t),
+        "projects" => super::projects::view(s, cx, t),
         "archived" => super::projects::archived(s, t),
         "about" => super::about::view(s, t),
         _ => unavailable(path, t),
     })
 }
 
-fn advanced_trigger(open: bool, t: &T) -> El {
+fn advanced_trigger(path: &str, open: bool, t: &T) -> El {
+    let path = path.to_owned();
     rune::row()
         .w_full()
         .min_h(40.0)
@@ -134,7 +161,11 @@ fn advanced_trigger(open: bool, t: &T) -> El {
                 .color(t.c.muted_foreground),
         )
         .child(text("Advanced").font(theme::XS_MEDIUM).color(t.c.muted_foreground))
-        .on_press(|s: &mut App| s.ui.settings.advanced = !s.ui.settings.advanced)
+        .on_press(move |s: &mut App| {
+            if !s.ui.settings.advanced.remove(&path) {
+                s.ui.settings.advanced.insert(path.clone());
+            }
+        })
 }
 
 fn unavailable(path: &str, t: &T) -> El {
