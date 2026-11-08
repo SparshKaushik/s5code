@@ -590,14 +590,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
     let selection = if selected { "All environments".to_string() } else { destination.clone() };
 
     let apply = Menu::new("usage-prices-apply")
-        .trigger(
-            kit::Button::new(selection)
-                .variant("outline")
-                .size("sm")
-                .disabled(pending || has_changes)
-                .on_press(|s: &mut App| ui(s).menu = !ui(s).menu)
-                .build(t),
-        )
+        .trigger(apply_trigger(t, &selection, pending || has_changes))
         .placement(Placement::BottomStart)
         .min_width(220.0)
         .open(u.menu)
@@ -821,6 +814,28 @@ fn table(s: &App, t: &T, u: &Ui, target: &Target, staged: &[Draft], errors: &Has
 
 fn radius() -> f32 {
     theme::radius::LG
+}
+
+/// Web's outline sm trigger with its trailing chevron; disabled while edits are staged.
+fn apply_trigger(t: &T, label: &str, disabled: bool) -> El {
+    let trigger = row()
+        .key("usage-prices-apply-trigger")
+        .h(28.0)
+        .px(10.0)
+        .gap(6.0)
+        .center_y()
+        .shrink()
+        .radius(8.0)
+        .border(1.0, t.c.input)
+        .fill(if t.dark { t.c.input.alpha_mul(0.32) } else { t.c.background })
+        .role("button")
+        .label(format!("Apply to: {label}"))
+        .child(text(label.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
+        .child(rune::icon(&i::CHEVRON_DOWN, 14.0).color(t.c.foreground));
+    if disabled {
+        return trigger.opacity(0.64);
+    }
+    trigger.hover(t.c.accent).focusable(true).focus_ring(2.0, 1.0, t.c.ring).on_press(|s: &mut App| ui(s).menu = !ui(s).menu)
 }
 
 #[cfg(test)]

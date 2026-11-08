@@ -380,6 +380,13 @@ fn without_limit(v: &Value) -> Value {
     v
 }
 
+/// Sends the typed query now, as Enter does, skipping the debounce.
+pub(super) fn submit(u: &mut Ui) {
+    u.sent_query = u.query.text.trim().to_string();
+    u.typed = u.query.text.clone();
+    u.typed_at = None;
+}
+
 /// Sends the typed query once typing pauses; a timer thread repaints when it is due.
 fn debounce(s: &mut App) -> bool {
     let waker = s.ui.panel.waker.clone();
@@ -836,10 +843,7 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                     if !matches!(key.key, rune::Key::Enter) {
                         return false;
                     }
-                    let u = ui(s);
-                    u.sent_query = u.query.text.trim().to_string();
-                    u.typed = u.query.text.clone();
-                    u.typed_at = None;
+                    submit(ui(s));
                     true
                 }),
         );

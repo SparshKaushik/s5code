@@ -127,6 +127,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-empty", |s| open_prs(s, |r| r["entries"] = json!([]))),
     ("pull-requests-filtered", |s| {
         open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        u.query.replace_text("no such branch");
+        pull_requests::submit(u);
+        u.requested = Some(pull_requests::input(u));
+    }),
+    ("pull-requests-searching", |s| {
+        open_prs(s, |_| {});
         s.ui.pages.pull_requests.query.replace_text("no such branch");
     }),
     ("pull-requests-error", |s| {
@@ -219,6 +226,16 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-model", |s| {
         open_usage(s, "cost");
         s.ui.pages.usage.model = Some("claude\0\0claude-opus-5-5".into());
+    }),
+    ("usage-model-unpriced", |s| {
+        open_usage(s, "cost");
+        let u = &mut s.ui.pages.usage;
+        for b in u.summary.as_mut().and_then(|v| v["buckets"].as_array_mut()).into_iter().flatten() {
+            if b["model"] == "kimi-k3" {
+                b["unpricedRecords"] = b["records"].clone();
+            }
+        }
+        u.model = Some("opencode\0moonshot\0kimi-k3".into());
     }),
     ("usage-prices", |s| {
         open_usage(s, "cost");
