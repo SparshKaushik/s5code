@@ -404,11 +404,97 @@
       "title": "Typography",
       "rows": [
         {
+          "key": "fontFamilySans",
+          "title": "Interface font",
+          "description": "Everything outside code blocks and the terminal.",
+          "kind": "font",
+          "size": "fontSizeInterface",
+          "min": 12,
+          "max": 20,
+          "placeholder": "{sans}"
+        },
+        {
+          "key": "fontFamilyComposer",
+          "title": "Prompt font",
+          "description": "Only the box you write prompts in. Mono works well here.",
+          "kind": "font",
+          "size": "fontSizePrompt",
+          "min": 12,
+          "max": 20,
+          "placeholder": "{interface}",
+          "when": [
+            "typographyAdvanced",
+            true
+          ]
+        },
+        {
+          "key": "fontFamilyCode",
+          "title": "Monospace font",
+          "description": "Code blocks, diffs, file previews, and the terminal.",
+          "kind": "font",
+          "size": "fontSizeCode",
+          "min": 10,
+          "max": 18,
+          "placeholder": "{mono}",
+          "unless": [
+            "typographyAdvanced",
+            true
+          ]
+        },
+        {
+          "key": "fontFamilyCode",
+          "title": "Code font",
+          "description": "Code blocks, diffs, and file previews.",
+          "kind": "font",
+          "size": "fontSizeCode",
+          "min": 10,
+          "max": 18,
+          "placeholder": "{mono}",
+          "when": [
+            "typographyAdvanced",
+            true
+          ]
+        },
+        {
+          "key": "fontFamilyTerminal",
+          "title": "Terminal font",
+          "description": "Terminal output, independent from code blocks and diffs.",
+          "kind": "font",
+          "size": "fontSizeTerminal",
+          "min": 8,
+          "max": 20,
+          "placeholder": "{mono}",
+          "when": [
+            "typographyAdvanced",
+            true
+          ]
+        },
+        {
+          "key": "wordWrap",
+          "title": "Word wrap",
+          "description": "Wrap long lines in code blocks, diffs, and file previews by default.",
+          "kind": "switch",
+          "options": []
+        }
+      ]
+    },
+    {
+      "title": "Advanced",
+      "rows": [
+        {
+          "key": "typographyAdvanced",
+          "title": "Separate fonts",
+          "description": "Set the prompt, code, and terminal fonts separately instead of one monospace font.",
+          "kind": "switch",
+          "options": []
+        },
+        {
           "key": "fontSmoothing",
           "title": "Font smoothing",
           "description": "Use thinner grayscale text smoothing instead of the macOS default.",
           "kind": "switch",
-          "options": []
+          "options": [],
+          "macOnly": true
         }
       ]
     }

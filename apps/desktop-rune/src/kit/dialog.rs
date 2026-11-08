@@ -64,16 +64,16 @@ impl Dialog {
         let Some(close) = self.close else {
             return;
         };
-        let dismiss = Button::new("Close")
-            .size("icon-xs")
-            .variant("ghost-muted")
-            .icon(&crate::icons::X)
-            .build(t);
-        let dismiss = if let Some(f) = self.button {
-            f(dismiss)
-        } else {
-            dismiss
-        };
+        // Web `DialogPopup`'s close button: `size="icon" variant="ghost"` at `absolute end-2 top-2`;
+        // alert dialogs (`AlertDialogPopup`) have none.
+        let dismiss = (self.outside).then(|| {
+            let dismiss = Button::new("Close").size("icon").variant("ghost").icon(&crate::icons::X).build(t);
+            match self.button {
+                Some(f) => f(dismiss),
+                None => dismiss,
+            }
+            .pin(None, Some(8.), Some(8.), None)
+        });
         let mut heading = col().grow(1.).min_w(0.).gap(8.).child(
             text(&self.title)
                 .font(theme::weight(theme::TEXT_LG, 600.))
@@ -104,15 +104,9 @@ impl Dialog {
             // dialog-glass follows Appearance > Glass opacity: 96% at the default 80%, solid at 100%; no blur.
             .fill(t.c.background.alpha_mul(1.0 - 0.2 * (1.0 - super::menu::glass_opacity())))
             .border(1., t.c.contrast_foreground.alpha_mul(0.1))
-            .child(
-                row()
-                    .w_full()
-                    .items_start()
-                    .gap(16.)
-                    .child(heading)
-                    .child(dismiss),
-            )
-            .children(self.body);
+            .child(row().w_full().items_start().child(heading))
+            .children(self.body)
+            .children(dismiss);
         layer.push(super::motion::scrim(t).key(format!("{}-backdrop", self.key)));
         layer.push(
             super::motion::layer()
