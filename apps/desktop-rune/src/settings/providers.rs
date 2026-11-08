@@ -554,24 +554,6 @@ fn compatibility_warning(live: Option<&Value>, enabled: bool) -> Option<&'static
     }
 }
 
-/// Whether `getProviderVersionAdvisoryPresentation` has anything to show.
-fn advisory(live: Option<&Value>, enabled: bool) -> Option<(&'static rune::Icon, &'static str)> {
-    if compatibility_warning(live, enabled).is_some() {
-        let title = match live?["compatibilityAdvisory"]["status"].as_str() {
-            Some("graceful") => "Limited support",
-            Some("unsupported") => "Unsupported version",
-            _ => "Known broken version",
-        };
-        return Some((&icons::TRIANGLE_ALERT, title));
-    }
-    let latest_bad = matches!(live?["compatibilityAdvisory"]["latestVersionStatus"].as_str(), Some("broken" | "unsupported"));
-    match live?["versionAdvisory"]["status"].as_str() {
-        Some("current" | "unknown") | None => None,
-        _ if latest_bad => None,
-        _ => Some((&icons::CIRCLE_ARROW_UP, "Update available")),
-    }
-}
-
 fn version_label(live: Option<&Value>) -> Option<String> {
     Some(super::provider_update::version_label(live?["version"].as_str()?))
 }
@@ -605,15 +587,8 @@ fn list_row(s: &App, t: &T, r: &Row, selected: bool) -> El {
     if let Some(v) = version_label(live) {
         title = title.child(text(v).font(theme::MONO_XS).color(t.c.muted_foreground).truncate().max_w(96.0));
     }
-    if let Some((glyph, label)) = advisory(live, enabled) {
-        let warn = glyph.name == "triangle-alert";
-        title = title.child(
-            kit::Button::new(format!("{label}, view details"))
-                .variant("ghost-muted")
-                .size("icon-micro")
-                .build(t)
-                .child(icon(glyph, 14.0).color(if warn { t.c.warning } else { t.c.muted_foreground })),
-        );
+    if let Some(trigger) = super::provider_update::trigger(s, t, &r.id, live, enabled, "row") {
+        title = title.child(trigger);
     }
     let mut status_line = row().w_full().mt(2.0).gap(6.0).items_start();
     if let Some(d) = dot(st.key, t) {
@@ -832,7 +807,7 @@ fn header_action(s: &App, t: &T, r: &Row, live: Option<&Value>, enabled: bool) -
     if let Some(v) = version_label(live) {
         action = action.child(text(v).font(theme::MONO_XS).color(t.c.muted_foreground));
     }
-    if let Some(trigger) = super::provider_update::trigger(s, t, &r.id, live, enabled) {
+    if let Some(trigger) = super::provider_update::trigger(s, t, &r.id, live, enabled, "header") {
         action = action.child(trigger);
     }
     let mut tail = row().gap(4.0).center_y();

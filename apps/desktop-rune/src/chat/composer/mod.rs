@@ -923,8 +923,16 @@ pub fn provider_icon(t: &T, driver: &str, size: f32) -> El {
                 .child(icon(&OPENCODE_INNER, size).color(srgb(inner)).absolute(0.0, 0.0))
                 .child(icon(&OPENCODE, size).color(srgb(outer)).absolute(0.0, 0.0))
         }
-        _ => icon(&icons::BOT, size).color(t.c.muted_foreground),
+        _ => provider_mark(t, driver, size).unwrap_or_else(|| icon(&icons::BOT, size).color(t.c.muted_foreground)),
     }
+}
+
+/// A provider package's layered mark (cursor, grok, kiro, ...), if the driver has one.
+pub fn provider_mark(t: &T, driver: &str, size: f32) -> Option<El> {
+    let layers = provider_icons::layers(driver)?;
+    Some(layers.iter().fold(el().size(size, size), |mark, &(glyph, light, dark)| {
+        mark.child(icon(glyph, size).color(srgb(if t.dark { dark } else { light })).absolute(0.0, 0.0))
+    }))
 }
 
 /// Gives the open route's composer the caret, or takes it away (the find bar holds it).
