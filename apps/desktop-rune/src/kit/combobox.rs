@@ -117,6 +117,7 @@ pub struct Combobox<S> {
     disabled: bool,
     label: Option<String>,
     trailing: Option<Trailing>,
+    header: Option<El>,
 }
 impl<S: 'static> Combobox<S> {
     pub fn new(
@@ -142,11 +143,17 @@ impl<S: 'static> Combobox<S> {
             disabled: false,
             label: None,
             trailing: None,
+            header: None,
         }
     }
     /// A control after an option's label, such as a switch; its own press doesn't choose the row.
     pub fn trailing(mut self, trailing: impl Fn(&ComboboxOption) -> Option<El> + 'static) -> Self {
         self.trailing = Some(Rc::new(trailing));
+        self
+    }
+    /// A row between the search and the results, such as column titles for `trailing` controls.
+    pub fn header(mut self, header: El) -> Self {
+        self.header = Some(header);
         self
     }
     /// The accessible name: what the choice is for ("Model"). The chosen option is read as its
@@ -498,6 +505,7 @@ impl<S: 'static> Combobox<S> {
             .min_h(0.)
             .shrink()
             .child(col().w_full().px(12.).pt(9.).child(search))
+            .children(self.header)
             .child(
                 col()
                     .w_full()

@@ -752,7 +752,8 @@ impl BaseChoice {
     }
 }
 
-fn base_choices(refs: &[(String, Option<String>)]) -> Vec<BaseChoice> {
+/// `head` is left out of the local branches, so its remote twin lists as remote-only.
+fn base_choices(refs: &[(String, Option<String>)], head: Option<&str>) -> Vec<BaseChoice> {
     let branch = |name: &str, remote: &str| {
         if remote.is_empty() { name.to_string() } else { name.strip_prefix(&format!("{remote}/")).unwrap_or(name).to_string() }
     };
@@ -760,7 +761,7 @@ fn base_choices(refs: &[(String, Option<String>)]) -> Vec<BaseChoice> {
     let mut used = HashSet::new();
     let mut choices: Vec<BaseChoice> = refs
         .iter()
-        .filter(|(_, r)| r.is_none())
+        .filter(|(n, r)| r.is_none() && Some(n.as_str()) != head)
         .map(|(local, _)| {
             let matches: Vec<&(&String, &String)> = remotes.iter().filter(|(n, r)| !used.contains(*n) && branch(n, r) == *local).collect();
             let remote = matches.iter().find(|(_, r)| r.as_str() == "origin").or(matches.first()).map(|(n, _)| (*n).clone());
@@ -780,14 +781,10 @@ fn base_choices(refs: &[(String, Option<String>)]) -> Vec<BaseChoice> {
 
 fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
     let ui = &app.ui.panel.diff;
-    let head = ui.source.head.clone();
-    let choices = base_choices(&ui.refs);
+    let choices = base_choices(&ui.refs, ui.source.head.as_deref());
     let mut options = vec![kit::ComboboxOption::new("", "Automatic")];
     let mut pairs = HashMap::new();
     for choice in &choices {
-        if choice.local.is_some() && choice.local == head {
-            continue;
-        }
         let value = choice.value(ui.base_ref.as_deref());
         if let (Some(local), Some(remote)) = (&choice.local, &choice.remote) {
             pairs.insert(value.clone(), (choice.label.clone(), local.clone(), remote.clone()));
@@ -817,6 +814,18 @@ fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
             .build(&k);
         Some(row().w(32.).center_y().justify_end().child(switch))
     };
+    let column = |label: &str| text(label.to_uppercase()).font(rune::TextStyle { tracking: 0.25, ..theme::weight(theme::TEXT_3XS, theme::MEDIUM) }).color(muted);
+    // Lines "Remote" up with the trailing column, which sits before the row's 14px check.
+    let columns = row()
+        .w_full()
+        .pl(12.)
+        .pr(34.)
+        .pt(8.)
+        .pb(6.)
+        .center_y()
+        .child(column("Branch").grow(1.))
+        .child(row().w(32.).justify_end().child(column("Remote")));
+    let columns = col().w_full().child(columns).child(el().w_full().h(1.).fill(t.c.border.alpha_mul(0.7)));
     let base = ui.source.base.clone().or(ui.base_ref.clone()).unwrap_or_else(|| "Automatic".into());
     let trigger = row()
         .h(24.0)
@@ -840,6 +849,7 @@ fn refs_combo(app: &App, t: &T, layer: &mut Vec<El>) -> El {
         .width(288.0)
         .trigger(trigger)
         .trailing(trailing)
+        .header(columns)
         .on_choose(|s: &mut App, id, _| {
             s.ui.panel.diff.refs_combo.close();
             s.ui.panel.diff.base_ref = (!id.is_empty()).then(|| id.to_string());
@@ -1235,7 +1245,7 @@ mod tests {
         let local = |n: &str| -> (String, Option<String>) { (n.to_string(), None) };
         let remote = |n: &str, r: &str| (n.to_string(), Some(r.to_string()));
         let refs = [local("main"), remote("upstream/main", "upstream"), remote("origin/main", "origin"), remote("origin/release", "origin"), local("wip")];
-        let choices = base_choices(&refs);
+        let choices = base_choices(&refs, None);
         let rows: Vec<(&str, Option<&str>, Option<&str>)> = choices.iter().map(|c| (c.label.as_str(), c.local.as_deref(), c.remote.as_deref())).collect();
         assert_eq!(
             rows,
@@ -1249,6 +1259,9 @@ mod tests {
         assert_eq!(choices[0].value(None), "main");
         assert_eq!(choices[0].value(Some("origin/main")), "origin/main");
         assert_eq!(choices[3].value(Some("main")), "origin/release");
+        // The thread's own branch isn't a base; its remote twin still is.
+        let labels: Vec<String> = base_choices(&refs, Some("main")).into_iter().map(|c| c.label).collect();
+        assert_eq!(labels, ["wip", "upstream/main", "origin/main", "origin/release"]);
     }
 
     #[test]
