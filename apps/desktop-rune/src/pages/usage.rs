@@ -36,6 +36,10 @@ pub struct Ui {
     pub model_hover: Option<(usize, f32, f32)>,
     model_plot_w: f32,
     pub prices: super::usage_prices::Ui,
+    pub limits: super::usage_limits::Ui,
+    pub tags: super::usage_tags::Ui,
+    /// The caption's "Unpriced usage details" popover.
+    pub unpriced_tip: bool,
     /// `server.refreshUsageRates` (true) or `server.refreshProviders` (false) in flight.
     refreshing: Option<(u64, bool)>,
     /// Rates refreshed; the rescanned summary is still on its way.
@@ -68,6 +72,9 @@ impl Default for Ui {
             model_hover: None,
             model_plot_w: 0.0,
             prices: Default::default(),
+            limits: Default::default(),
+            tags: Default::default(),
+            unpriced_tip: false,
             refreshing: None,
             reloading: false,
             answered: None,
@@ -160,7 +167,7 @@ const PROVIDERS: &[(&str, &str, &str)] = &[
     ("muse", "Muse Code", "muse"),
 ];
 
-fn kind_of_driver(driver: &str) -> &str {
+pub(super) fn kind_of_driver(driver: &str) -> &str {
     if driver == "claudeAgent" { "claude" } else { driver }
 }
 
@@ -176,7 +183,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color { r: a.r * k + b.r * (1.0 - k), g: a.g * k + b.g * (1.0 - k), b: a.b * k + b.b * (1.0 - k), a: a.a * k + b.a * (1.0 - k) }
 }
 
-fn color(t: &T, kind: &str) -> Color {
+pub(super) fn color(t: &T, kind: &str) -> Color {
     match kind {
         "codex" => t.c.contrast_foreground,
         "claude" | "claudeAgent" => hex("#d97757"),
@@ -199,7 +206,7 @@ const DAY: i64 = 86_400_000;
 const HOUR: i64 = 3_600_000;
 const MINUTE: i64 = 60_000;
 
-fn civil(days: i64) -> (i64, i64, i64) {
+pub(super) fn civil(days: i64) -> (i64, i64, i64) {
     let z = days + 719_468;
     let era = z.div_euclid(146_097);
     let doe = z - era * 146_097;
@@ -247,7 +254,7 @@ fn grouped(n: i64) -> String {
     if n < 0 { format!("-{out}") } else { out }
 }
 
-fn usd(v: f64) -> String {
+pub(super) fn usd(v: f64) -> String {
     let cents = (v * 100.0).round() as i64;
     format!("${}.{:02}", grouped(cents / 100), (cents % 100).abs())
 }
@@ -282,18 +289,6 @@ fn percent(share: f64) -> String {
     if p > 0.0 && p < 0.1 { "<0.1%".into() } else { format!("{p:.1}%") }
 }
 
-fn duration(ms: i64) -> String {
-    let ms = ms.max(0);
-    let (d, h, m) = (ms / DAY, ms % DAY / HOUR, ms % HOUR / MINUTE);
-    if d > 0 {
-        format!("{d}d {h}h")
-    } else if h > 0 {
-        format!("{h}h {m}m")
-    } else {
-        format!("{m}m")
-    }
-}
-
 // ---- data -------------------------------------------------------------------------------
 
 /// `server.getUsageSummary`'s input for the chosen window (makeWindow): calendar days in the
@@ -324,7 +319,7 @@ pub fn poll(s: &mut App) -> bool {
     if !matches!(s.route, Route::Usage) {
         return false;
     }
-    let mut changed = false;
+    let mut changed = super::usage_limits::poll(s) | super::usage_tags::poll(s);
     if !s.ui.pages.usage.preferences_read {
         let saved = s.client_settings.values.get(PREFERENCES).cloned().unwrap_or(Value::Null);
         apply_preferences(ui(s), &saved);
@@ -478,13 +473,13 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
     if !matches!(s.route, Route::Usage) {
         return false;
     }
-    if super::usage_prices::on_key(s, e) {
+    if super::usage_prices::on_key(s, e) || super::usage_tags::on_key(s, e) || super::usage_limits::on_key(s, e) {
         return true;
     }
     if !matches!(e.key, rune::Key::Escape) {
         let u = &s.ui.pages.usage;
         // Like resolveUsageShortcut: not while a dialog, menu or the palette has the keys.
-        if u.prices.open || u.model.is_some() || u.menu.is_some() || s.ui.shell.palette.open {
+        if u.prices.open || u.model.is_some() || u.menu.is_some() || u.tags.target.is_some() || u.limits.confirm.is_some() || s.ui.shell.palette.open {
             return false;
         }
         let Some(command) = shortcut(s, e) else { return false };
@@ -515,6 +510,37 @@ struct Totals {
     tokens: f64,
 }
 
+/// One breakdown row (ModelTotals): a transcript name, or every name tagged as one catalog entry.
+#[derive(Default)]
+struct ModelRow {
+    /// `kind\0apiProvider\0model`, or `kind\0tag\0pricedAs` for a tagged row.
+    key: String,
+    kind: &'static str,
+    model: String,
+    apis: Vec<String>,
+    priced_as: Option<String>,
+    unpriced_only: bool,
+    tagged: bool,
+    totals: Totals,
+    records: f64,
+    unpriced_records: f64,
+}
+
+impl ModelRow {
+    /// Only meaningful when exactly one gateway fed the row.
+    fn api(&self) -> &str {
+        match self.apis.as_slice() {
+            [one] => one,
+            _ => "",
+        }
+    }
+
+    /// isModelCostUnknown: every record lacks rates, so the cost is unknown rather than zero.
+    fn cost_unknown(&self) -> bool {
+        self.records > 0.0 && self.unpriced_records >= self.records
+    }
+}
+
 #[derive(Default)]
 struct Merged {
     cost: f64,
@@ -535,7 +561,7 @@ struct Merged {
     hourly: bool,
     clock: Clock,
     providers: Vec<(&'static str, Totals, i64)>,
-    models: Vec<(String, Totals)>,
+    models: Vec<ModelRow>,
     periods: Vec<String>,
     by_period: HashMap<String, HashMap<&'static str, Totals>>,
 }
@@ -544,7 +570,7 @@ struct Merged {
 /// names one. `window` is the request, whose rolling hours the hourly periods follow.
 fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option<&str>) -> Merged {
     let mut m = Merged::default();
-    let mut models: HashMap<String, Totals> = HashMap::new();
+    let mut models: HashMap<String, ModelRow> = HashMap::new();
     let mut providers: HashMap<&'static str, Totals> = HashMap::new();
     let hourly = summary["buckets"].as_array().into_iter().flatten().any(|b| b["hourStart"].is_string());
     for b in summary["buckets"].as_array().into_iter().flatten() {
@@ -552,7 +578,13 @@ fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option
         if hidden.contains(&kind) {
             continue;
         }
-        let model_key = format!("{kind}\0{}\0{}", field(b, "apiProvider"), field(b, "model"));
+        // A tagged bucket keys by what the user said it is, so one model under several gateway
+        // names collapses into one row.
+        let tagged_as = b["pricedAs"].as_str().filter(|_| b["costSource"] == "userTagged");
+        let model_key = match tagged_as {
+            Some(priced_as) => format!("{kind}\0tag\0{priced_as}"),
+            None => format!("{kind}\0{}\0{}", field(b, "apiProvider"), field(b, "model")),
+        };
         if model.is_some_and(|k| k != model_key) {
             continue;
         }
@@ -586,7 +618,23 @@ fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option
             t.tokens += total.tokens;
         };
         add(providers.entry(kind).or_default());
-        add(models.entry(model_key).or_default());
+        let entry = models.entry(model_key.clone()).or_insert_with(|| ModelRow {
+            key: model_key,
+            kind,
+            model: tagged_as.unwrap_or(field(b, "model")).to_string(),
+            priced_as: b["pricedAs"].as_str().map(str::to_string),
+            unpriced_only: true,
+            ..ModelRow::default()
+        });
+        let api = field(b, "apiProvider");
+        if !api.is_empty() && !entry.apis.iter().any(|a| a == api) {
+            entry.apis.push(api.to_string());
+        }
+        entry.unpriced_only &= b["costSource"] == "unpriced";
+        entry.tagged |= b["costSource"] == "userTagged";
+        entry.records += records;
+        entry.unpriced_records += unpriced;
+        add(&mut entry.totals);
         let period = if hourly { iso_ms(field(b, "hourStart")).map(iso_of).unwrap_or_default() } else { field(b, "day").to_string() };
         add(m.by_period.entry(period).or_default().entry(kind).or_default());
     }
@@ -595,8 +643,8 @@ fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option
         *sessions.entry(field(&src["fingerprint"], "provider")).or_default() += src["distinctSessions"].as_i64().unwrap_or(0);
     }
     m.providers = PROVIDERS.iter().filter_map(|p| providers.get(p.0).map(|t| (p.0, *t, sessions.get(p.0).copied().unwrap_or(0)))).collect();
-    m.models = models.into_iter().collect();
-    m.models.sort_by(|a, b| b.1.cost.total_cmp(&a.1.cost).then(b.1.tokens.total_cmp(&a.1.tokens)));
+    m.models = models.into_values().collect();
+    m.models.sort_by(|a, b| b.totals.cost.total_cmp(&a.totals.cost).then(b.totals.tokens.total_cmp(&a.totals.tokens)));
     let bounds = window.filter(|w| w["resolution"] == "hour").and_then(|w| Some((iso_ms(w["sinceTime"].as_str()?)?, iso_ms(w["untilTime"].as_str()?)?)));
     m.hourly = hourly || bounds.is_some();
     if let Some((since, until)) = bounds {
@@ -630,11 +678,11 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     page = if !connected {
         page.child(muted_line(t, if u.metric == "limits" { "Connect an environment to see limits." } else { "Connect an environment to see usage." }))
     } else if u.metric == "limits" {
-        page.child(limits(s, cx, t))
+        page.child(super::usage_limits::view(s, cx, t, &mut overlays))
     } else if let Some(error) = u.error.as_ref().filter(|_| u.summary.is_none()) {
         page.child(col().w_full().py(48.0).items_center().child(text(error.clone()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center)))
     } else if let Some(summary) = &u.summary {
-        overview(s, t, summary, page)
+        overview(s, t, summary, page, &mut overlays)
     } else {
         skeleton(t, page)
     };
@@ -642,6 +690,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         model_dialog(s, t, summary, key, &mut overlays);
     }
     super::usage_prices::view(s, t, &mut overlays);
+    super::usage_tags::view(s, t, &mut overlays);
     let body = kit::scroll_area(
         "usage-scroll",
         col().key("usage-scroll").grow(1.0).min_h(0.0).w_full().items_center().scroll(ScrollSpec { stick_bottom: false }).child(page),
@@ -673,7 +722,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     .absolute(0.0, 0.0)
 }
 
-fn muted_line(t: &T, line: &str) -> El {
+pub(super) fn muted_line(t: &T, line: &str) -> El {
     text(line.to_string()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap()
 }
 
@@ -824,262 +873,9 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     col().w_full().child(bar.child(right)).child(el().w_full().h(1.0).fill(t.c.border))
 }
 
-// ---- limits -----------------------------------------------------------------------------
-
-struct Account {
-    driver: String,
-    name: String,
-    windows: Vec<Value>,
-}
-
-fn notice(limits: &Value) -> Option<String> {
-    let message = limits["unavailable"]["message"].as_str().map(str::to_string);
-    match limits["unavailable"]["reason"].as_str() {
-        Some("unsupported") => Some(message.unwrap_or_else(|| "This account has no subscription limits.".into())),
-        Some("probeFailed") => Some(message.unwrap_or_else(|| "Could not read limits.".into())),
-        _ if limits["windows"].as_array().is_none_or(Vec::is_empty) => Some("No limits reported.".into()),
-        _ => None,
-    }
-}
-
-fn kind_rank(kind: &str) -> u8 {
-    match kind {
-        "session" => 0,
-        "weekly" => 1,
-        "monthly" => 2,
-        _ => 3,
-    }
-}
-
-fn reset_at(w: &Value) -> Option<i64> {
-    w["resetsAt"].as_str().and_then(iso_ms)
-}
-
-fn elapsed(w: &Value, now: i64) -> Option<f64> {
-    let len = w["windowDurationMins"].as_f64()? * MINUTE as f64;
-    let at = reset_at(w)?;
-    (len > 0.0).then(|| ((len - (at - now) as f64) / len).clamp(0.0, 1.0))
-}
-
-fn limits(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
-    let u = &s.ui.pages.usage;
-    let now = s.now_ms;
-    let providers = s.state().config.as_ref().and_then(|c| c["providers"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
-    let mut accounts: Vec<Account> = Vec::new();
-    let mut notices: Vec<String> = Vec::new();
-    let mut links: Vec<&Value> = Vec::new();
-    for p in providers {
-        let usable = p["enabled"].as_bool().unwrap_or(false) && p["installed"].as_bool().unwrap_or(false) && field(p, "availability") != "unavailable";
-        let limits = &p["usageLimits"];
-        if !usable || limits.is_null() || u.hidden.iter().any(|h| *h == kind_of_driver(field(p, "driver"))) {
-            continue;
-        }
-        if limits["externalUsage"].is_object() {
-            links.push(p);
-        }
-        match notice(limits) {
-            Some(n) if limits["unavailable"]["reason"] != "unsupported" => {
-                let name = p["displayName"].as_str().unwrap_or(field(p, "driver"));
-                notices.push(format!("{name}: {n}"));
-            }
-            Some(_) => {}
-            None => accounts.push(Account {
-                driver: field(p, "driver").to_string(),
-                name: p["auth"]["email"].as_str().or(p["displayName"].as_str()).unwrap_or("").to_string(),
-                windows: limits["windows"].as_array().cloned().unwrap_or_default(),
-            }),
-        }
-    }
-    let mut out = col().w_full().gap(32.0);
-    if accounts.is_empty() && notices.is_empty() && links.is_empty() {
-        return out.child(muted_line(t, "No provider on the selected environments reports subscription limits."));
-    }
-    if !notices.is_empty() {
-        let mut lines = col().gap(2.0).grow(1.0).shrink();
-        for n in notices {
-            lines = lines.child(text(n).font(theme::SM_MEDIUM).color(t.c.warning_foreground).wrap());
-        }
-        out = out.child(
-            row()
-                .w_full()
-                .gap(8.0)
-                .radius(radius::XL)
-                .border(1.0, t.c.warning.alpha_mul(0.32))
-                .fill(t.c.warning_surface)
-                .px(14.0)
-                .py(12.0)
-                .child(icon(&i::TRIANGLE_ALERT, 16.0).color(t.c.warning).mt(2.0).self_start())
-                .child(lines),
-        );
-    }
-    let mut drivers: Vec<&str> = Vec::new();
-    for a in &accounts {
-        if !drivers.contains(&a.driver.as_str()) {
-            drivers.push(&a.driver);
-        }
-    }
-    for driver in drivers {
-        let members: Vec<&Account> = accounts.iter().filter(|a| a.driver == driver).collect();
-        let (label, _) = presentation(kind_of_driver(driver));
-        let mut section = col().w_full().gap(12.0).child(
-            row().gap(8.0).center_y().child(el().size(20.0, 20.0).center().child(provider_icon(t, driver, 16.0))).child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground)),
-        );
-        // Codex ids name slots, so pool by kind; other drivers' ids are distinct allowances.
-        let mut pools: Vec<(String, Vec<(usize, &Value)>)> = Vec::new();
-        for (n, a) in members.iter().enumerate() {
-            for w in &a.windows {
-                let key = if driver == "codex" { field(w, "kind").to_string() } else { format!("{}:{}", field(w, "kind"), field(w, "id")) };
-                match pools.iter_mut().find(|p| p.0 == key) {
-                    Some(pool) => pool.1.push((n, w)),
-                    None => pools.push((key, vec![(n, w)])),
-                }
-            }
-        }
-        pools.sort_by_key(|p| kind_rank(field(p.1[0].1, "kind")));
-        for (key, pool) in &pools {
-            section = section.child(pool_card(t, cx, driver, key, &members, pool, now));
-        }
-        out = out.child(section);
-    }
-    for p in links {
-        let link = &p["usageLimits"]["externalUsage"];
-        let url = field(link, "url").to_string();
-        out = out.child(
-            row()
-                .w_full()
-                .gap(12.0)
-                .radius(radius::XL)
-                .border(1.0, t.c.border)
-                .padding(16.0)
-                .center_y()
-                .child(provider_icon(t, field(p, "driver"), 20.0))
-                .child(
-                    col()
-                        .grow(1.0)
-                        .shrink()
-                        .gap(4.0)
-                        .child(text(field(link, "label").to_string()).font(theme::SM_MEDIUM).color(t.c.foreground))
-                        .child(text(p["auth"]["email"].as_str().unwrap_or("").to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground)),
-                )
-                .child(kit::Button::new("Manage usage").variant("ghost-muted").size("xs").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                    let _ = tx.open_url(&url);
-                })),
-        );
-    }
-    out
-}
-
-fn pace_icon(used: f64, elapsed: f64) -> &'static rune::Icon {
-    let gap = used - elapsed * 100.0;
-    if gap > 5.0 {
-        &i::TRENDING_UP
-    } else if gap < -5.0 {
-        &i::TRENDING_DOWN
-    } else {
-        &i::GAUGE
-    }
-}
-
-fn cursor_copy(id: &str) -> Option<(&'static str, &'static str)> {
-    match id {
-        "totalPercentUsed" => Some(("Overall", "Combined usage across both allowances, not a third quota.")),
-        "autoPercentUsed" => Some(("Cursor Models", "Grok and Composer use this first. Auto can use either pool.")),
-        "apiPercentUsed" => Some(("Other Models", "Claude, GPT, and Gemini use this pool. Grok and Composer fall back here.")),
-        _ => None,
-    }
-}
-
-fn pool_card(t: &T, cx: &mut rune::Cx<App>, driver: &str, key: &str, members: &[&Account], pool: &[(usize, &Value)], now: i64) -> El {
-    let first = pool[0].1;
-    let used = pool.iter().map(|(_, w)| w["usedPercent"].as_f64().unwrap_or(0.0)).sum::<f64>() / pool.len() as f64;
-    let timed: Vec<(f64, f64)> = pool.iter().filter_map(|(_, w)| Some((w["usedPercent"].as_f64().unwrap_or(0.0), elapsed(w, now)?))).collect();
-    let pace = (!timed.is_empty()).then(|| {
-        let n = timed.len() as f64;
-        pace_icon(timed.iter().map(|x| x.0).sum::<f64>() / n, timed.iter().map(|x| x.1).sum::<f64>() / n)
-    });
-    let copy = if driver == "cursor" { cursor_copy(field(first, "id")) } else { None };
-    let label = copy.map(|c| c.0.to_string()).unwrap_or_else(|| field(first, "label").to_string());
-    let mut figure = row()
-        .gap(8.0)
-        .center_y()
-        .child(text(format!("{}%", (100.0 - used).round())).font(theme::weight(theme::TEXT_3XL, theme::SEMIBOLD).features("'tnum' 1")).color(t.c.foreground))
-        .child(text("left").font(theme::TEXT_SM).color(t.c.muted_foreground).mt(8.0));
-    if let Some(glyph) = pace {
-        figure = figure.child(icon(glyph, 14.0).color(t.c.muted_foreground).mt(8.0));
-    }
-    let left = col().w(176.0).shrink().gap(4.0).child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground)).child(figure);
-    let color = color(t, driver);
-    let columns = members.len();
-    let mut bars = row().grow(1.0).shrink().min_w(0.0).gap(4.0);
-    for n in 0..columns {
-        let Some((_, w)) = pool.iter().find(|(m, _)| *m == n) else {
-            bars = bars.child(el().grow(1.0).w(0.0));
-            continue;
-        };
-        bars = bars.child(segment(t, cx, &format!("usage-seg-{driver}-{key}-{n}"), members[n], w, color, columns > 1, now));
-    }
-    let mut card = col()
-        .w_full()
-        .gap(12.0)
-        .radius(radius::LG)
-        .border(1.0, t.c.border.alpha_mul(0.6))
-        .padding(16.0)
-        .child(row().w_full().gap(24.0).center_y().child(left).child(bars));
-    if let Some((_, description)) = copy {
-        card = card.child(text(description).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
-    }
-    card
-}
-
-#[allow(clippy::too_many_arguments)]
-fn segment(t: &T, cx: &mut rune::Cx<App>, key: &str, account: &Account, w: &Value, color: Color, named: bool, now: i64) -> El {
-    let width = cx.layout_with(key, |r| r[2]).unwrap_or(744.0);
-    let remaining = (100.0 - w["usedPercent"].as_f64().unwrap_or(0.0).clamp(0.0, 100.0)).round() as f32;
-    let h = 32.0;
-    let mut seg = el().key(key.to_string()).grow(1.0).w(0.0).min_w(0.0).h(h).radius(radius::MD).fill(t.c.muted).clip_rounded(radius::MD);
-    seg = seg.child(el().absolute(0.0, 0.0).w(width * remaining / 100.0).h(h).radius(radius::MD).fill(color.alpha_mul(0.35)));
-    if remaining < 100.0 {
-        // The used share hatched in the bar's colour: it refills when the window resets.
-        let hatch_w = width * (100.0 - remaining) / 100.0;
-        let mut shape = Shape::new();
-        let mut x = -h;
-        while x < hatch_w {
-            shape = shape.line([x, h], [x + h, 0.0], 1.0, LineCap::Butt, color.alpha_mul(0.2));
-            x += 5.0 * std::f32::consts::SQRT_2;
-        }
-        seg = seg.child(canvas(shape.view_box(hatch_w.max(1.0), h)).absolute(width - hatch_w, 0.0).w(hatch_w).h(h));
-    }
-    if let Some(e) = elapsed(w, now) {
-        let left = (1.0 - e) as f32;
-        let x = (width * left).max(3.0).min(width - 3.0);
-        seg = seg
-            .child(el().absolute(x - 3.0, 0.0).w(6.0).h(h).fill(t.c.background))
-            .child(el().absolute(x - 1.0, 2.0).w(2.0).h(h - 4.0).radius(radius::FULL).fill(t.c.foreground));
-    }
-    let mut inner = row().absolute(0.0, 0.0).w(width).h(h).px(8.0).gap(6.0).center_y();
-    if named {
-        inner = inner
-            .child(text(account.name.clone()).font(theme::XS_MEDIUM).color(t.c.foreground).truncate().shrink())
-            .child(text(format!("{remaining}%")).font(theme::weight(theme::TEXT_XS, theme::SEMIBOLD).features("'tnum' 1")).color(t.c.foreground));
-    }
-    if let Some(at) = reset_at(w) {
-        let resets = if at <= now {
-            "resets now".to_string()
-        } else if at - now < MINUTE {
-            "Resets momentarily".to_string()
-        } else {
-            format!("↻ {}", duration(at - now))
-        };
-        inner = inner.child(spacer()).child(
-            row().px(6.0).py(2.0).radius(radius::SM).fill(t.c.background.alpha_mul(0.85)).child(text(resets).font(theme::TEXT_2XS.features("'tnum' 1")).color(t.c.foreground)),
-        );
-    }
-    seg.child(inner)
-}
-
 // ---- cost and tokens --------------------------------------------------------------------
 
-fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
+fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.usage;
     let tokens_view = u.metric == "tokens";
     let mut m = merge(summary, &u.hidden, u.answered.as_ref(), None);
@@ -1094,7 +890,25 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
         text(format!("{} sessions{}", grouped(sessions), if tokens_view { "" } else { " · API estimate" })).font(theme::TEXT_XS).color(t.c.muted_foreground),
     );
     if !tokens_view && m.records > 0.0 && m.unpriced > 0.0 {
-        caption = caption.child(icon(&i::INFO, 12.0).color(t.c.muted_foreground));
+        let trigger = row()
+            .key("usage-unpriced-info")
+            .size(16.0, 16.0)
+            .center()
+            .radius(radius::SM)
+            .cursor(rune::Cursor::Pointer)
+            .role("button")
+            .label("Unpriced usage details")
+            .child(icon(&i::INFO, 12.0).color(t.c.muted_foreground))
+            .hover_delays(std::time::Duration::from_millis(300), std::time::Duration::ZERO)
+            .on_hover_change(|s: &mut App, on, _| ui(s).unpriced_tip = on)
+            .on_press(|s: &mut App| ui(s).unpriced_tip = true);
+        caption = caption.child(
+            kit::Tooltip::new("usage-unpriced-tip")
+                .trigger(trigger)
+                .label(format!("API estimate excludes {} unpriced records.", percent(m.unpriced / m.records)))
+                .open(u.unpriced_tip)
+                .build(&kit::theme(t), overlays),
+        );
     }
     let mut left = col()
         .w(288.0)
@@ -1600,22 +1414,24 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
     if m.models.is_empty() {
         return table.child(row().w_full().py(24.0).center().child(text("No activity in this window.").font(theme::TEXT_SM).color(muted)));
     }
-    let peak = m.models.iter().map(|x| if tokens_view { x.1.tokens } else { x.1.cost }).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
+    let peak = m.models.iter().map(|x| if tokens_view { x.totals.tokens } else { x.totals.cost }).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
     let total = if tokens_view { m.tokens } else { m.cost }.max(f64::MIN_POSITIVE);
-    for (n, (key, totals)) in by_metric(&m.models, tokens_view).into_iter().enumerate() {
-        let mut parts = key.split('\0');
-        let (kind, api, model) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
+    for (n, line) in by_metric(&m.models, tokens_view).into_iter().enumerate() {
+        let (kind, api, model, totals) = (line.kind, line.api(), line.model.as_str(), line.totals);
         let (_, driver) = presentation(kind);
         let v = if tokens_view { totals.tokens } else { totals.cost };
         let mut name = row().gap(6.0).center_y().child(provider_icon(t, driver, 14.0)).child(text(model.to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink());
         if !api.is_empty() {
             name = name.child(text(format!("via {api}")).font(theme::TEXT_XS).color(muted));
         }
-        let unpriced = totals.cost == 0.0 && totals.tokens > 0.0;
+        if line.unpriced_only || line.tagged {
+            name = name.child(tag_button(t, line));
+        }
+        let unpriced = line.cost_unknown();
         let cost = if unpriced { "Unpriced".to_string() } else { usd(totals.cost) };
         // modelShare: an unknown cost has no cost share, only a token share.
         let share = if unpriced && !tokens_view { String::new() } else { percent(v / total) };
-        let open = key.clone();
+        let open = line.key.clone();
         table = table
             .child(
                 row()
@@ -1636,7 +1452,7 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
                             .shrink()
                             .min_w(0.0)
                             .child(name)
-                            .child(if v > 0.0 { el().mt(6.0).h(2.0).w(((v / peak) as f32 * 192.0).max(2.0)).radius(radius::FULL).fill(color(t, kind)) } else { el().mt(6.0).h(2.0) }),
+                            .child(if v > 0.0 { el().mt(6.0).h(2.0).w(((v / peak) as f32 * 192.0).max(8.0)).radius(radius::FULL).fill(color(t, kind)) } else { el().mt(6.0).h(2.0) }),
                     )
                     .child(cell(cost, 120.0, num, if unpriced { muted } else { t.c.foreground }))
                     .child(cell(share, 96.0, num, muted))
@@ -1679,11 +1495,36 @@ fn period_table(t: &T, m: &Merged) -> El {
     table
 }
 
+/// The row's "Tag"/"Tagged" chip, opening UsageModelTagDialog on its transcript name or tag.
+fn tag_button(t: &T, line: &ModelRow) -> El {
+    let target = super::usage_tags::Target {
+        provider: line.kind.to_string(),
+        label: line.model.clone(),
+        untagged: (!line.tagged).then(|| (line.api().to_string(), line.model.clone())),
+        tagged_as: line.priced_as.clone().filter(|_| line.tagged),
+    };
+    row()
+        .key(format!("usage-tag-{}", line.key))
+        .gap(4.0)
+        .px(6.0)
+        .py(2.0)
+        .center_y()
+        .radius(radius::XS)
+        .border(1.0, t.c.border)
+        .hover(t.c.accent)
+        .cursor(rune::Cursor::Pointer)
+        .role("button")
+        .label(format!("Tag {}", line.model))
+        .on_press(move |s: &mut App| super::usage_tags::open(s, target.clone()))
+        .child(icon(&i::TAG, 12.0).color(t.c.muted_foreground))
+        .child(text(if line.tagged { "Tagged" } else { "Tag" }).font(theme::TEXT_XS).color(t.c.muted_foreground))
+}
+
 /// The breakdown's order: by cost, or by tokens in the tokens view (sortModelsByTokens).
-fn by_metric(models: &[(String, Totals)], tokens_view: bool) -> Vec<&(String, Totals)> {
+fn by_metric(models: &[ModelRow], tokens_view: bool) -> Vec<&ModelRow> {
     let mut sorted: Vec<_> = models.iter().collect();
     if tokens_view {
-        sorted.sort_by(|a, b| b.1.tokens.total_cmp(&a.1.tokens).then(b.1.cost.total_cmp(&a.1.cost)));
+        sorted.sort_by(|a, b| b.totals.tokens.total_cmp(&a.totals.tokens).then(b.totals.cost.total_cmp(&a.totals.cost)));
     }
     sorted
 }
@@ -1843,8 +1684,9 @@ mod tests {
 
     #[test]
     fn the_breakdown_orders_models_by_the_metric_and_lists_active_periods_newest_first() {
-        let models = vec![("a".to_string(), Totals { cost: 5.0, tokens: 10.0 }), ("b".to_string(), Totals { cost: 1.0, tokens: 90.0 })];
-        let names = |v: Vec<&(String, Totals)>| v.iter().map(|m| m.0.clone()).collect::<Vec<_>>();
+        let line = |key: &str, cost: f64, tokens: f64| ModelRow { key: key.into(), totals: Totals { cost, tokens }, ..ModelRow::default() };
+        let models = vec![line("a", 5.0, 10.0), line("b", 1.0, 90.0)];
+        let names = |v: Vec<&ModelRow>| v.iter().map(|m| m.key.clone()).collect::<Vec<_>>();
         assert_eq!(names(by_metric(&models, false)), ["a", "b"]);
         assert_eq!(names(by_metric(&models, true)), ["b", "a"]);
 
@@ -1854,6 +1696,27 @@ mod tests {
         }
         assert_eq!(active_periods(&m), ["2026-11-03", "2026-11-01"]);
         assert!(active_periods(&Merged::default()).is_empty());
+    }
+
+    #[test]
+    fn tagged_buckets_share_one_row_and_unpriced_rows_stay_taggable() {
+        let bucket = |api: &str, model: &str, source: &str, priced_as: Value, records: f64, unpriced: f64| {
+            let cost = if unpriced >= records { 0.0 } else { 1.0 };
+            json!({"provider": "pi", "apiProvider": api, "model": model, "costSource": source, "pricedAs": priced_as, "day": "2026-11-01", "records": records, "unpricedRecords": unpriced, "costUsd": cost, "totals": {"outputTokens": 10}})
+        };
+        let opus = json!("anthropic/claude-opus-5");
+        let summary = json!({"buckets": [
+            bucket("agentrouter", "opus-5", "userTagged", opus.clone(), 2.0, 0.0),
+            bucket("tokenrouter", "opus-latest", "userTagged", opus, 3.0, 0.0),
+            bucket("moonshot", "kimi-k3", "unpriced", Value::Null, 4.0, 4.0),
+        ]});
+        let m = merge(&summary, &[], None, None);
+        let rows: Vec<_> = m.models.iter().map(|r| (r.key.as_str(), r.model.as_str(), r.api(), r.tagged, r.unpriced_only, r.cost_unknown())).collect();
+        assert_eq!(
+            rows,
+            [("pi\0tag\0anthropic/claude-opus-5", "anthropic/claude-opus-5", "", true, false, false), ("pi\0moonshot\0kimi-k3", "kimi-k3", "moonshot", false, true, true)]
+        );
+        assert_eq!(merge(&summary, &[], None, Some("pi\0tag\0anthropic/claude-opus-5")).records, 5.0);
     }
 
     #[test]
