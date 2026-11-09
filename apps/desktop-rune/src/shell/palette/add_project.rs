@@ -734,7 +734,7 @@ fn start_clone(s: &mut App, destination: &str) {
         s.ui.shell.palette.add.pending = Some((pending, Pending::Clone(project_id)));
     }
 }
-fn iso_now() -> String {
+pub(crate) fn iso_now() -> String {
     let ms = data::now_ms();
     let (days, rest) = (ms.div_euclid(86_400_000), ms.rem_euclid(86_400_000));
     let (h, m, sec, milli) = (rest / 3_600_000, rest / 60_000 % 60, rest / 1000 % 60, rest % 1000);

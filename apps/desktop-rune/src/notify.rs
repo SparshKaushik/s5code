@@ -143,9 +143,32 @@ fn sync_badge(s: &mut App) {
     }
 }
 
+thread_local! {
+    /// The main window, raised when a desktop notification is clicked (UI thread only).
+    static WINDOW: std::cell::OnceCell<rune::AppHandle<App>> = const { std::cell::OnceCell::new() };
+}
+
+pub fn set_window(handle: rune::AppHandle<App>) {
+    WINDOW.with(|w| {
+        let _ = w.set(handle);
+    });
+}
+
+/// Threads whose desktop notification was clicked, from the helper processes' threads.
+static CLICKED: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
+
+/// A clicked notification brings the window forward on its thread, as Electron's does.
+fn open_clicked(s: &mut App) -> bool {
+    let Some(id) = CLICKED.lock().map(|mut c| c.pop()).ok().flatten() else { return false };
+    CLICKED.lock().map(|mut c| c.clear()).ok();
+    WINDOW.with(|w| w.get().map(|h| h.open()));
+    crate::shell::sidebar::open_thread(s, &id);
+    true
+}
+
 pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
     let now = data::now_ms();
-    let changed = observe(s, now);
+    let changed = open_clicked(s) | observe(s, now);
     let before = s.ui.notify.toasts.len();
     s.ui.notify.toasts.retain(|t| t.until > now);
     // Nothing else may wake the loop while a toast is up, so its timeout schedules its own poll.
@@ -225,7 +248,7 @@ fn present(s: &mut App, id: &str, description: String, status: Status, kind: Kin
     if !has_desktop(&mode) || focused {
         return;
     }
-    os::notify(title, &description);
+    os::notify(title, &description, id, s.ui.panel.waker.clone());
     let ui = &mut s.ui.notify;
     ui.pending.retain(|p| p != id);
     ui.pending.push(id.to_string());
@@ -319,7 +342,33 @@ fn toast_view(toast: &ThreadToast, t: &T, k: &rune_kit::Kit) -> El {
 /// Desktop notifications and the dock badge, through what each OS offers without a bundle
 /// entitlement: `osascript` and the Dock tile on macOS, `notify-send` elsewhere.
 mod os {
-    pub fn notify(title: &str, body: &str) {
+    /// On Linux, `notify-send --wait` prints the action the user clicked; older libnotify
+    /// without `--action` fails, and the plain notification shows instead.
+    pub fn notify(title: &str, body: &str, thread: &str, wake: Option<rune::Waker>) {
+        if cfg!(target_os = "linux") {
+            let (title, body, thread) = (title.to_owned(), body.to_owned(), thread.to_owned());
+            std::thread::spawn(move || {
+                let out = std::process::Command::new("notify-send")
+                    .args(["--app-name", "S5 Code", "--action=default=Open", "--wait", &title, &body])
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output();
+                match out {
+                    Ok(out) if out.status.success() => {
+                        if String::from_utf8_lossy(&out.stdout).trim() == "default" {
+                            super::CLICKED.lock().map(|mut c| c.push(thread)).ok();
+                            if let Some(wake) = wake {
+                                wake();
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = std::process::Command::new("notify-send").args(["--app-name", "S5 Code", &title, &body]).status();
+                    }
+                }
+            });
+            return;
+        }
         let mut command = if cfg!(target_os = "macos") {
             let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
             let mut c = std::process::Command::new("osascript");

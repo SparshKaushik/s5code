@@ -6,9 +6,11 @@
 
 mod chat;
 mod data;
+mod env;
 mod host;
 mod icons;
 mod kit;
+mod links;
 mod notify;
 mod onboarding;
 mod pages;
@@ -18,6 +20,7 @@ mod settings;
 mod shell;
 mod theme;
 mod tokens;
+mod wizard;
 
 use rune::{App as RuneApp, AppSpec, Cx, El, KeyEvent, Tx, Waker};
 
@@ -60,6 +63,9 @@ pub struct Ui {
     pub notify: notify::Ui,
     pub search: search::Ui,
     pub onboarding: onboarding::Ui,
+    pub env: env::Ui,
+    pub links: links::Ui,
+    pub wizard: wizard::Ui,
 }
 
 pub struct App {
@@ -115,6 +121,8 @@ impl App {
 
 fn setup(s: &mut App, waker: Waker) {
     s.ui.panel.waker = Some(waker.clone());
+    env::start(s);
+    links::start(s);
     s.host = host::start(move || waker());
 }
 
@@ -123,12 +131,14 @@ fn poll_host(s: &mut App) -> bool {
     match event {
         host::Event::Ready { url, token } => {
             let waker = s.ui.panel.waker.clone().expect("setup stores the waker");
-            s.src = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
-            s.navigate(s.route.clone());
+            *env::local_mut(s) = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
+            if s.ui.env.active == env::LOCAL {
+                s.navigate(s.route.clone());
+            }
         }
         host::Event::Failed(reason) => {
             eprintln!("s5code-rune: {reason}");
-            if let Source::Fixture(state) = &mut s.src {
+            if let Source::Fixture(state) = env::local_mut(s) {
                 state.conn = s5_net::Conn::Closed(reason);
             }
         }
@@ -151,6 +161,9 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= chat::details::poll(s);
     changed |= notify::poll(s, tx);
     changed |= onboarding::poll(s, tx);
+    changed |= env::poll(s);
+    changed |= links::poll(s);
+    changed |= wizard::poll(s);
     changed |= search::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();
@@ -213,7 +226,9 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", (1440.0, 900.0), App::new, view)
     };
-    RuneApp::new(spec).run();
+    let app = RuneApp::new(spec).on_open_url(links::on_open_url);
+    notify::set_window(app.handle());
+    app.run();
     panel::browser::shutdown();
     host::shutdown();
 }

@@ -996,11 +996,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     confirm_dialog(s, &model, t, overlays);
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
+    crate::env::sidebar_menu(s, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()
         .w(layout::SIDEBAR_W + 1.0)
         .h_full()
         .child(chrome::header(s, t, inset))
+        .children(crate::env::sidebar_switcher(s, t))
         .child(chrome::search_bar(s, t))
         .child(list)
         .child(chrome::footer(s, &model, t));
