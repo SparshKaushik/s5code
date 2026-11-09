@@ -45,11 +45,20 @@ pub struct Ui {
     stats_asked: HashSet<String>,
     stats_pending: Option<u64>,
     /// The hosts offered in the picker, kept from the unfiltered answer while a host narrows it.
-    hosts: Vec<Value>,
+    pub(super) hosts: Vec<Value>,
+    /// The scope's first page without the search (baselineQuery), held while a search runs.
+    baseline: Read,
+    /// The scope's authored and review-requested lists, which the groups lead with (partitionTargets).
+    partitions: [Read; 2],
+    /// Every state's rows in the scope while the Filters menu is open (facetQuery).
+    facets: Read,
+    pub picker: super::pr_filters::Picker,
     pub menu: Option<&'static str>,
     pub submenu: Option<&'static str>,
     pub selected: Option<String>,
     pub context: Option<(String, f32, f32)>,
+    /// The rows' quick actions, stack, checks and change breakdown.
+    pub row: super::pr_row::Ui,
 }
 
 #[derive(Clone, PartialEq)]
@@ -61,23 +70,23 @@ pub struct Filters {
     pub review: &'static str,
     pub checks: &'static str,
     pub author: Option<String>,
-    pub label: Option<String>,
+    /// Each one required (`labels: [[a], [b]]`), ten at most.
+    pub labels: Vec<String>,
     pub project: Option<String>,
     pub host: Option<String>,
 }
 
 impl Default for Filters {
     fn default() -> Self {
-        Filters { state: "open", involvement: "all", sort: "ready", draft: "all", review: "all", checks: "all", author: None, label: None, project: None, host: None }
+        Filters { state: "open", involvement: "all", sort: "ready", draft: "all", review: "all", checks: "all", author: None, labels: Vec::new(), project: None, host: None }
     }
 }
 
 impl Filters {
+    /// The Filters badge: one per narrowed menu, and one per chosen label.
     fn count(&self) -> usize {
-        [self.state != "open", self.involvement != "all", self.draft != "all", self.review != "all", self.checks != "all", self.author.is_some(), self.label.is_some(), self.project.is_some(), self.host.is_some()]
-            .iter()
-            .filter(|b| **b)
-            .count()
+        let set = [self.state != "open", self.involvement != "all", self.draft != "all", self.review != "all", self.checks != "all", self.author.is_some(), self.project.is_some(), self.host.is_some()];
+        set.iter().filter(|b| **b).count() + self.labels.len()
     }
 
     /// The menu's `PullRequestListFilters`, which typed qualifiers override key by key.
@@ -91,11 +100,50 @@ impl Filters {
         if let Some(author) = &self.author {
             out.insert("author".into(), json!(author));
         }
-        if let Some(label) = &self.label {
-            out.insert("labels".into(), json!([[label]]));
+        if !self.labels.is_empty() {
+            out.insert("labels".into(), json!(self.labels.iter().map(|l| [l]).collect::<Vec<_>>()));
         }
         out
     }
+}
+
+/// One `pullRequests.list` read kept beside the main list: the input last asked for, the request
+/// in flight, and the latest answer with the input it answers.
+#[derive(Default)]
+struct Read {
+    asked: Option<Value>,
+    pending: Option<u64>,
+    answer: Option<(Value, Value)>,
+}
+
+impl Read {
+    fn answer_for(&self, input: &Value) -> Option<&Value> {
+        self.answer.as_ref().filter(|a| &a.0 == input).map(|a| &a.1)
+    }
+}
+
+/// Folds `read`'s reply, then asks for `input` unless it was the last thing asked; `None` stops
+/// asking. A failed read keeps its last answer, as a query keeps its data.
+fn sync(read: &mut Read, net: Option<&mut s5_net::Net>, input: Option<Value>) -> bool {
+    let Some(net) = net else { return false };
+    let mut changed = false;
+    if let Some(id) = read.pending
+        && let Some(reply) = net.take_reply(id)
+    {
+        read.pending = None;
+        if let (Ok(result), Some(asked)) = (reply, read.asked.clone()) {
+            read.answer = Some((asked, result));
+        }
+        changed = true;
+    }
+    if let Some(input) = input
+        && read.asked.as_ref() != Some(&input)
+    {
+        read.pending = Some(net.request("pullRequests.list", input.clone()));
+        read.asked = Some(input);
+        changed = true;
+    }
+    changed
 }
 
 const STATES: &[(&str, &str, &rune::Icon)] =
@@ -110,9 +158,15 @@ const SORTS: &[(&str, &str, &rune::Icon)] = &[
     ("largest", "Largest shown", &i::MAXIMIZE_2),
     ("smallest", "Smallest shown", &i::MINIMIZE_2),
 ];
-const DRAFTS: &[(&str, &str)] = &[("all", "All"), ("only", "Drafts only"), ("hide", "Hide drafts")];
-const REVIEWS: &[(&str, &str)] = &[("all", "All"), ("approved", "Approved"), ("changes-requested", "Changes requested"), ("review-required", "Review required"), ("none", "No reviews")];
-const CHECKS: &[(&str, &str)] = &[("all", "All"), ("passing", "Passing"), ("failing", "Failing")];
+const DRAFTS: &[(&str, &str, &rune::Icon)] = &[("all", "All", &i::LAYERS), ("only", "Drafts only", &i::GIT_PULL_REQUEST_DRAFT), ("hide", "Hide drafts", &i::EYE_OFF)];
+const REVIEWS: &[(&str, &str, &rune::Icon)] = &[
+    ("all", "All", &i::LAYERS),
+    ("approved", "Approved", &i::CIRCLE_CHECK),
+    ("changes-requested", "Changes requested", &i::CIRCLE_X),
+    ("review-required", "Review required", &i::CIRCLE_DASHED),
+    ("none", "No reviews", &i::CIRCLE_SLASH),
+];
+const CHECKS: &[(&str, &str, &rune::Icon)] = &[("all", "All", &i::LAYERS), ("passing", "Passing", &i::CIRCLE_CHECK), ("failing", "Failing", &i::CIRCLE_X)];
 
 fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.pull_requests
@@ -235,7 +289,7 @@ pub(super) fn parse_query(raw: &str) -> (String, Map<String, Value>) {
                     };
                     state.map(|c| filters.insert("checks".into(), json!(c))).is_some()
                 }
-                "label" | "author" | "draft" | "review" | "status" | "checks" => false,
+                "author" | "draft" | "review" | "status" | "checks" => false,
                 _ if value.starts_with('/') => false,
                 _ => {
                     let list = names(raw_value, Some(key));
@@ -275,12 +329,9 @@ fn merged_filters(f: &Filters, typed: &Map<String, Value>) -> Map<String, Value>
     out
 }
 
-/// The request the toolbar describes, shaped as `pullRequests.list`'s input.
-pub(super) fn input(u: &Ui) -> Value {
-    let f = &u.filters;
-    let (text, typed) = parse_query(&u.sent_query);
-    let filters = merged_filters(f, &typed);
-    let mut v = json!({"state": f.state, "involvement": f.involvement, "limit": u.limit.unwrap_or(PAGE)});
+/// `pullRequests.list`'s input within the toolbar's project and host.
+fn scoped(f: &Filters, state: &str, involvement: &str, limit: u64, filters: Map<String, Value>) -> Value {
+    let mut v = json!({"state": state, "involvement": involvement, "limit": limit});
     if !filters.is_empty() {
         v["filters"] = Value::Object(filters);
     }
@@ -290,6 +341,29 @@ pub(super) fn input(u: &Ui) -> Value {
     if let Some(h) = &f.host {
         v["host"] = json!(h);
     }
+    v
+}
+
+/// baselineTargets: the scope's first page with the menu's filters, without the search.
+fn baseline_input(f: &Filters) -> Value {
+    scoped(f, f.state, f.involvement, PAGE, f.menu())
+}
+
+/// partitionTargets: the baseline asked again for one involvement.
+fn partition_input(f: &Filters, involvement: &str) -> Value {
+    scoped(f, f.state, involvement, PAGE, f.menu())
+}
+
+/// facetTargets: every state's rows in the scope, which the Author and Labels pickers count.
+fn facet_input(f: &Filters) -> Value {
+    scoped(f, "all", f.involvement, PAGE, Map::new())
+}
+
+/// The request the toolbar describes, shaped as `pullRequests.list`'s input.
+pub(super) fn input(u: &Ui) -> Value {
+    let f = &u.filters;
+    let (text, typed) = parse_query(&u.sent_query);
+    let mut v = scoped(f, f.state, f.involvement, u.limit.unwrap_or(PAGE), merged_filters(f, &typed));
     if !text.is_empty() {
         // The list input caps its query at 200 characters.
         v["query"] = json!(text.chars().take(200).collect::<String>().trim());
@@ -302,7 +376,7 @@ pub fn supported(s: &App) -> bool {
 }
 
 /// `host:repository#number`, one row across pages and stats (pullRequestEntryKey).
-fn key(e: &Value) -> String {
+pub(super) fn key(e: &Value) -> String {
     format!("{}:{}#{}", field(e, "host"), field(e, "repository"), e["number"])
 }
 
@@ -318,6 +392,9 @@ pub fn poll(s: &mut App) -> bool {
         let u = ui(s);
         u.invalidating = None;
         u.requested = None;
+        for read in [&mut u.baseline, &mut u.facets].into_iter().chain(u.partitions.iter_mut()) {
+            read.asked = None;
+        }
         changed = true;
     }
     if let Some(id) = s.ui.pages.pull_requests.stats_pending
@@ -349,6 +426,12 @@ pub fn poll(s: &mut App) -> bool {
                 if u.filters.host.is_none() || u.hosts.is_empty() {
                     u.hosts = result["providers"].as_array().cloned().unwrap_or_default();
                 }
+                // The list asked the baseline's own question, so its answer is the baseline's too.
+                let base = baseline_input(&u.filters);
+                if !append && u.requested.as_ref() == Some(&base) {
+                    u.baseline.answer = Some((base.clone(), result.clone()));
+                    u.baseline.asked = Some(base);
+                }
                 u.result = Some(result);
                 u.error = None;
             }
@@ -364,12 +447,60 @@ pub fn poll(s: &mut App) -> bool {
             ui(s).limit = None;
             return true;
         }
-        s.ui.pages.pull_requests.requested = Some(wanted.clone());
-        fetch(s, wanted, false);
+        let u = ui(s);
+        u.requested = Some(wanted.clone());
+        // Clearing a search shows the scope's held first page at once (`answered` = baselineQuery.data).
+        let held = u.baseline.answer_for(&wanted).cloned();
+        match held {
+            Some(held) if requested.is_some() => {
+                u.result = Some(held);
+                u.error = None;
+                u.pending = None;
+            }
+            _ => fetch(s, wanted, false),
+        }
         changed = true;
     }
+    changed |= sync_reads(s);
+    changed |= super::pr_filters::poll(s);
     want_stats(s);
     changed
+}
+
+/// What the page reads beside the list: the baseline while a search or longer page replaces it,
+/// the authored and review-requested partitions once the baseline has rows, and every state's
+/// rows while the Filters menu is open.
+fn sync_reads(s: &mut App) -> bool {
+    let u = &s.ui.pages.pull_requests;
+    let f = &u.filters;
+    let base = baseline_input(f);
+    let baseline = (u.requested.as_ref() != Some(&base)).then(|| base.clone());
+    let listed = u.baseline.answer_for(&base).is_some_and(|r| r["entries"].as_array().is_some_and(|e| !e.is_empty()));
+    let partitioned = partitions_wanted(u) && listed;
+    let [authored, reviewing] = ["authored", "reviewing"].map(|i| partitioned.then(|| partition_input(f, i)));
+    let facets = (u.menu == Some("filters")).then(|| facet_input(f));
+    let mut changed = sync(&mut s.ui.pages.pull_requests.baseline, s.src.net(), baseline);
+    changed |= sync(&mut s.ui.pages.pull_requests.partitions[0], s.src.net(), authored);
+    changed |= sync(&mut s.ui.pages.pull_requests.partitions[1], s.src.net(), reviewing);
+    changed | sync(&mut s.ui.pages.pull_requests.facets, s.src.net(), facets)
+}
+
+/// Records the shown list as the scope's baseline, with `authored` and `reviewing` as its
+/// partitions (scenes and tests).
+pub(super) fn hold_partitions(u: &mut Ui, authored: Value, reviewing: Value) {
+    let base = baseline_input(&u.filters);
+    u.baseline.answer = u.result.clone().map(|r| (base.clone(), r));
+    u.baseline.asked = Some(base);
+    let inputs = [partition_input(&u.filters, "authored"), partition_input(&u.filters, "reviewing")];
+    for ((read, input), answer) in u.partitions.iter_mut().zip(inputs).zip([authored, reviewing]) {
+        read.asked = Some(input.clone());
+        read.answer = Some((input, answer));
+    }
+}
+
+/// partitionsWanted: the groups lead with the partitions only over the whole scope, unsearched.
+fn partitions_wanted(u: &Ui) -> bool {
+    u.filters.involvement == "all" && u.query.text.trim().is_empty()
 }
 
 fn without_limit(v: &Value) -> Value {
@@ -515,19 +646,46 @@ fn load_more(s: &mut App) {
     }
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
-    if !matches!(s.route, Route::PullRequests) || !matches!(e.key, rune::Key::Escape) {
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
+    if !matches!(s.route, Route::PullRequests) {
         return false;
     }
-    let u = ui(s);
-    if u.context.take().is_some() || u.menu.take().is_some() {
-        u.submenu = None;
+    if matches!(e.key, rune::Key::Escape) {
+        let u = ui(s);
+        if u.context.take().is_some() || u.menu.take().is_some() {
+            u.submenu = None;
+            return true;
+        }
+        return u.selected.take().is_some();
+    }
+    if s.ui.shell.palette.open {
+        return false;
+    }
+    // PullRequestsColumn: mod+F focuses the search with its text selected.
+    if e.is_command('f') && !e.mods.shift && !e.mods.alt {
+        let u = ui(s);
+        u.picker.query.focused = false;
+        u.query.focused = true;
+        u.query.anchor = 0;
+        u.query.focus = u.query.text.len();
         return true;
     }
-    if u.selected.take().is_some() {
+    if crate::panel::shortcut(s, e, "rightPanel.close") {
+        return ui(s).selected.take().is_some();
+    }
+    if crate::panel::shortcut(s, e, "thread.copyReference")
+        && let Some(url) = ui(s).selected.clone()
+    {
+        tx.copy(url.clone());
+        crate::shell::palette::toast(s, &format!("{} link copied", short_label(&url)), Some(url.as_str()));
         return true;
     }
     false
+}
+
+/// The change request's `shortLabel` for its URL (findByChangeRequestUrl): GitLab's "MR", else "PR".
+fn short_label(url: &str) -> &'static str {
+    if url.contains("/-/merge_requests/") { "MR" } else { "PR" }
 }
 
 // ---- ranking ----------------------------------------------------------------------------
@@ -688,6 +846,78 @@ fn rank(entries: &mut [Value], sort: &str, group: Group, searching: bool) {
     }
 }
 
+/// The row with the size `listStats` measured, where the list answered without one.
+fn sized(u: &Ui, e: &Value) -> Value {
+    let mut e = e.clone();
+    if size(&e) == 0
+        && let Some(&(additions, deletions)) = u.stats.get(&key(&e))
+    {
+        e["additions"] = json!(additions);
+        e["deletions"] = json!(deletions);
+    }
+    e
+}
+
+/// pullRequestOverrideAfterAction on every held copy of the row (the list, the baseline and the
+/// partition reads), so it leaves views of its old state at once; the next reads confirm it.
+pub(super) fn after_action(u: &mut Ui, row: &str, action: &str, now_ms: i64) {
+    let [authored, reviewing] = &mut u.partitions;
+    let reads = [&mut u.baseline, authored, reviewing].into_iter().filter_map(|r| r.answer.as_mut().map(|a| &mut a.1));
+    for answer in u.result.iter_mut().chain(reads) {
+        for e in answer["entries"].as_array_mut().into_iter().flatten().filter(|e| key(e) == row) {
+            match action {
+                "close" => e["state"] = json!("closed"),
+                "reopen" => e["state"] = json!("open"),
+                "ready" => e["isDraft"] = json!(false),
+                _ => continue,
+            }
+            e["updatedAt"] = json!(super::usage::iso_of(now_ms));
+        }
+    }
+}
+
+/// The authored and review-requested reads the groups lead with, once both answered for this
+/// scope; none while searching, or when the baseline has no rows (baselineEmpty).
+fn held_partitions(u: &Ui) -> Option<[&Value; 2]> {
+    let f = &u.filters;
+    let baseline = u.baseline.answer_for(&baseline_input(f))?;
+    let empty = |key: &str| baseline[key].as_array().is_none_or(Vec::is_empty);
+    if !partitions_wanted(u) || (empty("entries") && empty("errors")) {
+        return None;
+    }
+    Some([u.partitions[0].answer_for(&partition_input(f, "authored"))?, u.partitions[1].answer_for(&partition_input(f, "reviewing"))?])
+}
+
+/// partitionPullRequestsWithPriority: the authored and review-requested reads lead, each row in the
+/// list's own copy where the list has it, so older priority rows join; the list's rest follows.
+fn partitioned(rows: Vec<Value>, authored: Vec<Value>, review: Vec<Value>) -> [(Group, Vec<Value>); 3] {
+    let mut lead: [Vec<Value>; 2] = [Vec::new(), Vec::new()];
+    let mut at: HashMap<String, (usize, usize)> = HashMap::new();
+    for (slot, read) in [authored, review].into_iter().enumerate() {
+        for e in read {
+            match at.get(&key(&e)) {
+                Some(&(held, i)) if held == slot => lead[slot][i] = e,
+                Some(_) => {}
+                None => {
+                    at.insert(key(&e), (slot, lead[slot].len()));
+                    lead[slot].push(e);
+                }
+            }
+        }
+    }
+    let mut others = Vec::new();
+    for e in rows {
+        match at.get(&key(&e)) {
+            Some(&(slot, i)) => lead[slot][i] = e,
+            None => others.push(e),
+        }
+    }
+    let [mut mine, mut asked] = lead;
+    mine.sort_by_key(|e| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0)));
+    asked.sort_by_key(|e| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0)));
+    [(Group::Authored, mine), (Group::Review, asked), (Group::Others, others)]
+}
+
 /// The rows as shown: measured sizes filled in, narrowed by the menu and the typed qualifiers
 /// and text, in their base order, then grouped by involvement and ranked by the sort.
 fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
@@ -703,16 +933,7 @@ fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
         .flatten()
         .filter(|e| matches_filters(&u.filters, &filters, result, e))
         .filter(|e| typed_text.is_empty() || (settled && searching_hosts.contains(field(e, "host"))) || matches_query(e, &typed_text))
-        .map(|e| {
-            let mut e = e.clone();
-            if size(&e) == 0
-                && let Some(&(additions, deletions)) = u.stats.get(&key(&e))
-            {
-                e["additions"] = json!(additions);
-                e["deletions"] = json!(deletions);
-            }
-            e
-        })
+        .map(|e| sized(u, e))
         .collect();
     let searching = !typed_text.is_empty();
     rows.sort_by_key(|e| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0)));
@@ -723,17 +944,29 @@ fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
         rank(&mut rows, u.filters.sort, Group::All, searching);
         return if rows.is_empty() { vec![] } else { vec![(Group::All, rows)] };
     }
-    let mut buckets: [(Group, Vec<Value>); 3] = [(Group::Authored, vec![]), (Group::Review, vec![]), (Group::Others, vec![])];
-    for e in rows {
-        let slot = if authored(result, &e) {
-            0
-        } else if e["viewerReviewRequested"].as_bool().unwrap_or(false) {
-            1
-        } else {
-            2
+    let partitions = held_partitions(u).map(|[mine, asked]| {
+        let narrow = |read: &Value| -> Vec<Value> {
+            read["entries"].as_array().into_iter().flatten().filter(|e| matches_filters(&u.filters, &filters, result, e)).map(|e| sized(u, e)).collect()
         };
-        buckets[slot].1.push(e);
-    }
+        (narrow(mine), narrow(asked))
+    });
+    let buckets = match partitions {
+        Some((mine, asked)) => partitioned(rows, mine, asked),
+        None => {
+            let mut buckets: [(Group, Vec<Value>); 3] = [(Group::Authored, vec![]), (Group::Review, vec![]), (Group::Others, vec![])];
+            for e in rows {
+                let slot = if authored(result, &e) {
+                    0
+                } else if e["viewerReviewRequested"].as_bool().unwrap_or(false) {
+                    1
+                } else {
+                    2
+                };
+                buckets[slot].1.push(e);
+            }
+            buckets
+        }
+    };
     buckets
         .into_iter()
         .filter(|b| !b.1.is_empty())
@@ -863,101 +1096,16 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
 
     let mut sort = Menu::new("pr-sort").trigger(Button("Sort", Some(&i::ARROW_DOWN_UP)).with("default").on_press(toggle("sort")).build(t)).placement(Placement::BottomStart).min_width(208.0).open(open("sort")).on_close(close);
     for &(id, label, glyph) in SORTS {
-        sort = sort.item(MenuItem::new(label).icon(glyph).radio(u.filters.sort == id).on_select(move |s: &mut App| {
-            ui(s).filters.sort = id;
-            ui(s).menu = None;
-        }));
+        // Radio items keep the menu open (Base UI's `closeOnClick` is off for them).
+        sort = sort.item(MenuItem::new(label).icon(glyph).radio(u.filters.sort == id).on_select(move |s: &mut App| ui(s).filters.sort = id));
     }
 
-    let count = u.filters.count();
     let mut filters_trigger = Button("Filters", Some(&i::LIST_FILTER)).with("default").on_press(toggle("filters")).build(t);
+    let count = u.filters.count();
     if count > 0 {
-        filters_trigger = filters_trigger.child(row().h(16.0).px(6.0).radius(radius::FULL).fill(t.c.muted).center().child(text(count.to_string()).font(theme::TEXT_XS).color(t.c.foreground)));
+        filters_trigger = filters_trigger.child(row().h(16.0).px(6.0).radius(radius::FULL).fill(t.c.muted).center().child(text(count.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground)));
     }
-    let result = u.result.as_ref();
-    let sub = u.submenu;
-    let sub_item = |label: &str, glyph: &'static rune::Icon, name: &'static str, entries: Vec<MenuEntry>| {
-        MenuEntry::item(MenuItem::new(label).icon(glyph).submenu(entries, sub == Some(name)).on_submenu_change(move |s: &mut App, on| ui(s).submenu = on.then_some(name)))
-    };
-    macro_rules! radios {
-        ($list:expr, $current:expr, $field:ident) => {
-            $list
-                .iter()
-                .map(|&(id, label, glyph)| {
-                    MenuEntry::item(MenuItem::new(label).icon(glyph).radio($current == id).on_select(move |s: &mut App| {
-                        ui(s).filters.$field = id;
-                        close(s);
-                    }))
-                })
-                .collect::<Vec<_>>()
-        };
-    }
-    macro_rules! plain {
-        ($list:expr, $current:expr, $field:ident) => {
-            $list
-                .iter()
-                .map(|&(id, label)| {
-                    MenuEntry::item(MenuItem::new(label).radio($current == id).on_select(move |s: &mut App| {
-                        ui(s).filters.$field = id;
-                        close(s);
-                    }))
-                })
-                .collect::<Vec<_>>()
-        };
-    }
-    let owned = |current: &Option<String>, any: &str, values: Vec<String>, set: fn(&mut Filters, Option<String>)| {
-        let mut out = vec![MenuEntry::item(MenuItem::new(any).radio(current.is_none()).on_select(move |s: &mut App| {
-            set(&mut ui(s).filters, None);
-            close(s);
-        }))];
-        for v in values {
-            let checked = current.as_deref() == Some(v.as_str());
-            let label = v.clone();
-            out.push(MenuEntry::item(MenuItem::new(label).radio(checked).on_select(move |s: &mut App| {
-                set(&mut ui(s).filters, Some(v.clone()));
-                close(s);
-            })));
-        }
-        out
-    };
-    let entries = result.and_then(|r| r["entries"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
-    let mut authors: Vec<String> = entries.iter().filter_map(|e| e["author"]["login"].as_str().map(str::to_string)).collect();
-    authors.sort_by_key(|a| a.to_lowercase());
-    authors.dedup();
-    let mut labels: Vec<String> = entries.iter().flat_map(|e| e["labels"].as_array().into_iter().flatten()).map(|l| field(l, "name").to_string()).collect();
-    labels.sort_by_key(|a| a.to_lowercase());
-    labels.dedup();
-    let mut projects: Vec<(String, String)> = s.state().projects.iter().map(|p| (field(p, "id").to_string(), field(p, "title").to_string())).collect();
-    projects.sort_by_key(|p| p.1.to_lowercase());
-    let mut project_entries = vec![MenuEntry::item(MenuItem::new("All projects").radio(u.filters.project.is_none()).on_select(move |s: &mut App| {
-        ui(s).filters.project = None;
-        close(s);
-    }))];
-    for (id, title) in projects {
-        let checked = u.filters.project.as_deref() == Some(id.as_str());
-        project_entries.push(MenuEntry::item(MenuItem::new(title).radio(checked).on_select(move |s: &mut App| {
-            ui(s).filters.project = Some(id.clone());
-            close(s);
-        })));
-    }
-    let filters = Menu::new("pr-filters")
-        .trigger(filters_trigger)
-        .placement(Placement::BottomStart)
-        .min_width(208.0)
-        .open(open("filters"))
-        .on_close(close)
-        .entries(vec![
-            sub_item("State", &i::GIT_PULL_REQUEST_ARROW, "state", radios!(STATES, u.filters.state, state)),
-            sub_item("Involvement", &i::USERS, "involvement", radios!(INVOLVEMENTS, u.filters.involvement, involvement)),
-            MenuEntry::Separator,
-            sub_item("Author", &i::USER_ROUND, "author", owned(&u.filters.author, "Anyone", authors, |f, v| f.author = v)),
-            sub_item("Labels", &i::LAYERS, "labels", owned(&u.filters.label, "Any label", labels, |f, v| f.label = v)),
-            sub_item("Draft", &i::GIT_PULL_REQUEST_DRAFT, "draft", plain!(DRAFTS, u.filters.draft, draft)),
-            sub_item("Review", &i::EYE, "review", plain!(REVIEWS, u.filters.review, review)),
-            sub_item("Checks", &i::CIRCLE_CHECK, "checks", plain!(CHECKS, u.filters.checks, checks)),
-            MenuEntry::Separator,
-            sub_item("Project", &i::FOLDER, "project", project_entries),
-        ]);
+    let filters = Menu::new("pr-filters").trigger(filters_trigger).placement(Placement::BottomStart).min_width(208.0).open(open("filters")).on_close(close).entries(filter_entries(s, t));
 
     let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
     let entries = if u.hosts.is_empty() { &expected } else { &u.hosts };
@@ -975,7 +1123,8 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         }));
     for (h, label, unavailable) in hosts {
         let checked = u.filters.host.as_deref() == Some(h.as_str());
-        let mut item = MenuItem::new(label).radio(checked).on_select(move |s: &mut App| {
+        let glyph = super::pr_row::host_icon(entries.iter().find(|p| field(p, "host") == h.as_str()).map_or("", |p| field(p, "kind")));
+        let mut item = MenuItem::new(label).icon(glyph).radio(checked).on_select(move |s: &mut App| {
             ui(s).filters.host = Some(h.clone());
             close(s);
         });
@@ -1003,6 +1152,92 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 .on_press(refresh)
                 .build(t),
         )
+}
+
+/// PullRequestFiltersMenu: State and Involvement, the row filters, Host when there is a choice, then
+/// Project. Each submenu shows its current choice; picking keeps the menu open, as on web.
+fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
+    let u = &s.ui.pages.pull_requests;
+    let f = &u.filters;
+    let sub = u.submenu;
+    let sub_item = |label: &str, glyph: &'static rune::Icon, value: String, name: &'static str, entries: Vec<MenuEntry>| {
+        // The host rows carry an "Unavailable" tag beside the name, which the default width clips.
+        let width = if name == "host" { 240. } else { 160. };
+        MenuEntry::item(MenuItem::new(label).icon(glyph).shortcut(value).submenu(entries, sub == Some(name)).submenu_min_width(width).on_submenu_change(move |s: &mut App, on| {
+            let u = ui(s);
+            if on && u.submenu != Some(name) && matches!(name, "author" | "labels") {
+                super::pr_filters::open(&mut u.picker);
+            }
+            u.submenu = on.then_some(name);
+        }))
+    };
+    type Options = &'static [(&'static str, &'static str, &'static rune::Icon)];
+    let radios = |label: &'static str, name: &'static str, options: Options, current: &str, set: fn(&mut Filters, &'static str)| {
+        let (_, value, glyph) = options.iter().find(|o| o.0 == current).copied().unwrap_or(options[0]);
+        let mut entries = vec![MenuEntry::Label(label.into())];
+        for &(id, title, glyph) in options {
+            entries.push(MenuEntry::item(MenuItem::new(title).icon(glyph).radio(current == id).on_select(move |s: &mut App| set(&mut ui(s).filters, id))));
+        }
+        sub_item(label, glyph, value.to_string(), name, entries)
+    };
+
+    fn rows(v: Option<&Value>) -> impl Iterator<Item = &Value> {
+        v.and_then(|v| v["entries"].as_array()).into_iter().flatten()
+    }
+    // collectPullRequestListFacets over every state's rows and the scope's first page.
+    let (authors, labels) = if u.menu == Some("filters") {
+        let listed = u.baseline.answer_for(&baseline_input(f)).or(u.result.as_ref());
+        super::pr_filters::facets(rows(u.facets.answer_for(&facet_input(f))).chain(rows(listed)), f.state)
+    } else {
+        Default::default()
+    };
+    let label_value = if f.labels.is_empty() { "Any".to_string() } else { format!("{} selected", f.labels.len()) };
+    let mut out = vec![
+        radios("State", "state", STATES, f.state, |f, v| f.state = v),
+        radios("Involvement", "involvement", INVOLVEMENTS, f.involvement, |f, v| f.involvement = v),
+        MenuEntry::Separator,
+        sub_item("Author", &i::USER_ROUND, f.author.clone().unwrap_or_else(|| "Anyone".into()), "author", super::pr_filters::author_entries(s, t, &authors)),
+        sub_item("Labels", &i::TAG, label_value, "labels", super::pr_filters::label_entries(s, t, &labels)),
+        radios("Draft", "draft", DRAFTS, f.draft, |f, v| f.draft = v),
+        radios("Review", "review", REVIEWS, f.review, |f, v| f.review = v),
+        radios("Checks", "checks", CHECKS, f.checks, |f, v| f.checks = v),
+    ];
+
+    let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
+    let hosts = if u.hosts.is_empty() { &expected } else { &u.hosts };
+    if hosts.len() > 1 {
+        let current = hosts.iter().find(|p| Some(field(p, "host")) == f.host.as_deref());
+        let (value, glyph) = current.map_or(("All".to_string(), &i::PLUG_2), |p| (host_label(hosts, p), super::pr_row::host_icon(field(p, "kind"))));
+        let mut entries = vec![
+            MenuEntry::Label("Host".into()),
+            MenuEntry::item(MenuItem::new("All").icon(&i::PLUG_2).radio(f.host.is_none()).on_select(|s: &mut App| ui(s).filters.host = None)),
+        ];
+        for p in hosts {
+            let host = field(p, "host").to_string();
+            let mut item = MenuItem::new(host_label(hosts, p)).icon(super::pr_row::host_icon(field(p, "kind"))).radio(f.host.as_deref() == Some(host.as_str()));
+            item = match unavailable_host(p) {
+                Some(_) => item.shortcut("Unavailable").disabled(true),
+                None => item.on_select(move |s: &mut App| ui(s).filters.host = Some(host.clone())),
+            };
+            entries.push(MenuEntry::item(item));
+        }
+        out.extend([MenuEntry::Separator, sub_item("Host", glyph, value, "host", entries)]);
+    }
+
+    let mut projects: Vec<(String, String)> = s.state().projects.iter().map(|p| (field(p, "id").to_string(), field(p, "title").to_string())).collect();
+    projects.sort_by_key(|p| p.1.to_lowercase());
+    let project_value = projects.iter().find(|p| Some(p.0.as_str()) == f.project.as_deref()).map_or("All projects".to_string(), |p| p.1.clone());
+    let mut entries = vec![
+        MenuEntry::Label("Project".into()),
+        MenuEntry::item(MenuItem::new("All projects").icon(&i::LAYERS).radio(f.project.is_none()).on_select(|s: &mut App| ui(s).filters.project = None)),
+    ];
+    for (id, title) in projects {
+        let checked = f.project.as_deref() == Some(id.as_str());
+        entries.push(MenuEntry::item(MenuItem::new(title).icon(&i::FOLDER_GIT_2).radio(checked).on_select(move |s: &mut App| ui(s).filters.project = Some(id.clone()))));
+    }
+    let project_glyph = if f.project.is_some() { &i::FOLDER_GIT_2 } else { &i::LAYERS };
+    out.extend([MenuEntry::Separator, sub_item("Project", project_glyph, project_value, "project", entries)]);
+    out
 }
 
 /// pullRequestHostLabel: the provider's name, or the host where two share a kind.
@@ -1068,7 +1303,6 @@ fn unavailable_host(p: &Value) -> Option<String> {
 }
 
 fn group_view(s: &App, t: &T, result: &Value, group: Group, entries: &[Value], overlays: &mut Vec<El>) -> El {
-    let _ = overlays;
     let mut out = col().w_full().gap(12.0);
     if group != Group::All {
         let (glyph, label): (&'static rune::Icon, &str) = match group {
@@ -1092,7 +1326,7 @@ fn group_view(s: &App, t: &T, result: &Value, group: Group, entries: &[Value], o
     }
     let mut rows = col().w_full().gap(2.0);
     for e in entries {
-        rows = rows.child(pr_row(s, t, result, e));
+        rows = rows.child(pr_row(s, t, result, e, overlays));
     }
     out.child(rows)
 }
@@ -1141,7 +1375,13 @@ pub fn relative(at: i64, now: i64) -> String {
     }
 }
 
-fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
+/// PullRequestListGroups' matchedElsewhere: the hosts matched the search somewhere no shown field
+/// holds, such as the description.
+fn matched_elsewhere(e: &Value, query: &str) -> bool {
+    !query.is_empty() && score(e, query) <= 10
+}
+
+fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> El {
     let url = field(e, "url").to_string();
     let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
     let (glyph, ink) = state_glyph(t, e);
@@ -1165,38 +1405,35 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
             })
         })
         .child(text(field(e, "title").to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink().min_w(0.0));
-    let mut signals = row().gap(4.0).center_y().shrink();
-    match field(e, "checksState") {
-        "passing" => signals = signals.child(icon(&i::CIRCLE_CHECK, 14.0).color(success(t))),
-        "failing" => signals = signals.child(icon(&i::CIRCLE_X, 14.0).color(t.c.destructive)),
-        "pending" => signals = signals.child(icon(&i::CIRCLE_DOT, 14.0).color(if t.dark { tw::AMBER_400.alpha_mul(0.9) } else { tw::AMBER_600 })),
-        _ => {}
-    }
+    let mut signals = row().gap(4.0).center_y().shrink().children(super::pr_row::checks(s, t, e, overlays));
     match field(e, "reviewDecision") {
         "approved" => signals = signals.child(icon(&i::USER_CHECK, 14.0).color(success(t))),
         "changes-requested" => signals = signals.child(icon(&i::USER_ROUND_X, 14.0).color(if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) })),
         "review-required" => signals = signals.child(icon(&i::USER_ROUND, 14.0).color(t.c.muted_foreground.alpha_mul(0.6))),
         _ => {}
     }
-    line1 = line1.child(signals).child(spacer());
+    line1 = line1.child(signals).child(spacer()).children(super::pr_row::stack(s, t, e, overlays));
     let (add, del) = (e["additions"].as_i64().unwrap_or(0), e["deletions"].as_i64().unwrap_or(0));
     if add > 0 || del > 0 {
         let stat = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
-        line1 = line1.child(
-            row()
-                .gap(4.0)
-                .shrink()
-                .child(text(format!("+{}", grouped(add))).font(stat).color(t.c.diff_addition_foreground))
-                .child(text(format!("-{}", grouped(del))).font(stat).color(t.c.diff_deletion_foreground)),
-        );
+        let counts = row()
+            .h(20.0)
+            .gap(4.0)
+            .center_y()
+            .shrink()
+            .child(text(format!("+{}", grouped(add))).font(stat).color(t.c.diff_addition_foreground))
+            .child(text(format!("-{}", grouped(del))).font(stat).color(t.c.diff_deletion_foreground));
+        line1 = line1.child(super::pr_row::breakdown(s, t, e, counts, overlays));
     }
     let login = e["author"]["login"].as_str().unwrap_or("ghost").to_string();
     let meta = theme::TEXT_2XS;
+    let matched = matched_elsewhere(e, &parse_query(&s.ui.pages.pull_requests.query.text).0);
     let mut line2 = row()
         .w_full()
         .h(16.0)
         .gap(6.0)
         .center_y()
+        .children(matched.then(|| super::pr_row::matched_badge(t)))
         .child(
             row()
                 .gap(4.0)
@@ -1230,14 +1467,11 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
     if let Some(at) = ts(e, "updatedAt") {
         line2 = line2.child(spacer()).child(text(relative(at, s.now_ms)).font(meta.features("'tnum' 1")).color(t.c.muted_foreground));
     }
-    let _ = result;
     let select = url.clone();
-    row()
-        .key(format!("pr-{url}"))
-        .w_full()
-        .radius(radius::MD)
-        .fill(if selected { t.c.accent } else { Color::TRANSPARENT })
-        .hover(if selected { t.c.accent } else { t.c.accent.alpha_mul(0.6) })
+    let body = row()
+        .grow(1.0)
+        .shrink()
+        .min_w(0.0)
         .cursor(Cursor::Pointer)
         .role("button")
         .label(field(e, "title").to_string())
@@ -1246,7 +1480,16 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
         .gap(8.0)
         .child(mark.mt(2.0).self_start())
         .child(col().grow(1.0).shrink().min_w(0.0).child(line1).child(line2))
-        .on_press(move |s: &mut App| ui(s).selected = Some(select.clone()))
+        .on_press(move |s: &mut App| ui(s).selected = Some(select.clone()));
+    row()
+        .key(format!("pr-{url}"))
+        .w_full()
+        .radius(radius::MD)
+        .fill(if selected { t.c.accent } else { Color::TRANSPARENT })
+        .hover(if selected { t.c.accent } else { t.c.accent.alpha_mul(0.6) })
+        .center_y()
+        .child(body)
+        .children(super::pr_row::speed_actions(s, t, result, e))
 }
 
 /// showPullRequestLinkContextMenu: copy the link, or open it on its host.
@@ -1484,6 +1727,58 @@ mod tests {
         assert_eq!(v["filters"], json!({"draft": "hide", "checks": "passing"}));
         assert_eq!(v["query"], "crash");
         assert_eq!((v["limit"].as_u64(), v["involvement"].as_str()), (Some(PAGE), Some("all")));
+
+        u.filters.labels = vec!["bug".into(), "ui".into()];
+        assert_eq!(u.filters.count(), 4);
+        let base = baseline_input(&u.filters);
+        assert_eq!(base, json!({"state": "open", "involvement": "all", "limit": PAGE, "filters": {"draft": "only", "checks": "passing", "labels": [["bug"], ["ui"]]}}));
+        assert_eq!(partition_input(&u.filters, "reviewing"), json!({"state": "open", "involvement": "reviewing", "limit": PAGE, "filters": base["filters"]}));
+        u.filters.project = Some("p1".into());
+        assert_eq!(facet_input(&u.filters), json!({"state": "all", "involvement": "all", "limit": PAGE, "projectId": "p1"}));
+        u.sent_query.clear();
+        assert_eq!(input(&u), baseline_input(&u.filters));
+    }
+
+    #[test]
+    fn the_partitions_lead_the_groups_until_a_search_starts() {
+        let row = |number: u64, login: &str, updated: &str| entry(json!({"number": number, "author": {"login": login}, "updatedAt": updated}));
+        let mut u = Ui::default();
+        u.filters.sort = "updated";
+        let mut asked = row(2, "mara", "2026-01-04T00:00:00Z");
+        asked["viewerReviewRequested"] = json!(true);
+        let result = json!({"viewers": {"github.com": "octo"}, "errors": [], "entries": [row(1, "octo", "2026-01-05T00:00:00Z"), asked, row(3, "lena", "2026-01-03T00:00:00Z")]});
+        u.result = Some(result.clone());
+        let mut stale = row(1, "octo", "2026-01-01T00:00:00Z");
+        stale["title"] = json!("Stale copy");
+        let older = row(9, "octo", "2025-12-01T00:00:00Z");
+        hold_partitions(&mut u, json!({"entries": [older, stale.clone()]}), json!({"entries": [stale, row(3, "lena", "2026-01-03T00:00:00Z")]}));
+        let shown = |u: &Ui| groups(u, &result).into_iter().map(|(g, rows)| (g, rows.iter().map(|e| e["number"].as_u64().unwrap_or(0)).collect::<Vec<_>>())).collect::<Vec<_>>();
+
+        let partitioned = shown(&u);
+        assert!(partitioned.iter().map(|g| g.0).eq([Group::Authored, Group::Review, Group::Others]));
+        assert_eq!(partitioned.into_iter().map(|g| g.1).collect::<Vec<_>>(), [vec![1, 9], vec![3], vec![2]]);
+        assert_eq!(groups(&u, &result)[0].1[0]["title"], "Fix login redirect");
+
+        u.query.replace_text("fix");
+        assert_eq!(shown(&u).into_iter().map(|g| g.1).collect::<Vec<_>>(), [vec![1], vec![2], vec![3]]);
+
+        u.query.replace_text("");
+        // A closed row leaves the open list at once, the partition reads' copies with it.
+        after_action(&mut u, &key(&row(3, "lena", "")), "close", 0);
+        let acted = u.result.clone().unwrap_or_default();
+        let after = groups(&u, &acted);
+        assert!(after.iter().map(|g| g.0).eq([Group::Authored, Group::Others]));
+        assert_eq!(after.iter().map(|g| g.1.len()).collect::<Vec<_>>(), [2, 1]);
+
+        u.result = Some(json!({"viewers": {}, "errors": [], "entries": []}));
+        hold_partitions(&mut u, json!({"entries": [row(9, "octo", "2025-12-01T00:00:00Z")]}), json!({"entries": []}));
+        assert!(held_partitions(&u).is_none());
+    }
+
+    #[test]
+    fn copying_names_the_change_request_by_its_host() {
+        assert_eq!(short_label("https://gitlab.com/acme/app/-/merge_requests/3"), "MR");
+        assert_eq!(short_label("https://github.com/acme/app/pull/3"), "PR");
     }
 
     #[test]
@@ -1512,6 +1807,11 @@ mod tests {
         assert_eq!(score(&e, "fix/login"), 60);
         assert_eq!(score(&e, "octo"), 50);
         assert_eq!(score(&e, "8"), 0);
+        assert!(!matched_elsewhere(&e, ""));
+        assert!(!matched_elsewhere(&e, "fix/login"));
+        assert!(!matched_elsewhere(&e, "redirect"));
+        assert!(matched_elsewhere(&e, "session cookie"));
+        assert!(matched_elsewhere(&e, "#8"));
     }
 
     #[test]
