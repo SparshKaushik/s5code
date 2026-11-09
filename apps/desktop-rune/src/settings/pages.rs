@@ -103,12 +103,15 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 .flatten()
                 .filter(|spec| !(project && spec["key"] == "fallbackModelSelection"))
                 .filter(|spec| c::visible(s, spec))
+                .filter(|spec| spec["macOnly"] != true || cfg!(target_os = "macos"))
                 .map(|spec| c::setting_row(s, cx, t, spec));
             // `AdvancedSettings`: a fold at the end of the previous section's card.
             if title == "Advanced" {
-                if let Some((_, last)) = groups.last_mut() {
-                    let open = s.ui.settings.advanced.contains(path);
-                    last.push(advanced_trigger(path, open, t));
+                if let Some((section, last)) = groups.last_mut() {
+                    // Each section's fold opens on its own, as web's per-section `AdvancedSettings`.
+                    let fold = format!("{path}/{section}");
+                    let open = s.ui.settings.advanced.contains(&fold);
+                    last.push(advanced_trigger(fold, open, t));
                     if open {
                         last.extend(rows);
                     }
@@ -144,8 +147,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
     })
 }
 
-fn advanced_trigger(path: &str, open: bool, t: &T) -> El {
-    let path = path.to_owned();
+fn advanced_trigger(path: String, open: bool, t: &T) -> El {
     rune::row()
         .w_full()
         .min_h(40.0)

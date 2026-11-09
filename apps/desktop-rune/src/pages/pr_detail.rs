@@ -151,7 +151,7 @@ pub fn poll(s: &mut App) -> bool {
 }
 
 fn message(e: &Value, fallback: &str) -> String {
-    e["message"].as_str().filter(|m| !m.is_empty()).unwrap_or(fallback).to_string()
+    super::pull_requests::error_text(e, fallback)
 }
 
 fn load(s: &mut App) {

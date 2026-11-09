@@ -46,6 +46,10 @@ pub fn select_width(key: &str) -> f32 {
         "sendShortcut" | "followUpBehavior" => 0.0,
         k if k.starts_with("snooze::when::") => 128.0,
         k if k.starts_with("snooze::unit::") => 112.0,
+        // Web `w-22`: the font size trigger beside its family field.
+        k if k.starts_with("fontSize") => 88.0,
+        // Web `w-64`: a source control host's account picker.
+        k if k.starts_with("schost::") => 256.0,
         _ => 160.0,
     }
 }
@@ -156,15 +160,24 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             .font(theme::SM_MEDIUM)
             .color(t.c.foreground),
     );
-    // Web resets the auto-settle day count from its switch row only.
-    if key != "sidebarAutoSettleAfterDays" && super::scope::customized(s, key) {
+    // Web resets the auto-settle day count from its switch row only, and has no reset for the
+    // Separate fonts switch; a font row resets its family and size together.
+    let size_key = spec["size"].as_str().filter(|_| spec["kind"] == "font").map(str::to_owned);
+    let customized = super::scope::customized(s, key) || size_key.as_deref().is_some_and(|k| super::scope::customized(s, k));
+    if !matches!(key, "sidebarAutoSettleAfterDays" | "typographyAdvanced") && customized {
         let owned = key.to_owned();
+        let size_key = size_key.clone();
         heading = heading.child(
             crate::kit::Button::new(format!("Reset {title}"))
                 .variant("ghost-muted")
                 .size("icon-micro")
                 .icon(&icons::UNDO_2)
-                .on_press(move |s: &mut App| super::scope::reset(s, &owned))
+                .on_press(move |s: &mut App| {
+                    super::scope::reset(s, &owned);
+                    if let Some(size) = &size_key {
+                        super::scope::reset(s, size);
+                    }
+                })
                 .build(t),
         );
     }
@@ -226,6 +239,7 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
             select(s, t, key, title, &options, select_width(key))
         }
         Some("slider") => slider(s, t, key, title),
+        Some("font") => font(s, t, key, title, spec),
         Some("model") => super::models::control(s, t, key),
         Some("secret") => super::providers::secret_control(s, t, key, title, spec["placeholder"].as_str().unwrap_or("")),
         _ => input(
@@ -276,6 +290,32 @@ pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     match children {
         Some(children) => col().key(format!("row-{key}")).w_full().px(16.0).pt(12.0).pb(4.0).child(line).child(children),
         None => line.key(format!("row-{key}")).px(16.0).py(12.0),
+    }
+}
+
+/// Web `FontFamilySettingsRow`'s control: the family field (`w-44`, placeholder the default
+/// family) and its `N px` size select.
+fn font(s: &App, t: &T, key: &str, title: &str, spec: &Value) -> El {
+    let size = spec["size"].as_str().unwrap_or("");
+    let (min, max) = (spec["min"].as_u64().unwrap_or(10), spec["max"].as_u64().unwrap_or(20));
+    let options: Vec<(Value, String)> = (min..=max).map(|px| (json!(px), format!("{px} px"))).collect();
+    let placeholder = font_placeholder(&value(s, "fontFamilySans"), spec["placeholder"].as_str().unwrap_or(""));
+    row()
+        .gap(8.0)
+        .center_y()
+        .child(input(s, t, key, 176.0, &placeholder, false))
+        .child(select(s, t, size, &format!("{title} size"), &options, select_width(size)))
+}
+
+/// The default family a font field falls back to: the platform's sans or monospace face, or
+/// for the prompt, whatever the interface uses.
+fn font_placeholder(interface: &Value, slot: &str) -> String {
+    let sans = if cfg!(target_os = "macos") { "SF Pro" } else { "Inter" };
+    match slot {
+        "{interface}" => interface.as_str().map(str::trim).filter(|f| !f.is_empty()).unwrap_or(sans).to_owned(),
+        "{sans}" => sans.to_owned(),
+        "{mono}" => (if cfg!(target_os = "macos") { "SF Mono" } else { "System monospace" }).to_owned(),
+        other => other.to_owned(),
     }
 }
 

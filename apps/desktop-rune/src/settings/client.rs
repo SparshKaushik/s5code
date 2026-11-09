@@ -39,6 +39,11 @@ impl ClientSettings {
         settings
     }
 
+    /// A file beside the settings for client UI state (the web's other localStorage keys).
+    pub fn sibling(&self, name: &str) -> PathBuf {
+        self.path.with_file_name(name)
+    }
+
     pub fn save(&mut self) {
         // Preserve an unreadable file so a later setting change cannot destroy it.
         if self.error.is_some() {
@@ -59,6 +64,11 @@ impl ClientSettings {
             self.error = Some(format!("Could not save client settings: {error}"));
         }
     }
+}
+
+/// A file kept beside the client settings, such as the composer drafts.
+pub fn sibling_path(name: &str) -> PathBuf {
+    config_path().with_file_name(name)
 }
 
 pub(crate) fn config_path() -> PathBuf {
