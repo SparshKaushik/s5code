@@ -45,12 +45,16 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if s.ui.shell.palette.gallery.is_some() {
         return crate::kit::gallery::view(s, cx, t);
     }
+    if let Some(recovery) = crate::onboarding::recovery(s) {
+        return rune_kit::root(crate::onboarding::recovery_view(recovery, t), Vec::new());
+    }
     let mut overlays = Vec::new();
     let sidebar = sidebar::view(s, cx, t, &mut overlays);
     let main = match s.frame_route() {
         Route::PullRequests => pages::pull_requests::view(s, cx, t, &mut overlays),
         // Usage opened with nothing to return to sits over an empty main column.
         Route::Usage => rune::col().key("main").grow(1.0).h_full().fill(t.c.background),
+        _ if crate::onboarding::shows_hero(s) => crate::onboarding::hero(s, t),
         _ => chat::view(s, cx, t),
     };
     overlays.extend(chat::details::overlays(s, t));
@@ -72,6 +76,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     }
     overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
+    overlays.extend(crate::search::overlay(s, t));
+    overlays.extend(crate::notify::overlays(s, t));
     overlays.extend(quit::overlay(s, t));
-    rune_kit::root(body, overlays).on_key_up(quit::on_key_up)
+    rune_kit::root(body, overlays)
+        .on_key_up(quit::on_key_up)
+        .on_window_focus(|s: &mut App, focused, _| crate::notify::window_focus(s, focused))
 }

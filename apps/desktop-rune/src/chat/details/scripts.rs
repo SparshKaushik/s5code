@@ -24,6 +24,8 @@ pub struct State {
     /// `t3.json` scripts by checkout (`useT3ProjectFileScripts`); empty when missing or invalid.
     files: HashMap<String, Vec<Value>>,
     reading: Option<(u64, String)>,
+    /// The project Settings opened the editor for, in place of the open thread's.
+    target: Option<String>,
 }
 
 #[derive(Default)]
@@ -123,7 +125,7 @@ pub fn next_id(name: &str, existing: &[String]) -> String {
         .unwrap_or(base)
 }
 
-fn command_for(id: &str) -> String {
+pub fn command_for(id: &str) -> String {
     format!("script.{id}.run")
 }
 
@@ -262,7 +264,36 @@ fn import(s: &mut App, file: &Value) {
 }
 
 fn project(s: &App) -> Option<Value> {
+    if let Some(id) = &s.ui.chat.details.scripts.target {
+        return s.state().projects.iter().find(|p| p["id"] == id.as_str()).cloned();
+    }
     composer::ctx(s).project.cloned()
+}
+
+/// Settings > Projects > Actions: the same editor, for a project picked there.
+pub fn open_for_project(s: &mut App, project: &str, script: Option<&Value>) {
+    s.ui.chat.details.scripts.target = Some(project.to_string());
+    open_editor(s, script);
+}
+
+/// Whether the editor is open for a project Settings picked (Settings draws it then).
+pub fn settings_editor_open(s: &App) -> bool {
+    let ui = &s.ui.chat.details.scripts;
+    ui.editor.is_some() && ui.target.is_some()
+}
+
+/// Escape closes the delete confirm, then the editor.
+pub fn escape(s: &mut App) -> bool {
+    let ui = &mut s.ui.chat.details.scripts;
+    if ui.confirm_delete {
+        ui.confirm_delete = false;
+        return true;
+    }
+    if ui.editor.is_none() {
+        return false;
+    }
+    close(s);
+    true
 }
 
 pub fn scripts(s: &App) -> Vec<Value> {
@@ -386,6 +417,7 @@ fn delete(s: &mut App) {
     let name = scripts.iter().find(|v| v["id"] == id.as_str()).map_or("Unknown", |v| data::s(v, "name")).to_string();
     let next = scripts.into_iter().filter(|v| v["id"] != id.as_str()).collect();
     persist(s, next, command_for(&id), Some(None), Some(name));
+    s.ui.chat.details.scripts.target = None;
 }
 
 pub fn poll(s: &mut App) -> bool {
@@ -426,7 +458,10 @@ fn poll_save(s: &mut App) -> bool {
     }
     match pending.deleted {
         Some(name) => palette::toast(s, &format!("Deleted action \"{name}\""), None),
-        None => s.ui.chat.details.scripts.editor = None,
+        None => {
+            s.ui.chat.details.scripts.editor = None;
+            s.ui.chat.details.scripts.target = None;
+        }
     }
     true
 }
@@ -700,6 +735,7 @@ fn close(s: &mut App) {
     let ui = &mut s.ui.chat.details.scripts;
     if ui.pending.is_none() {
         ui.editor = None;
+        ui.target = None;
     }
 }
 

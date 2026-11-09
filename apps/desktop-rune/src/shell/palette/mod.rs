@@ -8,7 +8,6 @@ use unicode_normalization::{UnicodeNormalization, char::is_combining_mark};
 
 pub(crate) mod actions;
 pub(crate) mod add_project;
-mod content;
 mod scenes;
 pub use scenes::SCENES;
 
@@ -36,7 +35,6 @@ pub struct Ui {
     picked: bool,
     add: add_project::State,
     act: actions::State,
-    content: content::State,
 }
 struct Notice {
     title: String,
@@ -71,7 +69,7 @@ enum Action {
     LinkPr(String),
     ShowPrs,
     Files,
-    Content,
+    ContentSearch,
     OpenFile(String),
     ProjectSettings(String),
 }
@@ -154,7 +152,7 @@ fn item(
         subtitle: None,
         description: None,
         disabled: false,
-        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::NewProject | Action::Files) {
+        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::NewProject | Action::Files | Action::ContentSearch) {
             Trailing::Chevron
         } else {
             Trailing::None
@@ -354,9 +352,6 @@ fn items(s: &App) -> Vec<Item> {
     let ui = &s.ui.shell.palette;
     if ui.page == "files" {
         return actions::file_items(s);
-    }
-    if ui.page == content::PAGE {
-        return content::items(s);
     }
     let mut out = vec![];
     if ui.page == "add-project" {
@@ -989,7 +984,6 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     s.ui.shell.palette.picked = false;
     add_project::sync_browse(s);
     actions::files_changed(s, tx);
-    content::changed(s, tx);
     s.ui.shell.palette.selected = 0;
     s.ui.shell.palette.search_due = None;
     s.ui.shell.palette.message_matches.clear();
@@ -1012,7 +1006,6 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
 pub fn poll(s: &mut App) -> bool {
     let mut changed = add_project::poll(s);
     changed |= actions::poll(s);
-    changed |= content::poll(s);
     let acknowledgements = std::mem::take(&mut s.ui.shell.palette.acknowledgements);
     for id in acknowledgements {
         if s.src.net().and_then(|net| net.take_reply(id)).is_none() {
@@ -1310,14 +1303,10 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             actions::open_files(s);
             return tx.wake_after(std::time::Duration::from_millis(1));
         }
-        Action::Content => {
-            push_page(s, content::PAGE, "");
-            content::open(s);
-            return tx.wake_after(std::time::Duration::from_millis(1));
-        }
         Action::Triage => actions::triage(s),
         Action::NewWithoutProject => actions::new_without_project(s),
         Action::Find => actions::find(s),
+        Action::ContentSearch => crate::search::open(s),
         Action::CopyThread => {
             actions::copy_thread(s, tx);
         }
@@ -1468,15 +1457,6 @@ fn global_shortcut(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
-    if crate::panel::shortcut(s, e, "projectSearch.toggle") {
-        if s.ui.shell.palette.open && s.ui.shell.palette.page == content::PAGE {
-            s.ui.shell.palette.open = false;
-        } else {
-            reset(s, true);
-            execute(s, Action::Content, tx);
-        }
-        return true;
-    }
     if crate::panel::shortcut(s, e, "theme.select") {
         reset(s, true);
         push_page(s, "themes", "");
@@ -1562,8 +1542,6 @@ fn placeholder(s: &App) -> String {
     let ui = &s.ui.shell.palette;
     if ui.page == "files" {
         "Search files…".into()
-    } else if ui.page == content::PAGE {
-        content::placeholder(s)
     } else if ui.page == "add-new" {
         "Project name".into()
     } else if add_project::repository_step(s) {
@@ -1685,9 +1663,6 @@ fn empty_text(s: &App) -> Option<String> {
     if ui.page == "files" {
         return Some(ui.act.files.error.clone().unwrap_or_else(|| actions::files_empty(s).into()));
     }
-    if ui.page == content::PAGE {
-        return Some(content::empty(s));
-    }
     if add_project::repository_step(s) {
         let url = ui.add.clone.as_ref().is_some_and(|c| c.provider.is_none());
         return Some(if url {
@@ -1719,7 +1694,7 @@ fn note(label: String, t: &T) -> El {
 fn footer(s: &App, rows: &[Item], t: &T) -> El {
     let ui = &s.ui.shell.palette;
     let picked_row = if ui.picked { rows.get(ui.selected) } else { None };
-    let action = if ui.page == "files" || ui.page == content::PAGE {
+    let action = if ui.page == "files" {
         Some("Open file")
     } else if ui.page == "add-new" {
         Some(match picked_row.map(|v| &v.action) {
@@ -1923,7 +1898,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     } else {
         icon(&icons::SEARCH, 16.).color(t.c.contrast_icon_muted)
     };
-    let submit = submit_button(s, t).or_else(|| content::options(s, t));
+    let submit = submit_button(s, t);
     let mut head = row()
         .w_full()
         .h(48.)
@@ -1938,17 +1913,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
     }
     let mut list = col().w_full().padding(8.);
     let mut group = "";
-    let mut file = None;
     for (i, v) in rows.iter().enumerate() {
-        if v.group == content::GROUP {
-            if file != v.description.as_deref() {
-                file = v.description.as_deref();
-                let count = rows[i..].iter().take_while(|r| r.description == v.description).count();
-                list = list.child(content::header(file.unwrap_or(""), count, t));
-            }
-            list = list.child(content::match_row(i, v, ui.selected == i, t));
-            continue;
-        }
         if group != v.group {
             group = v.group;
             let heading = if group == actions::FILES_GROUP { actions::heading(s) } else { group.to_string() };
@@ -1980,7 +1945,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
             None => kit::empty("No results found.", "", t),
         });
     }
-    let tall = ui.page == "files" || ui.page == content::PAGE;
+    let tall = ui.page == "files";
     let list = kit::scroll_area(
         "palette-results",
         list.max_h(if tall { 400. } else { 330. }).scroll(ScrollSpec { stick_bottom: false }),
@@ -1998,7 +1963,7 @@ fn palette(s: &App, t: &T) -> Vec<El> {
         .backdrop_blur(16.)
         .border(1., t.c.contrast_foreground.alpha_mul(0.1))
         .child(head);
-    if let Some(summary) = summary(s, t).or_else(|| content::status(s, t)) {
+    if let Some(summary) = summary(s, t) {
         panel = panel.child(summary);
     }
     let panel = panel

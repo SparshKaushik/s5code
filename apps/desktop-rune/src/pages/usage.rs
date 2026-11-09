@@ -35,6 +35,16 @@ pub struct Ui {
     pub model: Option<String>,
     pub model_hover: Option<(usize, f32, f32)>,
     model_plot_w: f32,
+    pub prices: super::usage_prices::Ui,
+    /// `server.refreshUsageRates` (true) or `server.refreshProviders` (false) in flight.
+    refreshing: Option<(u64, bool)>,
+    /// Rates refreshed; the rescanned summary is still on its way.
+    reloading: bool,
+    /// The request the shown summary answers, kept on screen while another window loads.
+    pub answered: Option<Value>,
+    /// Price, mapping and filter settings the summary was scanned under (usageScanSettingsAtom).
+    scan: Option<Value>,
+    pub preferences_read: bool,
 }
 
 impl Default for Ui {
@@ -57,6 +67,12 @@ impl Default for Ui {
             model: None,
             model_hover: None,
             model_plot_w: 0.0,
+            prices: Default::default(),
+            refreshing: None,
+            reloading: false,
+            answered: None,
+            scan: None,
+            preferences_read: false,
         }
     }
 }
@@ -120,7 +136,7 @@ impl Clock {
 fn clock(s: &App) -> Clock {
     let u = &s.ui.pages.usage;
     let format = s.client_settings.values.get("timestampFormat").and_then(Value::as_str).unwrap_or("locale");
-    let until = u.requested.as_ref().and_then(|r| r["untilTime"].as_str()).and_then(iso_ms).unwrap_or(s.now_ms);
+    let until = u.answered.as_ref().and_then(|r| r["untilTime"].as_str()).and_then(iso_ms).unwrap_or(s.now_ms);
     Clock { zone: u.zone, hour12: format != "24-hour", now: until }
 }
 
@@ -236,10 +252,14 @@ fn usd(v: f64) -> String {
     format!("${}.{:02}", grouped(cents / 100), (cents % 100).abs())
 }
 
+/// `toFixed` then `/\.0+$/`: only an all-zero fraction drops, so 1.50 stays 1.50.
 fn trim(v: f64) -> String {
     let digits = if v.abs() >= 100.0 { 0 } else if v.abs() >= 10.0 { 1 } else { 2 };
     let s = format!("{v:.digits$}");
-    if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s }
+    match s.split_once('.') {
+        Some((whole, fraction)) if fraction.bytes().all(|b| b == b'0') => whole.to_string(),
+        _ => s,
+    }
 }
 
 fn tokens(v: f64) -> String {
@@ -288,45 +308,82 @@ pub(super) fn input(u: &Ui, now: i64, aliases: &Value) -> Value {
     json!({"sinceDay": day_of(u.zone.wall(now) - (u.window_days - 1) * DAY), "untilDay": day(now), "timeZone": u.zone_name, "modelAliases": aliases, "resolution": "day"})
 }
 
+/// The settings a scan depends on: prices, mappings and the Cursor keychain opt-in refetch the
+/// summary when they change, and `usageModelFilter` rides along in the request (usageSummaryInput).
+fn scan_settings(s: &App) -> Value {
+    let settings = s.state().config.as_ref().map(|c| &c["settings"]).unwrap_or(&Value::Null);
+    json!([settings["usagePriceOverrides"], settings["usageModelAliases"], settings["cursorKeychainUsageEnabled"], settings["usageModelFilter"]])
+}
+
 /// What a fetched summary answers; the rolling hour bounds alone don't refetch.
 fn window_key(input: &Value) -> Value {
     json!([input["sinceDay"], input["resolution"], input["timeZone"], input["modelAliases"]])
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.route, Route::Usage) || s.ui.pages.usage.metric == "limits" {
+    if !matches!(s.route, Route::Usage) {
         return false;
     }
     let mut changed = false;
+    if !s.ui.pages.usage.preferences_read {
+        let saved = s.client_settings.values.get(PREFERENCES).cloned().unwrap_or(Value::Null);
+        apply_preferences(ui(s), &saved);
+        changed = true;
+    }
+    if let Some((id, rates)) = s.ui.pages.usage.refreshing
+        && let Some(_) = s.src.net().and_then(|n| n.take_reply(id))
+    {
+        let u = ui(s);
+        u.refreshing = None;
+        // Rates landed (a failed refresh still rescans, like refreshUsage): fetch again.
+        if rates {
+            u.requested = None;
+            u.reloading = true;
+        }
+        changed = true;
+    }
+    if s.ui.pages.usage.metric == "limits" {
+        return changed;
+    }
     if let Some(id) = s.ui.pages.usage.pending
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
     {
         let u = ui(s);
         u.pending = None;
+        u.reloading = false;
         match reply {
             Ok(summary) => {
                 u.summary = Some(summary);
+                u.answered = u.requested.clone();
                 u.error = None;
             }
-            Err(e) => u.error = Some(e["message"].as_str().unwrap_or("Could not read usage.").to_string()),
+            Err(_) => {
+                u.summary = None;
+                u.error = Some("This environment could not report usage.".into());
+            }
         }
         changed = true;
     }
-    let wanted = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
+    let scan = scan_settings(s);
+    let mut wanted = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
+    if !scan[3].is_null() {
+        wanted["modelFilter"] = scan[3].clone();
+    }
     let current = s.ui.pages.usage.requested.as_ref().map(window_key);
-    if current != Some(window_key(&wanted)) {
+    if current != Some(window_key(&wanted)) || s.ui.pages.usage.scan.as_ref() != Some(&scan) {
         s.ui.pages.usage.requested = Some(wanted.clone());
+        s.ui.pages.usage.scan = Some(scan);
         match s.src.net() {
+            // The last summary stays up, dimmed, until this one answers (useUsage's `shown`).
             Some(net) => {
                 let id = net.request("server.getUsageSummary", wanted);
-                let u = ui(s);
-                u.pending = Some(id);
-                u.summary = None;
+                ui(s).pending = Some(id);
             }
             None if !crate::host::live() => {
                 if s.ui.pages.usage.summary.is_none() {
                     s.ui.pages.usage.summary = super::fixture("usage.json").map(|f| f["summary"].clone());
                 }
+                s.ui.pages.usage.answered = s.ui.pages.usage.requested.clone();
             }
             None => {}
         }
@@ -335,9 +392,80 @@ pub fn poll(s: &mut App) -> bool {
     changed
 }
 
+/// The metric, window and hidden providers survive a restart (usagePagePreferences).
+const PREFERENCES: &str = "usagePagePreferences";
+
+fn apply_preferences(u: &mut Ui, saved: &Value) {
+    u.preferences_read = true;
+    if let Some(metric) = ["cost", "tokens", "limits"].into_iter().find(|m| saved["metric"] == *m) {
+        u.metric = metric;
+    }
+    if let Some(days) = saved["windowDays"].as_i64().filter(|d| [1, 7, 30, 90].contains(d)) {
+        u.window_days = days;
+    }
+    if let Some(hidden) = saved["hiddenProviders"].as_array() {
+        u.hidden = PROVIDERS.iter().map(|p| p.0).filter(|k| hidden.iter().any(|h| h == k)).collect();
+    }
+}
+
+fn preferences(u: &Ui) -> Value {
+    json!({"metric": u.metric, "windowDays": u.window_days, "hiddenProviders": u.hidden})
+}
+
+fn save_preferences(s: &mut App) {
+    let value = preferences(&s.ui.pages.usage);
+    if s.client_settings.values.get(PREFERENCES) != Some(&value) {
+        s.client_settings.values.insert(PREFERENCES.into(), value);
+        s.client_settings.save();
+    }
+}
+
+/// The header's Refresh: limits re-read provider status; usage refreshes model rates and then
+/// rescans the window from now, keeping the current figures up meanwhile.
 fn refresh(s: &mut App) {
-    let u = ui(s);
-    u.requested = None;
+    if refreshing(&s.ui.pages.usage) {
+        return;
+    }
+    let rates = s.ui.pages.usage.metric != "limits";
+    let (method, payload) = if rates { ("server.refreshUsageRates", json!({})) } else { ("server.refreshProviders", json!({})) };
+    match s.src.net() {
+        Some(net) => {
+            let id = net.request(method, payload);
+            ui(s).refreshing = Some((id, rates));
+        }
+        None => ui(s).requested = None,
+    }
+}
+
+fn refreshing(u: &Ui) -> bool {
+    u.refreshing.is_some() || u.reloading
+}
+
+/// Figures from another window, or mid-refresh, read as stale (`figureClass`).
+fn stale(u: &Ui) -> bool {
+    u.reloading || (u.pending.is_some() && u.answered.as_ref().map(window_key) != u.requested.as_ref().map(window_key))
+}
+
+/// UsagePage's metric and period shortcuts: `c`/`t`/`l` and Mod+Shift+1..4 by default.
+fn shortcut(s: &App, e: &rune::KeyEvent) -> Option<&'static str> {
+    const COMMANDS: &[&str] = &["usage.cost", "usage.tokens", "usage.limits", "usage.period.day", "usage.period.week", "usage.period.month", "usage.period.quarter"];
+    let find = |e: &rune::KeyEvent| COMMANDS.iter().copied().find(|c| crate::panel::shortcut(s, e, c));
+    find(e).or_else(|| {
+        // Shift turns the digit into its symbol on most layouts; bindings name the digit.
+        let symbol = match &e.key {
+            rune::Key::Text(t) => t.chars().next()?,
+            rune::Key::Command(c) => *c,
+            _ => return None,
+        };
+        let digit = unshifted(symbol)?;
+        let key = if matches!(e.key, rune::Key::Command(_)) { rune::Key::Command(digit) } else { rune::Key::Text(digit.to_string()) };
+        find(&rune::KeyEvent { key, mods: e.mods.clone() })
+    })
+}
+
+fn unshifted(c: char) -> Option<char> {
+    let at = "!@#$%^&*()".find(c)?;
+    "1234567890".chars().nth(at)
 }
 
 pub fn close(s: &mut App) {
@@ -347,8 +475,32 @@ pub fn close(s: &mut App) {
 }
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
-    if !matches!(s.route, Route::Usage) || !matches!(e.key, rune::Key::Escape) {
+    if !matches!(s.route, Route::Usage) {
         return false;
+    }
+    if super::usage_prices::on_key(s, e) {
+        return true;
+    }
+    if !matches!(e.key, rune::Key::Escape) {
+        let u = &s.ui.pages.usage;
+        // Like resolveUsageShortcut: not while a dialog, menu or the palette has the keys.
+        if u.prices.open || u.model.is_some() || u.menu.is_some() || s.ui.shell.palette.open {
+            return false;
+        }
+        let Some(command) = shortcut(s, e) else { return false };
+        let u = ui(s);
+        match command {
+            "usage.cost" => u.metric = "cost",
+            "usage.tokens" => u.metric = "tokens",
+            "usage.limits" => u.metric = "limits",
+            _ if u.metric == "limits" => {}
+            "usage.period.day" => u.window_days = 1,
+            "usage.period.week" => u.window_days = 7,
+            "usage.period.month" => u.window_days = 30,
+            _ => u.window_days = 90,
+        }
+        save_preferences(s);
+        return true;
     }
     let u = ui(s);
     if u.model.take().is_none() && u.menu.take().is_none() {
@@ -378,6 +530,7 @@ struct Merged {
     category: [f64; 5],
     fast: f64,
     ultrafast: f64,
+    premium: f64,
     unpriced_tokens: f64,
     hourly: bool,
     clock: Clock,
@@ -427,6 +580,7 @@ fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option
         m.category[4] += (total.cost - split.iter().sum::<f64>()).max(0.0);
         m.fast += b["fastCostUsd"].as_f64().unwrap_or(0.0);
         m.ultrafast += b["ultrafastCostUsd"].as_f64().unwrap_or(0.0);
+        m.premium += b["speedPremiumUsd"].as_f64().unwrap_or(0.0);
         let add = |t: &mut Totals| {
             t.cost += total.cost;
             t.tokens += total.tokens;
@@ -487,6 +641,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     if let (Some(key), Some(summary), false) = (&u.model, &u.summary, u.metric == "limits") {
         model_dialog(s, t, summary, key, &mut overlays);
     }
+    super::usage_prices::view(s, t, &mut overlays);
     let body = kit::scroll_area(
         "usage-scroll",
         col().key("usage-scroll").grow(1.0).min_h(0.0).w_full().items_center().scroll(ScrollSpec { stick_bottom: false }).child(page),
@@ -536,6 +691,7 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     };
     let visible: Vec<&str> = PROVIDERS.iter().map(|p| p.0).filter(|k| !u.hidden.contains(k)).collect();
     let provider_label = match visible.as_slice() {
+        [] => "No providers".into(),
         [one] => presentation(one).0.to_string(),
         v if v.len() == PROVIDERS.len() => "All providers".into(),
         v => format!("{} providers", v.len()),
@@ -551,7 +707,14 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .placement(Placement::BottomStart)
         .min_width(200.0)
         .open(u.menu == Some("providers"))
-        .on_close(|s: &mut App| ui(s).menu = None);
+        .on_close(|s: &mut App| ui(s).menu = None)
+        .item(MenuItem::new("All providers").checked(u.hidden.is_empty()).on_select(|s: &mut App| {
+            let u = ui(s);
+            u.hidden = if u.hidden.is_empty() { PROVIDERS.iter().map(|p| p.0).collect() } else { Vec::new() };
+            u.menu = Some("providers");
+            save_preferences(s);
+        }))
+        .separator();
     for &(kind, label, _) in PROVIDERS {
         providers = providers.item(MenuItem::new(label).checked(!u.hidden.contains(&kind)).on_select(move |s: &mut App| {
             let u = ui(s);
@@ -560,9 +723,39 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
             } else {
                 u.hidden.push(kind);
             }
+            // A checkbox item keeps the menu open (closeOnClick={false}).
+            u.menu = Some("providers");
+            save_preferences(s);
         }));
     }
-    let env = "All environments".to_string();
+    let target = super::usage_prices::target(s);
+    let mut envs = Menu::new("usage-environments")
+        .trigger(crumb("All environments".into(), false).on_press(toggle("environments")))
+        .placement(Placement::BottomStart)
+        .min_width(220.0)
+        .open(u.menu == Some("environments"))
+        .on_close(|s: &mut App| ui(s).menu = None)
+        .item(MenuItem::new("All environments").checked(true).on_select(|s: &mut App| ui(s).menu = Some("environments")))
+        .separator();
+    let status = if u.metric == "limits" {
+        None
+    } else if u.error.is_some() {
+        Some("Unavailable")
+    } else if u.pending.is_some() && u.summary.is_none() {
+        Some("Scanning…")
+    } else if u.pending.is_some() || refreshing(u) {
+        Some("Refreshing…")
+    } else {
+        Some("Ready")
+    };
+    let mut env_item = MenuItem::new(target.label).checked(true).on_select(|s: &mut App| ui(s).menu = Some("environments"));
+    if let Some(status) = status {
+        env_item = env_item.shortcut(status);
+    }
+    envs = envs.item(env_item).separator().item(MenuItem::new("Model prices").icon(&i::SLIDERS_HORIZONTAL).on_select(|s: &mut App| {
+        ui(s).menu = None;
+        super::usage_prices::open(s, None);
+    }));
     let mut bar = row()
         .key("usage-header")
         .w_full()
@@ -579,13 +772,13 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 .shrink()
                 .child(text("Usage").font(theme::SM_MEDIUM).color(t.c.muted_foreground))
                 .child(sep())
-                .child(crumb(env, false))
+                .child(envs.build(&k, overlays))
                 .child(sep())
                 .child(providers.build(&k, overlays)),
         );
     let limits = u.metric == "limits";
     if !limits && let Some(summary) = &u.summary {
-        let bounds = u.requested.as_ref().filter(|r| r["resolution"] == "hour").and_then(|r| Some((iso_ms(r["sinceTime"].as_str()?)?, iso_ms(r["untilTime"].as_str()?)?)));
+        let bounds = u.answered.as_ref().filter(|r| r["resolution"] == "hour").and_then(|r| Some((iso_ms(r["sinceTime"].as_str()?)?, iso_ms(r["untilTime"].as_str()?)?)));
         let label = match bounds {
             Some((since, until)) => format!("{} to {}", clock(s).date_hour(since), clock(s).date_hour(until)),
             None if u.window_days == 1 => "Past 24 hours".to_string(),
@@ -601,8 +794,8 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         right = right.child(
             ToggleGroup::new(&["Past 24h", "7 days", "30 days", "90 days"], &[selected])
                 .on_pick(move |s: &mut App, n: usize, _: &mut Tx| {
-                    let u = ui(s);
-                    u.window_days = windows[n];
+                    ui(s).window_days = windows[n];
+                    save_preferences(s);
                 })
                 .build(&k),
         );
@@ -612,10 +805,21 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     right = right
         .child(
             ToggleGroup::new(&["Cost", "Tokens", "Limits"], &[selected])
-                .on_pick(move |s: &mut App, n: usize, _: &mut Tx| ui(s).metric = metrics[n])
+                .on_pick(move |s: &mut App, n: usize, _: &mut Tx| {
+                    ui(s).metric = metrics[n];
+                    save_preferences(s);
+                })
                 .build(&k),
         )
-        .child(kit::Button::new("Refresh").variant("ghost").size("icon-sm").icon(&i::REFRESH_CW).on_press(refresh).build(t))
+        .child(
+            kit::Button::new(if limits { "Refresh limits" } else { "Refresh usage" })
+                .variant("ghost")
+                .size("icon-sm")
+                .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
+                .disabled(refreshing(u))
+                .on_press(refresh)
+                .build(t),
+        )
         .child(kit::Button::new("Close").variant("ghost").size("icon-sm").icon(&i::X).on_press(close).build(t));
     col().w_full().child(bar.child(right)).child(el().w_full().h(1.0).fill(t.c.border))
 }
@@ -878,11 +1082,12 @@ fn segment(t: &T, cx: &mut rune::Cx<App>, key: &str, account: &Account, w: &Valu
 fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
     let u = &s.ui.pages.usage;
     let tokens_view = u.metric == "tokens";
-    let mut m = merge(summary, &u.hidden, u.requested.as_ref(), None);
+    let mut m = merge(summary, &u.hidden, u.answered.as_ref(), None);
     m.clock = clock(s);
     let value = |x: Totals| if tokens_view { x.tokens } else { x.cost };
     let fmt = |v: f64| if tokens_view { tokens(v) } else { usd(v) };
     let tnum = |style: rune::tok::TextStyle| style.features("'tnum' 1");
+    let dim = if stale(u) { 0.4 } else { 1.0 };
 
     let sessions: i64 = m.providers.iter().map(|p| p.2).sum();
     let mut caption = row().gap(4.0).center_y().child(
@@ -898,8 +1103,8 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
         .child(
             col()
                 .gap(4.0)
-                .child(text(fmt(if tokens_view { m.tokens } else { m.cost })).font(tnum(theme::weight(TEXT_4XL, theme::SEMIBOLD))).color(t.c.foreground))
-                .child(caption),
+                .child(text(fmt(if tokens_view { m.tokens } else { m.cost })).font(tnum(theme::weight(TEXT_4XL, theme::SEMIBOLD))).color(t.c.foreground).opacity(dim))
+                .child(caption.opacity(dim)),
         );
     let mut rows = col().gap(16.0);
     for &(kind, totals, sessions) in &m.providers {
@@ -918,11 +1123,11 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
                         .child(el().size(8.0, 8.0).radius(radius::FULL).fill(color(t, kind)))
                         .child(provider_icon(t, driver, 16.0))
                         .child(text(label).font(theme::TEXT_SM).color(t.c.foreground))
-                        .child(text(format!("{} sessions", grouped(sessions))).font(theme::TEXT_2XS).color(t.c.muted_foreground))
+                        .child(text(sessions_label(sessions)).font(theme::TEXT_2XS).color(t.c.muted_foreground).opacity(dim))
                         .child(spacer())
-                        .child(text(fmt(value(totals))).font(tnum(theme::SM_MEDIUM)).color(t.c.foreground)),
+                        .child(text(fmt(value(totals))).font(tnum(theme::SM_MEDIUM)).color(t.c.foreground).opacity(dim)),
                 )
-                .child(text(sub).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+                .child(text(sub).font(theme::TEXT_XS).color(t.c.muted_foreground).opacity(dim)),
         );
     }
     left = left.child(rows);
@@ -944,38 +1149,40 @@ fn overview(s: &App, t: &T, summary: &Value, page: El) -> El {
             .w_full()
             .gap(24.0)
             .py(4.0)
+            .opacity(dim)
             .child(metric("Processed tokens", tokens(m.tokens)))
             .child(metric("Cached input", tokens(m.cached)))
             .child(metric("Uncached input", tokens(m.uncached)))
             .child(metric("Output", tokens(m.output)))
             .child(metric("Cache savings", usd(m.savings))),
     );
+    let mut page = page;
+    for message in source_messages(summary, &u.hidden) {
+        page = page.child(muted_line(t, &message));
+    }
     let mut page = page.child(top).child(totals);
     if m.tokens > 0.0 {
-        let shade = |k: f32| mix(t.c.foreground, t.c.background, k);
-        let token_parts = vec![("Input", m.uncached, shade(0.6)), ("Cache read", m.cached, shade(0.3)), ("Cache write", m.creation, shade(0.72)), ("Output", m.output, shade(1.0))];
-        let cost_parts = vec![
-            ("Input", m.category[0], shade(0.6)),
-            ("Cache read", m.category[1], shade(0.3)),
-            ("Cache write", m.category[2], shade(0.72)),
-            ("Output", m.category[3], shade(1.0)),
-            ("Other", m.category[4], shade(0.44)),
-        ];
-        let mut shares = row().w_full().gap(48.0).child(share_bar(t, "Tokens by type", &token_parts, tokens)).child(share_bar(t, "Cost by type", &cost_parts, usd));
-        if m.fast + m.ultrafast > 0.0 {
-            let standard = (m.cost - m.fast - m.ultrafast).max(0.0);
-            shares = shares.child(share_bar(t, "Cost by speed", &[("Standard", standard, shade(0.34)), ("Fast", m.fast, shade(0.66)), ("Ultrafast", m.ultrafast, shade(1.0))], usd));
+        // The metric picks the splits: tokens by type, or cost by type and by speed.
+        let mut shares = row().w_full().gap(48.0).opacity(dim);
+        if tokens_view {
+            shares = shares.child(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None)).child(el().grow(1.0).w(0.0));
+        } else {
+            shares = shares.child(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
+            shares = match speed_parts(t, &m) {
+                Some(parts) => shares.child(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))),
+                None => shares.child(el().grow(1.0).w(0.0)),
+            };
         }
         page = page.child(shares);
     }
-    page.child(breakdown(s, t, &m))
+    page.child(breakdown(s, t, &m, dim))
 }
 
 /// UsageModelDialog: one breakdown row's totals, trend and splits.
 fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<El>) {
     let u = &s.ui.pages.usage;
-    let all = merge(summary, &u.hidden, u.requested.as_ref(), None);
-    let mut m = merge(summary, &u.hidden, u.requested.as_ref(), Some(key));
+    let all = merge(summary, &u.hidden, u.answered.as_ref(), None);
+    let mut m = merge(summary, &u.hidden, u.answered.as_ref(), Some(key));
     m.clock = clock(s);
     let mut parts = key.split('\0');
     let (kind, _api, model) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
@@ -1005,20 +1212,35 @@ fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<E
     }
     // Unpriced cost is unknown, not zero, so its trend shows tokens.
     let tokens_view = unknown || u.metric == "tokens";
-    let shade = |k: f32| mix(t.c.foreground, t.c.background, k);
     let mut shares = row().w_full().gap(40.0);
     if !unknown {
-        let cost_parts = [("Input", m.category[0], shade(0.6)), ("Cache read", m.category[1], shade(0.3)), ("Cache write", m.category[2], shade(0.72)), ("Output", m.category[3], shade(1.0)), ("Other", m.category[4], shade(0.44))];
-        shares = shares.child(share_bar(t, "Cost by type", &cost_parts, usd));
+        shares = shares.child(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
     }
-    shares = shares.child(share_bar(t, "Tokens by type", &[("Input", m.uncached, shade(0.6)), ("Cache read", m.cached, shade(0.3)), ("Cache write", m.creation, shade(0.72)), ("Output", m.output, shade(1.0))], tokens));
+    shares = shares.child(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None));
     let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, u.model_hover, u.model_plot_w, true)).child(shares);
-    if m.fast + m.ultrafast > 0.0 {
-        let standard = (m.cost - m.fast - m.ultrafast).max(0.0);
-        body = body.child(row().w_full().child(share_bar(t, "Cost by speed", &[("Standard", standard, shade(0.34)), ("Fast", m.fast, shade(0.66)), ("Ultrafast", m.ultrafast, shade(1.0))], usd)));
+    if let Some(parts) = speed_parts(t, &m) {
+        body = body.child(row().w_full().child(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))));
     }
     if m.unpriced_tokens > 0.0 {
-        body = body.child(text(format!("{} tokens have no known price", tokens(m.unpriced_tokens))).font(theme::TEXT_XS).color(t.c.muted_foreground));
+        let set_price = model.to_string();
+        body = body.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(text(format!("{} tokens have no known price", tokens(m.unpriced_tokens))).font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(spacer())
+                .child(
+                    kit::Button::new("Set price")
+                        .on_press(move |s: &mut App| {
+                            let u = ui(s);
+                            u.model = None;
+                            u.model_hover = None;
+                            super::usage_prices::open(s, Some(&set_price));
+                        })
+                        .build(t),
+                ),
+        );
     }
     kit::Dialog::new("usage-model", model)
         .description(description)
@@ -1037,7 +1259,80 @@ fn h2(t: &T, label: &str) -> El {
     text(label.to_string()).font(theme::SM_MEDIUM).color(t.c.foreground)
 }
 
-fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> String) -> El {
+fn shade(t: &T, k: f32) -> Color {
+    mix(t.c.foreground, t.c.background, k)
+}
+
+fn token_parts(t: &T, m: &Merged) -> Vec<(&'static str, f64, Color)> {
+    vec![("Input", m.uncached, shade(t, 0.6)), ("Cache read", m.cached, shade(t, 0.3)), ("Cache write", m.creation, shade(t, 0.72)), ("Output", m.output, shade(t, 1.0))]
+}
+
+/// costTypeSegments: unsplit cost under a cent rounds away rather than showing as "Other".
+fn cost_parts(t: &T, m: &Merged) -> Vec<(&'static str, f64, Color)> {
+    let other = if m.category[4] >= 0.005 { m.category[4] } else { 0.0 };
+    vec![
+        ("Input", m.category[0], shade(t, 0.6)),
+        ("Cache read", m.category[1], shade(t, 0.3)),
+        ("Cache write", m.category[2], shade(t, 0.72)),
+        ("Output", m.category[3], shade(t, 1.0)),
+        ("Other", other, shade(t, 0.44)),
+    ]
+}
+
+fn speed_parts(t: &T, m: &Merged) -> Option<Vec<(&'static str, f64, Color)>> {
+    (m.fast + m.ultrafast > 0.0).then(|| {
+        let standard = (m.cost - m.fast - m.ultrafast).max(0.0);
+        vec![("Standard", standard, shade(t, 0.34)), ("Fast", m.fast, shade(t, 0.66)), ("Ultrafast", m.ultrafast, shade(t, 1.0))]
+    })
+}
+
+fn sessions_label(n: i64) -> String {
+    format!("{} {}", grouped(n), if n == 1 { "session" } else { "sessions" })
+}
+
+/// usageSourceMessages: what a partial, failed or Cursor source said, once each, with the
+/// malformed-record warnings folded into one total.
+fn source_messages(summary: &Value, hidden: &[&str]) -> Vec<String> {
+    let warning = |n: i64| format!("{n} malformed or inconsistent usage record(s) were skipped; usage may be incomplete.");
+    let mut messages: Vec<String> = Vec::new();
+    let mut malformed: HashMap<String, i64> = HashMap::new();
+    for source in summary["sources"].as_array().into_iter().flatten() {
+        let fp = &source["fingerprint"];
+        let provider = fp["provider"].as_str().unwrap_or("");
+        if hidden.contains(&provider) {
+            continue;
+        }
+        let status = source["status"].as_str().unwrap_or("");
+        let count = source["malformedRecords"].as_i64().unwrap_or(0);
+        let action = source["action"].as_bool().unwrap_or(false) || source["action"].is_object() || source["action"].is_string();
+        if !action && status != "partial" && status != "failed" && provider != "cursor" && !(status == "missing" && count > 0) {
+            continue;
+        }
+        let mut message = source["message"].as_str().unwrap_or("").to_string();
+        if count > 0 {
+            let key = json!([fp["hostId"], fp["provider"], fp["resolvedHomePath"], fp["volumeId"]]).to_string();
+            let seen = malformed.entry(key).or_default();
+            *seen = (*seen).max(count);
+            // Servers also append the warning to the message; keep any read failure before it.
+            if let Some(rest) = message.strip_suffix(&warning(count)) {
+                message = rest.trim().to_string();
+            }
+        }
+        if !message.is_empty() && !messages.contains(&message) {
+            messages.push(message);
+        }
+    }
+    let total: i64 = malformed.values().sum();
+    if total > 0 {
+        let line = warning(total);
+        if !messages.contains(&line) {
+            messages.push(line);
+        }
+    }
+    messages
+}
+
+fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> String, premium: Option<f64>) -> El {
     let shown: Vec<_> = parts.iter().filter(|p| p.1 > 0.0).collect();
     let mut bar = row().w_full().h(8.0).gap(2.0);
     for (n, (_, v, c)) in shown.iter().enumerate() {
@@ -1055,7 +1350,11 @@ fn share_bar(t: &T, title: &str, parts: &[(&str, f64, Color)], fmt: fn(f64) -> S
                 .child(text(fmt(*v)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.foreground)),
         );
     }
-    col().grow(1.0).w(0.0).min_w(0.0).gap(10.0).child(h2(t, title)).child(bar).child(legend)
+    let mut head = row().w_full().gap(12.0).center_y().child(h2(t, title)).child(spacer());
+    if let Some(premium) = premium {
+        head = head.child(text("Premium").font(theme::TEXT_XS).color(t.c.muted_foreground)).child(text(usd(premium)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.foreground).ml(-8.0));
+    }
+    col().grow(1.0).w(0.0).min_w(0.0).gap(10.0).child(head).child(bar).child(legend)
 }
 
 const VIEW_W: f32 = 960.0;
@@ -1268,14 +1567,14 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>,
     col().w_full().gap(4.0).child(row().w_full().gap(8.0).child(axis).child(plot)).child(x_labels)
 }
 
-fn breakdown(s: &App, t: &T, m: &Merged) -> El {
+fn breakdown(s: &App, t: &T, m: &Merged, dim: f32) -> El {
     let u = &s.ui.pages.usage;
     let k = kit::theme(t);
-    let period = if u.window_days == 1 { "Hour" } else { "Day" };
+    let period = if m.hourly || u.answered.as_ref().is_some_and(|r| r["resolution"] == "hour") { "Hour" } else { "Day" };
     let toggle = ToggleGroup::new(&["Model", period], &[usize::from(u.by_period)]).on_pick(|s: &mut App, n: usize, _: &mut Tx| ui(s).by_period = n == 1).build(&k);
     let header = row().w_full().center_y().child(h2(t, "Breakdown")).child(spacer()).child(toggle);
     let table = if u.by_period { period_table(t, m) } else { model_table(t, m, u.metric == "tokens") };
-    col().w_full().gap(12.0).child(header).child(table)
+    col().w_full().gap(12.0).child(header).child(table.opacity(dim))
 }
 
 fn cell(label: String, w: f32, style: rune::tok::TextStyle, c: Color) -> El {
@@ -1303,7 +1602,7 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
     }
     let peak = m.models.iter().map(|x| if tokens_view { x.1.tokens } else { x.1.cost }).fold(0.0, f64::max).max(f64::MIN_POSITIVE);
     let total = if tokens_view { m.tokens } else { m.cost }.max(f64::MIN_POSITIVE);
-    for (n, (key, totals)) in m.models.iter().enumerate() {
+    for (n, (key, totals)) in by_metric(&m.models, tokens_view).into_iter().enumerate() {
         let mut parts = key.split('\0');
         let (kind, api, model) = (parts.next().unwrap_or(""), parts.next().unwrap_or(""), parts.next().unwrap_or(""));
         let (_, driver) = presentation(kind);
@@ -1314,6 +1613,8 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
         }
         let unpriced = totals.cost == 0.0 && totals.tokens > 0.0;
         let cost = if unpriced { "Unpriced".to_string() } else { usd(totals.cost) };
+        // modelShare: an unknown cost has no cost share, only a token share.
+        let share = if unpriced && !tokens_view { String::new() } else { percent(v / total) };
         let open = key.clone();
         table = table
             .child(
@@ -1335,10 +1636,10 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
                             .shrink()
                             .min_w(0.0)
                             .child(name)
-                            .child(el().mt(6.0).h(2.0).w(((v / peak) as f32 * 192.0).max(8.0)).radius(radius::FULL).fill(color(t, kind))),
+                            .child(if v > 0.0 { el().mt(6.0).h(2.0).w(((v / peak) as f32 * 192.0).max(2.0)).radius(radius::FULL).fill(color(t, kind)) } else { el().mt(6.0).h(2.0) }),
                     )
                     .child(cell(cost, 120.0, num, if unpriced { muted } else { t.c.foreground }))
-                    .child(cell(percent(v / total), 96.0, num, muted))
+                    .child(cell(share, 96.0, num, muted))
                     .child(cell(tokens(totals.tokens), 112.0, num, muted).pr(8.0)),
             )
             .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5)));
@@ -1357,7 +1658,11 @@ fn period_table(t: &T, m: &Merged) -> El {
     }
     header = header.child(cell("Total".into(), 112.0, head, muted)).child(cell("Tokens".into(), 112.0, head, muted).pr(8.0));
     let mut table = col().w_full().child(header).child(el().w_full().h(1.0).fill(t.c.border));
-    for p in m.periods.iter().rev() {
+    let periods = active_periods(m);
+    if periods.is_empty() {
+        return table.child(row().w_full().py(24.0).center().child(text("No activity in this window.").font(theme::TEXT_SM).color(muted)));
+    }
+    for p in periods {
         let row_totals = m.by_period.get(p);
         let get = |k: &str| row_totals.and_then(|x| x.get(k)).copied().unwrap_or_default();
         let mut line = row().w_full().py(8.0).center_y().child(row().grow(1.0).pl(8.0).child(text(period_label(p, m.clock)).font(theme::TEXT_SM).color(t.c.foreground)));
@@ -1372,6 +1677,20 @@ fn period_table(t: &T, m: &Merged) -> El {
         table = table.child(line).child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5)));
     }
     table
+}
+
+/// The breakdown's order: by cost, or by tokens in the tokens view (sortModelsByTokens).
+fn by_metric(models: &[(String, Totals)], tokens_view: bool) -> Vec<&(String, Totals)> {
+    let mut sorted: Vec<_> = models.iter().collect();
+    if tokens_view {
+        sorted.sort_by(|a, b| b.1.tokens.total_cmp(&a.1.tokens).then(b.1.cost.total_cmp(&a.1.cost)));
+    }
+    sorted
+}
+
+/// The time breakdown lists periods that had activity, newest first (merged.daily/hourly).
+fn active_periods(m: &Merged) -> Vec<&String> {
+    m.periods.iter().rev().filter(|p| m.by_period.get(*p).is_some_and(|row| !row.is_empty())).collect()
 }
 
 /// UsageSkeleton: static placeholders in the overview's shape.
@@ -1496,5 +1815,65 @@ mod tests {
         assert_eq!(hovered_column(900.0, 300.0, 4), Some(3));
         assert_eq!(hovered_column(-5.0, 300.0, 1), Some(0));
         assert_eq!(hovered_column(10.0, 300.0, 0), None);
+    }
+
+    #[test]
+    fn token_counts_drop_only_an_all_zero_fraction() {
+        assert_eq!(tokens(1_500_000.0), "1.50M");
+        assert_eq!(tokens(2_000_000.0), "2M");
+        assert_eq!(tokens(12_300.0), "12.3K");
+        assert_eq!(tokens(250_000_000_000.0), "250B");
+        assert_eq!(tokens(999.0), "999");
+    }
+
+    #[test]
+    fn source_messages_skip_ready_sources_and_fold_malformed_counts() {
+        let warning = |n: i64| format!("{n} malformed or inconsistent usage record(s) were skipped; usage may be incomplete.");
+        let fp = |provider: &str, home: &str| json!({"hostId": "h", "provider": provider, "resolvedHomePath": home, "volumeId": "v"});
+        let summary = json!({"sources": [
+            {"fingerprint": fp("codex", "/a"), "status": "ready", "malformedRecords": 0, "message": "fine"},
+            {"fingerprint": fp("claude", "/b"), "status": "failed", "malformedRecords": 0, "message": "Could not read ~/.claude."},
+            {"fingerprint": fp("claude", "/c"), "status": "partial", "malformedRecords": 2, "message": format!("Read failed. {}", warning(2))},
+            {"fingerprint": fp("claude", "/c"), "status": "partial", "malformedRecords": 3, "message": warning(3)},
+            {"fingerprint": fp("codex", "/d"), "status": "missing", "malformedRecords": 1},
+            {"fingerprint": fp("grok", "/e"), "status": "failed", "malformedRecords": 0, "message": "Grok is hidden."},
+        ]});
+        assert_eq!(source_messages(&summary, &["grok"]), vec!["Could not read ~/.claude.".to_string(), "Read failed.".into(), warning(4)]);
+    }
+
+    #[test]
+    fn the_breakdown_orders_models_by_the_metric_and_lists_active_periods_newest_first() {
+        let models = vec![("a".to_string(), Totals { cost: 5.0, tokens: 10.0 }), ("b".to_string(), Totals { cost: 1.0, tokens: 90.0 })];
+        let names = |v: Vec<&(String, Totals)>| v.iter().map(|m| m.0.clone()).collect::<Vec<_>>();
+        assert_eq!(names(by_metric(&models, false)), ["a", "b"]);
+        assert_eq!(names(by_metric(&models, true)), ["b", "a"]);
+
+        let mut m = Merged { periods: vec!["2026-11-01".into(), "2026-11-02".into(), "2026-11-03".into()], ..Merged::default() };
+        for day in ["2026-11-01", "2026-11-03"] {
+            m.by_period.entry(day.into()).or_default().insert("codex", Totals::default());
+        }
+        assert_eq!(active_periods(&m), ["2026-11-03", "2026-11-01"]);
+        assert!(active_periods(&Merged::default()).is_empty());
+    }
+
+    #[test]
+    fn page_preferences_round_trip_and_ignore_unknown_values() {
+        let mut u = Ui::default();
+        apply_preferences(&mut u, &json!({"metric": "tokens", "windowDays": 7, "hiddenProviders": ["grok", "nope", "codex"]}));
+        assert_eq!((u.metric, u.window_days, u.hidden.clone()), ("tokens", 7, vec!["codex", "grok"]));
+        let mut back = Ui::default();
+        apply_preferences(&mut back, &preferences(&u));
+        assert_eq!((back.metric, back.window_days, back.hidden), ("tokens", 7, vec!["codex", "grok"]));
+
+        let mut fresh = Ui::default();
+        apply_preferences(&mut fresh, &json!({"metric": "watts", "windowDays": 3}));
+        assert_eq!((fresh.metric, fresh.window_days, fresh.preferences_read), ("limits", 30, true));
+    }
+
+    #[test]
+    fn shifted_digits_resolve_to_the_bound_digit() {
+        assert_eq!(unshifted('!'), Some('1'));
+        assert_eq!(unshifted('$'), Some('4'));
+        assert_eq!(unshifted('1'), None);
     }
 }

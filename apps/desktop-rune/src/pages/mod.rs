@@ -5,6 +5,7 @@ pub mod avatars;
 pub mod pr_detail;
 pub mod pull_requests;
 pub mod usage;
+pub mod usage_prices;
 
 use rune::{KeyEvent, Tx};
 use serde_json::{Value, json};
@@ -22,7 +23,7 @@ pub struct Ui {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_detail::poll(s) | usage::poll(s);
+    let changed = pull_requests::poll(s) | pr_detail::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }
@@ -113,6 +114,8 @@ fn open_usage(s: &mut App, metric: &'static str) {
     u.zone_name = "UTC".into();
     u.zone = crate::data::Zone::Fixed(0);
     u.requested = Some(usage::input(u, s.now_ms, &json!([])));
+    u.answered = u.requested.clone();
+    u.preferences_read = true;
 }
 
 fn light(s: &mut App) {
@@ -123,6 +126,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests", |s| open_prs(s, |_| {})),
     ("pull-requests-empty", |s| open_prs(s, |r| r["entries"] = json!([]))),
     ("pull-requests-filtered", |s| {
+        open_prs(s, |r| r["entries"] = json!([]));
+        let u = &mut s.ui.pages.pull_requests;
+        u.query.replace_text("no such branch");
+        pull_requests::submit(u);
+        u.requested = Some(pull_requests::input(u));
+    }),
+    ("pull-requests-searching", |s| {
         open_prs(s, |_| {});
         s.ui.pages.pull_requests.query.replace_text("no such branch");
     }),
@@ -216,5 +226,26 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-model", |s| {
         open_usage(s, "cost");
         s.ui.pages.usage.model = Some("claude\0\0claude-opus-5-5".into());
+    }),
+    ("usage-model-unpriced", |s| {
+        open_usage(s, "cost");
+        let u = &mut s.ui.pages.usage;
+        for b in u.summary.as_mut().and_then(|v| v["buckets"].as_array_mut()).into_iter().flatten() {
+            if b["model"] == "kimi-k3" {
+                b["unpricedRecords"] = b["records"].clone();
+            }
+        }
+        u.model = Some("opencode\0moonshot\0kimi-k3".into());
+    }),
+    ("usage-prices", |s| {
+        open_usage(s, "cost");
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(config) = state.config.as_mut()
+        {
+            config["settings"]["usagePriceOverrides"] = json!({"glm-4.6": {"inputCostPerMillionTokens": 0.6, "outputCostPerMillionTokens": 2.2, "cacheReadCostPerMillionTokens": 0.11}});
+            config["settings"]["usageModelAliases"] = json!({"claude-opus-5-5-preview": "claude-opus-5-5"});
+            config["environment"]["capabilities"]["usageModelAliases"] = json!(true);
+        }
+        usage_prices::open(s, Some("kimi-k2-thinking"));
     }),
 ];

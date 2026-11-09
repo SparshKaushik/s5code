@@ -28,11 +28,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if matches!(s.frame_route(), Route::Settings(_)) {
         return main;
     }
-    if home::no_projects(s) {
-        // The desktop window drags only where it opts in, so the hero keeps a titlebar strip.
-        let strip = rune::row().key("topbar").w_full().h(crate::theme::layout::TOPBAR_H).window_drag();
-        return main.child(strip).child(home::hero(s, t));
-    }
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let shown = details::shown(s, w, h);
     let lane = details::lane(w, h, shown != details::Shown::Inline);

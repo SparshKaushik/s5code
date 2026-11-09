@@ -48,7 +48,7 @@ fn step(current: Option<usize>, n: usize, forward: bool) -> usize {
 }
 
 pub fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
-    if s.ui.shell.palette.open {
+    if s.ui.shell.palette.open || s.ui.search.open {
         return false;
     }
     let forward = if crate::panel::shortcut(s, e, "workspace.focusNext") {

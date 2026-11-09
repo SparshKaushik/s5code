@@ -7,7 +7,6 @@ mod files;
 mod preview;
 mod terminal;
 mod vt;
-pub use terminal::take_message_context;
 
 use crate::{
     App, Route, data, icons, kit,
@@ -53,7 +52,18 @@ pub struct Ui {
     add_menu: bool,
     thread: String,
     closed: closed::Store,
+    /// Each thread's surfaces, as web's right panel state is per thread; browser tabs stay
+    /// alive while their thread is in the background.
+    stash: std::collections::HashMap<String, Stash>,
+    stash_key: String,
     pub waker: Option<Waker>,
+}
+#[derive(Default)]
+struct Stash {
+    surfaces: Vec<Surface>,
+    active: Option<Surface>,
+    open: bool,
+    pip: Option<browser::TabId>,
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -69,6 +79,8 @@ impl Default for Ui {
             add_menu: false,
             thread: String::new(),
             closed: Default::default(),
+            stash: Default::default(),
+            stash_key: String::new(),
             waker: None,
         }
     }
@@ -171,7 +183,9 @@ fn reopen_closed(app: &mut App) -> bool {
     let Some(c) = next else { return false };
     if current.as_deref() != Some(c.thread.as_str()) {
         app.navigate(Route::Thread(c.thread.clone()));
-        // Switch the panel's thread now, so the next poll doesn't reset what reopens here.
+        // Swap in that thread's panel and switch its thread now, so the next poll neither
+        // stashes nor resets what reopens here.
+        switch_thread(app);
         app.ui.panel.thread = c.thread;
         diff::reset(app);
         files::reset(app);
@@ -223,9 +237,42 @@ pub fn open_diff(app: &mut App, checkpoint: Value) {
     diff::open_turn(app, turn);
     activate(app, Surface::Diff);
 }
+/// Puts the panel away with the thread it belonged to and brings back the next thread's.
+fn switch_thread(app: &mut App) -> bool {
+    let key = match app.frame_route() {
+        Route::Thread(id) => id.clone(),
+        _ => String::new(),
+    };
+    if app.ui.panel.stash_key == key {
+        return false;
+    }
+    let previous = std::mem::replace(&mut app.ui.panel.stash_key, key.clone());
+    let panel = &mut app.ui.panel;
+    let saved = Stash {
+        surfaces: std::mem::take(&mut panel.surfaces),
+        active: panel.active.take(),
+        open: app.ui.shell.panel_open,
+        pip: panel.browser.pip.take(),
+    };
+    panel.stash.insert(previous, saved);
+    let next = panel.stash.remove(&key).unwrap_or_default();
+    panel.surfaces = next.surfaces;
+    panel.active = next.active;
+    panel.browser.pip = next.pip;
+    panel.add_menu = false;
+    app.ui.shell.panel_open = next.open;
+    true
+}
+
+/// The turn's diff, opened and scrolled to `path` once it loads (a changed-files row).
+pub fn open_diff_at(app: &mut App, checkpoint: Value, path: &str) {
+    open_diff(app, checkpoint);
+    app.ui.panel.diff.reveal = Some(path.to_owned());
+}
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut context_changed = false;
     if matches!(app.src, crate::data::Source::Live(_)) {
+        context_changed |= switch_thread(app);
         let thread = context(app).map(|(id, _)| id).unwrap_or_default();
         if app.ui.panel.thread != thread {
             app.ui.panel.thread = thread;
@@ -246,10 +293,11 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
 
     let changed = diff::poll(app)
+        | diff::reveal(app, tx)
         | files::poll(app, tx)
         | terminal::poll(app, tx)
         | drawer::poll(app)
-        | preview::poll(app);
+        | preview::poll(app, tx);
     changed | context_changed
 }
 /// Whether `e` resolves to `command` (`resolveShortcutCommand`): the last binding whose key
@@ -309,6 +357,7 @@ fn when_context(app: &App, name: &str) -> bool {
         "terminalOpen" => terminal_active(app) || context(app).is_some_and(|(thread, _)| app.ui.panel.drawer.is_open(&thread)),
         "rightPanelOpen" => app.ui.shell.panel_open,
         "previewOpen" => app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))),
+        "usagePageOpen" => matches!(app.route, crate::Route::Usage),
         _ => false,
     }
 }
@@ -336,23 +385,15 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         toggle_terminal(app);
         return true;
     }
-    if context(app).is_some() && shortcut(app, e, "preview.toggle") {
-        // `togglePreviewPanel`: close a showing browser, else show the last tab or a new one.
-        if app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))) {
-            app.ui.shell.panel_open = false;
-        } else if let Some(tab) = app.ui.panel.surfaces.iter().rev().find(|v| matches!(v, Surface::Browser(_))).copied() {
-            activate(app, tab);
-        } else {
-            add(app, Surface::Browser(0));
-        }
-        return true;
-    }
     if context(app).is_some() && shortcut(app, e, "diff.toggle") {
         if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
             app.ui.shell.panel_open = false;
         } else {
             activate(app, Surface::Diff);
         }
+        return true;
+    }
+    if preview::on_key(app, e, tx) {
         return true;
     }
     if app.ui.shell.panel_open
@@ -678,14 +719,17 @@ pub(super) fn notice(t: &T, message: &str) -> El {
 }
 
 pub fn overlays(app: &App, t: &T) -> Vec<El> {
-    let mut out = if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
-        diff::overlays(app, t)
-    } else {
-        vec![]
-    };
+    let mut out = vec![];
+    preview::pip(app, t, &mut out);
+    if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
+        out.extend(diff::overlays(app, t));
+    }
     terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     if app.ui.shell.panel_open {
+        if app.ui.panel.active == Some(Surface::Files) {
+            files::overlays(app, t, &mut out);
+        }
         preview::overlays(app, t, &mut out);
         if app.ui.panel.add_menu {
             add_menu(app, t, &mut out);
@@ -728,6 +772,31 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn each_thread_gets_its_own_panel_back() {
+        let mut app = App::new();
+        let ids: Vec<String> = app.state().threads.iter().take(2).map(|v| data::s(v, "id").to_string()).collect();
+        app.navigate(Route::Thread(ids[0].clone()));
+        switch_thread(&mut app);
+        app.ui.panel.surfaces = vec![Surface::Browser(1), Surface::Terminal];
+        app.ui.panel.active = Some(Surface::Browser(1));
+        app.ui.shell.panel_open = true;
+        app.ui.panel.browser.pip = Some(1);
+
+        app.navigate(Route::Thread(ids[1].clone()));
+        assert!(switch_thread(&mut app));
+        assert!(app.ui.panel.surfaces.is_empty() && app.ui.panel.active.is_none() && app.ui.panel.browser.pip.is_none());
+        assert!(!app.ui.shell.panel_open);
+        app.ui.panel.surfaces = vec![Surface::Diff];
+
+        app.navigate(Route::Thread(ids[0].clone()));
+        assert!(switch_thread(&mut app));
+        assert!(app.ui.panel.surfaces == vec![Surface::Browser(1), Surface::Terminal]);
+        assert!(app.ui.panel.active == Some(Surface::Browser(1)) && app.ui.shell.panel_open);
+        assert_eq!(app.ui.panel.browser.pip, Some(1));
+        assert!(!switch_thread(&mut app));
+    }
+
     #[test]
     fn configured_mod_key_uses_the_platform_primary_modifier() {
         let mut app = App::new();

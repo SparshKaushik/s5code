@@ -13,6 +13,37 @@ pub fn command(thread: &str, request: &str, fields: Value) -> Value {
 }
 use std::collections::HashMap;
 
+/// Approvals the open thread waits on (threadRequests.ts): pending requests that aren't
+/// questions, auth refreshes or dynamic tool calls.
+pub fn pending_approvals(p: &Value) -> Vec<&Value> {
+    array(p, "runtimeRequests")
+        .iter()
+        .filter(|r| s(r, "status") == "pending" && !matches!(s(r, "kind"), "user_input" | "auth_refresh" | "dynamic_tool_call"))
+        .collect()
+}
+
+fn live(request: &Value) -> bool {
+    s(&request["responseCapability"], "type") == "live"
+}
+
+/// The first approval takes the composer's text as decline feedback, when its provider accepts it.
+pub fn takes_feedback(approvals: &[&Value]) -> bool {
+    approvals.first().is_some_and(|r| live(r) && r["responseCapability"]["supportsFeedback"] == true)
+}
+
+/// What a message sent while approvals wait does (useComposerSend): becomes the first approval's
+/// decline feedback, or declines every live approval and then steers the turn. `Err` keeps the
+/// draft, with why.
+pub fn redirect(thread: &str, approvals: &[&Value], text: &str, extras: bool) -> Result<Vec<Value>, &'static str> {
+    if takes_feedback(approvals) {
+        if extras {
+            return Err("Send approval feedback without attachments or added context.");
+        }
+        return Ok(vec![command(thread, s(approvals[0], "id"), json!({"decision": "decline", "feedback": text.trim()}))]);
+    }
+    Ok(approvals.iter().filter(|r| live(r)).map(|r| command(thread, s(r, "id"), json!({"decision": "decline"}))).collect())
+}
+
 /// One question's answer (pendingUserInput.ts resolvePendingUserInputAnswer): its own typed
 /// answer when it takes one, else the picked option (a string) or options (an array).
 pub fn resolve(question: &Value, selected: Option<&Vec<String>>, custom: Option<&str>) -> Option<Value> {
@@ -62,6 +93,29 @@ mod tests {
         let c = command("thread", "request", json!({"answers":{"q":["one","two"]}}));
         assert_eq!(c["answers"], json!({"q":["one","two"]}));
         assert!(c["decision"].is_null());
+    }
+    #[test]
+    fn a_send_redirects_waiting_approvals_by_feedback_or_by_declining_them() {
+        let p = json!({"runtimeRequests": [
+            {"id": "q", "kind": "user_input", "status": "pending"},
+            {"id": "a", "kind": "command_execution_approval", "status": "pending", "responseCapability": {"type": "live"}},
+            {"id": "gone", "kind": "file_change_approval", "status": "pending", "responseCapability": {"type": "not_resumable"}},
+            {"id": "done", "kind": "command_execution_approval", "status": "resolved", "responseCapability": {"type": "live"}},
+        ]});
+        let approvals = pending_approvals(&p);
+        assert_eq!(approvals.iter().map(|r| s(r, "id")).collect::<Vec<_>>(), ["a", "gone"]);
+        let declines = redirect("t", &approvals, "do it differently", true).unwrap();
+        assert_eq!(declines.len(), 1);
+        assert_eq!((declines[0]["requestId"].as_str(), declines[0]["decision"].as_str()), (Some("a"), Some("decline")));
+        assert!(declines[0]["feedback"].is_null());
+
+        let p = json!({"runtimeRequests": [
+            {"id": "a", "kind": "command_execution_approval", "status": "pending", "responseCapability": {"type": "live", "supportsFeedback": true}},
+        ]});
+        let approvals = pending_approvals(&p);
+        let feedback = redirect("t", &approvals, " use npm ", false).unwrap();
+        assert_eq!(feedback[0]["feedback"], "use npm");
+        assert!(redirect("t", &approvals, "x", true).is_err());
     }
     #[test]
     fn single_answers_are_strings_multiple_answers_are_arrays_and_custom_takes_precedence() {

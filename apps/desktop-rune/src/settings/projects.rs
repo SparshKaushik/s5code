@@ -24,12 +24,6 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let organize = config.is_some_and(|c| c["environment"]["capabilities"]["projectOrganization"] == true);
     let key = |field: &str| format!("project::{id}::{field}");
 
-    let icon = match &project["projectIcon"] {
-        icon if icon["kind"] == "lucide" => format!("{} · {}", crate::data::s(icon, "name"), crate::data::s(icon, "color")),
-        icon if icon["kind"] == "monogram" => format!("{} · {}", crate::data::s(icon, "text"), crate::data::s(icon, "color")),
-        icon if icon["kind"] == "emoji" => crate::data::s(icon, "emoji").to_owned(),
-        _ => project["faviconPath"].as_str().unwrap_or("Automatic").to_owned(),
-    };
     let mut overview = vec![
         c::setting_row(
             s,
@@ -38,13 +32,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
             &json!({"key": key("title"), "title": "Name", "kind": "input", "width": 256, "placeholder": "Project name",
                 "description": "The shared name for this project group in the sidebar and thread lists."}),
         ),
-        c::setting_row(
-            s,
-            cx,
-            t,
-            &json!({"key": key("faviconPath"), "title": "Project icon", "kind": "input", "width": 256,
-                "placeholder": "Automatic", "description": icon}),
-        ),
+        super::project_icon::settings_row(t, project),
     ];
     if organize {
         overview.push(c::setting_row(
@@ -95,7 +83,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
                 ),
         )
         .child(c::card(overview, t))
-        .child(actions(s, t));
+        .child(actions(s, t, project));
 
     let checkout = super::about::about_row(t, &environment, &root, el());
     let remove = (id.clone(), title.clone());
@@ -169,36 +157,46 @@ fn listed(thread: &Value) -> bool {
     thread["lineage"]["relationshipToParent"] != "subagent" && thread["lineage"]["sideChat"] != true
 }
 
-/// Web `ProjectActionsSettings`' list. Adding and editing actions needs the script editor
-/// dialog, which the native client doesn't have yet.
-fn actions(s: &App, t: &T) -> El {
-    let scripts = super::value(s, "defaultProjectScripts");
+/// Web `ProjectActionsSettings`: the project's actions with their shortcuts, added and edited in
+/// the same dialog the thread's scripts menu opens.
+fn actions(s: &App, t: &T, project: &Value) -> El {
+    use crate::chat::details::scripts;
+    let id = crate::data::s(project, "id").to_owned();
+    let add = id.clone();
     let mut rows = vec![super::about::about_row(
         t,
         "Actions",
         "Commands that run in this project's checkout or its worktree, with optional shortcuts.",
-        el(),
+        crate::kit::Button::new("Add action")
+            .variant("outline")
+            .size("xs")
+            .icon(&crate::icons::PLUS)
+            .on_press(move |s: &mut App| scripts::open_for_project(s, &add, None))
+            .build(t)
+            .key("project-add-action"),
     )];
-    let scripts = scripts.as_array().map(Vec::as_slice).unwrap_or_default();
+    let scripts = scripts::resolve(super::server_settings(s), project);
     if scripts.is_empty() {
         rows.push(
             text("No actions configured.")
                 .font(theme::TEXT_SM)
                 .color(t.c.muted_foreground)
                 .px(16.0)
-                .py(10.0),
+                .py(8.0),
         );
     }
     for script in scripts {
+        let name = crate::data::s(&script, "name").to_owned();
         let mut heading = row()
             .gap(8.0)
             .center_y()
-            .child(rune::icon(&crate::icons::PLAY, 16.0).color(t.c.muted_foreground))
-            .child(text(crate::data::s(script, "name").to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate());
+            .min_w(0.0)
+            .child(rune::icon(scripts::icon_for(crate::data::s(&script, "icon")), 16.0).color(t.c.muted_foreground))
+            .child(text(name.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate());
         for (on, label) in [
             (script["runOnWorktreeCreate"] == true, "setup"),
             (script["runOnSettle"] == true, "on settle"),
-            (script["previewUrl"].is_string(), "preview · desktop only"),
+            (script["previewUrl"].as_str().is_some_and(|u| !u.is_empty()), "preview · desktop only"),
         ] {
             if on {
                 heading = heading.child(
@@ -212,14 +210,41 @@ fn actions(s: &App, t: &T) -> El {
                 );
             }
         }
+        let shortcut = crate::shell::palette::shortcut_label(s, &scripts::command_for(crate::data::s(&script, "id")));
+        let mut control = row().gap(8.0).center_y();
+        if !shortcut.is_empty() {
+            control = control.child(text(shortcut).font(theme::TEXT_XS).color(t.c.muted_foreground));
+        }
+        let (project, edit) = (id.clone(), script.clone());
+        control = control.child(
+            crate::kit::Button::new(format!("Edit {name}"))
+                .variant("ghost-muted")
+                .size("icon-xs")
+                .icon(&crate::icons::SETTINGS)
+                .on_press(move |s: &mut App| scripts::open_for_project(s, &project, Some(&edit)))
+                .build(t),
+        );
         rows.push(
-            col()
+            row()
                 .w_full()
                 .px(16.0)
                 .py(8.0)
-                .gap(4.0)
-                .child(heading)
-                .child(text(crate::data::s(script, "command").to_owned()).font(theme::MONO_XS).color(t.c.muted_foreground).truncate()),
+                .gap(32.0)
+                .center_y()
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(4.0)
+                        .child(heading)
+                        .child(
+                            text(crate::data::s(&script, "command").to_owned())
+                                .font(theme::MONO_XS)
+                                .color(t.c.muted_foreground)
+                                .truncate(),
+                        ),
+                )
+                .child(control),
         );
     }
     c::section("Actions", rows, t)

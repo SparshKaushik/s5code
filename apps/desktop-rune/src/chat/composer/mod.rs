@@ -3,6 +3,7 @@
 //! Drafts are kept per thread (and one for the home draft), as the web composer draft store does.
 //! `menu` is the @-mention and slash drawer, `picker` the model picker popover.
 
+pub mod chips;
 mod context;
 mod menu;
 mod picker;
@@ -32,11 +33,16 @@ pub struct Draft {
     pub model: Option<(String, String)>,
     pub runtime_mode: Option<String>,
     pub interaction_mode: Option<String>,
+    /// Context records (`ComposerContextRecord`, such as a picked preview element) to send.
+    pub context: Vec<Value>,
+    /// Records behind the prompt's context chips (`chips::pill_id`); a chip deleted from the
+    /// prompt leaves its record unsent.
+    pub contexts: Vec<Value>,
 }
 
 impl Default for Draft {
     fn default() -> Draft {
-        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None }
+        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, context: Vec::new(), contexts: Vec::new() }
     }
 }
 
@@ -57,6 +63,9 @@ pub struct Ui {
     editing: Option<(String, String)>,
     /// The prompt Up last recalled: the draft it went into, the message, and the text.
     recalled: Option<(String, String, String)>,
+    /// Drafts on disk: read once connected, then the last written copy and the next write check.
+    stored: Option<String>,
+    store_at: Option<std::time::Instant>,
 }
 
 /// The draft key for a route: the thread id, or `home` for the new-thread draft.
@@ -130,7 +139,16 @@ fn mode_for(s: &App, alternate: bool) -> &'static str {
         .and_then(|t| s.state().thread_views.get(data::s(t, "id")))
         .is_some_and(|v| crate::chat::timeline::queue::workflow(&v.projection).skips_compaction);
     let follow_up = crate::settings::value(s, "followUpBehavior");
-    dispatch_mode(running(s), can_steer, follow_up.as_str().unwrap_or("steer"), alternate)
+    // A message sent while an approval waits redirects the agent (resolveComposerDispatchMode).
+    let follow_up = if approvals(s).is_empty() { follow_up.as_str().unwrap_or("steer") } else { "steer" };
+    dispatch_mode(running(s), can_steer, follow_up, alternate)
+}
+
+/// Approvals the open thread waits on; a message sent now declines them.
+fn approvals(s: &App) -> Vec<Value> {
+    let Some(id) = ctx(s).thread.map(|t| data::s(t, "id")) else { return Vec::new() };
+    let Some(view) = s.state().thread_views.get(id) else { return Vec::new() };
+    crate::chat::timeline::requests::pending_approvals(&view.projection).into_iter().cloned().collect()
 }
 
 /// Prompts Up can recall (buildComposerPromptHistoryEntries): what the user typed themselves,
@@ -345,12 +363,43 @@ fn send(s: &mut App, alternate: bool) {
     }
     let mode = mode_for(s, alternate);
     let Some(d) = draft(s) else { return };
-    let mut text = d.edit.text.trim().to_string();
+    let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
+    let mut text = text.trim().to_string();
     // A file that can no longer be read keeps the draft as it is.
     let Some(uploads) = d.attachments.iter().map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
+    // Picked elements ride as records plus a text reference; chips are already links in the text.
+    let picks = d.context.clone();
+    if let Route::Thread(thread) = s.frame_route().clone()
+        && !text.is_empty()
+    {
+        let pending = approvals(s);
+        if !pending.is_empty() {
+            use crate::chat::timeline::requests;
+            let pending: Vec<&Value> = pending.iter().collect();
+            match requests::redirect(&thread, &pending, &text, !uploads.is_empty() || !contexts.is_empty() || !picks.is_empty()) {
+                Err(message) => {
+                    crate::shell::palette::toast(s, message, None);
+                    return;
+                }
+                Ok(commands) => {
+                    let Some(net) = s.src.net() else { return };
+                    for command in commands {
+                        net.dispatch(command);
+                    }
+                    // Feedback is the whole reply; otherwise the declines go first, then the steer.
+                    if requests::takes_feedback(&pending) {
+                        sent(s);
+                        return;
+                    }
+                }
+            }
+        }
+    }
     let mut plan_ref = None;
     if text.is_empty()
         && uploads.is_empty()
+        && contexts.is_empty()
+        && picks.is_empty()
         && let (Some((plan_id, markdown)), Route::Thread(id)) = (plan::follow_up(s), s.frame_route().clone())
     {
         // resolvePlanFollowUpSubmission: implementing leaves plan mode.
@@ -358,22 +407,27 @@ fn send(s: &mut App, alternate: bool) {
         plan_ref = Some(json!({"threadId": id, "planId": plan_id}));
         set_interaction_mode(s, "default");
     }
-    if text.is_empty() && uploads.is_empty() {
+    if text.is_empty() && uploads.is_empty() && contexts.is_empty() && picks.is_empty() {
         return;
     }
+    let text = with_context_references(&picks, &text);
+    let mut contexts = contexts;
+    contexts.extend(picks);
     let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
     let message_id = s5_net::uuid();
-    let context = crate::panel::take_message_context(s, &text);
-    let (thread_id, mut payload, launch) = match route {
+    let (thread_id, payload, launch) = match route {
         Route::Thread(id) => {
             let mut cmd = json!({
                 "type": "message.dispatch", "commandId": s5_net::uuid(), "createdBy": "user", "creationSource": "web",
                 "threadId": id, "messageId": message_id, "text": text, "attachments": [],
                 "dispatchMode": {"type": if mode == "queue" { "queue_after_active" } else { "start_immediately" }},
             });
+            if !contexts.is_empty() {
+                cmd["context"] = json!({"version": 1, "records": contexts});
+            }
             if mode != "queue" {
                 cmd["deliveryIntent"] = json!(mode);
             }
@@ -392,19 +446,18 @@ fn send(s: &mut App, alternate: bool) {
             let draft_run = crate::chat::details::take_draft_workspace(s);
             // A sidebar "new thread on branch" preset wins over the details card's env mode.
             let workspace = if preset == json!({"type": "root"}) { draft_run.unwrap_or(preset) } else { preset };
-            let params = json!({
+            let mut params = json!({
                 "commandId": s5_net::uuid(), "creationSource": "web", "threadId": thread_id, "projectId": project_id,
                 "title": "New thread", "generateTitle": true, "modelSelection": model, "runtimeMode": runtime,
                 "interactionMode": interaction, "workspaceStrategy": workspace,
                 "initialMessage": {"messageId": message_id, "text": text, "attachments": []},
             });
+            if !contexts.is_empty() {
+                params["initialMessage"]["context"] = json!({"version": 1, "records": contexts});
+            }
             (thread_id, params, true)
         }
     };
-    if let Some(context) = context {
-        let message = if launch { &mut payload["initialMessage"] } else { &mut payload };
-        message["context"] = context;
-    }
     let launch = launch.then(|| thread_id.clone());
     let Some(net) = s.src.net() else { return };
     let composer = &mut s.ui.chat.composer;
@@ -485,7 +538,27 @@ fn sent(s: &mut App) {
     } else {
         d.edit.clear();
         d.attachments.clear();
+        d.context.clear();
+        d.contexts.clear();
     }
+}
+
+/// Puts a context chip at the caret of the open route's draft and gives it the caret
+/// (addComposerContext): a terminal selection, a picked element, a PR.
+pub fn add_context(s: &mut App, record: Value) {
+    let d = draft_mut(s);
+    d.edit.insert_pill(chips::pill_id(&record), &chips::sanitize_label(data::s(&record, "label"), data::s(&record, "kind")));
+    d.edit.insert(" ");
+    d.edit.focused = true;
+    d.contexts.push(record);
+}
+
+/// "Add to chat" from a thread's terminal: the selection joins that thread's draft.
+pub fn add_terminal_context(s: &mut App, thread: &str, terminal_id: &str, terminal_label: &str, line_start: usize, line_end: usize, text: &str) {
+    if s.frame_route() != &Route::Thread(thread.to_owned()) {
+        s.navigate(Route::Thread(thread.to_owned()));
+    }
+    add_context(s, chips::terminal(terminal_id, terminal_label, line_start, line_end, text));
 }
 
 /// Opening a thread or the new-thread draft puts the caret in its composer (ChatView).
@@ -506,8 +579,11 @@ fn stop(s: &mut App) {
 
 /// Folds server replies the composer waits on (launches, file searches). Called from `poll`.
 pub fn poll(s: &mut App) -> bool {
+    if s.src.net().is_none() {
+        return false;
+    }
+    let mut changed = persist(s);
     let Some(net) = s.src.net() else { return false };
-    let mut changed = false;
     let composer = &mut s.ui.chat.composer;
     let mut i = 0;
     while i < composer.uploads.len() {
@@ -538,6 +614,105 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     changed
+}
+
+/// Drafts on disk, as the web composer draft store persists them: each draft's prompt with its
+/// pill ranges, attachments, picks and context records. Empty drafts and queued-message edits
+/// stay out.
+fn stored(drafts: &HashMap<String, Draft>) -> Value {
+    let mut out = serde_json::Map::new();
+    for (key, d) in drafts {
+        let blank = d.edit.text.trim().is_empty() && d.attachments.is_empty();
+        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none()) {
+            continue;
+        }
+        let pills: Vec<Value> = d.edit.pills().map(|(r, id)| json!([r.start, r.end, id])).collect();
+        let contexts: Vec<&Value> = d.contexts.iter().filter(|c| d.edit.pills().any(|(_, id)| id == chips::pill_id(c))).collect();
+        out.insert(
+            key.clone(),
+            json!({
+                "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
+                "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "contexts": contexts,
+            }),
+        );
+    }
+    Value::Object(out)
+}
+
+fn restored(v: &Value) -> HashMap<String, Draft> {
+    let strings = |v: &Value| v.as_array().map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_owned)).collect::<Vec<_>>()).unwrap_or_default();
+    let text = |v: &Value| v.as_str().map(str::to_owned);
+    let mut out = HashMap::new();
+    for (key, d) in v.as_object().into_iter().flatten() {
+        let prompt = data::s(d, "prompt");
+        let mut edit = TextEdit::new(prompt);
+        let mut pills: Vec<(usize, usize, &str)> = d["pills"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|p| Some((p[0].as_u64()? as usize, p[1].as_u64()? as usize, p[2].as_str()?)))
+            .filter(|(a, b, _)| a < b && *b <= prompt.len() && prompt.is_char_boundary(*a) && prompt.is_char_boundary(*b))
+            .collect();
+        // Last first, so earlier ranges stay where they were.
+        pills.sort_by_key(|p| std::cmp::Reverse(p.0));
+        for (a, b, id) in pills {
+            edit.replace_with_pill(a..b, id, &prompt[a..b]);
+        }
+        edit.set_caret(edit.text.len());
+        edit.focused = false;
+        let model = strings(&d["model"]);
+        out.insert(
+            key.clone(),
+            Draft {
+                edit,
+                attachments: strings(&d["attachments"]),
+                model: (model.len() == 2).then(|| (model[0].clone(), model[1].clone())),
+                runtime_mode: text(&d["runtimeMode"]),
+                interaction_mode: text(&d["interactionMode"]),
+                context: Vec::new(),
+                contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
+            },
+        );
+    }
+    out
+}
+
+/// Reads the stored drafts once connected, then writes them back at most every 300 ms when
+/// they change. A draft already touched this session wins over its stored copy.
+fn persist(s: &mut App) -> bool {
+    let path = crate::settings::client::sibling_path("composer-drafts.json");
+    let composer = &mut s.ui.chat.composer;
+    if composer.stored.is_none() {
+        let disk = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
+        let mut changed = false;
+        for (key, draft) in disk.as_ref().map(restored).unwrap_or_default() {
+            let slot = composer.drafts.entry(key).or_default();
+            if slot.edit.text.is_empty() && slot.attachments.is_empty() {
+                let focused = slot.edit.focused;
+                *slot = draft;
+                slot.edit.focused = focused;
+                changed = true;
+            }
+        }
+        composer.stored = Some(stored(&composer.drafts).to_string());
+        return changed;
+    }
+    let now = std::time::Instant::now();
+    if composer.store_at.is_some_and(|at| now < at) {
+        return false;
+    }
+    composer.store_at = Some(now + std::time::Duration::from_millis(300));
+    let next = stored(&composer.drafts).to_string();
+    if composer.stored.as_deref() != Some(next.as_str()) {
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+        }
+        if let Err(e) = std::fs::write(&path, &next) {
+            eprintln!("composer: saving drafts failed: {e}");
+        }
+        composer.stored = Some(next);
+    }
+    false
 }
 
 /// Keys inside the editor: the open menu's arrows, Return and Tab, Escape, and Shift+Tab for plan.
@@ -615,6 +790,18 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+/// While an approval waits, the prompt says a message declines it (ChatComposer).
+fn placeholder(s: &App) -> &'static str {
+    let pending = approvals(s);
+    if pending.is_empty() {
+        PLACEHOLDER
+    } else if crate::chat::timeline::requests::takes_feedback(&pending.iter().collect::<Vec<_>>()) {
+        "Send feedback to decline this request"
+    } else {
+        "Send a message to decline and redirect the agent"
+    }
+}
+
 fn supports_plan(s: &App) -> bool {
     selection(s).and_then(|(i, _)| provider(s, &i).map(|p| p["showInteractionModeToggle"] == true)).unwrap_or(false)
 }
@@ -640,7 +827,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
             .key("composer-editor")
             .w_full()
             .color(t.c.foreground)
-            .placeholder(PLACEHOLDER, t.c.placeholder)
+            .placeholder(placeholder(s), t.c.placeholder)
+            .pill_style({
+                let contexts = d.contexts.clone();
+                move |id| chips::pill_style(id, &contexts)
+            })
             .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
             .on_edit(|s: &mut App| &mut draft_mut(s).edit)
             .on_submit(|s: &mut App, _| send(s, false))
@@ -665,8 +856,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     if !t.dark {
         body = body.shadow(1.0, 2.0, Color::BLACK.alpha(0.05));
     }
-    if !d.attachments.is_empty() {
-        body = body.child(attachment_chips(t, &d.attachments));
+    if !d.attachments.is_empty() || !d.context.is_empty() {
+        body = body.child(attachment_chips(t, &d.attachments, &d.context));
     }
     let body = body.child(editor).child(footer(s, t));
 
@@ -743,7 +934,7 @@ fn primary_action(s: &App, t: &T) -> El {
     if let Some(action) = plan::action(s, t, typed) {
         return action;
     }
-    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
+    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty() || !d.context.is_empty());
     if running(s) && !sendable {
         return stop_button(t);
     }
@@ -766,22 +957,65 @@ fn stop_button(t: &T) -> El {
 }
 
 fn send_button(s: &App, t: &T, sendable: bool) -> El {
-    let label = match (editing_run(s).is_some(), mode_for(s, false)) {
+    let editing = editing_run(s).is_some();
+    let (mode, alternate) = (mode_for(s, false), mode_for(s, true));
+    let label = match (editing, mode) {
         (true, _) => "Update queued message",
         (_, "queue") => "Queue message",
         (_, "steer") => "Steer message",
         _ => "Submit message",
     };
+    // Mod-click sends the other way while a turn runs (ComposerPrimaryActions).
+    let help = if !editing && mode != alternate {
+        let key = if cfg!(target_os = "macos") { "Cmd" } else { "Ctrl" };
+        format!("Click to {mode}, {key}-click to {alternate}")
+    } else {
+        label.to_owned()
+    };
     let (bg, fg) = if sendable { (t.c.message_action, t.c.message_action_foreground) } else { (t.c.foreground.alpha_mul(0.12), t.c.muted_foreground) };
     let mut b = el().key("composer-send").size(32.0, 32.0).center().radius(radius::FULL).fill(bg).label(label).child(icon(&icons::ARROW_UP, 14.0).color(fg));
     if sendable {
-        b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(label).on_press(|s: &mut App| send(s, false));
+        b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(help).on_press_tx(|s: &mut App, tx| send(s, tx.mods().cmd));
     }
     b
 }
 
-fn attachment_chips(t: &T, paths: &[String]) -> El {
+fn attachment_chips(t: &T, paths: &[String], context: &[Value]) -> El {
     let mut chips = row().flex_wrap().gap(6.0).px(12.0).pt(12.0);
+    for (i, record) in context.iter().enumerate() {
+        let element = &record["elements"][0];
+        let tag = data::s(element, "tagName");
+        let name = if tag.is_empty() { data::s(record, "label").to_string() } else { format!("<{tag}> {}", data::s(record, "label")) };
+        chips = chips.child(
+            row()
+                .key(format!("composer-context-{i}"))
+                .h(28.0)
+                .pl(8.0)
+                .pr(4.0)
+                .gap(6.0)
+                .center_y()
+                .radius(theme::layout::CONTROL_RADIUS)
+                .fill(t.c.foreground.alpha_mul(0.06))
+                .help(data::s(element, "selector").to_string())
+                .child(icon(&icons::MOUSE_POINTER_CLICK, 14.0).color(t.c.muted_foreground))
+                .child(text(name).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(220.0))
+                .child(
+                    el().size(20.0, 20.0)
+                        .center()
+                        .radius(radius::SM)
+                        .hover(t.c.accent)
+                        .cursor(Cursor::Pointer)
+                        .label("Remove context")
+                        .child(icon(&icons::X, 12.0).color(t.c.muted_foreground))
+                        .on_press(move |s: &mut App| {
+                            let d = draft_mut(s);
+                            if i < d.context.len() {
+                                d.context.remove(i);
+                            }
+                        }),
+                ),
+        );
+    }
     for (i, path) in paths.iter().enumerate() {
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         chips = chips.child(
@@ -889,6 +1123,26 @@ pub fn set_focus(s: &mut App, focused: bool) {
     }
 }
 
+/// Queues a context record (and its image, sent as an attachment) on the open route's draft.
+pub fn add_picked_context(s: &mut App, record: Value, image: Option<String>) {
+    let d = draft_mut(s);
+    d.context.push(record);
+    d.attachments.extend(image);
+    d.edit.focused = true;
+}
+
+/// `formatComposerContextReference` links ahead of the typed text, as web's chips sit inline.
+fn with_context_references(context: &[Value], text: &str) -> String {
+    let mut out: Vec<String> = context
+        .iter()
+        .map(|r| format!("[{}](t3-context://v1/{}/{})", data::s(r, "label"), data::s(r, "kind"), data::s(r, "contextId")))
+        .collect();
+    if !text.is_empty() {
+        out.push(text.to_string());
+    }
+    out.join(" ")
+}
+
 /// Puts `text` back into the open route's draft after what is already there.
 pub fn append_to_draft(s: &mut App, text: &str) {
     let d = draft_mut(s);
@@ -959,6 +1213,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         set_text(s, "/");
         menu::refresh(s);
     }),
+    ("composer-contexts", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Why does ");
+        for record in chips::samples() {
+            add_context(s, record);
+        }
+    }),
     ("composer-attachments", |s| {
         on_replay_showcase(s);
         draft_mut(s).attachments = vec!["/home/ubuntu/s5code/README.md".into(), "/home/ubuntu/s5code/package.json".into()];
@@ -1004,6 +1265,17 @@ mod tests {
     }
 
     #[test]
+    fn context_records_lead_the_message_as_reference_links() {
+        let record = json!({"kind": "preview-annotation", "contextId": "preview-annotation_1", "label": "Demo"});
+        assert_eq!(
+            with_context_references(&[record.clone()], "make it blue"),
+            "[Demo](t3-context://v1/preview-annotation/preview-annotation_1) make it blue"
+        );
+        assert_eq!(with_context_references(&[record], ""), "[Demo](t3-context://v1/preview-annotation/preview-annotation_1)");
+        assert_eq!(with_context_references(&[], "hi"), "hi");
+    }
+
+    #[test]
     fn sending_resets_the_home_draft_but_keeps_thread_overrides() {
         let mut s = App::new();
         s.navigate(Route::Home { project_id: None });
@@ -1023,6 +1295,28 @@ mod tests {
         sent(&mut s);
         let d = draft(&s).unwrap();
         assert!(d.edit.text.is_empty());
+        assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
+    }
+
+    #[test]
+    fn drafts_round_trip_through_storage_with_their_chips() {
+        let record = chips::terminal("t", "Terminal 1", 2, 2, "ls");
+        let mut d = Draft::default();
+        d.edit.insert("see ");
+        d.edit.insert_pill(chips::pill_id(&record), "Terminal 1 line 2");
+        d.edit.insert(" and @a");
+        d.contexts = vec![record.clone(), chips::terminal("t", "Terminal 1", 5, 5, "deleted chip")];
+        d.runtime_mode = Some("approval-required".into());
+        let mut drafts = HashMap::new();
+        drafts.insert("thread-1".to_owned(), d);
+        drafts.insert("home".to_owned(), Draft::default());
+        drafts.insert("queued-edit:thread-1:run".to_owned(), Draft { edit: TextEdit::new("edit"), ..Draft::default() });
+        let back = restored(&stored(&drafts));
+        assert_eq!(back.keys().collect::<Vec<_>>(), [&"thread-1".to_owned()]);
+        let d = &back["thread-1"];
+        assert_eq!(d.edit.text, "see Terminal 1 line 2 and @a");
+        assert_eq!(d.edit.pills().map(|(r, id)| (r, id.to_owned())).collect::<Vec<_>>(), [(4..21, chips::pill_id(&record))]);
+        assert_eq!(d.contexts, [record]);
         assert_eq!(d.runtime_mode.as_deref(), Some("approval-required"));
     }
 

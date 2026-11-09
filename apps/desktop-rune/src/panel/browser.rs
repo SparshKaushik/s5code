@@ -23,6 +23,8 @@ pub type TabId = u32;
 
 pub enum Cmd {
     Open(TabId, Pixels),
+    /// Shows a page Chrome already opened (a popup) as this tab.
+    Adopt(TabId, Pixels, String),
     Close(TabId),
     /// Screencast this tab, or none while the panel hides it; the others send no frames.
     Show(Option<TabId>),
@@ -35,6 +37,11 @@ pub enum Cmd {
     /// `w * scale` device pixels so frames land 1:1 on a Retina screen.
     Viewport { w: f32, h: f32, scale: f32 },
     Zoom(TabId, f32),
+    /// An emulated CSS viewport (the device toolbar), or none to fill the page area.
+    Device(TabId, Option<(u32, u32)>),
+    /// Element picking: Chrome highlights what the pointer is over, a click picks it.
+    Pick(TabId, bool),
+    DevTools(TabId),
     /// `prefers-color-scheme`: "" follows Chrome's default.
     ColorScheme(&'static str),
     Mouse { kind: &'static str, x: f32, y: f32, clicks: u32 },
@@ -64,16 +71,26 @@ pub struct Status {
     pub painted: bool,
     pub failure: Option<Failure>,
     pub zoom: f32,
+    pub device: Option<(u32, u32)>,
+    pub picking: bool,
+    /// While picking, the CSS-pixel `[x, y, w, h]` of the element under the pointer. The headless
+    /// shell never paints Chrome's inspect overlay, so the panel draws this box itself.
+    pub hover: Option<[f32; 4]>,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1. }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None }
     }
 }
 
 pub enum Event {
     Screenshot(Result<PathBuf, String>),
+    /// A page opened a new window; it becomes a tab beside its opener.
+    Popup { target: String },
+    /// A picked element's details (`PickedElementPayload` fields plus its rect) and its PNG crop.
+    Picked { tab: TabId, element: Value, image: Option<Vec<u8>> },
+    DevTools(Result<String, String>),
 }
 
 #[derive(Default)]
@@ -156,11 +173,19 @@ pub fn shutdown() {
     }
 }
 
-/// Starts Chrome and returns its browser-level DevTools URL.
+/// Starts Chrome on the persistent Default profile, as the Electron app keeps its default
+/// session; a profile another instance holds falls back to a throwaway one.
 fn launch(scale: f32) -> Result<(Child, String), String> {
-    let profile = std::env::temp_dir().join(format!("s5-rune-chrome-{}", std::process::id()));
+    let persistent = crate::host::t3_home().join("userdata").join("browser").join("rune-default");
+    launch_in(&persistent, scale).or_else(|_| launch_in(&std::env::temp_dir().join(format!("s5-rune-chrome-{}", std::process::id())), scale))
+}
+
+fn launch_in(profile: &std::path::Path, scale: f32) -> Result<(Child, String), String> {
+    let _ = std::fs::create_dir_all(profile);
     let mut child = Command::new(chrome_path())
         .args(["--headless", "--no-sandbox", "--disable-gpu", "--hide-scrollbars", "--no-first-run", "--no-default-browser-check", "--remote-debugging-port=0"])
+        // Page and browser ids are unguessable, so any origin may open the DevTools frontend.
+        .arg("--remote-allow-origins=*")
         .arg(format!("--user-data-dir={}", profile.display()))
         .arg(format!("--force-device-scale-factor={scale}"))
         .arg("about:blank")
@@ -171,7 +196,11 @@ fn launch(scale: f32) -> Result<(Child, String), String> {
     let stderr = child.stderr.take().ok_or("no stderr")?;
     let mut lines = BufReader::new(stderr).lines();
     let ws = loop {
-        let line = lines.next().ok_or("Chrome exited before DevTools came up")?.map_err(|e| e.to_string())?;
+        let Some(line) = lines.next() else {
+            let _ = child.kill();
+            return Err("Chrome exited before DevTools came up".into());
+        };
+        let line = line.map_err(|e| e.to_string())?;
         if let Some(rest) = line.split("DevTools listening on ").nth(1) {
             break rest.trim().to_string();
         }
@@ -188,6 +217,10 @@ enum Reply {
     Frame(TabId),
     Navigated(TabId, String),
     Saved(PathBuf),
+    PickNode(TabId),
+    PickInfo(TabId),
+    PickShot(TabId, Value),
+    Hover(TabId),
 }
 
 #[derive(Default)]
@@ -200,12 +233,15 @@ struct Tab {
     index: usize,
     pixels: Option<Pixels>,
     zoom: f32,
+    device: Option<(u32, u32)>,
     /// The last document load error, waiting for the error page that reports its URL.
     error: Option<String>,
 }
 
 struct Worker {
     ws: WebSocket<TcpStream>,
+    /// Chrome's DevTools `host:port`.
+    host: String,
     next: u64,
     pending: HashMap<u64, Reply>,
     tabs: HashMap<TabId, Tab>,
@@ -216,6 +252,9 @@ struct Worker {
     scale: f32,
     scheme: &'static str,
     pressed: bool,
+    /// A hover lookup is in flight; the latest pointer position waits for it.
+    hovering: bool,
+    hover_next: Option<(TabId, f32, f32)>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
 }
@@ -240,6 +279,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
     ws.get_ref().set_read_timeout(Some(Duration::from_millis(15))).map_err(|e| e.to_string())?;
     let mut w = Worker {
         ws,
+        host: host.clone(),
         next: 0,
         pending: HashMap::new(),
         tabs: HashMap::new(),
@@ -249,6 +289,8 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         scale,
         scheme: "",
         pressed: false,
+        hovering: false,
+        hover_next: None,
         shared,
         waker,
     };
@@ -308,11 +350,15 @@ impl Worker {
 
     fn metrics(&mut self, tab: TabId) {
         let (w, h, _) = self.viewport;
-        let zoom = self.tabs.get(&tab).map_or(1., |t| t.zoom);
+        let (zoom, device) = self.tabs.get(&tab).map_or((1., None), |t| (t.zoom, t.device));
         if w < 1. || h < 1. {
             return;
         }
-        let (width, height) = metrics(w, h, zoom);
+        // An emulated device keeps its CSS size; zoom only scales how large it shows.
+        let (width, height) = match device {
+            Some((dw, dh)) => (dw, dh),
+            None => metrics(w, h, zoom),
+        };
         self.call(tab, "Emulation.setDeviceMetricsOverride", json!({ "width": width, "height": height, "deviceScaleFactor": self.scale, "mobile": false }), None);
     }
 
@@ -328,6 +374,16 @@ impl Worker {
         self.call(tab, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 92 }), Some(Reply::Frame(tab)));
     }
 
+    fn hover(&mut self) {
+        if self.hovering {
+            return;
+        }
+        let Some((tab, x, y)) = self.hover_next.take() else { return };
+        self.hovering = true;
+        let expression = format!("(() => {{ const e = document.elementFromPoint({x}, {y}); if (!e) return null; const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; }})()");
+        self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Hover(tab)));
+    }
+
     fn history(&mut self, tab: TabId) {
         self.call(tab, "Page.getNavigationHistory", json!({}), Some(Reply::History(tab)));
     }
@@ -338,6 +394,11 @@ impl Worker {
                 self.tabs.insert(tab, Tab { pixels: Some(pixels), zoom: 1., ..Default::default() });
                 self.shared.lock().unwrap().tabs.insert(tab, Status::default());
                 self.send(None, "Target.createTarget", json!({ "url": "about:blank" }), Some(Reply::Created(tab)));
+            }
+            Cmd::Adopt(tab, pixels, target) => {
+                self.tabs.insert(tab, Tab { pixels: Some(pixels), zoom: 1., target: Some(target.clone()), ..Default::default() });
+                self.shared.lock().unwrap().tabs.insert(tab, Status::default());
+                self.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }), Some(Reply::Attached(tab)));
             }
             Cmd::Close(tab) => {
                 if let Some(t) = self.tabs.remove(&tab) {
@@ -416,6 +477,39 @@ impl Worker {
                 t.zoom = zoom;
                 self.update(tab, |s| s.zoom = zoom);
                 self.metrics(tab);
+                // A metrics change alone sends no screencast frame.
+                if self.shown == Some(tab) {
+                    self.screencast(tab);
+                }
+            }
+            Cmd::Device(tab, device) => {
+                let Some(t) = self.tabs.get_mut(&tab) else { return };
+                t.device = device;
+                self.update(tab, |s| s.device = device);
+                self.metrics(tab);
+                if self.shown == Some(tab) {
+                    self.screencast(tab);
+                }
+            }
+            Cmd::Pick(tab, on) => {
+                self.update(tab, |s| {
+                    s.picking = on;
+                    s.hover = None;
+                });
+                // A lookup lost with a closed tab must not block the next session's.
+                self.hovering = false;
+                self.hover_next = None;
+                if on {
+                    self.call(tab, "DOM.enable", json!({}), None);
+                    self.call(tab, "Overlay.enable", json!({}), None);
+                }
+                let mode = if on { "searchForNode" } else { "none" };
+                self.call(tab, "Overlay.setInspectMode", json!({ "mode": mode, "highlightConfig": HIGHLIGHT.clone() }), None);
+            }
+            Cmd::DevTools(tab) => {
+                let target = self.tabs.get(&tab).and_then(|t| t.target.clone());
+                let url = target.ok_or_else(|| "The page has not opened yet.".to_string()).map(|target| devtools_url(&self.host, &target));
+                self.event(Event::DevTools(url));
             }
             Cmd::ColorScheme(scheme) => {
                 self.scheme = scheme;
@@ -426,7 +520,7 @@ impl Worker {
             }
             Cmd::Mouse { kind, x, y, clicks } => {
                 let Some(tab) = self.shown else { return };
-                let zoom = self.tabs.get(&tab).map_or(1., |t| t.zoom);
+                let zoom = self.input_scale(tab);
                 match kind {
                     "mousePressed" => self.pressed = true,
                     "mouseReleased" => self.pressed = false,
@@ -435,10 +529,14 @@ impl Worker {
                 let button = if kind != "mouseMoved" || self.pressed { "left" } else { "none" };
                 let buttons = if self.pressed { 1 } else { 0 };
                 self.call(tab, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x / zoom, "y": y / zoom, "button": button, "buttons": buttons, "clickCount": if kind == "mouseMoved" { 0 } else { clicks.max(1) } }), None);
+                if kind == "mouseMoved" && self.shared.lock().unwrap().tabs.get(&tab).is_some_and(|s| s.picking) {
+                    self.hover_next = Some((tab, x / zoom, y / zoom));
+                    self.hover();
+                }
             }
             Cmd::Wheel { x, y, dx, dy } => {
                 let Some(tab) = self.shown else { return };
-                let zoom = self.tabs.get(&tab).map_or(1., |t| t.zoom);
+                let zoom = self.input_scale(tab);
                 self.call(tab, "Input.dispatchMouseEvent", json!({ "type": "mouseWheel", "x": x / zoom, "y": y / zoom, "deltaX": -dx, "deltaY": -dy }), None);
             }
             Cmd::Text(text) => {
@@ -465,6 +563,23 @@ impl Worker {
         }
     }
 
+    /// Window points per CSS pixel on the shown page.
+    fn input_scale(&self, tab: TabId) -> f32 {
+        let (w, h, _) = self.viewport;
+        self.tabs.get(&tab).map_or(1., |t| match t.device {
+            Some(device) => device_box(w, h, device, t.zoom).2,
+            None => t.zoom.max(0.25),
+        })
+    }
+
+    fn event(&self, event: Event) {
+        let mut s = self.shared.lock().unwrap();
+        s.events.push(event);
+        s.generation += 1;
+        drop(s);
+        (self.waker)();
+    }
+
     fn message(&mut self, v: Value) {
         if let Some(id) = v["id"].as_u64() {
             if let Some(reply) = self.pending.remove(&id) {
@@ -474,11 +589,29 @@ impl Worker {
         }
         let Some(method) = v["method"].as_str() else { return };
         let p = &v["params"];
+        if method == "Target.targetCreated" {
+            let info = &p["targetInfo"];
+            let opener = info["openerId"].as_str().unwrap_or_default();
+            let ours = |id: &str| self.tabs.values().any(|t| t.target.as_deref() == Some(id));
+            if info["type"] == "page" && !opener.is_empty() && ours(opener) {
+                if let Some(target) = info["targetId"].as_str().filter(|id| !ours(id)) {
+                    self.event(Event::Popup { target: target.to_string() });
+                }
+            }
+            return;
+        }
         if method == "Target.targetInfoChanged" {
             let info = &p["targetInfo"];
             let Some(tab) = self.tabs.iter().find(|(_, t)| t.target.as_deref() == info["targetId"].as_str()).map(|(id, _)| *id) else { return };
             let title = info["title"].as_str().unwrap_or_default().to_string();
-            self.update(tab, |s| s.title = title);
+            let url = info["url"].as_str().unwrap_or_default().to_string();
+            self.update(tab, |s| {
+                s.title = title;
+                // An adopted popup may have navigated before it attached.
+                if s.url.is_empty() && url.starts_with("http") {
+                    s.url = url;
+                }
+            });
             return;
         }
         let Some(&tab) = v["sessionId"].as_str().and_then(|s| self.sessions.get(s)) else { return };
@@ -517,6 +650,10 @@ impl Worker {
                 self.update(tab, |s| s.url = url);
                 self.history(tab);
             }
+            "Overlay.inspectNodeRequested" => {
+                self.call(tab, "DOM.resolveNode", json!({ "backendNodeId": p["backendNodeId"] }), Some(Reply::PickNode(tab)));
+            }
+            "Overlay.inspectModeCanceled" => self.update(tab, |s| s.picking = false),
             "Network.loadingFailed" if p["type"] == "Document" && p["canceled"] != true => {
                 let error = net_error(p["errorText"].as_str().unwrap_or_default());
                 if let Some(t) = self.tabs.get_mut(&tab) {
@@ -560,6 +697,7 @@ impl Worker {
                 for (method, params, reply) in queue {
                     self.send(Some(&session), method, params, reply);
                 }
+                self.history(tab);
                 if self.shown == Some(tab) {
                     self.screencast(tab);
                 }
@@ -571,7 +709,11 @@ impl Worker {
                 let (can_back, can_forward) = travel(&t.history, t.index);
                 // The headless shell reports a target's title once, as its URL, before <title> parses.
                 let title = r["entries"][t.index]["title"].as_str().map(str::to_owned);
+                let url = r["entries"][t.index]["url"].as_str().filter(|u| u.starts_with("http")).map(str::to_owned);
                 self.update(tab, |s| {
+                    if let Some(url) = url.filter(|_| s.url.is_empty()) {
+                        s.url = url;
+                    }
                     s.can_back = can_back;
                     s.can_forward = can_forward;
                     if let Some(title) = title {
@@ -580,6 +722,31 @@ impl Worker {
                 });
             }
             Reply::Frame(tab) => self.paint(tab, r["data"].as_str()),
+            Reply::Hover(tab) => {
+                self.hovering = false;
+                let rect = serde_json::from_value::<[f32; 4]>(r["result"]["value"].clone()).ok().filter(|r| r[2] > 0. && r[3] > 0.);
+                self.update(tab, |s| s.hover = rect.filter(|_| s.picking));
+                self.hover();
+            }
+            Reply::PickNode(tab) => match r["object"]["objectId"].as_str() {
+                Some(object) => {
+                    let params = json!({ "objectId": object, "functionDeclaration": PICK_JS, "returnByValue": true });
+                    self.call(tab, "Runtime.callFunctionOn", params, Some(Reply::PickInfo(tab)));
+                }
+                None => self.command(Cmd::Pick(tab, false)),
+            },
+            Reply::PickInfo(tab) => {
+                self.command(Cmd::Pick(tab, false));
+                let Some(element) = r["result"]["value"].as_str().and_then(|v| serde_json::from_str::<Value>(v).ok()) else { return };
+                match clip(&element) {
+                    Some(clip) => self.call(tab, "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::PickShot(tab, element))),
+                    None => self.event(Event::Picked { tab, element, image: None }),
+                }
+            }
+            Reply::PickShot(tab, element) => {
+                let image = r["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
+                self.event(Event::Picked { tab, element, image });
+            }
             Reply::Navigated(tab, url) => {
                 let Some(text) = r["errorText"].as_str().filter(|e| !e.is_empty()) else { return };
                 let description = net_error(text);
@@ -600,11 +767,7 @@ impl Worker {
                         std::fs::write(&path, bytes).map_err(|e| e.to_string())
                     })
                     .map(|_| path);
-                let mut s = self.shared.lock().unwrap();
-                s.events.push(Event::Screenshot(saved));
-                s.generation += 1;
-                drop(s);
-                (self.waker)();
+                self.event(Event::Screenshot(saved));
             }
         }
     }
@@ -623,6 +786,107 @@ fn metrics(w: f32, h: f32, zoom: f32) -> (u32, u32) {
     let zoom = zoom.max(0.25);
     (((w / zoom).round() as u32).max(1), ((h / zoom).round() as u32).max(1))
 }
+
+/// Where an emulated `dw` x `dh` CSS viewport shows in a `w` x `h` page area, as web's
+/// `resolveBrowserViewportLayout`: zoomed, then shrunk to fit but never enlarged. Returns the
+/// box's width and height in points and its points per CSS pixel.
+pub fn device_box(w: f32, h: f32, (dw, dh): (u32, u32), zoom: f32) -> (f32, f32, f32) {
+    let zoom = zoom.max(0.25);
+    let (rw, rh) = (dw.max(1) as f32 * zoom, dh.max(1) as f32 * zoom);
+    let fit = if w < 1. || h < 1. { 1. } else { (w / rw).min(h / rh).min(1.) };
+    (rw * fit, rh * fit, zoom * fit)
+}
+
+/// The page's own DevTools frontend: the bundled one Chrome serves, else the hosted copy for
+/// the headless shell, which bundles none.
+fn devtools_url(host: &str, target: &str) -> String {
+    let ws = format!("{host}/devtools/page/{target}");
+    if http_get(host, "/devtools/inspector.html").is_some_and(|(status, _)| status == 200) {
+        return format!("http://{host}/devtools/inspector.html?ws={ws}");
+    }
+    let revision = http_get(host, "/json/version")
+        .and_then(|(_, body)| serde_json::from_str::<Value>(&body).ok())
+        .and_then(|v| v["WebKit-Version"].as_str().and_then(|s| s.split("(@").nth(1)).map(|s| s.trim_end_matches(')').to_string()));
+    match revision {
+        Some(rev) => format!("https://chrome-devtools-frontend.appspot.com/serve_rev/@{rev}/inspector.html?ws={ws}"),
+        None => format!("http://{host}/devtools/inspector.html?ws={ws}"),
+    }
+}
+
+fn http_get(host: &str, path: &str) -> Option<(u16, String)> {
+    use std::io::{Read, Write};
+    let mut stream = TcpStream::connect(host).ok()?;
+    stream.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+    write!(stream, "GET {path} HTTP/1.0\r\nHost: {host}\r\n\r\n").ok()?;
+    let mut response = String::new();
+    stream.read_to_string(&mut response).ok()?;
+    let status = response.split_whitespace().nth(1)?.parse().ok()?;
+    let body = response.split_once("\r\n\r\n").map_or("", |(_, b)| b).to_string();
+    Some((status, body))
+}
+
+/// The screenshot clip for a picked element, in document CSS pixels; none for an empty box.
+fn clip(element: &Value) -> Option<Value> {
+    let (x, y) = (element["doc"]["x"].as_f64()?, element["doc"]["y"].as_f64()?);
+    let (w, h) = (element["rect"]["width"].as_f64()?.min(4096.), element["rect"]["height"].as_f64()?.min(4096.));
+    (w >= 1. && h >= 1.).then(|| json!({ "x": x.max(0.), "y": y.max(0.), "width": w, "height": h, "scale": 1 }))
+}
+
+/// DevTools' element highlight colours.
+static HIGHLIGHT: std::sync::LazyLock<Value> = std::sync::LazyLock::new(|| {
+    json!({
+        "showInfo": true,
+        "showStyles": false,
+        "contentColor": { "r": 111, "g": 168, "b": 220, "a": 0.66 },
+        "paddingColor": { "r": 147, "g": 196, "b": 125, "a": 0.55 },
+        "borderColor": { "r": 255, "g": 229, "b": 153, "a": 0.66 },
+        "marginColor": { "r": 246, "g": 178, "b": 107, "a": 0.66 },
+    })
+});
+
+/// Runs on the picked element: what web's pick preload reports (`PickedElementPayload`), plus
+/// its viewport rect and document offset for the crop.
+const PICK_JS: &str = r##"function () {
+  const el = this;
+  const esc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : s);
+  const selector = (start) => {
+    const parts = [];
+    for (let n = start; n && n.nodeType === 1 && parts.length < 5; n = n.parentElement) {
+      if (n.id) { parts.unshift("#" + esc(n.id)); break; }
+      let part = n.tagName.toLowerCase() + [...n.classList].slice(0, 2).map((c) => "." + esc(c)).join("");
+      const parent = n.parentElement;
+      if (parent) {
+        const same = [...parent.children].filter((c) => c.tagName === n.tagName);
+        if (same.length > 1) part += ":nth-of-type(" + (same.indexOf(n) + 1) + ")";
+      }
+      parts.unshift(part);
+    }
+    return parts.join(" > ") || null;
+  };
+  const cs = getComputedStyle(el);
+  const props = ["display", "position", "width", "height", "margin", "padding", "color", "background-color",
+    "font-family", "font-size", "font-weight", "line-height", "border", "border-radius", "gap",
+    "flex-direction", "align-items", "justify-content"];
+  const styles = props.map((p) => p + ": " + cs.getPropertyValue(p)).join(";\n");
+  let componentName = null;
+  const fiberKey = Object.keys(el).find((k) => k.startsWith("__reactFiber$"));
+  for (let f = fiberKey ? el[fiberKey] : null; f; f = f.return) {
+    if (typeof f.type === "function") { componentName = f.type.displayName || f.type.name || null; break; }
+  }
+  const r = el.getBoundingClientRect();
+  return JSON.stringify({
+    pageUrl: location.href,
+    pageTitle: (document.title || "").trim() || null,
+    tagName: el.tagName.toLowerCase(),
+    selector: selector(el),
+    htmlPreview: el.outerHTML.slice(0, 500),
+    componentName,
+    source: null,
+    styles,
+    rect: { x: r.x, y: r.y, width: r.width, height: r.height },
+    doc: { x: r.x + scrollX, y: r.y + scrollY },
+  });
+}"##;
 
 /// Back and forward availability; the about:blank a tab opens on is not a place to go back to.
 fn travel(history: &[(i64, String)], index: usize) -> (bool, bool) {
@@ -677,6 +941,23 @@ mod tests {
         assert_eq!(travel(&h(&["about:blank", "http://a/"]), 1), (false, false));
         assert_eq!(travel(&h(&["http://a/", "http://a/2"]), 1), (true, false));
         assert_eq!(travel(&h(&["http://a/", "http://a/2"]), 0), (false, true));
+    }
+
+    #[test]
+    fn a_device_viewport_shrinks_to_fit_but_never_grows() {
+        assert_eq!(device_box(540., 800., (375, 667), 1.), (375., 667., 1.));
+        assert_eq!(device_box(512., 800., (1024, 1366), 1.), (512., 683., 0.5));
+        assert_eq!(device_box(540., 400., (375, 800), 1.), (187.5, 400., 0.5));
+        // Zoom enlarges the device until it no longer fits.
+        assert_eq!(device_box(1000., 1000., (375, 400), 2.), (750., 800., 2.));
+        assert_eq!(device_box(400., 1000., (400, 400), 2.), (400., 400., 1.));
+    }
+
+    #[test]
+    fn picked_elements_crop_in_document_pixels() {
+        let element = json!({ "rect": { "x": 10., "y": -5., "width": 120., "height": 30. }, "doc": { "x": 10., "y": 395. } });
+        assert_eq!(clip(&element), Some(json!({ "x": 10., "y": 395., "width": 120., "height": 30., "scale": 1 })));
+        assert_eq!(clip(&json!({ "rect": { "width": 0., "height": 10. }, "doc": { "x": 0., "y": 0. } })), None);
     }
 
     #[test]
