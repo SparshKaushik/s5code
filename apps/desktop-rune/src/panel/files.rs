@@ -44,6 +44,37 @@ pub struct Ui {
     error: Option<String>,
     /// The search match to mark and centre in the open file.
     line: Option<usize>,
+    image: Option<Image>,
+}
+
+/// An image file shown as a picture, from a served asset URL rather than `projects.readFile`.
+struct Image {
+    request: Option<u64>,
+    url: Option<String>,
+    pixels: rune::Pixels,
+    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+}
+
+/// `WORKSPACE_IMAGE_PREVIEW_EXTENSIONS` (packages/shared/src/mediaPreview.ts).
+const IMAGE_EXTENSIONS: [&str; 13] = [".avif", ".bmp", ".gif", ".ico", ".heic", ".heif", ".jpeg", ".jpg", ".png", ".svg", ".tif", ".tiff", ".webp"];
+
+fn is_image(path: &str) -> bool {
+    let path = path.to_lowercase();
+    IMAGE_EXTENSIONS.iter().any(|e| path.ends_with(e))
+}
+
+/// `filePreviewReadErrorMessage`, from the `ProjectReadFileError` in a failed reply's cause.
+fn read_error(cause: &Value) -> String {
+    let error = cause.as_array().and_then(|c| c.iter().find(|r| r["_tag"] == "Fail")).map_or(cause, |r| &r["error"]);
+    match error["failure"].as_str() {
+        Some("path_not_file") => "The path is a directory or special file, not a regular file.".into(),
+        Some("binary_file") => "The file is binary and cannot be displayed as text.".into(),
+        Some("workspace_path_outside_root") => "The requested path is outside the workspace.".into(),
+        Some("resolved_path_outside_root") => "The path resolves to a location outside the workspace.".into(),
+        Some("operation_failed") if error["operation"] == "realpath-workspace-root" => "The workspace folder could not be accessed.".into(),
+        Some("operation_failed") => "The file could not be accessed or read. It may be missing or inaccessible.".into(),
+        _ => crate::shell::palette::error_message(cause, "The file could not be read."),
+    }
 }
 impl Default for Ui {
     fn default() -> Self {
@@ -66,6 +97,7 @@ impl Default for Ui {
             save_error: None,
             error: None,
             line: None,
+            image: None,
         }
     }
 }
@@ -90,11 +122,26 @@ fn read(app: &mut App, path: String) {
     let Some(cwd) = super::workspace(app) else {
         return;
     };
-    let request = app
-        .src
-        .net()
-        .map(|n| n.request("projects.readFile", json!({"cwd":cwd,"relativePath":path})));
+    let image = is_image(&path).then(|| {
+        let absolute = format!("{}/{}", cwd.trim_end_matches('/'), path);
+        let resource = match super::context(app) {
+            Some((thread, _)) => json!({"_tag":"workspace-file","threadId":thread,"path":absolute}),
+            None => json!({"_tag":"draft-workspace-file","cwd":cwd,"path":absolute}),
+        };
+        Image {
+            request: app.src.net().map(|n| n.request("assets.createUrl", json!({"resource":resource}))),
+            url: None,
+            pixels: rune::Pixels::new(),
+            failed: Default::default(),
+        }
+    });
+    let request = if image.is_some() {
+        None
+    } else {
+        app.src.net().map(|n| n.request("projects.readFile", json!({"cwd":cwd,"relativePath":path})))
+    };
     let ui = &mut app.ui.panel.files;
+    ui.image = image;
     ui.selected = path;
     ui.line = None;
     ui.cwd = cwd;
@@ -135,6 +182,7 @@ fn close_file(app: &mut App) {
     let ui = &mut app.ui.panel.files;
     ui.selected.clear();
     ui.line = None;
+    ui.image = None;
     ui.reading = None;
     ui.save_error = None;
     show(ui, String::new(), false);
@@ -247,7 +295,30 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     tx.wake_after(DEBOUNCE);
                 }
             }
-            Err(e) => ui.error = Some(e.to_string()),
+            Err(e) => ui.error = Some(read_error(&e)),
+        }
+        changed = true;
+    }
+    if let Some(image) = ui.image.as_mut()
+        && let Some(id) = image.request
+        && let Some(reply) = app.src.net().and_then(|n| n.take_reply(id))
+    {
+        image.request = None;
+        match reply {
+            Ok(v) => {
+                let url = format!("{}{}", app.src.net().map(|n| n.base_url().trim_end_matches('/').to_owned()).unwrap_or_default(), data::s(&v, "relativeUrl"));
+                image.url = Some(url.clone());
+                let (pixels, failed, wake) = (image.pixels.clone(), image.failed.clone(), app.ui.panel.waker.clone());
+                std::thread::spawn(move || {
+                    if decode(&url, &pixels).is_none() {
+                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
+                    if let Some(wake) = wake {
+                        wake();
+                    }
+                });
+            }
+            Err(_) => image.failed.store(true, std::sync::atomic::Ordering::Relaxed),
         }
         changed = true;
     }
@@ -301,6 +372,36 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
 }
 
 /// Up from an open file shows its folder; from a folder, the folder's parent.
+/// PNG and JPEG decode here; other formats fail to the "Open in browser" fallback.
+fn decode(url: &str, pixels: &rune::Pixels) -> Option<()> {
+    use std::io::Read;
+    let mut bytes = Vec::new();
+    ureq::get(url).call().ok()?.into_reader().take(50 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
+    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
+    pixels.set(image.width(), image.height(), image.into_raw());
+    Some(())
+}
+
+fn image_view(image: &Image, t: &T) -> El {
+    if image.failed.load(std::sync::atomic::Ordering::Relaxed) {
+        let mut notice = col().grow(1.).center().gap(12.).padding(24.).child(text("Unable to load workspace image.").font(theme::TEXT_XS).color(t.c.destructive_foreground));
+        if let Some(url) = image.url.clone() {
+            notice = notice.child(
+                kit::Button::new("Open in browser")
+                    .icon(&icons::EXTERNAL_LINK)
+                    .variant("outline")
+                    .size("xs")
+                    .build(t)
+                    .on_press_tx(move |_: &mut App, tx: &mut Tx| {
+                        let _ = tx.open_url(&url);
+                    }),
+            );
+        }
+        return notice;
+    }
+    el().grow(1.).min_h(0.).min_w(0.).padding(16.).pixels_fit(&image.pixels, rune::SurfaceFit::Fit)
+}
+
 fn up(ui: &Ui) -> String {
     if !ui.selected.is_empty() {
         return ui.directory.clone();
@@ -414,6 +515,8 @@ pub fn view(app: &App, t: &T) -> El {
         );
     let content = if let Some(error) = &ui.error {
         scroll(super::notice(t, error))
+    } else if let Some(image) = &ui.image {
+        image_view(image, t)
     } else if !ui.selected.is_empty() {
         editor(ui, t)
     } else {
@@ -549,6 +652,16 @@ mod tests {
         assert_eq!(line_range(text, 3), Some(14..14));
         assert_eq!(&text[line_range(text, 4).unwrap()], "last");
         assert_eq!(line_range(text, 5), None);
+    }
+
+    #[test]
+    fn images_preview_and_read_failures_read_like_the_web() {
+        assert!(is_image("assets/Logo.PNG") && is_image("a.svg") && !is_image("png.ts"));
+        let cause = json!([{"_tag":"Fail","error":{"_tag":"ProjectReadFileError","failure":"binary_file","message":"Failed to read workspace file 'a.bin'."}}]);
+        assert_eq!(read_error(&cause), "The file is binary and cannot be displayed as text.");
+        let cause = json!([{"_tag":"Fail","error":{"failure":"operation_failed","operation":"realpath-workspace-root","message":"x"}}]);
+        assert_eq!(read_error(&cause), "The workspace folder could not be accessed.");
+        assert_eq!(read_error(&json!({"message":"network worker stopped"})), "network worker stopped");
     }
 
     #[test]
