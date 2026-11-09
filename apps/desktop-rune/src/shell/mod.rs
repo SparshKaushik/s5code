@@ -75,5 +75,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(palette::overlay(s, cx, t));
     overlays.extend(crate::search::overlay(s, t));
     overlays.extend(crate::notify::overlays(s, t));
+    crate::wizard::overlays(s, t, &mut overlays);
     rune_kit::root(body, overlays).on_window_focus(|s: &mut App, focused, _| crate::notify::window_focus(s, focused))
 }

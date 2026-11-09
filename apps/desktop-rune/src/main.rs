@@ -10,6 +10,7 @@ mod env;
 mod host;
 mod icons;
 mod kit;
+mod links;
 mod notify;
 mod onboarding;
 mod pages;
@@ -19,6 +20,7 @@ mod settings;
 mod shell;
 mod theme;
 mod tokens;
+mod wizard;
 
 use rune::{App as RuneApp, AppSpec, Cx, El, KeyEvent, Tx, Waker};
 
@@ -62,6 +64,8 @@ pub struct Ui {
     pub search: search::Ui,
     pub onboarding: onboarding::Ui,
     pub env: env::Ui,
+    pub links: links::Ui,
+    pub wizard: wizard::Ui,
 }
 
 pub struct App {
@@ -118,6 +122,7 @@ impl App {
 fn setup(s: &mut App, waker: Waker) {
     s.ui.panel.waker = Some(waker.clone());
     env::start(s);
+    links::start(s);
     s.host = host::start(move || waker());
 }
 
@@ -155,6 +160,8 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= notify::poll(s, tx);
     changed |= onboarding::poll(s, tx);
     changed |= env::poll(s);
+    changed |= links::poll(s);
+    changed |= wizard::poll(s);
     changed |= search::poll(s);
     chat::details::watch(s);
     let now = data::now_ms();
@@ -210,7 +217,7 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", (1440.0, 900.0), App::new, view)
     };
-    let app = RuneApp::new(spec);
+    let app = RuneApp::new(spec).on_open_url(links::on_open_url);
     notify::set_window(app.handle());
     app.run();
     panel::browser::shutdown();
