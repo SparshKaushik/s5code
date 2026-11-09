@@ -807,19 +807,24 @@ fn link_target(text: &str, cwd: &str) -> (String, String) {
 
 /// Whether a path link's file or folder exists, asking the server the first time it shows; a
 /// URL always opens. Only absolute paths up to 512 bytes are checked (`useFileMetadata`).
-fn link_exists(app: &mut App, link: &Link) -> Option<bool> {
+/// Whether `link` is known to exist, else the absolute path still to ask about.
+fn known_link(app: &App, link: &Link) -> Result<Option<bool>, String> {
     if link.kind == links::Kind::Url {
-        return Some(true);
+        return Ok(Some(true));
     }
-    let (_, cwd) = super::context(app)?;
+    let Some((_, cwd)) = super::context(app) else { return Ok(None) };
     let (absolute, _) = link_target(&link.text, &cwd);
     if !absolute.starts_with('/') || absolute.len() > 512 {
-        return Some(false);
+        return Ok(Some(false));
     }
-    let ui = &mut app.ui.panel.terminal;
-    if let Some(known) = ui.paths.get(&absolute) {
-        return *known;
-    }
+    app.ui.panel.terminal.paths.get(&absolute).copied().ok_or(absolute)
+}
+
+fn link_exists(app: &mut App, link: &Link) -> Option<bool> {
+    let absolute = match known_link(app, link) {
+        Ok(known) => return known,
+        Err(absolute) => absolute,
+    };
     let net = app.src.net()?;
     let request = net.request("filesystem.getMetadata", json!({"paths": [absolute]}));
     let ui = &mut app.ui.panel.terminal;
@@ -946,7 +951,9 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
             }
         }
     }
-    if let Some(link) = &session.hover {
+    // A path underlines only once it is known to exist, as the web checks it on hover.
+    let hover = session.hover.as_ref().filter(|link| known_link(app, link) == Ok(Some(true)));
+    if let Some(link) = hover {
         for &(r, first, last) in &link.spans {
             grid = grid.child(
                 el().absolute(x(first), y(r) + m.cell_h - 2.)
@@ -999,7 +1006,7 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
     let (t7, i7) = (t1.clone(), i1.clone());
     let (t8, i8) = (t1.clone(), i1.clone());
     let (t9, i9) = (t1.clone(), i1.clone());
-    let pointer = if session.hover.is_some() {
+    let pointer = if hover.is_some() {
         Cursor::Pointer
     } else if session.vt.reports_mouse(false) {
         Cursor::Default
@@ -1060,8 +1067,9 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
                 .vt
                 .mouse(MouseButton::None, false, true, col, row, rune::Mods::default());
             let hover = if session.vt.reports_mouse(false) { None } else { session.vt.link_at(col, row) };
-            // A path underlines only once it is known to exist, as the web checks it on hover.
-            let hover = hover.filter(|link| link_exists(s, link) == Some(true));
+            if let Some(link) = &hover {
+                link_exists(s, link);
+            }
             let Some(session) = s.ui.panel.terminal.get_mut(&t6, &i6) else {
                 return;
             };

@@ -775,18 +775,21 @@ fn sha_link(app: &App, t: &T, sha: &str) -> El {
         _ => None,
     };
     let Some(url) = identity.and_then(|i| commit_url(i, sha)) else {
-        return text(label).font(theme::MONO_XS).color(muted).px(8.0);
+        return text(label).font(theme::MONO_XS).color(muted);
     };
     let n = label.len();
     rich(label.clone(), vec![Span::new(0, n).underline(muted)])
         .font(theme::MONO_XS)
         .color(muted)
-        .px(8.0)
         .cursor(Cursor::Pointer)
         .role("link")
         .label(format!("Open commit {label}"))
         .help(url.clone())
-        .on_press_tx(move |s: &mut App, tx: &mut Tx| super::terminal::open_web(s, tx, &url, false))
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| {
+            let ui = &mut s.ui.panel.diff;
+            (ui.menu_open, ui.sub) = (false, None);
+            super::terminal::open_web(s, tx, &url, false);
+        })
 }
 
 fn short(sha: &str) -> &str {
@@ -1306,7 +1309,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
                     MenuItem::new(c.subject.clone())
                         .radio(ui.scope == Scope::Commit(sha.clone()))
                         .shortcut(crate::shell::sidebar::logic::relative_label(c.at, now))
-                        .trailing(sha_link(app, t, &sha))
+                        .trailing(sha_link(app, t, &sha).px(8.0))
                         .on_select(move |s: &mut App| select(s, Scope::Commit(sha.clone()))),
                 ));
             }

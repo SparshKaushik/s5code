@@ -244,6 +244,12 @@ fn toggle_menu(s: &mut App, menu: Menu) {
         git::refresh(s);
         return;
     }
+    // The branch picker opens on fresh local status, as web's `handleOpenChange` asks.
+    if ui.menu == Some(Menu::Branch)
+        && let (Some(cwd), Some(net)) = (cwd(s), s.src.net())
+    {
+        net.request("vcs.refreshStatus", json!({"cwd": cwd, "localOnly": true}));
+    }
     if ui.menu == Some(Menu::Scripts) {
         scripts::load_file(s, true);
         return;
