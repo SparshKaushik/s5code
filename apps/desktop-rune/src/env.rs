@@ -113,11 +113,23 @@ pub fn local_mut(s: &mut App) -> &mut Source {
     &mut ui.parked[i].1
 }
 
-fn source<'a>(s: &'a App, key: &str) -> Option<&'a Source> {
+pub fn source<'a>(s: &'a App, key: &str) -> Option<&'a Source> {
     if s.ui.env.active == key {
         return Some(&s.src);
     }
     s.ui.env.parked.iter().find(|(k, _)| k == key).map(|(_, src)| src)
+}
+
+pub fn source_mut<'a>(s: &'a mut App, key: &str) -> Option<&'a mut Source> {
+    if s.ui.env.active == key {
+        return Some(&mut s.src);
+    }
+    s.ui.env.parked.iter_mut().find(|(k, _)| k == key).map(|(_, src)| src)
+}
+
+/// Scenes stand a fixture in for a saved environment's connection.
+pub fn park(s: &mut App, key: &str, src: Source) {
+    s.ui.env.parked.push((key.into(), src));
 }
 
 fn local_id(s: &App) -> Option<String> {

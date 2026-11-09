@@ -216,6 +216,36 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_prs(s, |_| {});
         pr_row::scene(s, 2481, "breakdown");
     }),
+    ("pull-requests-close-sweep", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2481, "sweep");
+    }),
+    ("pull-requests-row-actions-read-only", |s| {
+        open_prs(s, |_| {});
+        let row = &mut s.ui.pages.pull_requests.row;
+        row.speed = true;
+        row.session.data = Some(json!({"authenticated": true, "scopes": ["orchestration:read"]}));
+    }),
+    ("pull-requests-provider-marks", |s| {
+        open_prs(s, |r| {
+            r["providers"] = json!([
+                {"host": "github.com", "kind": "github", "configured": true},
+                {"host": "gitlab.com", "kind": "gitlab", "configured": true},
+                {"host": "bitbucket.org", "kind": "bitbucket", "configured": true},
+                {"host": "dev.azure.com", "kind": "azure-devops", "configured": true},
+            ]);
+            for (number, kind, host) in [(2476, "gitlab", "gitlab.com"), (318, "bitbucket", "bitbucket.org"), (57, "azure-devops", "dev.azure.com")] {
+                if let Some(e) = r["entries"].as_array_mut().and_then(|rows| rows.iter_mut().find(|e| e["number"] == number)) {
+                    e["provider"] = json!(kind);
+                    e["host"] = json!(host);
+                }
+            }
+        });
+    }),
+    ("pull-requests-stack-saved", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2479, "stack-saved");
+    }),
     ("pull-requests-matched-elsewhere", |s| {
         open_prs(s, |r| {
             if let Some(entries) = r["entries"].as_array_mut() {
@@ -247,6 +277,32 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         u.hosts.push(json!({"host": "gitlab.com", "kind": "gitlab", "searchesOnHost": true, "projectCount": 1, "configured": false, "detail": "glab is not authenticated for gitlab.com."}));
         u.menu = Some("filters");
         u.submenu = Some("host");
+    }),
+    ("pull-requests-projects-menu", |s| {
+        open_prs(s, |_| {});
+        let first = s.state().projects.first().map(|p| crate::data::s(p, "id").to_string()).unwrap_or_default();
+        let u = &mut s.ui.pages.pull_requests;
+        if let Some(r) = &mut u.result {
+            r["errors"] = json!([{"projectId": first, "message": "gh is not authenticated for github.com. Run `gh auth login` and try again."}]);
+        }
+        u.menu = Some("filters");
+        u.submenu = Some("project");
+    }),
+    ("pull-requests-draft-typed", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        u.query.replace_text("draft:true");
+        pull_requests::submit(u);
+        u.requested = Some(pull_requests::input(u));
+        u.menu = Some("filters");
+        u.submenu = Some("draft");
+    }),
+    ("pull-requests-host-chosen", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        u.hosts = u.result.as_ref().and_then(|r| r["providers"].as_array()).cloned().unwrap_or_default();
+        u.filters.host = Some("github.com".into());
+        u.requested = Some(pull_requests::input(u));
     }),
     ("pull-requests-partitions", open_partitions),
     ("pull-requests-partitions-searching", |s| {
@@ -280,6 +336,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-detail-light", |s| {
         open_detail(s, 0, |_| {});
         light(s);
+    }),
+    ("pull-requests-maximized", |s| {
+        open_detail(s, 0, |_| {});
+        s.ui.pages.pull_requests.maximized = true;
+    }),
+    ("pull-requests-panel-hidden", |s| {
+        open_detail(s, 0, |_| {});
+        pull_requests::toggle_panel(&mut s.ui.pages.pull_requests);
     }),
     ("usage-limits", |s| open_usage(s, "limits")),
     ("usage-cost", |s| open_usage(s, "cost")),
@@ -325,6 +389,25 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "limits");
         usage_limits::pooled_scene(s);
         light(s);
+    }),
+    ("usage-limits-environments", |s| {
+        open_usage(s, "limits");
+        usage_limits::environments_scene(s);
+        s.ui.pages.usage.limits.segment = Some(usage_limits::segment_key("codex", "session", "session", "local:codex"));
+    }),
+    ("usage-limits-environments-menu", |s| {
+        open_usage(s, "limits");
+        usage_limits::environments_scene(s);
+        s.ui.pages.usage.environments = Some(vec![crate::env::LOCAL.into()]);
+        s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-cursor-keychain", |s| {
+        open_usage(s, "cost");
+        usage::cursor_scene(s);
+    }),
+    ("usage-limits-cursor-keychain", |s| {
+        open_usage(s, "limits");
+        usage::cursor_scene(s);
     }),
     ("usage-unpriced-tooltip", |s| {
         open_usage(s, "cost");

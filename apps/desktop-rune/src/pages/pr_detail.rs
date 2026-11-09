@@ -189,6 +189,11 @@ fn recorded_detail(recorded: &Value, entry: &Value) -> Value {
     d
 }
 
+/// A finished turn rereads the open pull request, keeping it shown meanwhile.
+pub(super) fn refresh(s: &mut App) {
+    load(s);
+}
+
 fn reload(s: &mut App) {
     let u = ui(s);
     u.files = None;
@@ -492,9 +497,12 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     panel.child(kit::scroll_area(&key, col().key(key.clone()).grow(1.0).min_h(0.0).w_full().scroll(ScrollSpec { stick_bottom: false }).child(content), t))
 }
 
-/// Crumbs, the primary action, the actions menu and the collapse button.
+/// Crumbs, the primary action, the actions menu, then the maximize and panel toggles.
 fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
     let open_url = field(d, "url").to_string();
+    let menu_url = open_url.clone();
+    let singular = if open_url.contains("/-/merge_requests/") { "merge request" } else { "pull request" };
+    let on_host = super::pull_requests::open_label(s.ui.pages.detail.entry.as_ref().unwrap_or(d), &s.ui.pages.pull_requests.hosts);
     let crumbs = row()
         .gap(6.0)
         .center_y()
@@ -508,12 +516,14 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
                 .center_y()
                 .cursor(Cursor::Pointer)
                 .role("link")
-                .label(format!("Open #{} on GitHub", d["number"]))
+                .label(format!("Open {singular} #{} on host", d["number"]))
+                .help(on_host)
                 .child(text(format!("#{}", d["number"])).font(theme::XS_MEDIUM.features("'tnum' 1")).color(tone(t, d)))
                 .child(icon(&i::EXTERNAL_LINK, 10.0).color(tone(t, d)))
                 .on_press_tx(move |_: &mut App, tx: &mut Tx| {
                     let _ = tx.open_url(&open_url);
-                }),
+                })
+                .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| s.ui.pages.pull_requests.context = Some((menu_url.clone(), at.x, at.y))),
         );
     let mut actions = row().gap(4.0).center_y().shrink();
     if loaded {
@@ -522,15 +532,7 @@ fn top(s: &App, t: &T, d: &Value, loaded: bool, overlays: &mut Vec<El>) -> El {
         }
         actions = actions.child(actions_menu(s, t, d, overlays));
     }
-    actions = actions.child(
-        kit::Button::new("")
-            .variant("ghost")
-            .size("icon-xs")
-            .icon(&i::PANEL_RIGHT)
-            .on_press(|s: &mut App| s.ui.pages.pull_requests.selected = None)
-            .build(t)
-            .label("Collapse pull request panel"),
-    );
+    actions = actions.child(super::pull_requests::maximize_control(s, t)).child(super::pull_requests::panel_control(s, t));
     row().key("pr-detail-top").w_full().h(layout::TOPBAR_H).shrink().pl(16.0).pr(12.0).gap(8.0).center_y().window_drag().child(crumbs).child(spacer()).child(actions)
 }
 
@@ -640,10 +642,12 @@ fn actions_menu(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
         }
     }
     let url = field(d, "url").to_string();
+    let on_host = super::pull_requests::open_label(s.ui.pages.detail.entry.as_ref().unwrap_or(d), &s.ui.pages.pull_requests.hosts);
+    let short = if url.contains("/-/merge_requests/") { "MR" } else { "PR" };
     let (open_url, copy_url, number) = (url.clone(), url, format!("#{}", d["number"]));
     menu = menu
         .separator()
-        .item(MenuItem::new("Open on GitHub").icon(&i::EXTERNAL_LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        .item(MenuItem::new(on_host).icon(&i::EXTERNAL_LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             let _ = tx.open_url(&open_url);
             ui(s).menu = false;
         }))
@@ -651,7 +655,7 @@ fn actions_menu(s: &App, t: &T, d: &Value, overlays: &mut Vec<El>) -> El {
             tx.copy(&copy_url);
             ui(s).menu = false;
         }))
-        .item(MenuItem::new("Copy PR number").icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        .item(MenuItem::new(format!("Copy {short} number")).icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             tx.copy(&number);
             ui(s).menu = false;
         }));
