@@ -33,6 +33,8 @@ pub struct Draft {
     pub model: Option<(String, String)>,
     pub runtime_mode: Option<String>,
     pub interaction_mode: Option<String>,
+    /// An effort level picked in this draft (the model's effort option), overriding the thread's.
+    pub effort: Option<String>,
     /// Records behind the prompt's context chips (`chips::pill_id`); a chip deleted from the
     /// prompt leaves its record unsent.
     pub contexts: Vec<Value>,
@@ -40,7 +42,7 @@ pub struct Draft {
 
 impl Default for Draft {
     fn default() -> Draft {
-        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, contexts: Vec::new() }
+        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, effort: None, contexts: Vec::new() }
     }
 }
 
@@ -252,6 +254,58 @@ fn selection_of(v: &Value) -> Option<(String, String)> {
     (!instance.is_empty()).then(|| (instance.to_string(), data::s(v, "model").to_string()))
 }
 
+/// The selected model's effort descriptor (`effort` or `reasoningEffort`) and its options,
+/// without the values a prompt keyword turns on (ultrathink).
+pub fn effort_options(s: &App) -> Option<(String, Vec<Value>)> {
+    let (instance, slug) = selection(s)?;
+    let model = provider(s, &instance)?["models"].as_array()?.iter().find(|x| data::s(x, "slug") == slug)?.clone();
+    let descriptors = model["capabilities"]["optionDescriptors"].as_array()?;
+    let d = descriptors.iter().find(|d| matches!(data::s(d, "id"), "effort" | "reasoningEffort"))?;
+    let injected: Vec<&str> = d["promptInjectedValues"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let options = d["options"].as_array()?.iter().filter(|o| !injected.contains(&data::s(o, "id"))).cloned().collect();
+    Some((data::s(d, "id").to_owned(), options))
+}
+
+/// The options the selection already carries: the thread's (or, on a home draft, the source the
+/// model came from) when the draft keeps that model, as `[{id, value}]`.
+fn source_options(s: &App) -> Vec<Value> {
+    let Some(thread) = ctx(s).thread else { return Vec::new() };
+    let selection = &thread["modelSelection"];
+    if draft(s).and_then(|d| d.model.clone()).is_some_and(|m| Some(m) != selection_of(selection)) {
+        return Vec::new();
+    }
+    match &selection["options"] {
+        Value::Array(a) => a.clone(),
+        Value::Object(o) => o.iter().map(|(id, value)| json!({"id": id, "value": value})).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The effort the next message runs at: the draft's pick, the thread's, else the default.
+pub fn effort(s: &App) -> Option<String> {
+    let (id, options) = effort_options(s)?;
+    if let Some(e) = draft(s).and_then(|d| d.effort.clone()).filter(|e| options.iter().any(|o| data::s(o, "id") == e)) {
+        return Some(e);
+    }
+    let thread = source_options(s).into_iter().find(|o| data::s(o, "id") == id).and_then(|o| o["value"].as_str().map(str::to_owned));
+    thread.or_else(|| options.iter().find(|o| o["isDefault"] == true).map(|o| data::s(o, "id").to_owned()))
+}
+
+/// The modelSelection to send: the model plus its options, a picked effort replacing the thread's.
+fn model_selection(s: &App) -> Option<Value> {
+    let (instance, model) = selection(s)?;
+    let mut options = source_options(s);
+    if let (Some(e), Some((id, _))) = (draft(s).and_then(|d| d.effort.clone()), effort_options(s)) {
+        options.retain(|o| data::s(o, "id") != id);
+        options.push(json!({"id": id, "value": e}));
+    }
+    let mut v = json!({"instanceId": instance, "model": model});
+    if !options.is_empty() {
+        v["options"] = Value::Array(options);
+    }
+    Some(v)
+}
+
 /// The model the next message goes to: the draft's pick, the thread's, else (on the home draft)
 /// the project's most recent, its default, the settings default, then the first ready provider.
 pub fn selection(s: &App) -> Option<(String, String)> {
@@ -405,7 +459,7 @@ fn send(s: &mut App, alternate: bool) {
     if text.is_empty() && uploads.is_empty() && contexts.is_empty() {
         return;
     }
-    let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
+    let model = model_selection(s);
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
@@ -614,7 +668,7 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
     let mut out = serde_json::Map::new();
     for (key, d) in drafts {
         let blank = d.edit.text.trim().is_empty() && d.attachments.is_empty();
-        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none()) {
+        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none() && d.effort.is_none()) {
             continue;
         }
         let pills: Vec<Value> = d.edit.pills().map(|(r, id)| json!([r.start, r.end, id])).collect();
@@ -623,7 +677,7 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
             key.clone(),
             json!({
                 "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
-                "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "contexts": contexts,
+                "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
             }),
         );
     }
@@ -660,6 +714,7 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 model: (model.len() == 2).then(|| (model[0].clone(), model[1].clone())),
                 runtime_mode: text(&d["runtimeMode"]),
                 interaction_mode: text(&d["interactionMode"]),
+                effort: text(&d["effort"]),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
             },
         );
@@ -867,7 +922,32 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 
 /// The composer's own overlays (the model picker), attached after the body so they draw above.
 pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
-    picker::view(s, cx, t)
+    let mut layers = picker::view(s, cx, t);
+    layers.extend(chip_details(s, t));
+    layers
+}
+
+/// A context chip's details while the caret rests against it (a click on a chip lands the caret
+/// on its edge), above the composer as web's chip popover opens above the chip.
+fn chip_details(s: &App, t: &T) -> Option<El> {
+    if s.ui.chat.composer.picker.open || menu::open_menu(s).is_some() {
+        return None;
+    }
+    let d = draft(s)?;
+    let record = chip_at_caret(d)?;
+    let card = crate::chat::timeline::chip::card(t, record, None);
+    Some(card.anchored("composer", rune::Side::Top, rune::Align::Start, 8.0))
+}
+
+/// The record of the chip the caret touches, for the kinds whose details have a body.
+fn chip_at_caret(d: &Draft) -> Option<&Value> {
+    if !d.edit.focused || d.edit.anchor != d.edit.focus {
+        return None;
+    }
+    let caret = d.edit.focus;
+    let (_, id) = d.edit.pills().find(|(r, _)| r.start == caret || r.end == caret)?;
+    let record = d.contexts.iter().find(|r| chips::pill_id(r) == id)?;
+    matches!(data::s(record, "kind"), "terminal" | "element" | "preview-annotation" | "review-comment").then_some(record)
 }
 
 fn composer_fill(t: &T) -> Color {
@@ -1193,6 +1273,20 @@ mod tests {
         assert!(upload(notes.to_str().unwrap()).is_none());
         assert!(upload(dir.join("gone.png").to_str().unwrap()).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn a_picked_effort_rides_in_the_model_selection() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        draft_mut(&mut s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        assert_eq!(effort(&s).as_deref(), Some("medium"));
+        let ids: Vec<String> = effort_options(&s).unwrap().1.iter().map(|o| data::s(o, "id").to_owned()).collect();
+        assert!(!ids.contains(&"ultrathink".to_owned()) && ids.contains(&"max".to_owned()));
+        assert_eq!(model_selection(&s).unwrap(), json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"}));
+        draft_mut(&mut s).effort = Some("high".into());
+        assert_eq!(effort(&s).as_deref(), Some("high"));
+        assert_eq!(model_selection(&s).unwrap()["options"], json!([{"id": "effort", "value": "high"}]));
     }
 
     #[test]

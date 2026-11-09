@@ -41,7 +41,7 @@ pub fn array<'a>(v: &'a Value, key: &str) -> &'a [Value] {
     v[key].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
-const LIFECYCLE: [&str; 6] = ["turn_start", "turn_complete", "run_start", "run_complete", "run_interrupt_request", "run_interrupt_result"];
+const LIFECYCLE: [&str; 5] = ["turn_start", "turn_complete", "run_start", "run_complete", "run_interrupt_request"];
 
 fn run_active(run: &Value) -> bool {
     matches!(s(run, "status"), "starting" | "running" | "waiting")
@@ -59,6 +59,7 @@ fn escapes_fold(kind: &str) -> bool {
             | "compaction"
             | "subagent"
             | "fork"
+            | "run_interrupt_result"
             | "handoff"
             | "secret_request"
             | "link_request"

@@ -111,17 +111,53 @@ fn link(record: &Value) -> String {
     format!("{bang}[{}]({HREF}{kind}/{})", sanitize_label(s(record, "label"), kind), s(record, "contextId"))
 }
 
-/// The text to send, each context pill written as its link, and the records still in it: a
-/// chip deleted from the prompt drops its record.
+/// serializeComposerFileLink: `[basename](path)`, the label escaped and the path URI-encoded.
+pub fn file_link(path: &str) -> String {
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(path);
+    let label = name.replace('\\', "\\\\").replace('[', "\\[").replace(']', "\\]");
+    let mut dest = String::new();
+    for b in path.bytes() {
+        if b.is_ascii_alphanumeric() || b";,/:@&=+$-_.!~*'".contains(&b) {
+            dest.push(b as char);
+        } else {
+            dest.push_str(&format!("%{b:02X}"));
+        }
+    }
+    format!("[{label}]({dest})")
+}
+
+fn percent_decoded(s: &str) -> Option<String> {
+    let (b, mut out, mut i) = (s.as_bytes(), Vec::new(), 0);
+    while i < b.len() {
+        if b[i] == b'%' {
+            out.push(u8::from_str_radix(s.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            out.push(b[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// The text to send, each context pill written as its link and each path mention as its file
+/// link, and the records still in it: a chip deleted from the prompt drops its record.
 pub fn outgoing(edit: &TextEdit, contexts: &[Value]) -> (String, Vec<Value>) {
     let mut pills: Vec<(Range<usize>, &str)> = edit.pills().collect();
     pills.sort_by_key(|(r, _)| r.start);
     let (mut out, mut used, mut at) = (String::new(), Vec::new(), 0);
     for (range, id) in pills {
-        let Some(record) = contexts.iter().find(|r| pill_id(r) == id) else { continue };
         out.push_str(&edit.text[at..range.start]);
-        out.push_str(&link(record));
         at = range.end;
+        if !id.starts_with(PILL) {
+            out.push_str(&file_link(id));
+            continue;
+        }
+        let Some(record) = contexts.iter().find(|r| pill_id(r) == id) else {
+            out.push_str(&edit.text[range]);
+            continue;
+        };
+        out.push_str(&link(record));
         if !used.contains(record) {
             used.push(record.clone());
         }
@@ -147,8 +183,91 @@ pub struct Shown {
     pub id: String,
 }
 
-/// Sent text with each context link replaced by its label (parseComposerContextReferences).
+/// Sent text with each context link and file link replaced by its label
+/// (parseComposerContextReferences, collectMentionTokens); a file link's id is its path.
 pub fn display(text: &str) -> (String, Vec<Shown>) {
+    let (out, chips) = context_links(text);
+    let (out, mentions) = file_links(&out);
+    let mut all: Vec<Shown> = remap(chips, &mentions);
+    all.extend(mentions.into_iter().map(|(m, _)| m));
+    all.sort_by_key(|c| c.range.start);
+    (out, all)
+}
+
+/// Context chip ranges moved past the file links folded before them.
+fn remap(chips: Vec<Shown>, mentions: &[(Shown, Range<usize>)]) -> Vec<Shown> {
+    chips
+        .into_iter()
+        .map(|mut c| {
+            let delta: usize = mentions.iter().filter(|(_, before)| before.end <= c.range.start).map(|(m, before)| before.len() - m.range.len()).sum();
+            c.range = c.range.start - delta..c.range.end - delta;
+            c
+        })
+        .collect()
+}
+
+/// `[basename](path)` tokens bounded by whitespace whose label is the path's basename, each with
+/// its range in the input; schemes other than a Windows drive are links, not files.
+fn file_links(text: &str) -> (String, Vec<(Shown, Range<usize>)>) {
+    let (mut out, mut found, mut at, mut i) = (String::new(), Vec::new(), 0, 0);
+    let b = text.as_bytes();
+    while i < b.len() {
+        let boundary = i == 0 || b[i - 1].is_ascii_whitespace();
+        if b[i] != b'[' || !boundary {
+            i += 1;
+            continue;
+        }
+        let Some(token) = file_link_at(text, i) else {
+            i += 1;
+            continue;
+        };
+        let (end, label, path) = token;
+        out.push_str(&text[at..i]);
+        found.push((Shown { range: out.len()..out.len() + label.len(), kind: "mention".into(), id: path }, i..end));
+        out.push_str(&label);
+        at = end;
+        i = end;
+    }
+    out.push_str(&text[at..]);
+    (out, found)
+}
+
+fn file_link_at(text: &str, start: usize) -> Option<(usize, String, String)> {
+    let b = text.as_bytes();
+    let mut j = start + 1;
+    let mut label = String::new();
+    while j < b.len() && b[j] != b']' {
+        if b[j] == b'\\' && j + 1 < b.len() {
+            j += 1;
+        }
+        let c = text[j..].chars().next()?;
+        label.push(c);
+        j += c.len_utf8();
+    }
+    if b.get(j + 1) != Some(&b'(') {
+        return None;
+    }
+    let dest_start = j + 2;
+    let close = text[dest_start..].find(|c: char| c == ')' || c.is_whitespace()).map(|k| dest_start + k)?;
+    if b[close] != b')' || close == dest_start {
+        return None;
+    }
+    let end = close + 1;
+    if end < b.len() && !b[end].is_ascii_whitespace() {
+        return None;
+    }
+    let raw = &text[dest_start..close];
+    let path = percent_decoded(raw).unwrap_or_else(|| raw.to_owned());
+    let scheme = path.find(':').is_some_and(|k| k > 0 && path[..k].chars().all(|c| c.is_ascii_alphanumeric() || "+.-".contains(c)) && path[..1].chars().all(|c| c.is_ascii_alphabetic()));
+    let drive = path.len() > 2 && path.as_bytes()[1] == b':' && matches!(path.as_bytes()[2], b'/' | b'\\');
+    let name = path.rsplit(['/', '\\']).next().unwrap_or(&path);
+    if path.is_empty() || (scheme && !drive) || label != name {
+        return None;
+    }
+    Some((end, label, path))
+}
+
+fn context_links(text: &str) -> (String, Vec<Shown>) {
     let marker = format!("]({HREF}");
     let (mut out, mut chips, mut at) = (String::new(), Vec::new(), 0);
     while let Some(found) = text[at..].find(&marker) {
@@ -263,6 +382,26 @@ mod tests {
         assert_eq!(chips.len(), 2);
         assert_eq!(&shown[chips[0].range.clone()], "Terminal 1 line 3");
         assert_eq!((chips[1].kind.as_str(), chips[1].id.as_str()), ("image", "img_1"));
+    }
+
+    #[test]
+    fn path_mentions_send_as_file_links_and_read_back_as_mentions() {
+        let mut edit = TextEdit::new("");
+        edit.insert("open ");
+        edit.insert_pill("src/a b(1).rs", "a b(1).rs");
+        edit.insert(" then ");
+        let pr = pull_request(&json!({"number": 7, "url": "u"}), false, &[]);
+        edit.insert_pill(pill_id(&pr), "#7");
+        let (text, records) = outgoing(&edit, &[pr.clone()]);
+        let pr_link = format!("[#7](t3-context://v1/review-comment/{})", s(&pr, "contextId"));
+        assert_eq!(text, format!("open [a b(1).rs](src/a%20b%281%29.rs) then {pr_link}"));
+        assert_eq!(records, [pr]);
+        let (shown, chips) = display(&format!("{text} [x](https://e.com) [y](z/w.rs)"));
+        assert_eq!(shown, "open a b(1).rs then #7 [x](https://e.com) [y](z/w.rs)");
+        assert_eq!((chips[0].kind.as_str(), chips[0].id.as_str()), ("mention", "src/a b(1).rs"));
+        assert_eq!(&shown[chips[0].range.clone()], "a b(1).rs");
+        assert_eq!(&shown[chips[1].range.clone()], "#7");
+        assert_eq!(chips.len(), 2);
     }
 
     #[test]
