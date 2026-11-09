@@ -6,6 +6,7 @@
 
 mod chat;
 mod data;
+mod desktop;
 mod host;
 mod icons;
 mod kit;
@@ -60,6 +61,7 @@ pub struct Ui {
     pub notify: notify::Ui,
     pub search: search::Ui,
     pub onboarding: onboarding::Ui,
+    pub desktop: desktop::Ui,
 }
 
 pub struct App {
@@ -123,6 +125,7 @@ fn poll_host(s: &mut App) -> bool {
     match event {
         host::Event::Ready { url, token } => {
             let waker = s.ui.panel.waker.clone().expect("setup stores the waker");
+            s.ui.desktop.server = Some((url.clone(), token.clone()));
             s.src = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
             s.navigate(s.route.clone());
         }
@@ -150,6 +153,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= notify::poll(s, tx);
     changed |= onboarding::poll(s, tx);
     changed |= search::poll(s);
+    changed |= desktop::poll(s, tx);
     chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
@@ -161,7 +165,13 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    search::on_key(s, e, tx) || settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
+    desktop::on_quit_key(s, e, tx)
+        || search::on_key(s, e, tx)
+        || settings::on_key(s, e, tx)
+        || pages::on_key(s, e, tx)
+        || shell::on_key(s, e, tx)
+        || chat::on_key(s, e, tx)
+        || desktop::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
@@ -174,7 +184,8 @@ pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t: T = settings::apply_theme(s, theme::theme(is_dark(s, cx)));
-    shell::view(s, cx, &t)
+    let app = shell::view(s, cx, &t);
+    desktop::frame(s, cx, &t, app)
 }
 
 /// Every module's scenes, gathered once.
@@ -195,16 +206,21 @@ fn main() {
     if std::env::args().any(|a| a == "--check-server") {
         std::process::exit(host::check());
     }
+    // A second launch focuses the running window and exits.
+    let Some(instance) = desktop::single::claim() else { return };
     let spec = AppSpec {
-        min_size: Some((640.0, 480.0)),
+        min_size: Some(desktop::MIN_SIZE),
         families: (theme::SANS, "ui-monospace"),
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
         scenes: scenes(),
-        ..AppSpec::new("S5 Code", (1440.0, 900.0), App::new, view)
+        ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
-    RuneApp::new(spec).run();
+    let app = desktop::configure(RuneApp::new(spec));
+    instance.serve(app.handle());
+    app.run();
     panel::browser::shutdown();
     host::shutdown();
+    drop(instance);
 }
