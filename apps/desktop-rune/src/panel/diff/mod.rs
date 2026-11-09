@@ -165,9 +165,14 @@ pub fn open_changes(app: &mut App) {
     choose(app, Scope::Branch);
 }
 
+/// A turn stays chosen when newer turns land, as web pins the run it opened.
 pub fn open_turn(app: &mut App, count: u64) {
-    let latest = turns(app).first().map(|t| t.count);
-    choose(app, if latest == Some(count) { Scope::Turn(None) } else { Scope::Turn(Some(count)) });
+    choose(app, Scope::Turn(Some(count)));
+}
+
+/// "Latest turn" pins the newest turn now; with none yet it follows the first to land.
+fn latest_turn(app: &App) -> Scope {
+    Scope::Turn(turns(app).first().map(|t| t.count))
 }
 
 fn choose(app: &mut App, scope: Scope) {
@@ -682,11 +687,20 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
-/// "9:00 AM", as the sidebar prints times.
-fn clock(ms: i64) -> String {
-    let mins = ms.rem_euclid(86_400_000) / 60_000;
+/// "9:00 AM" in local time, or "09:00" under the 24-hour setting (`formatShortTimestamp`).
+fn clock(app: &App, ms: i64) -> String {
+    let hour12 = app.client_settings.values.get("timestampFormat").and_then(Value::as_str) != Some("24-hour");
+    clock_at(data::Zone::Local.wall(ms), hour12)
+}
+
+fn clock_at(wall: i64, hour12: bool) -> String {
+    let mins = wall.rem_euclid(86_400_000) / 60_000;
     let (h, m) = (mins / 60, mins % 60);
-    format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+    if hour12 {
+        format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+    } else {
+        format!("{h:02}:{m:02}")
+    }
 }
 
 /// A header toggle: ghost `sm` button that shows pressed with the accent fill.
@@ -1165,7 +1179,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
             MenuEntry::item(
                 MenuItem::new(format!("Turn {n}"))
                     .radio(matches!(ui.scope, Scope::Turn(_)) && current == Some(n))
-                    .shortcut(clock(turn.at))
+                    .shortcut(clock(app, turn.at))
                     .on_select(move |s: &mut App| {
                         open_turn(s, n);
                         load(s);
@@ -1208,7 +1222,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
         })
         .item(MenuItem::new("Changes").radio(ui.scope == Scope::Branch).on_select(|s: &mut App| select(s, Scope::Branch)))
         .item(MenuItem::new("Uncommitted").radio(ui.scope == Scope::Unstaged).on_select(|s: &mut App| select(s, Scope::Unstaged)))
-        .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, Scope::Turn(None))))
+        .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, latest_turn(s))))
         .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Turns) } else { None };
         }))
@@ -1306,6 +1320,8 @@ mod tests {
         assert_eq!(turn_of(&Scope::Turn(None), &turns), Some(2));
         assert_eq!(turn_of(&Scope::Turn(Some(1)), &turns), Some(1));
         assert_eq!(turn_of(&Scope::Turn(Some(9)), &turns), Some(2));
+        assert_eq!((clock_at(0, true), clock_at(13 * 3_600_000 + 5 * 60_000, true)), ("12:00 AM".into(), "1:05 PM".into()));
+        assert_eq!(clock_at(13 * 3_600_000 + 5 * 60_000, false), "13:05");
         assert_eq!(turn_of(&Scope::Branch, &turns), None);
     }
 
