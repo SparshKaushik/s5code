@@ -3,9 +3,13 @@
 
 pub mod avatars;
 pub mod pr_detail;
+pub mod pr_filters;
+pub mod pr_row;
 pub mod pull_requests;
 pub mod usage;
+pub mod usage_limits;
 pub mod usage_prices;
+pub mod usage_tags;
 
 use rune::{KeyEvent, Tx};
 use serde_json::{Value, json};
@@ -23,7 +27,7 @@ pub struct Ui {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = pull_requests::poll(s) | pr_detail::poll(s) | usage::poll(s) | usage_prices::poll(s);
+    let changed = pull_requests::poll(s) | pr_row::poll(s) | pr_detail::poll(s) | usage::poll(s) | usage_prices::poll(s);
     want_avatars(s);
     changed
 }
@@ -46,12 +50,13 @@ fn want_avatars(s: &mut App) {
         .chain(list(detail, "reviewers"))
         .chain(list(activity, "comments").map(|c| &c["author"]))
         .chain(list(activity, "reviewThreads").flat_map(|t| t["comments"].as_array().into_iter().flatten()).map(|c| &c["author"]))
-        .chain(entries.iter().map(|e| &e["author"]));
+        .chain(entries.iter().map(|e| &e["author"]))
+        .chain(pr_filters::hosted_actors(&pages.pull_requests.picker));
     pages.avatars.want(avatars::urls(actors), waker);
 }
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
+    pr_row::on_key(s, e) || usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
 }
 
 /// A bundled recording next to the shell fixtures (`fixtures/pull-requests.json`, `usage.json`).
@@ -75,6 +80,32 @@ fn open_prs(s: &mut App, entries: impl Fn(&mut Value)) {
     u.result = Some(result);
     // Recorded as already requested, so poll() leaves the scene's state alone.
     u.requested = Some(pull_requests::input(u));
+}
+
+/// The list grouped by its authored and review-requested reads, which add an older authored row.
+fn open_partitions(s: &mut App) {
+    open_prs(s, |_| {});
+    let u = &mut s.ui.pages.pull_requests;
+    let entries = u.result.as_ref().and_then(|r| r["entries"].as_array()).cloned().unwrap_or_default();
+    let mut older = entries.first().cloned().unwrap_or(Value::Null);
+    older["number"] = json!(2401);
+    older["title"] = json!("feat(desktop-rune): keep pull request filters across restarts");
+    older["url"] = json!("https://github.com/s5labs/s5code/pull/2401");
+    older["headBranch"] = json!("feat/rune-pr-filters");
+    older["createdAt"] = json!("2026-10-27T11:20:00.000Z");
+    older["updatedAt"] = json!("2026-10-28T16:40:00.000Z");
+    let authored: Vec<Value> = entries.iter().filter(|e| e["author"]["login"] == "sparsh").cloned().chain([older]).collect();
+    let reviewing: Vec<Value> = entries.iter().filter(|e| e["viewerReviewRequested"] == true).cloned().collect();
+    pull_requests::hold_partitions(u, json!({"entries": authored}), json!({"entries": reviewing}));
+}
+
+/// The Filters menu open on `submenu`, its picker searching the hosts with nothing typed yet.
+fn open_picker(s: &mut App, submenu: &'static str, kind: &str, answer: Value) {
+    let u = &mut s.ui.pages.pull_requests;
+    u.menu = Some("filters");
+    u.submenu = Some(submenu);
+    pr_filters::open(&mut u.picker);
+    pr_filters::hold(&mut u.picker, kind, None, None, answer);
 }
 
 /// The list with its first row open in the detail, loaded from `pull-request-detail.json`.
@@ -164,6 +195,59 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             state.projects.clear();
         }
     }),
+    ("pull-requests-row-actions", |s| {
+        open_prs(s, |_| {});
+        s.ui.pages.pull_requests.row.speed = true;
+    }),
+    ("pull-requests-stack-menu", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2479, "stack");
+    }),
+    ("pull-requests-checks-popover", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2481, "checks");
+    }),
+    ("pull-requests-breakdown-tooltip", |s| {
+        open_prs(s, |_| {});
+        pr_row::scene(s, 2481, "breakdown");
+    }),
+    ("pull-requests-matched-elsewhere", |s| {
+        open_prs(s, |r| {
+            if let Some(entries) = r["entries"].as_array_mut() {
+                entries.retain(|e| e["number"] == 57 || e["number"] == 2470);
+            }
+        });
+        let u = &mut s.ui.pages.pull_requests;
+        u.query.replace_text("jitter");
+        pull_requests::submit(u);
+        u.requested = Some(pull_requests::input(u));
+    }),
+    ("pull-requests-author-picker", |s| {
+        open_prs(s, |_| {});
+        let hosted = json!([{"login": "octocat", "name": "The Octocat", "avatarUrl": null}, {"login": "mara", "name": "Mara Okafor", "avatarUrl": null}]);
+        open_picker(s, "author", "authors", json!({"authors": hosted, "labels": [], "truncated": false}));
+    }),
+    ("pull-requests-label-picker", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        u.filters.labels = vec!["bug".into(), "server".into()];
+        u.requested = Some(pull_requests::input(u));
+        let hosted = json!([{"name": "docs", "color": "0075ca"}, {"name": "bug", "color": "d73a4a"}]);
+        open_picker(s, "labels", "labels", json!({"labels": hosted, "authors": [], "truncated": false}));
+    }),
+    ("pull-requests-filters-hosts", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        u.hosts = u.result.as_ref().and_then(|r| r["providers"].as_array()).cloned().unwrap_or_default();
+        u.hosts.push(json!({"host": "gitlab.com", "kind": "gitlab", "searchesOnHost": true, "projectCount": 1, "configured": false, "detail": "glab is not authenticated for gitlab.com."}));
+        u.menu = Some("filters");
+        u.submenu = Some("host");
+    }),
+    ("pull-requests-partitions", open_partitions),
+    ("pull-requests-partitions-searching", |s| {
+        open_partitions(s);
+        s.ui.pages.pull_requests.query.replace_text("desktop");
+    }),
     ("pull-requests-detail", |s| open_detail(s, 0, |_| {})),
     ("pull-requests-detail-timeline", |s| open_detail(s, 1, |_| {})),
     ("pull-requests-detail-code", |s| {
@@ -222,6 +306,28 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("usage-cost-light", |s| {
         open_usage(s, "cost");
         light(s);
+    }),
+    ("usage-limits-pooled", |s| {
+        open_usage(s, "limits");
+        usage_limits::pooled_scene(s);
+    }),
+    ("usage-limits-pooled-popover", |s| {
+        open_usage(s, "limits");
+        usage_limits::pooled_scene(s);
+        s.ui.pages.usage.limits.segment = Some(usage_limits::segment_key("codex", "session", "session", "local:codex_work"));
+    }),
+    ("usage-limits-pooled-light", |s| {
+        open_usage(s, "limits");
+        usage_limits::pooled_scene(s);
+        light(s);
+    }),
+    ("usage-unpriced-tooltip", |s| {
+        open_usage(s, "cost");
+        s.ui.pages.usage.unpriced_tip = true;
+    }),
+    ("usage-tag-dialog", |s| {
+        open_usage(s, "cost");
+        usage_tags::scene(s);
     }),
     ("usage-model", |s| {
         open_usage(s, "cost");
