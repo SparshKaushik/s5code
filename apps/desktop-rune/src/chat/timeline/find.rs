@@ -57,7 +57,7 @@ fn query(app: &App) -> Option<&str> {
 /// How many matches a row holds: user text plainly, replies in their rendered Markdown.
 fn row_matches(row: &Row, q: &str) -> usize {
     match row {
-        Row::User(item) => find_plain(s(item, "text"), q).len(),
+        Row::User(item) => find_plain(&crate::chat::composer::chips::display(s(item, "text")).0, q).len(),
         Row::Assistant(item) => find_markdown(s(item, "text"), q, Case::Insensitive).len(),
         _ => 0,
     }

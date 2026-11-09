@@ -237,7 +237,12 @@ pub fn field_value(s: &App, id: &str, field: &str) -> Value {
         return json!("");
     }
     let entry = &server_settings(s)["providerInstances"][id];
-    if field == "displayName" || field == "enabled" { entry[field].clone() } else { entry["config"][field].clone() }
+    if top_level(field) { entry[field].clone() } else { entry["config"][field].clone() }
+}
+
+/// Fields that sit on the instance itself rather than in its driver `config`.
+fn top_level(field: &str) -> bool {
+    matches!(field, "displayName" | "enabled" | "accentColor")
 }
 
 /// The instance after one field changes; empty text clears the field (`clearWhenEmpty: "omit"`).
@@ -247,7 +252,7 @@ pub fn config_patch(settings: &Value, id: &str, driver: &str, field: &str, value
         entry = json!({"driver": driver});
     }
     let empty = value.as_str().is_some_and(|v| v.trim().is_empty()) && field != "agentId";
-    let target = if field == "displayName" || field == "enabled" {
+    let target = if top_level(field) {
         &mut entry
     } else {
         if !entry["config"].is_object() {
@@ -302,7 +307,7 @@ fn secret_fields(driver: &str) -> &'static [&'static str] {
     }
 }
 
-fn is_secret_field(driver: &str, field: &str) -> bool {
+pub(super) fn is_secret_field(driver: &str, field: &str) -> bool {
     secret_fields(driver).contains(&field)
 }
 
@@ -568,8 +573,7 @@ fn advisory(live: Option<&Value>, enabled: bool) -> Option<(&'static rune::Icon,
 }
 
 fn version_label(live: Option<&Value>) -> Option<String> {
-    let v = live?["version"].as_str()?;
-    Some(if v.starts_with(|c: char| c.is_ascii_digit()) { format!("v{v}") } else { v.to_owned() })
+    Some(super::provider_update::version_label(live?["version"].as_str()?))
 }
 
 fn dot(key: &str, t: &T) -> Option<El> {
@@ -679,7 +683,7 @@ fn list(s: &App, t: &T, rows: &[Row], selected: Option<&str>) -> El {
             .role("button")
             .label("Add provider")
             .cursor(rune::Cursor::Pointer)
-            .on_press(|s: &mut App| s.ui.settings.provider_picker = true)
+            .on_press(super::add_provider::open)
             .child(icon(&icons::PLUS, 16.0).color(t.c.muted_foreground))
             .child(text("Add provider").font(theme::TEXT_SM).color(t.c.muted_foreground)),
     );
@@ -725,8 +729,27 @@ fn text_row(s: &App, cx: &rune::Cx<App>, t: &T, id: &str, field: &str, title: &s
     )
 }
 
+/// Web's "Display name" row: the accent colour swatch, then the name field (`w-56`).
+fn display_name_row(s: &App, t: &T, id: &str, name: &str, placeholder: &str) -> El {
+    row()
+        .key(format!("row-{}", field_key(id, "displayName")))
+        .w_full()
+        .px(16.0)
+        .py(12.0)
+        .gap(32.0)
+        .center_y()
+        .child(col().grow(1.0).min_w(0.0).child(text("Display name").font(theme::SM_MEDIUM).color(t.c.foreground)))
+        .child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(super::accent::trigger(s, t, id, name))
+                .child(c::input(s, t, &field_key(id, "displayName"), 224.0, placeholder, false)),
+        )
+}
+
 /// `ProviderSettingsForm`'s text fields per driver: field, title, description, placeholder.
-fn runtime_fields(driver: &str, config: &Value) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
+pub(super) fn runtime_fields(driver: &str, config: &Value) -> Vec<(&'static str, &'static str, &'static str, &'static str)> {
     let binary = |description: &'static str, placeholder: &'static str| ("binaryPath", "Binary path", description, placeholder);
     let launch = |description: &'static str, placeholder: &'static str| ("launchArgs", "Launch arguments", description, placeholder);
     match driver {
@@ -809,15 +832,8 @@ fn header_action(s: &App, t: &T, r: &Row, live: Option<&Value>, enabled: bool) -
     if let Some(v) = version_label(live) {
         action = action.child(text(v).font(theme::MONO_XS).color(t.c.muted_foreground));
     }
-    if let Some((glyph, label)) = advisory(live, enabled) {
-        let warn = glyph.name == "triangle-alert";
-        action = action.child(
-            kit::Button::new(format!("{label}, view details"))
-                .variant("ghost-muted")
-                .size("icon-xs")
-                .build(t)
-                .child(icon(glyph, 14.0).color(if warn { t.c.warning } else { t.c.muted_foreground })),
-        );
+    if let Some(trigger) = super::provider_update::trigger(s, t, &r.id, live, enabled) {
+        action = action.child(trigger);
     }
     let mut tail = row().gap(4.0).center_y();
     if r.is_default && r.dirty {
@@ -895,7 +911,7 @@ fn small_input(edit: &TextEdit, key: &str, placeholder: &str, t: &T, mono: bool)
 }
 
 /// `SecretInput`: masked, never prefilled, and dropped from the edit buffer once committed.
-fn secret_input(s: &App, t: &T, key: &str, placeholder: &str, mono: bool) -> El {
+pub(super) fn secret_input(s: &App, t: &T, key: &str, placeholder: &str, mono: bool) -> El {
     let edit = s.ui.settings.edits.get(key).cloned().unwrap_or_else(|| TextEdit::new(String::new()).secure());
     let (k1, k2) = (key.to_owned(), key.to_owned());
     rune::text_input(&edit, if mono { theme::MONO_SM } else { theme::TEXT_SM })
@@ -1534,7 +1550,7 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         Some(header_action(s, t, r, live, enabled)),
         vec![
             status_row(t, live, enabled),
-            text_row(s, cx, t, &r.id, "displayName", "Display name", "", label(&r.driver)),
+            display_name_row(s, t, &r.id, &name, label(&r.driver)),
         ],
         t,
     )];
@@ -1690,7 +1706,7 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
         .variant("ghost-muted")
         .size("icon-xs")
         .icon(&icons::PLUS)
-        .on_press(|s: &mut App| s.ui.settings.provider_picker = true)
+        .on_press(super::add_provider::open)
         .build(t);
     let detail = match rows.iter().find(|r| Some(&r.id) == selected.as_ref()) {
         Some(r) => kit::scroll_area(
@@ -1754,31 +1770,6 @@ pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
         .build(t, layers);
 }
 
-pub fn picker(s: &App, t: &T, layers: &mut Vec<El>) {
-    if !s.ui.settings.provider_picker {
-        return;
-    }
-    let mut choices = col().w_full().gap(8.0);
-    for p in live_providers(s) {
-        let id = p["instanceId"].as_str().unwrap_or("").to_owned();
-        let enable = p["enabled"] == false;
-        choices = choices.child(
-            c::button(&format!("{} {}", if enable { "Enable" } else { "Disable" }, p["displayName"].as_str().unwrap_or(&id)), t).on_press(
-                move |s: &mut App| {
-                    update(s, &id, "enabled", json!(enable));
-                    s.ui.settings.provider = enable.then(|| id.clone());
-                    s.ui.settings.provider_picker = false;
-                },
-            ),
-        );
-    }
-    kit::Dialog::new("add-provider", "Add provider")
-        .open(true)
-        .on_close(|s: &mut App| s.ui.settings.provider_picker = false)
-        .child(choices)
-        .build(t, layers);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1794,6 +1785,13 @@ mod tests {
         // An emptied field is dropped rather than saved as "".
         let cleared = config_patch(&settings, "custom", "codex", "homePath", json!("  "));
         assert_eq!(cleared["providerInstances"]["custom"]["config"], json!({"future":true}));
+        // The accent colour sits on the instance, and clearing it omits the key.
+        let accent = config_patch(&settings, "custom", "codex", "accentColor", json!("#2563eb"));
+        assert_eq!(accent["providerInstances"]["custom"]["accentColor"], "#2563eb");
+        assert!(accent["providerInstances"]["custom"]["config"].get("accentColor").is_none());
+        let settings = accent;
+        let cleared = config_patch(&settings, "custom", "codex", "accentColor", json!(""));
+        assert!(cleared["providerInstances"]["custom"].get("accentColor").is_none());
     }
 
     #[test]
