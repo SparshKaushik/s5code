@@ -278,9 +278,24 @@ fn apply(r: &mut Running, event: &Value, now: i64) {
     }
 }
 
+/// Busy per checkout, as web keys action state by `{environmentId, cwd}`.
 fn is_busy(s: &App) -> bool {
     let g = &s.ui.chat.details.git;
-    g.running.is_some() || g.publish.as_ref().is_some_and(|p| p.pending.is_some())
+    let here = cwd(s);
+    g.running.as_ref().is_some_and(|r| Some(&r.cwd) == here.as_ref()) || g.publish.as_ref().is_some_and(|p| p.pending.is_some())
+}
+
+/// `resolveChangesTotals`: the branch's totals when it has work, else the working tree's, so a
+/// fresh commit doesn't read +0 while the diff still shows it.
+pub fn changes_totals(local: &Value) -> (u64, u64) {
+    let pair = |v: &Value| (v["insertions"].as_u64().unwrap_or(0), v["deletions"].as_u64().unwrap_or(0));
+    let tree = pair(&local["workingTree"]);
+    let branch = local["branchChanges"].is_object().then(|| pair(&local["branchChanges"]));
+    match branch {
+        Some(b) if b != (0, 0) => b,
+        _ if tree != (0, 0) => tree,
+        b => b.unwrap_or(tree),
+    }
 }
 
 fn quick_action(s: &App, status: Option<&Value>) -> Quick {
@@ -456,16 +471,16 @@ fn finish(s: &mut App, reply: s5_net::Reply) {
                 };
                 s.ui.chat.details.git.success = Some(Success { cwd: r.cwd, title: title.into(), description: Some(description), until });
             }
-            Err(e) => palette::toast(s, "Pull failed", Some(&palette::error_message(&e, "An error occurred."))),
+            Err(e) => palette::toast_error(s, "Pull failed", Some(&palette::error_message(&e, "An error occurred."))),
         }
         return;
     }
     let result = match (reply, r.result) {
         (Ok(_), Some(result)) => result,
-        (Ok(_), None) => return,
+        (Ok(v), None) => v,
         (Err(e), _) => {
             let message = r.failure.unwrap_or_else(|| palette::error_message(&e, "An error occurred."));
-            return palette::toast(s, "Action failed", Some(&message));
+            return palette::toast_error(s, "Action failed", Some(&message));
         }
     };
     // `syncThreadBranchAfterGitAction`: a feature branch the action made becomes the thread's.
@@ -532,8 +547,7 @@ pub fn view(s: &App, t: &T, local: &Value, draft: bool) -> Option<El> {
     let here = cwd(s);
     let running = git.running.as_ref().filter(|r| Some(&r.cwd) == here.as_ref());
     let success = git.success.as_ref().filter(|v| Some(&v.cwd) == here.as_ref());
-    let insertions = local["workingTree"]["insertions"].as_u64().unwrap_or(0) + local["workingTree"]["deletions"].as_u64().unwrap_or(0);
-    if quiet(s, draft) && running.is_none() && q.disabled && insertions == 0 {
+    if quiet(s, draft) && running.is_none() && q.disabled && changes_totals(local) == (0, 0) {
         return None;
     }
     let group = row().key("details-git").w_full().radius(theme::layout::CONTROL_RADIUS);
@@ -605,6 +619,18 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
         }
     }
     rows
+}
+
+/// A commit dialog file row opens in the editor, against the worktree root (`openChangedFileInEditor`).
+fn open_file(s: &mut App, path: &str) {
+    let root = status(s).and_then(|v| v["workingTree"]["rootPath"].as_str().map(str::to_string));
+    let (Some(root), Some((editor, _))) = (root, super::editors(s).into_iter().next()) else {
+        return palette::toast_error(s, "Editor opening is unavailable.", None);
+    };
+    let target = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", root.trim_end_matches('/')) };
+    if let Some(net) = s.src.net() {
+        net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}));
+    }
 }
 
 pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
@@ -716,7 +742,19 @@ fn commit_dialog(s: &App, t: &T, out: &mut Vec<El>) {
                         .build(&k),
                 );
             }
-            line = line.child(text(path.clone()).font(theme::mono(theme::TEXT_SM)).color(if excluded { muted } else { t.c.foreground }).truncate().grow(1.0).shrink().min_w(0.0));
+            let target = path.clone();
+            let name = text(path.clone())
+                .font(theme::mono(theme::TEXT_SM))
+                .color(if excluded { muted } else { t.c.foreground })
+                .truncate_head()
+                .grow(1.0)
+                .shrink()
+                .min_w(0.0)
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label(format!("Open {path} in editor"))
+                .on_press(move |s: &mut App| open_file(s, &target));
+            line = line.child(name);
             line = line.child(if excluded { text("Excluded").font(theme::mono(theme::TEXT_SM)).color(muted) } else { diff_count(t, *add, *del) });
             list = list.child(line);
         }
@@ -1156,6 +1194,14 @@ mod tests {
             v[key] = value.clone();
         }
         v
+    }
+
+    #[test]
+    fn changes_totals_prefer_branch_work_then_the_tree() {
+        let local = |branch: Value| json!({"workingTree": {"insertions": 3, "deletions": 1}, "branchChanges": branch});
+        assert_eq!(changes_totals(&local(json!({"insertions": 9, "deletions": 0}))), (9, 0));
+        assert_eq!(changes_totals(&local(json!({"insertions": 0, "deletions": 0}))), (3, 1), "a zero branch total doesn't hide a dirty tree");
+        assert_eq!(changes_totals(&local(Value::Null)), (3, 1));
     }
 
     #[test]
