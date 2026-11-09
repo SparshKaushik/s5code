@@ -274,6 +274,27 @@ impl Vt {
         self.term.scroll_display(Scroll::Bottom);
     }
 
+    /// Shift+PageUp/PageDown page through history and Shift+Mod+Home/End jump to its ends, on
+    /// the normal screen only (the web surface's `pageHistory` and `jumpHistory`).
+    pub fn history_key(&mut self, e: &KeyEvent, mac: bool) -> bool {
+        let m = e.mods;
+        let primary = if mac { m.cmd } else { m.ctrl };
+        let page = m.shift && !m.alt && !m.ctrl && !m.cmd;
+        let jump = m.shift && !m.alt && primary;
+        let scroll = match e.key {
+            Key::PageUp if page => Scroll::PageUp,
+            Key::PageDown if page => Scroll::PageDown,
+            Key::Home if jump => Scroll::Top,
+            Key::End if jump => Scroll::Bottom,
+            _ => return false,
+        };
+        if self.term.mode().contains(TermMode::ALT_SCREEN) {
+            return false;
+        }
+        self.term.scroll_display(scroll);
+        true
+    }
+
     /// The program's pending output is already applied; only the scrollback view moves.
     pub fn scroll_lines(&mut self, lines: i32) -> bool {
         let before = self.term.grid().display_offset();
@@ -979,6 +1000,10 @@ mod tests {
             vt.key(&key(Key::PageDown, |m| m.shift = true)).unwrap(),
             "\x1b[6;2~"
         );
+        assert!(!vt.history_key(&key(Key::PageUp, |_| {}), false), "plain PageUp goes to the program");
+        assert!(vt.history_key(&key(Key::PageUp, |m| m.shift = true), false));
+        assert!(vt.history_key(&key(Key::Home, |m| (m.shift, m.ctrl) = (true, true)), false));
+        assert!(!vt.history_key(&key(Key::Home, |m| (m.shift, m.ctrl) = (true, true)), true), "Cmd is primary on macOS");
         assert_eq!(vt.key(&key(Key::Function(1), |_| {})).unwrap(), "\x1bOP");
         assert_eq!(vt.key(&key(Key::Function(5), |_| {})).unwrap(), "\x1b[15~");
         assert_eq!(vt.key(&key(Key::Tab, |m| m.shift = true)).unwrap(), "\x1b[Z");

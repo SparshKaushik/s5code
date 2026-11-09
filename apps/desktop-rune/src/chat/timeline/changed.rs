@@ -116,7 +116,11 @@ pub fn card(app: &App, checkpoint: &Value, t: &T) -> El {
     let entries = tree(files, &|path| expanded.contains(&fold_key(path)));
     let open_diff = {
         let checkpoint = checkpoint.clone();
-        move |app: &mut App| crate::panel::open_diff(app, checkpoint.clone())
+        let first = files.first().map(|f| s(f, "path").to_owned()).filter(|p| !p.is_empty());
+        move |app: &mut App| match &first {
+            Some(path) => crate::panel::open_diff_at(app, checkpoint.clone(), path),
+            None => crate::panel::open_diff(app, checkpoint.clone()),
+        }
     };
     let mut head = row()
         .w_full()

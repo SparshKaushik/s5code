@@ -41,7 +41,7 @@ pub fn array<'a>(v: &'a Value, key: &str) -> &'a [Value] {
     v[key].as_array().map(Vec::as_slice).unwrap_or(&[])
 }
 
-const LIFECYCLE: [&str; 6] = ["turn_start", "turn_complete", "run_start", "run_complete", "run_interrupt_request", "run_interrupt_result"];
+const LIFECYCLE: [&str; 5] = ["turn_start", "turn_complete", "run_start", "run_complete", "run_interrupt_request"];
 
 fn run_active(run: &Value) -> bool {
     matches!(s(run, "status"), "starting" | "running" | "waiting")
@@ -59,6 +59,7 @@ fn escapes_fold(kind: &str) -> bool {
             | "compaction"
             | "subagent"
             | "fork"
+            | "run_interrupt_result"
             | "handoff"
             | "secret_request"
             | "link_request"
@@ -285,6 +286,7 @@ pub fn label(item: &Value) -> String {
         "approval_request" => "Approval requested".into(),
         "user_input_request" if !item["questionAnswer"].is_null() => "Answered questions".into(),
         "user_input_request" => "Input requested".into(),
+        "notification" if !s(item, "summary").is_empty() => s(item, "summary").into(),
         _ => kind.replace('_', " "),
     }
 }
@@ -481,6 +483,8 @@ mod tests {
         assert_eq!(label(&json!({"type":"file_change","changes":[{},{}]})), "Changed 2 files");
         assert_eq!(label(&json!({"type":"dynamic_tool","toolName":null})), "Tool call");
         assert_eq!(label(&json!({"type":"mcp_tool_call"})), "mcp tool call");
+        let restart = json!({"type":"notification","title":null,"summary":"T3 Code restarted and resumed this turn","detail":"Continue"});
+        assert_eq!(label(&restart), "T3 Code restarted and resumed this turn");
     }
 
     #[test]

@@ -41,6 +41,7 @@ struct Notice {
     description: Option<String>,
     until: i64,
     actions: Vec<ToastAction>,
+    error: bool,
 }
 /// A toast button: its label, whether it is the primary one, and what it does.
 pub(crate) type ToastAction = (String, bool, std::rc::Rc<dyn Fn(&mut App, &mut Tx)>);
@@ -288,6 +289,18 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         description: description.filter(|v| !v.is_empty()).map(str::to_owned),
         until: data::now_ms() + 4000,
         actions,
+        error: false,
+    });
+}
+/// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
+/// be read.
+pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
+    s.ui.shell.palette.notice = Some(Notice {
+        title: title.into(),
+        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
+        until: i64::MAX,
+        actions: Vec::new(),
+        error: true,
     });
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -1876,6 +1889,11 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         for (label, primary, run) in &notice.actions {
             let run = run.clone();
             toast = toast.action(&kit::theme(t), label, *primary, move |s: &mut App, tx: &mut Tx| run(s, tx));
+        }
+        if notice.error {
+            toast = toast
+                .lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive))
+                .on_close(|s: &mut App| s.ui.shell.palette.notice = None);
         }
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }
