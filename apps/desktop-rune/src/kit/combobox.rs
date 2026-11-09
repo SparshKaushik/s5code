@@ -95,6 +95,7 @@ fn filtered(options: &[ComboboxOption], query: &str) -> Vec<usize> {
 
 type Access<S> = Rc<dyn for<'a> Fn(&'a mut S) -> &'a mut ComboboxState>;
 type Choose<S> = Rc<dyn Fn(&mut S, &str, &mut Tx)>;
+type Trailing = Rc<dyn Fn(&ComboboxOption) -> Option<El>>;
 
 /// `Combobox::new("models", &s.combo, &options, |s: &mut App| &mut s.combo)`.
 /// Selection is app-controlled through `current` and `on_choose`; search/open/highlight
@@ -115,6 +116,8 @@ pub struct Combobox<S> {
     trigger: Option<El>,
     disabled: bool,
     label: Option<String>,
+    trailing: Option<Trailing>,
+    header: Option<El>,
 }
 impl<S: 'static> Combobox<S> {
     pub fn new(
@@ -139,7 +142,19 @@ impl<S: 'static> Combobox<S> {
             trigger: None,
             disabled: false,
             label: None,
+            trailing: None,
+            header: None,
         }
+    }
+    /// A control after an option's label, such as a switch; its own press doesn't choose the row.
+    pub fn trailing(mut self, trailing: impl Fn(&ComboboxOption) -> Option<El> + 'static) -> Self {
+        self.trailing = Some(Rc::new(trailing));
+        self
+    }
+    /// A row between the search and the results, such as column titles for `trailing` controls.
+    pub fn header(mut self, header: El) -> Self {
+        self.header = Some(header);
+        self
     }
     /// The accessible name: what the choice is for ("Model"). The chosen option is read as its
     /// value; without it the placeholder names the field.
@@ -410,6 +425,9 @@ impl<S: 'static> Combobox<S> {
                         .truncate(),
                 );
             }
+            if let Some(control) = self.trailing.as_ref().and_then(|f| f(option)) {
+                entry = entry.child(control);
+            }
             entry = entry.child(
                 icon(&icons::CHECK, 14.)
                     .color(k.c.text_base)
@@ -487,6 +505,7 @@ impl<S: 'static> Combobox<S> {
             .min_h(0.)
             .shrink()
             .child(col().w_full().px(12.).pt(9.).child(search))
+            .children(self.header)
             .child(
                 col()
                     .w_full()

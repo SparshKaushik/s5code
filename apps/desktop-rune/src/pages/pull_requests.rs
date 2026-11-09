@@ -1,14 +1,25 @@
 //! `/pull-requests` (PullRequestsPage): every project's pull requests in one list, grouped by
 //! involvement and ranked by the chosen sort, with the toolbar's search, sort, filters and host.
 
+use std::collections::{HashMap, HashSet};
+use std::time::{Duration, Instant};
+
 use rune::{Color, Cursor, El, PointerPress, ScrollSpec, Tx, col, el, icon, row, spacer, text, text_input};
-use serde_json::{Value, json};
+use serde_json::{Map, Value, json};
 
 use crate::data::{s as field, ts};
 use crate::icons as i;
 use crate::kit::{self, Menu, MenuEntry, MenuItem, Placement};
 use crate::theme::{self, AlphaMul, T, layout, radius, tw};
 use crate::{App, Route};
+
+/// Rows a page asks for, and the most "Load more" grows one listing to (PAGE_SIZE, MAX_PAGE_SIZE).
+const PAGE: u64 = 99;
+const MAX_PAGE: u64 = 500;
+/// The typed query reaches the hosts this long after the last keystroke (SEARCH_DEBOUNCE_MS).
+const DEBOUNCE: Duration = Duration::from_millis(250);
+/// `pullRequests.listStats` takes at most this many refs per call.
+const MAX_STATS_REFS: usize = 500;
 
 #[derive(Default)]
 pub struct Ui {
@@ -20,8 +31,21 @@ pub struct Ui {
     pub requested: Option<Value>,
     pub filters: Filters,
     pub query: rune::TextEdit,
-    /// The query sent to the hosts (on Enter); typing filters the loaded rows meanwhile.
+    /// The query sent to the hosts: the typed one once typing pauses, or at once on Enter.
     pub sent_query: String,
+    /// The typed text last seen, and when it changed while not yet sent.
+    typed: String,
+    typed_at: Option<Instant>,
+    /// Rows asked for; grows by a page when the hosts can't continue from cursors.
+    limit: Option<u64>,
+    /// `pullRequests.invalidate` in flight from Refresh.
+    invalidating: Option<u64>,
+    /// Measured sizes for rows the list answered without one (`listStats`), by row key.
+    stats: HashMap<String, (i64, i64)>,
+    stats_asked: HashSet<String>,
+    stats_pending: Option<u64>,
+    /// The hosts offered in the picker, kept from the unfiltered answer while a host narrows it.
+    hosts: Vec<Value>,
     pub menu: Option<&'static str>,
     pub submenu: Option<&'static str>,
     pub selected: Option<String>,
@@ -55,6 +79,23 @@ impl Filters {
             .filter(|b| **b)
             .count()
     }
+
+    /// The menu's `PullRequestListFilters`, which typed qualifiers override key by key.
+    fn menu(&self) -> Map<String, Value> {
+        let mut out = Map::new();
+        for (key, value) in [("draft", self.draft), ("review", self.review), ("checks", self.checks)] {
+            if value != "all" {
+                out.insert(key.into(), json!(value));
+            }
+        }
+        if let Some(author) = &self.author {
+            out.insert("author".into(), json!(author));
+        }
+        if let Some(label) = &self.label {
+            out.insert("labels".into(), json!([[label]]));
+        }
+        out
+    }
 }
 
 const STATES: &[(&str, &str, &rune::Icon)] =
@@ -69,7 +110,7 @@ const SORTS: &[(&str, &str, &rune::Icon)] = &[
     ("largest", "Largest shown", &i::MAXIMIZE_2),
     ("smallest", "Smallest shown", &i::MINIMIZE_2),
 ];
-const DRAFTS: &[(&str, &str)] = &[("all", "All"), ("only", "Drafts only"), ("exclude", "Hide drafts")];
+const DRAFTS: &[(&str, &str)] = &[("all", "All"), ("only", "Drafts only"), ("hide", "Hide drafts")];
 const REVIEWS: &[(&str, &str)] = &[("all", "All"), ("approved", "Approved"), ("changes-requested", "Changes requested"), ("review-required", "Review required"), ("none", "No reviews")];
 const CHECKS: &[(&str, &str)] = &[("all", "All"), ("passing", "Passing"), ("failing", "Failing")];
 
@@ -77,29 +118,169 @@ fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.pull_requests
 }
 
+// ---- query ------------------------------------------------------------------------------
+
+/// Runs of characters outside `sep`, where a `"quoted"` span may hold anything; an unclosed
+/// quote is dropped, as `/(?:[^\s"]|"[^"]*")+/g` skips it.
+fn runs(raw: &str, sep: fn(char) -> bool) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < raw.len() {
+        let start = at;
+        while let Some(c) = raw[at..].chars().next() {
+            if c == '"' {
+                match raw[at + 1..].find('"') {
+                    Some(end) => at += end + 2,
+                    None => break,
+                }
+            } else if sep(c) {
+                break;
+            } else {
+                at += c.len_utf8();
+            }
+        }
+        if at > start {
+            out.push(&raw[start..at]);
+        } else if let Some(c) = raw[at..].chars().next() {
+            at += c.len_utf8();
+        }
+    }
+    out
+}
+
+fn unquoted(raw: &str) -> String {
+    raw.replace('"', "").trim().to_string()
+}
+
+fn capped(name: &str) -> String {
+    name.chars().take(200).collect::<String>().trim().to_string()
+}
+
+fn names(raw: &str, prefix: Option<&str>) -> Vec<String> {
+    runs(raw, |c| c == ',')
+        .into_iter()
+        .map(unquoted)
+        .filter(|n| !n.is_empty())
+        .map(|n| match prefix {
+            Some(key) if !n.contains(':') => format!("{key}:{n}"),
+            _ => n,
+        })
+        .take(10)
+        .map(|n| capped(&n))
+        .filter(|n| !n.is_empty())
+        .collect()
+}
+
+/// `^(-?)([A-Za-z][A-Za-z0-9_-]*):(.*)$` as (negated, key, raw value).
+fn qualifier(token: &str) -> Option<(bool, &str, &str)> {
+    let (negated, rest) = match token.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, token),
+    };
+    let (key, value) = rest.split_once(':')?;
+    let mut chars = key.chars();
+    let valid = chars.next().is_some_and(|c| c.is_ascii_alphabetic()) && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    valid.then_some((negated, key, value))
+}
+
+/// parsePullRequestQuery: GitHub-style qualifiers become `PullRequestListFilters`; the rest is
+/// the text. An unknown `key:value` is a scoped label, so `area:ui` finds the label "area:ui".
+pub(super) fn parse_query(raw: &str) -> (String, Map<String, Value>) {
+    let mut text = Vec::new();
+    let (mut labels, mut excluded): (Vec<Vec<String>>, Vec<String>) = (Vec::new(), Vec::new());
+    let mut filters = Map::new();
+    for token in runs(raw, char::is_whitespace) {
+        let parsed = qualifier(token);
+        let value = parsed.map(|q| unquoted(q.2)).unwrap_or_default();
+        let taken = match parsed.filter(|_| !value.is_empty()) {
+            None => false,
+            Some((negated, key, raw_value)) => match key.to_ascii_lowercase().as_str() {
+                "label" => {
+                    let list = names(raw_value, None);
+                    match (list.is_empty(), negated) {
+                        (true, _) => false,
+                        (false, true) => {
+                            excluded.extend(list);
+                            true
+                        }
+                        (false, false) => {
+                            labels.push(list);
+                            true
+                        }
+                    }
+                }
+                "author" if !negated => {
+                    filters.insert("author".into(), json!(capped(&value)));
+                    true
+                }
+                "draft" if !negated && matches!(value.to_ascii_lowercase().as_str(), "true" | "false") => {
+                    filters.insert("draft".into(), json!(if value.eq_ignore_ascii_case("true") { "only" } else { "hide" }));
+                    true
+                }
+                "review" if !negated => {
+                    let decision = match value.to_ascii_lowercase().as_str() {
+                        "approved" => Some("approved"),
+                        "changes_requested" | "changes-requested" => Some("changes-requested"),
+                        "required" | "review-required" => Some("review-required"),
+                        "none" => Some("none"),
+                        _ => None,
+                    };
+                    decision.map(|d| filters.insert("review".into(), json!(d))).is_some()
+                }
+                "status" | "checks" if !negated => {
+                    let state = match value.to_ascii_lowercase().as_str() {
+                        "success" | "passing" => Some("passing"),
+                        "failure" | "failing" => Some("failing"),
+                        _ => None,
+                    };
+                    state.map(|c| filters.insert("checks".into(), json!(c))).is_some()
+                }
+                "label" | "author" | "draft" | "review" | "status" | "checks" => false,
+                _ if value.starts_with('/') => false,
+                _ => {
+                    let list = names(raw_value, Some(key));
+                    match (list.is_empty(), negated) {
+                        (true, _) => false,
+                        (false, true) => {
+                            excluded.extend(list);
+                            true
+                        }
+                        (false, false) => {
+                            labels.push(list);
+                            true
+                        }
+                    }
+                }
+            },
+        };
+        if !taken {
+            text.push(token);
+        }
+    }
+    if !labels.is_empty() {
+        labels.truncate(10);
+        filters.insert("labels".into(), json!(labels));
+    }
+    if !excluded.is_empty() {
+        excluded.truncate(10);
+        filters.insert("excludedLabels".into(), json!(excluded));
+    }
+    (text.join(" "), filters)
+}
+
+/// The menu's filters with the typed qualifiers laid over them.
+fn merged_filters(f: &Filters, typed: &Map<String, Value>) -> Map<String, Value> {
+    let mut out = f.menu();
+    out.extend(typed.iter().map(|(k, v)| (k.clone(), v.clone())));
+    out
+}
+
 /// The request the toolbar describes, shaped as `pullRequests.list`'s input.
 pub(super) fn input(u: &Ui) -> Value {
     let f = &u.filters;
-    let mut filters = serde_json::Map::new();
-    if f.draft != "all" {
-        filters.insert("draft".into(), json!(f.draft));
-    }
-    if f.review != "all" {
-        filters.insert("review".into(), json!(f.review));
-    }
-    if f.checks != "all" {
-        filters.insert("checks".into(), json!(f.checks));
-    }
-    if let Some(label) = &f.label {
-        filters.insert("labels".into(), json!([[label]]));
-    }
-    if let Some(author) = &f.author {
-        filters.insert("author".into(), json!(author));
-    }
-    let mut v = json!({"state": f.state, "limit": 99});
-    if f.involvement != "all" {
-        v["involvement"] = json!(f.involvement);
-    }
+    let (text, typed) = parse_query(&u.sent_query);
+    let filters = merged_filters(f, &typed);
+    let mut v = json!({"state": f.state, "involvement": f.involvement, "limit": u.limit.unwrap_or(PAGE)});
     if !filters.is_empty() {
         v["filters"] = Value::Object(filters);
     }
@@ -109,8 +290,9 @@ pub(super) fn input(u: &Ui) -> Value {
     if let Some(h) = &f.host {
         v["host"] = json!(h);
     }
-    if !u.sent_query.is_empty() {
-        v["query"] = json!(u.sent_query);
+    if !text.is_empty() {
+        // The list input caps its query at 200 characters.
+        v["query"] = json!(text.chars().take(200).collect::<String>().trim());
     }
     v
 }
@@ -119,37 +301,155 @@ pub fn supported(s: &App) -> bool {
     s.state().config.is_some()
 }
 
+/// `host:repository#number`, one row across pages and stats (pullRequestEntryKey).
+fn key(e: &Value) -> String {
+    format!("{}:{}#{}", field(e, "host"), field(e, "repository"), e["number"])
+}
+
 pub fn poll(s: &mut App) -> bool {
     if !matches!(s.frame_route(), Route::PullRequests) {
         return false;
     }
-    let mut changed = false;
+    let mut changed = debounce(s);
+    if let Some(id) = s.ui.pages.pull_requests.invalidating
+        && s.src.net().and_then(|n| n.take_reply(id)).is_some()
+    {
+        // Host caches are dropped (or the call failed, which web also ignores): ask again.
+        let u = ui(s);
+        u.invalidating = None;
+        u.requested = None;
+        changed = true;
+    }
+    if let Some(id) = s.ui.pages.pull_requests.stats_pending
+        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
+    {
+        let u = ui(s);
+        u.stats_pending = None;
+        if let Ok(reply) = reply {
+            for stat in reply["stats"].as_array().into_iter().flatten() {
+                let host = u.result.as_ref().and_then(|r| r["entries"].as_array()).and_then(|es| {
+                    es.iter().find(|e| field(e, "repository") == field(stat, "repository") && e["number"] == stat["number"]).map(|e| field(e, "host").to_string())
+                });
+                if let Some(host) = host {
+                    let k = format!("{host}:{}#{}", field(stat, "repository"), stat["number"]);
+                    u.stats.insert(k, (stat["additions"].as_i64().unwrap_or(0), stat["deletions"].as_i64().unwrap_or(0)));
+                }
+            }
+        }
+        changed = true;
+    }
     if let Some((id, append)) = s.ui.pages.pull_requests.pending
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
     {
         let u = ui(s);
         u.pending = None;
         match reply {
-            Ok(mut result) => {
-                if append && let Some(prev) = u.result.take() {
-                    let mut entries = prev["entries"].as_array().cloned().unwrap_or_default();
-                    entries.extend(result["entries"].as_array().cloned().unwrap_or_default());
-                    result["entries"] = Value::Array(entries);
+            Ok(result) => {
+                let result = if append { appended(u.result.take(), result) } else { result };
+                if u.filters.host.is_none() || u.hosts.is_empty() {
+                    u.hosts = result["providers"].as_array().cloned().unwrap_or_default();
                 }
                 u.result = Some(result);
                 u.error = None;
             }
-            Err(e) => u.error = Some(e["message"].as_str().unwrap_or("Could not load pull requests.").to_string()),
+            Err(e) => u.error = Some(error_text(&e, "The environment request failed.")),
         }
         changed = true;
     }
     let wanted = input(&s.ui.pages.pull_requests);
-    if s.ui.pages.pull_requests.requested.as_ref() != Some(&wanted) {
+    let requested = s.ui.pages.pull_requests.requested.clone();
+    if requested.as_ref() != Some(&wanted) {
+        // A different question starts from the first page again.
+        if requested.as_ref().is_some_and(|r| without_limit(r) != without_limit(&wanted)) && s.ui.pages.pull_requests.limit.is_some() {
+            ui(s).limit = None;
+            return true;
+        }
         s.ui.pages.pull_requests.requested = Some(wanted.clone());
         fetch(s, wanted, false);
         changed = true;
     }
+    want_stats(s);
     changed
+}
+
+fn without_limit(v: &Value) -> Value {
+    let mut v = v.clone();
+    if let Some(o) = v.as_object_mut() {
+        o.remove("limit");
+    }
+    v
+}
+
+/// Sends the typed query now, as Enter does, skipping the debounce.
+pub(super) fn submit(u: &mut Ui) {
+    u.sent_query = u.query.text.trim().to_string();
+    u.typed = u.query.text.clone();
+    u.typed_at = None;
+}
+
+/// Sends the typed query once typing pauses; a timer thread repaints when it is due.
+fn debounce(s: &mut App) -> bool {
+    let waker = s.ui.panel.waker.clone();
+    let u = ui(s);
+    if u.query.text != u.typed {
+        u.typed = u.query.text.clone();
+        u.typed_at = Some(Instant::now());
+        if let Some(waker) = waker {
+            std::thread::spawn(move || {
+                std::thread::sleep(DEBOUNCE);
+                waker();
+            });
+        }
+    }
+    match u.typed_at {
+        Some(at) if at.elapsed() >= DEBOUNCE => {
+            u.typed_at = None;
+            u.sent_query = u.typed.clone();
+            true
+        }
+        _ => false,
+    }
+}
+
+/// A continuation's rows after the held ones, skipping any already listed and ranking the new
+/// ones among themselves.
+fn appended(prev: Option<Value>, mut next: Value) -> Value {
+    let Some(prev) = prev else { return next };
+    let mut entries = prev["entries"].as_array().cloned().unwrap_or_default();
+    let held: HashSet<String> = entries.iter().map(key).collect();
+    let mut arrived: Vec<Value> = next["entries"].as_array().into_iter().flatten().filter(|e| !held.contains(&key(e))).cloned().collect();
+    arrived.sort_by_key(|e| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0)));
+    entries.extend(arrived);
+    next["entries"] = Value::Array(entries);
+    next
+}
+
+/// Asks the hosts for the sizes of rows listed without one, a batch at a time.
+fn want_stats(s: &mut App) {
+    let u = &s.ui.pages.pull_requests;
+    if u.stats_pending.is_some() || !matches!(s.src, crate::data::Source::Live(_)) {
+        return;
+    }
+    let refs: Vec<(String, Value)> = u
+        .result
+        .as_ref()
+        .and_then(|r| r["entries"].as_array())
+        .into_iter()
+        .flatten()
+        .filter(|e| size(e) == 0 && !u.stats_asked.contains(&key(e)) && e["projectId"].is_string())
+        .take(MAX_STATS_REFS)
+        .map(|e| (key(e), json!({"projectId": e["projectId"], "repository": e["repository"], "number": e["number"]})))
+        .collect();
+    if refs.is_empty() {
+        return;
+    }
+    let payload = json!({"refs": refs.iter().map(|r| r.1.clone()).collect::<Vec<_>>()});
+    if let Some(net) = s.src.net() {
+        let id = net.request("pullRequests.listStats", payload);
+        let u = ui(s);
+        u.stats_pending = Some(id);
+        u.stats_asked.extend(refs.into_iter().map(|r| r.0));
+    }
 }
 
 fn fetch(s: &mut App, payload: Value, append: bool) {
@@ -160,22 +460,59 @@ fn fetch(s: &mut App, payload: Value, append: bool) {
         }
         None if !crate::host::live() => {
             if ui(s).result.is_none() {
-                ui(s).result = super::fixture("pull-requests.json");
+                let result = super::fixture("pull-requests.json");
+                let u = ui(s);
+                u.hosts = result.as_ref().and_then(|r| r["providers"].as_array()).cloned().unwrap_or_default();
+                u.result = result;
             }
         }
         None => {}
     }
 }
 
+/// Refresh drops the hosts' cached answers, then lists again (`pullRequests.invalidate`).
 fn refresh(s: &mut App) {
-    ui(s).requested = None;
+    if refreshing(&s.ui.pages.pull_requests) {
+        return;
+    }
+    match s.src.net() {
+        Some(net) => {
+            let id = net.request("pullRequests.invalidate", json!({}));
+            let u = ui(s);
+            u.invalidating = Some(id);
+            u.stats.clear();
+            u.stats_asked.clear();
+        }
+        None => ui(s).requested = None,
+    }
+}
+
+fn refreshing(u: &Ui) -> bool {
+    u.invalidating.is_some() || u.pending.is_some_and(|p| !p.1)
+}
+
+/// Whether "Load more" has anything to ask: cursors to continue from, or room to grow the page.
+fn can_load_more(u: &Ui, result: &Value) -> bool {
+    let cursors = result["nextCursors"].as_object().is_some_and(|c| !c.is_empty());
+    result["truncated"].as_bool().unwrap_or(false) && (cursors || u.limit.unwrap_or(PAGE) < MAX_PAGE)
 }
 
 fn load_more(s: &mut App) {
-    let Some(cursors) = s.ui.pages.pull_requests.result.as_ref().map(|r| r["nextCursors"].clone()) else { return };
-    let mut payload = input(&s.ui.pages.pull_requests);
-    payload["cursors"] = cursors;
-    fetch(s, payload, true);
+    let u = &s.ui.pages.pull_requests;
+    if u.pending.is_some() {
+        return;
+    }
+    let Some(result) = u.result.as_ref() else { return };
+    let cursors = result["nextCursors"].clone();
+    if cursors.as_object().is_some_and(|c| !c.is_empty()) {
+        let mut payload = input(u);
+        payload["cursors"] = cursors;
+        fetch(s, payload, true);
+    } else {
+        // Without cursors the hosts answer a longer first page instead.
+        let u = ui(s);
+        u.limit = Some((u.limit.unwrap_or(PAGE) + PAGE).min(MAX_PAGE));
+    }
 }
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
@@ -196,12 +533,12 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _: &mut Tx) -> bool {
 // ---- ranking ----------------------------------------------------------------------------
 
 fn viewer<'a>(result: &'a Value, e: &Value) -> &'a str {
-    result["viewers"][field(e, "host")].as_str().unwrap_or("")
+    result["viewers"][field(e, "host")].as_str().map(str::trim).unwrap_or("")
 }
 
 fn authored(result: &Value, e: &Value) -> bool {
     let me = viewer(result, e);
-    !me.is_empty() && e["author"]["login"].as_str().is_some_and(|l| l.eq_ignore_ascii_case(me))
+    !me.is_empty() && e["author"]["login"].as_str().is_some_and(|l| l.trim().eq_ignore_ascii_case(me))
 }
 
 fn open(e: &Value) -> bool {
@@ -209,47 +546,82 @@ fn open(e: &Value) -> bool {
 }
 
 fn conflicting(e: &Value) -> bool {
-    open(e) && !e["isDraft"].as_bool().unwrap_or(false) && field(e, "mergeability") == "conflicting"
+    field(e, "mergeability") == "conflicting"
 }
 
 fn size(e: &Value) -> i64 {
     e["additions"].as_i64().unwrap_or(0) + e["deletions"].as_i64().unwrap_or(0)
 }
 
-fn matches_filters(f: &Filters, result: &Value, e: &Value, query: &str) -> bool {
-    let state_ok = f.state == "all" || field(e, "state") == f.state;
+/// resolvePullRequestAuthorFilter: `@me` and `me` name the signed-in account where it is known.
+fn author_filter<'a>(author: &'a str, viewer: &'a str) -> &'a str {
+    let trimmed = author.trim();
+    let me = trimmed.strip_prefix('@').unwrap_or(trimmed).eq_ignore_ascii_case("me");
+    if me && !viewer.trim().is_empty() { viewer } else { trimmed }
+}
+
+/// narrowPullRequestsToFilters and matchesPullRequestFilters: state, project and host, then the
+/// draft, review, label and author filters. Checks are the host's call, never narrowed here.
+fn matches_filters(f: &Filters, filters: &Map<String, Value>, result: &Value, e: &Value) -> bool {
+    let narrowed = (f.state == "all" || field(e, "state") == f.state)
+        && f.project.as_deref().is_none_or(|p| field(e, "projectId") == p)
+        && f.host.as_deref().is_none_or(|h| field(e, "host") == h);
     let involvement_ok = match f.involvement {
         "reviewing" => e["viewerReviewRequested"].as_bool().unwrap_or(false),
         "authored" => authored(result, e),
         _ => true,
     };
-    let draft = e["isDraft"].as_bool().unwrap_or(false);
-    let draft_ok = match f.draft {
-        "only" => draft,
-        "exclude" => !draft,
-        _ => true,
+    let labels: HashSet<String> = e["labels"].as_array().into_iter().flatten().map(|l| field(l, "name").trim().to_lowercase()).collect();
+    let holds = |l: &Value| l.as_str().is_some_and(|l| labels.contains(&l.trim().to_lowercase()));
+    let draft_ok = filters.get("draft").and_then(Value::as_str).is_none_or(|d| e["isDraft"].as_bool().unwrap_or(false) == (d == "only"));
+    let review_ok = match filters.get("review").and_then(Value::as_str) {
+        None => true,
+        Some("none") => e["reviewDecision"].as_str().is_none(),
+        Some(r) => field(e, "reviewDecision") == r,
     };
-    let review_ok = match f.review {
-        "all" => true,
-        "none" => e["reviewDecision"].is_null(),
-        r => field(e, "reviewDecision") == r,
-    };
-    let checks_ok = f.checks == "all" || field(e, "checksState") == f.checks;
-    let author_ok = f.author.as_deref().is_none_or(|a| e["author"]["login"].as_str() == Some(a));
-    let labels = e["labels"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let label_ok = f.label.as_deref().is_none_or(|l| labels.iter().any(|x| field(x, "name") == l));
-    let project_ok = f.project.as_deref().is_none_or(|p| field(e, "projectId") == p);
-    let host_ok = f.host.as_deref().is_none_or(|h| field(e, "host") == h);
-    state_ok && involvement_ok && draft_ok && review_ok && checks_ok && author_ok && label_ok && project_ok && host_ok && matches_query(e, query)
+    let labels_ok = filters.get("labels").and_then(Value::as_array).is_none_or(|groups| groups.iter().all(|g| g.as_array().is_some_and(|g| g.iter().any(holds))));
+    let excluded_ok = filters.get("excludedLabels").and_then(Value::as_array).is_none_or(|ls| !ls.iter().any(holds));
+    let author_ok = filters.get("author").and_then(Value::as_str).is_none_or(|a| {
+        e["author"]["login"].as_str().is_some_and(|login| login.eq_ignore_ascii_case(author_filter(a, viewer(result, e))))
+    });
+    narrowed && involvement_ok && draft_ok && review_ok && labels_ok && excluded_ok && author_ok
 }
 
-/// `#N title repository headBranch login`, plus `label:x` tokens against the labels.
+/// matchesPullRequestQuery: the whole phrase, anywhere in `#N title repository branch login`.
 fn matches_query(e: &Value, query: &str) -> bool {
-    let hay = format!("#{} {} {} {} {}", e["number"], field(e, "title"), field(e, "repository"), field(e, "headBranch"), e["author"]["login"].as_str().unwrap_or("")).to_lowercase();
-    query.split_whitespace().all(|token| match token.strip_prefix("label:") {
-        Some(label) => e["labels"].as_array().is_some_and(|ls| ls.iter().any(|l| field(l, "name").to_lowercase().contains(label))),
-        None => hay.contains(token),
-    })
+    let needle = query.trim().to_lowercase();
+    needle.is_empty() || format!("#{} {} {} {} {}", e["number"], field(e, "title"), field(e, "repository"), field(e, "headBranch"), e["author"]["login"].as_str().unwrap_or("")).to_lowercase().contains(&needle)
+}
+
+/// scorePullRequestMatch: how well a row answers the host search, for its initial order.
+fn score(e: &Value, query: &str) -> u8 {
+    let needle = query.trim().to_lowercase();
+    if needle.is_empty() {
+        return 0;
+    }
+    let number = needle.strip_prefix('#').unwrap_or(&needle);
+    if !number.is_empty() && number.bytes().all(|b| b.is_ascii_digit()) {
+        return if e["number"].to_string() == number { 100 } else { 0 };
+    }
+    let title = field(e, "title").to_lowercase();
+    let terms: Vec<&str> = needle.split_whitespace().collect();
+    if title == needle {
+        90
+    } else if title.contains(&needle) {
+        80
+    } else if terms.len() > 1 && terms.iter().all(|t| title.contains(t)) {
+        70
+    } else if field(e, "headBranch").to_lowercase().contains(&needle) {
+        60
+    } else if e["author"]["login"].as_str().unwrap_or("").to_lowercase().contains(&needle) {
+        50
+    } else if field(e, "repository").to_lowercase().contains(&needle) {
+        40
+    } else if terms.iter().any(|t| title.contains(t)) {
+        30
+    } else {
+        10
+    }
 }
 
 fn ready_tier(e: &Value) -> u8 {
@@ -301,52 +673,75 @@ enum Group {
     All,
 }
 
-fn rank(entries: &mut [&Value], sort: &str, group: Group, ranked_by_query: bool) {
-    let updated = |e: &Value| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0));
-    entries.sort_by_key(|e| updated(*e));
-    if ranked_by_query && matches!(sort, "ready" | "blocked") {
-        return;
-    }
+/// sortPullRequestGroups over rows already in their base order (recency, or search rank).
+/// Readiness and blocking rank only an unsearched list; a search keeps the host's order.
+fn rank(entries: &mut [Value], sort: &str, group: Group, searching: bool) {
+    let created = |e: &Value| ts(e, "createdAt");
     match sort {
-        "ready" => entries.sort_by_key(|e| (ready_tier(e), size(e) == 0, size(e))),
-        "blocked" => entries.sort_by_key(|e| blocked_tier(e, group)),
-        "newest" => entries.sort_by_key(|e| std::cmp::Reverse(ts(e, "createdAt").unwrap_or(0))),
-        "oldest" => entries.sort_by_key(|e| ts(e, "createdAt").unwrap_or(0)),
+        "ready" if !searching => entries.sort_by_key(|e| (ready_tier(e), size(e) == 0, size(e))),
+        "blocked" if !searching => entries.sort_by_key(|e| blocked_tier(e, group)),
+        "newest" => entries.sort_by_key(|e| (created(e).is_none(), std::cmp::Reverse(created(e).unwrap_or(0)))),
+        "oldest" => entries.sort_by_key(|e| (created(e).is_none(), created(e).unwrap_or(0))),
         "largest" => entries.sort_by_key(|e| (size(e) == 0, std::cmp::Reverse(size(e)))),
         "smallest" => entries.sort_by_key(|e| (size(e) == 0, size(e))),
         _ => {}
     }
 }
 
-fn groups<'a>(u: &Ui, result: &'a Value) -> Vec<(Group, Vec<&'a Value>)> {
-    let query = u.query.text.trim().to_lowercase();
-    let rows: Vec<&Value> = result["entries"].as_array().into_iter().flatten().filter(|e| matches_filters(&u.filters, result, e, &query)).collect();
-    let ranked = !query.is_empty();
+/// The rows as shown: measured sizes filled in, narrowed by the menu and the typed qualifiers
+/// and text, in their base order, then grouped by involvement and ranked by the sort.
+fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
+    let (typed_text, typed) = parse_query(&u.query.text);
+    let (sent_text, _) = parse_query(&u.sent_query);
+    let filters = merged_filters(&u.filters, &typed);
+    let settled = u.query.text == u.sent_query && u.pending.is_none();
+    // Hosts that search text themselves match fields rows don't carry; trust their answer.
+    let searching_hosts: HashSet<&str> = result["providers"].as_array().into_iter().flatten().filter(|p| p["searchesOnHost"] == true).map(|p| field(p, "host")).collect();
+    let mut rows: Vec<Value> = result["entries"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|e| matches_filters(&u.filters, &filters, result, e))
+        .filter(|e| typed_text.is_empty() || (settled && searching_hosts.contains(field(e, "host"))) || matches_query(e, &typed_text))
+        .map(|e| {
+            let mut e = e.clone();
+            if size(&e) == 0
+                && let Some(&(additions, deletions)) = u.stats.get(&key(&e))
+            {
+                e["additions"] = json!(additions);
+                e["deletions"] = json!(deletions);
+            }
+            e
+        })
+        .collect();
+    let searching = !typed_text.is_empty();
+    rows.sort_by_key(|e| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0)));
+    if searching {
+        rows.sort_by_key(|e| std::cmp::Reverse(score(e, &sent_text)));
+    }
     if u.filters.involvement != "all" {
-        let mut all = rows;
-        rank(&mut all, u.filters.sort, Group::All, ranked);
-        return if all.is_empty() { vec![] } else { vec![(Group::All, all)] };
+        rank(&mut rows, u.filters.sort, Group::All, searching);
+        return if rows.is_empty() { vec![] } else { vec![(Group::All, rows)] };
     }
-    let mut out = Vec::new();
-    for group in [Group::Authored, Group::Review, Group::Others] {
-        let mut members: Vec<&Value> = rows
-            .iter()
-            .copied()
-            .filter(|e| {
-                let mine = authored(result, e);
-                match group {
-                    Group::Authored => mine,
-                    Group::Review => !mine && e["viewerReviewRequested"].as_bool().unwrap_or(false),
-                    _ => !mine && !e["viewerReviewRequested"].as_bool().unwrap_or(false),
-                }
-            })
-            .collect();
-        if !members.is_empty() {
-            rank(&mut members, u.filters.sort, group, ranked);
-            out.push((group, members));
-        }
+    let mut buckets: [(Group, Vec<Value>); 3] = [(Group::Authored, vec![]), (Group::Review, vec![]), (Group::Others, vec![])];
+    for e in rows {
+        let slot = if authored(result, &e) {
+            0
+        } else if e["viewerReviewRequested"].as_bool().unwrap_or(false) {
+            1
+        } else {
+            2
+        };
+        buckets[slot].1.push(e);
     }
-    out
+    buckets
+        .into_iter()
+        .filter(|b| !b.1.is_empty())
+        .map(|(group, mut members)| {
+            rank(&mut members, u.filters.sort, group, searching);
+            (group, members)
+        })
+        .collect()
 }
 
 // ---- view -------------------------------------------------------------------------------
@@ -364,29 +759,27 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
         .window_drag()
         .child(text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground));
     let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(toolbar(s, t, overlays));
-    let loading = u.result.is_none() && u.error.is_none();
     match (&u.result, &u.error) {
-        (None, Some(error)) => content = content.child(unavailable(t, error)),
-        _ if loading => content = content.child(ghost(t)),
+        (None, None) => content = content.child(ghost(t, 7, Some("Loading pull requests…".into()))),
+        (None, Some(error)) => content = content.child(unavailable(t, error, u.pending.is_some())),
         (Some(result), error) => {
-            if let Some(error) = error {
+            let groups = groups(u, result);
+            match error {
+                Some(error) if groups.is_empty() => content = content.child(unavailable(t, error, u.pending.is_some())),
+                _ if groups.is_empty() => content = content.child(empty(s, t, result)),
+                _ => {
+                    for (group, entries) in &groups {
+                        content = content.child(group_view(s, t, result, *group, entries, overlays));
+                    }
+                }
+            }
+            if let Some(error) = error.as_ref().filter(|_| !groups.is_empty()) {
                 content = content.child(error_banner(t, error));
             }
-            let groups = groups(u, result);
-            if groups.is_empty() {
-                content = content.child(empty(s, t, result));
-            } else {
-                for (group, entries) in groups {
-                    content = content.child(group_view(s, t, result, group, &entries, overlays));
-                }
-                if result["truncated"].as_bool().unwrap_or(false) {
-                    content = content.child(
-                        row().w_full().py(12.0).center().child(Button("Load more pull requests", None).sm().on_press(load_more).build(t)),
-                    );
-                }
+            if result["truncated"].as_bool().unwrap_or(false) && !groups.is_empty() {
+                content = content.child(load_more_footer(u, t, result));
             }
         }
-        _ => {}
     }
     let body = kit::scroll_area(
         "pr-scroll",
@@ -396,7 +789,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     if let Some((url, x, y)) = &u.context
         && let Some(e) = u.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| field(e, "url") == url))
     {
-        context_menu(t, e, *x, *y, overlays);
+        context_menu(t, e, &u.hosts, *x, *y, overlays);
     }
     let list = col().key("pr-list").grow(1.0).shrink().min_w(0.0).h_full().fill(t.c.background).child(header).child(body);
     let mut main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background).child(list);
@@ -450,8 +843,7 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                     if !matches!(key.key, rune::Key::Enter) {
                         return false;
                     }
-                    let u = ui(s);
-                    u.sent_query = u.query.text.trim().to_string();
+                    submit(ui(s));
                     true
                 }),
         );
@@ -567,24 +959,30 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
             sub_item("Project", &i::FOLDER, "project", project_entries),
         ]);
 
-    let hosts: Vec<String> = result.and_then(|r| r["providers"].as_array()).into_iter().flatten().map(|p| field(p, "host").to_string()).collect();
-    let host_label = u.filters.host.clone().unwrap_or_else(|| "All".into());
+    let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
+    let entries = if u.hosts.is_empty() { &expected } else { &u.hosts };
+    let hosts: Vec<(String, String, Option<String>)> = entries.iter().map(|p| (field(p, "host").to_string(), host_label(entries, p), unavailable_host(p))).collect();
+    let host_label = u.filters.host.as_ref().map(|h| hosts.iter().find(|x| &x.0 == h).map(|x| x.1.clone()).unwrap_or_else(|| h.clone())).unwrap_or_else(|| "All".into());
     let mut host = Menu::new("pr-host")
         .trigger(kit::Button::new(host_label).variant("outline").icon(&i::PLUG_2).on_press(toggle("host")).build(t))
         .placement(Placement::BottomStart)
         .min_width(180.0)
         .open(open("host"))
         .on_close(close)
-        .item(MenuItem::new("All hosts").radio(u.filters.host.is_none()).on_select(move |s: &mut App| {
+        .item(MenuItem::new("All").icon(&i::PLUG_2).radio(u.filters.host.is_none()).on_select(move |s: &mut App| {
             ui(s).filters.host = None;
             close(s);
         }));
-    for h in hosts {
+    for (h, label, unavailable) in hosts {
         let checked = u.filters.host.as_deref() == Some(h.as_str());
-        host = host.item(MenuItem::new(h.clone()).radio(checked).on_select(move |s: &mut App| {
+        let mut item = MenuItem::new(label).radio(checked).on_select(move |s: &mut App| {
             ui(s).filters.host = Some(h.clone());
             close(s);
-        }));
+        });
+        if unavailable.is_some() {
+            item = item.shortcut("Unavailable").disabled(true);
+        }
+        host = host.item(item);
     }
 
     row()
@@ -596,10 +994,80 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .child(sort.build(&k, overlays))
         .child(filters.build(&k, overlays))
         .child(host.build(&k, overlays))
-        .child(kit::Button::new("Refresh").variant("outline").size("icon").icon(&i::REFRESH_CW).on_press(refresh).build(t))
+        .child(
+            kit::Button::new(if refreshing(u) { "Refreshing pull requests" } else { "Refresh pull requests" })
+                .variant("outline")
+                .size("icon")
+                .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
+                .disabled(refreshing(u))
+                .on_press(refresh)
+                .build(t),
+        )
 }
 
-fn group_view(s: &App, t: &T, result: &Value, group: Group, entries: &[&Value], overlays: &mut Vec<El>) -> El {
+/// pullRequestHostLabel: the provider's name, or the host where two share a kind.
+fn host_label(hosts: &[Value], p: &Value) -> String {
+    let kind = field(p, "kind");
+    if hosts.iter().filter(|h| field(h, "kind") == kind).count() > 1 {
+        return field(p, "host").to_string();
+    }
+    match kind {
+        "github" => "GitHub".into(),
+        "gitlab" => "GitLab".into(),
+        "bitbucket" => "Bitbucket".into(),
+        "azure-devops" => "Azure DevOps".into(),
+        "gitcafe" => "GitCafe".into(),
+        "forgejo" => "Forgejo".into(),
+        _ => field(p, "host").to_string(),
+    }
+}
+
+/// usePullRequestListView's expectedHosts: each project remote's host, until a list names them.
+fn expected_hosts(projects: &[Value]) -> Vec<Value> {
+    let mut out: Vec<Value> = Vec::new();
+    for p in projects {
+        let identity = &p["repositoryIdentity"];
+        let Some(kind) = identity["provider"].as_str() else { continue };
+        let host = identity["canonicalKey"].as_str().and_then(|k| k.split('/').next()).map(str::trim).filter(|h| !h.is_empty());
+        let host = host.map(str::to_lowercase).unwrap_or_else(|| kind.to_string());
+        if !out.iter().any(|h| h["host"] == host.as_str()) {
+            out.push(json!({"host": host, "kind": kind}));
+        }
+    }
+    out
+}
+
+/// formatEnvironmentQueryError. The pull request errors' messages are getters web derives from
+/// their fields, so the wire carries only the tag and fields.
+pub(super) fn error_text(cause: &Value, fallback: &str) -> String {
+    fn tagged(v: &Value) -> Option<&Value> {
+        match v {
+            Value::Object(m) if m.get("_tag").and_then(Value::as_str).is_some_and(|t| t.starts_with("PullRequest")) => Some(v),
+            Value::Object(m) => m.values().find_map(tagged),
+            Value::Array(rows) => rows.iter().find_map(tagged),
+            _ => None,
+        }
+    }
+    match tagged(cause) {
+        Some(e) if field(e, "_tag") == "PullRequestUnavailableError" => match e["requirement"].as_str().map(str::trim).filter(|r| !r.is_empty()) {
+            Some(requirement) => requirement.to_string(),
+            None => match field(e, "reason") {
+                "cli-missing" => "The tool this host is read through is not installed or set up.",
+                "cli-unauthenticated" => "This host has no working credentials.",
+                _ => "Change requests cannot be browsed for this project's host yet.",
+            }
+            .to_string(),
+        },
+        Some(e) if field(e, "_tag") == "PullRequestOperationError" => format!("Pull request operation {} failed: {}", field(e, "operation"), field(e, "detail")),
+        _ => crate::shell::palette::error_message(cause, fallback),
+    }
+}
+
+fn unavailable_host(p: &Value) -> Option<String> {
+    (p["configured"] == false).then(|| p["detail"].as_str().unwrap_or("This host could not be read.").to_string())
+}
+
+fn group_view(s: &App, t: &T, result: &Value, group: Group, entries: &[Value], overlays: &mut Vec<El>) -> El {
     let _ = overlays;
     let mut out = col().w_full().gap(12.0);
     if group != Group::All {
@@ -649,15 +1117,19 @@ fn success(t: &T) -> Color {
     if t.dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }
 }
 
-/// GitHub-style compact counts: 1.2k, 34k, 1.5m.
-fn compact(n: i64) -> String {
-    let short = |v: f64, unit: &str| if v < 10.0 { format!("{}{unit}", format!("{v:.1}").trim_end_matches(".0")) } else { format!("{}{unit}", v.round()) };
-    match n {
-        n if n < 1000 => n.to_string(),
-        n if n < 999_500 => short(n as f64 / 1e3, "k"),
-        n => short(n as f64 / 1e6, "m"),
+/// `Intl.NumberFormat` in English: 1234 is "1,234".
+fn grouped(n: i64) -> String {
+    let digits = n.unsigned_abs().to_string();
+    let mut out = String::new();
+    for (k, c) in digits.chars().enumerate() {
+        if k > 0 && (digits.len() - k) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(c);
     }
+    if n < 0 { format!("-{out}") } else { out }
 }
+
 
 pub fn relative(at: i64, now: i64) -> String {
     let secs = ((now - at) / 1000).max(0);
@@ -674,7 +1146,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
     let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
     let (glyph, ink) = state_glyph(t, e);
     let mut mark = el().size(16.0, 16.0).child(icon(glyph, 16.0).color(ink));
-    if conflicting(e) {
+    if conflicting(e) && open(e) && !e["isDraft"].as_bool().unwrap_or(false) {
         mark = mark.child(
             el().absolute(8.0, 8.0).size(12.0, 12.0).center().radius(radius::FULL).fill(t.c.background).child(icon(&i::TRIANGLE_ALERT, 12.0).color(t.c.destructive)),
         );
@@ -685,7 +1157,13 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
         .h(20.0)
         .gap(6.0)
         .center_y()
-        .child(text(format!("#{}", e["number"])).font(mono).color(t.c.muted_foreground).shrink())
+        .child({
+            // Only the number carries the link menu (PullRequestRow's onContextMenu).
+            let menu_url = url.clone();
+            text(format!("#{}", e["number"])).font(mono).color(t.c.muted_foreground).shrink().on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
+                ui(s).context = Some((menu_url.clone(), at.x, at.y));
+            })
+        })
         .child(text(field(e, "title").to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink().min_w(0.0));
     let mut signals = row().gap(4.0).center_y().shrink();
     match field(e, "checksState") {
@@ -706,10 +1184,10 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
         let stat = theme::mono(theme::TEXT_2XS).features("'tnum' 1");
         line1 = line1.child(
             row()
-                .gap(8.0)
+                .gap(4.0)
                 .shrink()
-                .child(row().min_w(27.0).justify_end().child(text(format!("+{}", compact(add))).font(stat).color(t.c.diff_addition_foreground)))
-                .child(row().min_w(27.0).justify_end().child(text(format!("-{}", compact(del))).font(stat).color(t.c.diff_deletion_foreground))),
+                .child(text(format!("+{}", grouped(add))).font(stat).color(t.c.diff_addition_foreground))
+                .child(text(format!("-{}", grouped(del))).font(stat).color(t.c.diff_deletion_foreground)),
         );
     }
     let login = e["author"]["login"].as_str().unwrap_or("ghost").to_string();
@@ -754,7 +1232,6 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
     }
     let _ = result;
     let select = url.clone();
-    let menu_url = url.clone();
     row()
         .key(format!("pr-{url}"))
         .w_full()
@@ -770,17 +1247,18 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value) -> El {
         .child(mark.mt(2.0).self_start())
         .child(col().grow(1.0).shrink().min_w(0.0).child(line1).child(line2))
         .on_press(move |s: &mut App| ui(s).selected = Some(select.clone()))
-        .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| {
-            let u = ui(s);
-            u.selected = Some(menu_url.clone());
-            u.context = Some((menu_url.clone(), at.x, at.y));
-        })
 }
 
-fn context_menu(t: &T, e: &Value, x: f32, y: f32, overlays: &mut Vec<El>) {
+/// showPullRequestLinkContextMenu: copy the link, or open it on its host.
+fn context_menu(t: &T, e: &Value, hosts: &[Value], x: f32, y: f32, overlays: &mut Vec<El>) {
     let url = field(e, "url").to_string();
-    let project = field(e, "projectId").to_string();
     let close = |s: &mut App| ui(s).context = None;
+    let provider = field(e, "provider");
+    let name = match host_label(&[], &json!({"kind": provider, "host": ""})) {
+        n if n.is_empty() => hosts.iter().find(|h| field(h, "host") == field(e, "host")).map(|h| host_label(&[], h)).filter(|n| n != field(e, "host")).unwrap_or_default(),
+        n => n,
+    };
+    let open_label = if name.is_empty() { "Open on host".to_string() } else { format!("Open on {name}") };
     let open_url = url.clone();
     let copy_url = url.clone();
     Menu::new("pr-context")
@@ -789,20 +1267,49 @@ fn context_menu(t: &T, e: &Value, x: f32, y: f32, overlays: &mut Vec<El>) {
         .open(true)
         .at(x, y)
         .on_close(close)
-        .item(MenuItem::new("Open on GitHub").icon(&i::EXTERNAL_LINK).on_select_tx(move |s: &mut App, tx: &mut Tx| {
-            let _ = tx.open_url(&open_url);
-            ui(s).context = None;
-        }))
         .item(MenuItem::new("Copy link").icon(&i::COPY).on_select_tx(move |s: &mut App, tx: &mut Tx| {
             tx.copy(&copy_url);
             ui(s).context = None;
         }))
-        .separator()
-        .item(MenuItem::new("Start thread in project").icon(&i::SQUARE_PEN).on_select(move |s: &mut App| {
+        .item(MenuItem::new(open_label).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+            let _ = tx.open_url(&open_url);
             ui(s).context = None;
-            crate::shell::sidebar::go(s, Route::Home { project_id: Some(project.clone()) });
         }))
         .overlay(&kit::theme(t), overlays);
+}
+
+/// The list's foot while the hosts hold more: a spinner while loading, the button while there
+/// is a way to ask, and a nudge to narrow once the page can't grow.
+fn load_more_footer(u: &Ui, t: &T, result: &Value) -> El {
+    let foot = row().w_full().py(12.0).center();
+    let muted = t.c.muted_foreground;
+    match u.pending {
+        Some((_, append)) => foot.child(
+            row()
+                .gap(8.0)
+                .center_y()
+                .child(icon(&i::LOADER_CIRCLE, 14.0).color(muted))
+                .child(text(if append { "Loading more" } else { "Updating pull requests" }).font(theme::TEXT_XS).color(muted)),
+        ),
+        None if can_load_more(u, result) => foot.child(Button("Load more pull requests", None).sm().on_press(load_more).build(t)),
+        None => foot.child(text("Narrow your search to find more pull requests.").font(theme::TEXT_XS).color(muted)),
+    }
+}
+
+/// Lists again without dropping host caches (the banner's and unavailable state's Retry).
+fn retry(s: &mut App) {
+    ui(s).requested = None;
+}
+
+fn check_again(u: &Ui, t: &T) -> El {
+    let busy = refreshing(u);
+    kit::Button::new(if busy { "Checking..." } else { "Check again" })
+        .variant("outline")
+        .size("sm")
+        .icon(if busy { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
+        .disabled(busy)
+        .on_press(refresh)
+        .build(t)
 }
 
 fn error_banner(t: &T, error: &str) -> El {
@@ -816,17 +1323,20 @@ fn error_banner(t: &T, error: &str) -> El {
         .px(12.0)
         .py(8.0)
         .child(text(format!("{error} Showing the last pull requests loaded.")).font(theme::TEXT_XS).color(t.c.warning_foreground).wrap().grow(1.0).shrink())
-        .child(Button("Retry", None).with("xs").on_press(refresh).build(t))
+        .child(Button("Retry", None).with("xs").on_press(retry).build(t))
 }
 
 const TITLE_W: [f32; 7] = [0.6, 0.4, 0.5, 0.667, 0.4, 0.6, 0.5];
 const META_W: [f32; 7] = [0.4, 0.333, 0.4, 0.25, 0.333, 0.4, 0.333];
 
-/// PullRequestGhosts: static placeholder rows while the first page loads.
-fn ghost(t: &T) -> El {
+/// PullRequestGhosts: static placeholder rows while the first page loads or a search travels.
+fn ghost(t: &T, count: usize, caption: Option<String>) -> El {
     let bar = t.c.muted_foreground.alpha_mul(0.15);
-    let mut rows = col().w_full().gap(2.0).child(row().px(12.0).pb(4.0).child(text("Loading pull requests…").font(theme::XS_MEDIUM).color(t.c.muted_foreground)));
-    for n in 0..7 {
+    let mut rows = col().w_full().gap(2.0);
+    if let Some(caption) = caption {
+        rows = rows.child(row().px(12.0).pb(4.0).child(text(caption).font(theme::XS_MEDIUM).color(t.c.muted_foreground)));
+    }
+    for n in 0..count.min(TITLE_W.len()) {
         let line = |h: f32, frac: f32| row().w_full().child(el().h(h).w_frac(frac).radius(4.0).fill(bar));
         rows = rows.child(
             row()
@@ -872,8 +1382,15 @@ fn state_block(t: &T, top: El, title: &str, description: &str, actions: El) -> E
         .child(actions)
 }
 
-fn unavailable(t: &T, error: &str) -> El {
-    state_block(t, media(t, &i::GIT_PULL_REQUEST_ARROW), "Could not load pull requests", error, Button("Retry", Some(&i::REFRESH_CW)).sm().on_press(refresh).build(t))
+fn unavailable(t: &T, error: &str, retrying: bool) -> El {
+    let retry = kit::Button::new(if retrying { "Retrying..." } else { "Retry" })
+        .variant("outline")
+        .size("sm")
+        .icon(if retrying { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
+        .disabled(retrying)
+        .on_press(retry)
+        .build(t);
+    state_block(t, media(t, &i::GIT_PULL_REQUEST_ARROW), "Could not load pull requests", error, retry)
 }
 
 /// BranchMark: a branch leaving a baseline and rejoining it, dashed where it is still open.
@@ -890,28 +1407,173 @@ static BRANCH_MARK: rune::Icon = rune::Icon {
 
 fn empty(s: &App, t: &T, result: &Value) -> El {
     let u = &s.ui.pages.pull_requests;
-    let query = u.query.text.trim();
-    let any = result["entries"].as_array().is_some_and(|e| !e.is_empty());
-    if s.state().projects.iter().all(|p| !p["archivedAt"].is_null()) {
-        let add = Button("Add project", Some(&i::PLUS)).sm().on_press(crate::shell::palette::open_add_project).build(t);
-        return state_block(t, media(t, &i::FOLDER_PLUS), "No projects in this workspace", "Add a project, and the pull requests from its repository appear here.", row().child(add));
-    }
-    let (title, description) = if !query.is_empty() {
-        (format!("Nothing matches “{query}”"), "The hosts were searched for it. Try fewer words, or search by number, author or branch.")
-    } else if any || u.filters.count() > 0 {
-        ("Nothing under these filters".to_string(), "Widen the state, involvement or project filter to see more.")
-    } else {
-        ("No pull requests".to_string(), "Pull requests from every project in this workspace appear here.")
-    };
+    let query = u.query.text.as_str();
+    let shown = if query.chars().count() > 48 { format!("{}…", query.chars().take(48).collect::<String>()) } else { query.to_string() };
     let mark = el().w(128.0).h(80.0).clip_rounded(0.0).mb(8.0).child(icon(&BRANCH_MARK, 128.0).color(t.c.muted_foreground.alpha_mul(0.6)).absolute(0.0, 1.6));
+    if s.state().projects.iter().all(|p| !p["archivedAt"].is_null()) {
+        let add = kit::Button::new("Add project").size("sm").icon(&i::PLUS).on_press(crate::shell::palette::open_add_project).build(t);
+        return state_block(t, mark, "No projects in this workspace", "Add a project, and the pull requests from its repository appear here.", row().child(add));
+    }
+    // The typed search hasn't reached the hosts yet, or its answer is still on the way.
+    if !query.is_empty() && (query != u.sent_query || u.pending.is_some()) {
+        return ghost(t, 5, Some(format!("Searching every host for “{shown}”")));
+    }
     let mut actions = row().gap(8.0);
-    if !query.is_empty() {
+    let (title, description) = if !query.is_empty() {
         actions = actions.child(Button("Clear search", Some(&i::SEARCH)).sm().on_press(|s: &mut App| {
             let u = ui(s);
             u.query.clear();
             u.sent_query.clear();
+            u.typed.clear();
+            u.typed_at = None;
         }).build(t));
-    }
-    actions = actions.child(Button("Check again", Some(&i::REFRESH_CW)).sm().on_press(refresh).build(t));
+        (format!("Nothing matches “{shown}”"), "The hosts were searched for it. Try fewer words, or search by number, author or branch.")
+    } else {
+        if can_load_more(u, result) {
+            let loading = u.pending.is_some();
+            actions = actions.child(kit::Button::new(if loading { "Loading..." } else { "Load more pull requests" }).variant("outline").size("sm").disabled(loading).on_press(load_more).build(t));
+        }
+        let f = &u.filters;
+        let filtered = !f.menu().is_empty() || f.state != "open" || f.involvement != "all" || f.project.is_some() || f.host.is_some();
+        if filtered {
+            ("Nothing under these filters".to_string(), "Widen the state, involvement or project filter to see more.")
+        } else {
+            ("No pull requests".to_string(), "Pull requests from every project in this workspace appear here.")
+        }
+    };
+    actions = actions.child(check_again(u, t));
     state_block(t, mark, &title, description, actions)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn entry(v: Value) -> Value {
+        let mut e = json!({"host": "github.com", "repository": "acme/app", "number": 7, "title": "Fix login redirect", "headBranch": "fix/login", "state": "open", "isDraft": false, "labels": [], "author": {"login": "Octo"}});
+        if let (Some(e), Some(v)) = (e.as_object_mut(), v.as_object()) {
+            e.extend(v.clone());
+        }
+        e
+    }
+
+    #[test]
+    fn the_query_parser_lifts_qualifiers_and_keeps_the_rest_as_text() {
+        let (text, f) = parse_query(r#"login bug label:"needs review",ui -label:wip author:@me draft:false review:changes_requested status:failure area:api is:/x -author:bob"#);
+        assert_eq!(text, "login bug is:/x -author:bob");
+        assert_eq!(Value::Object(f), json!({
+            "labels": [["needs review", "ui"], ["area:api"]],
+            "excludedLabels": ["wip"],
+            "author": "@me",
+            "draft": "hide",
+            "review": "changes-requested",
+            "checks": "failing",
+        }));
+        assert_eq!(parse_query("draft:maybe review:soon label:").0, "draft:maybe review:soon label:");
+        assert_eq!(parse_query(r#"say "hi there" ok"#).0, r#"say "hi there" ok"#);
+        assert!(parse_query("").1.is_empty());
+    }
+
+    #[test]
+    fn typed_qualifiers_override_the_menu_and_reach_the_request() {
+        let mut u = Ui::default();
+        u.filters.draft = "only";
+        u.filters.checks = "passing";
+        u.sent_query = "draft:false crash".into();
+        let v = input(&u);
+        assert_eq!(v["filters"], json!({"draft": "hide", "checks": "passing"}));
+        assert_eq!(v["query"], "crash");
+        assert_eq!((v["limit"].as_u64(), v["involvement"].as_str()), (Some(PAGE), Some("all")));
+    }
+
+    #[test]
+    fn rows_match_filters_case_insensitively_and_leave_checks_to_the_host() {
+        let result = json!({"viewers": {"github.com": "octo"}});
+        let e = entry(json!({"labels": [{"name": "Bug"}, {"name": "area:UI"}], "checksState": "failing", "isDraft": true}));
+        let f = Filters::default();
+        let pass = |filters: Value| matches_filters(&f, filters.as_object().unwrap(), &result, &e);
+        assert!(pass(json!({"labels": [["bug"], ["area:ui", "nope"]], "author": "@me", "draft": "only", "checks": "passing"})));
+        assert!(!pass(json!({"excludedLabels": ["BUG"]})));
+        assert!(!pass(json!({"draft": "hide"})));
+        assert!(!pass(json!({"author": "someone"})));
+        assert!(pass(json!({"review": "none"})));
+        assert!(!matches_filters(&Filters { state: "merged", ..Filters::default() }, &Map::new(), &result, &e));
+    }
+
+    #[test]
+    fn text_matches_the_whole_phrase_and_search_scores_rank_titles_first() {
+        let e = entry(json!({}));
+        assert!(matches_query(&e, "login redirect"));
+        assert!(matches_query(&e, "#7 fix"));
+        assert!(!matches_query(&e, "redirect login"));
+        assert_eq!(score(&e, "#7"), 100);
+        assert_eq!(score(&e, "fix login redirect"), 90);
+        assert_eq!(score(&e, "redirect login"), 70);
+        assert_eq!(score(&e, "fix/login"), 60);
+        assert_eq!(score(&e, "octo"), 50);
+        assert_eq!(score(&e, "8"), 0);
+    }
+
+    #[test]
+    fn readiness_puts_any_conflict_last_and_blocking_counts_draft_conflicts() {
+        let conflicted_draft = entry(json!({"isDraft": true, "mergeability": "conflicting"}));
+        let closed_conflict = entry(json!({"state": "closed", "mergeability": "conflicting"}));
+        assert_eq!(ready_tier(&closed_conflict), 4);
+        assert_eq!(ready_tier(&conflicted_draft), 4);
+        assert_eq!(blocked_tier(&conflicted_draft, Group::Authored), 0);
+        assert_eq!(blocked_tier(&closed_conflict, Group::Authored), 6);
+        let mut rows = vec![entry(json!({"createdAt": "2026-01-02T00:00:00Z"})), entry(json!({})), entry(json!({"createdAt": "2026-01-01T00:00:00Z"}))];
+        rank(&mut rows, "oldest", Group::All, false);
+        assert_eq!(rows.iter().map(|e| e["createdAt"].as_str()).collect::<Vec<_>>(), [Some("2026-01-01T00:00:00Z"), Some("2026-01-02T00:00:00Z"), None]);
+    }
+
+    #[test]
+    fn a_continuation_appends_only_rows_not_already_listed() {
+        let prev = json!({"entries": [entry(json!({"number": 1})), entry(json!({"number": 2}))]});
+        let next = json!({"entries": [entry(json!({"number": 2})), entry(json!({"number": 3}))], "truncated": false});
+        let merged = appended(Some(prev), next);
+        let numbers: Vec<i64> = merged["entries"].as_array().unwrap().iter().map(|e| e["number"].as_i64().unwrap()).collect();
+        assert_eq!(numbers, [1, 2, 3]);
+        assert_eq!(merged["truncated"], false);
+    }
+
+    #[test]
+    fn load_more_continues_from_cursors_or_grows_the_page_to_its_cap() {
+        let mut u = Ui::default();
+        let truncated = json!({"truncated": true, "nextCursors": {}});
+        assert!(can_load_more(&u, &truncated));
+        u.limit = Some(MAX_PAGE);
+        assert!(!can_load_more(&u, &truncated));
+        assert!(can_load_more(&u, &json!({"truncated": true, "nextCursors": {"github.com": "c"}})));
+        assert!(!can_load_more(&u, &json!({"truncated": false, "nextCursors": {"github.com": "c"}})));
+    }
+
+    #[test]
+    fn hosts_are_named_by_provider_unless_two_share_one() {
+        let one = vec![json!({"host": "github.com", "kind": "github"}), json!({"host": "gitlab.com", "kind": "gitlab"})];
+        assert_eq!(host_label(&one, &one[0]), "GitHub");
+        let two = vec![json!({"host": "github.com", "kind": "github"}), json!({"host": "ghe.acme.dev", "kind": "github"})];
+        assert_eq!(host_label(&two, &two[1]), "ghe.acme.dev");
+        assert_eq!(unavailable_host(&json!({"configured": false, "detail": null})).as_deref(), Some("This host could not be read."));
+        assert_eq!(grouped(1234567), "1,234,567");
+        let projects = [
+            json!({"repositoryIdentity": {"provider": "github", "canonicalKey": "GitHub.com/s5labs/demo"}}),
+            json!({"repositoryIdentity": {"provider": "github", "canonicalKey": "github.com/s5labs/other"}}),
+            json!({"repositoryIdentity": null}),
+        ];
+        assert_eq!(expected_hosts(&projects), vec![json!({"host": "github.com", "kind": "github"})]);
+    }
+
+    #[test]
+    fn failures_read_like_the_error_classes_web_decodes() {
+        let fail = |error: Value| json!([{"_tag": "Fail", "error": error}]);
+        let unauthenticated = fail(json!({"_tag": "PullRequestUnavailableError", "reason": "cli-unauthenticated", "provider": "github"}));
+        assert_eq!(error_text(&unauthenticated, "x"), "This host has no working credentials.");
+        let named = fail(json!({"_tag": "PullRequestUnavailableError", "reason": "cli-missing", "requirement": "Set GH_TOKEN."}));
+        assert_eq!(error_text(&named, "x"), "Set GH_TOKEN.");
+        let operation = fail(json!({"_tag": "PullRequestOperationError", "operation": "list", "detail": "rate limited"}));
+        assert_eq!(error_text(&operation, "x"), "Pull request operation list failed: rate limited");
+        assert_eq!(error_text(&json!({"message": "offline"}), "x"), "offline");
+        assert_eq!(error_text(&json!([{"_tag": "Die"}]), "The environment request failed."), "The environment request failed.");
+    }
 }

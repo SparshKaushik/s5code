@@ -436,7 +436,7 @@ fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>) {
     });
     let record = annotation(&id, element);
     let detail = record["elements"][0]["selector"].as_str().or(record["elements"][0]["tagName"].as_str()).unwrap_or_default().to_string();
-    crate::chat::composer::add_context(app, record, image);
+    crate::chat::composer::add_picked_context(app, record, image);
     crate::shell::palette::toast(app, "Element added to the composer", Some(&detail));
 }
 
