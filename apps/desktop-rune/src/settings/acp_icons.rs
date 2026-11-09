@@ -106,9 +106,11 @@ pub fn poll(s: &mut App) -> bool {
         in_flight += 1;
     }
     for entry in icons.entries.values_mut() {
-        if let Entry::Loading(slot) = entry
-            && let Some(fetched) = slot.lock().unwrap_or_else(|e| e.into_inner()).take()
-        {
+        let fetched = match entry {
+            Entry::Loading(slot) => slot.lock().unwrap_or_else(|e| e.into_inner()).take(),
+            _ => None,
+        };
+        if let Some(fetched) = fetched {
             *entry = fetched.map_or(Entry::Missing, Entry::Ready);
             changed = true;
         }

@@ -155,15 +155,15 @@ fn cell(s: &App, x: f32, y: f32) -> (usize, usize) {
 
 pub fn view(s: &App, t: &T, instance: &str, state: &Value) -> El {
     let interaction = &state["interaction"];
-    let key = format!("{}:{}", state["flowId"], interaction["id"]);
+    let flow_key = format!("{}:{}", state["flowId"], interaction["id"]);
     let output = interaction["output"].as_str().unwrap_or("");
     let offset = interaction["outputOffset"].as_u64().map_or_else(|| output.encode_utf16().count(), |n| n as usize);
     let (font, cell_w, cell_h) = metrics(s);
     let palette = crate::panel::terminal::palette(t);
     let mut slot = s.ui.settings.auth.terminal.term.borrow_mut();
-    if slot.as_ref().is_none_or(|term| term.key != key) {
+    if slot.as_ref().is_none_or(|t| t.key != flow_key) {
         *slot = Some(Term {
-            key,
+            key: flow_key,
             instance: instance.to_owned(),
             flow: state["flowId"].clone(),
             interaction: interaction["id"].clone(),
@@ -174,18 +174,18 @@ pub fn view(s: &App, t: &T, instance: &str, state: &Value) -> El {
             input: TextEdit::new(""),
         });
     }
-    let term = slot.as_mut().expect("set above");
-    term.palette = palette;
-    match feed(output, offset, term.written) {
-        Some(Feed::Append(tail)) => term.vt.feed(tail),
+    let cur = slot.as_mut().expect("set above");
+    cur.palette = palette;
+    match feed(output, offset, cur.written) {
+        Some(Feed::Append(tail)) => cur.vt.feed(tail),
         Some(Feed::Reset) => {
-            let (cols, rows) = term.vt.size();
-            term.vt = Vt::new(cols, rows);
-            term.vt.feed(output);
+            let (cols, rows) = cur.vt.size();
+            cur.vt = Vt::new(cols, rows);
+            cur.vt.feed(output);
         }
         None => {}
     }
-    term.written = offset;
+    cur.written = offset;
 
     let rgb = |c: vt::Rgb8| Color {
         r: rune::color::srgb_decode(c[0] as f32 / 255.0),
@@ -206,7 +206,7 @@ pub fn view(s: &App, t: &T, instance: &str, state: &Value) -> El {
         .role("group")
         .label("Provider sign-in terminal")
         .cursor(Cursor::Text);
-    let (rows, cursor) = term.vt.frame(&palette);
+    let (rows, cursor) = cur.vt.frame(&palette);
     for (r, row) in rows.iter().enumerate() {
         for &(col, cells, color) in &row.fills {
             grid = grid.child(el().absolute(x(col), y(r)).size(cells as f32 * cell_w, cell_h).fill(rgb(color)));
@@ -220,7 +220,7 @@ pub fn view(s: &App, t: &T, instance: &str, state: &Value) -> El {
             }
         }
     }
-    let focused = term.input.focused;
+    let focused = cur.input.focused;
     if let Some(c) = cursor {
         let mark = el().absolute(x(c.col), y(c.row)).size(cell_w, cell_h);
         grid = grid.child(if focused { mark.fill(t.c.terminal_cursor) } else { mark.border(1.0, t.c.terminal_cursor) });
@@ -228,8 +228,8 @@ pub fn view(s: &App, t: &T, instance: &str, state: &Value) -> El {
             grid = grid.child(text(glyph.text.clone()).font(font).color(t.c.terminal_background).absolute(x(c.col), y(c.row)));
         }
     }
-    let (cursor_col, cursor_row) = term.vt.cursor_point();
-    let input = text_input(&term.input, font)
+    let (cursor_col, cursor_row) = cur.vt.cursor_point();
+    let input = text_input(&cur.input, font)
         .single_line()
         .key("provider-auth-terminal-input")
         .label("Provider sign-in terminal input")
