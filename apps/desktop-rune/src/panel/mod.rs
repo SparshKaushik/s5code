@@ -477,6 +477,7 @@ fn when_context(app: &App, name: &str) -> bool {
         "terminalOpen" => terminal_active(app) || context(app).is_some_and(|(thread, _)| app.ui.panel.drawer.is_open(&thread)),
         "rightPanelOpen" => app.ui.shell.panel_open,
         "previewOpen" => app.ui.shell.panel_open && matches!(app.ui.panel.active, Some(Surface::Browser(_))),
+        "previewFocus" => app.ui.panel.browser.focused,
         "usagePageOpen" => matches!(app.route, crate::Route::Usage),
         _ => false,
     }
@@ -994,5 +995,29 @@ mod tests {
         let bindings = app.state().config.as_ref().unwrap()["keybindings"].as_array().unwrap().clone();
         assert_eq!(resolve(&bindings, &press('d'), &context), Some("terminal.split"));
         assert!(when(&id("true"), &context) && !when(&id("unknown"), &context));
+    }
+
+    #[test]
+    fn preview_focus_takes_the_page_zoom_keys() {
+        let mut app = App::new();
+        let mut state = data::empty_state();
+        let id = |name: &str| serde_json::json!({"type": "identifier", "name": name});
+        let not = |node| serde_json::json!({"type": "not", "node": node});
+        state.config = Some(serde_json::json!({"keybindings": [
+            {"command": "preview.zoomOut", "shortcut": {"key": "-", "modKey": true}, "whenAst": id("previewFocus")},
+            {"command": "chat.find", "shortcut": {"key": "f", "modKey": true}, "whenAst": not(id("previewFocus"))},
+        ]}));
+        app.src = data::Source::Fixture(state);
+        let press = |key: char| {
+            let mut event = KeyEvent::from(Key::Command(key));
+            event.mods.cmd = true;
+            event.mods.ctrl = !cfg!(target_os = "macos");
+            event
+        };
+        assert!(!shortcut(&app, &press('-'), "preview.zoomOut"), "the app zooms while the page lacks focus");
+        assert!(shortcut(&app, &press('f'), "chat.find"));
+        app.ui.panel.browser.focused = true;
+        assert!(shortcut(&app, &press('-'), "preview.zoomOut"));
+        assert!(!shortcut(&app, &press('f'), "chat.find"), "web leaves mod+f to the page");
     }
 }

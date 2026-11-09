@@ -180,6 +180,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    panel::preview::note_focus(s, tx);
     shell::quit::on_key(s, e, tx)
         || search::on_key(s, e, tx)
         || settings::on_key(s, e, tx)

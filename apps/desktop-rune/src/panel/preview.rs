@@ -106,6 +106,8 @@ pub struct Ui {
     presets: bool,
     /// When the zoom pill hides, as web's `ZoomIndicator` does 1.5 s after a change.
     zoom_until: i64,
+    /// Whether the panel's browser had focus at the last key event (the `previewFocus` context).
+    pub(super) focused: bool,
     /// A picked element waiting for its comment, as web's annotation editor holds it.
     pending: Option<Pending>,
     comment: TextEdit,
@@ -752,6 +754,11 @@ fn annotation(id: &str, element: &Value, comment: &str) -> Value {
     })
 }
 
+/// Records `previewFocus` before any shortcut resolves, so `when` clauses see it on this key.
+pub fn note_focus(app: &mut App, tx: &Tx) {
+    app.ui.panel.browser.focused = panel_tab(app).is_some() && tx.focused().is_some_and(|k| k.contains("browser-"));
+}
+
 /// The preview shortcuts: `preview.toggle` anywhere, the rest while the browser has focus.
 pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if super::shortcut(app, e, "preview.toggle") {
@@ -765,7 +772,7 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         }
         return true;
     }
-    let Some(tab) = panel_tab(app).filter(|_| tx.focused().is_some_and(|k| k.contains("browser-"))) else { return false };
+    let Some(tab) = panel_tab(app).filter(|_| app.ui.panel.browser.focused) else { return false };
     if super::shortcut(app, e, "preview.refresh") {
         send(app, Cmd::Reload { tab, hard: false });
     } else if super::shortcut(app, e, "preview.focusUrl") {
@@ -1884,7 +1891,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     kit::Menu::new("browser-more")
         .anchor("browser-menu")
         .placement(kit::Placement::BottomEnd)
-        .min_width(224.)
+        .min_width(248.)
         .open(true)
         .on_close(|s: &mut App| {
             s.ui.panel.browser.menu = false;
