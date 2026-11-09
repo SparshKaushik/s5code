@@ -2654,5 +2654,120 @@
    "email": "sparsh@example.com",
    "label": "Claude Max"
   }
- }
+ },
+ "pooled": {
+  "providers": [
+   {
+    "instanceId": "codex_work",
+    "driver": "codex",
+    "displayName": "Codex Work",
+    "accentColor": "#2563eb",
+    "enabled": true,
+    "installed": true,
+    "status": "ready",
+    "auth": {
+     "status": "authenticated",
+     "email": "work@acme.io",
+     "label": "ChatGPT Business"
+    },
+    "usageLimits": {
+     "checkedAt": "2026-11-06T10:04:18.000Z",
+     "resetCredits": {
+      "availableCount": 2,
+      "nextExpiresAt": "2026-11-13T00:00:00.000Z",
+      "nextCreditId": "credit_1"
+     },
+     "windows": [
+      {
+       "id": "primary",
+       "kind": "session",
+       "label": "5 hour",
+       "usedPercent": 64,
+       "resetsAt": "2026-11-06T11:40:18.000Z",
+       "windowDurationMins": 300
+      },
+      {
+       "id": "secondary",
+       "kind": "weekly",
+       "label": "Weekly",
+       "usedPercent": 100,
+       "resetsAt": "2026-11-07T09:00:18.000Z",
+       "windowDurationMins": 10080
+      }
+     ]
+    }
+   }
+  ],
+  "usageLimitSources": [
+   {
+    "id": "cli-proxy",
+    "label": "CLI Proxy",
+    "accounts": [
+     {
+      "id": "team-claude.json",
+      "driver": "claudeAgent",
+      "plan": "Claude Team",
+      "usageLimits": {
+       "checkedAt": "2026-11-06T10:01:40.000Z",
+       "credentialFingerprint": "9f2c41d7",
+       "windows": [
+        {
+         "id": "five_hour",
+         "kind": "session",
+         "label": "5 hour",
+         "usedPercent": 55,
+         "resetsAt": "2026-11-06T13:10:18.000Z",
+         "windowDurationMins": 300
+        },
+        {
+         "id": "seven_day",
+         "kind": "weekly",
+         "label": "Weekly",
+         "usedPercent": 22,
+         "resetsAt": "2026-11-12T08:00:18.000Z",
+         "windowDurationMins": 10080
+        }
+       ]
+      }
+     }
+    ]
+   },
+   {
+    "id": "old-proxy",
+    "label": "Old proxy",
+    "accounts": [],
+    "error": "Could not reach http://127.0.0.1:8317."
+   }
+  ]
+ },
+ "tagModels": [
+  {
+   "id": "moonshotai/kimi-k3",
+   "providerName": "Moonshot AI",
+   "modelName": "Kimi K3",
+   "inputCostPerMillion": 0.6,
+   "outputCostPerMillion": 2.5
+  },
+  {
+   "id": "openrouter/moonshotai/kimi-k3",
+   "providerName": "OpenRouter",
+   "modelName": "Kimi K3",
+   "inputCostPerMillion": 0.7,
+   "outputCostPerMillion": 2.8
+  },
+  {
+   "id": "moonshotai/kimi-k2-thinking",
+   "providerName": "Moonshot AI",
+   "modelName": "Kimi K2 Thinking",
+   "inputCostPerMillion": 0.6,
+   "outputCostPerMillion": 2.5
+  },
+  {
+   "id": "groq/moonshotai/kimi-k2-instruct",
+   "providerName": "Groq",
+   "modelName": "Kimi K2 Instruct",
+   "inputCostPerMillion": 1,
+   "outputCostPerMillion": 3
+  }
+ ]
 }
