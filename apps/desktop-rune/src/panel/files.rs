@@ -61,16 +61,21 @@ pub struct Ui {
     /// The search match to mark and centre in the open file.
     line: Option<usize>,
     image: Option<Image>,
+    /// Decodes previews off the UI thread, as the sidebar's favicons do.
+    images: Option<rune::ImageCache>,
 }
+
+type Download = std::sync::Arc<std::sync::Mutex<Option<Option<Vec<u8>>>>>;
 
 /// An image file shown as a picture, from a served asset URL rather than `projects.readFile`.
 struct Image {
     request: Option<u64>,
     url: Option<String>,
-    pixels: rune::Pixels,
-    failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    /// The decode has finished, either way, and the view shows its outcome.
-    settled: bool,
+    download: Download,
+    decoded: Option<rune::Image>,
+    /// SVGs rasterize at twice their own size, so they draw at half their pixel size.
+    svg: bool,
+    failed: bool,
 }
 
 /// `WORKSPACE_IMAGE_PREVIEW_EXTENSIONS` (packages/shared/src/mediaPreview.ts).
@@ -145,6 +150,7 @@ impl Default for Ui {
             read_failure: None,
             line: None,
             image: None,
+            images: None,
         }
     }
 }
@@ -302,9 +308,10 @@ fn read(app: &mut App, path: String) {
         Image {
             request: app.src.net().map(|n| n.request("assets.createUrl", json!({"resource":resource}))),
             url: None,
-            pixels: rune::Pixels::new(),
-            failed: Default::default(),
-            settled: false,
+            download: Download::default(),
+            decoded: None,
+            svg: false,
+            failed: false,
         }
     });
     let request = if image.is_some() {
@@ -520,25 +527,29 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             Ok(v) => {
                 let url = format!("{}{}", app.src.net().map(|n| n.base_url().trim_end_matches('/').to_owned()).unwrap_or_default(), data::s(&v, "relativeUrl"));
                 image.url = Some(url.clone());
-                let (pixels, failed, wake) = (image.pixels.clone(), image.failed.clone(), app.ui.panel.waker.clone());
+                let (out, wake) = (image.download.clone(), app.ui.panel.waker.clone());
                 std::thread::spawn(move || {
-                    if decode(&url, &pixels).is_none() {
-                        failed.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
+                    *out.lock().unwrap_or_else(|e| e.into_inner()) = Some(download(&url));
                     if let Some(wake) = wake {
                         wake();
                     }
                 });
             }
-            Err(_) => image.failed.store(true, std::sync::atomic::Ordering::Relaxed),
+            Err(_) => image.failed = true,
         }
         changed = true;
     }
     if let Some(image) = ui.image.as_mut()
-        && !image.settled
-        && (image.failed.load(std::sync::atomic::Ordering::Relaxed) || image.pixels.size() != (0, 0))
+        && let Some(bytes) = image.download.lock().unwrap_or_else(|e| e.into_inner()).take()
     {
-        image.settled = true;
+        match (bytes, app.ui.panel.waker.clone()) {
+            (Some(bytes), Some(waker)) => {
+                let cache = ui.images.get_or_insert_with(|| rune::ImageCache::new(waker));
+                image.svg = is_svg(&bytes);
+                image.decoded = Some(cache.load(bytes));
+            }
+            _ => image.failed = true,
+        }
         changed = true;
     }
     let mut done = vec![];
@@ -615,14 +626,19 @@ fn on_key(s: &mut App, e: &KeyEvent, _: &mut Tx) -> bool {
     false
 }
 
-/// PNG and JPEG decode here; other formats fail to the "Open in browser" fallback.
-fn decode(url: &str, pixels: &rune::Pixels) -> Option<()> {
+/// PNG, JPEG, GIF (its first frame), WebP, BMP, ICO and TIFF decode; SVG rasterizes like the
+/// sidebar's favicons. AVIF and HEIC fail to the "Open in browser" fallback.
+fn download(url: &str) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut bytes = Vec::new();
     ureq::get(url).call().ok()?.into_reader().take(50 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
-    let image = image::load_from_memory(&bytes).ok()?.to_rgba8();
-    pixels.set(image.width(), image.height(), image.into_raw());
-    Some(())
+    Some(bytes)
+}
+
+/// SVG text or gzipped SVGZ, which the image cache rasterizes at twice the drawing's own size.
+fn is_svg(bytes: &[u8]) -> bool {
+    let start = bytes.iter().position(|b| !b.is_ascii_whitespace()).unwrap_or(bytes.len());
+    bytes[start..].starts_with(b"<") || bytes.starts_with(&[0x1f, 0x8b])
 }
 
 fn read_failure_view(f: &ReadFailure, t: &T) -> El {
@@ -643,7 +659,8 @@ fn read_failure_view(f: &ReadFailure, t: &T) -> El {
 }
 
 fn image_view(image: &Image, t: &T) -> El {
-    if image.failed.load(std::sync::atomic::Ordering::Relaxed) {
+    let decoded = image.decoded.as_ref().filter(|d| d.is_ready());
+    if image.failed || decoded.is_some_and(|d| d.error().is_some()) {
         let mut notice = col().grow(1.).center().gap(12.).padding(24.).child(text("Unable to load workspace image.").font(theme::TEXT_XS).color(t.c.destructive_foreground));
         if let Some(url) = image.url.clone() {
             notice = notice.child(
@@ -659,12 +676,13 @@ fn image_view(image: &Image, t: &T) -> El {
         }
         return notice;
     }
-    if !image.settled {
+    let Some(decoded) = decoded else {
         return col().grow(1.).center().child(kit::Spinner::new().size("lg").tone("muted").build(&kit::theme(t)));
-    }
+    };
     // `PreviewImageContent` fits the image inside a 16px margin and never scales it up.
-    let (w, h) = image.pixels.size();
-    col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32).max_h(h as f32).pixels_fit(&image.pixels, rune::SurfaceFit::Fit))
+    let (w, h) = decoded.pixels().size();
+    let k = if image.svg { 0.5 } else { 1. };
+    col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32 * k).max_h(h as f32 * k).pixels_fit(decoded.pixels(), rune::SurfaceFit::Fit))
 }
 
 fn editor(ui: &Ui, t: &T) -> El {
@@ -969,6 +987,19 @@ mod tests {
         assert_eq!((failure.attempted.as_deref(), failure.cwd.as_str()), (Some("/etc/passwd"), "/w"));
         assert_eq!(read_failure(&json!({"message":"x"}), "/fallback").cwd, "/fallback");
         assert_eq!(read_error(&json!({"message":"network worker stopped"})), "network worker stopped");
+    }
+
+    #[test]
+    fn gif_webp_and_bmp_previews_decode_and_svg_is_sniffed() {
+        let picture = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(3, 2, image::Rgba([200, 10, 10, 255])));
+        for format in [image::ImageFormat::Gif, image::ImageFormat::WebP, image::ImageFormat::Bmp] {
+            let mut bytes = std::io::Cursor::new(Vec::new());
+            picture.write_to(&mut bytes, format).expect("encodes");
+            let decoded = image::load_from_memory(bytes.get_ref()).unwrap_or_else(|e| panic!("{format:?}: {e}"));
+            assert_eq!((decoded.width(), decoded.height()), (3, 2), "{format:?}");
+            assert!(!is_svg(bytes.get_ref()));
+        }
+        assert!(is_svg(b"  <svg xmlns='http://www.w3.org/2000/svg'/>"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ unicode-normalization = "0.1"
 ureq = { version = "2", default-features = false, features = ["json"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico", "gif", "webp", "bmp"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 # Already in the tree through rustls; PBKDF2 and SHA-256 for browser cookie import.
 ring = "0.17"
