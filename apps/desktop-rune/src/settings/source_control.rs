@@ -20,6 +20,230 @@ pub struct Ui {
     revealed: bool,
     /// A host settings write is in flight; its reply rescans, like web's `onSaved`.
     pub rescan: bool,
+    app: AppSignIn,
+    app_revealed: bool,
+}
+
+/// Web `SourceControlAppSignInSettings`'s state: GitHub's device flow, run by the server.
+#[derive(Default, Debug, PartialEq)]
+enum AppSignIn {
+    #[default]
+    Idle,
+    Starting(u64),
+    Waiting { code: String, uri: String, expires_at: i64, wait: u64 },
+    Failed(String),
+}
+
+const APP_NAME: &str = "T3 Code for GitHub";
+const APP_HOST: &str = "github.com";
+const APP_INSTALL: &str = "https://github.com/apps/t3-code-for-github/installations/new";
+const APP_REVOKE: &str = "https://github.com/settings/apps/authorizations";
+
+fn app_input() -> Value {
+    json!({"provider": "github", "host": APP_HOST})
+}
+
+/// The next sign-in state for a reply; a reply for an attempt that's no longer current is dropped.
+fn app_reply(state: &AppSignIn, id: u64, reply: Result<Value, Value>) -> Option<AppSignIn> {
+    let failed = |e: &Value| AppSignIn::Failed(super::failure_detail(e).unwrap_or_else(|| "GitHub sign-in failed. Try again.".into()));
+    match state {
+        AppSignIn::Starting(start) if *start == id => Some(match reply {
+            Ok(prompt) => AppSignIn::Waiting {
+                code: prompt["userCode"].as_str().unwrap_or("").to_owned(),
+                uri: prompt["verificationUri"].as_str().unwrap_or("https://github.com/login/device").to_owned(),
+                expires_at: prompt["expiresAt"].as_i64().unwrap_or(0),
+                wait: 0,
+            },
+            Err(e) => failed(&e),
+        }),
+        AppSignIn::Waiting { wait, .. } if *wait == id => Some(match reply {
+            Ok(_) => AppSignIn::Idle,
+            Err(e) => failed(&e),
+        }),
+        _ => None,
+    }
+}
+
+/// Settles the device flow's start and wait replies; a finished sign-in rescans.
+pub fn poll(s: &mut App) -> bool {
+    let pending = match &s.ui.settings.source_control.app {
+        AppSignIn::Starting(id) => *id,
+        AppSignIn::Waiting { wait, .. } if *wait != 0 => *wait,
+        _ => return false,
+    };
+    let Some(reply) = s.src.net().and_then(|n| n.take_reply(pending)) else { return false };
+    let succeeded = reply.is_ok();
+    let Some(mut next) = app_reply(&s.ui.settings.source_control.app, pending, reply) else { return false };
+    if let AppSignIn::Waiting { wait, .. } = &mut next
+        && let Some(net) = s.src.net()
+    {
+        *wait = net.request("sourceControl.signInWait", app_input());
+    }
+    let done = succeeded && next == AppSignIn::Idle;
+    s.ui.settings.source_control.app = next;
+    if done {
+        scan(s);
+    }
+    true
+}
+
+/// Web's `toLocaleTimeString(undefined, {hour: "numeric", minute: "2-digit"})` in en-US.
+fn clock(at: i64) -> String {
+    let minutes = crate::data::Zone::Local.wall(at).div_euclid(60_000).rem_euclid(24 * 60);
+    let (hour, minute) = (minutes / 60, minutes % 60);
+    format!("{}:{minute:02} {}", (hour + 11) % 12 + 1, if hour < 12 { "AM" } else { "PM" })
+}
+
+fn link(label: &'static str, url: &'static str, t: &T) -> El {
+    crate::kit::Button::new(label).variant("link").size("xs").icon(&icons::EXTERNAL_LINK).on_press(move |s: &mut App| super::auth::open_url(s, url)).build(t)
+}
+
+/// A band under the card's header, with its top rule.
+fn band(rule: rune::Color, fill: rune::Color, py: f32, body: El) -> El {
+    col().w_full().child(el().h(1.0).w_full().fill(rule)).child(col().w_full().px(12.0).py(py).fill(fill).child(body))
+}
+
+/// The GitHub App card, shown when the server can run its device flow (`appSignIn`).
+fn app_sign_in(s: &App, t: &T, account: Option<&str>) -> El {
+    let ui = &s.ui.settings.source_control;
+    let hosts = saved(s, "github");
+    let signed_in = hosts["signIns"][APP_HOST].as_str().is_some_and(|v| !v.is_empty());
+    let token_overrides = has_secret(&hosts["tokens"][APP_HOST]);
+    let failed = match &ui.app {
+        AppSignIn::Failed(message) if !signed_in => Some(message.clone()),
+        _ => None,
+    };
+    let waiting = match &ui.app {
+        AppSignIn::Waiting { code, uri, expires_at, .. } if !signed_in => Some((code.clone(), uri.clone(), *expires_at)),
+        _ => None,
+    };
+    let (subtitle, action): (El, El) = if signed_in {
+        let subtitle = match account.filter(|_| !token_overrides) {
+            Some(account) => text(format!("Signed in as {}", login(account, ui.app_revealed)))
+                .role("button")
+                .label(if ui.app_revealed { "Hide account" } else { "Show account" })
+                .cursor(rune::Cursor::Pointer)
+                .on_press(|s: &mut App| s.ui.settings.source_control.app_revealed ^= true),
+            None if token_overrides => text("Signed in, but the token saved below is used while it can be read."),
+            None => text("Signed in"),
+        };
+        let action = crate::kit::Button::new("Sign out")
+            .variant("outline")
+            .size("xs")
+            .on_press(|s: &mut App| {
+                s.ui.settings.source_control.app = AppSignIn::Idle;
+                let mut sign_ins = saved(s, "github")["signIns"].as_object().cloned().unwrap_or_default();
+                sign_ins.insert(APP_HOST.into(), json!(""));
+                s.ui.settings.source_control.rescan = true;
+                request(s, "server.updateSettings", json!({"patch": {"sourceControlHosts": {"github": {"signIns": sign_ins}}}}));
+            })
+            .build(t);
+        (subtitle, action)
+    } else if waiting.is_some() {
+        let action = crate::kit::Button::new("Cancel")
+            .variant("ghost")
+            .size("xs")
+            .on_press(|s: &mut App| {
+                s.ui.settings.source_control.app = AppSignIn::Idle;
+                request(s, "sourceControl.signInCancel", app_input());
+            })
+            .build(t);
+        (text("Approve the app on GitHub to finish signing in."), action)
+    } else {
+        let starting = matches!(ui.app, AppSignIn::Starting(_));
+        let action = crate::kit::Button::new(if failed.is_some() { "Try again" } else { "Sign in with GitHub" })
+            .size("xs")
+            .disabled(starting)
+            .on_press(|s: &mut App| {
+                if let Some(net) = s.src.net() {
+                    let id = net.request("sourceControl.signInStart", app_input());
+                    s.ui.settings.source_control.app = AppSignIn::Starting(id);
+                }
+            })
+            .build(t);
+        (text("A far higher GitHub API rate limit than a personal token or gh login."), action)
+    };
+    let logo = super::host_logos::layers("github").into_iter().flatten().fold(el().size(20.0, 20.0), |logo, &(glyph, _)| logo.child(rune::icon(glyph, 20.0).color(t.c.foreground).absolute(0.0, 0.0)));
+    let mut mark = el().size(40.0, 40.0).radius(10.0).fill(t.c.muted).center().child(logo);
+    if signed_in {
+        mark = mark.child(
+            el().size(16.0, 16.0).radius(8.0).fill(t.c.success).border(2.0, t.c.card).center().absolute(28.0, 28.0).child(rune::icon(&icons::CHECK, 10.0).color(rune::Color::WHITE)),
+        );
+    }
+    let mut card = col()
+        .w_full()
+        .radius(12.0)
+        .border(1.0, if failed.is_some() { t.c.destructive.alpha_mul(0.4) } else { t.c.border })
+        .fill(t.c.card)
+        .clip_rounded(12.0)
+        .child(
+            row()
+                .w_full()
+                .padding(12.0)
+                .gap(12.0)
+                .center_y()
+                .child(mark)
+                .child(
+                    col()
+                        .grow(1.0)
+                        .min_w(0.0)
+                        .gap(2.0)
+                        .child(text(APP_NAME).font(theme::SM_MEDIUM).color(t.c.foreground))
+                        .child(subtitle.font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
+                )
+                .child(action),
+        );
+    let muted = t.c.muted.alpha_mul(0.4);
+    if let Some((code, uri, expires_at)) = waiting {
+        let mut cells = row().gap(4.0).center_y().label(code.clone());
+        for c in code.chars() {
+            cells = cells.child(if c == '-' {
+                text("\u{2013}").font(theme::MONO_SM).color(t.c.muted_foreground).px(2.0)
+            } else {
+                el().size(32.0, 40.0)
+                    .radius(6.0)
+                    .border(1.0, t.c.border)
+                    .fill(t.c.background)
+                    .center()
+                    .child(text(c.to_string()).font(theme::weight(theme::mono(theme::TEXT_LG), theme::MEDIUM)).color(t.c.foreground))
+            });
+        }
+        let (copy_code, open_code) = (code.clone(), code);
+        cells = cells.child(
+            crate::kit::Button::new("Copy code")
+                .variant("ghost")
+                .size("icon-xs")
+                .icon(&icons::COPY)
+                .build(t)
+                .on_press_tx(move |_: &mut App, tx: &mut rune::Tx| tx.copy(copy_code.clone())),
+        );
+        let open = crate::kit::Button::new("Copy code & open GitHub").size("sm").icon(&icons::EXTERNAL_LINK).build(t).on_press_tx(move |s: &mut App, tx: &mut rune::Tx| {
+            tx.copy(open_code.clone());
+            super::auth::open_url(s, &uri);
+        });
+        let status = row()
+            .gap(6.0)
+            .center_y()
+            .child(el().size(6.0, 6.0).radius(3.0).fill(t.c.warning))
+            .child(small(format!("Waiting for approval · code expires at {}", clock(expires_at)), t));
+        let body = row().w_full().gap(24.0).center_y().child(cells).child(el().grow(1.0)).child(col().gap(8.0).items_end().child(open).child(status));
+        card = card.child(band(t.c.border, muted, 16.0, body));
+    }
+    if signed_in {
+        let body = row()
+            .w_full()
+            .gap(12.0)
+            .center_y()
+            .child(small("Reaches repositories in accounts and organizations that installed the app.", t).grow(1.0).min_w(0.0))
+            .child(link("Install on an organization", APP_INSTALL, t))
+            .child(link("Manage on GitHub", APP_REVOKE, t));
+        card = card.child(band(t.c.border, muted, 8.0, body));
+    }
+    if let Some(message) = failed {
+        let body = text(message).font(theme::TEXT_XS).color(t.c.destructive).wrap().role("alert");
+        card = card.child(band(t.c.destructive.alpha_mul(0.2), t.c.destructive.alpha_mul(0.05), 8.0, body));
+    }
+    card
 }
 
 pub const DISCOVERY: &str = "server.discoverSourceControl";
@@ -170,7 +394,13 @@ fn item_row(s: &App, item: &Value, t: &T) -> El {
     }
     let body = match credentials(kind) {
         Some(credentials) => {
-            let mut body = col().w_full().gap(24.0).child(token_form(s, t, kind, label, &credentials));
+            let mut body = col().w_full().gap(24.0);
+            if item["appSignIn"] == true {
+                let divider = |t: &T| el().h(1.0).grow(1.0).fill(t.c.border);
+                let or = text("Or use your own credentials").font(theme::TEXT_2XS).color(t.c.muted_foreground);
+                body = body.child(app_sign_in(s, t, opt(&item["auth"]["account"]))).child(row().w_full().gap(12.0).center_y().child(divider(t)).child(or).child(divider(t)));
+            }
+            body = body.child(token_form(s, t, kind, label, &credentials));
             if available(item) {
                 body = body.child(accounts(s, t, kind, label, &credentials, &item["auth"]));
             }
@@ -722,6 +952,18 @@ pub fn view(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn device_flow_replies_settle_only_the_current_attempt() {
+        let prompt = json!({"userCode": "ABCD-1234", "verificationUri": "https://github.com/login/device", "expiresAt": 1762603500000_i64});
+        let waiting = app_reply(&AppSignIn::Starting(7), 7, Ok(prompt.clone())).unwrap();
+        assert_eq!(waiting, AppSignIn::Waiting { code: "ABCD-1234".into(), uri: "https://github.com/login/device".into(), expires_at: 1762603500000, wait: 0 });
+        assert_eq!(app_reply(&AppSignIn::Starting(8), 7, Ok(prompt)), None);
+        let pending = AppSignIn::Waiting { code: "ABCD-1234".into(), uri: String::new(), expires_at: 0, wait: 9 };
+        assert_eq!(app_reply(&pending, 9, Ok(json!({"account": "octocat"}))), Some(AppSignIn::Idle));
+        let denied = json!([{"_tag": "Fail", "error": {"_tag": "SourceControlSignInError", "reason": "denied", "detail": "The sign-in was denied on GitHub."}}]);
+        assert_eq!(app_reply(&pending, 9, Err(denied)), Some(AppSignIn::Failed("The sign-in was denied on GitHub.".into())));
+        assert_eq!(app_reply(&AppSignIn::Idle, 9, Ok(json!({}))), None);
+    }
     #[test]
     fn summaries_follow_web_item_summary() {
         let git = json!({"kind":"git","label":"Git","implemented":true,"status":"available","installHint":"Install Git"});

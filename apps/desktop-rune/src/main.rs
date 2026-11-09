@@ -141,6 +141,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= s.src.net().is_some_and(|net| net.drain());
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
+    settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s);
     changed |= chat::composer::poll(s);
     changed |= shell::palette::poll(s);
@@ -201,9 +202,11 @@ fn main() {
     if std::env::args().any(|a| a == "--check-server") {
         std::process::exit(host::check());
     }
+    let (fonts, families) = settings::fonts::launch();
     let spec = AppSpec {
         min_size: Some((640.0, 480.0)),
-        families: (theme::SANS, "ui-monospace"),
+        fonts,
+        families,
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
