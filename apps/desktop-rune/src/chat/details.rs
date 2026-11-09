@@ -584,7 +584,9 @@ fn card(s: &App, t: &T) -> Option<El> {
         .padding(1.0)
         .child(general);
 
-    if let Some(v) = vcs(s).map(|v| &v["local"]).filter(|v| v["isRepo"] == true) {
+    // A failed status stream still shows the section, with Commit disabled and +0 -0.
+    let failed = (vcs(s).is_none() && git::status_error(s).is_some()).then(|| json!({"isRepo": true}));
+    if let Some(v) = vcs(s).map(|v| &v["local"]).or(failed.as_ref()).filter(|v| v["isRepo"] == true) {
         let current = data::s(v, "refName").to_string();
         // resolveBranchTriggerLabel: a new worktree names the branch it starts from.
         let branch = match run.as_ref().filter(|r| r.worktree) {
@@ -607,25 +609,20 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
-        if let Some(git) = git::view(s, t, v, draft) {
-            section = section.child(git);
-        }
-        if draft {
-            return Some(card.child(section));
-        }
+        // The Changes row hides with the quiet git row; a draft shows it disabled.
+        let Some(git) = git::view(s, t, v, draft) else { return Some(card.child(section)) };
+        section = section.child(git);
         let (add, del) = git::changes_totals(v);
         let stat = theme::mono(theme::XS_MEDIUM);
-        section = section.child(
-            action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
-                .w_full()
-                .child(
-                    row()
-                        .gap(6.0)
-                        .child(text(format!("+{add}")).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
-                        .child(text(format!("-{del}")).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
-                )
-                .on_press(|s: &mut App| crate::panel::open_changes(s)),
-        );
+        let changes = action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
+            .w_full()
+            .child(
+                row()
+                    .gap(6.0)
+                    .child(text(format!("+{add}")).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
+                    .child(text(format!("-{del}")).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
+            );
+        section = section.child(if draft { changes.opacity(0.64) } else { changes.on_press(|s: &mut App| crate::panel::open_changes(s)) });
         card = card.child(section);
     }
     Some(card)
@@ -810,7 +807,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DraftRun, Item, Ref, Shown, branch_items, lane, local_name, shown, take_draft_workspace, toggle};
+    use super::{DraftRun, Item, Ref, Shown, branch_items, draft_run, git, lane, local_name, shown, take_draft_workspace, toggle};
     use serde_json::json;
     use crate::{App, Route, data};
 
@@ -856,6 +853,20 @@ mod tests {
         *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true };
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
+    }
+
+    #[test]
+    fn a_branch_made_by_commit_on_new_branch_becomes_the_drafts() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
+        s.navigate(Route::Home { project_id: Some(project) });
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true };
+        git::sync_branch(&mut s, &json!({"branch": {"status": "skipped_not_requested"}}));
+        assert_eq!(draft_run(&s).unwrap().base.as_deref(), Some("main"));
+        git::sync_branch(&mut s, &json!({"branch": {"status": "created", "name": "feature/fix"}}));
+        let run = draft_run(&s).unwrap();
+        assert_eq!((run.base.as_deref(), run.from_origin), (Some("feature/fix"), false));
+        assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/fix"})));
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub struct MenuItem {
     sub: Option<(Vec<MenuEntry>, bool)>,
     sub_width: f32,
     sub_keys: Option<Box<dyn FnOnce(El) -> El>>,
+    /// Content after the label, with its own presses, such as a commit's link.
+    trailing: Option<El>,
     acts: Acts,
 }
 impl MenuItem {
@@ -51,11 +53,16 @@ impl MenuItem {
             sub: None,
             sub_width: 160.,
             sub_keys: None,
+            trailing: None,
             acts: Acts::default(),
         }
     }
     pub fn icon(mut self, glyph: &'static Icon) -> Self {
         self.glyph = Some(glyph);
+        self
+    }
+    pub fn trailing(mut self, value: El) -> Self {
+        self.trailing = Some(value);
         self
     }
     pub fn shortcut(mut self, value: impl Into<String>) -> Self {
@@ -305,6 +312,9 @@ impl MenuItem {
         }
         if self.radio && !native {
             e = e.child(mark(self.checked == Some(true)));
+        }
+        if let Some(trailing) = self.trailing {
+            e = e.child(trailing);
         }
         if let Some((entries, open)) = self.sub {
             e = e

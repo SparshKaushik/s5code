@@ -1,6 +1,7 @@
 //! Terminal sessions shared by the drawer and the right panel, keyed by thread and terminal id,
 //! and the viewport that draws one. Wire payloads match the web's `terminal.*` RPCs.
 
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use super::vt::{self, Link, MouseButton, Palette, SelectBy, Vt, Wheel, links};
@@ -24,6 +25,10 @@ const BLINK_CYCLE: rune::Cycle = rune::Cycle {
 };
 const RESIZE_SETTLE: Duration = Duration::from_millis(150);
 const PADDING: f32 = 4.;
+/// A double or triple click waits this long before its selection menu, so a third click can land.
+const MULTI_CLICK_MENU: Duration = Duration::from_millis(500);
+/// Middle-click pastes the terminal's own selection on X11-style desktops (`isMiddleClickPastePlatform`).
+const MIDDLE_PASTE: bool = cfg!(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "netbsd", target_os = "dragonfly"));
 
 pub struct Session {
     pub thread: String,
@@ -57,6 +62,8 @@ pub struct Session {
     attached: bool,
     /// Input typed once the attach snapshot lands, for a project script run in a new terminal.
     queued: Option<String>,
+    /// The grid's top-left in window points, to place the selection menu at a release.
+    origin: (f32, f32),
 }
 
 impl Session {
@@ -83,6 +90,7 @@ impl Session {
             running: false,
             attached: false,
             queued: None,
+            origin: (0., 0.),
         }
     }
 
@@ -173,6 +181,16 @@ pub struct Menu {
     thread: String,
     id: String,
     at: (f32, f32),
+    /// The selection's own menu after a mouse selection: Add to chat and Copy only.
+    selection: bool,
+}
+
+/// A selection menu waiting out a double or triple click.
+struct Popup {
+    thread: String,
+    id: String,
+    at: (f32, f32),
+    due: Instant,
 }
 
 #[derive(Default)]
@@ -187,6 +205,12 @@ pub struct Ui {
     palette: std::cell::Cell<Option<Palette>>,
     /// Edits for a field whose session closed under it.
     spare: TextEdit,
+    popup: Option<Popup>,
+    /// Whether each absolute path a link names exists (`filesystem.getMetadata`); `None` while asked.
+    paths: HashMap<String, Option<bool>>,
+    path_requests: Vec<(u64, String)>,
+    /// A path link pressed before its check came back: opens if it exists.
+    open_when_known: Option<(String, String)>,
 }
 
 impl Ui {
@@ -325,7 +349,19 @@ pub fn palette(t: &T) -> Palette {
 
 /// Drains attach streams, replies and IME text, and runs the focused cursor's blink.
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
-    let mut changed = false;
+    let mut changed = poll_links(app);
+    if let Some(p) = app.ui.panel.terminal.popup.as_ref() {
+        let now = Instant::now();
+        if now >= p.due {
+            let p = app.ui.panel.terminal.popup.take().unwrap();
+            if app.ui.panel.terminal.get(&p.thread, &p.id).is_some_and(|s| s.vt.selection_text().is_some()) {
+                app.ui.panel.terminal.menu = Some(Menu { thread: p.thread, id: p.id, at: p.at, selection: true });
+                changed = true;
+            }
+        } else {
+            tx.wake_after(p.due - now);
+        }
+    }
     let pending = std::mem::take(&mut app.ui.panel.terminal.pending);
     for request in pending {
         match app.src.net().and_then(|net| net.take_reply(request)) {
@@ -432,6 +468,28 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     for (thread, id) in ended {
         super::drawer::session_ended(app, &thread, &id);
         changed = true;
+    }
+    changed
+}
+
+/// Path checks coming back; a path pressed while it was asked opens once it exists.
+fn poll_links(app: &mut App) -> bool {
+    let mut changed = false;
+    for (request, path) in std::mem::take(&mut app.ui.panel.terminal.path_requests) {
+        let Some(reply) = app.src.net().and_then(|net| net.take_reply(request)) else {
+            app.ui.panel.terminal.path_requests.push((request, path));
+            continue;
+        };
+        let exists = reply.is_ok_and(|v| matches!(v["entries"][0]["kind"].as_str(), Some("file" | "directory")));
+        let ui = &mut app.ui.panel.terminal;
+        ui.paths.insert(path.clone(), Some(exists));
+        changed = true;
+        if ui.open_when_known.as_ref().is_some_and(|(p, _)| *p == path)
+            && let Some((_, target)) = ui.open_when_known.take()
+            && exists
+        {
+            open_path(app, target);
+        }
     }
     changed
 }
@@ -557,6 +615,31 @@ fn clip(e: &KeyEvent, mac: bool, selection: bool) -> Option<Clip> {
     }
 }
 
+/// Shortcuts the web terminal turns into shell input itself: macOS Cmd+K clears (a form feed,
+/// as Ctrl+L), Option or Alt+arrows move by word, and on macOS Cmd+arrows go to the line's ends
+/// and Cmd+Backspace deletes to its start (`isTerminalClearShortcut`, `terminalNavigationShortcutData`).
+fn shortcut_input(e: &KeyEvent, mac: bool) -> Option<&'static str> {
+    let m = e.mods;
+    if m.shift || m.ctrl {
+        return None;
+    }
+    let meta = if mac { m.cmd } else { m.logo };
+    let letter = match &e.key {
+        Key::Command(c) => Some(c.to_ascii_lowercase()),
+        Key::Text(t) => t.chars().next().map(|c| c.to_ascii_lowercase()),
+        _ => None,
+    };
+    match (&e.key, letter) {
+        (_, Some('k')) if mac && meta && !m.alt => Some("\x0c"),
+        (Key::Left, _) if m.alt && !meta => Some("\x1bb"),
+        (Key::Right, _) if m.alt && !meta => Some("\x1bf"),
+        (Key::Left, _) if mac && meta && !m.alt => Some("\x01"),
+        (Key::Right, _) if mac && meta && !m.alt => Some("\x05"),
+        (Key::Backspace, _) if mac && meta && !m.alt => Some("\x15"),
+        _ => None,
+    }
+}
+
 fn copy_selection(app: &mut App, tx: &mut Tx, thread: &str, id: &str, clear: bool) {
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return;
@@ -608,6 +691,10 @@ fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool
             return true;
         }
         None => {}
+    }
+    if let Some(data) = shortcut_input(e, cfg!(target_os = "macos")) {
+        send(app, thread, id, data.to_string());
+        return true;
     }
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return false;
@@ -689,15 +776,9 @@ fn home_of(cwd: &str) -> Option<String> {
     }
 }
 
-/// Where a path link points: inside the workspace (opened in the Files panel), else an
-/// absolute path for the editor. Relative paths resolve against the terminal's directory.
-#[derive(Debug, PartialEq)]
-enum PathTarget {
-    Workspace(String),
-    Outside(String),
-}
-
-fn path_target(text: &str, cwd: &str) -> PathTarget {
+/// `resolvePathLinkTarget`: a path link's absolute path, relative ones joined to the terminal's
+/// directory and `~/` to the home it sits in, then its `:line:col` again for the editor.
+fn link_target(text: &str, cwd: &str) -> (String, String) {
     let path = links::strip_position(text);
     let joined = if let Some(rest) = path.strip_prefix("~/") {
         match home_of(cwd) {
@@ -719,41 +800,72 @@ fn path_target(text: &str, cwd: &str) -> PathTarget {
             p => parts.push(p),
         }
     }
-    let absolute = format!("/{}", parts.join("/"));
-    let root = format!("{}/", cwd.trim_end_matches('/'));
-    match absolute.strip_prefix(&root) {
-        Some(relative) if !relative.is_empty() && joined.starts_with('/') => PathTarget::Workspace(relative.to_string()),
-        _ => PathTarget::Outside(absolute),
+    let absolute = if joined.starts_with('/') { format!("/{}", parts.join("/")) } else { joined.clone() };
+    let target = format!("{absolute}{}", &text[path.len()..]);
+    (absolute, target)
+}
+
+/// Whether a path link's file or folder exists, asking the server the first time it shows; a
+/// URL always opens. Only absolute paths up to 512 bytes are checked (`useFileMetadata`).
+fn link_exists(app: &mut App, link: &Link) -> Option<bool> {
+    if link.kind == links::Kind::Url {
+        return Some(true);
     }
+    let (_, cwd) = super::context(app)?;
+    let (absolute, _) = link_target(&link.text, &cwd);
+    if !absolute.starts_with('/') || absolute.len() > 512 {
+        return Some(false);
+    }
+    let ui = &mut app.ui.panel.terminal;
+    if let Some(known) = ui.paths.get(&absolute) {
+        return *known;
+    }
+    let net = app.src.net()?;
+    let request = net.request("filesystem.getMetadata", json!({"paths": [absolute]}));
+    let ui = &mut app.ui.panel.terminal;
+    ui.paths.insert(absolute.clone(), None);
+    ui.path_requests.push((request, absolute));
+    None
 }
 
 /// Opens a clicked link: URLs in the preview when links open in the app (Cmd or Ctrl still
-/// picks the system browser), workspace files in the Files panel, other paths in the preferred
-/// editor (`handleLinkActivate`, `openTerminalLinkInPreview`).
+/// picks the system browser), paths at their line in the preferred editor (`handleLinkActivate`,
+/// `openTerminalLinkInPreview`, `openInPreferredEditor`).
 fn open_link(app: &mut App, tx: &mut Tx, link: &Link, force_browser: bool) {
     if link.kind == links::Kind::Url {
-        if in_preview(&app.client_settings.values, &link.text, force_browser) && super::context(app).is_some() {
-            super::open_preview(app, &link.text);
-        } else {
-            let _ = tx.open_url(&link.text);
-        }
-        return;
+        return open_web(app, tx, &link.text, force_browser);
     }
     let Some((_, cwd)) = super::context(app) else {
         return;
     };
-    match path_target(&link.text, &cwd) {
-        PathTarget::Workspace(relative) => super::open_file(app, relative),
-        PathTarget::Outside(absolute) => {
-            let config = app.state().config.as_ref();
-            let editor = config
-                .and_then(|c| c["availableEditors"].as_array())
-                .and_then(|v| v.first())
-                .map(|e| e.as_str().map_or_else(|| data::s(e, "id").to_string(), str::to_string));
-            if let (Some(editor), Some(net)) = (editor, app.src.net()) {
-                net.request("shell.openInEditor", json!({"cwd": absolute, "editor": editor}));
-            }
-        }
+    let (absolute, target) = link_target(&link.text, &cwd);
+    match link_exists(app, link) {
+        Some(true) => open_path(app, target),
+        Some(false) => {}
+        None => app.ui.panel.terminal.open_when_known = Some((absolute, target)),
+    }
+}
+
+/// A web link in the preview when Settings send links there, else the system browser.
+pub(super) fn open_web(app: &mut App, tx: &mut Tx, url: &str, force_browser: bool) {
+    if in_preview(&app.client_settings.values, url, force_browser) && super::context(app).is_some() {
+        super::open_preview(app, url);
+    } else {
+        let _ = tx.open_url(url);
+    }
+}
+
+fn open_path(app: &mut App, target: String) {
+    let config = app.state().config.as_ref();
+    let editor = config
+        .and_then(|c| c["availableEditors"].as_array())
+        .and_then(|v| v.first())
+        .map(|e| e.as_str().map_or_else(|| data::s(e, "id").to_string(), str::to_string));
+    let Some(editor) = editor else {
+        return crate::shell::palette::toast_error(app, "Editor opening is unavailable.", None);
+    };
+    if let Some(net) = app.src.net() {
+        net.request("shell.openInEditor", json!({"cwd": target, "editor": editor}));
     }
 }
 
@@ -932,12 +1044,15 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
             resize(s, &t4, &i4, cols, rows);
         })
         .cursor(pointer)
+        .pointer_buttons([rune::PointerButton::Middle])
         .on_drag(move |s: &mut App, d, tx| drag(s, tx, &t5, &i5, d))
         .on_pointer_move_local(move |s: &mut App, p, _| {
             let (col, row) = cell_at(s, &t6, &i6, p.x, p.y);
             let Some(session) = s.ui.panel.terminal.get_mut(&t6, &i6) else {
                 return;
             };
+            let at = p.window();
+            session.origin = (at.x - p.x, at.y - p.y);
             if session.button.is_some() || session.press.is_some() {
                 return;
             }
@@ -945,6 +1060,11 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
                 .vt
                 .mouse(MouseButton::None, false, true, col, row, rune::Mods::default());
             let hover = if session.vt.reports_mouse(false) { None } else { session.vt.link_at(col, row) };
+            // A path underlines only once it is known to exist, as the web checks it on hover.
+            let hover = hover.filter(|link| link_exists(s, link) == Some(true));
+            let Some(session) = s.ui.panel.terminal.get_mut(&t6, &i6) else {
+                return;
+            };
             if session.hover != hover {
                 session.hover = hover;
             }
@@ -972,7 +1092,7 @@ pub fn viewport(app: &App, t: &T, thread: &str, id: &str) -> El {
             }
             let at = p.window();
             focus(s, &t8, &i8);
-            s.ui.panel.terminal.menu = Some(Menu { thread: t8.clone(), id: i8.clone(), at: (at.x, at.y) });
+            s.ui.panel.terminal.menu = Some(Menu { thread: t8.clone(), id: i8.clone(), at: (at.x, at.y), selection: false });
         })
         .on_wheel(move |s: &mut App, w, _| {
             let m = metrics(s);
@@ -995,7 +1115,21 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
     if d.phase == Phase::Down {
         focus(s, thread, id);
         super::drawer::activate(s, thread, id);
+        let ui = &mut s.ui.panel.terminal;
+        ui.popup = None;
+        ui.menu = None;
     }
+    if tx.button() == rune::PointerButton::Middle {
+        return middle(s, tx, thread, id, d);
+    }
+    // A path not known to exist is plain text; one still being checked opens if it does.
+    let link = if d.phase == Phase::Down {
+        let (col, row) = cell_at(s, thread, id, d.x, d.y);
+        let link = s.ui.panel.terminal.get(thread, id).and_then(|session| session.vt.link_at(col, row));
+        link.filter(|link| link_exists(s, link) != Some(false))
+    } else {
+        None
+    };
     let (col, row, right) = cell_side(s, thread, id, d.x, d.y);
     let (c0, r0, right0) = cell_side(s, thread, id, d.start_x, d.start_y);
     let mods = tx.mods();
@@ -1010,7 +1144,7 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
                 session.button = Some(MouseButton::Left);
                 report = session.vt.mouse(MouseButton::Left, true, false, col, row, mods);
                 Press::Report
-            } else if let (1, false, Some(link)) = (d.clicks, mods.shift, session.vt.link_at(col, row)) {
+            } else if let (1, false, Some(link)) = (d.clicks, mods.shift, link) {
                 Press::Link(link)
             } else {
                 let by = match d.clicks {
@@ -1052,6 +1186,10 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
             }
             Some(Press::Link(link)) if !d.cancelled() => open = Some((link, mods.ctrl || mods.cmd)),
             Some(Press::Select { by: SelectBy::Cell, moved: false }) => session.vt.clear_selection(),
+            Some(Press::Select { .. }) if !d.cancelled() && session.vt.selection_text().is_some() => {
+                let at = (session.origin.0 + d.x, session.origin.1 + d.y);
+                select_menu(s, tx, thread, id, at, d.clicks >= 2);
+            }
             _ => {}
         },
     }
@@ -1060,6 +1198,42 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
     }
     if let Some((link, force_browser)) = open {
         open_link(s, tx, &link, force_browser);
+    }
+}
+
+/// A mouse selection offers Add to chat and Copy where it was released (`selectionActions.ts`);
+/// after a double or triple click it waits, so a further click can extend it first.
+fn select_menu(s: &mut App, tx: &mut Tx, thread: &str, id: &str, at: (f32, f32), multi: bool) {
+    let ui = &mut s.ui.panel.terminal;
+    if multi {
+        ui.popup = Some(Popup { thread: thread.to_string(), id: id.to_string(), at, due: Instant::now() + MULTI_CLICK_MENU });
+        tx.wake_after(MULTI_CLICK_MENU);
+    } else {
+        ui.menu = Some(Menu { thread: thread.to_string(), id: id.to_string(), at, selection: true });
+    }
+}
+
+/// The middle button: reported to a program reading the mouse, else on X11-style desktops it
+/// pastes the terminal's own selection, the only primary-selection buffer it can read.
+fn middle(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
+    let (col, row) = cell_at(s, thread, id, d.x, d.y);
+    let mods = tx.mods();
+    let Some(session) = s.ui.panel.terminal.get_mut(thread, id) else {
+        return;
+    };
+    let data = if session.vt.reports_mouse(mods.shift || mods.ctrl || mods.cmd) {
+        match d.phase {
+            Phase::Down => session.vt.mouse(MouseButton::Middle, true, false, col, row, mods),
+            Phase::Move => session.vt.mouse(MouseButton::Middle, true, true, col, row, mods),
+            Phase::Up => session.vt.mouse(MouseButton::Middle, false, false, col, row, mods),
+        }
+    } else if MIDDLE_PASTE && d.phase == Phase::Down {
+        session.vt.selection_text().map(|text| session.vt.paste(&text))
+    } else {
+        None
+    };
+    if let Some(data) = data {
+        send(s, thread, id, data);
     }
 }
 
@@ -1094,6 +1268,24 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                 .disabled(!selection)
         }),
         kit::MenuEntry::item(item("Copy", |s, tx, th, id| copy_selection(s, tx, th, id, false)).disabled(!selection)),
+    ];
+    let entries = if menu.selection {
+        entries
+    } else {
+        entries.into_iter().chain(right_click_entries(item)).collect()
+    };
+    kit::Menu::new("terminal-menu")
+        .native(true)
+        .width(198.)
+        .entries(entries)
+        .open(true)
+        .at(menu.at.0, menu.at.1)
+        .on_close(|s: &mut App| s.ui.panel.terminal.menu = None)
+        .overlay(&kit::theme(t), out);
+}
+
+fn right_click_entries(item: impl Fn(&str, fn(&mut App, &mut Tx, &str, &str)) -> kit::MenuItem) -> Vec<kit::MenuEntry> {
+    vec![
         kit::MenuEntry::item(item("Paste", |_, tx, th, id| paste_clipboard(tx, th, id))),
         kit::MenuEntry::item(item("Select all", |s, _, th, id| {
             if let Some(session) = s.ui.panel.terminal.get_mut(th, id) {
@@ -1105,15 +1297,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                 session.vt.scroll_to_bottom();
             }
         })),
-    ];
-    kit::Menu::new("terminal-menu")
-        .native(true)
-        .width(198.)
-        .entries(entries)
-        .open(true)
-        .at(menu.at.0, menu.at.1)
-        .on_close(|s: &mut App| s.ui.panel.terminal.menu = None)
-        .overlay(&kit::theme(t), out);
+    ]
 }
 
 /// Loads a recorded `terminal.attach` snapshot into a session for headless scenes.
@@ -1166,10 +1350,12 @@ mod tests {
         rt.pointer_up(x(4.8), y);
         rt.frame(0.);
         assert_eq!(selection(&rt).as_deref(), Some("hello"));
+        assert!(rt.state.ui.panel.terminal.menu.as_ref().is_some_and(|m| m.selection), "a mouse selection offers Add to chat and Copy");
         rt.pointer_down(x(8.), y);
         rt.pointer_up(x(8.), y);
         rt.frame(0.);
         assert_eq!(selection(&rt), None, "a click clears the selection");
+        assert!(rt.state.ui.panel.terminal.menu.is_none());
     }
 
     #[test]
@@ -1260,14 +1446,33 @@ mod tests {
     }
 
     #[test]
-    fn path_links_open_in_the_workspace_or_the_editor() {
+    fn path_links_resolve_to_absolute_editor_targets() {
         let cwd = "/home/me/repo";
-        assert_eq!(path_target("src/main.rs:12:3", cwd), PathTarget::Workspace("src/main.rs".into()));
-        assert_eq!(path_target("./a/../b.ts", cwd), PathTarget::Workspace("b.ts".into()));
-        assert_eq!(path_target("/home/me/repo/x/y", cwd), PathTarget::Workspace("x/y".into()));
-        assert_eq!(path_target("~/notes.md", cwd), PathTarget::Outside("/home/me/notes.md".into()));
-        assert_eq!(path_target("../other/z", cwd), PathTarget::Outside("/home/me/other/z".into()));
-        assert_eq!(path_target("/etc/hosts", cwd), PathTarget::Outside("/etc/hosts".into()));
+        let target = |text: &str| link_target(text, cwd);
+        assert_eq!(target("src/main.rs:12:3"), ("/home/me/repo/src/main.rs".into(), "/home/me/repo/src/main.rs:12:3".into()));
+        assert_eq!(target("./a/../b.ts").0, "/home/me/repo/b.ts");
+        assert_eq!(target("~/notes.md:4").1, "/home/me/notes.md:4");
+        assert_eq!(target("../other/z").0, "/home/me/other/z");
+        assert_eq!(target("/etc/hosts").0, "/etc/hosts");
+    }
+
+    #[test]
+    fn shell_shortcuts_follow_the_web_terminal() {
+        let key = |k: Key, f: fn(&mut rune::Mods)| {
+            let mut e = KeyEvent::from(k);
+            f(&mut e.mods);
+            e
+        };
+        let mac_cmd = |m: &mut rune::Mods| (m.cmd, m.logo) = (true, true);
+        assert_eq!(shortcut_input(&key(Key::Command('k'), mac_cmd), true), Some("\x0c"));
+        assert_eq!(shortcut_input(&key(Key::Command('k'), |m| (m.cmd, m.ctrl) = (true, true)), false), None, "Ctrl+K off macOS is the shell's");
+        assert_eq!(shortcut_input(&key(Key::Left, |m| m.alt = true), true), Some("\x1bb"));
+        assert_eq!(shortcut_input(&key(Key::Right, |m| m.alt = true), false), Some("\x1bf"));
+        assert_eq!(shortcut_input(&key(Key::Left, mac_cmd), true), Some("\x01"));
+        assert_eq!(shortcut_input(&key(Key::Right, mac_cmd), true), Some("\x05"));
+        assert_eq!(shortcut_input(&key(Key::Backspace, mac_cmd), true), Some("\x15"));
+        assert_eq!(shortcut_input(&key(Key::Left, |m| (m.alt, m.shift) = (true, true)), true), None, "Shift keeps the encoder's sequence");
+        assert_eq!(shortcut_input(&key(Key::Left, |m| (m.logo, m.cmd) = (true, false)), false), None, "Super+arrow is the desktop's");
     }
 
     #[test]

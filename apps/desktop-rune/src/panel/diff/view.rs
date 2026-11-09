@@ -481,7 +481,7 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     .on_press_tx(move |s: &mut App, tx| toggle_file(s, f, sticky, tx));
     let (mark, mark_color) = change_mark(l, file);
     let path = file.path().to_owned();
-    let open = path.clone();
+    let (open, menu) = (path.clone(), path.clone());
     let title = text(path.clone())
         .font(l.title)
         .color(l.fg)
@@ -490,7 +490,8 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
         .shrink()
         .key("title")
         .cursor(Cursor::Pointer)
-        .on_press(move |s: &mut App| crate::panel::open_file(s, open.clone()));
+        .on_press(move |s: &mut App| crate::panel::open_file(s, open.clone()))
+        .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| super::file_menu::open(s, menu.clone(), (at.x, at.y)));
     let mut name = row().key("name").items_center().gap(6.0).min_w(0.0).shrink();
     if let (FileStatus::Renamed | FileStatus::Copied, Some(old)) = (file.status, file.old_path.as_deref()) {
         name = name

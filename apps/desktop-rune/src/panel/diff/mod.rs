@@ -1,5 +1,6 @@
 //! The Diff surface, ported from web's DiffPanel: a scope picker over the same review and
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
+mod file_menu;
 mod state;
 mod view;
 
@@ -7,7 +8,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use rune::{Color, Cursor, El, Icon, ScrollSpec, col, el, icon, row, text};
+use rune::{Color, Cursor, El, Icon, ScrollSpec, Span, Tx, col, el, icon, rich, row, text};
 use rune_kit::diff::{FileDiff, FileStatus};
 use serde_json::{Value, json};
 
@@ -113,6 +114,7 @@ pub struct Ui {
     partial: HashSet<String>,
     /// A file to open and scroll to once the chosen scope's patch shows (a changed-files row).
     pub reveal: Option<String>,
+    file_menu: file_menu::State,
 }
 
 impl Default for Ui {
@@ -147,6 +149,7 @@ impl Default for Ui {
             counts: HashMap::new(),
             partial: HashSet::new(),
             reveal: None,
+            file_menu: Default::default(),
         }
     }
 }
@@ -418,7 +421,7 @@ fn visible(app: &App) -> bool {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = false;
+    let mut changed = file_menu::poll(app);
     if let Some(id) = app.ui.panel.diff.commits_pending
         && let Some(reply) = take(app, id)
     {
@@ -723,6 +726,69 @@ fn scope_label(ui: &Ui, turns: &[Turn]) -> String {
     }
 }
 
+/// `projectCommitUrl`: the code host's page for `sha`, from the project's repository identity.
+fn commit_url(identity: &Value, sha: &str) -> Option<String> {
+    let (host, repository) = identity["canonicalKey"].as_str()?.split_once('/')?;
+    let route = match identity["provider"].as_str()? {
+        "github" if repository.split('/').count() == 2 => "commit",
+        "gitlab" => "-/commit",
+        "bitbucket" => "commits",
+        "gitcafe" | "forgejo" | "azure-devops" => "commit",
+        _ => return None,
+    };
+    let base = match identity["webUrl"].as_str() {
+        Some(web) => web.to_string(),
+        None => format!("{}/{repository}", web_origin(host, identity["locator"]["remoteUrl"].as_str().unwrap_or("").trim())),
+    };
+    let base = base.split(['?', '#']).next()?;
+    let (scheme, rest) = base.split_once("://")?;
+    if host.is_empty() || !matches!(scheme, "http" | "https") {
+        return None;
+    }
+    let (authority, path) = rest.split_once('/').unwrap_or((rest, ""));
+    let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    let path = path.trim_end_matches('/');
+    let path = if path.is_empty() { String::new() } else { format!("{path}/") };
+    Some(format!("{scheme}://{authority}/{path}{route}/{}", sha.to_lowercase()))
+}
+
+/// `remoteWebOrigin`: an HTTP remote on `host` names the web origin, port included; SSH does not.
+fn web_origin(host: &str, remote: &str) -> String {
+    let http = remote.split_once("://").filter(|(scheme, _)| matches!(*scheme, "http" | "https"));
+    if let Some((scheme, rest)) = http {
+        let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+        let authority = authority.rsplit_once('@').map_or(authority, |(_, h)| h).to_lowercase();
+        let name = authority.split(':').next().unwrap_or("");
+        if authority.eq_ignore_ascii_case(host) || name.eq_ignore_ascii_case(host) {
+            return format!("{scheme}://{authority}");
+        }
+    }
+    format!("https://{host}")
+}
+
+/// A commit's short SHA, linked to its host page when the project has one.
+fn sha_link(app: &App, t: &T, sha: &str) -> El {
+    let label = short(sha).to_string();
+    let muted = t.c.muted_foreground;
+    let identity = match &app.route {
+        crate::Route::Thread(id) => app.state().threads.iter().find(|v| v["id"] == *id).and_then(|thread| app.state().projects.iter().find(|p| p["id"] == thread["projectId"])).map(|p| &p["repositoryIdentity"]),
+        _ => None,
+    };
+    let Some(url) = identity.and_then(|i| commit_url(i, sha)) else {
+        return text(label).font(theme::MONO_XS).color(muted).px(8.0);
+    };
+    let n = label.len();
+    rich(label.clone(), vec![Span::new(0, n).underline(muted)])
+        .font(theme::MONO_XS)
+        .color(muted)
+        .px(8.0)
+        .cursor(Cursor::Pointer)
+        .role("link")
+        .label(format!("Open commit {label}"))
+        .help(url.clone())
+        .on_press_tx(move |s: &mut App, tx: &mut Tx| super::terminal::open_web(s, tx, &url, false))
+}
+
 fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
@@ -967,7 +1033,7 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
     let scope = if commit { scope.min_w(0.0).shrink() } else { scope };
     let mut left = row().key("panel-diff-refs").grow(1.0).min_w(0.0).shrink().gap(12.0).center_y().child(scope);
     if let Scope::Commit(sha) = &ui.scope {
-        left = left.child(text(short(sha).to_string()).font(theme::MONO_XS).color(t.c.muted_foreground));
+        left = left.child(sha_link(app, t, sha).key("panel-diff-sha"));
     }
     let git_ok = is_repo(app) != Some(false);
     if ui.scope == Scope::Branch && git_ok {
@@ -1239,7 +1305,8 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
                 commit_entries.push(MenuEntry::item(
                     MenuItem::new(c.subject.clone())
                         .radio(ui.scope == Scope::Commit(sha.clone()))
-                        .shortcut(format!("{}  {}", crate::shell::sidebar::logic::relative_label(c.at, now), short(&sha)))
+                        .shortcut(crate::shell::sidebar::logic::relative_label(c.at, now))
+                        .trailing(sha_link(app, t, &sha))
                         .on_select(move |s: &mut App| select(s, Scope::Commit(sha.clone()))),
                 ));
             }
@@ -1284,6 +1351,7 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     if ui.refs_combo.open && ui.scope == Scope::Branch {
         refs_combo(app, t, &mut layer);
     }
+    file_menu::overlay(app, t, &mut layer);
     layer
 }
 
@@ -1429,6 +1497,20 @@ mod tests {
         let rows = tree_rows(&paths, &folded);
         assert_eq!(rows.iter().map(|r| r.label.as_str()).collect::<Vec<_>>(), vec!["README.md", "apps", "web/src", "server", "c.ts"]);
         assert_eq!(all_dirs(&paths), HashSet::from(["apps".to_string(), "apps/web/src".to_string(), "apps/server".to_string()]));
+    }
+
+    #[test]
+    fn commit_links_follow_the_hosts_routes() {
+        let sha = "ABCDEF1234";
+        let github = json!({"provider": "github", "canonicalKey": "github.com/s5labs/demo", "locator": {"remoteUrl": "git@github.com:s5labs/demo.git"}});
+        assert_eq!(commit_url(&github, sha).as_deref(), Some("https://github.com/s5labs/demo/commit/abcdef1234"));
+        let gitlab = json!({"provider": "gitlab", "canonicalKey": "gitlab.example.com/group/sub/repo", "locator": {"remoteUrl": "https://me:secret@gitlab.example.com:8443/group/sub/repo.git"}});
+        assert_eq!(commit_url(&gitlab, sha).as_deref(), Some("https://gitlab.example.com:8443/group/sub/repo/-/commit/abcdef1234"));
+        let web = json!({"provider": "bitbucket", "canonicalKey": "bitbucket.org/team/repo", "webUrl": "https://bitbucket.org/team/repo/", "locator": {"remoteUrl": ""}});
+        assert_eq!(commit_url(&web, sha).as_deref(), Some("https://bitbucket.org/team/repo/commits/abcdef1234"));
+        assert_eq!(commit_url(&json!({"canonicalKey": "github.com/a/b", "locator": {"remoteUrl": ""}}), sha), None, "no provider, no link");
+        assert_eq!(commit_url(&json!({"provider": "github", "canonicalKey": "github.com/a/b/c"}), sha), None);
+        assert_eq!(commit_url(&Value::Null, sha), None);
     }
 
     #[test]

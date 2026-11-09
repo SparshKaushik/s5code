@@ -195,6 +195,12 @@ impl Net {
         self.state.vcs.insert(cwd.to_owned(), json!({"local":null,"remote":null}));
         let _ = self.tx.send(Command::Watch(Route::Vcs(cwd.to_owned())));
     }
+    /// Resubscribes a status stream that ended in an error, keeping the error until a snapshot lands.
+    pub fn retry_vcs(&mut self, cwd: &str) {
+        if self.state.vcs.get(cwd).is_some_and(|v| v.get("error").is_some()) {
+            let _ = self.tx.send(Command::Watch(Route::Vcs(cwd.to_owned())));
+        }
+    }
     pub fn unwatch_vcs(&mut self, cwd: &str) {
         self.state.vcs.remove(cwd);
         let _ = self.tx.send(Command::Unwatch(Route::Vcs(cwd.to_owned())));
@@ -516,6 +522,13 @@ impl State {
                 for key in ["local", "remote"] {
                     if let Some(part) = item.get(key) {
                         value[key] = part.clone();
+                    }
+                }
+                if let Some(error) = item.get("error") {
+                    value["error"] = error.clone();
+                } else if !value["local"].is_null() {
+                    if let Some(map) = value.as_object_mut() {
+                        map.remove("error");
                     }
                 }
             }
