@@ -271,6 +271,16 @@ mod tests {
     }
 
     #[test]
+    fn pointer_menus_map_window_points_into_the_zoomed_app() {
+        let mut ui = Ui::default();
+        ui.set_zoom_level(1.0);
+        let (x, y) = from_window(1200.0, 240.0);
+        assert!((x - 1000.0).abs() < 1e-3 && (y - 200.0).abs() < 1e-3);
+        ui.set_zoom_level(0.0);
+        assert_eq!(from_window(1200.0, 240.0), (1200.0, 240.0));
+    }
+
+    #[test]
     fn restored_size_keeps_the_minimum_and_ignores_garbage() {
         assert_eq!(restore_size(None), DEFAULT_SIZE);
         assert_eq!(restore_size(Some([1200.0, 800.0])), (1200.0, 800.0));
