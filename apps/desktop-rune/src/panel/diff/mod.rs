@@ -89,6 +89,10 @@ pub struct Ui {
     folds: HashMap<String, bool>,
     /// Each thread and scope's fold choices, back when it shows again (`collapsedFileKeysByScopeKey`).
     remembered: HashMap<(String, Scope), HashMap<String, bool>>,
+    /// The panel's own wrap and whitespace toggles; until pressed they follow the settings,
+    /// which pressing leaves alone (web's DiffPanel seeds local state from them).
+    wrap: Option<bool>,
+    ignore_ws: Option<bool>,
     menu_open: bool,
     sub: Option<Sub>,
     commits: Option<Result<(Vec<Commit>, bool), String>>,
@@ -126,6 +130,8 @@ impl Default for Ui {
             touched: false,
             folds: HashMap::new(),
             remembered: HashMap::new(),
+            wrap: None,
+            ignore_ws: None,
             menu_open: false,
             sub: None,
             commits: None,
@@ -147,6 +153,14 @@ impl Default for Ui {
 
 fn setting(app: &App, key: &str, default: bool) -> bool {
     app.client_settings.values.get(key).and_then(Value::as_bool).unwrap_or(default)
+}
+
+fn wrap_on(app: &App) -> bool {
+    app.ui.panel.diff.wrap.unwrap_or_else(|| setting(app, "wordWrap", true))
+}
+
+fn ignore_ws(app: &App) -> bool {
+    app.ui.panel.diff.ignore_ws.unwrap_or_else(|| setting(app, "diffIgnoreWhitespace", true))
 }
 
 fn save_setting(app: &mut App, key: &str, value: Value) {
@@ -273,7 +287,7 @@ fn source_kind(scope: &Scope) -> &'static str {
 fn signature(app: &App, scope: &Scope) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     scope.hash(&mut h);
-    setting(app, "diffIgnoreWhitespace", true).hash(&mut h);
+    ignore_ws(app).hash(&mut h);
     app.ui.panel.diff.base_ref.hash(&mut h);
     match scope {
         Scope::Turn(_) => turn_of(scope, &turns(app)).hash(&mut h),
@@ -293,7 +307,7 @@ pub fn load(app: &mut App) {
     sync_settings(app);
     let Some((thread, cwd)) = super::context(app) else { return };
     let scope = app.ui.panel.diff.scope.clone();
-    let ignore_ws = setting(app, "diffIgnoreWhitespace", true);
+    let ignore_ws = ignore_ws(app);
     let request = match &scope {
         Scope::Turn(_) => turn_of(&scope, &turns(app)).map(|n| {
             ("orchestration.getTurnDiff", json!({ "threadId": thread, "fromTurnCount": n.saturating_sub(1), "toTurnCount": n, "ignoreWhitespace": ignore_ws }))
@@ -567,7 +581,7 @@ fn incomplete(files: &[FileDiff], meta: &[FileStat]) -> Vec<FileStat> {
 /// Asks for each file's own patch, as web's lazy per-file loads do (`input.file`).
 fn fetch_files(app: &mut App, scope: &Scope, files: Vec<FileStat>) {
     let Some((_, cwd)) = super::context(app) else { return };
-    let ignore_ws = setting(app, "diffIgnoreWhitespace", true);
+    let ignore_ws = ignore_ws(app);
     let base = app.ui.panel.diff.base_ref.clone();
     let mut ids = vec![];
     if let Some(net) = app.src.net() {
@@ -1007,14 +1021,14 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
         ));
     }
     right = right.child(layout_group(app, t));
-    let wrap = setting(app, "wordWrap", true);
+    let wrap = wrap_on(app);
     right = right.child(toggle(t, "panel-diff-wrap", if wrap { "Disable line wrapping" } else { "Enable line wrapping" }, &icons::TEXT_WRAP, wrap, move |s: &mut App| {
-        save_setting(s, "wordWrap", json!(!wrap));
+        s.ui.panel.diff.wrap = Some(!wrap);
         s.ui.panel.diff.state.set_wrap(!wrap);
     }));
-    let ignore = setting(app, "diffIgnoreWhitespace", true);
+    let ignore = ignore_ws(app);
     right = right.child(toggle(t, "panel-diff-whitespace", if ignore { "Show whitespace changes" } else { "Hide whitespace changes" }, &icons::PILCROW, ignore, move |s: &mut App| {
-        save_setting(s, "diffIgnoreWhitespace", json!(!ignore));
+        s.ui.panel.diff.ignore_ws = Some(!ignore);
         load(s);
     }));
     if ui.files.iter().any(|f| is_test_file(f.path())) {
@@ -1284,10 +1298,10 @@ pub fn fixture(app: &mut App) {
     apply(app);
 }
 
-/// The persisted layout and wrap settings, which other clients may change too.
+/// The persisted layout setting, which other clients may change too, and the wrap toggle.
 fn sync_settings(app: &mut App) {
     let split = app.client_settings.values.get("diffLayout").and_then(Value::as_str) == Some("split");
-    let wrap = setting(app, "wordWrap", true);
+    let wrap = wrap_on(app);
     let st = &mut app.ui.panel.diff.state;
     st.set_mode(if split { DiffMode::Split } else { DiffMode::Unified });
     st.set_wrap(wrap);
