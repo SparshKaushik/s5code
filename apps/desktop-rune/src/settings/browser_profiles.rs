@@ -4,12 +4,14 @@
 //!
 //! Profiles are client settings. Rune's browser keeps one Default profile in the T3 home
 //! (`userdata/browser/rune-default`), cleared from the preview menu, so the data cleared here is
-//! a server browser's (`preview.clearProfile`). Importing cookies reads another browser on this
-//! machine through the Electron preview bridge; Rune has no such bridge, so "Import from" lists
-//! no browsers.
+//! a server browser's (`preview.clearProfile`). "Import from" reads a Chromium browser on this
+//! machine (`panel::browser_import`) into that Default profile, the only one Rune's Chrome
+//! opens, so the wizard offers no "New profile" target.
 
-use rune::{El, col, row, text};
+use rune::{El, col, icon, row, text};
 use serde_json::{Value, json};
+
+use crate::panel::browser_import::{self as import, Profile, Source, Stage};
 
 use super::{controls, request, update, value as setting};
 use crate::kit::{self, Menu, MenuItem, Placement};
@@ -28,6 +30,48 @@ pub struct Ui {
     /// `(id, name)` awaiting the remove or clear confirmation.
     pub remove: Option<(String, String)>,
     pub clear: Option<(String, String)>,
+    pub import: Option<Import>,
+}
+
+/// Web's `BrowserImportWizard`, minus the steps only Safari needs.
+pub struct Import {
+    source: &'static Source,
+    profiles: Vec<Profile>,
+    from: String,
+    step: Step,
+}
+
+enum Step {
+    Configure,
+    Quit,
+    Blocked(&'static str),
+    Running(import::Job),
+}
+
+/// `initialWizardStep` for a freshly read source.
+fn wizard(source: &'static Source, from: Option<String>) -> Import {
+    let profiles = import::profiles(source);
+    let from = from.filter(|f| profiles.iter().any(|p| p.directory == *f)).or_else(|| profiles.first().map(|p| p.directory.clone())).unwrap_or_default();
+    let step = if import::running(source) {
+        Step::Quit
+    } else if profiles.is_empty() {
+        Step::Blocked("unknownSourceProfile")
+    } else {
+        Step::Configure
+    };
+    Import { source, profiles, from, step }
+}
+
+fn run_import(s: &mut App, scale: f32) {
+    let Some(w) = s.ui.settings.profiles.import.as_ref() else { return };
+    let (source, from) = (w.source, w.from.clone());
+    let step = match crate::panel::preview::import(s, scale, source, from) {
+        Some(job) => Step::Running(job),
+        None => Step::Blocked("sessionUnavailable"),
+    };
+    if let Some(w) = s.ui.settings.profiles.import.as_mut() {
+        w.step = step;
+    }
 }
 
 fn user_profiles(s: &App) -> Vec<Value> {
@@ -177,12 +221,19 @@ pub fn parts(s: &App, t: &T) -> (El, Option<El>) {
 }
 
 /// The open menu and any confirmation dialog.
-pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
+pub fn overlays(s: &App, t: &T, scale: f32, layers: &mut Vec<El>) {
     let k = kit::theme(t);
     match s.ui.settings.profiles.menu.as_deref() {
         Some("add") => {
             let full = user_profiles(s).len() >= MAX_COUNT;
-            let longest = if full { "You’ve reached the profile limit" } else { "No supported browsers found" };
+            let sources = import::installed();
+            let longest = if full {
+                "You’ve reached the profile limit"
+            } else if sources.is_empty() {
+                "No supported browsers found"
+            } else {
+                sources.iter().map(|s| s.name).max_by_key(|n| n.len()).unwrap_or_default()
+            };
             let mut menu = Menu::new("profiles-add-menu")
                 .anchor("profiles-add")
                 .width(fit(longest))
@@ -197,10 +248,17 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             if full {
                 menu = menu.item(MenuItem::new("You’ve reached the profile limit").disabled(true));
             }
-            menu.separator()
-                .group_label("Import from")
-                .item(MenuItem::new("No supported browsers found").disabled(true))
-                .overlay(&k, layers);
+            menu = menu.separator().group_label("Import from");
+            if sources.is_empty() {
+                menu = menu.item(MenuItem::new("No supported browsers found").disabled(true));
+            }
+            for source in sources {
+                menu = menu.item(MenuItem::new(source.name).on_select(move |s: &mut App| {
+                    s.ui.settings.profiles.import = Some(wizard(source, None));
+                    close_menu(s);
+                }));
+            }
+            menu.overlay(&k, layers);
         }
         Some(id) => {
             if let Some((id, name, built_in)) = listed(s).into_iter().find(|(i, _, _)| i == id) {
@@ -274,10 +332,181 @@ pub fn overlays(s: &App, t: &T, layers: &mut Vec<El>) {
             ))
             .build(t, layers);
     }
+    if let Some(w) = &s.ui.settings.profiles.import {
+        import_dialog(s, t, w, scale, layers);
+    }
+}
+
+fn cookie_count(n: usize) -> String {
+    format!("{} {}", thousands(n), if n == 1 { "cookie" } else { "cookies" })
+}
+
+fn thousands(n: usize) -> String {
+    let digits = n.to_string();
+    let mut out = String::new();
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i) % 3 == 0 {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
+fn close_import(s: &mut App) {
+    s.ui.settings.profiles.import = None;
+}
+
+/// Web's `SelectableTile`.
+fn tile(t: &T, key: String, selected: bool, title: &str, subtitle: Option<String>, on_select: impl Fn(&mut App) + Clone + 'static) -> El {
+    let mut tile = row()
+        .key(key)
+        .w_full()
+        .gap(12.0)
+        .px(12.0)
+        .py(8.0)
+        .center_y()
+        .radius(theme::radius::LG)
+        .border(1.0, if selected { t.c.primary } else { t.c.border.alpha_mul(0.6) })
+        .focusable(true)
+        .role("button")
+        .label(title.to_owned())
+        .on_press(on_select);
+    tile = if selected { tile.fill(t.c.primary.alpha_mul(0.08)) } else { tile.hover(t.c.muted.alpha_mul(0.4)) };
+    tile.child(
+        col()
+            .grow(1.0)
+            .min_w(0.0)
+            .child(text(title.to_owned()).font(theme::weight(theme::TEXT_SM, theme::MEDIUM)).color(t.c.foreground).truncate())
+            .children(subtitle.map(|sub| text(sub).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate())),
+    )
+    .child(
+        row()
+            .w(16.0)
+            .h(16.0)
+            .radius(8.0)
+            .center()
+            .border(1.0, if selected { t.c.primary } else { t.c.input })
+            .fill(if selected { t.c.primary } else { rune::Color::TRANSPARENT })
+            .children(selected.then(|| icon(&icons::CHECK, 10.0).color(t.c.primary_foreground))),
+    )
+}
+
+fn section(t: &T, label: &str, tiles: Vec<El>) -> El {
+    col()
+        .grow(1.0)
+        .min_w(0.0)
+        .gap(8.0)
+        .child(text(label.to_uppercase()).font(theme::weight(theme::TEXT_XS, theme::MEDIUM)).color(t.c.muted_foreground))
+        .children(tiles)
+}
+
+fn busy(t: &T, label: &str) -> El {
+    row()
+        .gap(12.0)
+        .py(8.0)
+        .center_y()
+        .child(kit::Spinner::new().size("md").tone("muted").build(&kit::theme(t)))
+        .child(text(label.to_owned()).font(theme::TEXT_SM).color(t.c.muted_foreground))
+}
+
+fn footer(buttons: Vec<El>) -> El {
+    row().w_full().gap(8.0).justify_end().children(buttons)
+}
+
+const ENVIRONMENT: &str = "This device";
+
+fn import_dialog(s: &App, t: &T, w: &Import, scale: f32, layers: &mut Vec<El>) {
+    let name = w.source.name;
+    let cancel = || kit::Button::new("Cancel").variant("outline").on_press(close_import).build(t);
+    let stage = match &w.step {
+        Step::Running(job) => Some(job.lock().unwrap().clone()),
+        _ => None,
+    };
+    let dialog = |title: String, description: String| kit::Dialog::new("browser-import", title).open(true).alert().description(description).on_close(close_import);
+    let blocked = |reason: &'static str| {
+        let mut buttons = vec![kit::Button::new("Close").variant("outline").on_press(close_import).build(t)];
+        if import::retryable(reason) {
+            buttons.push(kit::Button::new("Try again").on_press(move |s: &mut App| run_import(s, scale)).build(t));
+        }
+        dialog(format!("Couldn’t import from {name}"), import::failure_copy(reason).to_owned()).child(footer(buttons))
+    };
+    let quit = || {
+        let source = w.source;
+        let from = w.from.clone();
+        dialog(format!("Quit {name} to import"), format!("{name} is open, so its cookies can’t be read yet. Quit it, then continue.")).child(footer(vec![
+            cancel(),
+            kit::Button::new("I’ve quit it")
+                .on_press(move |s: &mut App| s.ui.settings.profiles.import = Some(wizard(source, Some(from.clone()))))
+                .build(t),
+        ]))
+    };
+    let built = match (&w.step, stage) {
+        (Step::Configure, _) => {
+            let from: Vec<El> = w
+                .profiles
+                .iter()
+                .map(|p| {
+                    let directory = p.directory.clone();
+                    let subtitle = p.cookies.map(|n| if n == 0 { "no cookies".to_owned() } else { cookie_count(n) });
+                    tile(t, format!("import-from-{}", p.directory), p.directory == w.from, &p.name, subtitle, move |s: &mut App| {
+                        if let Some(w) = s.ui.settings.profiles.import.as_mut() {
+                            w.from = directory.clone();
+                        }
+                    })
+                })
+                .collect();
+            let into = vec![tile(t, "import-into-default".into(), true, "Default", Some("Existing profile".into()), |_: &mut App| {})];
+            let body = row()
+                .w_full()
+                .gap(16.0)
+                .center_y()
+                .child(section(t, "From", from))
+                .child(icon(&icons::ARROW_RIGHT, 16.0).color(t.c.muted_foreground))
+                .child(section(t, "Into", into));
+            dialog(format!("Import from {name}"), format!("Choose which cookies to import for {ENVIRONMENT}.")).child(body).child(footer(vec![
+                cancel(),
+                kit::Button::new("Import").disabled(w.from.is_empty()).on_press(move |s: &mut App| run_import(s, scale)).build(t),
+            ]))
+        }
+        (Step::Quit, _) | (_, Some(Stage::Failed("browserRunning"))) => quit(),
+        (Step::Blocked(reason), _) => blocked(*reason),
+        (_, Some(Stage::Failed(reason))) => blocked(reason),
+        (_, Some(Stage::Writing { .. })) if crate::panel::preview::browser_failed(s) => blocked("sessionUnavailable"),
+        (_, Some(Stage::Done { imported, skipped, domains })) => {
+            let title = if imported > 0 {
+                format!("Imported {}", cookie_count(imported))
+            } else if skipped > 0 {
+                format!("Skipped {}", cookie_count(skipped))
+            } else {
+                "No cookies found".to_owned()
+            };
+            let description = if imported > 0 {
+                let tail = if skipped > 0 { format!(" {} skipped.", cookie_count(skipped)) } else { String::new() };
+                format!("Added to Default for {ENVIRONMENT}.{tail}")
+            } else if skipped > 0 {
+                format!("No cookies were imported for {ENVIRONMENT}.")
+            } else {
+                format!("There were no cookies to import for {ENVIRONMENT}.")
+            };
+            let mut d = dialog(title, description);
+            if !domains.is_empty() {
+                d = d.child(
+                    col()
+                        .gap(4.0)
+                        .child(text("SKIPPED").font(theme::weight(theme::TEXT_XS, theme::MEDIUM)).color(t.c.muted_foreground))
+                        .child(text(import::skipped_domains(&domains)).font(theme::TEXT_SM).color(t.c.foreground).wrap()),
+                );
+            }
+            d.child(footer(vec![kit::Button::new("Done").on_press(close_import).build(t)]))
+        }
+        _ => dialog("Importing cookies".into(), "This may take a moment.".into()).child(busy(t, "Importing…")),
+    };
+    built.build(t, layers);
 }
 
 /// Escape closes the innermost profile overlay first.
 pub fn escape(s: &mut App) -> bool {
     let p = &mut s.ui.settings.profiles;
-    p.menu.take().is_some() || p.remove.take().is_some() || p.clear.take().is_some()
+    p.menu.take().is_some() || p.remove.take().is_some() || p.clear.take().is_some() || p.import.take().is_some()
 }

@@ -149,6 +149,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);
     changed |= pages::poll(s);
+    changed |= shell::quit::poll(s);
     changed |= chat::details::poll(s);
     changed |= notify::poll(s, tx);
     changed |= onboarding::poll(s, tx);
@@ -165,7 +166,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    desktop::on_quit_key(s, e, tx)
+    shell::quit::on_key(s, e, tx)
         || search::on_key(s, e, tx)
         || settings::on_key(s, e, tx)
         || pages::on_key(s, e, tx)
@@ -185,7 +186,7 @@ pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t: T = settings::apply_theme(s, theme::theme(is_dark(s, cx)));
     let app = shell::view(s, cx, &t);
-    desktop::frame(s, cx, &t, app)
+    desktop::frame(s, cx, app)
 }
 
 /// Every module's scenes, gathered once.

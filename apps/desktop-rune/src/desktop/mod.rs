@@ -1,21 +1,19 @@
 //! What the Electron main process gives the app (apps/desktop/src) beyond the web UI: the
-//! application menu and its accelerators, app zoom, reload, the quit hold, window chrome,
-//! size and state, and the single-instance lock.
+//! application menu and its accelerators, app zoom, reload, window chrome, size and state,
+//! and the single-instance lock. The quit hold is `shell::quit`.
 //!
 //! Rune's native menus exist only on macOS. Electron hides the menu bar elsewhere, so there
 //! only the accelerators matter: `on_key` runs them last, after every surface had the key.
 
 #[cfg(target_os = "macos")]
 mod macos;
-pub mod quit;
 pub mod single;
 
 use std::cell::Cell;
 
-use rune::{App as RuneApp, Color, Cx, El, Key, KeyEvent, Tx, el, row, text};
+use rune::{App as RuneApp, Cx, El, Key, KeyEvent, Tx, el};
 
 use crate::data::{self, Source};
-use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route};
 
 #[cfg(target_os = "macos")]
@@ -38,7 +36,6 @@ const SAVE_DEBOUNCE_MS: i64 = 500;
 pub struct Ui {
     /// The bundled server's URL and token, kept for Reload.
     pub server: Option<(String, String)>,
-    pub quit: quit::QuitHold,
     zoom_level: f32,
     /// The window's size as the last view laid it out, for saving.
     window: Cell<Option<[f32; 2]>>,
@@ -154,26 +151,6 @@ fn zoom(s: &mut App, tx: &mut Tx, step: Option<f32>) {
     let _ = prefs().set("zoomLevel", &level);
 }
 
-/// Cmd/Ctrl+Q first, before any surface: the quit hold sees every press and repeat.
-pub fn on_quit_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    let now = data::now_ms();
-    let quit_key = e.is_command('q') && !e.mods.shift && !e.mods.alt && !(cfg!(target_os = "macos") && e.mods.ctrl);
-    if !quit_key {
-        if !tx.key_repeat() && !matches!(e.key, Key::Modifier { .. }) {
-            s.ui.desktop.quit.other_key(now);
-        }
-        return false;
-    }
-    let mode = quit::Mode::from_setting(s.client_settings.values.get("confirmQuit").and_then(|v| v.as_str()));
-    if s.ui.desktop.quit.press(mode, tx.key_repeat(), now) {
-        tx.quit();
-    }
-    if let Some(at) = s.ui.desktop.quit.deadline() {
-        tx.wake_after(std::time::Duration::from_millis((at - now).max(0) as u64));
-    }
-    true
-}
-
 /// The menu's accelerators, after every surface had the key (the preview panel takes its own
 /// reload and zoom first). Cmd/Ctrl+W nothing took is swallowed: it never closes the window.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
@@ -204,14 +181,6 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         ui.zoom_level = if level.is_finite() { level.clamp(ZOOM_LEVELS.0, ZOOM_LEVELS.1) } else { 0.0 };
         ui.saved_size = prefs.get("windowSize");
         changed = ui.zoom_level != 0.0;
-    }
-    let hint = ui.quit.hint();
-    if ui.quit.tick(now) {
-        tx.quit();
-    }
-    changed |= hint != ui.quit.hint();
-    if let Some(at) = ui.quit.deadline() {
-        tx.wake_after(std::time::Duration::from_millis((at - now).max(0) as u64));
     }
     // macOS saves the frame itself (macos::autosave_frame).
     if !cfg!(target_os = "macos") && !rune::is_headless() {
@@ -244,39 +213,18 @@ fn save_size(ui: &mut Ui, now: i64, tx: &mut Tx) {
     }
 }
 
-/// The window's content: the app at its zoom, with the quit hint over it. Zoom draws the app
+/// The window's content: the app at its zoom. Zoom draws the app
 /// `k` times larger over a window `1/k` the size, as Chromium's zoom factor lays a page out.
-pub fn frame(s: &App, cx: &mut Cx<App>, t: &T, app: El) -> El {
+pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
     let size = cx.layout_size(FRAME);
     s.ui.desktop.window.set(size);
     let k = s.ui.desktop.zoom_factor();
-    let [w, h] = size.unwrap_or([DEFAULT_SIZE.0, DEFAULT_SIZE.1]);
-    let mut app = app;
-    if let Some(mode) = s.ui.desktop.quit.hint() {
-        app = app.child(quit_hint(mode, t, h / k));
-    }
-    if size.is_some() && (k - 1.0).abs() > 1e-3 {
+    if let Some([w, h]) = size
+        && (k - 1.0).abs() > 1e-3
+    {
         app = app.absolute(0.0, 0.0).size(w / k, h / k).scale(k).origin(0.0, 0.0);
     }
     el().key(FRAME).w_full().h_full().child(app)
-}
-
-/// QuitHoldOverlay: a pill centred 22% down the window.
-fn quit_hint(mode: quit::Mode, t: &T, height: f32) -> El {
-    let shortcut = if cfg!(target_os = "macos") { "⌘Q" } else { "Ctrl+Q" };
-    let message = match mode {
-        quit::Mode::Hold => format!("Hold {shortcut} or press twice to quit"),
-        _ => format!("Press {shortcut} again to quit"),
-    };
-    let pill = el()
-        .px(32.0)
-        .py(16.0)
-        .radius(theme::radius::FULL)
-        .fill(t.c.foreground.alpha_mul(0.95))
-        .shadow(20.0, 25.0, Color::BLACK.alpha_mul(0.1))
-        .shadow(8.0, 10.0, Color::BLACK.alpha_mul(0.1))
-        .child(text(message.clone()).font(theme::weight(theme::TEXT_2XL, 700.0)).color(t.c.background));
-    row().key("quit-hint").role("status").label(message).pin(Some(0.0), Some(height * 0.22), Some(0.0), None).center().child(pill)
 }
 
 #[cfg(test)]
