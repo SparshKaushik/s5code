@@ -6,6 +6,7 @@
 
 mod chat;
 mod data;
+mod desktop;
 mod env;
 mod host;
 mod icons;
@@ -63,6 +64,7 @@ pub struct Ui {
     pub notify: notify::Ui,
     pub search: search::Ui,
     pub onboarding: onboarding::Ui,
+    pub desktop: desktop::Ui,
     pub env: env::Ui,
     pub links: links::Ui,
     pub wizard: wizard::Ui,
@@ -131,6 +133,7 @@ fn poll_host(s: &mut App) -> bool {
     match event {
         host::Event::Ready { url, token } => {
             let waker = s.ui.panel.waker.clone().expect("setup stores the waker");
+            s.ui.desktop.server = Some((url.clone(), token.clone()));
             *env::local_mut(s) = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
             if s.ui.env.active == env::LOCAL {
                 s.navigate(s.route.clone());
@@ -165,6 +168,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     changed |= links::poll(s);
     changed |= wizard::poll(s);
     changed |= search::poll(s);
+    changed |= desktop::poll(s, tx);
     chat::details::watch(s);
     let now = data::now_ms();
     if matches!(s.src, Source::Live(_)) && now / 1000 != s.now_ms / 1000 {
@@ -182,6 +186,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         || pages::on_key(s, e, tx)
         || shell::on_key(s, e, tx)
         || chat::on_key(s, e, tx)
+        || desktop::on_key(s, e, tx)
 }
 
 pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
@@ -194,7 +199,8 @@ pub fn is_dark(s: &App, cx: &Cx<App>) -> bool {
 
 fn view(s: &App, cx: &mut Cx<App>) -> El {
     let t: T = settings::apply_theme(s, theme::theme(is_dark(s, cx)));
-    shell::view(s, cx, &t)
+    let app = shell::view(s, cx, &t);
+    desktop::frame(s, cx, app)
 }
 
 /// Every module's scenes, gathered once.
@@ -215,20 +221,24 @@ fn main() {
     if std::env::args().any(|a| a == "--check-server") {
         std::process::exit(host::check());
     }
+    // A second launch focuses the running window and exits.
+    let Some(instance) = desktop::single::claim() else { return };
     let (fonts, families) = settings::fonts::launch();
     let spec = AppSpec {
-        min_size: Some((640.0, 480.0)),
+        min_size: Some(desktop::MIN_SIZE),
         fonts,
         families,
         setup: Some(setup),
         poll: Some(poll),
         on_key: Some(on_key),
         scenes: scenes(),
-        ..AppSpec::new("S5 Code", (1440.0, 900.0), App::new, view)
+        ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
-    let app = RuneApp::new(spec).on_open_url(links::on_open_url);
+    let app = desktop::configure(RuneApp::new(spec)).on_open_url(links::on_open_url);
     notify::set_window(app.handle());
+    instance.serve(app.handle());
     app.run();
     panel::browser::shutdown();
     host::shutdown();
+    drop(instance);
 }
