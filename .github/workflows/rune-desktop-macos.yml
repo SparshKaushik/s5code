@@ -86,9 +86,17 @@ jobs:
             <key>CFBundleVersion</key><string>${{ github.run_number }}</string>
             <key>LSMinimumSystemVersion</key><string>12.0</string>
             <key>NSHighResolutionCapable</key><true/>
+            <key>CFBundleURLTypes</key>
+            <array>
+              <dict>
+                <key>CFBundleURLName</key><string>S5 Code prompt link</string>
+                <key>CFBundleURLSchemes</key><array><string>s5code</string></array>
+              </dict>
+            </array>
           </dict>
           </plist>
           PLIST
+          plutil -lint "$app/Contents/Info.plist"
           codesign --force --sign - "$app/Contents/MacOS/s5code-server"
           codesign --force --deep --sign - "$app"
           codesign --verify --verbose "$app"
