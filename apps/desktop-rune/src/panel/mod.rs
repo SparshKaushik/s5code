@@ -218,6 +218,17 @@ fn switch_thread(app: &mut App) -> bool {
     true
 }
 
+/// A thread launched from the new-thread draft keeps the panel the draft had, as web's draft id
+/// becomes the thread id.
+pub fn adopt(app: &mut App, thread: &str) {
+    let panel = &mut app.ui.panel;
+    if panel.stash_key.is_empty() {
+        panel.stash_key = thread.to_owned();
+    } else if let Some(draft) = panel.stash.remove("") {
+        panel.stash.insert(thread.to_owned(), draft);
+    }
+}
+
 /// The turn's diff, opened and scrolled to `path` once it loads (a changed-files row).
 pub fn open_diff_at(app: &mut App, checkpoint: Value, path: &str) {
     open_diff(app, checkpoint);
@@ -745,6 +756,14 @@ mod tests {
         assert!(app.ui.panel.active == Some(Surface::Browser(1)) && app.ui.shell.panel_open);
         assert_eq!(app.ui.panel.browser.pip, Some(1));
         assert!(!switch_thread(&mut app));
+
+        app.navigate(Route::Home { project_id: None });
+        assert!(switch_thread(&mut app));
+        app.ui.panel.surfaces = vec![Surface::Browser(2)];
+        adopt(&mut app, "thread:launched");
+        app.navigate(Route::Thread("thread:launched".into()));
+        assert!(!switch_thread(&mut app));
+        assert!(app.ui.panel.surfaces == vec![Surface::Browser(2)]);
     }
 
     #[test]
