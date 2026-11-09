@@ -121,7 +121,7 @@ pub fn shown(s: &App, w: f32, h: f32) -> Shown {
     if composer::ctx(s).project.is_none() {
         return Shown::None;
     }
-    let key = composer::draft_key(s.frame_route());
+    let key = composer::draft_key(s, s.frame_route());
     match lane(w, h, false).card {
         true if !s.ui.chat.details.closed.contains(&key) => Shown::Inline,
         false if s.ui.chat.details.popover.as_ref() == Some(&key) => Shown::Popover,
@@ -131,7 +131,7 @@ pub fn shown(s: &App, w: f32, h: f32) -> Shown {
 
 /// The topbar toggle: flips the inline card for this thread, or its popover when it can't fit.
 pub fn toggle(s: &mut App, fits: bool) {
-    let key = composer::draft_key(s.frame_route());
+    let key = composer::draft_key(s, s.frame_route());
     let d = &mut s.ui.chat.details;
     d.menu = None;
     if fits {
@@ -314,13 +314,13 @@ fn draft_run(s: &App) -> Option<DraftRun> {
     if composer::ctx(s).thread.is_some() {
         return None;
     }
-    let key = composer::draft_key(s.frame_route());
+    let key = composer::draft_key(s, s.frame_route());
     Some(s.ui.chat.details.drafts.get(&key).cloned().unwrap_or_else(|| draft_default(s)))
 }
 
 fn draft_run_mut(s: &mut App) -> &mut DraftRun {
     let fallback = draft_default(s);
-    let key = composer::draft_key(s.frame_route());
+    let key = composer::draft_key(s, s.frame_route());
     s.ui.chat.details.drafts.entry(key).or_insert(fallback)
 }
 
@@ -338,7 +338,7 @@ fn worktree_base(s: &App, run: &DraftRun) -> Option<String> {
 /// `workspaceStrategy`, or `None` to run in the checkout.
 pub fn take_draft_workspace(s: &mut App) -> Option<Value> {
     let run = draft_run(s)?;
-    let key = composer::draft_key(s.frame_route());
+    let key = composer::draft_key(s, s.frame_route());
     s.ui.chat.details.drafts.remove(&key);
     if !run.worktree {
         return None;
