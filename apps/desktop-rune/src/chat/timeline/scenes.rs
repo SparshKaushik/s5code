@@ -75,6 +75,21 @@ fn error(app: &mut App) {
         }
     }
 }
+fn chip_details(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    let records = crate::chat::composer::chips::samples();
+    let link = |r: &serde_json::Value| format!("[{}](t3-context://v1/{}/{})", crate::data::s(r, "label"), crate::data::s(r, "kind"), crate::data::s(r, "contextId"));
+    let text = format!("Why does {} fail? See {}", link(&records[0]), link(&records[2]));
+    let open = crate::data::s(&records[0], "contextId").to_owned();
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["visibleTurnItems"].as_array_mut())
+    {
+        items.push(serde_json::json!({"position": 100, "item": {"id": "scene-chips", "type": "user_message", "text": text,
+            "createdAt": "2026-01-01T00:00:00Z", "attachments": [], "context": {"records": records}}}));
+    }
+    app.ui.chat.timeline.chip = Some(("scene-chips".into(), open));
+}
 fn light(app: &mut App) {
     showcase(app);
     app.appearance = Appearance::Light;
@@ -92,4 +107,5 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-opencode-docs", docs),
     ("timeline-expanded", expanded),
     ("timeline-light", light),
+    ("timeline-chip-details", chip_details),
 ];
