@@ -303,7 +303,8 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
                             .placeholder("Type a reply and press Enter")
                             .on_edit(|s: &mut App| &mut s.ui.settings.auth.terminal_input)
                             .on_submit(move |s: &mut App, _| {
-                                let line = std::mem::take(&mut s.ui.settings.auth.terminal_input).text;
+                                let line = s.ui.settings.auth.terminal_input.text.clone();
+                                s.ui.settings.auth.terminal_input.clear();
                                 respond(s, &send_id, &send_state, json!({"type": "terminal", "data": format!("{line}\r")}));
                             })
                             .build(t)
