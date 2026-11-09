@@ -131,7 +131,7 @@ impl App {
 fn setup(s: &mut App, waker: Waker) {
     s.ui.panel.waker = Some(waker.clone());
     env::start(s);
-    links::start(s);
+    prompt_link::start(s);
     s.host = host::start(move || waker());
 }
 

@@ -209,7 +209,7 @@ pub fn remote_label(s: &App, row: &Value) -> Option<String> {
 }
 
 /// The client to send a command about `id` through; an id no environment lists goes to `App::src`.
-pub fn net_for(s: &mut App, id: &str) -> Option<&mut s5_net::Net> {
+pub fn net_for<'a>(s: &'a mut App, id: &str) -> Option<&'a mut s5_net::Net> {
     let key = owner(s, id);
     if key == s.ui.env.active {
         return s.src.net();
