@@ -12,19 +12,22 @@ pub mod single;
 
 use std::cell::Cell;
 
-use rune::{App as RuneApp, Color, Cx, El, Key, KeyEvent, MenuItem, Shortcut, Tx, el, row, text};
+use rune::{App as RuneApp, Color, Cx, El, Key, KeyEvent, Tx, el, row, text};
 
 use crate::data::{self, Source};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route};
 
+#[cfg(target_os = "macos")]
 pub const APP_NAME: &str = "S5 Code";
 /// Electron's `minWidth`/`minHeight`.
 pub const MIN_SIZE: (f32, f32) = (840.0, 620.0);
 const DEFAULT_SIZE: (f32, f32) = (1440.0, 900.0);
 const MAX_SIZE: f32 = 8192.0;
 const FRAME: &str = "app-frame";
+#[cfg(target_os = "macos")]
 const SETTINGS_TITLE: &str = "Settings…";
+#[cfg(target_os = "macos")]
 const QUIT_TITLE: &str = "Quit S5 Code";
 /// Chromium's zoom: each step is half a level, a level is a factor of 1.2.
 const ZOOM_STEP: f32 = 0.5;
@@ -76,22 +79,10 @@ fn restore_size(saved: Option<[f32; 2]>) -> (f32, f32) {
 
 /// The app's menu, chrome and window behaviour.
 pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
-    let key = |s: &str| s.parse::<Shortcut>().expect("valid accelerator");
-    let app = app
-        // Electron's `trafficLightPosition` under its 52 pt topbar; the titlebar band drags.
-        .chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 19.0)), drag_regions: false })
-        .standard_menus()
-        .menu_item(MenuItem::new(SETTINGS_TITLE, |s: &mut App, _: &mut Tx| open_settings(s)).id("settings").key_equivalent(key("cmd+,")).keys_first())
-        .menu_item(MenuItem::new(QUIT_TITLE, |_: &mut App, tx: &mut Tx| tx.quit()).id("quit").key_equivalent(key("cmd+q")).keys_first())
-        .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
-        .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
-        .menu_item(MenuItem::new("Force Reload", |s: &mut App, _: &mut Tx| reload(s, true)).id("force-reload").menu("View").key_equivalent(key("cmd+shift+r")).keys_first())
-        .menu_item(MenuItem::separator().menu("View"))
-        .menu_item(MenuItem::new("Actual Size", |s: &mut App, tx: &mut Tx| zoom(s, tx, None)).id("zoom-reset").menu("View").key_equivalent(key("cmd+0")).keys_first())
-        .menu_item(MenuItem::new("Zoom In", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(ZOOM_STEP))).id("zoom-in").menu("View").key_equivalent(key("cmd+=")).keys_first())
-        .menu_item(MenuItem::new("Zoom Out", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(-ZOOM_STEP))).id("zoom-out").menu("View").key_equivalent(key("cmd+-")).keys_first());
+    // Electron's `trafficLightPosition` under its 52 pt topbar; the titlebar band drags.
+    let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 19.0)), drag_regions: false });
     #[cfg(target_os = "macos")]
-    let app = app
+    let app = mac_menu(app)
         // As Electron on macOS: closing the window keeps the app; the Dock icon reopens it.
         .keep_running()
         .on_window(|window| {
@@ -102,6 +93,23 @@ pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
             macos::autosave_frame(window);
         });
     app
+}
+
+/// DesktopApplicationMenu.ts's items Rune can make; `macos::fix_menus` does the rest.
+#[cfg(target_os = "macos")]
+fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
+    use rune::{MenuItem, Shortcut};
+    let key = |s: &str| s.parse::<Shortcut>().expect("valid accelerator");
+    app.standard_menus()
+        .menu_item(MenuItem::new(SETTINGS_TITLE, |s: &mut App, _: &mut Tx| open_settings(s)).id("settings").key_equivalent(key("cmd+,")).keys_first())
+        .menu_item(MenuItem::new(QUIT_TITLE, |_: &mut App, tx: &mut Tx| tx.quit()).id("quit").key_equivalent(key("cmd+q")).keys_first())
+        .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
+        .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
+        .menu_item(MenuItem::new("Force Reload", |s: &mut App, _: &mut Tx| reload(s, true)).id("force-reload").menu("View").key_equivalent(key("cmd+shift+r")).keys_first())
+        .menu_item(MenuItem::separator().menu("View"))
+        .menu_item(MenuItem::new("Actual Size", |s: &mut App, tx: &mut Tx| zoom(s, tx, None)).id("zoom-reset").menu("View").key_equivalent(key("cmd+0")).keys_first())
+        .menu_item(MenuItem::new("Zoom In", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(ZOOM_STEP))).id("zoom-in").menu("View").key_equivalent(key("cmd+=")).keys_first())
+        .menu_item(MenuItem::new("Zoom Out", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(-ZOOM_STEP))).id("zoom-out").menu("View").key_equivalent(key("cmd+-")).keys_first())
 }
 
 fn open_settings(s: &mut App) {
