@@ -15,6 +15,14 @@ const STAGES: [&str; 3] = ["Connect", "Agents", "Projects"];
 /// `PRIMARY_AGENT_DRIVERS`.
 const AGENTS: [(&str, &str); 2] = [("codex", "Codex"), ("claudeAgent", "Claude Code")];
 const PRIVACY_POLICY_URL: &str = "https://t3.codes/privacy";
+/// `RECENT_PROJECT_WINDOW_MS` and `DEFAULT_SELECTION_MIN_THREADS` (onboarding/projectImport.logic.ts).
+const RECENT_WINDOW_MS: i64 = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_SELECTION_MIN_THREADS: u64 = 3;
+/// `AgentSessionSource.literals`, each with its `IMPORT_SOURCE_NAMES` label.
+const SOURCES: [(&str, &str); 3] = [("claudeAgent", "Claude Code"), ("codex", "Codex"), ("pi", "Pi")];
+const SCAN_LIMIT_MESSAGE: &str = "Scan limit reached. Some projects or conversations may be missing.";
+/// The "Other folders" section's key in `Ui::toggled`.
+const OTHER: &str = "other";
 
 #[derive(Default, Clone, Copy, PartialEq, Debug)]
 enum Step {
@@ -36,6 +44,8 @@ pub struct Ui {
     scan_error: Option<String>,
     /// Candidate paths to import.
     selected: HashSet<String>,
+    /// Import sections opened or closed away from their default (groups open, other folders closed).
+    toggled: HashSet<String>,
     import: Option<Import>,
 }
 
@@ -135,7 +145,8 @@ pub fn poll(s: &mut App) -> bool {
         match reply {
             Ok(v) => {
                 let candidates = v["candidates"].as_array().cloned().unwrap_or_default();
-                ui.selected = candidates.iter().filter(|c| c["alreadyImported"] != true).map(|c| data::s(c, "path").to_owned()).collect();
+                let now = data::now_ms();
+                ui.selected = candidates.iter().filter(|c| recent(c, now)).map(|c| data::s(c, "path").to_owned()).collect();
                 ui.truncated = v["truncated"] == true;
                 ui.candidates = Some(candidates);
             }
@@ -243,9 +254,222 @@ fn close(s: &mut App) {
 fn go(s: &mut App, step: Step) {
     s.ui.wizard.step = step;
     if step == Step::Projects && s.ui.wizard.candidates.is_none() && s.ui.wizard.scan.is_none() {
-        s.ui.wizard.scan_error = None;
-        s.ui.wizard.scan = s.src.net().map(|n| n.request("agentSessions.scan", json!({})));
+        scan(s);
     }
+}
+
+fn scan(s: &mut App) {
+    s.ui.wizard.scan_error = None;
+    s.ui.wizard.scan = s.src.net().map(|n| n.request("agentSessions.scan", json!({})));
+}
+
+/// `partitionOnboardingProjects`' `recent`, which starts selected: a git repository with a few
+/// threads, active in the last month. A server predating git scans sends no `git` at all.
+fn recent(c: &Value, now: i64) -> bool {
+    !c.get("git").is_some_and(Value::is_null)
+        && c["threadCount"].as_u64().unwrap_or(0) >= DEFAULT_SELECTION_MIN_THREADS
+        && data::ts(c, "lastActiveAt").is_some_and(|at| at >= now - RECENT_WINDOW_MS && at <= now)
+}
+
+#[derive(Debug, PartialEq)]
+struct Group {
+    key: String,
+    label: String,
+    /// Indexes into the candidates.
+    members: Vec<usize>,
+    threads: u64,
+    last_active: Option<i64>,
+}
+
+/// `groupOnboardingProjects`: candidates by repository, most recently active first, and the
+/// folders outside git.
+fn groups(candidates: &[Value]) -> (Vec<Group>, Vec<usize>) {
+    let mut groups: Vec<Group> = vec![];
+    let mut other = vec![];
+    for (i, c) in candidates.iter().enumerate() {
+        let git = c.get("git");
+        if git.is_some_and(Value::is_null) {
+            other.push(i);
+            continue;
+        }
+        let key = match git.and_then(|g| g["remoteKey"].as_str()) {
+            Some(remote) => format!("remote:{remote}"),
+            None => format!("path:{}", data::s(c, "path")),
+        };
+        let (threads, active) = (c["threadCount"].as_u64().unwrap_or(0), data::ts(c, "lastActiveAt"));
+        match groups.iter_mut().find(|g| g.key == key) {
+            Some(g) => {
+                g.members.push(i);
+                g.threads += threads;
+                g.last_active = g.last_active.max(active);
+            }
+            None => groups.push(Group {
+                key,
+                label: git.and_then(|g| g["repository"].as_str()).unwrap_or(data::s(c, "title")).to_owned(),
+                members: vec![i],
+                threads,
+                last_active: active,
+            }),
+        }
+    }
+    groups.sort_by(|a, b| match (a.last_active, b.last_active) {
+        (x, y) if x == y => a.label.cmp(&b.label),
+        (None, _) => std::cmp::Ordering::Greater,
+        (_, None) => std::cmp::Ordering::Less,
+        (Some(x), Some(y)) => y.cmp(&x),
+    });
+    (groups, other)
+}
+
+/// `splitOnboardingProjectPath`: the folder name and the path before it.
+fn split_path(path: &str) -> (&str, &str) {
+    let trimmed = path.trim_end_matches(['/', '\\']);
+    if trimmed.is_empty() {
+        return ("", path);
+    }
+    match trimmed.rfind(['/', '\\']) {
+        Some(i) => (&trimmed[..=i], &trimmed[i + 1..]),
+        None => ("", trimmed),
+    }
+}
+
+fn set_selected(s: &mut App, paths: &[String], on: bool) {
+    if s.ui.wizard.import.is_some() {
+        return;
+    }
+    for path in paths {
+        if on {
+            s.ui.wizard.selected.insert(path.clone());
+        } else {
+            s.ui.wizard.selected.remove(path);
+        }
+    }
+}
+
+fn toggle_section(s: &mut App, key: &str) {
+    if !s.ui.wizard.toggled.remove(key) {
+        s.ui.wizard.toggled.insert(key.to_owned());
+    }
+}
+
+/// `ImportRowMeta`: which agents left history, how many threads, and how long ago.
+fn row_meta(sources: Option<&Value>, threads: u64, last_active: Option<i64>, t: &T) -> El {
+    let muted = t.c.muted_foreground;
+    let mut out = row().gap(4.).center_y();
+    for (source, name) in SOURCES {
+        let has = sources.and_then(Value::as_array).is_some_and(|list| list.iter().any(|v| v == source));
+        out = out.child(row().size(16., 16.).center().children(has.then(|| crate::chat::composer::provider_icon(t, source, 12.).label(name))));
+    }
+    let age = last_active.map(|at| crate::shell::sidebar::logic::relative_label(at, data::now_ms())).unwrap_or_default();
+    out.child(row().w(40.).justify_end().child(text(threads.to_string()).font(theme::TEXT_XS).color(muted)))
+        .child(row().w(36.).justify_end().child(text(age).font(theme::TEXT_XS).color(muted)))
+}
+
+/// `ImportCandidateRow`: a top-level row names its repository; a nested one shows only its path.
+fn candidate_row(c: &Value, label: Option<&str>, nested: bool, ui: &Ui, t: &T) -> El {
+    let path = data::s(c, "path").to_owned();
+    let (parent, name) = split_path(&path);
+    let (font, ink) = if label.is_some() { (theme::mono(theme::TEXT_2XS), t.c.muted_foreground) } else { (theme::mono(theme::TEXT_XS), t.c.foreground) };
+    let mut info = row().grow(1.).shrink().min_w(0.).gap(8.).center_y().help(path.clone());
+    if let Some(label) = label {
+        info = info.child(text(label.to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.));
+    }
+    info = info.child(row().shrink().min_w(0.).child(text(parent.to_owned()).font(font).color(ink).truncate().shrink().min_w(0.)).child(text(name.to_owned()).font(font).color(ink).truncate()));
+    let checked = ui.selected.contains(&path);
+    let toggle = path.clone();
+    row()
+        .w_full()
+        .gap(10.)
+        .pr(8.)
+        .pl(if nested { 32. } else { 8. })
+        .py(6.)
+        .radius(6.)
+        .center_y()
+        .hover(t.c.muted.alpha_mul(0.4))
+        .child(kit::Checkbox::new(checked).hide_label().label(label.unwrap_or(&path)).disabled(ui.import.is_some()).build(&kit::theme(t)))
+        .child(info)
+        .child(row_meta((!nested).then(|| &c["sources"]), c["threadCount"].as_u64().unwrap_or(0), data::ts(c, "lastActiveAt"), t))
+        .on_press(move |s: &mut App| set_selected(s, std::slice::from_ref(&toggle), !checked))
+}
+
+/// A collapsible section's header: its checkbox selects every member, the rest opens or closes it.
+fn section_header(key: &str, open: bool, paths: Vec<String>, ui: &Ui, title: El, meta: El, t: &T) -> El {
+    let chosen = paths.iter().filter(|p| ui.selected.contains(*p)).count();
+    let all = chosen == paths.len();
+    let key = key.to_owned();
+    row()
+        .w_full()
+        .gap(10.)
+        .px(8.)
+        .py(6.)
+        .radius(6.)
+        .center_y()
+        .hover(t.c.muted.alpha_mul(0.4))
+        .child(
+            kit::Checkbox::new(all)
+                .indeterminate(chosen > 0 && !all)
+                .hide_label()
+                .label("Select section")
+                .disabled(ui.import.is_some())
+                .on_toggle(move |s: &mut App| set_selected(s, &paths, !all))
+                .build(&kit::theme(t)),
+        )
+        .child(
+            row()
+                .grow(1.)
+                .shrink()
+                .min_w(0.)
+                .gap(6.)
+                .center_y()
+                .role("button")
+                .cursor(rune::Cursor::Pointer)
+                .child(icon(if open { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 14.).color(t.c.muted_foreground))
+                .child(title.shrink().min_w(0.))
+                .child(rune::el().grow(1.))
+                .child(meta)
+                .on_press(move |s: &mut App| toggle_section(s, &key)),
+        )
+}
+
+/// `ImportCandidateList`.
+fn import_list(candidates: &[Value], ui: &Ui, t: &T) -> El {
+    let (repositories, other) = groups(candidates);
+    let paths = |members: &[usize]| members.iter().map(|&i| data::s(&candidates[i], "path").to_owned()).collect::<Vec<_>>();
+    let mut list = col().w_full().gap(2.);
+    for group in &repositories {
+        if let [only] = group.members[..] {
+            list = list.child(candidate_row(&candidates[only], Some(&group.label), false, ui, t));
+            continue;
+        }
+        let open = !ui.toggled.contains(&group.key);
+        let mut sources: Vec<Value> = vec![];
+        for &i in &group.members {
+            for source in candidates[i]["sources"].as_array().into_iter().flatten() {
+                if !sources.contains(source) {
+                    sources.push(source.clone());
+                }
+            }
+        }
+        let title = text(group.label.clone()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate();
+        list = list.child(section_header(&group.key, open, paths(&group.members), ui, title, row_meta(Some(&Value::Array(sources)), group.threads, group.last_active, t), t));
+        if open {
+            for &i in &group.members {
+                list = list.child(candidate_row(&candidates[i], None, true, ui, t));
+            }
+        }
+    }
+    if !other.is_empty() {
+        let open = ui.toggled.contains(OTHER);
+        let count = format!("{} {}", other.len(), if other.len() == 1 { "folder" } else { "folders" });
+        let title = text("Other folders").font(theme::TEXT_SM).color(t.c.muted_foreground).truncate();
+        list = list.child(section_header(OTHER, open, paths(&other), ui, title, text(count).font(theme::TEXT_XS).color(t.c.muted_foreground), t));
+        if open {
+            for &i in &other {
+                list = list.child(candidate_row(&candidates[i], None, true, ui, t));
+            }
+        }
+    }
+    list
 }
 
 fn start_import(s: &mut App) {
@@ -392,8 +616,7 @@ fn projects(s: &App, t: &T) -> El {
     let ui = &s.ui.wizard;
     let importing = ui.import.is_some();
     let skip = kit::Button::new("Do not import projects").variant("ghost-muted").disabled(importing).on_press(|s: &mut App| finish(s, None)).build(t);
-    let Some(candidates) = &ui.candidates else {
-        let message = ui.scan_error.clone().unwrap_or_else(|| "Looking for projects from Claude Code and Codex…".into());
+    if ui.candidates.is_none() && ui.scan_error.is_none() {
         return col()
             .w_full()
             .min_h(160.)
@@ -404,17 +627,16 @@ fn projects(s: &App, t: &T) -> El {
                     .center()
                     .gap(12.)
                     .py(24.)
-                    .children(ui.scan_error.is_none().then(|| kit::Spinner::new().size("lg").tone("muted").build(&kit::theme(t))))
-                    .child(text(message).font(theme::TEXT_SM).color(t.c.muted_foreground)),
+                    .child(kit::Spinner::new().size("lg").tone("muted").build(&kit::theme(t)))
+                    .child(text("Looking for projects from Claude Code and Codex…").font(theme::TEXT_SM).color(t.c.muted_foreground)),
             )
             .child(row().w_full().child(rune::el().grow(1.)).child(skip));
-    };
+    }
+    let candidates = ui.candidates.as_deref().unwrap_or_default();
     let mut body = col().w_full().gap(12.).child(heading("Import your projects", Some("Import projects and conversations from Claude Code and Codex on your selected computers."), t));
-    if candidates.is_empty() {
-        body = body.child(text("No projects found.").font(theme::TEXT_SM).color(t.c.muted_foreground));
-    } else {
+    let chosen = candidates.iter().filter(|c| ui.selected.contains(data::s(c, "path"))).count();
+    if !candidates.is_empty() {
         let total = candidates.len();
-        let chosen = candidates.iter().filter(|c| ui.selected.contains(data::s(c, "path"))).count();
         body = body.child(
             row()
                 .w_full()
@@ -428,54 +650,33 @@ fn projects(s: &App, t: &T) -> El {
                         .disabled(importing || chosen == total)
                         .on_press(|s: &mut App| {
                             let paths: Vec<String> = s.ui.wizard.candidates.iter().flatten().map(|c| data::s(c, "path").to_owned()).collect();
-                            s.ui.wizard.selected.extend(paths);
+                            set_selected(s, &paths, true);
                         })
                         .build(t),
                 )
                 .child(kit::Button::new("Select none").variant("ghost").size("xs").disabled(importing || chosen == 0).on_press(|s: &mut App| s.ui.wizard.selected.clear()).build(t)),
         );
-        let mut list = col().w_full().gap(2.);
-        for c in candidates {
-            let path = data::s(c, "path").to_owned();
-            let checked = ui.selected.contains(&path);
-            let meta = format!("{} · {}", c["sources"].as_array().into_iter().flatten().filter_map(|v| v.as_str()).map(|v| if v == "claudeAgent" { "Claude Code" } else if v == "codex" { "Codex" } else { v }).collect::<Vec<_>>().join(", "), c["threadCount"].as_u64().unwrap_or(0));
-            let toggle = path.clone();
-            list = list.child(
-                row()
-                    .w_full()
-                    .gap(10.)
-                    .px(8.)
-                    .py(8.)
-                    .radius(6.)
-                    .center_y()
-                    .hover(t.c.accent)
-                    .child(kit::Checkbox::new(checked).hide_label().label(data::s(c, "title")).disabled(importing).build(&kit::theme(t)))
-                    .child(
-                        col()
-                            .grow(1.)
-                            .shrink()
-                            .min_w(0.)
-                            .child(text(data::s(c, "title").to_owned()).font(theme::SM_MEDIUM).color(t.c.foreground).truncate())
-                            .child(text(path.clone()).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate()),
-                    )
-                    .child(text(meta).font(theme::TEXT_XS).color(t.c.muted_foreground))
-                    .on_press(move |s: &mut App| {
-                        if s.ui.wizard.import.is_some() {
-                            return;
-                        }
-                        if !s.ui.wizard.selected.remove(&toggle) {
-                            s.ui.wizard.selected.insert(toggle.clone());
-                        }
-                    }),
-            );
-        }
-        body = body.child(kit::scroll_area("wizard-import-list", list.scroll(rune::ScrollSpec { stick_bottom: false }), t).max_h(320.));
-        if ui.truncated {
-            body = body.child(text("Scan limit reached. Some projects or conversations may be missing.").font(theme::TEXT_XS).color(t.c.muted_foreground));
-        }
     }
-    let label = if importing { "Importing…" } else { "Import" };
-    body.child(rune::el().h(8.)).child(row().w_full().gap(8.).child(rune::el().grow(1.)).child(skip).child(continue_button(t, label, importing || ui.selected.is_empty(), start_import)))
+    let mut list = col().w_full().gap(2.);
+    if let Some(error) = &ui.scan_error {
+        list = list.child(
+            row()
+                .w_full()
+                .gap(12.)
+                .center_y()
+                .child(text(format!("Could not check projects. {error}")).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().grow(1.).shrink().min_w(0.))
+                .child(kit::Button::new("Retry").variant("ghost").size("sm").on_press(scan).build(t)),
+        );
+    } else if candidates.is_empty() {
+        list = list.child(text("No existing Claude Code or Codex projects found.").font(theme::TEXT_SM).color(t.c.muted_foreground).py(8.));
+    }
+    if ui.truncated {
+        list = list.child(text(SCAN_LIMIT_MESSAGE).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    }
+    list = list.child(import_list(candidates, ui, t));
+    body = body.child(kit::scroll_area("wizard-import-list", list.scroll(rune::ScrollSpec { stick_bottom: false }), t).max_h(320.));
+    let label = if importing { "Importing…".into() } else { format!("Import {chosen} {}", if chosen == 1 { "project" } else { "projects" }) };
+    body.child(rune::el().h(8.)).child(row().w_full().gap(8.).child(rune::el().grow(1.)).child(skip).child(continue_button(t, &label, importing || chosen == 0, start_import)))
 }
 
 pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
@@ -536,6 +737,36 @@ mod tests {
         assert_eq!(p(json!({"enabled": true, "installed": true, "status": "ready", "auth": {"status": "authenticated"}})), "ready");
         assert_eq!(p(json!({"enabled": true, "installed": true, "status": "warning", "auth": {"status": "authenticated"}})), "attention");
         assert_eq!(summary(Some(&json!({"installed": false}))), "Not found · CLI not detected on PATH.");
+    }
+
+    #[test]
+    fn import_candidates_group_by_repository_and_recent_ones_start_selected() {
+        let now = data::iso_ms("2026-11-09T12:00:00.000Z").unwrap();
+        let c = |path: &str, git: Option<Value>, threads: u64, at: Option<&str>| {
+            let mut v = json!({"path": path, "title": path.rsplit('/').next(), "sources": ["codex"], "threadCount": threads, "lastActiveAt": at, "alreadyImported": false});
+            if let Some(git) = git {
+                v["git"] = git;
+            }
+            v
+        };
+        let repo = |name: &str| json!({"remoteKey": format!("github.com/{name}"), "repository": name});
+        let candidates = [
+            c("/w/app", Some(repo("me/app")), 5, Some("2026-11-01T00:00:00.000Z")),
+            c("/w/app-wt", Some(repo("me/app")), 1, Some("2026-11-08T00:00:00.000Z")),
+            c("/w/old", Some(repo("me/old")), 9, Some("2026-08-01T00:00:00.000Z")),
+            c("/w/legacy", None, 3, Some("2026-11-05T00:00:00.000Z")),
+            c("/tmp/notes", Some(Value::Null), 7, Some("2026-11-08T00:00:00.000Z")),
+        ];
+        let picked: Vec<&str> = candidates.iter().filter(|c| recent(c, now)).map(|c| data::s(c, "path")).collect();
+        assert_eq!(picked, ["/w/app", "/w/legacy"], "few threads, a stale month, or no git leave a project unselected");
+
+        let (repositories, other) = groups(&candidates);
+        let summary: Vec<(&str, &[usize], u64)> = repositories.iter().map(|g| (g.label.as_str(), &g.members[..], g.threads)).collect();
+        assert_eq!(summary, [("me/app", &[0, 1][..], 6), ("legacy", &[3][..], 3), ("me/old", &[2][..], 9)]);
+        assert_eq!(repositories[0].last_active, data::ts(&candidates[1], "lastActiveAt"));
+        assert_eq!(other, [4]);
+        assert_eq!(split_path("/w/app/"), ("/w/", "app"));
+        assert_eq!(split_path("app"), ("", "app"));
     }
 
     #[test]
