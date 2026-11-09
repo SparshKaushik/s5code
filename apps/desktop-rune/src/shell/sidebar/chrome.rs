@@ -190,7 +190,10 @@ pub fn footer(s: &App, model: &Model, t: &T) -> El {
                 .on_press(|s: &mut App| super::go(s, Route::Settings("providers".into()))),
         );
     }
-    bar
+    match super::updates::pill(s, t) {
+        Some(pill) => rune::col().w_full().shrink().child(rune::el().w_full().px(8.0).pt(8.0).child(pill)).child(bar),
+        None => bar,
+    }
 }
 
 /// `SidebarThreadUndoNotice`: fills the footer's free space, right-aligned, while an action can
@@ -327,7 +330,7 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
             .radius(radius::MD)
             .center_y()
             .cursor(Cursor::Pointer)
-            .child(super::row::monogram(t, model.project(th), settled && !on))
+            .child(super::favicon::mark(s, t, &th.project_id, model.project(th), settled && !on, 16.0))
             .child(text(th.title.clone()).font(if settled { theme::TEXT_SM } else { theme::SM_MEDIUM }).color(title_color).truncate().grow(1.0).shrink())
             .child(text(logic::relative_label(th.card_time(), model.now)).font(theme::TEXT_XS).color(t.sb.muted_foreground.alpha_mul(0.55)).w(32.0).align(rune::Align::End))
             .on_hover_change(move |s: &mut App, on, _: &mut Tx| {

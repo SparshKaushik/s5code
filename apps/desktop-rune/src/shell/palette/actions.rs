@@ -390,9 +390,9 @@ pub fn link_dialog(s: &App, t: &T, layer: &mut Vec<El>) {
 // File picker.
 
 fn files_context(s: &App) -> Option<(String, String)> {
-    let thread = thread(s)?;
-    let project = s.state().projects.iter().find(|p| p["id"] == thread["projectId"])?;
-    let cwd = thread["worktreePath"].as_str().filter(|v| !v.is_empty()).unwrap_or(data::s(project, "workspaceRoot"));
+    let ctx = crate::chat::composer::ctx(s);
+    let project = ctx.project?;
+    let cwd = ctx.thread.and_then(|t| t["worktreePath"].as_str()).filter(|v| !v.is_empty()).unwrap_or(data::s(project, "workspaceRoot"));
     Some((data::s(project, "title").to_owned(), cwd.to_owned()))
 }
 /// Debounces the search 120 ms after the query settles, as the web picker does.

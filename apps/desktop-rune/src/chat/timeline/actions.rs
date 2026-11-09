@@ -14,6 +14,7 @@ use std::collections::HashMap;
 pub struct Rewind {
     thread: String,
     text: String,
+    records: Vec<Value>,
     scope: String,
     checkpoint: String,
 }
@@ -21,8 +22,9 @@ pub struct Rewind {
 #[derive(Default)]
 pub struct State {
     confirm: Option<Rewind>,
-    /// In-flight rollbacks, by RPC: the prompt that returns to the composer once it lands.
-    rewinds: HashMap<u64, String>,
+    /// In-flight rollbacks, by RPC: the prompt (and its context records) that returns to the
+    /// composer once it lands.
+    rewinds: HashMap<u64, (String, Vec<Value>)>,
     /// In-flight forks, by RPC: the thread to open once it lands.
     forks: HashMap<u64, String>,
     pub error: Option<String>,
@@ -91,12 +93,25 @@ fn running(app: &App, thread: &str) -> bool {
     })
 }
 
+/// Whether the thread's provider can rewind its conversation (supportsConversationRollback).
+fn rolls_back(app: &App) -> bool {
+    let composer = crate::chat::composer::ctx(app);
+    let instance = composer.thread.map(|t| s(&t["modelSelection"], "instanceId")).unwrap_or_default();
+    crate::chat::composer::provider(app, instance).is_none_or(|p| p["supportsConversationRollback"] != false)
+}
+
 /// The row under a prompt: timestamp, "Edit from here" when it can be rewound, copy.
 pub fn user(app: &App, thread: &str, item: &Value, targets: &HashMap<String, (String, String)>, t: &T) -> El {
     let mut buttons = row().gap(2.0).center_y();
     if let Some((scope, checkpoint)) = targets.get(s(item, "id")) {
-        let rewind = Rewind { thread: thread.to_owned(), text: s(item, "text").to_owned(), scope: scope.clone(), checkpoint: checkpoint.clone() };
+        let records = rows::array(&item["context"], "records").to_vec();
+        let rewind = Rewind { thread: thread.to_owned(), text: s(item, "text").to_owned(), records, scope: scope.clone(), checkpoint: checkpoint.clone() };
         buttons = buttons.child(ghost(t, format!("edit-from-{}", s(item, "id")), &icons::PENCIL, "Edit from here").on_press(move |app: &mut App| {
+            if !rolls_back(app) {
+                app.ui.chat.timeline.actions.error =
+                    Some("This provider does not support reverting conversation history. Start a new thread instead.".into());
+                return;
+            }
             if running(app, &rewind.thread) {
                 app.ui.chat.timeline.actions.error = Some("Interrupt the current turn before reverting checkpoints.".into());
                 return;
@@ -149,7 +164,7 @@ fn rewind(app: &mut App, restore_files: bool) {
         "type": "checkpoint.rollback", "commandId": s5_net::uuid(), "threadId": r.thread,
         "scopeId": r.scope, "checkpointId": r.checkpoint, "restoreFiles": restore_files,
     }));
-    app.ui.chat.timeline.actions.rewinds.insert(rpc, r.text);
+    app.ui.chat.timeline.actions.rewinds.insert(rpc, (r.text, r.records));
 }
 
 pub fn poll(app: &mut App) -> bool {
@@ -176,9 +191,9 @@ pub fn poll(app: &mut App) -> bool {
         }
         false
     });
-    for prompt in landed {
+    for (prompt, records) in landed {
         if !prompt.trim().is_empty() {
-            crate::chat::composer::append_to_draft(app, prompt.trim());
+            crate::chat::composer::append_with_chips(app, prompt.trim(), &records, "\n\n");
         }
     }
     if let Some(target) = opened {

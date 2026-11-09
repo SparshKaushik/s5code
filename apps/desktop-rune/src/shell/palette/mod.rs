@@ -41,6 +41,7 @@ struct Notice {
     description: Option<String>,
     until: i64,
     actions: Vec<ToastAction>,
+    error: bool,
 }
 /// A toast button: its label, whether it is the primary one, and what it does.
 pub(crate) type ToastAction = (String, bool, std::rc::Rc<dyn Fn(&mut App, &mut Tx)>);
@@ -84,6 +85,8 @@ enum Trailing {
     Check(bool),
     /// The theme or appearance in use: "Current" in muted text.
     Current,
+    /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
+    Pin(String, bool),
 }
 struct SearchTerm {
     value: String,
@@ -286,6 +289,18 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         description: description.filter(|v| !v.is_empty()).map(str::to_owned),
         until: data::now_ms() + 4000,
         actions,
+        error: false,
+    });
+}
+/// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
+/// be read.
+pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
+    s.ui.shell.palette.notice = Some(Notice {
+        title: title.into(),
+        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
+        until: i64::MAX,
+        actions: Vec::new(),
+        error: true,
     });
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -368,6 +383,7 @@ fn items(s: &App) -> Vec<Item> {
     if ui.page == "appearance" {
         out.extend(appearance_items(s));
     }
+    let (actions_only, typed) = actions_filter(ui);
     if ui.page.is_empty() {
         let project = match &s.route {
             Route::Thread(id) => s
@@ -469,7 +485,10 @@ fn items(s: &App) -> Vec<Item> {
             settings.fields = keywords(&["project", "settings", "name", "icon", "scripts", "workspace", "checkout", "remove"]);
             out.push(settings);
         }
-        let browsing = ui.query.text.trim().is_empty();
+        if !actions_only && !typed.trim().is_empty() {
+            out.extend(suggestions(s, &out, &normalize_query(typed)));
+        }
+        let browsing = typed.trim().is_empty();
         let open_thread = match &s.route {
             Route::Thread(id) => Some(id.as_str()),
             _ => None,
@@ -491,7 +510,7 @@ fn items(s: &App) -> Vec<Item> {
         for v in threads.into_iter().take(limit) {
             out.push(item(
                 data::s(v, "title"),
-                if ui.query.text.trim().is_empty() {
+                if browsing {
                     "Recent Threads"
                 } else {
                     "Threads"
@@ -524,7 +543,7 @@ fn items(s: &App) -> Vec<Item> {
                         .push(SearchTerm::weighted(data::s(pr, "title"), 0.5));
                     row.references.push(data::s(pr, "url").into());
                 }
-                row.pick = active_pick(v, &normalize_query(&ui.query.text), s.now_ms);
+                row.pick = active_pick(v, &normalize_query(typed), s.now_ms);
                 row.usage = usage_boost(v, s.now_ms);
 
                 let minutes =
@@ -541,7 +560,8 @@ fn items(s: &App) -> Vec<Item> {
             }
         }
     }
-    if ui.page == "projects" || (!ui.query.text.trim().is_empty() && ui.page.is_empty()) {
+    if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
+        let can_pin = actions::can_organize_projects(s);
         for p in &s.state().projects {
             out.push(item(
                 data::s(p, "title"),
@@ -556,9 +576,12 @@ fn items(s: &App) -> Vec<Item> {
                     Action::OpenProject(data::s(p, "id").into())
                 },
             ));
+            if can_pin && let Some(row) = out.last_mut() {
+                row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());
+            }
         }
     }
-    if !ui.query.text.trim().is_empty() && ui.page.is_empty() {
+    if !typed.trim().is_empty() && ui.page.is_empty() {
         for (label, page) in [
             ("General", "general"),
             ("Appearance", "appearance"),
@@ -575,7 +598,10 @@ fn items(s: &App) -> Vec<Item> {
             ));
         }
     }
-    let query = normalize_query(&ui.query.text);
+    if actions_only {
+        out.retain(|v| v.group == "Actions");
+    }
+    let query = normalize_query(typed);
     if !query.is_empty() {
         let rank = |v: &Item, typos: bool| -> Option<(f32, bool, f32)> {
             let thread = matches!(v.action, Action::Navigate(Route::Thread(_)));
@@ -710,7 +736,7 @@ fn items(s: &App) -> Vec<Item> {
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
             .collect();
-        if ui.message_query == query && ui.page.is_empty() {
+        if ui.message_query == query && ui.page.is_empty() && !actions_only {
             let mut hits: Vec<_> = ui.message_matches.iter().collect();
             let subject = |hit: &serde_json::Value| {
                 s.state()
@@ -766,6 +792,53 @@ fn items(s: &App) -> Vec<Item> {
         }
     }
     out
+}
+/// A root query starting with ">" searches actions only, by the text after it.
+fn actions_filter(ui: &Ui) -> (bool, &str) {
+    match ui.query.text.strip_prefix('>') {
+        Some(rest) if ui.page.is_empty() => (true, rest),
+        _ => (false, ui.query.text.as_str()),
+    }
+}
+/// `buildNestedSearchItems`: submenu options join the root search as "New thread in demo" or
+/// "Change theme: Dracula", unless the query only names the submenu.
+fn suggestions(s: &App, top: &[Item], query: &str) -> Vec<Item> {
+    let mut out = vec![];
+    for parent in top {
+        let Action::Page(page) = &parent.action else { continue };
+        let children = match *page {
+            "projects" => s
+                .state()
+                .projects
+                .iter()
+                .map(|p| item(data::s(p, "title"), "", &icons::FOLDER_GIT_2, "", Action::Navigate(Route::Home { project_id: Some(data::s(p, "id").into()) })))
+                .collect(),
+            "themes" => theme_items(s),
+            "appearance" => appearance_items(s),
+            _ => continue,
+        };
+        let Some(prefix) = suggestion_prefix(&parent.title, query) else { continue };
+        for mut child in children {
+            let title = format!("{prefix}{}", child.title);
+            if top.iter().any(|v| v.title == title) {
+                continue;
+            }
+            child.title = title;
+            child.group = "Suggestions";
+            child.fields = vec![];
+            out.push(child);
+        }
+    }
+    out
+}
+/// "New thread in..." prefixes "New thread in ", "Change theme" prefixes "Change theme: ";
+/// none when the query only names the submenu.
+fn suggestion_prefix(title: &str, query: &str) -> Option<String> {
+    let stem = title.strip_suffix("...").or_else(|| title.strip_suffix('…')).unwrap_or(title);
+    if fold(stem).starts_with(query) {
+        return None;
+    }
+    Some(if stem == title { format!("{stem}: ") } else { format!("{} ", stem.trim_end()) })
 }
 fn filler(token: &str) -> bool {
     [
@@ -936,6 +1009,7 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     s.ui.shell.palette.message_matches.clear();
     s.ui.shell.palette.message_query = query.clone();
     if !s.ui.shell.palette.page.is_empty()
+        || s.ui.shell.palette.query.text.starts_with('>')
         || !query.split_whitespace().any(|v| {
             v.chars().count() >= 3
                 || (v.chars().count() == 2
@@ -1629,7 +1703,10 @@ fn empty_text(s: &App) -> Option<String> {
         }
         .into());
     }
-    add_project::page_is_flow(&ui.page).then(|| "No matching commands, projects, or threads.".into())
+    if actions_filter(ui).0 {
+        return Some("No matching actions.".into());
+    }
+    (ui.page.is_empty() || add_project::page_is_flow(&ui.page)).then(|| "No matching commands, projects, or threads.".into())
 }
 fn note(label: String, t: &T) -> El {
     row().w_full().px(16.).py(12.).child(text(label).font(theme::TEXT_SM).color(t.c.contrast_muted_foreground))
@@ -1777,6 +1854,21 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         }
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
+        Trailing::Pin(project, pinned) if *pinned || selected => {
+            let (project, pinned) = (project.clone(), *pinned);
+            let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
+            entry = entry.child(
+                kit::Button::new(label.clone())
+                    .icon(&icons::PIN)
+                    .size("icon-xs")
+                    .variant("ghost-muted")
+                    .on_press(move |s: &mut App| actions::pin_project(s, &project, !pinned))
+                    .build(t)
+                    .key(format!("palette-pin-{i}"))
+                    .help(label),
+            );
+        }
+        Trailing::Pin(..) => {}
     }
     entry
 }
@@ -1795,6 +1887,11 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
             let run = run.clone();
             let button = kit::Button::new(label.clone()).variant(if *primary { "default" } else { "outline" }).size("xs").build(t);
             toast = toast.button(*primary, button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)));
+        }
+        if notice.error {
+            toast = toast
+                .lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive))
+                .on_close(|s: &mut App| s.ui.shell.palette.notice = None);
         }
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }
@@ -1920,6 +2017,14 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn submenu_suggestions_name_the_submenu_unless_the_query_only_names_it() {
+        assert_eq!(suggestion_prefix("New thread in...", "demo").as_deref(), Some("New thread in "));
+        assert_eq!(suggestion_prefix("Change theme", "dracula").as_deref(), Some("Change theme: "));
+        assert_eq!(suggestion_prefix("New thread in…", "new thread"), None);
+        assert_eq!(suggestion_prefix("Change theme", "change"), None);
+    }
+
     #[test]
     fn shortcut_labels_spell_modifiers_out_off_mac() {
         let k = serde_json::json!({ "key": "n", "modKey": true, "shiftKey": true });

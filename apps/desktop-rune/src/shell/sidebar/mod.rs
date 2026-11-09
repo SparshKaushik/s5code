@@ -4,10 +4,12 @@
 
 mod brand;
 mod chrome;
+mod favicon;
 pub mod logic;
 mod menu;
 mod row;
 mod snooze;
+mod updates;
 
 pub use self::row::monogram;
 
@@ -94,6 +96,8 @@ pub struct Ui {
     pub content: (String, Vec<String>),
     content_due: Option<(i64, String)>,
     content_req: Option<(u64, String)>,
+    favicons: favicon::Favicons,
+    provider_updates: updates::State,
 }
 
 impl Ui {
@@ -606,7 +610,7 @@ pub fn start_rename(s: &mut App, id: &str) {
 /// ThreadRenameInput commits on blur: focus moved off the editor. Also records visits to the
 /// thread on screen.
 pub fn poll(s: &mut App) -> bool {
-    let searched = poll_content(s);
+    let searched = poll_content(s) | favicon::poll(s) | updates::poll(s);
     let shown = match &s.route {
         Route::Thread(id) => Some(id.clone()),
         _ => None,
@@ -992,11 +996,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     confirm_dialog(s, &model, t, overlays);
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
+    crate::env::sidebar_menu(s, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()
         .w(layout::SIDEBAR_W + 1.0)
         .h_full()
         .child(chrome::header(s, t, inset))
+        .children(crate::env::sidebar_switcher(s, t))
         .child(chrome::search_bar(s, t))
         .child(list)
         .child(chrome::footer(s, &model, t));

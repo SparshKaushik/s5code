@@ -15,7 +15,7 @@ thread_local! {
 
 /// Adds the window, hidden until `open`, to the app's event loop.
 pub fn register(app: &mut rune::App<crate::App>) {
-    let spec = AppSpec { min_size: Some((240., 160.)), families: (crate::theme::SANS, "ui-monospace"), ..AppSpec::new("Browser preview", (480., 320.), Popout::default, view) };
+    let spec = AppSpec { min_size: Some((240., 160.)), ..AppSpec::new("Browser preview", (480., 320.), Popout::default, view) };
     let options = rune::WindowOptions { always_on_top: true, ..Default::default() };
     let window = rune::App::new(spec).windowless().window_options(options);
     let (handle, _) = app.window(rune::WindowSpec::from_app("browser-preview", window));
