@@ -6,6 +6,7 @@ use rune::{Color, El, Key, KeyEvent, Phase, Pixels, ScrollSpec, Span, TextEdit, 
 use serde_json::{Value, json};
 
 use super::browser::{self, Cmd, Status, TabId};
+use super::popout;
 use super::browser_import;
 use crate::{
     App, Route, data, icons, kit,
@@ -114,6 +115,30 @@ pub struct Ui {
     pip_start: Option<[f32; 4]>,
     /// The chat area the floating preview stays inside, in window points.
     pip_area: [f32; 4],
+    /// The pending pick `Cmd::Track` follows.
+    tracked: Option<TabId>,
+    /// The page's open `alert`, `confirm` or `prompt`.
+    dialog: Option<Dialog>,
+    /// The page's right-click menu.
+    context: Option<Context>,
+    /// The tab the separate preview window mirrors, and the title it was given.
+    popout: Option<TabId>,
+    popout_title: String,
+    /// The separate window has shown since it was asked for, so hiding it means it closed.
+    popout_seen: bool,
+}
+
+struct Dialog {
+    tab: TabId,
+    kind: String,
+    message: String,
+    input: TextEdit,
+}
+
+struct Context {
+    tab: TabId,
+    at: (f32, f32),
+    info: Value,
 }
 
 struct Pending {
@@ -138,6 +163,11 @@ pub fn open(app: &mut App) -> TabId {
     let pixels = Pixels::new();
     ui.tabs.insert(tab, Tab::new(pixels.clone()));
     ui.browser.send(Cmd::Open(tab, pixels));
+    // `browserDefaultZoomFactor`: "Page zoom applied to new browser tabs."
+    let zoom = crate::settings::value(app, "browserDefaultZoomFactor").as_f64().unwrap_or(1.) as f32;
+    if let Some(&zoom) = ZOOM_LEVELS.iter().find(|z| (**z - zoom).abs() < 0.001).filter(|z| **z != 1.) {
+        app.ui.panel.browser.browser.send(Cmd::Zoom(tab, zoom));
+    }
     tab
 }
 
@@ -181,6 +211,13 @@ pub fn close(app: &mut App, tab: TabId) {
     }
     if ui.pip == Some(tab) {
         ui.pip = None;
+    }
+    if ui.dialog.as_ref().is_some_and(|d| d.tab == tab) {
+        ui.dialog = None;
+    }
+    if ui.popout == Some(tab) {
+        ui.popout = None;
+        popout::close();
     }
 }
 
@@ -379,9 +416,10 @@ fn pip_tab(app: &App) -> Option<TabId> {
     (matches!(app.frame_route(), Route::Thread(_)) && panel_tab(app) != Some(tab) && app.ui.panel.browser.tabs.contains_key(&tab)).then_some(tab)
 }
 
-/// The one tab Chrome screencasts: the panel's, else the floating one.
+/// The one tab Chrome screencasts: the panel's, else the floating one, else the separate
+/// window's.
 fn shown(app: &App) -> Option<TabId> {
-    panel_tab(app).or_else(|| pip_tab(app))
+    panel_tab(app).or_else(|| pip_tab(app)).or_else(|| app.ui.panel.browser.popout.filter(|_| popout::visible()))
 }
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
@@ -403,6 +441,11 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     if ui.shown != want {
         ui.shown = want;
         ui.browser.send(Cmd::Show(want));
+    }
+    let track = ui.pending.as_ref().map(|p| p.tab);
+    if ui.tracked != track {
+        ui.tracked = track;
+        ui.browser.send(Cmd::Track(track));
     }
     let (generation, events, statuses) = {
         let mut shared = ui.browser.shared.lock().unwrap();
@@ -455,38 +498,176 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                 }
             }
             browser::Event::DevTools(Err(e)) => crate::shell::palette::toast(app, "Unable to open DevTools", Some(&e)),
+            browser::Event::Recorded(Ok(path)) => recording_saved(app, path),
+            browser::Event::Recorded(Err(e)) => crate::shell::palette::toast(app, "Unable to stop recording", Some(&e)),
+            browser::Event::Dialog { tab, kind, message, default } => {
+                let mut input = TextEdit::new(default.as_str());
+                input.focused = kind == "prompt";
+                input.set_selection(0, input.text.len());
+                app.ui.panel.browser.dialog = Some(Dialog { tab, kind, message, input });
+            }
+            browser::Event::DialogClosed(tab) => {
+                if app.ui.panel.browser.dialog.as_ref().is_some_and(|d| d.tab == tab) {
+                    app.ui.panel.browser.dialog = None;
+                }
+            }
+            browser::Event::Context { tab, at, info } => app.ui.panel.browser.context = Some(Context { tab, at, info }),
+            browser::Event::Clipboard(text) => tx.copy(text),
+            browser::Event::Image(png) => match rune::ClipboardImage::from_png(png) {
+                Some(png) => tx.copy_rich(rune::ClipboardContent::new("").with_image(png)),
+                None => crate::shell::palette::toast(app, "Unable to copy image", None),
+            },
+            // Electron moves a person's download to Downloads and shows it in its folder.
+            browser::Event::Download(Ok(path)) => {
+                if let Err(e) = reveal(&path) {
+                    crate::shell::palette::toast(app, "Unable to show the download", Some(&e));
+                }
+            }
+            browser::Event::Download(Err(e)) => crate::shell::palette::toast(app, "Unable to save the download", Some(&e)),
+        }
+    }
+    if let Some(tab) = app.ui.panel.browser.popout {
+        if !popout::visible() {
+            if app.ui.panel.browser.popout_seen {
+                app.ui.panel.browser.popout = None;
+                changed = true;
+            }
+        } else {
+            app.ui.panel.browser.popout_seen = true;
+            let title = popout_title(app, tab);
+            if app.ui.panel.browser.popout_title != title {
+                app.ui.panel.browser.popout_title = title.clone();
+                popout::retitle(title);
+            }
         }
     }
     changed
 }
 
-/// Web's screenshot toast: Copy image, Copy path and Reveal.
-fn screenshot_saved(app: &mut App, path: std::path::PathBuf) {
-    let (image, shown, revealed) = (path.clone(), path.display().to_string(), path);
-    let reveal_label = if cfg!(target_os = "macos") {
+/// Electron's separate window title: `Preview · {title}`, or "Browser preview" for a blank tab.
+fn popout_title(app: &App, tab: TabId) -> String {
+    if idle(&app.ui.panel.browser.browser.status(tab)) {
+        return "Browser preview".into();
+    }
+    format!("Preview · {}", title(app, tab))
+}
+
+/// Opens the separate preview window on the tab, or closes it.
+fn toggle_popout(app: &mut App, tab: TabId) {
+    if app.ui.panel.browser.popout.is_some() && popout::visible() {
+        app.ui.panel.browser.popout = None;
+        popout::close();
+        return;
+    }
+    let Some(pixels) = app.ui.panel.browser.tabs.get(&tab).map(|t| t.pixels.clone()) else { return };
+    let ui = &mut app.ui.panel.browser;
+    ui.popout = Some(tab);
+    // The next poll titles the window once it exists.
+    ui.popout_title = String::new();
+    ui.popout_seen = false;
+    popout::open(pixels);
+}
+
+fn reveal_label() -> &'static str {
+    if cfg!(target_os = "macos") {
         "Reveal in Finder"
     } else if cfg!(windows) {
         "Reveal in File Explorer"
     } else {
         "Reveal in Files"
-    };
-    fn act(label: &str, primary: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> crate::shell::palette::ToastAction {
-        (label.to_owned(), primary, std::rc::Rc::new(f))
     }
+}
+
+/// Electron's `shell.showItemInFolder`: the file selected in its folder. On Linux that is the
+/// file manager's FileManager1 D-Bus call, else the folder opens with its default app.
+pub fn reveal(path: &std::path::Path) -> Result<(), String> {
+    use std::process::Command;
+    if cfg!(target_os = "macos") {
+        return Command::new("open").arg("-R").arg(path).spawn().map(drop).map_err(|e| e.to_string());
+    }
+    if cfg!(windows) {
+        return Command::new("explorer").arg(format!("/select,{}", path.display())).spawn().map(drop).map_err(|e| e.to_string());
+    }
+    let item = format!("array:string:{}", file_uri(path));
+    let dir = path.parent().unwrap_or(path).to_path_buf();
+    std::thread::spawn(move || {
+        let call = ["--session", "--print-reply", "--reply-timeout=3000", "--dest=org.freedesktop.FileManager1", "--type=method_call", "/org/freedesktop/FileManager1", "org.freedesktop.FileManager1.ShowItems"];
+        let shown = Command::new("dbus-send").args(call).arg(&item).arg("string:").output().is_ok_and(|o| o.status.success());
+        if !shown {
+            let _ = Command::new("xdg-open").arg(&dir).status();
+        }
+    });
+    Ok(())
+}
+
+/// A `file://` URI with everything but unreserved characters and `/` escaped; dbus-send splits
+/// array items on commas, so they must not stay bare.
+fn file_uri(path: &std::path::Path) -> String {
+    let escaped: String = path
+        .display()
+        .to_string()
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' | b'/' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect();
+    format!("file://{escaped}")
+}
+
+fn act(label: &str, primary: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> crate::shell::palette::ToastAction {
+    (label.to_owned(), primary, std::rc::Rc::new(f))
+}
+
+/// Web's recording toast: Reveal first, Copy path beside it.
+fn recording_saved(app: &mut App, path: std::path::PathBuf) {
+    let (shown, revealed) = (path.display().to_string(), path);
+    let actions = vec![
+        act(reveal_label(), true, move |s, _| {
+            if let Err(e) = reveal(&revealed) {
+                crate::shell::palette::toast(s, "Unable to reveal recording", Some(&e));
+            }
+        }),
+        act("Copy path", false, move |_, tx| tx.copy(shown.clone())),
+    ];
+    crate::shell::palette::toast_with(app, "Recording saved", None, actions);
+}
+
+/// The camera: a screenshot, Shift to start recording, and a press while recording stops it.
+fn capture(app: &mut App, tab: TabId, record: bool) {
+    let status = app.ui.panel.browser.browser.status(tab);
+    let artifacts = crate::host::t3_home().join("userdata").join("browser-artifacts");
+    if status.recording {
+        let stem = artifacts.join(format!("browser-recording-{}", base36(data::now_ms().max(0) as u64)));
+        send(app, Cmd::StopRecording(stem));
+    } else if record {
+        let fps = if crate::settings::value(app, "browserRecordingFrameRate").as_u64() == Some(60) { 60 } else { 30 };
+        let mouse = crate::settings::value(app, "browserRecordingShowMousePresses") == true;
+        let keys = crate::settings::value(app, "browserRecordingShowKeyPresses") == true;
+        send(app, Cmd::Record { tab, fps, mouse, keys });
+    } else {
+        screenshot(app, tab);
+    }
+}
+
+/// Answers the page's dialog: OK accepts (with the prompt's text), Cancel dismisses.
+fn answer(app: &mut App, accept: bool) {
+    let Some(d) = app.ui.panel.browser.dialog.take() else { return };
+    let text = if accept && d.kind == "prompt" { d.input.text.clone() } else { String::new() };
+    send(app, Cmd::Dialog { tab: d.tab, accept, text });
+}
+
+/// Web's screenshot toast: Copy image, Copy path and Reveal.
+fn screenshot_saved(app: &mut App, path: std::path::PathBuf) {
+    let (image, shown, revealed) = (path.clone(), path.display().to_string(), path);
     let actions = vec![
         act("Copy image", true, move |s, tx| match std::fs::read(&image).ok().and_then(rune::ClipboardImage::from_png) {
             Some(png) => tx.copy_rich(rune::ClipboardContent::new("").with_image(png)),
             None => crate::shell::palette::toast(s, "Unable to copy screenshot", Some("The image could not be read.")),
         }),
         act("Copy path", false, move |_, tx| tx.copy(shown.clone())),
-        act(reveal_label, false, move |s, tx| {
-            let result = if cfg!(target_os = "macos") {
-                std::process::Command::new("open").arg("-R").arg(&revealed).spawn().map(drop).map_err(|e| e.to_string())
-            } else {
-                let dir = revealed.parent().unwrap_or(&revealed);
-                tx.open_url(&format!("file://{}", dir.display())).map_err(|e| e.to_string())
-            };
-            if let Err(e) = result {
+        act(reveal_label(), false, move |s, _| {
+            if let Err(e) = reveal(&revealed) {
                 crate::shell::palette::toast(s, "Unable to reveal screenshot", Some(&e));
             }
         }),
@@ -801,12 +982,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                 send(s, Cmd::Pick(tab, on));
             },
         ))
-        .child(
-            action("Screenshot", &icons::CAMERA)
-                .disabled(!status.painted || !live)
-                .on_press(move |s: &mut App| screenshot(s, tab))
-                .build(t),
-        )
+        .child(capture_button(t, tab, &status, live))
         .child(toggle(
             t,
             if pip { "Close floating preview" } else { "Float preview over chat" },
@@ -830,7 +1006,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     });
     let fatal = ui.browser.shared.lock().unwrap().fatal.clone();
     let content = if let Some(error) = fatal {
-        kit::empty("The browser could not start", &error, t).grow(1.)
+        notice_empty(t, "The browser could not start", &error)
     } else if let Some(failure) = &status.failure {
         unreachable(t, tab, failure, ui.details)
     } else if idle(&status) {
@@ -870,8 +1046,92 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
                 send(s, Cmd::Viewport { w: r[2].max(1.), h: r[3].max(1.), scale })
             })
             .child(content)
-            .children(zoom_pill),
+            .children(zoom_pill)
+            .children(ui.dialog.as_ref().filter(|d| d.tab == tab).map(|d| js_dialog(t, d, &status.url))),
     )
+}
+
+/// Web's camera: secondary with a red glyph and dot while recording.
+fn capture_button(t: &T, tab: TabId, status: &Status, live: bool) -> El {
+    let press = move |s: &mut App, tx: &mut Tx| capture(s, tab, tx.mods().shift);
+    if status.recording {
+        return kit::Button::new("Stop recording")
+            .variant("secondary")
+            .size("icon-xs")
+            .build(t)
+            .child(icon(&icons::CAMERA, 14.).color(t.c.destructive).a11y_hidden())
+            .child(el().pin(None, Some(2.), Some(2.), None).size(6., 6.).radius(3.).fill(t.c.destructive))
+            .help("Stop recording")
+            .on_press_tx(press);
+    }
+    let disabled = !status.painted || !live;
+    let button = action("Capture screenshot", &icons::CAMERA).disabled(disabled).build(t).help("Screenshot · Shift-click to record");
+    if disabled { button } else { button.on_press_tx(press) }
+}
+
+/// The page's `alert`, `confirm` or `prompt`, over the page as Chrome shows its own: the
+/// message, the prompt's field, Cancel and OK. Enter accepts, Escape cancels.
+fn js_dialog(t: &T, d: &Dialog, url: &str) -> El {
+    let origin = host(url).map_or_else(|| "This page".to_string(), |h| h.to_string());
+    let mut card = col()
+        .key("browser-dialog")
+        .role("alertdialog")
+        .label(format!("{origin} says"))
+        .w(400.)
+        .padding(16.)
+        .gap(12.)
+        .radius(12.)
+        .border(1., t.c.border)
+        .fill(t.c.popover)
+        .shadow(8., 24., Color::BLACK.alpha(0.25))
+        .child(text(format!("{origin} says")).font(theme::SM_MEDIUM).color(t.c.contrast_foreground))
+        .child(text(d.message.clone()).font(theme::TEXT_SM).color(t.c.contrast_foreground).wrap().w_full());
+    if d.kind == "prompt" {
+        card = card.child(
+            text_input(&d.input, theme::TEXT_SM)
+                .key("browser-dialog-input")
+                .single_line()
+                .role("textbox")
+                .label("Prompt")
+                .w_full()
+                .h(32.)
+                .px(9.)
+                .radius(theme::layout::CONTROL_RADIUS)
+                .fill(t.c.background)
+                .border(1., t.c.ring)
+                .color(t.c.contrast_foreground)
+                .caret(t.c.contrast_foreground, t.c.primary.alpha_mul(0.3))
+                .on_edit(|s: &mut App| match s.ui.panel.browser.dialog.as_mut() {
+                    Some(d) => &mut d.input,
+                    None => &mut s.ui.panel.browser.comment,
+                })
+                .on_submit(|s: &mut App, tx: &mut Tx| {
+                    answer(s, true);
+                    tx.blur();
+                })
+                .on_input_key(|s: &mut App, e, tx| {
+                    if !matches!(e.key, Key::Escape) {
+                        return false;
+                    }
+                    answer(s, false);
+                    tx.blur();
+                    true
+                }),
+        );
+    }
+    let mut buttons = row().w_full().gap(8.).center_y().child(el().grow(1.));
+    if d.kind != "alert" {
+        buttons = buttons.child(kit::Button::new("Cancel").variant("outline").size("sm").on_press(|s: &mut App| answer(s, false)).build(t));
+    }
+    buttons = buttons.child(kit::Button::new("OK").size("sm").on_press(|s: &mut App| answer(s, true)).build(t));
+    row()
+        .pin(Some(0.), Some(0.), Some(0.), Some(0.))
+        .fill(Color::BLACK.alpha(0.2))
+        .items_start()
+        .pt(24.)
+        .child(el().grow(1.))
+        .child(card.child(buttons))
+        .child(el().grow(1.))
 }
 
 /// Web's `BrowserDeviceToolbar`: preset, width × height, aspect lock, rotate and close.
@@ -1039,7 +1299,10 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
                 .shadow(8., 24., Color::BLACK.alpha(0.25))
                 .child(page(&state.pixels, "browser-pip-page", sw / w).size(w, h)),
         )
-        .child(el().pin(None, Some(10.), Some(10.), None).size(8., 8.).radius(4.).fill(t.c.foreground.alpha_mul(0.25)).group_opacity(1., 0.))
+        .child({
+            let dot = el().pin(None, Some(10.), Some(10.), None).size(8., 8.).radius(4.).group_opacity(1., 0.);
+            if status.recording { dot.fill(t.c.destructive).role("status").label("Recording preview") } else { dot.fill(t.c.foreground.alpha_mul(0.25)) }
+        })
         .children(handles)
         .child(pill);
     area = area.child(frame);
@@ -1138,8 +1401,10 @@ fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El>
 fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32)) -> Vec<El> {
     let ui = &app.ui.panel.browser;
     let Some(pending) = ui.pending.as_ref().filter(|p| p.tab == tab) else { return Vec::new() };
-    let [x, y, w, h] = pending.rect;
-    let mut out: Vec<El> = hover_rect(pending.rect, scale, page)
+    // Where the element is now, so the box and editor follow a scroll, as web's overlay does.
+    let rect = ui.browser.status(tab).picked.unwrap_or(pending.rect);
+    let [x, y, w, h] = rect;
+    let mut out: Vec<El> = hover_rect(rect, scale, page)
         .map(|[x, y, w, h]| el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
         .into_iter()
         .collect();
@@ -1231,7 +1496,38 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             send(s, Cmd::Wheel { x: w.x * k, y: w.y * k, dx: w.dx, dy: w.dy });
             true
         })
-        .on_key(|s: &mut App, e, _| {
+        .on_secondary_press_local(move |s: &mut App, p, _| {
+            s.ui.panel.browser.context = None;
+            send(s, Cmd::Inspect { x: p.x * k, y: p.y * k, at: (p.window_x, p.window_y) });
+        })
+        .on_key(|s: &mut App, e, tx| {
+            // An open dialog blocks the page: Enter accepts it, Escape cancels it.
+            if s.ui.panel.browser.dialog.as_ref().is_some_and(|d| Some(d.tab) == s.ui.panel.browser.shown) {
+                match e.key {
+                    Key::Enter => answer(s, true),
+                    Key::Escape => answer(s, false),
+                    _ => {}
+                }
+                return true;
+            }
+            // The page's editing shortcuts, on the system clipboard, as Electron's edit roles.
+            if let Key::Command(c) = e.key {
+                let cmd = match c {
+                    'c' => Cmd::CopySelection { cut: false },
+                    'x' => Cmd::CopySelection { cut: true },
+                    'a' => Cmd::Edit("selectAll"),
+                    'z' if e.mods.shift => Cmd::Edit("redo"),
+                    'z' => Cmd::Edit("undo"),
+                    'y' if !cfg!(target_os = "macos") => Cmd::Edit("redo"),
+                    'v' => {
+                        paste(tx);
+                        return true;
+                    }
+                    _ => return false,
+                };
+                send(s, cmd);
+                return true;
+            }
             if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) {
                 return false;
             }
@@ -1264,6 +1560,14 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             send(s, cmd);
             true
         })
+}
+
+fn paste(tx: &mut Tx) {
+    tx.read_clipboard(|s: &mut App, content, _| {
+        if !content.text().is_empty() {
+            send(s, Cmd::Text(content.text().to_string()));
+        }
+    });
 }
 
 /// `PreviewUnreachable`.
@@ -1335,6 +1639,43 @@ fn unreachable(t: &T, tab: TabId, failure: &browser::Failure, details: bool) -> 
     row().grow(1.).min_h(0.).w_full().fill(t.c.background).child(el().grow(1.)).child(body).child(el().grow(1.))
 }
 
+/// Web's `Empty` as the preview's empty state draws it: the globe tile, an xl title and a
+/// centred description that wraps inside 384 points.
+fn notice_empty(t: &T, title: &str, description: &str) -> El {
+    col()
+        .grow(1.)
+        .min_h(0.)
+        .w_full()
+        .center()
+        .px(24.)
+        .child(
+            el().size(36., 36.)
+                .radius(6.)
+                .fill(t.c.card)
+                .border(1., t.c.border)
+                .center()
+                .mb(24.)
+                .child(icon(&icons::GLOBE, 18.).size(18., 18.).color(t.c.muted_foreground)),
+        )
+        .child(
+            text(title.to_string())
+                .font(theme::weight(theme::TEXT_XL, theme::SEMIBOLD))
+                .color(t.c.contrast_foreground)
+                .align(rune::Align::Center)
+                .wrap()
+                .max_w(384.),
+        )
+        .child(
+            text(description.to_string())
+                .font(theme::TEXT_SM)
+                .color(t.c.muted_foreground)
+                .align(rune::Align::Center)
+                .wrap()
+                .max_w(384.)
+                .mt(4.),
+        )
+}
+
 /// `PreviewEmptyState`: recent pages and the server's listening ports, else a hint.
 fn empty(app: &App, t: &T, tab: TabId) -> El {
     let ui = &app.ui.panel.browser;
@@ -1357,35 +1698,7 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
     };
     servers.sort_by_key(|v| v.2);
     if servers.is_empty() && ui.recents.is_empty() {
-        return col()
-            .grow(1.)
-            .min_h(0.)
-            .w_full()
-            .center()
-            .px(24.)
-            .child(
-                el().size(36., 36.)
-                    .radius(6.)
-                    .fill(t.c.card)
-                    .border(1., t.c.border)
-                    .center()
-                    .mb(24.)
-                    .child(icon(&icons::GLOBE, 18.).size(18., 18.).color(t.c.muted_foreground)),
-            )
-            .child(
-                text("No preview yet")
-                    .font(theme::weight(theme::TEXT_XL, theme::SEMIBOLD))
-                    .color(t.c.contrast_foreground),
-            )
-            .child(
-                text("Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.")
-                    .font(theme::TEXT_SM)
-                    .color(t.c.muted_foreground)
-                    .align(rune::Align::Center)
-                    .wrap()
-                    .max_w(384.)
-                    .mt(4.),
-            );
+        return notice_empty(t, "No preview yet", "Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.");
     }
     let section = |glyph: &'static rune::Icon, title: &str| {
         row()
@@ -1493,6 +1806,9 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
 /// `PreviewMoreMenu` and the device preset list.
 pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
     let ui = &app.ui.panel.browser;
+    if let Some(c) = ui.context.as_ref().filter(|c| Some(c.tab) == ui.shown) {
+        context_menu(t, c, out);
+    }
     let Some(tab) = panel_tab(app) else { return };
     let status = ui.browser.status(tab);
     if ui.presets && status.device.is_some() {
@@ -1581,6 +1897,14 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                 }),
         )
         .item(
+            kit::MenuItem::new(if ui.popout.is_some() && popout::visible() { "Close separate preview window" } else { "Open separate preview window" })
+                .disabled(blank && ui.popout.is_none())
+                .on_select(move |s: &mut App| {
+                    close(s);
+                    toggle_popout(s, tab);
+                }),
+        )
+        .item(
             kit::MenuItem::new("Appearance")
                 .submenu(vec![radio("System", ""), radio("Light", "light"), radio("Dark", "dark")], ui.appearance)
                 .on_submenu_change(|s: &mut App, open| s.ui.panel.browser.appearance = open),
@@ -1600,9 +1924,57 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         .overlay(&kit::theme(t), out);
 }
 
+/// Electron's page menu: Copy Link on a web link, Copy Image on an image, then the edit roles.
+fn context_menu(t: &T, c: &Context, out: &mut Vec<El>) {
+    let info = &c.info;
+    let done = |s: &mut App| s.ui.panel.browser.context = None;
+    let mut menu = kit::Menu::new("browser-context").native(true).width(198.).open(true).at(c.at.0, c.at.1).on_close(done);
+    if let Some(link) = info["link"].as_str().filter(|l| l.starts_with("http://") || l.starts_with("https://")) {
+        let link = link.to_string();
+        menu = menu
+            .item(kit::MenuItem::new("Copy Link").on_select_tx(move |s: &mut App, tx: &mut Tx| {
+                done(s);
+                tx.copy(link.clone());
+            }))
+            .separator();
+    }
+    if info["image"].is_object() {
+        let clip = info["image"].clone();
+        menu = menu
+            .item(kit::MenuItem::new("Copy Image").on_select(move |s: &mut App| {
+                done(s);
+                send(s, Cmd::CopyImage(clip.clone()));
+            }))
+            .separator();
+    }
+    let (editable, selection) = (info["editable"] == true, info["selection"] == true);
+    menu.item(kit::MenuItem::new("Cut").disabled(!(editable && selection)).on_select(move |s: &mut App| {
+        done(s);
+        send(s, Cmd::CopySelection { cut: true });
+    }))
+    .item(kit::MenuItem::new("Copy").disabled(!selection).on_select(move |s: &mut App| {
+        done(s);
+        send(s, Cmd::CopySelection { cut: false });
+    }))
+    .item(kit::MenuItem::new("Paste").disabled(!editable).on_select_tx(move |s: &mut App, tx: &mut Tx| {
+        done(s);
+        paste(tx);
+    }))
+    .item(kit::MenuItem::new("Select All").on_select(move |s: &mut App| {
+        done(s);
+        send(s, Cmd::Edit("selectAll"));
+    }))
+    .overlay(&kit::theme(t), out);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reveal_escapes_paths_for_dbus() {
+        assert_eq!(file_uri(std::path::Path::new("/home/a b/x,y.png")), "file:///home/a%20b/x%2Cy.png");
+    }
 
     #[test]
     fn address_bar_resolves_like_web() {

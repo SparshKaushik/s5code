@@ -4,10 +4,15 @@ use rune::{El, Tx};
 use rune_kit::Kit;
 
 /// `Toast::new("saved", "Settings saved").description("Saved locally").build(&kit)`.
-pub struct Toast(rune_kit::Toast);
+pub struct Toast(rune_kit::Toast, Vec<(bool, El)>);
 impl Toast {
     pub fn new(key: impl Into<String>, title: impl Into<String>) -> Self {
-        Self(rune_kit::Toast::new(key, title))
+        Self(rune_kit::Toast::new(key, title), vec![])
+    }
+    /// A built button for web's stacked toast row: one right-aligned line, the primary last.
+    pub fn button(mut self, primary: bool, button: El) -> Self {
+        self.1.push((primary, button));
+        self
     }
     pub fn description(mut self, value: impl Into<String>) -> Self {
         self.0 = self.0.description(value);
@@ -17,12 +22,14 @@ impl Toast {
         self.0 = self.0.on_close(f);
         self
     }
-    pub fn action<S: 'static>(mut self, k: &Kit, label: &str, primary: bool, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
-        self.0 = self.0.action(k, label, primary, f);
-        self
-    }
     pub fn build(self, k: &Kit) -> El {
-        super::motion::popup(self.0.build(k))
+        let mut toast = self.0.build(k);
+        if !self.1.is_empty() {
+            let (primary, rest): (Vec<_>, Vec<_>) = self.1.into_iter().partition(|(p, _)| *p);
+            let buttons = rest.into_iter().chain(primary).map(|(_, b)| b);
+            toast = toast.child(rune::row().key("actions").w_full().gap(6.).center_y().child(rune::el().grow(1.)).children(buttons));
+        }
+        super::motion::popup(toast)
             .w(356.)
             .padding(16.)
             .radius(8.)

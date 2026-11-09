@@ -3,6 +3,7 @@ pub mod browser;
 mod diff;
 pub mod drawer;
 mod files;
+pub mod popout;
 pub(crate) mod preview;
 pub mod browser_import;
 mod terminal;

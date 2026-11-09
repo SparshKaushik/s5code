@@ -53,6 +53,23 @@ pub enum Cmd {
     ClearCache,
     /// Imported cookies (CDP `CookieParam`s, each with its bare host) for the Default profile.
     SetCookies(Vec<(Value, String)>, super::browser_import::Job),
+    /// Records the tab's frames into a video, as web's Shift-click on the camera.
+    /// `mouse` and `keys` draw presses into it, as web's recording settings do.
+    Record { tab: TabId, fps: u32, mouse: bool, keys: bool },
+    /// Ends the recording and saves it at this path, its extension the encoder's format.
+    StopRecording(PathBuf),
+    /// Follows the picked element so its box and comment editor move with the page.
+    Track(Option<TabId>),
+    /// Answers the page's open `alert`, `confirm` or `prompt`.
+    Dialog { tab: TabId, accept: bool, text: String },
+    /// What is under a right-click at a page point; `at` is the menu's window point.
+    Inspect { x: f32, y: f32, at: (f32, f32) },
+    /// The selection, as `Event::Clipboard`; `cut` deletes it after.
+    CopySelection { cut: bool },
+    /// The PNG of a document-pixel rect, as `Event::Image`.
+    CopyImage(Value),
+    /// `document.execCommand` on the shown page (`selectAll`, `undo`, `redo`).
+    Edit(&'static str),
 }
 
 /// A navigation that never reached a page, as Chrome reports it (`ERR_CONNECTION_REFUSED`).
@@ -78,11 +95,14 @@ pub struct Status {
     /// While picking, the CSS-pixel `[x, y, w, h]` of the element under the pointer. The headless
     /// shell never paints Chrome's inspect overlay, so the panel draws this box itself.
     pub hover: Option<[f32; 4]>,
+    /// The picked element's current CSS-pixel rect while `Cmd::Track` follows it.
+    pub picked: Option<[f32; 4]>,
+    pub recording: bool,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false }
     }
 }
 
@@ -93,6 +113,16 @@ pub enum Event {
     /// A picked element's details (`PickedElementPayload` fields plus its rect) and its PNG crop.
     Picked { tab: TabId, element: Value, image: Option<Vec<u8>> },
     DevTools(Result<String, String>),
+    Recorded(Result<PathBuf, String>),
+    /// The page opened `alert`, `confirm` or `prompt` and waits for `Cmd::Dialog`.
+    Dialog { tab: TabId, kind: String, message: String, default: String },
+    DialogClosed(TabId),
+    /// A right-click's link, image rect, editable and selection, at the menu's window point.
+    Context { tab: TabId, at: (f32, f32), info: Value },
+    Clipboard(String),
+    Image(Vec<u8>),
+    /// A finished download, moved to the Downloads folder, as Electron does for a person's.
+    Download(Result<PathBuf, String>),
 }
 
 #[derive(Default)]
@@ -228,6 +258,33 @@ enum Reply {
     PickShot(TabId, Value),
     Hover(TabId),
     Cookie(super::browser_import::Job, String),
+    RecCreated,
+    RecAttached,
+    RecStopped,
+    RecChunk(usize),
+    RecSeed(f32),
+    Track(TabId),
+    Context(TabId, (f32, f32)),
+    Selection(TabId, bool),
+    Image,
+    /// A key press for the recording, unless the focused field is a password.
+    KeyPress(String),
+}
+
+/// A recording: an encoder page in the same Chrome draws the tab's screencast frames into a
+/// canvas and `MediaRecorder` encodes it, as the server's recordings do.
+struct Recording {
+    tab: TabId,
+    mouse: bool,
+    keys: bool,
+    target: Option<String>,
+    session: Option<String>,
+    /// Encoder calls made before its session attached.
+    queue: Vec<(String, Option<Reply>)>,
+    /// Set once stopping; no frames go in after it.
+    path: Option<PathBuf>,
+    mime: String,
+    chunks: Vec<Option<Vec<u8>>>,
 }
 
 #[derive(Default)]
@@ -262,6 +319,13 @@ struct Worker {
     /// A hover lookup is in flight; the latest pointer position waits for it.
     hovering: bool,
     hover_next: Option<(TabId, f32, f32)>,
+    recording: Option<Recording>,
+    tracking: Option<TabId>,
+    track_busy: bool,
+    /// In-flight downloads by guid: the page's file name.
+    downloads: HashMap<String, String>,
+    /// When each tab's renderer last crashed, for web's three remounts in 30 s.
+    crashes: HashMap<TabId, Vec<std::time::Instant>>,
     shared: Arc<Mutex<Shared>>,
     waker: Waker,
 }
@@ -298,10 +362,18 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         pressed: false,
         hovering: false,
         hover_next: None,
+        recording: None,
+        tracking: None,
+        track_busy: false,
+        downloads: HashMap::new(),
+        crashes: HashMap::new(),
         shared,
         waker,
     };
     w.send(None, "Target.setDiscoverTargets", json!({ "discover": true }), None);
+    let dir = downloads_staging();
+    let _ = std::fs::create_dir_all(&dir);
+    w.send(None, "Browser.setDownloadBehavior", json!({ "behavior": "allowAndName", "downloadPath": dir, "eventsEnabled": true }), None);
     for cmd in early {
         w.command(cmd);
     }
@@ -408,6 +480,9 @@ impl Worker {
                 self.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }), Some(Reply::Attached(tab)));
             }
             Cmd::Close(tab) => {
+                if self.recording.as_ref().is_some_and(|r| r.tab == tab) {
+                    self.end_recording(None);
+                }
                 if let Some(t) = self.tabs.remove(&tab) {
                     if let Some(target) = t.target {
                         self.send(None, "Target.closeTarget", json!({ "targetId": target }), None);
@@ -536,6 +611,15 @@ impl Worker {
                 let button = if kind != "mouseMoved" || self.pressed { "left" } else { "none" };
                 let buttons = if self.pressed { 1 } else { 0 };
                 self.call(tab, "Input.dispatchMouseEvent", json!({ "type": kind, "x": x / zoom, "y": y / zoom, "button": button, "buttons": buttons, "clickCount": if kind == "mouseMoved" { 0 } else { clicks.max(1) } }), None);
+                if let Some(r) = self.recording.as_ref().filter(|r| r.tab == tab && r.path.is_none()) {
+                    let (cx, cy) = (x / zoom, y / zoom);
+                    let press = match kind {
+                        "mousePressed" if r.mouse => format!("; __s5Recorder.press({cx}, {cy}, true)"),
+                        "mouseReleased" if r.mouse => format!("; __s5Recorder.press({cx}, {cy}, false)"),
+                        _ => String::new(),
+                    };
+                    self.rec_eval(format!("__s5Recorder.cursor({cx}, {cy}){press}"), None);
+                }
                 if kind == "mouseMoved" && self.shared.lock().unwrap().tabs.get(&tab).is_some_and(|s| s.picking) {
                     self.hover_next = Some((tab, x / zoom, y / zoom));
                     self.hover();
@@ -548,10 +632,14 @@ impl Worker {
             }
             Cmd::Text(text) => {
                 let Some(tab) = self.shown else { return };
+                if text.chars().count() == 1 {
+                    self.key_press(tab, key_label(&text));
+                }
                 self.call(tab, "Input.insertText", json!({ "text": text }), None);
             }
             Cmd::Key(key) => {
                 let Some(tab) = self.shown else { return };
+                self.key_press(tab, key_label(key));
                 let code = key_code(key);
                 let text = if key == "Enter" { "\r" } else { "" };
                 let down = if text.is_empty() { "rawKeyDown" } else { "keyDown" };
@@ -573,7 +661,110 @@ impl Worker {
                     self.send(None, "Storage.setCookies", json!({ "cookies": [cookie] }), Some(Reply::Cookie(job.clone(), host)));
                 }
             }
+            Cmd::Record { tab, fps, mouse, keys } => {
+                if self.recording.is_some() || !self.tabs.contains_key(&tab) {
+                    return;
+                }
+                let script = ENCODER_JS.replace("__FPS__", &fps.to_string());
+                self.recording = Some(Recording { tab, mouse, keys, target: None, session: None, queue: vec![(script, None)], path: None, mime: String::new(), chunks: vec![] });
+                self.update(tab, |s| s.recording = true);
+                self.send(None, "Target.createTarget", json!({ "url": "about:blank" }), Some(Reply::RecCreated));
+                // Seed the first frame so a still page records too.
+                let width = self.css_width(tab);
+                self.call(tab, "Page.captureScreenshot", json!({ "format": "jpeg", "quality": 90 }), Some(Reply::RecSeed(width)));
+            }
+            Cmd::StopRecording(path) => {
+                let Some(r) = self.recording.as_mut().filter(|r| r.path.is_none()) else { return };
+                r.path = Some(path);
+                self.rec_eval("__s5Recorder.stop()".into(), Some(Reply::RecStopped));
+            }
+            Cmd::Track(tab) => {
+                self.tracking = tab;
+                self.track_busy = false;
+                let tabs: Vec<TabId> = self.tabs.keys().copied().collect();
+                for id in tabs {
+                    self.update(id, |s| s.picked = None);
+                }
+                if tab.is_some() {
+                    self.track();
+                }
+            }
+            Cmd::Dialog { tab, accept, text } => {
+                self.call(tab, "Page.handleJavaScriptDialog", json!({ "accept": accept, "promptText": text }), None);
+            }
+            Cmd::Inspect { x, y, at } => {
+                let Some(tab) = self.shown else { return };
+                let zoom = self.input_scale(tab);
+                let expression = CONTEXT_JS.replace("__X__", &(x / zoom).to_string()).replace("__Y__", &(y / zoom).to_string());
+                self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Context(tab, at)));
+            }
+            Cmd::CopySelection { cut } => {
+                let Some(tab) = self.shown else { return };
+                let expression = "(() => { const e = document.activeElement; if (e && typeof e.selectionStart === 'number' && e.value !== undefined) return e.value.slice(e.selectionStart, e.selectionEnd); return String(getSelection()); })()";
+                self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Selection(tab, cut)));
+            }
+            Cmd::CopyImage(clip) => {
+                let Some(tab) = self.shown else { return };
+                self.call(tab, "Page.captureScreenshot", json!({ "format": "png", "clip": clip }), Some(Reply::Image));
+            }
+            Cmd::Edit(command) => {
+                let Some(tab) = self.shown else { return };
+                self.call(tab, "Runtime.evaluate", json!({ "expression": format!("document.execCommand('{command}')") }), None);
+            }
         }
+    }
+
+    /// The shown page's CSS width, which maps frame pixels to page points.
+    fn css_width(&self, tab: TabId) -> f32 {
+        let (w, h, _) = self.viewport;
+        self.tabs.get(&tab).map_or(w, |t| match t.device {
+            Some((dw, _)) => dw as f32,
+            None => metrics(w, h, t.zoom).0 as f32,
+        })
+    }
+
+    /// A call on the encoder page, held until its session attaches.
+    fn rec_eval(&mut self, expression: String, reply: Option<Reply>) {
+        let Some(r) = self.recording.as_mut() else { return };
+        match r.session.clone() {
+            Some(session) => self.send(Some(&session), "Runtime.evaluate", json!({ "expression": expression, "awaitPromise": true, "returnByValue": true }), reply),
+            None => r.queue.push((expression, reply)),
+        }
+    }
+
+    fn rec_frame(&mut self, data: &str, css_width: f32) {
+        if self.recording.as_ref().is_some_and(|r| r.path.is_none()) && css_width >= 1. {
+            self.rec_eval(format!("__s5Recorder.frame(\"{data}\", {css_width})"), None);
+        }
+    }
+
+    /// Closes the encoder and reports the saved file or why there is none; `None` drops it.
+    fn end_recording(&mut self, result: Option<Result<PathBuf, String>>) {
+        let Some(r) = self.recording.take() else { return };
+        if let Some(target) = r.target {
+            self.send(None, "Target.closeTarget", json!({ "targetId": target }), None);
+        }
+        self.update(r.tab, |s| s.recording = false);
+        if let Some(result) = result {
+            self.event(Event::Recorded(result));
+        }
+    }
+
+    /// Shows a key in the recording, once the page says no password field has focus.
+    fn key_press(&mut self, tab: TabId, label: String) {
+        if !self.recording.as_ref().is_some_and(|r| r.tab == tab && r.keys && r.path.is_none()) {
+            return;
+        }
+        let expression = "(() => { let e = document.activeElement; while (e && e.shadowRoot && e.shadowRoot.activeElement) e = e.shadowRoot.activeElement; return !!e && (e.tagName === 'IFRAME' || e.tagName.includes('-') || (e.getAttribute('type') || '').toLowerCase() === 'password'); })()";
+        self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::KeyPress(label)));
+    }
+
+    /// Asks where the picked element is now; frames ask again, one lookup at a time.
+    fn track(&mut self) {
+        let Some(tab) = self.tracking.filter(|_| !self.track_busy) else { return };
+        self.track_busy = true;
+        let expression = "(() => { const e = window.__s5Picked; if (!e || !e.isConnected) return null; const r = e.getBoundingClientRect(); return [r.x, r.y, r.width, r.height]; })()";
+        self.call(tab, "Runtime.evaluate", json!({ "expression": expression, "returnByValue": true }), Some(Reply::Track(tab)));
     }
 
     /// Window points per CSS pixel on the shown page.
@@ -613,6 +804,38 @@ impl Worker {
             }
             return;
         }
+        if method == "Browser.downloadWillBegin" {
+            let name = p["suggestedFilename"].as_str().filter(|n| !n.is_empty()).unwrap_or("download").to_string();
+            self.downloads.insert(p["guid"].as_str().unwrap_or_default().to_string(), name);
+            return;
+        }
+        if method == "Browser.downloadProgress" {
+            let guid = p["guid"].as_str().unwrap_or_default().to_string();
+            match p["state"].as_str() {
+                Some("completed") => {
+                    let name = self.downloads.remove(&guid).unwrap_or_else(|| "download".into());
+                    let saved = save_download(&std::path::Path::new(&downloads_staging()).join(&guid), &downloads_dir(), &name);
+                    self.event(Event::Download(saved));
+                }
+                Some("canceled") => {
+                    self.downloads.remove(&guid);
+                }
+                _ => {}
+            }
+            return;
+        }
+        if method == "Target.targetCrashed" {
+            let Some(tab) = self.tabs.iter().find(|(_, t)| t.target.as_deref() == p["targetId"].as_str()).map(|(id, _)| *id) else { return };
+            let now = std::time::Instant::now();
+            let recent = self.crashes.entry(tab).or_default();
+            recent.retain(|at| now.duration_since(*at) < Duration::from_secs(30));
+            recent.push(now);
+            // Web remounts a crashed page up to three times in 30 s, then leaves it.
+            if recent.len() <= 3 {
+                self.call(tab, "Page.reload", json!({}), None);
+            }
+            return;
+        }
         if method == "Target.targetInfoChanged" {
             let info = &p["targetInfo"];
             let Some(tab) = self.tabs.iter().find(|(_, t)| t.target.as_deref() == info["targetId"].as_str()).map(|(id, _)| *id) else { return };
@@ -638,7 +861,26 @@ impl Worker {
                 if self.shown == Some(tab) {
                     self.paint(tab, p["data"].as_str());
                 }
+                if self.recording.as_ref().is_some_and(|r| r.tab == tab) {
+                    let width = p["metadata"]["deviceWidth"].as_f64().unwrap_or(0.) as f32;
+                    self.rec_frame(p["data"].as_str().unwrap_or_default(), width);
+                }
+                if self.tracking == Some(tab) {
+                    self.track();
+                }
             }
+            "Page.javascriptDialogOpening" => {
+                let kind = p["type"].as_str().unwrap_or("alert").to_string();
+                // Leaving a page is the person's own request; Chrome's prompt would only repeat it.
+                if kind == "beforeunload" {
+                    self.call(tab, "Page.handleJavaScriptDialog", json!({ "accept": true }), None);
+                } else {
+                    let message = p["message"].as_str().unwrap_or_default().to_string();
+                    let default = p["defaultPrompt"].as_str().unwrap_or_default().to_string();
+                    self.event(Event::Dialog { tab, kind, message, default });
+                }
+            }
+            "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
             "Page.frameStartedLoading" if main(&p["frameId"]) => self.update(tab, |s| s.loading = true),
             "Page.frameStoppedLoading" | "Page.loadEventFired" if method == "Page.loadEventFired" || main(&p["frameId"]) => {
                 self.update(tab, |s| s.loading = false);
@@ -766,12 +1008,115 @@ impl Worker {
                 self.event(Event::Picked { tab, element, image });
             }
             Reply::Navigated(tab, url) => {
-                let Some(text) = r["errorText"].as_str().filter(|e| !e.is_empty()) else { return };
+                // A navigation that turned into a download, or was stopped, leaves the page as it was.
+                let Some(text) = r["errorText"].as_str().filter(|e| !e.is_empty() && net_error(e) != "ERR_ABORTED") else { return };
                 let description = net_error(text);
                 self.update(tab, |s| {
                     s.loading = false;
                     s.failure = Some(Failure { url, description });
                 });
+            }
+            Reply::RecCreated => {
+                let Some(target) = r["targetId"].as_str().map(str::to_owned) else {
+                    let e = error["message"].as_str().unwrap_or("Chrome could not open the encoder.").to_string();
+                    return self.end_recording(Some(Err(e)));
+                };
+                match self.recording.as_mut() {
+                    Some(rec) => {
+                        rec.target = Some(target.clone());
+                        self.send(None, "Target.attachToTarget", json!({ "targetId": target, "flatten": true }), Some(Reply::RecAttached));
+                    }
+                    None => self.send(None, "Target.closeTarget", json!({ "targetId": target }), None),
+                }
+            }
+            Reply::RecAttached => {
+                let Some(session) = r["sessionId"].as_str().map(str::to_owned) else { return };
+                let Some(rec) = self.recording.as_mut() else { return };
+                rec.session = Some(session.clone());
+                for (expression, reply) in std::mem::take(&mut rec.queue) {
+                    self.send(Some(&session), "Runtime.evaluate", json!({ "expression": expression, "awaitPromise": true, "returnByValue": true }), reply);
+                }
+            }
+            Reply::RecSeed(width) => {
+                if let Some(data) = r["data"].as_str() {
+                    let data = data.to_string();
+                    self.rec_frame(&data, width);
+                }
+            }
+            Reply::RecStopped => {
+                let value = &r["result"]["value"];
+                let failed = r["exceptionDetails"]["exception"]["description"].as_str().or(error["message"].as_str());
+                let count = value["count"].as_u64().unwrap_or(0) as usize;
+                let mime = value["mimeType"].as_str().unwrap_or_default().to_string();
+                if let Some(e) = failed {
+                    return self.end_recording(Some(Err(e.to_string())));
+                }
+                if count == 0 || mime.is_empty() {
+                    return self.end_recording(Some(Err("The recording captured no frames.".into())));
+                }
+                if let Some(rec) = self.recording.as_mut() {
+                    rec.mime = mime;
+                    rec.chunks = vec![None; count];
+                }
+                for index in 0..count {
+                    self.rec_eval(format!("__s5Recorder.chunk({index})"), Some(Reply::RecChunk(index)));
+                }
+            }
+            Reply::RecChunk(index) => {
+                let bytes = r["result"]["value"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok());
+                let Some(rec) = self.recording.as_mut() else { return };
+                let Some(bytes) = bytes else {
+                    return self.end_recording(Some(Err("The recording could not be read.".into())));
+                };
+                if let Some(slot) = rec.chunks.get_mut(index) {
+                    *slot = Some(bytes);
+                }
+                if rec.chunks.iter().any(Option::is_none) {
+                    return;
+                }
+                let data: Vec<u8> = rec.chunks.iter_mut().flat_map(|c| c.take().unwrap_or_default()).collect();
+                let path = rec.path.clone().unwrap_or_default().with_extension(recording_extension(&rec.mime));
+                let saved = path
+                    .parent()
+                    .map_or(Ok(()), std::fs::create_dir_all)
+                    .and_then(|_| std::fs::write(&path, data))
+                    .map(|_| path)
+                    .map_err(|e| e.to_string());
+                self.end_recording(Some(saved));
+            }
+            Reply::Track(tab) => {
+                self.track_busy = false;
+                if self.tracking != Some(tab) {
+                    return;
+                }
+                let rect = serde_json::from_value::<[f32; 4]>(r["result"]["value"].clone()).ok();
+                self.update(tab, |s| s.picked = rect);
+            }
+            Reply::Context(tab, at) => {
+                let info = r["result"]["value"].clone();
+                if info.is_object() {
+                    self.event(Event::Context { tab, at, info });
+                }
+            }
+            Reply::Selection(tab, cut) => {
+                let text = r["result"]["value"].as_str().unwrap_or_default().to_string();
+                if text.is_empty() {
+                    return;
+                }
+                if cut {
+                    self.call(tab, "Runtime.evaluate", json!({ "expression": "document.execCommand('delete')" }), None);
+                }
+                self.event(Event::Clipboard(text));
+            }
+            Reply::KeyPress(label) => {
+                if r["result"]["value"] == false {
+                    self.rec_eval(format!("__s5Recorder.key({})", Value::String(label)), None);
+                }
+            }
+            Reply::Image => {
+                if let Some(bytes) = r["data"].as_str().and_then(|d| base64::engine::general_purpose::STANDARD.decode(d).ok()) {
+                    self.event(Event::Image(bytes));
+                }
             }
             Reply::Saved(path) => {
                 let saved = r["data"]
@@ -892,6 +1237,7 @@ const PICK_JS: &str = r##"function () {
     if (typeof f.type === "function") { componentName = f.type.displayName || f.type.name || null; break; }
   }
   const r = el.getBoundingClientRect();
+  window.__s5Picked = el;
   return JSON.stringify({
     pageUrl: location.href,
     pageTitle: (document.title || "").trim() || null,
@@ -905,6 +1251,221 @@ const PICK_JS: &str = r##"function () {
     doc: { x: r.x + scrollX, y: r.y + scrollY },
   });
 }"##;
+
+/// `recordingKeyLabel` for an unmodified key: arrows and symbols for named keys, letters upper.
+fn key_label(key: &str) -> String {
+    match key {
+        "Enter" => "↵".into(),
+        "Tab" => "⇥".into(),
+        "Backspace" => "⌫".into(),
+        "Delete" => "⌦".into(),
+        "Escape" => "Esc".into(),
+        "ArrowUp" => "↑".into(),
+        "ArrowDown" => "↓".into(),
+        "ArrowLeft" => "←".into(),
+        "ArrowRight" => "→".into(),
+        " " => "Space".into(),
+        k if k.chars().count() == 1 => k.to_uppercase(),
+        k => k.into(),
+    }
+}
+
+/// `MediaRecorder`'s format as the saved file's extension, as Electron names recordings.
+fn recording_extension(mime: &str) -> &'static str {
+    if mime.starts_with("video/mp4") { "mp4" } else { "webm" }
+}
+
+/// Where Chrome writes downloads, each named by its guid, before they move to Downloads.
+fn downloads_staging() -> String {
+    crate::host::t3_home().join("userdata").join("browser-downloads").display().to_string()
+}
+
+fn downloads_dir() -> PathBuf {
+    let home = PathBuf::from(std::env::var("HOME").unwrap_or_default());
+    let configured = std::fs::read_to_string(home.join(".config/user-dirs.dirs")).ok().and_then(|text| {
+        let line = text.lines().find(|l| l.starts_with("XDG_DOWNLOAD_DIR="))?;
+        let value = line.split_once('=')?.1.trim().trim_matches('"').replace("$HOME", &home.display().to_string());
+        Some(PathBuf::from(value))
+    });
+    configured.unwrap_or_else(|| home.join("Downloads"))
+}
+
+/// The first free name in `dir`: `name`, then `name (1).ext` up to 99, as Electron's copy.
+fn unique_path(dir: &std::path::Path, name: &str) -> Option<PathBuf> {
+    let name = std::path::Path::new(name).file_name().map_or_else(|| "download".into(), |n| n.to_string_lossy().into_owned());
+    let (stem, ext) = match name.rsplit_once('.') {
+        Some((stem, ext)) if !stem.is_empty() => (stem.to_string(), format!(".{ext}")),
+        _ => (name.clone(), String::new()),
+    };
+    std::iter::once(name)
+        .chain((1..=99).map(|n| format!("{stem} ({n}){ext}")))
+        .map(|n| dir.join(n))
+        .find(|p| !p.exists())
+}
+
+fn save_download(from: &std::path::Path, dir: &std::path::Path, name: &str) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let to = unique_path(dir, name).ok_or_else(|| format!("{name} already exists in {}.", dir.display()))?;
+    if std::fs::rename(from, &to).is_err() {
+        std::fs::copy(from, &to).map_err(|e| e.to_string())?;
+        let _ = std::fs::remove_file(from);
+    }
+    Ok(to)
+}
+
+/// The encoder page: a canvas fed the tab's JPEG frames and recorded by `MediaRecorder`, as the
+/// server's `recordingEncoderScript`, drawing the person's arrow where web's recording cursor is.
+const ENCODER_JS: &str = r##"(() => {
+  const canvas = document.createElement("canvas");
+  const context = canvas.getContext("2d");
+  const chunks = [];
+  const ARROW = new Path2D("M1 1v18l4-4 4 8 3-1.5-4-8H15Z");
+  let recorder = null, started = null, stopped = null, frame = null, cursor = null, ring = null, key = null, timer = null;
+  // Web's compositor: a click ring that fades 600 ms after release, a key badge for 900 ms.
+  const animate = () => {
+    clearInterval(timer);
+    timer = setInterval(() => {
+      const now = performance.now();
+      paint();
+      const ringDone = !ring || (!ring.held && now > ring.releasedAt + 600);
+      if (ringDone && (!key || now > key.until)) { ring = null; key = null; clearInterval(timer); paint(); }
+    }, 1000 / __FPS__);
+  };
+  const paint = () => {
+    if (!frame) return;
+    const fit = Math.min(canvas.width / frame.width, canvas.height / frame.height);
+    const width = frame.width * fit, height = frame.height * fit;
+    const x = (canvas.width - width) / 2, y = (canvas.height - height) / 2;
+    if (width < canvas.width || height < canvas.height) { context.fillStyle = "#000"; context.fillRect(0, 0, canvas.width, canvas.height); }
+    context.drawImage(frame, x, y, width, height);
+    if (cursor) {
+      const s = fit * frame.cssScale;
+      context.save();
+      context.translate(x + cursor.x * s, y + cursor.y * s);
+      context.scale(s, s);
+      context.lineWidth = 1.5;
+      context.lineJoin = "round";
+      context.fillStyle = "#000";
+      context.strokeStyle = "#fff";
+      context.fill(ARROW);
+      context.stroke(ARROW);
+      context.restore();
+    }
+    const now = performance.now();
+    const s = fit * frame.cssScale;
+    if (ring && (ring.held || now < ring.releasedAt + 600)) {
+      const progress = ring.held ? 0 : Math.min(1, (now - ring.releasedAt) / 600);
+      const opacity = 0.9 * (1 - progress);
+      context.save();
+      context.strokeStyle = context.fillStyle = "#3b82f6";
+      context.lineWidth = 2 * s;
+      context.beginPath();
+      context.arc(x + ring.x * s, y + ring.y * s, 20 * s * (1 + progress * 0.5), 0, Math.PI * 2);
+      context.globalAlpha = opacity * 0.15;
+      context.fill();
+      context.globalAlpha = opacity;
+      context.stroke();
+      context.restore();
+    }
+    if (key && now < key.until) {
+      context.save();
+      context.font = `500 ${26 * s}px system-ui, sans-serif`;
+      const w = Math.min(width - 32 * s, context.measureText(key.label).width + 36 * s), h = 54 * s;
+      const left = x + (width - w) / 2, top = y + height - 24 * s - h;
+      context.fillStyle = "rgba(32,32,34,.86)";
+      context.beginPath();
+      context.roundRect(left, top, w, h, 14 * s);
+      context.fill();
+      context.fillStyle = "white";
+      context.textAlign = "center";
+      context.textBaseline = "middle";
+      context.fillText(key.label, x + width / 2, top + h / 2, w - 24 * s);
+      context.restore();
+    }
+  };
+  window.__s5Recorder = {
+    async frame(base64, cssWidth) {
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const bitmap = await createImageBitmap(new Blob([bytes], { type: "image/jpeg" }));
+      if (!recorder) {
+        canvas.width = bitmap.width;
+        canvas.height = bitmap.height;
+        const mimeType = ["video/mp4;codecs=avc1", "video/webm;codecs=vp9", "video/webm;codecs=vp8", "video/webm"].find((t) => MediaRecorder.isTypeSupported(t));
+        const bitsPerSecond = Math.min(50e6, Math.max(2.5e6, bitmap.width * bitmap.height * __FPS__ * 0.05));
+        recorder = new MediaRecorder(canvas.captureStream(__FPS__), { mimeType, videoBitsPerSecond: bitsPerSecond });
+        started = new Promise((resolve, reject) => { recorder.onstart = resolve; recorder.onerror = (e) => reject(e.error); });
+        stopped = new Promise((resolve) => { recorder.onstop = resolve; });
+        recorder.ondataavailable = (e) => { if (e.data.size > 0) chunks.push(e.data); };
+        recorder.start(1000);
+      }
+      bitmap.cssScale = bitmap.width / cssWidth;
+      frame?.close();
+      frame = bitmap;
+      paint();
+      await started;
+      return true;
+    },
+    cursor(x, y) {
+      cursor = { x, y };
+      paint();
+    },
+    press(x, y, held) {
+      ring = held ? { x, y, held: true, releasedAt: 0 } : { x, y, held: false, releasedAt: performance.now() };
+      animate();
+    },
+    key(label) {
+      key = { label, until: performance.now() + 900 };
+      animate();
+    },
+    async stop() {
+      if (!recorder) return { mimeType: null, count: 0 };
+      if (recorder.state !== "inactive") {
+        // Wait for the last paint to reach the stream; a stop can otherwise beat it.
+        const video = document.createElement("video");
+        video.muted = true;
+        video.srcObject = recorder.stream;
+        const next = () => Promise.race([new Promise((r) => video.requestVideoFrameCallback(r)), stopped]);
+        const initial = next();
+        void video.play().catch(() => {});
+        await initial;
+        if (recorder.state !== "inactive") {
+          const delivered = next();
+          recorder.stream.getVideoTracks()[0].requestFrame();
+          paint();
+          await delivered;
+        }
+        video.pause();
+        video.srcObject = null;
+        if (recorder.state !== "inactive") recorder.stop();
+      }
+      await stopped;
+      return { mimeType: recorder.mimeType, count: chunks.length };
+    },
+    async chunk(index) {
+      const bytes = new Uint8Array(await chunks[index].arrayBuffer());
+      let binary = "";
+      for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+      return btoa(binary);
+    },
+  };
+})()"##;
+
+/// What a right-click lands on, for the page menu Electron builds from `context-menu` params.
+const CONTEXT_JS: &str = r##"(() => {
+  const e = document.elementFromPoint(__X__, __Y__);
+  const link = e && e.closest("a[href]");
+  const img = e && e.closest("img");
+  const field = e && e.closest("input, textarea, [contenteditable]:not([contenteditable=false])");
+  const editable = !!field && !field.disabled && !field.readOnly;
+  const active = document.activeElement;
+  const fieldSelection = active && typeof active.selectionStart === "number" && active.selectionStart !== active.selectionEnd;
+  let image = null;
+  if (img) {
+    const r = img.getBoundingClientRect();
+    if (r.width >= 1 && r.height >= 1) image = { x: r.x + scrollX, y: r.y + scrollY, width: Math.min(r.width, 4096), height: Math.min(r.height, 4096), scale: 1 };
+  }
+  return { link: link ? link.href : null, image, editable, selection: String(getSelection()).length > 0 || !!fieldSelection };
+})()"##;
 
 /// Back and forward availability; the about:blank a tab opens on is not a place to go back to.
 fn travel(history: &[(i64, String)], index: usize) -> (bool, bool) {
@@ -976,6 +1537,38 @@ mod tests {
         let element = json!({ "rect": { "x": 10., "y": -5., "width": 120., "height": 30. }, "doc": { "x": 10., "y": 395. } });
         assert_eq!(clip(&element), Some(json!({ "x": 10., "y": 395., "width": 120., "height": 30., "scale": 1 })));
         assert_eq!(clip(&json!({ "rect": { "width": 0., "height": 10. }, "doc": { "x": 0., "y": 0. } })), None);
+    }
+
+    #[test]
+    fn downloads_take_the_first_free_name_like_electron() {
+        let dir = std::env::temp_dir().join(format!("s5-downloads-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        assert_eq!(unique_path(&dir, "report.pdf"), Some(dir.join("report.pdf")));
+        std::fs::write(dir.join("report.pdf"), b"a").unwrap();
+        std::fs::write(dir.join("report (1).pdf"), b"b").unwrap();
+        assert_eq!(unique_path(&dir, "report.pdf"), Some(dir.join("report (2).pdf")));
+        // A page's name never leaves the folder.
+        assert_eq!(unique_path(&dir, "../../etc/passwd"), Some(dir.join("passwd")));
+        let staged = dir.join("guid-1");
+        std::fs::write(&staged, b"c").unwrap();
+        assert_eq!(save_download(&staged, &dir, "notes"), Ok(dir.join("notes")));
+        assert!(!staged.exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn recorded_keys_read_like_web() {
+        assert_eq!(key_label("Enter"), "↵");
+        assert_eq!(key_label("a"), "A");
+        assert_eq!(key_label(" "), "Space");
+        assert_eq!(key_label("PageDown"), "PageDown");
+    }
+
+    #[test]
+    fn recordings_are_named_by_their_format() {
+        assert_eq!(recording_extension("video/mp4;codecs=avc1"), "mp4");
+        assert_eq!(recording_extension("video/webm;codecs=vp9"), "webm");
     }
 
     #[test]
