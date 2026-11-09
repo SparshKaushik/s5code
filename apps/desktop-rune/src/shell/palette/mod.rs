@@ -40,7 +40,10 @@ struct Notice {
     title: String,
     description: Option<String>,
     until: i64,
+    actions: Vec<ToastAction>,
 }
+/// A toast button: its label, whether it is the primary one, and what it does.
+pub(crate) type ToastAction = (String, bool, std::rc::Rc<dyn Fn(&mut App, &mut Tx)>);
 struct Restart {
     thread: String,
     remaining: Vec<String>,
@@ -275,10 +278,14 @@ fn format_shortcut(k: &serde_json::Value, mac: bool) -> String {
     label
 }
 pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
+    toast_with(s, title, description, Vec::new());
+}
+pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, actions: Vec<ToastAction>) {
     s.ui.shell.palette.notice = Some(Notice {
         title: title.into(),
         description: description.filter(|v| !v.is_empty()).map(str::to_owned),
         until: data::now_ms() + 4000,
+        actions,
     });
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -1783,6 +1790,10 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         let mut toast = kit::Toast::new("palette-notice", notice.title.clone());
         if let Some(description) = &notice.description {
             toast = toast.description(description.clone());
+        }
+        for (label, primary, run) in &notice.actions {
+            let run = run.clone();
+            toast = toast.action(&kit::theme(t), label, *primary, move |s: &mut App, tx: &mut Tx| run(s, tx));
         }
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }

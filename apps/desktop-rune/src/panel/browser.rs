@@ -51,6 +51,8 @@ pub enum Cmd {
     Screenshot(TabId, PathBuf),
     ClearCookies,
     ClearCache,
+    /// Imported cookies (CDP `CookieParam`s, each with its bare host) for the Default profile.
+    SetCookies(Vec<(Value, String)>, super::browser_import::Job),
 }
 
 /// A navigation that never reached a page, as Chrome reports it (`ERR_CONNECTION_REFUSED`).
@@ -133,6 +135,10 @@ impl Browser {
                 waker();
             }
         });
+    }
+
+    pub fn sender(&self) -> Option<Sender<Cmd>> {
+        self.tx.clone()
     }
 
     pub fn send(&self, cmd: Cmd) {
@@ -221,6 +227,7 @@ enum Reply {
     PickInfo(TabId),
     PickShot(TabId, Value),
     Hover(TabId),
+    Cookie(super::browser_import::Job, String),
 }
 
 #[derive(Default)]
@@ -560,6 +567,12 @@ impl Worker {
                 let method = if matches!(cmd, Cmd::ClearCookies) { "Network.clearBrowserCookies" } else { "Network.clearBrowserCache" };
                 self.call(tab, method, json!({}), None);
             }
+            // One write per cookie, so a cookie Chrome rejects is skipped instead of the batch.
+            Cmd::SetCookies(cookies, job) => {
+                for (cookie, host) in cookies {
+                    self.send(None, "Storage.setCookies", json!({ "cookies": [cookie] }), Some(Reply::Cookie(job.clone(), host)));
+                }
+            }
         }
     }
 
@@ -722,6 +735,11 @@ impl Worker {
                 });
             }
             Reply::Frame(tab) => self.paint(tab, r["data"].as_str()),
+            Reply::Cookie(job, host) => {
+                if super::browser_import::written(&job, error.is_null(), &host) {
+                    (self.waker)();
+                }
+            }
             Reply::Hover(tab) => {
                 self.hovering = false;
                 let rect = serde_json::from_value::<[f32; 4]>(r["result"]["value"].clone()).ok().filter(|r| r[2] > 0. && r[3] > 0.);

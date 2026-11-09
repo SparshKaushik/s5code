@@ -610,6 +610,7 @@ pub fn poll(s: &mut App) -> bool {
     });
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
     if let Some(id) = opened {
+        crate::panel::adopt(s, &id);
         s.navigate(Route::Thread(id));
         changed = true;
     }

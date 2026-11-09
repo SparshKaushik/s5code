@@ -6,6 +6,7 @@ use rune::{Color, El, Key, KeyEvent, Phase, Pixels, ScrollSpec, Span, TextEdit, 
 use serde_json::{Value, json};
 
 use super::browser::{self, Cmd, Status, TabId};
+use super::browser_import;
 use crate::{
     App, Route, data, icons, kit,
     theme::{self, AlphaMul, T},
@@ -104,6 +105,23 @@ pub struct Ui {
     presets: bool,
     /// When the zoom pill hides, as web's `ZoomIndicator` does 1.5 s after a change.
     zoom_until: i64,
+    /// A picked element waiting for its comment, as web's annotation editor holds it.
+    pending: Option<Pending>,
+    comment: TextEdit,
+    /// The floating preview's `[x, y, width]` in the chat area once moved or resized.
+    pip_frame: Option<[f32; 3]>,
+    /// The `[x, y, w, h]` a PiP drag or resize started from.
+    pip_start: Option<[f32; 4]>,
+    /// The chat area the floating preview stays inside, in window points.
+    pip_area: [f32; 4],
+}
+
+struct Pending {
+    tab: TabId,
+    element: Value,
+    image: Option<Vec<u8>>,
+    /// The element's viewport rect in CSS pixels.
+    rect: [f32; 4],
 }
 
 /// A new tab on a blank page; Chrome starts with the first one.
@@ -123,6 +141,23 @@ pub fn open(app: &mut App) -> TabId {
     tab
 }
 
+/// Imports a browser profile's cookies into the Default profile. Chrome starts for it when no
+/// tab has, at the window's scale, since the headless shell keeps the scale it starts with.
+pub fn import(app: &mut App, scale: f32, source: &'static browser_import::Source, directory: String) -> Option<browser_import::Job> {
+    let waker = app.ui.panel.waker.clone()?;
+    let ui = &mut app.ui.panel.browser;
+    if !ui.browser.started() {
+        ui.browser.start(waker.clone());
+        ui.browser.send(Cmd::Viewport { w: 0., h: 0., scale });
+    }
+    Some(browser_import::start(source, directory, ui.browser.sender()?, waker))
+}
+
+/// Chrome could not start or its connection dropped, so an import's writes never land.
+pub fn browser_failed(app: &App) -> bool {
+    app.ui.panel.browser.browser.shared.lock().unwrap().fatal.is_some()
+}
+
 /// A window the page opened (`window.open`, `target=_blank`), shown as a tab, as web does.
 fn adopt(app: &mut App, target: String) {
     let ui = &mut app.ui.panel.browser;
@@ -140,6 +175,9 @@ pub fn close(app: &mut App, tab: TabId) {
     ui.browser.send(Cmd::Close(tab));
     if ui.shown == Some(tab) {
         ui.shown = None;
+    }
+    if ui.pending.as_ref().is_some_and(|p| p.tab == tab) {
+        ui.pending = None;
     }
     if ui.pip == Some(tab) {
         ui.pip = None;
@@ -407,12 +445,10 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
     for event in events {
         match event {
-            browser::Event::Screenshot(Ok(path)) => {
-                crate::shell::palette::toast(app, "Screenshot saved", Some(&path.display().to_string()))
-            }
+            browser::Event::Screenshot(Ok(path)) => screenshot_saved(app, path),
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
             browser::Event::Popup { target } => adopt(app, target),
-            browser::Event::Picked { element, image, .. } => attach(app, &element, image),
+            browser::Event::Picked { tab, element, image } => pick(app, tab, element, image),
             browser::Event::DevTools(Ok(url)) => {
                 if let Err(e) = tx.open_url(&url) {
                     crate::shell::palette::toast(app, "Unable to open DevTools", Some(&e.to_string()));
@@ -424,8 +460,59 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     changed
 }
 
+/// Web's screenshot toast: Copy image, Copy path and Reveal.
+fn screenshot_saved(app: &mut App, path: std::path::PathBuf) {
+    let (image, shown, revealed) = (path.clone(), path.display().to_string(), path);
+    let reveal_label = if cfg!(target_os = "macos") {
+        "Reveal in Finder"
+    } else if cfg!(windows) {
+        "Reveal in File Explorer"
+    } else {
+        "Reveal in Files"
+    };
+    fn act(label: &str, primary: bool, f: impl Fn(&mut App, &mut Tx) + 'static) -> crate::shell::palette::ToastAction {
+        (label.to_owned(), primary, std::rc::Rc::new(f))
+    }
+    let actions = vec![
+        act("Copy image", true, move |s, tx| match std::fs::read(&image).ok().and_then(rune::ClipboardImage::from_png) {
+            Some(png) => tx.copy_rich(rune::ClipboardContent::new("").with_image(png)),
+            None => crate::shell::palette::toast(s, "Unable to copy screenshot", Some("The image could not be read.")),
+        }),
+        act("Copy path", false, move |_, tx| tx.copy(shown.clone())),
+        act(reveal_label, false, move |s, tx| {
+            let result = if cfg!(target_os = "macos") {
+                std::process::Command::new("open").arg("-R").arg(&revealed).spawn().map(drop).map_err(|e| e.to_string())
+            } else {
+                let dir = revealed.parent().unwrap_or(&revealed);
+                tx.open_url(&format!("file://{}", dir.display())).map_err(|e| e.to_string())
+            };
+            if let Err(e) = result {
+                crate::shell::palette::toast(s, "Unable to reveal screenshot", Some(&e));
+            }
+        }),
+    ];
+    crate::shell::palette::toast_with(app, "Screenshot saved", None, actions);
+}
+
+/// A picked element opens the comment editor beside it, as web's annotation overlay does.
+fn pick(app: &mut App, tab: TabId, element: Value, image: Option<Vec<u8>>) {
+    let r = &element["rect"];
+    let rect = [&r["x"], &r["y"], &r["width"], &r["height"]].map(|v| v.as_f64().unwrap_or(0.) as f32);
+    let ui = &mut app.ui.panel.browser;
+    ui.pending = Some(Pending { tab, element, image, rect });
+    ui.comment = TextEdit::new("");
+    ui.comment.focused = true;
+}
+
+/// Enter or Attach: the pending element and its comment go to the composer.
+fn submit_annotation(app: &mut App) {
+    let Some(p) = app.ui.panel.browser.pending.take() else { return };
+    let comment = app.ui.panel.browser.comment.text.trim().to_string();
+    attach(app, &p.element, p.image, &comment);
+}
+
 /// A picked element goes to the composer as web's preview annotation, its crop as an image.
-fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>) {
+fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>, comment: &str) {
     let id = s5_net::uuid();
     let image = image.and_then(|bytes| {
         let dir = crate::host::t3_home().join("userdata").join("browser-artifacts");
@@ -434,14 +521,14 @@ fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>) {
         std::fs::write(&path, bytes).ok()?;
         Some(path.display().to_string())
     });
-    let record = annotation(&id, element);
+    let record = annotation(&id, element, comment);
     let detail = record["elements"][0]["selector"].as_str().or(record["elements"][0]["tagName"].as_str()).unwrap_or_default().to_string();
     crate::chat::composer::add_picked_context(app, record, image);
     crate::shell::palette::toast(app, "Element added to the composer", Some(&detail));
 }
 
-/// `previewAnnotationContextRecord` for one picked element and no comment.
-fn annotation(id: &str, element: &Value) -> Value {
+/// `previewAnnotationContextRecord` for one picked element and its comment.
+fn annotation(id: &str, element: &Value, comment: &str) -> Value {
     let bounded = |v: &Value, max: usize| v.as_str().map(|s| s.chars().take(max).collect::<String>());
     let page_url = bounded(&element["pageUrl"], 2048).unwrap_or_default();
     let page_title = bounded(&element["pageTitle"], 2048).filter(|t| !t.trim().is_empty());
@@ -465,7 +552,7 @@ fn annotation(id: &str, element: &Value) -> Value {
         "annotationId": id,
         "pageUrl": page_url,
         "pageTitle": page_title,
-        "comment": "",
+        "comment": comment.chars().take(8000).collect::<String>(),
         "targetSummary": "1 selected element",
         "styleChanges": [],
         "elements": [details],
@@ -751,10 +838,10 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     } else if let Some(size) = status.device {
         let (w, h, scale) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
         let page = page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7));
-        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))))
+        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))))
     } else {
         let hover = hover_box(t, &status, status.zoom.max(0.25), ui.area);
-        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover)
+        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover).children(annotation_editor(app, t, tab, status.zoom.max(0.25), ui.area))
     };
     let zoom_pill = (ui.zoom_until != 0 && !idle(&status)).then(|| {
         row()
@@ -885,9 +972,19 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
         None => ui.area,
     };
     let (sw, sh) = if sw < 1. || sh < 1. { (16., 10.) } else { (sw, sh) };
-    let w = 320f32.min(320. * sw / sh);
-    let h = w * sh / sw;
-    let right = 12. + if app.ui.shell.panel_open { app.ui.panel.width + 1. } else { 0. };
+    let aspect = sw / sh;
+    let right = if app.ui.shell.panel_open { app.ui.panel.width + 1. } else { 0. };
+    let container = (ui.pip_area[2], ui.pip_area[3]);
+    let mut area = el()
+        .key("browser-pip-area")
+        .pin(Some(0.), Some(theme::layout::TOPBAR_H), Some(right), Some(0.))
+        .on_layout(|s: &mut App, r| s.ui.panel.browser.pip_area = r);
+    // The chat area's size arrives with the first layout.
+    if container.0 < 1. || container.1 < 1. {
+        out.push(area);
+        return;
+    }
+    let [x, y, w, h] = pip_frame(ui.pip_frame, aspect, container);
     let pill = row()
         .pin(None, Some(6.), Some(6.), None)
         .h(32.)
@@ -899,6 +996,8 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
         .fill(t.c.popover.alpha_mul(0.92))
         .shadow(4., 16., Color::BLACK.alpha(0.2))
         .group_opacity(0., 1.)
+        .cursor(rune::Cursor::Grab)
+        .on_drag(move |s: &mut App, d, _| pip_gesture(s, d, (0, 0), aspect))
         .child(
             action("Open preview in right panel", &icons::PANEL_RIGHT)
                 .on_press(move |s: &mut App| {
@@ -908,28 +1007,196 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
                 .build(t),
         )
         .child(action("Close floating preview", &icons::X).on_press(|s: &mut App| s.ui.panel.browser.pip = None).build(t));
-    out.push(
-        el().key("browser-pip")
-            .pin(None, Some(theme::layout::TOPBAR_H + 12.), Some(right), None)
-            .size(w, h)
-            .radius(12.)
-            .clip_rounded(12.)
-            .fill(t.c.background)
-            .border(1., t.c.border.alpha_mul(0.8))
-            .shadow(8., 24., Color::BLACK.alpha(0.25))
-            .hover_group()
-            .role("region")
-            .label("Floating preview")
-            .child(page(&state.pixels, "browser-pip-page", sw / w).size(w, h))
-            .child(el().pin(None, Some(10.), Some(10.), None).size(8., 8.).radius(4.).fill(t.c.foreground.alpha_mul(0.25)).group_opacity(1., 0.))
-            .child(pill),
-    );
+    // Web's `RESIZE_HANDLES`: 8 pt edges and 16 pt corners straddling the frame.
+    let handles = [(0, -1, -4., 0.), (0, 1, -4., 0.), (-1, 0, -4., 0.), (1, 0, -4., 0.), (-1, -1, -8., 16.), (1, -1, -8., 16.), (-1, 1, -8., 16.), (1, 1, -8., 16.)].map(|(dx, dy, inset, size)| {
+        let handle = el().on_drag(move |s: &mut App, d, _| pip_gesture(s, d, (dx, dy), aspect));
+        let handle = match (dx, dy) {
+            (0, -1) => handle.pin(Some(0.), Some(inset), Some(0.), None).h(8.).cursor(rune::Cursor::ResizeRow),
+            (0, _) => handle.pin(Some(0.), None, Some(0.), Some(inset)).h(8.).cursor(rune::Cursor::ResizeRow),
+            (-1, 0) => handle.pin(Some(inset), Some(0.), None, Some(0.)).w(8.).cursor(rune::Cursor::ResizeColumn),
+            (_, 0) => handle.pin(None, Some(0.), Some(inset), Some(0.)).w(8.).cursor(rune::Cursor::ResizeColumn),
+            _ => {
+                let (l, r) = if dx < 0 { (Some(inset), None) } else { (None, Some(inset)) };
+                let (top, b) = if dy < 0 { (Some(inset), None) } else { (None, Some(inset)) };
+                handle.pin(l, top, r, b).size(size, size).cursor(rune::Cursor::Move)
+            }
+        };
+        handle.key(format!("browser-pip-resize-{dx}-{dy}"))
+    });
+    let frame = el()
+        .key("browser-pip")
+        .pin(Some(x), Some(y), None, None)
+        .size(w, h)
+        .hover_group()
+        .role("region")
+        .label("Floating preview")
+        .child(
+            el().size(w, h)
+                .radius(12.)
+                .clip_rounded(12.)
+                .fill(t.c.background)
+                .border(1., t.c.border.alpha_mul(0.8))
+                .shadow(8., 24., Color::BLACK.alpha(0.25))
+                .child(page(&state.pixels, "browser-pip-page", sw / w).size(w, h)),
+        )
+        .child(el().pin(None, Some(10.), Some(10.), None).size(8., 8.).radius(4.).fill(t.c.foreground.alpha_mul(0.25)).group_opacity(1., 0.))
+        .children(handles)
+        .child(pill);
+    area = area.child(frame);
+    out.push(area);
+}
+
+const PIP_GAP: f32 = 12.;
+
+fn pip_min_width(aspect: f32) -> f32 {
+    240f32.max(150. * aspect)
+}
+
+/// `fitPreviewMiniPlayerWidth`: `(w, h)` at the source's aspect ratio.
+fn pip_fit(desired: f32, aspect: f32, (max_w, max_h): (f32, f32), min_w: f32) -> (f32, f32) {
+    let w = desired.max(min_w).min(max_w.max(1.)).min((max_h * aspect).max(1.)).round();
+    (w, (w / aspect).round())
+}
+
+fn pip_clamp((x, y): (f32, f32), (w, h): (f32, f32), (cw, ch): (f32, f32)) -> (f32, f32) {
+    (x.max(PIP_GAP).min((cw - w - PIP_GAP).max(PIP_GAP)), y.max(PIP_GAP).min((ch - h - PIP_GAP).max(PIP_GAP)))
+}
+
+/// `resolvePreviewMiniPlayerFrame`: `[x, y, w, h]` in the chat area; a moved or resized
+/// preview keeps its width, the default sits top right at up to 320 pt.
+fn pip_frame(frame: Option<[f32; 3]>, aspect: f32, container: (f32, f32)) -> [f32; 4] {
+    let max = (container.0 - 2. * PIP_GAP, container.1 - 2. * PIP_GAP);
+    let (desired, min_w) = match frame {
+        Some([_, _, w]) => (w, w),
+        None => (320f32.min(320. * aspect), pip_min_width(aspect)),
+    };
+    let size = pip_fit(desired, aspect, max, min_w);
+    let at = frame.map_or((container.0 - PIP_GAP - size.0, PIP_GAP), |[x, y, _]| (x, y));
+    let (x, y) = pip_clamp(at, size, container);
+    [x, y, size.0, size.1]
+}
+
+/// `resizePreviewMiniPlayer`; `dir` is -1/0/1 per axis (west/north is -1).
+fn pip_resize([x, y, w, h]: [f32; 4], (dx, dy): (i8, i8), (mx, my): (f32, f32), aspect: f32, (cw, ch): (f32, f32)) -> [f32; 4] {
+    let (right, bottom) = (x + w, y + h);
+    let max_w = match dx {
+        -1 => right - PIP_GAP,
+        1 => cw - PIP_GAP - x,
+        _ => cw - 2. * PIP_GAP,
+    };
+    let max_h = match dy {
+        -1 => bottom - PIP_GAP,
+        1 => ch - PIP_GAP - y,
+        _ => ch - 2. * PIP_GAP,
+    };
+    let want_w = w + mx * dx as f32;
+    let want_h = h + my * dy as f32;
+    // Corners project onto the aspect diagonal so opposite-moving axes never jump.
+    let desired = match (dx != 0, dy != 0) {
+        (true, true) => (want_w + want_h / aspect) / (1. + 1. / (aspect * aspect)),
+        (true, false) => want_w,
+        _ => want_h * aspect,
+    };
+    let size = pip_fit(desired, aspect, (max_w, max_h), w.min(pip_min_width(aspect)));
+    let at = (if dx < 0 { right - size.0 } else { x }, if dy < 0 { bottom - size.1 } else { y });
+    let (x, y) = pip_clamp(at, size, (cw, ch));
+    [x, y, size.0, size.1]
+}
+
+/// Dragging the pill moves the floating preview; an edge or corner resizes it.
+fn pip_gesture(s: &mut App, d: &rune::Drag, dir: (i8, i8), aspect: f32) {
+    let ui = &mut s.ui.panel.browser;
+    let container = (ui.pip_area[2], ui.pip_area[3]);
+    let start = match (d.phase, ui.pip_start) {
+        (Phase::Down, _) | (_, None) => {
+            let start = pip_frame(ui.pip_frame, aspect, container);
+            ui.pip_start = Some(start);
+            start
+        }
+        (_, Some(start)) => start,
+    };
+    let [x, y, w, _] = if dir == (0, 0) {
+        let (x, y) = pip_clamp((start[0] + d.dx, start[1] + d.dy), (start[2], start[3]), container);
+        [x, y, start[2], start[3]]
+    } else {
+        pip_resize(start, dir, (d.dx, d.dy), aspect, container)
+    };
+    ui.pip_frame = Some([x, y, w]);
+    if matches!(d.phase, Phase::Up) {
+        ui.pip_start = None;
+    }
 }
 
 /// The picker's box around the element under the pointer, as web's annotation overlay draws it.
 fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El> {
     let [x, y, w, h] = hover_rect(status.hover.filter(|_| status.picking)?, scale, page)?;
     Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
+}
+
+/// The picked element's box and web's compact annotation editor beside it: the comment and
+/// Attach (Enter); Escape drops the pick.
+fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32)) -> Vec<El> {
+    let ui = &app.ui.panel.browser;
+    let Some(pending) = ui.pending.as_ref().filter(|p| p.tab == tab) else { return Vec::new() };
+    let [x, y, w, h] = pending.rect;
+    let mut out: Vec<El> = hover_rect(pending.rect, scale, page)
+        .map(|[x, y, w, h]| el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
+        .into_iter()
+        .collect();
+    let size = (360f32.min(page.0 - 16.).max(160.), 50.);
+    let (left, top) = editor_position([x * scale, y * scale, w * scale, h * scale], size, page);
+    let comment = text_input(&ui.comment, theme::TEXT_SM)
+        .key("browser-annotation-comment")
+        .single_line()
+        .role("textbox")
+        .label("Describe the change")
+        .placeholder("Describe the change…", t.c.muted_foreground)
+        .grow(1.)
+        .min_w(0.)
+        .h(32.)
+        .py(6.)
+        .color(t.c.foreground)
+        .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
+        .on_edit(|s: &mut App| &mut s.ui.panel.browser.comment)
+        .on_submit(|s: &mut App, tx: &mut Tx| {
+            submit_annotation(s);
+            tx.blur();
+        })
+        .on_input_key(|s: &mut App, e, tx| {
+            if !matches!(e.key, Key::Escape) {
+                return false;
+            }
+            s.ui.panel.browser.pending = None;
+            tx.blur();
+            true
+        });
+    out.push(
+        row()
+            .key("browser-annotation-editor")
+            .pin(Some(left), Some(top), None, None)
+            .w(size.0)
+            .h(size.1)
+            .padding(8.)
+            .gap(8.)
+            .center_y()
+            .radius(12.)
+            .border(1., t.c.border)
+            .fill(t.c.popover.alpha_mul(0.96))
+            .shadow(8., 24., Color::BLACK.alpha(0.25))
+            .child(comment)
+            .child(kit::Button::new("Attach").on_press(submit_annotation).build(t)),
+    );
+    out
+}
+
+/// `positionCompactEditor`: right of the target, else left, below or above, whichever overflows
+/// the page least, then kept 8 pt inside it.
+fn editor_position([x, y, w, h]: [f32; 4], (ew, eh): (f32, f32), (pw, ph): (f32, f32)) -> (f32, f32) {
+    let gap = 8.;
+    let candidates = [(x + w + gap, y), (x - ew - gap, y), (x + w - ew, y + h + gap), (x + w - ew, y - eh - gap)];
+    let overflow = |(l, t): (f32, f32)| (-l).max(0.) + (-t).max(0.) + (l + ew - pw).max(0.) + (t + eh - ph).max(0.);
+    let best = candidates.into_iter().fold(candidates[0], |best, c| if overflow(c) < overflow(best) { c } else { best });
+    (best.0.max(8.).min((pw - ew - 8.).max(8.)), best.1.max(8.).min((ph - eh - 8.).max(8.)))
 }
 
 /// A CSS-pixel rect in page points, cut to the page.
@@ -967,6 +1234,9 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
         .on_key(|s: &mut App, e, _| {
             if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) {
                 return false;
+            }
+            if matches!(e.key, Key::Escape) && s.ui.panel.browser.pending.take().is_some() {
+                return true;
             }
             // Escape leaves element picking, as web's annotation mode.
             let picking = s.ui.panel.browser.shown.filter(|&tab| s.ui.panel.browser.browser.status(tab).picking);
@@ -1363,6 +1633,31 @@ mod tests {
     }
 
     #[test]
+    fn the_annotation_editor_sits_beside_its_element_and_inside_the_page() {
+        // Right of the element when it fits, else left, else below.
+        assert_eq!(editor_position([10., 10., 100., 40.], (360., 50.), (800., 600.)), (118., 10.));
+        assert_eq!(editor_position([600., 10., 190., 40.], (360., 50.), (800., 600.)), (232., 10.));
+        assert_eq!(editor_position([0., 10., 780., 40.], (360., 50.), (800., 600.)), (420., 58.));
+        // A page smaller than the editor pins it to the margin.
+        assert_eq!(editor_position([0., 0., 100., 100.], (360., 50.), (300., 40.)), (8., 8.));
+    }
+
+    #[test]
+    fn the_floating_preview_moves_and_resizes_inside_the_chat_area() {
+        let area = (1000., 700.);
+        // The default frame sits top right at 320 pt wide, 12 pt from the edges.
+        assert_eq!(pip_frame(None, 1.6, area), [668., 12., 320., 200.]);
+        // A moved frame keeps its width and stays inside the area.
+        assert_eq!(pip_frame(Some([900., -50., 400.]), 1.6, area), [588., 12., 400., 250.]);
+        // The east edge widens at the aspect ratio; the west edge keeps the right side put.
+        assert_eq!(pip_resize([100., 100., 320., 200.], (1, 0), (80., 0.), 1.6, area), [100., 100., 400., 250.]);
+        assert_eq!(pip_resize([100., 100., 320., 200.], (-1, 0), (-80., 0.), 1.6, area), [20., 100., 400., 250.]);
+        // Never smaller than the minimum, never past the area's edge.
+        assert_eq!(pip_resize([100., 100., 320., 200.], (1, 1), (-500., -500.), 1.6, area)[2], 240.);
+        assert_eq!(pip_resize([100., 100., 320., 200.], (1, 0), (5000., 0.), 1.6, area)[2], 888.);
+    }
+
+    #[test]
     fn device_sizes_stay_inside_web_limits() {
         assert!(valid_size(375, 667) && valid_size(3840, 2160) && !valid_size(3840, 2161) && !valid_size(200, 800));
         assert_eq!(clamp_size(100, 5000), (240, 3840));
@@ -1376,14 +1671,15 @@ mod tests {
             "htmlPreview": "<button id=\"go\">Sign in</button>", "componentName": null, "source": null, "styles": "color: red",
             "rect": { "x": 1 }, "doc": { "x": 1 },
         });
-        let record = annotation("abc", &element);
+        let record = annotation("abc", &element, "Make it blue");
         assert_eq!(record["contextId"], "preview-annotation_abc");
+        assert_eq!(record["comment"], "Make it blue");
         assert_eq!(record["label"], "Demo home");
         assert_eq!(record["targetSummary"], "1 selected element");
         let details = &record["elements"][0];
         assert_eq!(details["selector"], "#go");
         assert!(details.get("rect").is_none() && details["source"].is_null());
-        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }));
+        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }), "");
         assert_eq!(untitled["label"], "Preview annotation");
         assert!(untitled["pageTitle"].is_null());
     }

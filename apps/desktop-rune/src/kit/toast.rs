@@ -17,6 +17,10 @@ impl Toast {
         self.0 = self.0.on_close(f);
         self
     }
+    pub fn action<S: 'static>(mut self, k: &Kit, label: &str, primary: bool, f: impl Fn(&mut S, &mut Tx) + 'static) -> Self {
+        self.0 = self.0.action(k, label, primary, f);
+        self
+    }
     pub fn build(self, k: &Kit) -> El {
         super::motion::popup(self.0.build(k))
             .w(356.)

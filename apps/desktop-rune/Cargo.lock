@@ -2993,6 +2993,7 @@ dependencies = [
  "alacritty_terminal",
  "base64",
  "image",
+ "ring",
  "rune",
  "rune-kit",
  "s5-net",
