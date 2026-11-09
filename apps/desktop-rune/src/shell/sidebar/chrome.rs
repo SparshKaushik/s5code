@@ -134,14 +134,18 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
     for p in s.state().projects.iter().filter(|p| p["archivedAt"].is_null()) {
         let id = crate::data::s(p, "id").to_string();
         let on = ui.project_scope.contains(&id);
-        menu = menu.item(crate::kit::MenuItem::new(crate::data::s(p, "title")).checked(on).on_select(move |s: &mut App| {
+        let mut item = crate::kit::MenuItem::new(crate::data::s(p, "title")).checked(on).on_select(move |s: &mut App| {
             let scope = &mut s.ui.shell.sidebar.project_scope;
             if on {
                 scope.retain(|x| *x != id);
             } else {
                 scope.push(id.clone());
             }
-        }));
+        });
+        if let Some(remote) = crate::env::remote_label(s, p) {
+            item = item.trailing_icon(&i::SERVER, format!("On {remote}"));
+        }
+        menu = menu.item(item);
     }
     menu.overlay(&crate::kit::theme(t), overlays);
 }

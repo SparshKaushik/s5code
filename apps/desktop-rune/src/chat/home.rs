@@ -44,12 +44,17 @@ pub fn take_workspace(s: &mut App, project: &str) -> Value {
 
 /// The project the draft belongs to: the route's, else the one with the latest activity.
 pub fn draft_project(s: &App) -> Option<&Value> {
-    let st = s.state();
     if let Route::Home { project_id: Some(id) } = s.frame_route()
         && let Some(p) = composer::project_by_id(s, id)
     {
         return Some(p);
     }
+    most_active_project(s)
+}
+
+/// The project a draft without one lands in.
+pub fn most_active_project(s: &App) -> Option<&Value> {
+    let st = s.state();
     // sortScopedProjectsForSidebar by "updated_at": a project with threads ranks by its latest
     // user message, else by its own timestamps; ties go by title.
     let thread_ts = |t: &Value| data::ts(t, "latestUserMessageAt").or_else(|| data::ts(t, "updatedAt")).or_else(|| data::ts(t, "createdAt")).unwrap_or(i64::MIN);

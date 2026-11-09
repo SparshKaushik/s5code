@@ -107,6 +107,7 @@ impl App {
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
+        env::follow(self, &route);
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
         {
@@ -148,7 +149,7 @@ fn poll_host(s: &mut App) -> bool {
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = poll_host(s);
-    changed |= s.src.net().is_some_and(|net| net.drain());
+    changed |= env::drain(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
     settings::fonts::follow(s, tx);

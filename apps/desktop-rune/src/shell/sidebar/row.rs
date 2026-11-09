@@ -249,14 +249,14 @@ pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
     if !project.is_empty() {
         rows = rows.child(detail(monogram_at(t, project, false, 12.0), project.to_string()));
     }
-    let env = s.state().config.as_ref().map(|c| crate::data::s(&c["environment"], "label").to_string()).unwrap_or_default();
-    if !env.is_empty() {
-        rows = rows.child(detail(icon(&i::SERVER, 12.0).color(t.c.muted_foreground).shrink(), env));
+    let raw = s.state().threads.iter().find(|v| crate::data::s(v, "id") == id);
+    // The web names the machine only once projects span environments.
+    if let Some(raw) = raw.filter(|_| crate::env::spans(s)) {
+        rows = rows.child(detail(icon(&i::SERVER, 12.0).color(t.c.muted_foreground).shrink(), crate::env::label(s, &crate::env::of(s, raw))));
     }
     if let Some(branch) = &th.branch {
         rows = rows.child(detail(icon(&i::GIT_BRANCH, 12.0).color(t.c.muted_foreground).shrink(), branch.clone()));
     }
-    let raw = s.state().threads.iter().find(|v| crate::data::s(v, "id") == id);
     let slug = raw.map(|v| crate::data::s(&v["modelSelection"], "model").to_string()).unwrap_or_default();
     if let Some(driver) = model.drivers.get(&th.provider).filter(|_| !slug.is_empty()) {
         let label = crate::chat::composer::model_name(s, &th.provider, &slug);

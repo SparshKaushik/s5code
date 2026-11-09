@@ -514,7 +514,7 @@ fn items(s: &App) -> Vec<Item> {
                     .find(|p| data::s(p, "id") == data::s(v, "projectId"))
                     .map(|p| data::s(p, "title"))
                     .unwrap_or("");
-                row.subtitle = Some(format!("{project} · Local · ∞"));
+                row.subtitle = Some(format!("{project} · {} · ∞", crate::env::location(s, v)));
                 row.fields.push(SearchTerm::weighted(
                     data::s(v, "branch")
                         .trim_start_matches("t3/")
@@ -563,6 +563,9 @@ fn items(s: &App) -> Vec<Item> {
                     Action::OpenProject(data::s(p, "id").into())
                 },
             ));
+            if let Some(row) = out.last_mut() {
+                row.subtitle = Some(format!("{} · {}", crate::env::location(s, p), data::s(p, "workspaceRoot")));
+            }
             if can_pin && let Some(row) = out.last_mut() {
                 row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());
             }
@@ -1333,7 +1336,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                     if let Some(at) = data::iso_ms(&visited) {
                         s.ui.shell.sidebar.visits.claim_open(id, at);
                     }
-                    if let Some(net) = s.src.net() {
+                    if let Some(net) = crate::env::net_for(s, id) {
                         let ack=net.dispatch(serde_json::json!({"type":"thread.visit","threadId":id,"visitedAt":visited,"opened":true,"searchQuery":query}));
                         s.ui.shell.palette.acknowledgements.push(ack);
                     }

@@ -23,6 +23,7 @@ pub struct MenuItem {
     label: String,
     glyph: Option<&'static Icon>,
     shortcut: Option<String>,
+    trailing: Option<(&'static Icon, String)>,
     checked: Option<bool>,
     radio: bool,
     option: bool,
@@ -41,6 +42,7 @@ impl MenuItem {
             label: label.into(),
             glyph: None,
             shortcut: None,
+            trailing: None,
             checked: None,
             radio: false,
             option: false,
@@ -60,6 +62,11 @@ impl MenuItem {
     }
     pub fn shortcut(mut self, value: impl Into<String>) -> Self {
         self.shortcut = Some(value.into());
+        self
+    }
+    /// A muted glyph after the label, described by `help` (the web's `ProjectEnvironmentBadge`).
+    pub fn trailing_icon(mut self, glyph: &'static Icon, help: impl Into<String>) -> Self {
+        self.trailing = Some((glyph, help.into()));
         self
     }
     pub fn variant(mut self, value: &str) -> Self {
@@ -288,6 +295,9 @@ impl MenuItem {
                     k.c.text_base
                 }),
         );
+        if let Some((glyph, help)) = self.trailing {
+            e = e.child(icon(glyph, 14.).color(muted).role("img").label(help.clone()).help(help));
+        }
         if let Some(shortcut) = self.shortcut {
             e = e.shortcut_hint(shortcut.clone()).child(
                 text(shortcut)
