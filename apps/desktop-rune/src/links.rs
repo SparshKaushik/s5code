@@ -107,18 +107,25 @@ pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
     })())
 }
 
+/// Opens a prompt link from anywhere (a second launch, the OS's URL handler), on the UI thread:
+/// the draft lands now, or once the shell has loaded. False when `url` is no prompt link.
+pub fn open(s: &mut App, url: &str) -> bool {
+    let Some(link) = parse(url) else { return false };
+    s.ui.links.pending = Some(link);
+    poll(s);
+    true
+}
+
 /// Links passed on the command line at launch.
 pub fn start(s: &mut App) {
-    if let Some(link) = std::env::args().skip(1).find_map(|a| parse(&a)) {
-        s.ui.links.pending = Some(link);
+    if let Some(url) = std::env::args().skip(1).find(|a| parse(a).is_some()) {
+        open(s, &url);
     }
 }
 
 /// macOS hands links to the running app.
 pub fn on_open_url(s: &mut App, url: &str, _: &mut rune::Tx) {
-    if let Some(link) = parse(url) {
-        s.ui.links.pending = Some(link);
-    }
+    open(s, url);
 }
 
 /// `findPromptLinkProjects`: the repository's projects, most recently updated first.

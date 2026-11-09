@@ -23,6 +23,12 @@ mod theme;
 mod tokens;
 mod wizard;
 
+/// The entry the desktop shell hands `t3code://new?…` prompt links to: `prompt_link::open(app, url)`.
+pub(crate) use links as prompt_link;
+
+/// The Linux launcher entry (`<APP_ID>.desktop`) the unread badge counts on.
+pub const APP_ID: &str = "in.newsa.s5code.rune-prototype";
+
 use rune::{App as RuneApp, AppSpec, Cx, El, KeyEvent, Tx, Waker};
 
 use crate::data::Source;

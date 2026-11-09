@@ -167,6 +167,9 @@ fn open_clicked(s: &mut App) -> bool {
 }
 
 pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
+    if let Some(waker) = &s.ui.panel.waker {
+        os::listen(waker.clone());
+    }
     let now = data::now_ms();
     let changed = open_clicked(s) | observe(s, now);
     let before = s.ui.notify.toasts.len();
@@ -339,9 +342,23 @@ fn toast_view(toast: &ThreadToast, t: &T, k: &rune_kit::Kit) -> El {
     kit::motion::popup(kit::menu::glass(col().key(format!("thread-toast-{id}")).role("status").w_full().child(content).child(dismiss), k, false))
 }
 
-/// Desktop notifications and the dock badge, through what each OS offers without a bundle
-/// entitlement: `osascript` and the Dock tile on macOS, `notify-send` elsewhere.
+/// Desktop notifications and the unread badge. macOS posts through Notification Center when the
+/// app runs from its bundle (else `osascript`, which can't report clicks) and badges the Dock tile;
+/// Linux uses `notify-send` and the launcher entry's count; Windows shows a PowerShell toast.
 mod os {
+    /// macOS hands a clicked notification's thread back from any thread.
+    pub fn listen(wake: rune::Waker) {
+        static ONCE: std::sync::Once = std::sync::Once::new();
+        ONCE.call_once(|| {
+            rune_mac::notify::on_click(move |click| {
+                if let Some(thread) = click.get("thread") {
+                    super::CLICKED.lock().map(|mut c| c.push(thread.to_owned())).ok();
+                    wake();
+                }
+            })
+        });
+    }
+
     /// On Linux, `notify-send --wait` prints the action the user clicked; older libnotify
     /// without `--action` fails, and the plain notification shows instead.
     pub fn notify(title: &str, body: &str, thread: &str, wake: Option<rune::Waker>) {
@@ -369,13 +386,21 @@ mod os {
             });
             return;
         }
+        if rune_mac::notify::available() {
+            rune_mac::notify::post(&rune_mac::notify::Notification::new(thread, title).body(body).info("thread", thread));
+            return;
+        }
         let mut command = if cfg!(target_os = "macos") {
             let quote = |v: &str| format!("\"{}\"", v.replace('\\', "\\\\").replace('"', "\\\""));
             let mut c = std::process::Command::new("osascript");
             c.arg("-e").arg(format!("display notification {} with title {}", quote(body), quote(title)));
             c
         } else if cfg!(target_os = "windows") {
-            return;
+            let mut c = std::process::Command::new("powershell");
+            c.args(["-NoProfile", "-NonInteractive", "-Command", WINDOWS_TOAST]).env("S5_TOAST_TITLE", title).env("S5_TOAST_BODY", body);
+            #[cfg(windows)]
+            std::os::windows::process::CommandExt::creation_flags(&mut c, 0x0800_0000);
+            c
         } else {
             let mut c = std::process::Command::new("notify-send");
             c.args(["--app-name", "S5 Code", title, body]);
@@ -422,8 +447,43 @@ mod os {
         }
     }
 
-    /// Linux has no common launcher badge; Windows would need a taskbar overlay icon.
-    #[cfg(not(target_os = "macos"))]
+    /// The toast template, filled from the environment so no text is parsed as script. It posts as
+    /// PowerShell, the one app id Windows accepts unregistered, so a click opens nothing.
+    const WINDOWS_TOAST: &str = "[void][Windows.UI.Notifications.ToastNotificationManager,Windows.UI.Notifications,ContentType=WindowsRuntime];\
+        $x=[Windows.UI.Notifications.ToastNotificationManager]::GetTemplateContent([Windows.UI.Notifications.ToastTemplateType]::ToastText02);\
+        $t=$x.GetElementsByTagName('text');[void]$t.Item(0).AppendChild($x.CreateTextNode($env:S5_TOAST_TITLE));\
+        [void]$t.Item(1).AppendChild($x.CreateTextNode($env:S5_TOAST_BODY));\
+        [Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\\WindowsPowerShell\\v1.0\\powershell.exe').Show([Windows.UI.Notifications.ToastNotification]::new($x))";
+
+    /// `com.canonical.Unity.LauncherEntry.Update` for the app's `.desktop` file, which docks such as
+    /// KDE's task manager and Dash to Dock draw as a count on the launcher.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
+    pub fn launcher_entry(count: usize) -> Vec<String> {
+        [
+            "emit",
+            "--session",
+            "--object-path",
+            "/com/canonical/unity/launcherentry/s5code",
+            "--signal",
+            "com.canonical.Unity.LauncherEntry.Update",
+            &format!("application://{}.desktop", crate::APP_ID),
+            &format!("{{'count': <int64 {count}>, 'count-visible': <{}>}}", count > 0),
+        ]
+        .map(str::to_owned)
+        .to_vec()
+    }
+
+    #[cfg(target_os = "linux")]
+    pub fn set_badge(count: usize) {
+        let mut command = std::process::Command::new("gdbus");
+        command.args(launcher_entry(count)).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        std::thread::spawn(move || {
+            let _ = command.status();
+        });
+    }
+
+    /// Windows would need a taskbar overlay icon.
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
     pub fn set_badge(_count: usize) {}
 }
 
@@ -431,6 +491,14 @@ mod os {
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn the_linux_badge_counts_on_the_apps_launcher_entry() {
+        let args = os::launcher_entry(3);
+        assert_eq!(args[6], format!("application://{}.desktop", crate::APP_ID));
+        assert_eq!(args[7], "{'count': <int64 3>, 'count-visible': <true>}");
+        assert_eq!(os::launcher_entry(0)[7], "{'count': <int64 0>, 'count-visible': <false>}");
+    }
 
     fn obs(attention: Option<&str>, completed_at: Option<i64>) -> Observation {
         Observation { attention: attention.map(str::to_string), settled: completed_at.is_some(), completed_at }

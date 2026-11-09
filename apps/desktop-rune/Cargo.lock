@@ -2879,6 +2879,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rune-mac"
+version = "0.0.1"
+source = "git+https://github.com/anomalyco/rune?rev=47cb857795c3b1dd5097c15d6161719ae738ddda#47cb857795c3b1dd5097c15d6161719ae738ddda"
+dependencies = [
+ "block2 0.5.1",
+ "objc2 0.5.3",
+]
+
+[[package]]
 name = "rune-motion"
 version = "0.1.0"
 source = "git+https://github.com/anomalyco/rune?rev=47cb857795c3b1dd5097c15d6161719ae738ddda#47cb857795c3b1dd5097c15d6161719ae738ddda"
@@ -3025,6 +3034,7 @@ dependencies = [
  "ring",
  "rune",
  "rune-kit",
+ "rune-mac",
  "s5-net",
  "serde_json",
  "tungstenite",
