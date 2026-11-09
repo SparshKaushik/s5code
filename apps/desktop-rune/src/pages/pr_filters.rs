@@ -195,8 +195,12 @@ pub fn label_choices(facets: &[LabelFacet], hosted: &[Value], query: &str) -> Ve
 /// The label picker's rows: chosen labels no choice offers, then the choices.
 pub fn visible_labels(value: &[String], facets: &[LabelFacet], hosted: &[Value], query: &str) -> Vec<LabelFacet> {
     let choices = label_choices(facets, hosted, query);
-    let missing = value.iter().filter(|v| !choices.iter().any(|c| c.name.to_lowercase() == v.to_lowercase()));
-    missing.map(|name| LabelFacet { name: name.clone(), color: None, count: 0 }).chain(choices).collect()
+    let missing: Vec<LabelFacet> = value
+        .iter()
+        .filter(|v| !choices.iter().any(|c| c.name.to_lowercase() == v.to_lowercase()))
+        .map(|name| LabelFacet { name: name.clone(), color: None, count: 0 })
+        .collect();
+    missing.into_iter().chain(choices).collect()
 }
 
 /// The chosen labels after (un)ticking `name`, capped like the menu.

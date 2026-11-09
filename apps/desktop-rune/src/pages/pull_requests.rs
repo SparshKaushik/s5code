@@ -289,7 +289,7 @@ pub(super) fn parse_query(raw: &str) -> (String, Map<String, Value>) {
                     };
                     state.map(|c| filters.insert("checks".into(), json!(c))).is_some()
                 }
-                "label" | "author" | "draft" | "review" | "status" | "checks" => false,
+                "author" | "draft" | "review" | "status" | "checks" => false,
                 _ if value.starts_with('/') => false,
                 _ => {
                     let list = names(raw_value, Some(key));
