@@ -436,6 +436,20 @@ pub fn open_panel(app: &mut App) {
     }
 }
 
+/// An activated Terminal surface takes the keyboard (web's `focusTerminal`).
+pub fn focus_panel(app: &mut App) {
+    let Some(thread) = current_thread(app) else {
+        return;
+    };
+    let Some(groups) = app.ui.panel.drawer.groups(Owner::Panel, &thread) else {
+        return;
+    };
+    let active = Some(&groups.active).filter(|a| groups.ids().any(|id| id == *a)).or_else(|| groups.ids().next()).cloned();
+    if let Some(id) = active {
+        terminal::focus(app, &thread, &id);
+    }
+}
+
 /// Closing the panel's Terminal surface stops its terminals.
 pub fn close_panel(app: &mut App) {
     let Some(thread) = current_thread(app) else {

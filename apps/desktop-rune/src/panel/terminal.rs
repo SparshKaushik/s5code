@@ -612,6 +612,9 @@ fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return false;
     };
+    if session.vt.history_key(e, cfg!(target_os = "macos")) {
+        return true;
+    }
     match session.vt.key(e) {
         Some(data) => {
             session.vt.clear_selection();
@@ -629,10 +632,7 @@ struct Metrics {
 }
 
 fn metrics(app: &App) -> Metrics {
-    let size = app.client_settings.values["fontSizeTerminal"]
-        .as_f64()
-        .unwrap_or(12.)
-        .clamp(8., 20.) as f32;
+    let size = font_size(&app.client_settings.values);
     let cell_h = (size * 1.35).round().max(1.);
     let font = theme::mono(rune::TextStyle::new(size, 400.)).lh(cell_h);
     let cell_w = rune::text::advance("MMMMMMMMMM", font) / 10.;
@@ -641,6 +641,19 @@ fn metrics(app: &App) -> Metrics {
         cell_w: if cell_w > 0. { cell_w } else { size * 0.6 },
         cell_h,
     }
+}
+
+fn in_preview(settings: &serde_json::Map<String, Value>, url: &str, force_browser: bool) -> bool {
+    let web = url.starts_with("http://") || url.starts_with("https://");
+    web && !force_browser && settings.get("browserLinkTarget").and_then(Value::as_str) == Some("app")
+}
+
+/// The code font size, or the terminal's own under advanced typography
+/// (`resolveTerminalFontSizePreference`).
+fn font_size(settings: &serde_json::Map<String, Value>) -> f32 {
+    let advanced = settings.get("typographyAdvanced").and_then(Value::as_bool).unwrap_or(false);
+    let (key, default) = if advanced { ("fontSizeTerminal", 12.) } else { ("fontSizeCode", 13.) };
+    settings.get(key).and_then(Value::as_f64).unwrap_or(default).clamp(8., 20.) as f32
 }
 
 fn cell_at(app: &App, thread: &str, id: &str, x: f32, y: f32) -> (usize, usize) {
@@ -714,11 +727,16 @@ fn path_target(text: &str, cwd: &str) -> PathTarget {
     }
 }
 
-/// Opens a clicked link: URLs in the browser, workspace files in the Files panel, other paths
-/// in the preferred editor (`handleLinkActivate`).
-fn open_link(app: &mut App, tx: &mut Tx, link: &Link) {
+/// Opens a clicked link: URLs in the preview when links open in the app (Cmd or Ctrl still
+/// picks the system browser), workspace files in the Files panel, other paths in the preferred
+/// editor (`handleLinkActivate`, `openTerminalLinkInPreview`).
+fn open_link(app: &mut App, tx: &mut Tx, link: &Link, force_browser: bool) {
     if link.kind == links::Kind::Url {
-        let _ = tx.open_url(&link.text);
+        if in_preview(&app.client_settings.values, &link.text, force_browser) && super::context(app).is_some() {
+            super::open_preview(app, &link.text);
+        } else {
+            let _ = tx.open_url(&link.text);
+        }
         return;
     }
     let Some((_, cwd)) = super::context(app) else {
@@ -1032,7 +1050,7 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
                 session.button = None;
                 report = session.vt.mouse(MouseButton::Left, false, false, col, row, mods);
             }
-            Some(Press::Link(link)) if !d.cancelled() => open = Some(link),
+            Some(Press::Link(link)) if !d.cancelled() => open = Some((link, mods.ctrl || mods.cmd)),
             Some(Press::Select { by: SelectBy::Cell, moved: false }) => session.vt.clear_selection(),
             _ => {}
         },
@@ -1040,8 +1058,8 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
     if let Some(data) = report {
         send(s, thread, id, data);
     }
-    if let Some(link) = open {
-        open_link(s, tx, &link);
+    if let Some((link, force_browser)) = open {
+        open_link(s, tx, &link, force_browser);
     }
 }
 
@@ -1111,6 +1129,19 @@ pub fn fixture(app: &mut App, thread: &str, id: &str, recorded: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn links_and_fonts_follow_the_settings() {
+        let settings = |v: Value| v.as_object().cloned().unwrap();
+        let app = settings(json!({"browserLinkTarget": "app"}));
+        assert!(in_preview(&app, "https://example.com", false));
+        assert!(!in_preview(&app, "https://example.com", true));
+        assert!(!in_preview(&app, "file:///tmp/a", false));
+        assert!(!in_preview(&settings(json!({"browserLinkTarget": "system"})), "https://example.com", false));
+        assert_eq!(font_size(&settings(json!({}))), 13.);
+        assert_eq!(font_size(&settings(json!({"fontSizeCode": 15, "fontSizeTerminal": 10}))), 15.);
+        assert_eq!(font_size(&settings(json!({"typographyAdvanced": true, "fontSizeCode": 15, "fontSizeTerminal": 10}))), 10.);
+    }
 
     #[test]
     fn presses_on_the_grid_select_by_drag_and_a_click_clears() {

@@ -126,7 +126,10 @@ fn activate(app: &mut App, surface: Surface) {
     match surface {
         Surface::Diff => diff::load(app),
         Surface::Files => files::load(app, "".into()),
-        Surface::Terminal => drawer::open_panel(app),
+        Surface::Terminal => {
+            drawer::open_panel(app);
+            drawer::focus_panel(app);
+        }
         _ => {}
     }
 }
@@ -320,8 +323,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         context_changed |= switch_thread(app);
         let thread = context(app).map(|(id, _)| id).unwrap_or_default();
         if app.ui.panel.thread != thread {
-            app.ui.panel.thread = thread;
-            diff::reset(app);
+            let previous = std::mem::replace(&mut app.ui.panel.thread, thread);
+            diff::reset(app, &previous);
             files::reset(app);
             if app.ui.shell.panel_open {
                 match app.ui.panel.active {
