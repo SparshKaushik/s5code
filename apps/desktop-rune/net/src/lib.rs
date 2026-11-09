@@ -56,6 +56,7 @@ pub type Reply = Result<Value, Value>;
 mod pairing;
 mod projection;
 pub use pairing::{fetch_descriptor, resolve_pairing};
+pub use url;
 mod transport;
 use serde_json::json;
 use std::sync::{
