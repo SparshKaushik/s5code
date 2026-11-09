@@ -128,7 +128,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let project = if scratch { "No project".to_string() } else { project.map(|p| data::s(p, "title").to_string()).unwrap_or_default() };
     let mut crumbs = row().gap(12.0).center_y().shrink().min_w(0.0);
     if !project.is_empty() {
-        let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { monogram(t, &project, 14.0) };
+        let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { composer::ctx(s).project.map_or_else(|| monogram(t, &project, 14.0), |p| crate::shell::sidebar::favicon::view(s, t, p, 14.0)) };
         crumbs = crumbs
             .child(row().gap(6.0).center_y().child(mark).child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate()))
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));

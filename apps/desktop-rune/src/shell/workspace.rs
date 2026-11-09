@@ -1,15 +1,20 @@
-//! `workspace.focusNext` / `workspace.focusPrevious` (the web's workspace focus controller),
-//! over the areas Rune can focus by hand: the sidebar's search field, then the composer.
+//! `workspace.focusNext` / `workspace.focusPrevious` (the web's workspace focus controller), in
+//! the web's area order: sidebar, composer, panel, terminal. Rune focuses only text fields by
+//! hand, so each area lands on its field (the sidebar's search, the composer, the browser's
+//! address bar or the Files search, a terminal) and the conversation and details are passed over.
 
 use rune::{KeyEvent, Tx};
 
 use crate::chat::composer;
+use crate::panel::Region;
 use crate::{App, Route};
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Area {
     Sidebar,
     Composer,
+    Panel,
+    Terminal,
 }
 
 fn areas(s: &App) -> Vec<Area> {
@@ -19,6 +24,12 @@ fn areas(s: &App) -> Vec<Area> {
     }
     if matches!(s.frame_route(), Route::Thread(_) | Route::Home { .. }) {
         out.push(Area::Composer);
+    }
+    if crate::panel::region_available(s, Region::Panel) {
+        out.push(Area::Panel);
+    }
+    if crate::panel::region_available(s, Region::Terminal) {
+        out.push(Area::Terminal);
     }
     out
 }
@@ -32,6 +43,10 @@ fn current(s: &App) -> Option<Area> {
         Some(Area::Sidebar)
     } else if s.ui.chat.composer.drafts.get(&composer_key(s)).is_some_and(|d| d.edit.focused) {
         Some(Area::Composer)
+    } else if crate::panel::region_focused(s, Region::Panel) {
+        Some(Area::Panel)
+    } else if crate::panel::region_focused(s, Region::Terminal) {
+        Some(Area::Terminal)
     } else {
         None
     }
@@ -67,6 +82,14 @@ pub fn on_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {
     s.ui.shell.sidebar.search.focused = target == Area::Sidebar;
     let key = composer_key(s);
     s.ui.chat.composer.drafts.entry(key).or_default().edit.focused = target == Area::Composer;
+    crate::panel::focus_region(
+        s,
+        match target {
+            Area::Panel => Some(Region::Panel),
+            Area::Terminal => Some(Region::Terminal),
+            _ => None,
+        },
+    );
     true
 }
 

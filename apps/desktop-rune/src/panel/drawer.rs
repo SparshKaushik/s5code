@@ -311,6 +311,17 @@ fn launch_context(app: &App) -> Option<(String, String, Option<String>)> {
     Some((thread, cwd, worktree))
 }
 
+/// The current thread's active terminal for `owner`, which `workspace.focusNext` focuses.
+pub(super) fn active_terminal(app: &App, owner: Owner) -> Option<(String, String)> {
+    let thread = current_thread(app)?;
+    let ui = &app.ui.panel.drawer;
+    if owner == Owner::Drawer && !ui.is_open(&thread) {
+        return None;
+    }
+    let active = ui.groups(owner, &thread)?.active.clone();
+    (!active.is_empty()).then_some((thread, active))
+}
+
 fn current_thread(app: &App) -> Option<String> {
     match &app.route {
         Route::Thread(id) => Some(id.clone()),

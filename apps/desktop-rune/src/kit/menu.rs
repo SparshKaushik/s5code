@@ -33,6 +33,8 @@ pub struct MenuItem {
     sub: Option<(Vec<MenuEntry>, bool)>,
     sub_width: f32,
     sub_keys: Option<Box<dyn FnOnce(El) -> El>>,
+    leading: Option<El>,
+    trailing: Option<El>,
     acts: Acts,
 }
 impl MenuItem {
@@ -51,11 +53,23 @@ impl MenuItem {
             sub: None,
             sub_width: 160.,
             sub_keys: None,
+            leading: None,
+            trailing: None,
             acts: Acts::default(),
         }
     }
     pub fn icon(mut self, glyph: &'static Icon) -> Self {
         self.glyph = Some(glyph);
+        self
+    }
+    /// Custom content before the label in place of an icon, such as a project favicon.
+    pub fn leading(mut self, value: El) -> Self {
+        self.leading = Some(value);
+        self
+    }
+    /// Custom content after the label, such as a row's own pin button.
+    pub fn trailing(mut self, value: El) -> Self {
+        self.trailing = Some(value);
         self
     }
     pub fn shortcut(mut self, value: impl Into<String>) -> Self {
@@ -265,7 +279,9 @@ impl MenuItem {
         } else if self.inset {
             e = e.child(el().w(16.));
         }
-        if let Some(glyph) = self.glyph {
+        if let Some(leading) = self.leading {
+            e = e.child(leading);
+        } else if let Some(glyph) = self.glyph {
             e = e.child(
                 el().size(12., 16.).child(
                     icon(glyph, 16.)
@@ -302,6 +318,9 @@ impl MenuItem {
                         k.c.text_faint
                     }),
             );
+        }
+        if let Some(trailing) = self.trailing {
+            e = e.child(trailing);
         }
         if self.radio && !native {
             e = e.child(mark(self.checked == Some(true)));
