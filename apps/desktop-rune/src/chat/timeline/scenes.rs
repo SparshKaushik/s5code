@@ -103,6 +103,19 @@ fn error_banner_chatgpt(app: &mut App) {
     failed_run(app, serde_json::json!({"class": "provider_error", "retryable": false,
         "code": "subscription_sharing_workplace_individual_usage_limit_exceeded", "message": "You've hit your usage limit."}));
 }
+fn system_notification(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["visibleTurnItems"].as_array_mut())
+    {
+        for (n, (kind, summary)) in [("system", "T3 Code restarted and resumed this turn"), ("command", "Background command finished")].into_iter().enumerate() {
+            items.push(serde_json::json!({"position": 100 + n, "item": {"id": format!("scene-notification-{kind}"), "type": "notification",
+                "status": "completed", "outcome": "updated", "source": {"kind": kind}, "summary": summary, "detail": "Continue",
+                "createdAt": "2026-01-01T00:00:00Z"}}));
+        }
+    }
+}
 fn chip_details(app: &mut App) {
     showcase(app);
     let Route::Thread(id) = app.route.clone() else { return };
@@ -128,6 +141,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-error", error),
     ("timeline-error-banner", error_banner),
     ("timeline-error-banner-chatgpt", error_banner_chatgpt),
+    ("timeline-system-notification", system_notification),
     ("timeline-working", working),
     ("timeline-showcase", showcase),
     ("timeline-todo", todo),

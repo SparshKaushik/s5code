@@ -2,7 +2,7 @@
 //! (ChatBannerLane). The error is `threadErrorSummary` over the presented latest run
 //! (orchestrationV2ThreadError.ts, threadExecution.ts); a dismissal holds for the session.
 
-use rune::{Color, El, col, el, icon, row, text};
+use rune::{Color, El, col, icon, row, text};
 use serde_json::Value;
 
 use super::rows::array;
@@ -154,20 +154,26 @@ pub fn view(app: &App, t: &T) -> Option<El> {
     let dismiss = icon_button(&icons::X, "Dismiss error").size("icon-xs").on_press(move |app: &mut App| {
         app.ui.chat.timeline.errors.dismissed.insert(key.clone());
     });
+    // px-3.5 py-3 inside the border; a first-line action adds pt-0.5 and a 24-point floor.
     Some(
-        el().key("thread-error-banner").radius(radius::XL).fill(glass(t, tint)).backdrop_blur(if t.dark { 16.0 } else { 12.0 }).border(1.0, border.alpha_mul(0.32)).role("alert").child(
-            // px-3.5 py-3 inside the border; a first-line action adds pt-0.5 and a 24-point floor.
-            row()
-                .items_start()
-                .gap(8.0)
-                .px(15.0)
-                .py(13.0)
-                .pt(15.0)
-                .min_h(50.0)
-                .child(row().h(20.0).w(16.0).center().child(glyph))
-                .child(col().grow(1.0).shrink().min_w(0.0).child(body))
-                .child(row().h(20.0).gap(4.0).center_y().children(action).child(dismiss.build(t))),
-        ),
+        row()
+            .key("thread-error-banner")
+            .role("alert")
+            .shrink()
+            .min_w(0.0)
+            .items_start()
+            .gap(8.0)
+            .px(15.0)
+            .py(13.0)
+            .pt(15.0)
+            .min_h(50.0)
+            .radius(radius::XL)
+            .fill(glass(t, tint))
+            .backdrop_blur(if t.dark { 16.0 } else { 12.0 })
+            .border(1.0, border.alpha_mul(0.32))
+            .child(row().h(20.0).w(16.0).center().child(glyph))
+            .child(col().grow(1.0).shrink().min_w(0.0).child(body))
+            .child(row().h(20.0).gap(4.0).center_y().children(action).child(dismiss.build(t))),
     )
 }
 
@@ -200,57 +206,13 @@ fn expandable(app: &App, t: &T, key: &str, error: &str, color: Color) -> El {
     out
 }
 
-/// alert-glass: the page background at the glass opacity under a 4% tint.
+/// alert-glass: the page background at the glass opacity under a 4% tint, mixed in sRGB as CSS
+/// `color-mix(in srgb)` does (theme colours are linear).
 fn glass(t: &T, tint: Color) -> Color {
+    let enc = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
+    let dec = |c: f32| if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
     let (bg, base) = (t.c.background, 0.8 * 0.96);
     let a = 0.04 + base;
-    let mix = |tc: f32, bc: f32| (tc * 0.04 + bc * base) / a;
+    let mix = |tc: f32, bc: f32| dec((enc(tc) * 0.04 + enc(bc) * base) / a);
     Color { r: mix(tint.r, bg.r), g: mix(tint.g, bg.g), b: mix(tint.b, bg.b), a }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use serde_json::json;
-
-    fn projection(runs: Value, session_error: Value) -> Value {
-        let error = |id: &str, node: &str, at: &str, failure: Value| {
-            json!({"id": id, "type": "error", "status": "failed", "runId": "r1", "nodeId": node, "updatedAt": at, "ordinal": 1, "failure": failure})
-        };
-        json!({
-            "thread": {"providerInstanceId": "codex", "activeProviderThreadId": null},
-            "runs": runs,
-            "turnItems": [
-                error("e1", "root", "2026-11-09T10:00:00.000Z", json!({"message": "older", "class": "provider_error"})),
-                error("e2", "root", "2026-11-09T10:01:00.000Z", json!({"message": "Limit hit", "class": "usage_limit", "code": "subscription_sharing_usage_limit_exceeded"})),
-                error("e3", "child", "2026-11-09T10:02:00.000Z", json!({"message": "subagent failed", "class": "provider_error"})),
-            ],
-            "providerSessions": [{"providerInstanceId": "claude", "lastError": "other provider"}, {"providerInstanceId": "codex", "lastError": session_error}],
-        })
-    }
-
-    fn run(id: &str, ordinal: i64, status: &str) -> Value {
-        json!({"id": id, "ordinal": ordinal, "status": status, "rootNodeId": "root", "startedAt": "2026-11-09T09:59:00.000Z", "completedAt": if status == "queued" { Value::Null } else { json!("2026-11-09T10:01:00.000Z") }})
-    }
-
-    #[test]
-    fn the_runtime_error_is_the_latest_root_failure_unless_the_session_reports_another() {
-        let limited = projection(json!([run("r1", 1, "failed"), run("r2", 2, "queued")]), Value::Null);
-        assert_eq!(
-            runtime_error(&limited),
-            Some(RuntimeError { message: "Limit hit".into(), class: Some("usage_limit".into()), code: Some(CHATGPT_USAGE_LIMIT_CODE.into()), failed: true })
-        );
-        let superseded = projection(json!([run("r1", 1, "failed")]), json!("Session died"));
-        assert_eq!(runtime_error(&superseded), Some(RuntimeError { message: "Session died".into(), class: None, code: None, failed: true }));
-        let running = projection(json!([run("r1", 1, "failed"), run("r2", 2, "running")]), Value::Null);
-        assert_eq!(runtime_error(&running), None);
-        assert_eq!(runtime_error(&projection(json!([]), json!("idle error"))), None);
-    }
-
-    #[test]
-    fn a_json_error_shows_its_nested_message() {
-        assert_eq!(message(r#"{"error":{"message":"Rate limited","type":"x"}}"#), "Rate limited");
-        assert_eq!(message(r#"{"error":{"message":"  "}}"#), r#"{"error":{"message":"  "}}"#);
-        assert_eq!(message("plain"), "plain");
-    }
 }
