@@ -49,6 +49,7 @@ pub struct Ui {
     pub select_options: Vec<(Value, String)>,
     pub task_editor: Option<Value>,
     pub delete_task: Option<(Value, String)>,
+    pub auth: auth::Ui,
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
@@ -393,7 +394,7 @@ fn failure_detail(cause: &Value) -> Option<String> {
         if let Some(text) = error.as_str().filter(|t| !t.is_empty()) {
             return (reason["_tag"] == "Fail").then(|| text.to_owned());
         }
-        if let Some(message) = error["message"].as_str().filter(|m| !m.is_empty()) {
+        if let Some(message) = error["message"].as_str().or(error["detail"].as_str()).filter(|m| !m.is_empty()) {
             return Some(message.to_owned());
         }
         (error["_tag"] == "ServerSettingsError").then(|| {
@@ -473,6 +474,11 @@ pub fn poll(s: &mut App) -> bool {
             ));
         }
     }
+    for resource in add_provider::wanted(s) {
+        if !wanted.contains(&resource) {
+            wanted.push(resource);
+        }
+    }
     if wanted != s.ui.settings.active_resources {
         if let Some(net) = s.src.net() {
             for (method, payload) in &s.ui.settings.active_resources {
@@ -487,7 +493,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | source_control::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -917,6 +923,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     accent::popover(s, t, &mut overlays);
     provider_update::popover(s, t, &mut overlays);
     providers::confirm(s, t, &mut overlays);
+    auth::confirm(s, t, &mut overlays);
     themes::editor(s, t, &mut overlays);
     themes::import_dialog(s, t, &mut overlays);
     projects::confirm_delete(s, t, &mut overlays);
@@ -1425,6 +1432,8 @@ mod patch_tests {
         assert!(failure_message("server.updateSettings", "Mac", &write).ends_with("Server settings write failed at /s.json."));
         let typed = json!([{"_tag":"Fail","error":{"_tag":"X","message":"No such task."}}]);
         assert_eq!(failure_message("scheduledTasks.upsert", "Mac", &typed), "No such task.");
+        let setup = json!([{"_tag":"Fail","error":{"_tag":"ProviderSetupError","detail":"Sign-in expired."}}]);
+        assert_eq!(failure_message("provider.auth.start", "Mac", &setup), "Sign-in expired.");
     }
     #[test]
     fn escape_clears_a_search_before_closing() {
