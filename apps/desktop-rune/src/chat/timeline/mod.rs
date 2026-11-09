@@ -178,7 +178,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     }
     if matches!(
         kind,
-        "error" | "notification" | "system_notice" | "handoff" | "secret_request" | "link_request"
+        "error" | "system_notice" | "handoff" | "secret_request" | "link_request"
     ) {
         let detail = [
             s(&item["failure"], "message"),
@@ -237,6 +237,15 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         return subagent::view(app, item, t);
     }
     let glyph = match kind {
+        // workEntryIconName: a notification's icon names its source.
+        "notification" if s(item, "outcome") == "failed" => &icons::CIRCLE_ALERT,
+        "notification" => match s(&item["source"], "kind") {
+            "subagent" | "delegated_task" => &icons::BOT,
+            "command" => &icons::TERMINAL,
+            "monitor" => &icons::EYE,
+            "background_task" => &icons::ZAP,
+            _ => &icons::INFO,
+        },
         "approval_request" | "user_input_request" => &icons::MESSAGE_CIRCLE,
         "reasoning" => &icons::BRAIN,
         "command_execution" => &icons::TERMINAL,
@@ -328,6 +337,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     } else if expanded {
         let detail = if kind == "reasoning" {
             s(item, "text").to_owned()
+        } else if kind == "notification" {
+            s(item, "detail").to_owned()
         } else {
             ["input", "output", "fileName"]
                 .iter()

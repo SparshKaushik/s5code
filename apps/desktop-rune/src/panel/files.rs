@@ -644,7 +644,7 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         })),
         kit::MenuEntry::item(kit::MenuItem::new("Add to chat").on_select(move |s: &mut App| {
             s.ui.panel.files.menu = None;
-            crate::chat::composer::append_to_draft(s, &format!("{chat_link} "));
+            crate::chat::composer::append_with_chips(s, &format!("{chat_link} "), &[], " ");
         })),
     ];
     kit::Menu::new("files-menu")

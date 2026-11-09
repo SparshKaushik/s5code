@@ -80,7 +80,9 @@ pub fn overlay(app: &App, t: &T) -> Option<El> {
     let (item, id) = app.ui.chat.timeline.chip.as_ref()?;
     let Route::Thread(thread) = app.frame_route() else { return None };
     let view = app.state().thread_views.get(thread)?;
-    let message = super::rows::array(&view.projection, "turnItems").iter().find(|i| s(i, "id") == item)?;
+    let p = &view.projection;
+    let mut items = super::rows::array(p, "visibleTurnItems").iter().map(|v| &v["item"]).chain(super::rows::array(p, "turnItems"));
+    let message = items.find(|i| s(i, "id") == item)?;
     let record = super::rows::array(&message["context"], "records").iter().find(|r| s(r, "contextId") == id)?;
     let screenshot = super::rows::array(message, "attachments")
         .iter()

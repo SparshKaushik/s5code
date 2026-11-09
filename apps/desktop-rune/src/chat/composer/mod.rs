@@ -1165,6 +1165,33 @@ pub fn attach_path(s: &mut App, path: String) {
 }
 
 /// Puts `text` back into the open route's draft after what is already there.
+/// Sent-form text appended to the draft after `gap` (a rewound prompt, a file's "Add to chat"):
+/// file links become mentions and context links chips, with the `records` they were sent with.
+pub fn append_with_chips(s: &mut App, text: &str, records: &[Value], gap: &str) {
+    let (shown_text, shown) = chips::display(text);
+    let d = draft_mut(s);
+    d.edit.set_caret(d.edit.text.len());
+    if !d.edit.text.trim().is_empty() && !d.edit.text.ends_with(gap) {
+        d.edit.insert(gap);
+    }
+    let mut at = 0;
+    for c in &shown {
+        d.edit.insert(&shown_text[at..c.range.start]);
+        let label = &shown_text[c.range.clone()];
+        match records.iter().find(|r| data::s(r, "contextId") == c.id) {
+            _ if c.kind == "mention" => d.edit.insert_pill(c.id.clone(), label),
+            Some(record) => {
+                d.edit.insert_pill(chips::pill_id(record), &chips::sanitize_label(data::s(record, "label"), data::s(record, "kind")));
+                d.contexts.push(record.clone());
+            }
+            None => d.edit.insert(label),
+        }
+        at = c.range.end;
+    }
+    d.edit.insert(&shown_text[at..]);
+    d.edit.focused = true;
+}
+
 pub fn append_to_draft(s: &mut App, text: &str) {
     let d = draft_mut(s);
     let next = if d.edit.text.trim().is_empty() { text.to_owned() } else { format!("{}\n\n{text}", d.edit.text.trim_end()) };
@@ -1241,6 +1268,28 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             add_context(s, record);
         }
     }),
+    ("composer-chip-details", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Why does ");
+        for record in chips::samples() {
+            add_context(s, record);
+        }
+        let d = draft_mut(s);
+        let end = d.edit.pills().map(|(r, _)| r.end).next().unwrap_or(0);
+        d.edit.set_caret(end);
+    }),
+    ("composer-pr", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Review #");
+        menu::refresh(s);
+    }),
+    ("composer-effort", |s| {
+        on_replay_showcase(s);
+        let d = draft_mut(s);
+        d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        d.effort = Some("high".into());
+        picker::toggle(s);
+    }),
     ("composer-attachments", |s| {
         on_replay_showcase(s);
         draft_mut(s).attachments = vec!["/home/ubuntu/s5code/README.md".into(), "/home/ubuntu/s5code/package.json".into()];
@@ -1287,6 +1336,21 @@ mod tests {
         draft_mut(&mut s).effort = Some("high".into());
         assert_eq!(effort(&s).as_deref(), Some("high"));
         assert_eq!(model_selection(&s).unwrap()["options"], json!([{"id": "effort", "value": "high"}]));
+    }
+
+    #[test]
+    fn a_rewound_prompt_returns_with_its_chips() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        set_text(&mut s, "draft");
+        let pr = chips::samples().into_iter().find(|r| data::s(r, "kind") == "review-comment").unwrap();
+        let sent = format!("open [a.rs](src/a.rs) and [{}](t3-context://v1/review-comment/{})", data::s(&pr, "label"), data::s(&pr, "contextId"));
+        append_with_chips(&mut s, &sent, std::slice::from_ref(&pr), "\n\n");
+        let d = draft(&s).unwrap();
+        assert_eq!(d.edit.pills().count(), 2);
+        let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
+        assert_eq!(text, format!("draft\n\n{sent}"));
+        assert_eq!(contexts.len(), 1);
     }
 
     #[test]

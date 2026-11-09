@@ -286,6 +286,7 @@ pub fn label(item: &Value) -> String {
         "approval_request" => "Approval requested".into(),
         "user_input_request" if !item["questionAnswer"].is_null() => "Answered questions".into(),
         "user_input_request" => "Input requested".into(),
+        "notification" if !s(item, "summary").is_empty() => s(item, "summary").into(),
         _ => kind.replace('_', " "),
     }
 }
@@ -482,6 +483,8 @@ mod tests {
         assert_eq!(label(&json!({"type":"file_change","changes":[{},{}]})), "Changed 2 files");
         assert_eq!(label(&json!({"type":"dynamic_tool","toolName":null})), "Tool call");
         assert_eq!(label(&json!({"type":"mcp_tool_call"})), "mcp tool call");
+        let restart = json!({"type":"notification","title":null,"summary":"T3 Code restarted and resumed this turn","detail":"Continue"});
+        assert_eq!(label(&restart), "T3 Code restarted and resumed this turn");
     }
 
     #[test]
