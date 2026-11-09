@@ -6,8 +6,8 @@ pub mod drawer;
 mod files;
 pub(crate) mod preview;
 pub mod browser_import;
-mod terminal;
-mod vt;
+pub(crate) mod terminal;
+pub(crate) mod vt;
 
 use crate::{
     App, Route, data, icons, kit,

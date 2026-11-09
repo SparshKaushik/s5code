@@ -20,7 +20,8 @@ fn style(t: &T) -> MarkdownStyle {
         .strong_weight(600.0)
         .list(20.0, 4.0)
         .code_block(code_background(t), rune::Color::TRANSPARENT)
-        .code_block_font(theme::MONO_XS.lh(19.25))
+        // Tuned at 12/19.25 for the default 13px code size; both follow the setting.
+        .code_block_font(theme::mono(rune::TextStyle::new(12.0 * t.code / 13.0, 400.0).lh(19.25 * t.code / 13.0)))
         .code_block_padding(14.4, 12.8)
         .table_outline(None)
         .table_rules(t.c.border.alpha_mul(0.6))
@@ -186,7 +187,7 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, unwrapped, copied);
+    let version = (source, t.dark, colors, unwrapped, copied, t.code.to_bits());
     rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None))
 }
 

@@ -17,11 +17,13 @@ pub struct T {
     pub c: Tokens,
     /// Tokens inside the sidebar (`[data-app-sidebar]` re-points foreground, rows, labels).
     pub sb: Tokens,
+    /// `--font-size-code` for chat code blocks, in layout points.
+    pub code: f32,
 }
 
 pub fn theme(dark: bool) -> T {
     use crate::tokens::*;
-    if dark { T { dark, c: DARK, sb: SIDEBAR_DARK } } else { T { dark, c: LIGHT, sb: SIDEBAR_LIGHT } }
+    if dark { T { dark, c: DARK, sb: SIDEBAR_DARK, code: 13.0 } } else { T { dark, c: LIGHT, sb: SIDEBAR_LIGHT, code: 13.0 } }
 }
 
 /// Tailwind's `color/NN` opacity modifier: multiplies the token's own alpha.
@@ -59,9 +61,10 @@ const fn ts(size: f32, line_height: f32, weight: f32) -> TextStyle {
     TextStyle::new(size, weight).lh(line_height)
 }
 
-/// `font-mono` (`ui-monospace, "SF Mono", ...`): SF Mono on macOS, fontconfig's monospace elsewhere.
+/// `font-mono`: the mono slot, which holds the code font setting ahead of `ui-monospace` (SF Mono
+/// on macOS, fontconfig's monospace elsewhere).
 pub const fn mono(style: TextStyle) -> TextStyle {
-    TextStyle { family: Family::SystemMono, ..style }
+    TextStyle { family: Family::Mono, ..style }
 }
 
 pub const fn weight(style: TextStyle, w: f32) -> TextStyle {

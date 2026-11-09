@@ -218,7 +218,7 @@ fn save_size(ui: &mut Ui, now: i64, tx: &mut Tx) {
 pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
     let size = cx.layout_size(FRAME);
     s.ui.desktop.window.set(size);
-    let k = s.ui.desktop.zoom_factor();
+    let k = s.ui.desktop.zoom_factor() * crate::settings::fonts::interface_scale(&s.client_settings.values);
     if let Some([w, h]) = size
         && (k - 1.0).abs() > 1e-3
     {

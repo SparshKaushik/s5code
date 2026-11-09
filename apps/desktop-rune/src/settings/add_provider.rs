@@ -4,7 +4,7 @@
 use super::{providers, request, server_settings};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons, kit};
-use rune::{El, TextEdit, col, el, row, text};
+use rune::{El, TextEdit, col, el, icon, row, text};
 use serde_json::{Map, Value, json};
 use std::collections::{HashMap, HashSet};
 
@@ -56,12 +56,33 @@ pub struct Wizard {
     acp_search: TextEdit,
     acp_agents: Option<Result<Vec<Value>, String>>,
     acp_search_id: Option<u64>,
+    /// The query the shown results answer (or the one in flight), and when typing last changed
+    /// the box: web searches the server once typing settles for `SEARCH_DEBOUNCE_MS`.
+    acp_submitted: Option<String>,
+    acp_typed_at: Option<i64>,
     /// The `prepareAcpRegistryAgent` in flight and the agent it prepares.
     acp_prepare: Option<(u64, Value)>,
     acp_error: Option<String>,
     /// The ACP instance created on Identity; the Sign in step follows it.
     created: Option<String>,
     chatgpt: Option<ChatGpt>,
+    /// The local ACP command's variables (web `localEnvironment`).
+    env: Vec<EnvVar>,
+}
+
+#[derive(Clone)]
+pub struct EnvVar {
+    name: TextEdit,
+    value: TextEdit,
+    sensitive: bool,
+}
+
+/// `publishRows` for a new instance: rows with a valid name, the rest left out as web does.
+fn local_environment(rows: &[EnvVar]) -> Vec<Value> {
+    rows.iter()
+        .filter(|r| providers::valid_env_name(r.name.text.trim()))
+        .map(|r| json!({"name": r.name.text.trim(), "value": r.value.text.clone(), "sensitive": r.sensitive}))
+        .collect()
 }
 
 /// Web `AddCodexAccountDialog`: a managed Codex instance per ChatGPT account.
@@ -301,6 +322,10 @@ fn save(s: &mut App) {
     }
     if !config.is_empty() {
         instance["config"] = Value::Object(config);
+    }
+    let environment = local_environment(&w.env);
+    if w.acp == Some(Acp::Local) && !environment.is_empty() {
+        instance["environment"] = json!(environment);
     }
     let signs_in = matches!(w.acp, Some(Acp::Registry(_) | Acp::Manual));
     if signs_in {
@@ -562,6 +587,19 @@ fn acp_search(s: &App, t: &T) -> El {
                     .placeholder("Search agents…")
                     .disabled(busy)
                     .on_edit(|s: &mut App| &mut wizard(s).acp_search)
+                    .on_change(|s: &mut App, tx| {
+                        let w = wizard(s);
+                        w.acp_error = None;
+                        w.acp_typed_at = Some(crate::data::now_ms());
+                        tx.wake_after(std::time::Duration::from_millis(SEARCH_DEBOUNCE_MS as u64));
+                    })
+                    .on_submit(|s: &mut App, _| {
+                        let w = wizard(s);
+                        w.acp_error = None;
+                        w.acp_typed_at = None;
+                        // Enter re-runs even an unchanged query, as web's `search.refresh()`.
+                        w.acp_submitted = None;
+                    })
                     .build(t)
                     .single_line()
                     .grow(1.0)
@@ -578,11 +616,7 @@ fn acp_search(s: &App, t: &T) -> El {
         Some(Err(error)) => return out.child(notice(t, error)),
         Some(Ok(agents)) => agents,
     };
-    let query = w.acp_search.text.trim().to_lowercase();
-    let shown: Vec<&Value> = agents
-        .iter()
-        .filter(|a| query.is_empty() || ["id", "name", "description"].iter().any(|k| a[*k].as_str().is_some_and(|v| v.to_lowercase().contains(&query))))
-        .collect();
+    let shown: Vec<&Value> = agents.iter().collect();
     if shown.is_empty() {
         return out.child(
             col()
@@ -607,7 +641,7 @@ fn acp_search(s: &App, t: &T) -> El {
             .py(8.0)
             .radius(8.0)
             .center_y()
-            .child(crate::chat::composer::provider_icon(t, "acpRegistry", 16.0))
+            .child(super::acp_icons::mark(s, t, agent["icon"].as_str(), 16.0))
             .child(
                 col()
                     .grow(1.0)
@@ -693,11 +727,104 @@ fn acp_form(s: &App, t: &T, local: bool) -> El {
         let control = input(t, format!("add-provider-config-{key}"), &edit, placeholder, move |s: &mut App| wizard(s).config.entry(owned.clone()).or_default()).label(title);
         body = body.child(field_row(t, title, description, None, control));
     }
+    if local {
+        body = body.child(env_section(t, &w.env));
+    }
     body
 }
 
+/// Web's `ProviderEnvironmentSection` for the command not saved yet.
+fn env_section(t: &T, rows: &[EnvVar]) -> El {
+    let head = row()
+        .w_full()
+        .gap(32.0)
+        .center_y()
+        .child(
+            col()
+                .grow(1.0)
+                .min_w(0.0)
+                .gap(4.0)
+                .child(text("Variables").font(theme::SM_MEDIUM).color(t.c.foreground))
+                .child(text("API keys, base URLs, and other per-instance CLI settings.").font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap()),
+        )
+        .child(
+            kit::Button::new("Add variable")
+                .variant("outline")
+                .size("sm")
+                .icon(&icons::PLUS)
+                .on_press(|s: &mut App| wizard(s).env.push(EnvVar { name: TextEdit::new(""), value: TextEdit::new("").secure(), sensitive: true }))
+                .build(t),
+        );
+    let mut out = col().w_full().py(12.0).gap(8.0).child(head);
+    for (index, v) in rows.iter().enumerate() {
+        let label = if v.name.text.trim().is_empty() { (index + 1).to_string() } else { v.name.text.trim().to_owned() };
+        let name = kit::Input::new(&v.name)
+            .size("sm")
+            .font("mono")
+            .placeholder("VARIABLE_NAME")
+            .on_edit(move |s: &mut App| &mut wizard(s).env[index].name)
+            .build(t)
+            .key(format!("add-provider-env-{index}-name"))
+            .single_line()
+            .grow(1.0)
+            .min_w(0.0)
+            .label(format!("Environment variable name {}", index + 1));
+        let mut value = kit::Input::new(&v.value)
+            .size("sm")
+            .font("mono")
+            .placeholder("value")
+            .on_edit(move |s: &mut App| &mut wizard(s).env[index].value)
+            .build(t)
+            .key(format!("add-provider-env-{index}-value"))
+            .single_line()
+            .grow(1.0)
+            .min_w(0.0)
+            .label(format!("Environment variable value {}", index + 1));
+        if v.sensitive {
+            value = value.secure();
+        }
+        let lock = if v.sensitive { &icons::LOCK } else { &providers::LOCK_OPEN };
+        out = out.child(
+            col()
+                .key(format!("add-provider-env-{index}"))
+                .w_full()
+                .gap(6.0)
+                .child(
+                    row().w_full().gap(6.0).center_y().child(name).child(
+                        kit::Button::new(format!("Remove environment variable {label}"))
+                            .variant("ghost-destructive")
+                            .size("icon-micro")
+                            .icon(&icons::X)
+                            .on_press(move |s: &mut App| {
+                                wizard(s).env.remove(index);
+                            })
+                            .build(t),
+                    ),
+                )
+                .child(
+                    row().w_full().gap(6.0).center_y().child(value).child(
+                        kit::Button::new(format!("Mark environment variable {label} as sensitive"))
+                            .variant("ghost-muted")
+                            .size("icon-micro")
+                            .on_press(move |s: &mut App| {
+                                let row = &mut wizard(s).env[index];
+                                row.sensitive = !row.sensitive;
+                                row.value.set_secure(row.sensitive);
+                            })
+                            .build(t)
+                            .child(icon(lock, 12.0).color(t.c.muted_foreground)),
+                    ),
+                ),
+        );
+    }
+    if !rows.is_empty() {
+        out = out.child(text("Sensitive values are stored separately and never returned to the app.").font(theme::TEXT_XS).color(t.c.muted_foreground).wrap());
+    }
+    out
+}
+
 /// Step 1's header for a registry agent: name, version and distribution, and its links.
-fn agent_header(t: &T, agent: &Value) -> El {
+fn agent_header(s: &App, t: &T, agent: &Value) -> El {
     let mut links = row().gap(4.0);
     for (label, key) in [("Docs", "website"), ("Source", "repository")] {
         if let Some(url) = agent[key].as_str().map(str::to_owned) {
@@ -709,7 +836,7 @@ fn agent_header(t: &T, agent: &Value) -> El {
         .gap(12.0)
         .pb(8.0)
         .center_y()
-        .child(crate::chat::composer::provider_icon(t, "acpRegistry", 20.0))
+        .child(super::acp_icons::mark(s, t, agent["icon"].as_str(), 20.0))
         .child(
             col()
                 .grow(1.0)
@@ -767,7 +894,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     }
     let w = &s.ui.settings.add_provider;
     let environment = environment(s);
-    let mut panel = col().w_full().gap(16.0).px(24.0).py(20.0).radius(12.0).fill(t.c.background.alpha_mul(0.8)).border(1.0, t.c.foreground.alpha_mul(0.05));
+    let mut panel = col().w_full().min_h(0.0).gap(16.0).px(24.0).py(20.0).radius(12.0).fill(t.c.background.alpha_mul(0.8)).border(1.0, t.c.foreground.alpha_mul(0.05));
     let body = match (w.step, &w.created) {
         (_, Some(id)) => sign_in(s, t, id),
         (0, _) => {
@@ -816,14 +943,14 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         (1, _) => {
             let mut body = col().w_full();
             if let Some(Acp::Registry(agent)) = &w.acp {
-                body = body.child(agent_header(t, agent));
+                body = body.child(agent_header(s, t, agent));
             }
             body.child(identity(s, t))
         }
         _ => config(s, t),
     };
-    // The window can be shorter than the open Show more fold; web's `DialogPanel` scrolls too.
-    panel = panel.child(col().key("add-provider-body").w_full().max_h(440.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body));
+    // Web's `WizardPopup` scrolls once the dialog reaches the window's height.
+    panel = panel.child(col().key("add-provider-body").w_full().min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body));
     if let Some(error) = &s.ui.settings.error {
         panel = panel.child(notice(t, error));
     }
@@ -860,6 +987,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                 .child(
                     kit::Button::new("Continue with ChatGPT")
                         .size("sm")
+                        .icon(&crate::chat::composer::provider_icons::OPENAI)
                         .on_press(|s: &mut App| {
                             s.ui.settings.provider_picker = false;
                             s.ui.settings.error = None;
@@ -985,19 +1113,41 @@ fn install_ready(state: Option<&Value>) -> bool {
     state.is_some_and(|i| !matches!(i["phase"].as_str(), Some("downloading" | "extracting" | "verifying" | "failed" | "cancelled")) && !i["installedVersion"].is_null())
 }
 
+const SEARCH_DEBOUNCE_MS: i64 = 300;
+
+/// The query the registry should answer now: the box once typing settles, else the last one.
+fn search_query(w: &Wizard, now: i64) -> String {
+    match (w.acp_typed_at, &w.acp_submitted) {
+        (Some(at), Some(submitted)) if now - at < SEARCH_DEBOUNCE_MS => submitted.clone(),
+        _ => w.acp_search.text.trim().to_owned(),
+    }
+}
+
+/// The registry agents the search step lists.
+pub(super) fn agents(s: &App) -> &[Value] {
+    match &s.ui.settings.add_provider.acp_agents {
+        Some(Ok(agents)) => agents,
+        _ => &[],
+    }
+}
+
 /// Drives the wizard's own requests: the registry list, agent preparation, and the ChatGPT
 /// account's install then sign-in.
 pub fn poll(s: &mut App) -> bool {
     let mut changed = false;
     let w = &s.ui.settings.add_provider;
+    let query = search_query(w, crate::data::now_ms());
     if s.ui.settings.provider_picker
         && w.step == 0
-        && w.acp_agents.is_none()
         && w.acp_search_id.is_none()
+        && w.acp_submitted.as_ref() != Some(&query)
         && let Some(net) = s.src.net()
     {
-        let pending = net.request("server.searchAcpRegistry", json!({"query": "", "limit": 512}));
-        wizard(s).acp_search_id = Some(pending);
+        let input = if query.is_empty() { json!({"query": "", "limit": 512}) } else { json!({"query": query}) };
+        let pending = net.request("server.searchAcpRegistry", input);
+        let w = wizard(s);
+        w.acp_search_id = Some(pending);
+        w.acp_submitted = Some(query);
     }
     if let Some(pending) = s.ui.settings.add_provider.acp_search_id
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(pending))
@@ -1105,5 +1255,19 @@ mod tests {
         assert!(install_ready(Some(&json!({"phase": "succeeded", "installedVersion": "1.0.0"}))));
         assert!(!install_ready(Some(&json!({"phase": "downloading", "installedVersion": "0.9.0"}))));
         assert!(!install_ready(Some(&json!({"phase": "idle", "installedVersion": null}))));
+
+        let mut search = Wizard { acp_search: TextEdit::new(" amp "), acp_typed_at: Some(1_000), ..Wizard::default() };
+        assert_eq!(search_query(&search, 1_100), "amp", "the first search doesn't wait");
+        search.acp_submitted = Some(String::new());
+        assert_eq!(search_query(&search, 1_299), "", "typing keeps the last results until it settles");
+        assert_eq!(search_query(&search, 1_300), "amp");
+        search.acp_typed_at = None;
+        assert_eq!(search_query(&search, 1_000), "amp", "Enter searches at once");
+
+        let var = |name: &str, value: &str, sensitive| EnvVar { name: TextEdit::new(name), value: TextEdit::new(value), sensitive };
+        assert_eq!(
+            local_environment(&[var(" API_KEY ", "k", true), var("", "", true), var("9BAD", "x", false), var("BASE_URL", "u", false)]),
+            [json!({"name": "API_KEY", "value": "k", "sensitive": true}), json!({"name": "BASE_URL", "value": "u", "sensitive": false})]
+        );
     }
 }
