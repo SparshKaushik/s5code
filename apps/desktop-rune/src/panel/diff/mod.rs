@@ -87,6 +87,8 @@ pub struct Ui {
     touched: bool,
     /// Those choices by path, kept while a file is out of the list (hidden, or its patch loading).
     folds: HashMap<String, bool>,
+    /// Each thread and scope's fold choices, back when it shows again (`collapsedFileKeysByScopeKey`).
+    remembered: HashMap<(String, Scope), HashMap<String, bool>>,
     menu_open: bool,
     sub: Option<Sub>,
     commits: Option<Result<(Vec<Commit>, bool), String>>,
@@ -123,6 +125,7 @@ impl Default for Ui {
             seen: 0,
             touched: false,
             folds: HashMap::new(),
+            remembered: HashMap::new(),
             menu_open: false,
             sub: None,
             commits: None,
@@ -152,11 +155,28 @@ fn save_setting(app: &mut App, key: &str, value: Value) {
 }
 
 /// A new thread starts on "Changes"; the view preferences stay.
-pub fn reset(app: &mut App) {
-    let old = std::mem::take(&mut app.ui.panel.diff);
+pub fn reset(app: &mut App, previous: &str) {
+    let mut old = std::mem::take(&mut app.ui.panel.diff);
+    remember(&mut old, previous);
     let ui = &mut app.ui.panel.diff;
     ui.hide_tests = old.hide_tests;
     ui.tree_open = old.tree_open;
+    ui.remembered = old.remembered;
+}
+
+/// Keeps the shown scope's fold choices for when it shows again.
+fn remember(ui: &mut Ui, thread: &str) {
+    let Some(shown) = ui.shown.clone() else { return };
+    capture(&mut ui.folds, &ui.state, ui.touched);
+    if !ui.folds.is_empty() {
+        ui.remembered.insert((thread.to_owned(), shown), std::mem::take(&mut ui.folds));
+    }
+}
+
+/// Starts `scope` from its remembered fold choices, or the default.
+fn recall(ui: &mut Ui, thread: &str, scope: &Scope) {
+    ui.touched = false;
+    ui.folds = ui.remembered.get(&(thread.to_owned(), scope.clone())).cloned().unwrap_or_default();
 }
 
 /// The git card's "Changes" row (`openChangesFromThreadPanel` selects the branch scope).
@@ -176,13 +196,14 @@ fn latest_turn(app: &App) -> Scope {
 }
 
 fn choose(app: &mut App, scope: Scope) {
+    let thread = app.ui.panel.thread.clone();
     let ui = &mut app.ui.panel.diff;
     ui.menu_open = false;
     ui.sub = None;
     if ui.scope != scope {
+        remember(ui, &thread);
+        recall(ui, &thread, &scope);
         ui.scope = scope;
-        ui.touched = false;
-        ui.folds.clear();
     }
 }
 
@@ -342,13 +363,18 @@ fn apply(app: &mut App) {
 }
 
 fn collapsed_for(folds: &mut HashMap<String, bool>, shown: &DiffState, touched: bool, files: &[FileDiff], default: bool) -> Vec<String> {
+    capture(folds, shown, touched);
+    files.iter().map(|f| f.path()).filter(|p| folds.get(*p).copied().unwrap_or(default)).map(str::to_string).collect()
+}
+
+/// Records the shown files' folds once the user has changed any.
+fn capture(folds: &mut HashMap<String, bool>, shown: &DiffState, touched: bool) {
     if touched {
         let collapsed = shown.collapsed_paths();
         for f in shown.files() {
             folds.insert(f.path().to_string(), collapsed.iter().any(|p| p == f.path()));
         }
     }
-    files.iter().map(|f| f.path()).filter(|p| folds.get(*p).copied().unwrap_or(default)).map(str::to_string).collect()
 }
 
 fn take(app: &mut App, id: u64) -> Option<Result<Value, Value>> {
@@ -406,14 +432,14 @@ pub fn poll(app: &mut App) -> bool {
     if let Some((id, scope)) = app.ui.panel.diff.pending.clone()
         && let Some(reply) = take(app, id)
     {
+        let thread = app.ui.panel.thread.clone();
         let ui = &mut app.ui.panel.diff;
         ui.pending = None;
         if scope != ui.scope {
             return true;
         }
         if ui.shown.as_ref() != Some(&scope) {
-            ui.touched = false;
-            ui.folds.clear();
+            recall(ui, &thread, &scope);
         }
         ui.shown = Some(scope.clone());
         let mut missing = vec![];
@@ -1352,6 +1378,16 @@ mod tests {
         state.set_files(b, &collapsed);
         let abc = patch(&["a.ts", "b.ts", "c.ts"]);
         assert_eq!(collapsed_for(&mut folds, &state, true, &abc, true), vec!["b.ts", "c.ts"]);
+
+        // Each thread's scope gets its folds back when it shows again.
+        let mut ui = Ui { shown: Some(Scope::Branch), folds, ..Ui::default() };
+        remember(&mut ui, "t1");
+        recall(&mut ui, "t1", &Scope::Unstaged);
+        assert!(ui.folds.is_empty() && !ui.touched);
+        recall(&mut ui, "t1", &Scope::Branch);
+        assert_eq!(ui.folds.get("a.ts"), Some(&false));
+        recall(&mut ui, "t2", &Scope::Branch);
+        assert!(ui.folds.is_empty());
     }
 
     #[test]
