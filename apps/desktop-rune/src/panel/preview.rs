@@ -197,6 +197,12 @@ pub fn title(app: &App, tab: TabId) -> String {
     host(&status.url).unwrap_or("Browser").into()
 }
 
+/// The page a tab shows, unless it is blank.
+pub fn url(app: &App, tab: TabId) -> Option<String> {
+    let status = app.ui.panel.browser.browser.status(tab);
+    (!idle(&status)).then(|| status.url.clone())
+}
+
 fn idle(s: &Status) -> bool {
     s.url.is_empty() || s.url == "about:blank"
 }

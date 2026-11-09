@@ -306,6 +306,10 @@ fn changed(app: &mut App, tx: &mut Tx) {
     tx.wake_after(DEBOUNCE);
 }
 
+pub fn selected(app: &App) -> String {
+    app.ui.panel.files.selected.clone()
+}
+
 /// Writes the open file's draft now instead of after the debounce.
 pub fn flush(app: &mut App) {
     let ui = &mut app.ui.panel.files;

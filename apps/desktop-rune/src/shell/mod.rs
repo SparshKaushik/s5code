@@ -2,6 +2,8 @@
 
 pub mod sidebar;
 pub mod palette;
+pub mod quit;
+mod workspace;
 
 use rune::{Cx, El, KeyEvent, Tx, row};
 
@@ -13,6 +15,7 @@ pub struct Ui {
     pub sidebar: sidebar::Ui,
     pub palette: palette::Ui,
     pub panel_open: bool,
+    pub quit: quit::QuitHold,
 }
 
 /// The references open on an empty "New thread" (d01) and on "Replay showcase" (d02).
@@ -35,7 +38,7 @@ fn open_titled(s: &mut App, title: &str) {
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     sidebar::release_undo_key(s, e);
-    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
+    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
@@ -75,5 +78,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(palette::overlay(s, cx, t));
     overlays.extend(crate::search::overlay(s, t));
     overlays.extend(crate::notify::overlays(s, t));
-    rune_kit::root(body, overlays).on_window_focus(|s: &mut App, focused, _| crate::notify::window_focus(s, focused))
+    overlays.extend(quit::overlay(s, t));
+    rune_kit::root(body, overlays)
+        .on_key_up(quit::on_key_up)
+        .on_window_focus(|s: &mut App, focused, _| crate::notify::window_focus(s, focused))
 }
