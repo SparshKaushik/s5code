@@ -332,14 +332,7 @@ fn succeeded(s: &mut App, a: &Acting) {
         list.requested = None;
         return;
     }
-    let held = list.result.as_mut().and_then(|r| r["entries"].as_array_mut()).into_iter().flatten().find(|e| row_key(e) == a.key);
-    if let Some(e) = held {
-        match a.action {
-            "close" => e["state"] = json!("closed"),
-            "reopen" => e["state"] = json!("open"),
-            _ => e["isDraft"] = json!(false),
-        }
-    }
+    super::pull_requests::after_action(list, &a.key, a.action, crate::data::now_ms());
 }
 
 fn failed(s: &mut App, a: &Acting, raw: &str) {

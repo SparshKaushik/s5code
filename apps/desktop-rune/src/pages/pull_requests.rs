@@ -858,6 +858,24 @@ fn sized(u: &Ui, e: &Value) -> Value {
     e
 }
 
+/// pullRequestOverrideAfterAction on every held copy of the row (the list, the baseline and the
+/// partition reads), so it leaves views of its old state at once; the next reads confirm it.
+pub(super) fn after_action(u: &mut Ui, row: &str, action: &str, now_ms: i64) {
+    let [authored, reviewing] = &mut u.partitions;
+    let reads = [&mut u.baseline, authored, reviewing].into_iter().filter_map(|r| r.answer.as_mut().map(|a| &mut a.1));
+    for answer in u.result.iter_mut().chain(reads) {
+        for e in answer["entries"].as_array_mut().into_iter().flatten().filter(|e| key(e) == row) {
+            match action {
+                "close" => e["state"] = json!("closed"),
+                "reopen" => e["state"] = json!("open"),
+                "ready" => e["isDraft"] = json!(false),
+                _ => continue,
+            }
+            e["updatedAt"] = json!(super::usage::iso_of(now_ms));
+        }
+    }
+}
+
 /// The authored and review-requested reads the groups lead with, once both answered for this
 /// scope; none while searching, or when the baseline has no rows (baselineEmpty).
 fn held_partitions(u: &Ui) -> Option<[&Value; 2]> {
@@ -1745,6 +1763,13 @@ mod tests {
         assert_eq!(shown(&u).into_iter().map(|g| g.1).collect::<Vec<_>>(), [vec![1], vec![2], vec![3]]);
 
         u.query.replace_text("");
+        // A closed row leaves the open list at once, the partition reads' copies with it.
+        after_action(&mut u, &key(&row(3, "lena", "")), "close", 0);
+        let acted = u.result.clone().unwrap_or_default();
+        let after = groups(&u, &acted);
+        assert!(after.iter().map(|g| g.0).eq([Group::Authored, Group::Others]));
+        assert_eq!(after.iter().map(|g| g.1.len()).collect::<Vec<_>>(), [2, 1]);
+
         u.result = Some(json!({"viewers": {}, "errors": [], "entries": []}));
         hold_partitions(&mut u, json!({"entries": [row(9, "octo", "2025-12-01T00:00:00Z")]}), json!({"entries": []}));
         assert!(held_partitions(&u).is_none());

@@ -223,7 +223,7 @@ fn day_of(ms: i64) -> String {
     format!("{y:04}-{m:02}-{d:02}")
 }
 
-fn iso_of(ms: i64) -> String {
+pub(super) fn iso_of(ms: i64) -> String {
     let rem = ms.rem_euclid(DAY);
     format!("{}T{:02}:{:02}:{:02}.000Z", day_of(ms), rem / HOUR, rem % HOUR / MINUTE, rem % MINUTE / 1000)
 }
