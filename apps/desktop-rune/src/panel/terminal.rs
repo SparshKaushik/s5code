@@ -45,6 +45,8 @@ pub struct Session {
     pub hover: Option<Link>,
     /// The grid the viewport fits, re-sent after an attach snapshot brings the server's own.
     fit: Option<(usize, usize)>,
+    /// The PTY's grid, from the attach snapshot and later activity.
+    grid: Option<(usize, usize)>,
     /// Set once the drawer has acted on the session ending.
     pub ended: bool,
     exit_noted: bool,
@@ -74,6 +76,7 @@ impl Session {
             press: None,
             hover: None,
             fit: None,
+            grid: None,
             ended: false,
             exit_noted: false,
             notify_at: None,
@@ -81,6 +84,26 @@ impl Session {
             attached: false,
             queued: None,
         }
+    }
+
+    /// The grid to draw: the viewport's fit, never past the PTY's own (`applyGrid` in the web's
+    /// ghostty surface), so a wider view waits for the shell instead of reflowing ahead of it.
+    fn drawn(&self) -> Option<(usize, usize)> {
+        match (self.fit, self.grid) {
+            (Some((c, r)), Some((gc, gr))) => Some((c.min(gc), r.min(gr))),
+            (fit, grid) => fit.or(grid),
+        }
+    }
+
+    fn apply_grid(&mut self) {
+        if let Some(size) = self.drawn().filter(|size| *size != self.vt.size()) {
+            self.vt.resize(size.0, size.1);
+        }
+    }
+
+    /// The PTY hears the fit once it settles, unless it already has it.
+    fn schedule_notify(&mut self) {
+        self.notify_at = (self.fit.is_some() && self.fit != self.grid).then(|| Instant::now() + RESIZE_SETTLE);
     }
 
     /// The session's own label, else "Terminal N" from its id (`getTerminalLabel`).
@@ -275,14 +298,18 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return;
     };
-    session.fit = Some((cols, rows));
-    // Recorded sessions keep the grid they were captured at.
-    if session.vt.size() == (cols, rows) || session.payload.is_none() {
+    if session.fit == Some((cols, rows)) {
         return;
     }
-    // The grid reflows now; the shell only hears settled sizes so a drag doesn't reprint its prompt.
-    session.vt.resize(cols, rows);
-    session.notify_at = Some(Instant::now() + RESIZE_SETTLE);
+    session.fit = Some((cols, rows));
+    // Recorded sessions keep the grid they were captured at.
+    if session.payload.is_none() {
+        return;
+    }
+    // A narrower grid reflows now; the shell only hears settled sizes so a drag doesn't reprint
+    // its prompt.
+    session.apply_grid();
+    session.schedule_notify();
 }
 
 pub fn palette(t: &T) -> Palette {
@@ -331,7 +358,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     });
     let mut writes = vec![];
     let mut ended = vec![];
-    let mut refit = vec![];
     let mut notify = vec![];
     for index in 0..app.ui.panel.terminal.sessions.len() {
         let payload = app.ui.panel.terminal.sessions[index].payload.clone();
@@ -343,11 +369,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         for event in &events {
             apply(session, event);
             changed = true;
-            if data::s(event, "type") == "snapshot"
-                && let Some((cols, rows)) = session.fit
-            {
-                refit.push((session.thread.clone(), session.id.clone(), cols, rows));
-            }
             if session.attached
                 && let Some(queued) = session.queued.take()
             {
@@ -388,8 +409,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             let now = Instant::now();
             if now >= at {
                 session.notify_at = None;
-                let (cols, rows) = session.vt.size();
-                notify.push((session.thread.clone(), session.id.clone(), cols, rows));
+                if let Some((cols, rows)) = session.fit {
+                    notify.push((session.thread.clone(), session.id.clone(), cols, rows));
+                }
             } else {
                 tx.wake_after(at - now);
             }
@@ -406,9 +428,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
     for (thread, id, data) in writes {
         send(app, &thread, &id, data);
-    }
-    for (thread, id, cols, rows) in refit {
-        resize(app, &thread, &id, cols, rows);
     }
     for (thread, id) in ended {
         super::drawer::session_ended(app, &thread, &id);
@@ -441,9 +460,11 @@ fn apply(session: &mut Session, event: &Value) {
     match kind {
         "snapshot" | "restarted" => {
             let snapshot = &event["snapshot"];
-            let (cols, rows) = session.vt.size();
-            let cols = snapshot["cols"].as_u64().map_or(cols, |v| v as usize);
-            let rows = snapshot["rows"].as_u64().map_or(rows, |v| v as usize);
+            if let (Some(cols), Some(rows)) = (snapshot["cols"].as_u64(), snapshot["rows"].as_u64()) {
+                session.grid = Some((cols as usize, rows as usize));
+            }
+            // History replays at the grid it will be drawn at, as web's surface does.
+            let (cols, rows) = session.drawn().unwrap_or(session.vt.size());
             session.vt = Vt::new(cols, rows);
             session.vt.feed(data::s(snapshot, "history"));
             session.vt.flush_sync(true);
@@ -460,12 +481,15 @@ fn apply(session: &mut Session, event: &Value) {
             session.ended = false;
             session.running = snapshot["hasRunningSubprocess"] == true;
             session.attached = true;
+            // A new attach hears the fit again (`resendSize`).
+            session.schedule_notify();
             note_exit(session);
         }
         "activity" => {
             session.running = event["hasRunningSubprocess"] == true;
             if let (Some(cols), Some(rows)) = (event["cols"].as_u64(), event["rows"].as_u64()) {
-                session.vt.resize(cols as usize, rows as usize);
+                session.grid = Some((cols as usize, rows as usize));
+                session.apply_grid();
             }
         }
         "output" => session.vt.feed(data::s(event, "data")),
@@ -1136,6 +1160,13 @@ mod tests {
             &json!({"type":"activity","sequence":13,"cols":100,"rows":30}),
         );
         assert_eq!(session.vt.size(), (100, 30));
+        // A wider view waits for the PTY's grid; a narrower one reflows at once (`applyGrid`).
+        session.fit = Some((120, 40));
+        session.apply_grid();
+        assert_eq!(session.vt.size(), (100, 30));
+        session.fit = Some((90, 20));
+        session.apply_grid();
+        assert_eq!(session.vt.size(), (90, 20));
         apply(
             &mut session,
             &json!({"type":"snapshot","snapshot":{"history":"resumed","sequence":20}}),
