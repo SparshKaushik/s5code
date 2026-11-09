@@ -1530,7 +1530,7 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         t,
     )];
     if let Some(p) = live.filter(|p| p["setup"]["canAuthenticate"] == true) {
-        sections.push(flat_section(heading("Setup", t), None, vec![super::auth::view(s, t, p)], t));
+        sections.push(flat_section(heading("Setup", t), None, vec![col().w_full().px(16.0).child(super::auth::view(s, t, p))], t));
     }
     let fields = runtime_fields(&r.driver, &instance["config"]);
     if !fields.is_empty() || !DRIVERS.iter().any(|(d, _, _)| *d == r.driver) {

@@ -467,7 +467,8 @@ pub fn poll(s: &mut App) -> bool {
         }
     }
     if matches!(&s.route,Route::Settings(p) if p=="providers") {
-        if let Some(id) = providers::selected_id(s) {
+        // A subscription opened before the server knows the instance fails for good.
+        if let Some(id) = providers::selected_id(s).filter(|id| crate::chat::composer::provider(s, id).is_some()) {
             wanted.push((
                 "provider.auth.subscribe".to_owned(),
                 json!({"instanceId":id}),

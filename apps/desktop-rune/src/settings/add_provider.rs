@@ -74,6 +74,7 @@ pub struct ChatGpt {
 
 pub fn open(s: &mut App) {
     s.ui.settings.add_provider = Wizard::default();
+    s.ui.settings.error = None;
     s.ui.settings.provider_picker = true;
 }
 
@@ -767,8 +768,8 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     let w = &s.ui.settings.add_provider;
     let environment = environment(s);
     let mut panel = col().w_full().gap(16.0).px(24.0).py(20.0).radius(12.0).fill(t.c.background.alpha_mul(0.8)).border(1.0, t.c.foreground.alpha_mul(0.05));
-    panel = match (w.step, &w.created) {
-        (_, Some(id)) => panel.child(sign_in(s, t, id)),
+    let body = match (w.step, &w.created) {
+        (_, Some(id)) => sign_in(s, t, id),
         (0, _) => {
             let mut step = col()
                 .w_full()
@@ -810,17 +811,19 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                     _ => acp_search(s, t),
                 });
             }
-            panel.child(step)
+            step
         }
         (1, _) => {
             let mut body = col().w_full();
             if let Some(Acp::Registry(agent)) = &w.acp {
                 body = body.child(agent_header(t, agent));
             }
-            panel.child(body.child(identity(s, t)))
+            body.child(identity(s, t))
         }
-        _ => panel.child(config(s, t)),
+        _ => config(s, t),
     };
+    // The window can be shorter than the open Show more fold; web's `DialogPanel` scrolls too.
+    panel = panel.child(col().key("add-provider-body").w_full().max_h(440.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body));
     if let Some(error) = &s.ui.settings.error {
         panel = panel.child(notice(t, error));
     }
@@ -859,6 +862,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
                         .size("sm")
                         .on_press(|s: &mut App| {
                             s.ui.settings.provider_picker = false;
+                            s.ui.settings.error = None;
                             wizard(s).chatgpt = Some(ChatGpt { name: TextEdit::new("Personal"), created: None, install_sent: false, auth_sent: false });
                         })
                         .build(t),
@@ -911,14 +915,24 @@ fn chatgpt_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
             if let Some(note) = multiple_accounts(s, t, "codex") {
                 body = body.child(note);
             }
-            body = body.child(field_row(
-                t,
-                "Account name",
-                "Shown in the provider list and model picker.",
-                None,
-                input(t, "chatgpt-account-name".into(), &chatgpt.name, "e.g. Personal or Work", |s: &mut App| &mut wizard(s).chatgpt.get_or_insert_with(|| ChatGpt { name: TextEdit::new(""), created: None, install_sent: false, auth_sent: false }).name)
-                    .label("Account name"),
-            ));
+            // Web's stacked `Field`: label, input, then description.
+            let name = kit::Input::new(&chatgpt.name)
+                .placeholder("e.g. Personal or Work")
+                .on_edit(|s: &mut App| &mut wizard(s).chatgpt.get_or_insert_with(|| ChatGpt { name: TextEdit::new(""), created: None, install_sent: false, auth_sent: false }).name)
+                .on_submit(|s: &mut App, _| add_chatgpt(s))
+                .build(t)
+                .key("chatgpt-account-name")
+                .w_full()
+                .single_line()
+                .label("Account name");
+            body = body.child(
+                col()
+                    .w_full()
+                    .gap(8.0)
+                    .child(text("Account name").font(theme::SM_MEDIUM).color(t.c.foreground))
+                    .child(name)
+                    .child(text("Shown in the provider list and model picker.").font(theme::TEXT_XS).color(t.c.muted_foreground)),
+            );
             let footer = row()
                 .w_full()
                 .gap(8.0)
@@ -954,11 +968,12 @@ fn chatgpt_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
 /// account's install and sign-in state.
 pub fn wanted(s: &App) -> Vec<(String, Value)> {
     let w = &s.ui.settings.add_provider;
+    let live = |id: &&String| crate::chat::composer::provider(s, id).is_some();
     let mut out = Vec::new();
-    if let Some(id) = w.created.as_ref().filter(|_| s.ui.settings.provider_picker) {
+    if let Some(id) = w.created.as_ref().filter(|_| s.ui.settings.provider_picker).filter(live) {
         out.push(("provider.auth.subscribe".to_owned(), json!({"instanceId": id})));
     }
-    if let Some(id) = w.chatgpt.as_ref().and_then(|c| c.created.as_ref()) {
+    if let Some(id) = w.chatgpt.as_ref().and_then(|c| c.created.as_ref()).filter(live) {
         out.push(("provider.auth.subscribe".to_owned(), json!({"instanceId": id})));
         out.push(("provider.install.subscribe".to_owned(), json!({"instanceId": id})));
     }

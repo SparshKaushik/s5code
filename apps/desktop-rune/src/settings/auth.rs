@@ -360,33 +360,29 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
         out = out.child(
             col()
                 .w_full()
-                .gap(6.0)
-                .child(text("If the final localhost page does not load, paste its full URL here.").font(theme::TEXT_XS.lh(18.0)).color(t.c.muted_foreground).wrap())
+                .gap(8.0)
+                .child(text("If the final localhost page does not load, paste its full URL here.").font(theme::TEXT_SM).color(t.c.foreground).wrap())
                 .child(
-                    row()
+                    kit::Input::new(&s.ui.settings.auth_response)
+                        .size("sm")
+                        .on_edit(|s: &mut App| &mut s.ui.settings.auth_response)
+                        .build(t)
                         .w_full()
-                        .gap(8.0)
-                        .child(
-                            kit::Input::new(&s.ui.settings.auth_response)
-                                .size("sm")
-                                .placeholder("http://localhost:1455/auth/callback?…")
-                                .on_edit(|s: &mut App| &mut s.ui.settings.auth_response)
-                                .build(t)
-                                .single_line()
-                                .grow(1.0)
-                                .label("Callback URL"),
-                        )
-                        .child(
-                            kit::Button::new("Continue")
-                                .size("sm")
-                                .disabled(empty)
-                                .on_press(move |s: &mut App| {
-                                    let callback = s.ui.settings.auth_response.text.trim().to_owned();
-                                    request(s, "provider.auth.complete", json!({"instanceId": complete_id, "flowId": flow, "callbackUrl": callback}));
-                                    s.ui.settings.auth_response.clear();
-                                })
-                                .build(t),
-                        ),
+                        .single_line()
+                        .label("Callback URL"),
+                )
+                .child(
+                    kit::Button::new("Continue")
+                        .variant("outline")
+                        .size("sm")
+                        .disabled(empty)
+                        .on_press(move |s: &mut App| {
+                            let callback = s.ui.settings.auth_response.text.trim().to_owned();
+                            request(s, "provider.auth.complete", json!({"instanceId": complete_id, "flowId": flow, "callbackUrl": callback}));
+                            s.ui.settings.auth_response.clear();
+                        })
+                        .build(t)
+                        .self_start(),
                 ),
         );
     }
