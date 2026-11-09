@@ -40,6 +40,7 @@ struct Notice {
     title: String,
     description: Option<String>,
     until: i64,
+    error: bool,
 }
 struct Restart {
     thread: String,
@@ -279,6 +280,17 @@ pub(crate) fn toast(s: &mut App, title: &str, description: Option<&str>) {
         title: title.into(),
         description: description.filter(|v| !v.is_empty()).map(str::to_owned),
         until: data::now_ms() + 4000,
+        error: false,
+    });
+}
+/// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
+/// be read.
+pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
+    s.ui.shell.palette.notice = Some(Notice {
+        title: title.into(),
+        description: description.filter(|v| !v.is_empty()).map(str::to_owned),
+        until: i64::MAX,
+        error: true,
     });
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -1783,6 +1795,11 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         let mut toast = kit::Toast::new("palette-notice", notice.title.clone());
         if let Some(description) = &notice.description {
             toast = toast.description(description.clone());
+        }
+        if notice.error {
+            toast = toast
+                .lead(icon(&icons::CIRCLE_ALERT, 16.).color(t.c.destructive))
+                .on_close(|s: &mut App| s.ui.shell.palette.notice = None);
         }
         out.push(kit::ToastRegion::new().toast(toast.build(&kit::theme(t))).build(&kit::theme(t)));
     }

@@ -613,7 +613,7 @@ fn card(s: &App, t: &T) -> Option<El> {
         if draft {
             return Some(card.child(section));
         }
-        let (add, del) = (v["workingTree"]["insertions"].as_u64().unwrap_or(0), v["workingTree"]["deletions"].as_u64().unwrap_or(0));
+        let (add, del) = git::changes_totals(v);
         let stat = theme::mono(theme::XS_MEDIUM);
         section = section.child(
             action(t, "details-changes", icon(&icons::FILE_DIFF, 16.0).color(muted), "Changes", fg)
