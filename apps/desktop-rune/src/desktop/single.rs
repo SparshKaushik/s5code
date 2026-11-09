@@ -3,7 +3,7 @@
 //! Unix only: a socket in the T3 home's userdata directory is the lock.
 
 #[cfg(unix)]
-pub use unix::{Instance, claim};
+pub use unix::claim;
 
 #[cfg(unix)]
 mod unix {

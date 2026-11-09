@@ -15,7 +15,7 @@ use std::cell::Cell;
 use rune::{App as RuneApp, Color, Cx, El, Key, KeyEvent, MenuItem, Shortcut, Tx, el, row, text};
 
 use crate::data::{self, Source};
-use crate::theme::{self, T};
+use crate::theme::{self, AlphaMul, T};
 use crate::{App, Route};
 
 pub const APP_NAME: &str = "S5 Code";
