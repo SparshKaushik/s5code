@@ -56,6 +56,8 @@ pub struct Ui {
     unsaved: HashMap<(String, String), String>,
     save_error: Option<String>,
     error: Option<String>,
+    /// Why the open file could not be read; the tree's own failures stay in `error`.
+    read_failure: Option<ReadFailure>,
     /// The search match to mark and centre in the open file.
     line: Option<usize>,
     image: Option<Image>,
@@ -67,6 +69,8 @@ struct Image {
     url: Option<String>,
     pixels: rune::Pixels,
     failed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    /// The decode has finished, either way, and the view shows its outcome.
+    settled: bool,
 }
 
 /// `WORKSPACE_IMAGE_PREVIEW_EXTENSIONS` (packages/shared/src/mediaPreview.ts).
@@ -77,9 +81,31 @@ fn is_image(path: &str) -> bool {
     IMAGE_EXTENSIONS.iter().any(|e| path.ends_with(e))
 }
 
+#[derive(Debug, PartialEq)]
+struct ReadFailure {
+    message: String,
+    attempted: Option<String>,
+    cwd: String,
+}
+
+fn failure(cause: &Value) -> &Value {
+    cause.as_array().and_then(|c| c.iter().find(|r| r["_tag"] == "Fail")).map_or(cause, |r| &r["error"])
+}
+
+/// What the web's failed file preview shows: the message, the path the server tried, and the
+/// workspace it read from.
+fn read_failure(cause: &Value, cwd: &str) -> ReadFailure {
+    let error = failure(cause);
+    ReadFailure {
+        message: read_error(cause),
+        attempted: error["resolvedPath"].as_str().or(error["operationPath"].as_str()).map(str::to_owned),
+        cwd: error["cwd"].as_str().unwrap_or(cwd).to_owned(),
+    }
+}
+
 /// `filePreviewReadErrorMessage`, from the `ProjectReadFileError` in a failed reply's cause.
 fn read_error(cause: &Value) -> String {
-    let error = cause.as_array().and_then(|c| c.iter().find(|r| r["_tag"] == "Fail")).map_or(cause, |r| &r["error"]);
+    let error = failure(cause);
     match error["failure"].as_str() {
         Some("path_not_file") => "The path is a directory or special file, not a regular file.".into(),
         Some("binary_file") => "The file is binary and cannot be displayed as text.".into(),
@@ -116,6 +142,7 @@ impl Default for Ui {
             unsaved: HashMap::new(),
             save_error: None,
             error: None,
+            read_failure: None,
             line: None,
             image: None,
         }
@@ -277,6 +304,7 @@ fn read(app: &mut App, path: String) {
             url: None,
             pixels: rune::Pixels::new(),
             failed: Default::default(),
+            settled: false,
         }
     });
     let request = if image.is_some() {
@@ -288,6 +316,7 @@ fn read(app: &mut App, path: String) {
     ui.image = image;
     ui.selected = path;
     ui.line = None;
+    ui.read_failure = None;
     ui.cwd = cwd;
     ui.reading = request;
     ui.error = None;
@@ -334,6 +363,7 @@ fn close_file(app: &mut App) {
     ui.selected.clear();
     ui.line = None;
     ui.image = None;
+    ui.read_failure = None;
     ui.reading = None;
     ui.save_error = None;
     show(ui, String::new(), false);
@@ -473,7 +503,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     tx.wake_after(DEBOUNCE);
                 }
             }
-            Err(e) => ui.error = Some(read_error(&e)),
+            Err(e) => ui.read_failure = Some(read_failure(&e, &ui.cwd)),
         }
         changed = true;
     }
@@ -498,6 +528,13 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             }
             Err(_) => image.failed.store(true, std::sync::atomic::Ordering::Relaxed),
         }
+        changed = true;
+    }
+    if let Some(image) = ui.image.as_mut()
+        && !image.settled
+        && (image.failed.load(std::sync::atomic::Ordering::Relaxed) || image.pixels.size() != (0, 0))
+    {
+        image.settled = true;
         changed = true;
     }
     let mut done = vec![];
@@ -584,6 +621,23 @@ fn decode(url: &str, pixels: &rune::Pixels) -> Option<()> {
     Some(())
 }
 
+fn read_failure_view(f: &ReadFailure, t: &T) -> El {
+    let line = |content: El| row().w_full().justify_center().child(content.shrink());
+    let mut body = col().w_full().gap(12.).px(24.).py(24.).child(line(text(f.message.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap()));
+    if let Some(path) = &f.attempted {
+        body = body.child(
+            col()
+                .w_full()
+                .center()
+                .child(text("Attempted path").font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(text(path.clone()).font(theme::mono(theme::TEXT_XS)).color(t.c.foreground).wrap_anywhere().selectable(true)),
+        );
+    }
+    let folder = format!("Workspace folder: {}. Check the link's path or locate the file in Files.", f.cwd);
+    body = body.child(line(text(folder).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap().selectable(true)));
+    col().grow(1.).min_h(0.).justify_center().child(body)
+}
+
 fn image_view(image: &Image, t: &T) -> El {
     if image.failed.load(std::sync::atomic::Ordering::Relaxed) {
         let mut notice = col().grow(1.).center().gap(12.).padding(24.).child(text("Unable to load workspace image.").font(theme::TEXT_XS).color(t.c.destructive_foreground));
@@ -601,7 +655,12 @@ fn image_view(image: &Image, t: &T) -> El {
         }
         return notice;
     }
-    el().grow(1.).min_h(0.).min_w(0.).padding(16.).pixels_fit(&image.pixels, rune::SurfaceFit::Fit)
+    if !image.settled {
+        return col().grow(1.).center().child(kit::Spinner::new().size("lg").tone("muted").build(&kit::theme(t)));
+    }
+    // `PreviewImageContent` fits the image inside a 16px margin and never scales it up.
+    let (w, h) = image.pixels.size();
+    col().grow(1.).min_h(0.).min_w(0.).center().padding(16.).child(el().w_full().grow(1.).min_h(0.).max_w(w as f32).max_h(h as f32).pixels_fit(&image.pixels, rune::SurfaceFit::Fit))
 }
 
 fn editor(ui: &Ui, t: &T) -> El {
@@ -797,6 +856,8 @@ pub fn view(app: &App, t: &T) -> El {
                 })
                 .child(text(format!("{error} Click to retry.")).font(theme::TEXT_XS).color(t.c.destructive).wrap().grow(1.)),
         )
+    } else if let Some(failure) = &ui.read_failure {
+        read_failure_view(failure, t)
     } else if let Some(image) = &ui.image {
         image_view(image, t)
     } else if !ui.selected.is_empty() {
@@ -899,6 +960,10 @@ mod tests {
         assert_eq!(read_error(&cause), "The file is binary and cannot be displayed as text.");
         let cause = json!([{"_tag":"Fail","error":{"failure":"operation_failed","operation":"realpath-workspace-root","message":"x"}}]);
         assert_eq!(read_error(&cause), "The workspace folder could not be accessed.");
+        let cause = json!([{"_tag":"Fail","error":{"failure":"resolved_path_outside_root","cwd":"/w","resolvedPath":"/etc/passwd"}}]);
+        let failure = read_failure(&cause, "/fallback");
+        assert_eq!((failure.attempted.as_deref(), failure.cwd.as_str()), (Some("/etc/passwd"), "/w"));
+        assert_eq!(read_failure(&json!({"message":"x"}), "/fallback").cwd, "/fallback");
         assert_eq!(read_error(&json!({"message":"network worker stopped"})), "network worker stopped");
     }
 
