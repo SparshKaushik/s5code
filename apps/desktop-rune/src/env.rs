@@ -245,7 +245,7 @@ pub fn poll(s: &mut App) -> bool {
     true
 }
 
-fn keys(s: &App) -> Vec<String> {
+pub fn keys(s: &App) -> Vec<String> {
     std::iter::once(LOCAL.to_owned()).chain(s.ui.env.saved.iter().map(|e| e.id.clone())).collect()
 }
 
@@ -293,8 +293,14 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
                 .child(actions),
         );
     }
+    rows.push(pairing_form(s, t));
+    rows
+}
+
+/// The web's remote pairing fields: a host (or a whole pairing URL) and a pairing code.
+pub fn pairing_form(s: &App, t: &T) -> El {
     let pairing = s.ui.env.pairing.is_some();
-    let field = |label: &str, input: El| col().grow(1.0).shrink().min_w(0.0).gap(6.0).child(text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground)).child(input);
+    let field = |label: &str, input: El| col().gap(6.0).child(text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground)).child(input);
     let mut form = col()
         .key("env-add")
         .w_full()
@@ -305,11 +311,10 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
             row()
                 .w_full()
                 .gap(12.0)
-                .child(field("Host", kit::Input::new(&s.ui.env.host).placeholder("backend.example.com").on_edit(|s: &mut App| &mut s.ui.env.host).on_submit(|s: &mut App, _| add(s)).build(t).single_line()))
+                .child(field("Host", kit::Input::new(&s.ui.env.host).placeholder("backend.example.com").on_edit(|s: &mut App| &mut s.ui.env.host).on_submit(|s: &mut App, _| add(s)).build(t).single_line()).grow(1.0).shrink().min_w(0.0))
                 .child(
                     field("Pairing code", kit::Input::new(&s.ui.env.code).placeholder("PAIRCODE").on_edit(|s: &mut App| &mut s.ui.env.code).on_submit(|s: &mut App, _| add(s)).build(t).single_line())
-                        .w(160.0)
-                        .grow(0.0),
+                        .w(160.0),
                 ),
         )
         .child(text("Paste a full pairing URL here to fill both fields automatically.").font(theme::TEXT_XS).color(t.c.muted_foreground));
@@ -325,8 +330,7 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
                 .build(t),
         ),
     );
-    rows.push(form);
-    rows
+    form
 }
 
 /// The sidebar's environment switcher, under the brand row once another environment is saved.
