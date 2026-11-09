@@ -51,6 +51,22 @@ impl Ui {
     fn zoom_factor(&self) -> f32 {
         1.2f32.powf(self.zoom_level)
     }
+
+    fn set_zoom_level(&mut self, level: f32) {
+        self.zoom_level = level;
+        ZOOM.with(|z| z.set(self.zoom_factor()));
+    }
+}
+
+thread_local! {
+    /// The app zoom, for code that holds window points but no `App`.
+    static ZOOM: Cell<f32> = const { Cell::new(1.0) };
+}
+
+/// Window points (`PointerPress`, a context menu's anchor) to the zoomed app's layout points.
+pub fn from_window(x: f32, y: f32) -> (f32, f32) {
+    let k = ZOOM.with(Cell::get);
+    (x / k, y / k)
 }
 
 /// Window state that outlives a launch: the app zoom everywhere, the window size where Rune
@@ -158,7 +174,7 @@ fn zoom(s: &mut App, tx: &mut Tx, step: Option<f32>) {
     if level == s.ui.desktop.zoom_level {
         return;
     }
-    s.ui.desktop.zoom_level = level;
+    s.ui.desktop.set_zoom_level(level);
     tx.instant();
     let _ = prefs().set("zoomLevel", &level);
 }
@@ -190,7 +206,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         ui.prefs_loaded = true;
         let prefs = prefs();
         let level = prefs.get::<f32>("zoomLevel").unwrap_or(0.0);
-        ui.zoom_level = if level.is_finite() { level.clamp(ZOOM_LEVELS.0, ZOOM_LEVELS.1) } else { 0.0 };
+        ui.set_zoom_level(if level.is_finite() { level.clamp(ZOOM_LEVELS.0, ZOOM_LEVELS.1) } else { 0.0 });
         ui.saved_size = prefs.get("windowSize");
         changed = ui.zoom_level != 0.0;
     }
