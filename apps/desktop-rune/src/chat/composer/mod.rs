@@ -973,6 +973,11 @@ fn footer(s: &App, t: &T) -> El {
     if let Some((instance, model)) = selection(s) {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
         let name = model_name(s, &instance, &model);
+        // ComposerModelEffort with the default effortDisplay "label": the level's name.
+        let effort = effort(s).and_then(|e| {
+            let (_, options) = effort_options(s)?;
+            options.iter().find(|o| data::s(o, "id") == e).map(|o| data::s(o, "label").to_owned())
+        });
         right = right.child(
             row()
                 .key("composer-model-chip")
@@ -986,6 +991,7 @@ fn footer(s: &App, t: &T) -> El {
                 .label(name.clone())
                 .child(provider_icon(t, &driver, 16.0))
                 .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
+                .children(effort.map(|e| text(e).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0)))
                 .on_press(|s: &mut App| picker::toggle(s)),
         );
     }
