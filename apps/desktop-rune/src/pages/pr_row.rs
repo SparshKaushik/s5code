@@ -825,6 +825,23 @@ mod tests {
     }
 
     #[test]
+    fn shift_alone_shows_the_quick_actions_until_released() {
+        let mut s = App::new();
+        s.route = Route::PullRequests;
+        let key = |pressed: bool, mods: rune::Mods| KeyEvent { key: Key::Modifier { modifier: rune::Modifier::ShiftLeft, pressed }, mods };
+        let shift = || rune::Mods { shift: true, ..Default::default() };
+        assert!(on_key(&mut s, &key(true, shift())));
+        assert!(s.ui.pages.pull_requests.row.speed);
+        assert!(!on_key(&mut s, &key(true, shift())));
+        assert!(on_key(&mut s, &key(false, rune::Mods::default())));
+        assert!(!s.ui.pages.pull_requests.row.speed);
+        // Shift inside a chord is a shortcut, and other pages ignore it.
+        assert!(!on_key(&mut s, &key(true, rune::Mods { shift: true, ctrl: true, cmd: true, ..Default::default() })));
+        s.route = Route::Home { project_id: None };
+        assert!(!on_key(&mut s, &key(true, shift())));
+    }
+
+    #[test]
     fn quick_actions_follow_the_state_and_what_the_host_allows() {
         let reported = json!({"providers": [{"host": "GitHub.com", "actions": ["close", "reopen"]}]});
         let open = entry(json!({}));

@@ -161,6 +161,11 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    // Lone modifiers only drive the pull request rows' Shift actions; the other handlers predate
+    // them (the sidebar would hand mod+z back to text fields on the Cmd press alone).
+    if matches!(e.key, rune::Key::Modifier { .. }) {
+        return pages::on_modifier(s, e);
+    }
     search::on_key(s, e, tx) || settings::on_key(s, e, tx) || pages::on_key(s, e, tx) || shell::on_key(s, e, tx) || chat::on_key(s, e, tx)
 }
 
@@ -204,7 +209,7 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", (1440.0, 900.0), App::new, view)
     };
-    RuneApp::new(spec).run();
+    RuneApp::new(spec).modifier_keys().run();
     panel::browser::shutdown();
     host::shutdown();
 }

@@ -55,8 +55,13 @@ fn want_avatars(s: &mut App) {
     pages.avatars.want(avatars::urls(actors), waker);
 }
 
+/// Shift held alone shows the pull request rows' quick actions.
+pub fn on_modifier(s: &mut App, e: &KeyEvent) -> bool {
+    pr_row::on_key(s, e)
+}
+
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
-    pr_row::on_key(s, e) || usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
+    usage::on_key(s, e, tx) || pr_detail::on_key(s, e, tx) || pull_requests::on_key(s, e, tx)
 }
 
 /// A bundled recording next to the shell fixtures (`fixtures/pull-requests.json`, `usage.json`).

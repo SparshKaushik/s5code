@@ -1143,7 +1143,9 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     let f = &u.filters;
     let sub = u.submenu;
     let sub_item = |label: &str, glyph: &'static rune::Icon, value: String, name: &'static str, entries: Vec<MenuEntry>| {
-        MenuEntry::item(MenuItem::new(label).icon(glyph).shortcut(value).submenu(entries, sub == Some(name)).on_submenu_change(move |s: &mut App, on| {
+        // The host rows carry an "Unavailable" tag beside the name, which the default width clips.
+        let width = if name == "host" { 240. } else { 160. };
+        MenuEntry::item(MenuItem::new(label).icon(glyph).shortcut(value).submenu(entries, sub == Some(name)).submenu_min_width(width).on_submenu_change(move |s: &mut App, on| {
             let u = ui(s);
             if on && u.submenu != Some(name) && matches!(name, "author" | "labels") {
                 super::pr_filters::open(&mut u.picker);
