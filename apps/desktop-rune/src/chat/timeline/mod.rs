@@ -371,6 +371,23 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                 .child(markdown::view(app, &detail, s(item, "id"), t))
                 .child(copy_button(app, &detail, t)),
         );
+        if kind == "file_change" {
+            let route_thread = match app.frame_route() {
+                crate::Route::Thread(id) => id.clone(),
+                _ => String::new(),
+            };
+            let thread = Some(s(item, "sourceThreadId")).filter(|v| !v.is_empty()).map_or(route_thread, str::to_owned);
+            let target = Some(s(item, "sourceItemId")).filter(|v| !v.is_empty()).unwrap_or(s(item, "id")).to_owned();
+            out = out.child(
+                row().px(28.0).child(
+                    crate::kit::Button::new("Open diff")
+                        .variant("outline")
+                        .size("xs")
+                        .on_press(move |app: &mut App| crate::panel::open_tool_diff(app, thread.clone(), target.clone()))
+                        .build(t),
+                ),
+            );
+        }
     }
     out
 }

@@ -47,12 +47,29 @@ pub enum Row {
     Line { f: u32, h: u32, i: u32 },
     /// Split mode: removed line `del` beside added line `add`.
     Pair { f: u32, h: u32, del: u32, add: u32 },
+    /// Unchanged line `k` of the gap before hunk `h` (the hunk count for the file's tail),
+    /// shown from the file's loaded contents.
+    Gap { f: u32, h: u32, k: u32 },
+    /// Note `n`: a review comment, or the one being written, under the line it ends on.
+    Comment { f: u32, n: u32 },
+}
+
+/// Marks a gap's line in highlight and find keys, apart from its hunk's lines.
+pub const GAP: u32 = 1 << 31;
+
+/// A comment shown under the line `at` of `file`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Note {
+    pub file: usize,
+    pub at: LineRef,
+    pub id: String,
+    pub draft: bool,
 }
 
 impl Row {
     pub fn file(self) -> usize {
         match self {
-            Row::File(f) | Row::Note(f) | Row::Sep { f, .. } | Row::Line { f, .. } | Row::Pair { f, .. } => f as usize,
+            Row::File(f) | Row::Note(f) | Row::Sep { f, .. } | Row::Line { f, .. } | Row::Pair { f, .. } | Row::Gap { f, .. } | Row::Comment { f, .. } => f as usize,
         }
     }
 }
@@ -79,6 +96,19 @@ pub struct DiffState {
     side_lines: Vec<Vec<[Vec<u32>; 2]>>,
     /// Per file, per hunk: unchanged lines folded away before it.
     hidden: Vec<Vec<u32>>,
+    /// Per file, per gap (one per hunk, then the tail): its first old and new line numbers.
+    gap_starts: Vec<Vec<(u32, u32)>>,
+    /// Per file: its new side's lines once loaded, which fill the gaps.
+    contents: Vec<Option<Rc<[String]>>>,
+    /// Per file, per gap: lines shown from its top and from its bottom.
+    expanded: Vec<HashMap<u32, (u32, u32)>>,
+    notes: Vec<Note>,
+    /// Find matches by line, `(file, h, i)` or `(file, GAP | h, k)`: byte ranges and which is current.
+    hits: HashMap<(u32, u32, u32), Vec<(std::ops::Range<usize>, bool)>>,
+    /// Whether gaps can load the file to expand (a git scope).
+    pub expandable: bool,
+    /// Bumped when the files or their contents change, so find searches again.
+    pub files_rev: u64,
     digits: Vec<u32>,
     columns: u32,
     pub rows: Vec<Row>,
@@ -136,6 +166,13 @@ impl DiffState {
             chunks: RefCell::new(HashMap::new()),
             side_lines: Vec::new(),
             hidden: Vec::new(),
+            gap_starts: Vec::new(),
+            contents: Vec::new(),
+            expanded: Vec::new(),
+            notes: Vec::new(),
+            hits: HashMap::new(),
+            expandable: false,
+            files_rev: 0,
             digits: Vec::new(),
             columns: 0,
             rows: Vec::new(),
@@ -183,6 +220,28 @@ impl DiffState {
                     .collect()
             })
             .collect();
+        self.gap_starts = files
+            .iter()
+            .map(|f| {
+                let (mut old, mut new) = (1, 1);
+                let mut starts: Vec<(u32, u32)> = f
+                    .hunks
+                    .iter()
+                    .map(|h| {
+                        let at = (old, new);
+                        (old, new) = (end(h, Side::Old), end(h, Side::New));
+                        at
+                    })
+                    .collect();
+                starts.push((old, new));
+                starts
+            })
+            .collect();
+        self.contents = vec![None; files.len()];
+        self.expanded = vec![HashMap::new(); files.len()];
+        self.notes.clear();
+        self.hits.clear();
+        self.files_rev += 1;
         self.digits = files
             .iter()
             .map(|f| f.hunks.last().map_or(0, |h| end(h, Side::Old).max(end(h, Side::New)).saturating_sub(1)))
@@ -256,6 +315,97 @@ impl DiffState {
     /// Unchanged lines folded away before hunk `h` of `file`.
     pub fn hidden(&self, file: usize, h: usize) -> u32 {
         self.hidden.get(file).and_then(|v| v.get(h)).copied().unwrap_or(0)
+    }
+
+    /// Unchanged lines in gap `h` of `file`; the tail counts once the file is loaded.
+    pub fn gap_len(&self, file: usize, h: usize) -> u32 {
+        let Some(f) = self.files.get(file) else { return 0 };
+        if h < f.hunks.len() {
+            return self.hidden(file, h);
+        }
+        let Some(lines) = self.contents.get(file).and_then(Option::as_ref) else { return 0 };
+        (lines.len() as u32 + 1).saturating_sub(self.gap_starts[file][h].1)
+    }
+
+    /// Lines of gap `h` shown from its top and from its bottom.
+    pub fn gap_shown(&self, file: usize, h: usize) -> (u32, u32) {
+        if !self.loaded(file) {
+            return (0, 0);
+        }
+        let n = self.gap_len(file, h);
+        let (top, bottom) = self.expanded.get(file).and_then(|m| m.get(&(h as u32))).copied().unwrap_or((0, 0));
+        let top = top.min(n);
+        (top, bottom.min(n - top))
+    }
+
+    /// Lines of gap `h` still folded.
+    pub fn remaining(&self, file: usize, h: usize) -> u32 {
+        let (top, bottom) = self.gap_shown(file, h);
+        self.gap_len(file, h) - top - bottom
+    }
+
+    pub fn loaded(&self, file: usize) -> bool {
+        self.contents.get(file).is_some_and(Option::is_some)
+    }
+
+    /// Line `k` of gap `h`: its old and new numbers and its text.
+    pub fn gap_line(&self, file: usize, h: usize, k: u32) -> Option<(u32, u32, &str)> {
+        let (old, new) = *self.gap_starts.get(file)?.get(h)?;
+        let text = self.contents.get(file)?.as_ref()?.get((new + k - 1) as usize)?;
+        Some((old + k, new + k, text.as_str()))
+    }
+
+    /// The files' loaded contents and each gap's shown lines, by file index.
+    pub fn set_extras(&mut self, contents: Vec<Option<Rc<[String]>>>, expanded: Vec<HashMap<u32, (u32, u32)>>) {
+        for (f, lines) in contents.iter().enumerate() {
+            if let Some(lines) = lines {
+                let digits = (lines.len().max(1) as u32).ilog10() + 1;
+                if let Some(d) = self.digits.get_mut(f) {
+                    *d = (*d).max(digits);
+                }
+                self.columns = self.columns.max(lines.iter().map(|l| columns(l)).max().unwrap_or(0));
+            }
+        }
+        self.contents = contents;
+        self.expanded = expanded;
+        self.contents.resize(self.files.len(), None);
+        self.expanded.resize(self.files.len(), HashMap::new());
+        self.chunks.borrow_mut().clear();
+        self.files_rev += 1;
+        self.rebuild();
+    }
+
+    pub fn notes(&self) -> &[Note] {
+        &self.notes
+    }
+
+    /// Returns whether the notes changed.
+    pub fn set_notes(&mut self, notes: Vec<Note>) -> bool {
+        if self.notes == notes {
+            return false;
+        }
+        self.notes = notes;
+        self.rebuild();
+        true
+    }
+
+    pub fn set_hits(&mut self, hits: HashMap<(u32, u32, u32), Vec<(std::ops::Range<usize>, bool)>>) {
+        self.hits = hits;
+        self.rev += 1;
+    }
+
+    /// Find matches on line `i` of hunk `h` (`GAP | h` for a gap's line).
+    pub fn hits_on(&self, f: usize, h: u32, i: u32) -> &[(std::ops::Range<usize>, bool)] {
+        self.hits.get(&(f as u32, h, i)).map_or(&[], Vec::as_slice)
+    }
+
+    /// The row showing `line` on `side` of `file`.
+    pub fn row_at(&self, file: usize, side: Side, line: u32) -> Option<u32> {
+        self.row_of.get(&(file as u32, side, line)).copied()
+    }
+
+    pub fn reveal_row(&self, r: u32, tx: &mut Tx) {
+        self.reveal_below_header(r, tx);
     }
 
     pub fn selection(&self) -> Option<LineRange> {
@@ -486,12 +636,17 @@ impl DiffState {
             Row::File(_) => HEADER_H,
             Row::Note(_) => NOTE_H,
             Row::Sep { .. } => SEP_H,
+            Row::Comment { n, .. } if self.notes.get(n as usize).is_some_and(|n| n.draft) => 104.0,
+            Row::Comment { .. } => 40.0,
             _ => LINE_H,
         }
     }
 
     /// Row `r`'s line text on `side`.
     pub fn row_text(&self, r: Row, side: Side) -> Option<&str> {
+        if let Row::Gap { f, h, k } = r {
+            return self.gap_line(f as usize, h as usize, k).map(|(_, _, t)| t);
+        }
         let (f, h, i) = match r {
             Row::Line { f, h, i } => (f, h, i),
             Row::Pair { f, h, del, add } => (f, h, if side == Side::Old { del } else { add }),
@@ -504,22 +659,31 @@ impl DiffState {
     /// Colour-only highlights of line `i` of hunk `h` of file `f`, read on `side`, relative to
     /// the line. Each side of a hunk is highlighted once as a whole.
     pub fn highlights(&self, f: usize, h: usize, i: u32, side: Side) -> Vec<(std::ops::Range<usize>, Paint)> {
+        let lines = &self.side_lines[f][h][side as usize];
+        let Ok(k) = lines.binary_search(&i) else { return Vec::new() };
+        let hunk = &self.files[f].hunks[h];
+        self.paint(f, (f as u32, h as u32, side), k, || lines.iter().map(|&j| hunk.lines[j as usize].text.as_str()).collect())
+    }
+
+    /// Highlights of line `k` of gap `h`, the gap highlighted as a whole.
+    pub fn gap_highlights(&self, f: usize, h: usize, k: u32) -> Vec<(std::ops::Range<usize>, Paint)> {
+        let n = self.gap_len(f, h);
+        self.paint(f, (f as u32, GAP | h as u32, Side::New), k as usize, || (0..n).filter_map(|j| self.gap_line(f, h, j).map(|(_, _, t)| t)).collect())
+    }
+
+    fn paint<'a>(&'a self, f: usize, key: (u32, u32, Side), k: usize, lines: impl FnOnce() -> Vec<&'a str>) -> Vec<(std::ops::Range<usize>, Paint)> {
         let file = &self.files[f];
         let lang = file.language();
         if self.highlighter.is_builtin() && !lang.is_some_and(rune_kit::syntax::known) {
             return Vec::new();
         }
-        let lines = &self.side_lines[f][h][side as usize];
-        let Ok(k) = lines.binary_search(&i) else { return Vec::new() };
-        let key = (f as u32, h as u32, side);
         let chunk = self.chunks.borrow().get(&key).cloned();
         let chunk = chunk.unwrap_or_else(|| {
-            let hunk = &file.hunks[h];
             let mut text = String::new();
-            let mut starts = Vec::with_capacity(lines.len() + 1);
-            for &j in lines {
+            let mut starts = Vec::new();
+            for line in lines() {
                 starts.push(text.len() as u32);
-                text.push_str(&hunk.lines[j as usize].text);
+                text.push_str(line);
                 text.push('\n');
             }
             starts.push(text.len() as u32);
@@ -531,6 +695,9 @@ impl DiffState {
             cache.insert(key, chunk.clone());
             chunk
         });
+        if k + 1 >= chunk.starts.len() {
+            return Vec::new();
+        }
         let (a, b) = (chunk.starts[k] as usize, chunk.starts[k + 1] as usize - 1);
         let from = chunk.hl.partition_point(|(r, _)| r.end <= a);
         chunk.hl[from..]
@@ -548,6 +715,10 @@ impl DiffState {
                 let i = if side == Side::Old { del } else { add };
                 self.files[f as usize].hunks[h as usize].lines[i as usize].number(side)
             }
+            Row::Gap { f, h, k } => {
+                let (old, new) = self.gap_starts[f as usize][h as usize];
+                Some(if side == Side::Old { old + k } else { new + k })
+            }
             _ => None,
         }
     }
@@ -556,11 +727,14 @@ impl DiffState {
         self.rev += 1;
         self.nav = None;
         let mut rows = Vec::new();
-        self.file_rows.clear();
-        self.hunk_rows.clear();
+        let (mut file_rows, mut hunk_rows) = (Vec::new(), Vec::new());
+        let mut notes: HashMap<(usize, Side, u32), Vec<u32>> = HashMap::new();
+        for (n, note) in self.notes.iter().enumerate() {
+            notes.entry((note.file, note.at.side, note.at.line)).or_default().push(n as u32);
+        }
         for (f, file) in self.files.iter().enumerate() {
             let fu = f as u32;
-            self.file_rows.push(rows.len() as u32);
+            file_rows.push(rows.len() as u32);
             rows.push(Row::File(fu));
             if self.collapsed[f] {
                 continue;
@@ -571,10 +745,8 @@ impl DiffState {
             }
             for (h, hunk) in file.hunks.iter().enumerate() {
                 let hu = h as u32;
-                self.hunk_rows.push(rows.len() as u32);
-                if self.hidden[f][h] > 0 {
-                    rows.push(Row::Sep { f: fu, h: hu });
-                }
+                hunk_rows.push(rows.len() as u32);
+                self.push_gap(&mut rows, &notes, f, h);
                 let lines = &hunk.lines;
                 let mut i = 0;
                 while i < lines.len() {
@@ -589,19 +761,23 @@ impl DiffState {
                         }
                         let (nd, na) = (add - del, i - add);
                         for k in 0..nd.max(na) {
-                            rows.push(match (k < nd, k < na) {
+                            let r = match (k < nd, k < na) {
                                 (true, true) => Row::Pair { f: fu, h: hu, del: (del + k) as u32, add: (add + k) as u32 },
                                 (true, false) => Row::Line { f: fu, h: hu, i: (del + k) as u32 },
                                 _ => Row::Line { f: fu, h: hu, i: (add + k) as u32 },
-                            });
+                            };
+                            self.push_line(&mut rows, &notes, r);
                         }
                         continue;
                     }
-                    rows.push(Row::Line { f: fu, h: hu, i: i as u32 });
+                    self.push_line(&mut rows, &notes, Row::Line { f: fu, h: hu, i: i as u32 });
                     i += 1;
                 }
             }
+            self.push_gap(&mut rows, &notes, f, file.hunks.len());
         }
+        self.file_rows = file_rows;
+        self.hunk_rows = hunk_rows;
         let keys: Vec<String> = rows.iter().map(|&r| self.key_of(r)).collect();
         if !self.visible_rows.is_empty() {
             if let Some(top) = self.keys.get(self.visible_rows.start)
@@ -627,6 +803,33 @@ impl DiffState {
         self.rows = rows;
     }
 
+    /// A line's row, then the comments that end on it.
+    fn push_line(&self, rows: &mut Vec<Row>, notes: &HashMap<(usize, Side, u32), Vec<u32>>, r: Row) {
+        rows.push(r);
+        let f = r.file();
+        for side in [Side::Old, Side::New] {
+            if let Some(ids) = self.row_line(r, side).and_then(|n| notes.get(&(f, side, n))) {
+                rows.extend(ids.iter().map(|&n| Row::Comment { f: f as u32, n }));
+            }
+        }
+    }
+
+    /// Gap `h`'s shown top lines, its separator while lines stay folded, then its bottom lines.
+    fn push_gap(&self, rows: &mut Vec<Row>, notes: &HashMap<(usize, Side, u32), Vec<u32>>, f: usize, h: usize) {
+        let n = self.gap_len(f, h);
+        let (top, bottom) = self.gap_shown(f, h);
+        let (fu, hu) = (f as u32, h as u32);
+        for k in 0..top {
+            self.push_line(rows, notes, Row::Gap { f: fu, h: hu, k });
+        }
+        if n > top + bottom {
+            rows.push(Row::Sep { f: fu, h: hu });
+        }
+        for k in n - bottom..n {
+            self.push_line(rows, notes, Row::Gap { f: fu, h: hu, k });
+        }
+    }
+
     /// The same key for an unchanged or removed line in both modes, so a switch keeps rows.
     fn key_of(&self, r: Row) -> String {
         match r {
@@ -642,6 +845,8 @@ impl DiffState {
                 }
             }
             Row::Pair { f, h, del, .. } => format!("pd{f}.o{}", self.files[f as usize].hunks[h as usize].lines[del as usize].old.unwrap_or(0)),
+            Row::Gap { f, h, k } => format!("pd{f}.c{}", self.gap_starts[f as usize][h as usize].0 + k),
+            Row::Comment { f, n } => format!("pd{f}.m{}", self.notes[n as usize].id),
         }
     }
 
@@ -670,7 +875,8 @@ mod tests {
             .map(|&r| match r {
                 Row::File(f) => format!("file{f}"),
                 Row::Note(_) => "note".into(),
-                Row::Sep { f, h } => format!("sep{}", s.hidden(f as usize, h as usize)),
+                Row::Sep { f, h } => format!("sep{}", s.remaining(f as usize, h as usize)),
+                Row::Comment { n, .. } => format!("comment {}", s.notes()[n as usize].id),
                 _ => {
                     let n = |side| s.row_line(r, side).map_or("-".into(), |v: u32| v.to_string());
                     format!("{}|{}", n(Side::Old), n(Side::New))
@@ -686,6 +892,33 @@ mod tests {
             shown(&s),
             ["file0", "sep9", "10|10", "11|-", "12|-", "-|11", "-|12", "-|13", "13|14", "sep26", "40|41", "41|-", "-|42", "file1", "note"]
         );
+    }
+
+    #[test]
+    fn expanded_gaps_show_the_loaded_file_around_their_separator() {
+        let mut s = state();
+        let lines: Rc<[String]> = (1..=50).map(|n| format!("l{n}")).collect();
+        s.set_extras(vec![Some(lines)], vec![HashMap::from([(0, (0, 2)), (2, (3, 0))])]);
+        let rows = shown(&s);
+        assert_eq!(rows[..5], ["file0", "sep7", "8|8", "9|9", "10|10"]);
+        assert_eq!(rows[14..], ["-|42", "42|43", "43|44", "44|45", "sep5", "file1", "note"]);
+        assert_eq!(s.gap_line(0, 2, 0), Some((42, 43, "l43")));
+        assert_eq!(s.row_at(0, Side::Old, 9), Some(3));
+        // Asking for more than the gap holds shows all of it, with no separator.
+        let loaded = s.contents[0].clone();
+        s.set_extras(vec![loaded], vec![HashMap::from([(1, (20, 20))])]);
+        assert_eq!(s.remaining(0, 1), 0);
+        assert!(!shown(&s).contains(&"sep26".to_owned()));
+    }
+
+    #[test]
+    fn comments_sit_under_the_line_they_end_on() {
+        let mut s = state();
+        let note = |id: &str, side, line| Note { file: 0, at: LineRef { side, line }, id: id.into(), draft: false };
+        assert!(s.set_notes(vec![note("a", Side::New, 12), note("b", Side::Old, 11)]));
+        assert!(!s.set_notes(vec![note("a", Side::New, 12), note("b", Side::Old, 11)]));
+        assert_eq!(shown(&s)[3..9], ["11|-", "comment b", "12|-", "-|11", "-|12", "comment a"]);
+        assert_ne!(s.keys[4], s.keys[8]);
     }
 
     #[test]

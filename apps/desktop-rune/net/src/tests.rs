@@ -204,6 +204,16 @@ fn shell_config_and_vcs() {
         json!({"_tag":"remoteUpdated","remote":null}),
     );
     assert!(s.vcs["/repo"]["remote"].is_null());
+    s.fold(
+        Route::Vcs("/repo".into()),
+        json!({"error":{"_tag":"Failure","cause":{"message":"git failed"}}}),
+    );
+    assert_eq!(s.vcs["/repo"]["error"]["cause"]["message"], "git failed");
+    s.fold(
+        Route::Vcs("/repo".into()),
+        json!({"_tag":"snapshot","local":{"isRepo":true},"remote":null}),
+    );
+    assert!(s.vcs["/repo"].get("error").is_none());
 }
 #[test]
 fn pairing_and_uuid() {

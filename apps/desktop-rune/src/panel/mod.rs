@@ -151,6 +151,11 @@ pub fn open_changes(app: &mut App) {
     diff::open_changes(app);
     activate(app, Surface::Diff);
 }
+/// A file_change item's "Open diff": its recorded patch in the diff surface.
+pub fn open_tool_diff(app: &mut App, thread: String, item: String) {
+    diff::open_tool_call(app, thread, item);
+    activate(app, Surface::Diff);
+}
 /// Shows `url` in the browser surface (a project script's `autoOpenPreview`).
 pub fn open_preview(app: &mut App, url: &str) {
     let tab = preview::open(app);
