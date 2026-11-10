@@ -7,8 +7,12 @@
 
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(unix)]
+pub mod cli;
 pub mod exposure;
 pub mod single;
+#[cfg(target_os = "linux")]
+mod url_handler;
 
 use std::cell::Cell;
 
@@ -49,6 +53,8 @@ pub struct Ui {
     /// The bundled server's URL and token, kept for Reload.
     pub server: Option<(String, String)>,
     pub exposure: exposure::State,
+    #[cfg(unix)]
+    pub cli: cli::State,
     zoom_level: f32,
     /// The window's size as the last view laid it out, for saving.
     window: Cell<Option<[f32; 2]>>,
@@ -146,6 +152,8 @@ pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
     if let Some([x, y]) = saved_position(&prefs()) {
         app.handle().set_position((x, y));
     }
+    #[cfg(target_os = "linux")]
+    url_handler::register();
     #[cfg(target_os = "macos")]
     let app = mac_menu(app)
         // As Electron on macOS: closing the window keeps the app; the Dock icon reopens it.
@@ -267,6 +275,8 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         ui.frame_offset = prefs.get("windowFrameOffset");
         ui.saved = prefs.get("windowSize").map(|size| Bounds { size, position: ui.restored });
         ui.exposure.load();
+        #[cfg(unix)]
+        ui.cli.load();
         changed = ui.zoom_level != 0.0;
     }
     if let Some(origin) = ui.origin.filter(|o| *o != [0, 0])

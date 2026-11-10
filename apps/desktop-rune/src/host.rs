@@ -48,7 +48,7 @@ fn remote() -> Option<(String, String)> {
 }
 
 /// `s5code-server` beside the executable (`Contents/MacOS` in the macOS bundle).
-fn bundled_binary() -> Option<PathBuf> {
+pub(crate) fn bundled_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("S5_SERVER_BIN") {
         return Some(PathBuf::from(path));
     }
