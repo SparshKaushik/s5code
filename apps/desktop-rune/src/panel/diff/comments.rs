@@ -32,11 +32,11 @@ pub struct ReviewLine<'a> {
 
 /// The hunks' lines in patch order, with every gap line once the file is loaded (pierre's
 /// expanded context, which a partial file lacks).
-pub fn review_lines(st: &DiffState, f: usize) -> Vec<ReviewLine<'_>> {
+pub fn review_lines<'a>(st: &'a DiffState, f: usize) -> Vec<ReviewLine<'a>> {
     let Some(file) = st.files().get(f) else { return vec![] };
     let loaded = st.loaded(f);
     let mut out = vec![];
-    let gap = |out: &mut Vec<ReviewLine<'_>>, h: usize| {
+    let gap = |out: &mut Vec<ReviewLine<'a>>, h: usize| {
         if loaded {
             for k in 0..st.gap_len(f, h) {
                 if let Some((old, new, text)) = st.gap_line(f, h, k) {
@@ -253,7 +253,7 @@ fn has_comments(app: &App) -> bool {
 }
 
 /// Note `n`'s row: the editor, or a sent comment.
-pub fn row(s: &App, l: &Look, n: usize) -> El {
+pub fn view(s: &App, l: &Look, n: usize) -> El {
     let ui = &s.ui.panel.diff;
     let t = &l.t;
     let Some(note) = ui.state.notes().get(n) else { return col() };
@@ -293,7 +293,7 @@ pub fn row(s: &App, l: &Look, n: usize) -> El {
             col()
                 .w_full()
                 .gap(6.0)
-                .p(8.0)
+                .padding(8.0)
                 .radius(8.0)
                 .border(1.0, t.c.border)
                 .fill(t.c.background)

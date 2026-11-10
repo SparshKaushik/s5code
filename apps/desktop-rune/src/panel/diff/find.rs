@@ -299,7 +299,7 @@ pub fn bar(s: &App, t: &T) -> Option<El> {
         row()
             .key("diff-find")
             .gap(2.0)
-            .p(4.0)
+            .padding(4.0)
             .items_center()
             .radius(8.0)
             .fill(t.c.popover)

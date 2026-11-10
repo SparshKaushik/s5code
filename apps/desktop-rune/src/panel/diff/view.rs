@@ -240,7 +240,7 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
         Row::Note(f) => memo(key, (l.version, st.rev, vw), || note(st, l, f as usize)),
         Row::Sep { f, h } => memo(key, (l.version, st.rev, vw), || separator(st, l, f as usize, h as usize)),
         Row::Comment { n, .. } => {
-            let mut inner = super::comments::row(s, l, n as usize).key("inner");
+            let mut inner = super::comments::view(s, l, n as usize).key("inner");
             inner = match view_w(st) {
                 Some(w) => inner.w(w).sticky_left(0.0),
                 None => inner.w_full(),
