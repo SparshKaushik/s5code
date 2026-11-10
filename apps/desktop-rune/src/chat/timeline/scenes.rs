@@ -177,6 +177,10 @@ fn secret_request(app: &mut App) {
         }
     }
 }
+fn long_message_open(app: &mut App) {
+    long_message(app);
+    app.ui.chat.timeline.expanded.insert("user-full:scene-long".into());
+}
 fn light(app: &mut App) {
     showcase(app);
     app.appearance = Appearance::Light;
@@ -199,6 +203,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-light", light),
     ("timeline-chip-details", chip_details),
     ("timeline-long-message", long_message),
+    ("timeline-long-message-open", long_message_open),
     ("timeline-approval-warning", pending_warning),
     ("timeline-secret-request", secret_request),
 ];

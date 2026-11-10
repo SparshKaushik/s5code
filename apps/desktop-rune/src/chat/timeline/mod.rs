@@ -653,19 +653,20 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     let mut bubble = col().key(chip::bubble_key(s(item, "id"))).padding(12.0).radius(16.0).fill(t.c.message_surface).child(body);
                     if foldable {
                         let label = if folded { "Show full message" } else { "Show less" };
+                        // A full-width row here would let the text measure at its unwrapped width.
                         bubble = bubble.child(
-                            row().w_full().justify_end().mt(6.0).child(
-                                crate::kit::button::Button::new(label)
-                                    .variant("ghost-muted")
-                                    .size("xs")
-                                    .on_press(move |app: &mut App| {
-                                        if !app.ui.chat.timeline.expanded.remove(&fold_key) {
-                                            app.ui.chat.timeline.expanded.insert(fold_key.clone());
-                                        }
-                                    })
-                                    .build(t)
-                                    .expanded(!folded),
-                            ),
+                            crate::kit::button::Button::new(label)
+                                .variant("ghost-muted")
+                                .size("xs")
+                                .on_press(move |app: &mut App| {
+                                    if !app.ui.chat.timeline.expanded.remove(&fold_key) {
+                                        app.ui.chat.timeline.expanded.insert(fold_key.clone());
+                                    }
+                                })
+                                .build(t)
+                                .expanded(!folded)
+                                .self_end()
+                                .mt(6.0),
                         );
                     }
                     content = content.child(bubble);

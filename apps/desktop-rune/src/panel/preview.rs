@@ -194,6 +194,9 @@ fn restart(app: &mut App) {
     ui.browser = browser::Browser::default();
     ui.browser.start(waker);
     ui.restarts += 1;
+    // The new worker hasn't been told which tab shows or is tracked; poll resends both.
+    ui.shown = None;
+    ui.tracked = None;
     let tabs: Vec<TabId> = ui.tabs.keys().copied().collect();
     for tab in tabs {
         let pixels = Pixels::new();
