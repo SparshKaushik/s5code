@@ -23,6 +23,8 @@ import * as HttpApi from "effect/http-api/HttpApi";
 import * as HttpApiBuilder from "effect/http-api/HttpApiBuilder";
 import * as Schema from "effect/Schema";
 
+import { DEFAULT_HOSTED_APP_URL } from "@t3tools/shared/connectAuth";
+
 import * as CloudLink from "../cloud/CloudLink.ts";
 import * as ServerConfig from "../config.ts";
 import { makeDpopKey } from "./dpop.testkit.ts";
@@ -653,7 +655,9 @@ it.live(
 
       const onTunnel = yield* handoff("box.example.ts.net");
       const hosted = new URL(onTunnel.location);
-      expect(`${hosted.origin}${hosted.pathname}`).toBe("https://app.t3.codes/approve-agent");
+      expect(hosted.href.split("?")[0]).toBe(
+        new URL("/approve-agent", DEFAULT_HOSTED_APP_URL).href,
+      );
       expect(hosted.searchParams.get("environment")).toEqual(expect.any(String));
       hosted.searchParams.delete("environment");
       expect(hosted.searchParams.toString()).toBe(onTunnel.query);
