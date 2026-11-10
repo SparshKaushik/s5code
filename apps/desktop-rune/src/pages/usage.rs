@@ -40,8 +40,8 @@ pub struct Ui {
     pub tags: super::usage_tags::Ui,
     /// The caption's "Unpriced usage details" popover.
     pub unpriced_tip: bool,
-    /// `server.refreshUsageRates` (true) or `server.refreshProviders` (false) in flight.
-    refreshing: Option<(u64, bool)>,
+    /// `server.refreshUsageRates` in flight.
+    refreshing: Option<u64>,
     /// Rates refreshed; the rescanned summary is still on its way.
     reloading: bool,
     /// The request the shown summary answers, kept on screen while another window loads.
@@ -49,6 +49,10 @@ pub struct Ui {
     /// Price, mapping and filter settings the summary was scanned under (usageScanSettingsAtom).
     scan: Option<Value>,
     pub preferences_read: bool,
+    /// The environment filter's checked environments; `None` is "All environments".
+    pub environments: Option<Vec<String>>,
+    /// `server.updateSettings` opting into Cursor's keychain login, in flight.
+    pub cursor_enabling: Option<u64>,
 }
 
 impl Default for Ui {
@@ -80,6 +84,8 @@ impl Default for Ui {
             answered: None,
             scan: None,
             preferences_read: false,
+            environments: None,
+            cursor_enabling: None,
         }
     }
 }
@@ -325,20 +331,25 @@ pub fn poll(s: &mut App) -> bool {
         apply_preferences(ui(s), &saved);
         changed = true;
     }
-    if let Some((id, rates)) = s.ui.pages.usage.refreshing
+    if let Some(id) = s.ui.pages.usage.refreshing
         && let Some(_) = s.src.net().and_then(|n| n.take_reply(id))
     {
         let u = ui(s);
         u.refreshing = None;
         // Rates landed (a failed refresh still rescans, like refreshUsage): fetch again.
-        if rates {
-            u.requested = None;
-            u.reloading = true;
-        }
+        u.requested = None;
+        u.reloading = true;
         changed = true;
     }
-    if s.ui.pages.usage.metric == "limits" {
-        return changed;
+    if let Some(id) = s.ui.pages.usage.cursor_enabling
+        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
+    {
+        ui(s).cursor_enabling = None;
+        // The opt-in is a scan setting, so the summary refetches when it lands; limits refresh here.
+        if reply.is_ok() {
+            super::usage_limits::refresh(s, false);
+        }
+        changed = true;
     }
     if let Some(id) = s.ui.pages.usage.pending
         && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
@@ -415,25 +426,121 @@ fn save_preferences(s: &mut App) {
     }
 }
 
-/// The header's Refresh: limits re-read provider status; usage refreshes model rates and then
-/// rescans the window from now, keeping the current figures up meanwhile.
+/// The header's Refresh: limits re-read provider status on every selected environment; usage
+/// refreshes model rates and then rescans the window from now, keeping the current figures up.
 fn refresh(s: &mut App) {
     if refreshing(&s.ui.pages.usage) {
         return;
     }
-    let rates = s.ui.pages.usage.metric != "limits";
-    let (method, payload) = if rates { ("server.refreshUsageRates", json!({})) } else { ("server.refreshProviders", json!({})) };
+    if s.ui.pages.usage.metric == "limits" {
+        super::usage_limits::refresh(s, false);
+        return;
+    }
     match s.src.net() {
         Some(net) => {
-            let id = net.request(method, payload);
-            ui(s).refreshing = Some((id, rates));
+            let id = net.request("server.refreshUsageRates", json!({}));
+            ui(s).refreshing = Some(id);
         }
         None => ui(s).requested = None,
     }
 }
 
 fn refreshing(u: &Ui) -> bool {
-    u.refreshing.is_some() || u.reloading
+    u.refreshing.is_some() || u.reloading || super::usage_limits::busy(&u.limits)
+}
+
+/// The environments the filter leaves in, in the app's order (`selectedEnvironments`).
+pub(super) fn selected_environments(s: &App) -> Vec<String> {
+    let chosen = &s.ui.pages.usage.environments;
+    crate::env::keys(s).into_iter().filter(|k| chosen.as_ref().is_none_or(|c| c.contains(k))).collect()
+}
+
+/// UsageEnvironmentFilter's checkbox: checking every environment again reads as "All".
+fn toggle_environment(all: &[String], selected: &[String], key: &str, on: bool) -> Option<Vec<String>> {
+    let mut next: Vec<String> = selected.iter().filter(|k| *k != key).cloned().collect();
+    if on {
+        next.push(key.to_string());
+    }
+    (next.len() != all.len()).then_some(next)
+}
+
+const CHATGPT_USAGE_URL: &str = "https://chatgpt.com/#settings/Usage";
+
+/// usesChatGptSharing: a ChatGPT login that shares its plan with other apps.
+fn shares_chatgpt(provider: &Value) -> bool {
+    provider["auth"]["status"] == "authenticated" && provider["auth"]["subscriptionSharing"] == true
+}
+
+pub(super) const CURSOR_KEYCHAIN_COPY: &str = "Requires access to your Cursor login in macOS Keychain.";
+
+/// needsCursorKeychainAccess through cursorKeychainAccessEnvironments: the scan asks for the
+/// keychain and Cursor is ready, unless a scan already reads a Cursor account.
+fn needs_cursor_keychain(summary: &Value, providers: &Value) -> bool {
+    let sources = summary["sources"].as_array().map(Vec::as_slice).unwrap_or(&[]);
+    let reads_account = sources.iter().any(|src| src["fingerprint"]["provider"] == "cursor" && src["fingerprint"]["hostId"] == "cursor.com");
+    !reads_account
+        && sources.iter().any(|src| src["action"] == "enableCursorKeychain")
+        && providers.as_array().into_iter().flatten().any(|p| p["driver"] == "cursor" && p["status"] == "ready")
+}
+
+/// The label of the environment on screen when it should offer the Cursor keychain opt-in. Only
+/// that environment's usage is scanned, so it is the only one that can ask.
+pub(super) fn cursor_access(s: &App) -> Option<String> {
+    let u = &s.ui.pages.usage;
+    let active = &s.ui.env.active;
+    let providers = s.state().config.as_ref().map(|c| &c["providers"])?;
+    let selected = u.metric != "limits" || selected_environments(s).contains(active);
+    (!u.hidden.contains(&"cursor") && selected && needs_cursor_keychain(u.summary.as_ref()?, providers)).then(|| crate::env::label(s, active))
+}
+
+/// CursorEnableButton: `server.updateSettings` turns `cursorKeychainUsageEnabled` on.
+pub(super) fn enable_cursor(s: &mut App) {
+    if s.ui.pages.usage.cursor_enabling.is_some() {
+        return;
+    }
+    if let Some(net) = s.src.net() {
+        let id = net.request("server.updateSettings", json!({"patch": {"cursorKeychainUsageEnabled": true}}));
+        ui(s).cursor_enabling = Some(id);
+    }
+}
+
+/// The `usage-cursor-keychain` scenes: Cursor is ready and its scan asks for the keychain.
+pub(super) fn cursor_scene(s: &mut App) {
+    if let crate::data::Source::Fixture(state) = &mut s.src
+        && let Some(providers) = state.config.as_mut().and_then(|c| c["providers"].as_array_mut())
+    {
+        for p in providers {
+            if p["driver"] == "cursor" {
+                p["status"] = json!("ready");
+            }
+        }
+    }
+    if let Some(sources) = s.ui.pages.usage.summary.as_mut().and_then(|v| v["sources"].as_array_mut()) {
+        sources.push(json!({
+            "fingerprint": {"provider": "cursor", "hostId": "devbox"}, "status": "missing", "scannedFiles": 0, "skippedFiles": 0,
+            "malformedRecords": 0, "distinctSessions": 0, "message": null, "action": "enableCursorKeychain",
+        }));
+    }
+}
+
+/// CursorEnableRow: the overview's Cursor line, with an inline "Enable" in place of figures.
+fn cursor_enable_row(s: &App, t: &T, label: &str) -> El {
+    let mut enable = row()
+        .role("button")
+        .label(format!("Enable Cursor usage from {label}"))
+        .help(CURSOR_KEYCHAIN_COPY)
+        .child(text("Enable").font(theme::SM_MEDIUM).color(t.c.foreground));
+    enable = if s.ui.pages.usage.cursor_enabling.is_some() { enable.opacity(0.64) } else { enable.cursor(rune::Cursor::Pointer).focusable(true).on_press(enable_cursor) };
+    row()
+        .w_full()
+        .gap(8.0)
+        .min_h(20.0)
+        .center_y()
+        .child(el().size(8.0, 8.0).radius(radius::FULL).fill(color(t, "cursor")))
+        .child(provider_icon(t, "cursor", 16.0))
+        .child(text("Cursor").font(theme::TEXT_SM).color(t.c.foreground))
+        .child(spacer())
+        .child(enable)
 }
 
 /// Figures from another window, or mid-refresh, read as stale (`figureClass`).
@@ -465,6 +572,7 @@ fn unshifted(c: char) -> Option<char> {
 
 pub fn close(s: &mut App) {
     ui(s).menu = None;
+    super::usage_limits::closed(&mut ui(s).limits);
     let route = s.ui.settings.return_route.take().unwrap_or(Route::Home { project_id: None });
     s.navigate(route);
 }
@@ -677,6 +785,8 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let connected = s.state().config.is_some();
     page = if !connected {
         page.child(muted_line(t, if u.metric == "limits" { "Connect an environment to see limits." } else { "Connect an environment to see usage." }))
+    } else if u.metric == "limits" && selected_environments(s).is_empty() {
+        page.child(muted_line(t, "Select an environment to see limits."))
     } else if u.metric == "limits" {
         page.child(super::usage_limits::view(s, cx, t, &mut overlays))
     } else if let Some(error) = u.error.as_ref().filter(|_| u.summary.is_none()) {
@@ -730,12 +840,12 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.usage;
     let k = kit::theme(t);
     let sep = || text("/").font(theme::SM_MEDIUM).color(t.c.icon_muted);
-    let crumb = |label: String, current: bool| {
+    let crumb = |label: String| {
         row()
             .gap(4.0)
             .center_y()
             .cursor(rune::Cursor::Pointer)
-            .child(text(label).font(theme::SM_MEDIUM).color(if current { t.c.foreground } else { t.c.muted_foreground }))
+            .child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground))
             .child(icon(&i::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground).opacity(0.6))
     };
     let visible: Vec<&str> = PROVIDERS.iter().map(|p| p.0).filter(|k| !u.hidden.contains(k)).collect();
@@ -752,7 +862,7 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         }
     };
     let mut providers = Menu::new("usage-providers")
-        .trigger(crumb(provider_label, true).on_press(toggle("providers")))
+        .trigger(crumb(provider_label).on_press(toggle("providers")))
         .placement(Placement::BottomStart)
         .min_width(200.0)
         .open(u.menu == Some("providers"))
@@ -777,31 +887,64 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
             save_preferences(s);
         }));
     }
-    let target = super::usage_prices::target(s);
+    // Limits read every environment; cost and tokens scan only the one on screen.
+    let limits_mode = u.metric == "limits";
+    let all = crate::env::keys(s);
+    let selected = selected_environments(s);
+    let env_label = match (limits_mode, &u.environments, selected.as_slice()) {
+        (true, Some(_), [one]) => crate::env::label(s, one),
+        (true, Some(_), many) => format!("{} environments", many.len()),
+        _ => "All environments".to_string(),
+    };
+    let issue = !limits_mode && u.error.is_some();
+    let env_trigger = row()
+        .gap(4.0)
+        .center_y()
+        .cursor(rune::Cursor::Pointer)
+        .child(text(env_label).font(theme::SM_MEDIUM).color(t.c.muted_foreground))
+        .child(if issue {
+            icon(&i::CIRCLE_ALERT, 14.0).color(t.c.warning_foreground).role("img").label("Some environments could not report usage")
+        } else {
+            icon(&i::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground).opacity(0.6)
+        });
     let mut envs = Menu::new("usage-environments")
-        .trigger(crumb("All environments".into(), false).on_press(toggle("environments")))
+        .trigger(env_trigger.on_press(toggle("environments")))
         .placement(Placement::BottomStart)
         .min_width(220.0)
         .open(u.menu == Some("environments"))
         .on_close(|s: &mut App| ui(s).menu = None)
-        .item(MenuItem::new("All environments").checked(true).on_select(|s: &mut App| ui(s).menu = Some("environments")))
+        .item(MenuItem::new("All environments").checked(!limits_mode || u.environments.is_none()).on_select(move |s: &mut App| {
+            let u = ui(s);
+            if limits_mode {
+                u.environments = if u.environments.is_none() { Some(Vec::new()) } else { None };
+            }
+            u.menu = Some("environments");
+        }))
         .separator();
-    let status = if u.metric == "limits" {
-        None
-    } else if u.error.is_some() {
-        Some("Unavailable")
-    } else if u.pending.is_some() && u.summary.is_none() {
-        Some("Scanning…")
-    } else if u.pending.is_some() || refreshing(u) {
-        Some("Refreshing…")
+    if limits_mode {
+        for key in &all {
+            let checked = selected.contains(key);
+            let (all, selected, key) = (all.clone(), selected.clone(), key.clone());
+            envs = envs.item(MenuItem::new(crate::env::label(s, &key)).checked(checked).on_select(move |s: &mut App| {
+                let u = ui(s);
+                u.environments = toggle_environment(&all, &selected, &key, !checked);
+                u.menu = Some("environments");
+            }));
+        }
     } else {
-        Some("Ready")
-    };
-    let mut env_item = MenuItem::new(target.label).checked(true).on_select(|s: &mut App| ui(s).menu = Some("environments"));
-    if let Some(status) = status {
-        env_item = env_item.shortcut(status);
+        let status = if u.error.is_some() {
+            "Unavailable"
+        } else if u.pending.is_some() && u.summary.is_none() {
+            "Scanning…"
+        } else if u.pending.is_some() || refreshing(u) {
+            "Refreshing…"
+        } else {
+            "Ready"
+        };
+        let label = super::usage_prices::target(s).label;
+        envs = envs.item(MenuItem::new(label).checked(true).shortcut(status).on_select(|s: &mut App| ui(s).menu = Some("environments")));
     }
-    envs = envs.item(env_item).separator().item(MenuItem::new("Model prices").icon(&i::SLIDERS_HORIZONTAL).on_select(|s: &mut App| {
+    envs = envs.separator().item(MenuItem::new("Model prices").icon(&i::SLIDERS_HORIZONTAL).on_select(|s: &mut App| {
         ui(s).menu = None;
         super::usage_prices::open(s, None);
     }));
@@ -920,8 +1063,28 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
                 .child(text(fmt(if tokens_view { m.tokens } else { m.cost })).font(tnum(theme::weight(TEXT_4XL, theme::SEMIBOLD))).color(t.c.foreground).opacity(dim))
                 .child(caption.opacity(dim)),
         );
+    if !u.hidden.contains(&"codex") && s.state().config.as_ref().is_some_and(|c| c["providers"].as_array().into_iter().flatten().any(shares_chatgpt)) {
+        left = left.child(
+            row()
+                .w_full()
+                .gap(8.0)
+                .center_y()
+                .child(text("ChatGPT shared usage").font(theme::TEXT_XS).color(t.c.muted_foreground))
+                .child(spacer())
+                .child(kit::Button::new("Manage usage").variant("ghost-muted").size("xs").icon(&i::EXTERNAL_LINK).build(t).on_press_tx(|_: &mut App, tx: &mut Tx| {
+                    let _ = tx.open_url(CHATGPT_USAGE_URL);
+                })),
+        );
+    }
+    let mut cursor = cursor_access(s).map(|label| cursor_enable_row(s, t, &label));
+    let cursor_at = ["codex", "claude"].iter().map(|k| m.providers.iter().position(|p| p.0 == *k).map_or(0, |at| at + 1)).max().unwrap_or(0);
     let mut rows = col().gap(16.0);
-    for &(kind, totals, sessions) in &m.providers {
+    for (n, &(kind, totals, sessions)) in m.providers.iter().enumerate() {
+        if n == cursor_at
+            && let Some(line) = cursor.take()
+        {
+            rows = rows.child(line);
+        }
         let (label, driver) = presentation(kind);
         let share = if tokens_view { totals.tokens / m.tokens.max(1.0) } else { totals.cost / m.cost.max(f64::MIN_POSITIVE) };
         let sub = if tokens_view { format!("{} of tokens · {}", percent(share), usd(totals.cost)) } else { format!("{} of cost · {} tokens", percent(share), tokens(totals.tokens)) };
@@ -944,7 +1107,7 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
                 .child(text(sub).font(theme::TEXT_XS).color(t.c.muted_foreground).opacity(dim)),
         );
     }
-    left = left.child(rows);
+    left = left.child(rows.children(cursor));
     let hourly = m.hourly;
     let chart_title = match (hourly, tokens_view) {
         (false, false) => "Daily cost",
@@ -1738,5 +1901,24 @@ mod tests {
         assert_eq!(unshifted('!'), Some('1'));
         assert_eq!(unshifted('$'), Some('4'));
         assert_eq!(unshifted('1'), None);
+    }
+
+    #[test]
+    fn the_environment_filter_reads_all_once_every_environment_is_checked() {
+        let all = ["".to_string(), "studio".into(), "lab".into()];
+        assert_eq!(toggle_environment(&all, &all, "studio", false), Some(vec!["".to_string(), "lab".into()]));
+        assert_eq!(toggle_environment(&all, &["".to_string(), "lab".into()], "studio", true), None);
+        assert_eq!(toggle_environment(&all, &[], "lab", true), Some(vec!["lab".to_string()]));
+    }
+
+    #[test]
+    fn cursor_asks_for_the_keychain_only_while_no_scan_reads_its_account() {
+        let asking = json!({"sources": [{"fingerprint": {"provider": "cursor", "hostId": "devbox"}, "status": "missing", "action": "enableCursorKeychain"}]});
+        let ready = json!([{"driver": "cursor", "status": "ready"}]);
+        assert!(needs_cursor_keychain(&asking, &ready));
+        assert!(!needs_cursor_keychain(&asking, &json!([{"driver": "cursor", "status": "disabled"}])));
+        let mut reading = asking.clone();
+        reading["sources"].as_array_mut().unwrap().push(json!({"fingerprint": {"provider": "cursor", "hostId": "cursor.com"}, "status": "ok"}));
+        assert!(!needs_cursor_keychain(&reading, &ready));
     }
 }

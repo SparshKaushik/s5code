@@ -4,7 +4,7 @@
 
 mod brand;
 mod chrome;
-mod favicon;
+pub(crate) mod favicon;
 pub mod logic;
 mod menu;
 mod row;
