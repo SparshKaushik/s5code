@@ -349,8 +349,9 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
     let mut li = el().key(format!("sb-folder-li-{}", g.key)).w_full().child(button);
     if hovered {
         let project = g.representative.clone();
-        let tip = format!("New thread in {}", g.label);
-        let new = super::row::hover_action(t, format!("sb-folder-new-{}", g.key), &i::SQUARE_PEN, 14.0, Some(tip.as_str()), 6.0)
+        let new = super::row::hover_action(t, format!("sb-folder-new-{}", g.key), &i::SQUARE_PEN, 14.0, None, 6.0)
+            .role("button")
+            .label(format!("New thread in {}", g.label))
             .on_press(move |s: &mut App| new_thread_in(s, &project));
         li = li.child(new.pin(None, Some(4.0), Some(24.0), None));
     }

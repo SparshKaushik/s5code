@@ -170,15 +170,16 @@ fn scope_pin(t: &T, g: &super::folders::Group) -> El {
     let color = t.sb.muted_foreground;
     let glyph = icon(&i::PIN, 14.0);
     let glyph = if pinned { glyph.color(color) } else { glyph.color(color.alpha(0.0)).group_color(color) };
+    // The hover fill is a sibling: a `hover` ancestor would take over the glyph's hover group
+    // from the menu row, and an unpinned pin would only show under the pointer.
     el().key(format!("sb-scope-pin-{}", g.key))
         .size(24.0, 24.0)
         .ml(4.0)
-        .radius(radius::SM)
         .center()
         .role("button")
         .label(if pinned { format!("Unpin {}", g.label) } else { format!("Pin {}", g.label) })
-        .hover(t.sb.sidebar_row_hover)
         .cursor(Cursor::Pointer)
+        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(radius::SM).hover(t.sb.sidebar_row_hover))
         .child(glyph)
         .on_press(move |s: &mut App| {
             for m in &members {

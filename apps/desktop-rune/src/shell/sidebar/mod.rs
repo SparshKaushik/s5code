@@ -199,7 +199,37 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene_home(s);
         s.client_settings.values.insert("boringSidebarEnabled".into(), json!(true));
     }),
+    ("sidebar-grouped", |s| {
+        scene_home(s);
+        scene_shared_repository(s);
+        s.client_settings.values.insert("boringSidebarEnabled".into(), json!(true));
+    }),
+    ("sidebar-grouped-scope", |s| {
+        scene_home(s);
+        scene_shared_repository(s);
+        toggle_scope(s);
+    }),
 ];
+
+/// The fixture's `server` and `s5code` projects as two checkouts of one repository, the first
+/// pinned, with project organization on so the scope menu offers pins.
+fn scene_shared_repository(s: &mut App) {
+    let crate::data::Source::Fixture(state) = &mut s.src else { return };
+    for p in &mut state.projects {
+        let root = match p["title"].as_str() {
+            Some("server") => "/home/ubuntu/s5code-ref",
+            Some("s5code") => "/home/ubuntu/projects/s5code",
+            _ => continue,
+        };
+        p["repositoryIdentity"] = json!({"canonicalKey": "github.com/s5labs/s5code", "displayName": "s5labs/s5code", "name": "s5code", "provider": "github", "rootPath": root});
+        if p["title"] == "server" {
+            p["pinnedAt"] = json!("2026-01-01T00:00:00.000Z");
+        }
+    }
+    if let Some(config) = state.config.as_mut() {
+        config["environment"]["capabilities"]["projectOrganization"] = json!(true);
+    }
+}
 
 fn thread_titled(s: &App, title: &str) -> Option<String> {
     s.state().threads.iter().find(|t| t["title"].as_str().is_some_and(|x| x.starts_with(title))).map(|t| crate::data::s(t, "id").to_string())
