@@ -27,7 +27,7 @@ mod wizard;
 pub(crate) use links as prompt_link;
 
 /// The Linux launcher entry (`<APP_ID>.desktop`) the unread badge counts on.
-pub const APP_ID: &str = "in.newsa.s5code.rune-prototype";
+pub use desktop::APP_ID;
 
 use rune::{App as RuneApp, AppSpec, Cx, El, KeyEvent, Tx, Waker};
 
