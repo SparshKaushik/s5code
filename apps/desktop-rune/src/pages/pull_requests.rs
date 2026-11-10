@@ -752,6 +752,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     }
     if matches!(e.key, rune::Key::Escape) {
         let u = ui(s);
+        if super::pr_row::cancel_sweep(&mut u.row) {
+            return true;
+        }
         if u.context.take().is_some() || u.menu.take().is_some() {
             u.submenu = None;
             return true;
@@ -1538,6 +1541,16 @@ fn state_glyph(t: &T, e: &Value) -> (&'static rune::Icon, Color) {
     }
 }
 
+/// PULL_REQUEST_STATE_PRESENTATION's label.
+fn state_label(e: &Value) -> &'static str {
+    match field(e, "state") {
+        "open" if e["isDraft"].as_bool().unwrap_or(false) => "Draft",
+        "merged" => "Merged",
+        "closed" => "Closed",
+        _ => "Open",
+    }
+}
+
 fn success(t: &T) -> Color {
     if t.dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }
 }
@@ -1576,10 +1589,21 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
     let url = field(e, "url").to_string();
     let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
     let (glyph, ink) = state_glyph(t, e);
-    let mut mark = el().size(16.0, 16.0).child(icon(glyph, 16.0).color(ink));
+    let mut mark = el().size(16.0, 16.0).child(icon(glyph, 16.0).color(ink)).label(state_label(e)).help(state_label(e));
     if conflicting(e) && open(e) && !e["isDraft"].as_bool().unwrap_or(false) {
+        let tip = match field(e, "baseBranch") {
+            "" => "Has conflicts".to_string(),
+            base => format!("Conflicts with {base}"),
+        };
         mark = mark.child(
-            el().absolute(8.0, 8.0).size(12.0, 12.0).center().radius(radius::FULL).fill(t.c.background).child(icon(&i::TRIANGLE_ALERT, 12.0).color(t.c.destructive)),
+            el().absolute(8.0, 8.0)
+                .size(12.0, 12.0)
+                .center()
+                .radius(radius::FULL)
+                .fill(t.c.background)
+                .label(tip.clone())
+                .help(tip)
+                .child(icon(&i::TRIANGLE_ALERT, 12.0).color(t.c.destructive)),
         );
     }
     let mono = theme::mono(theme::TEXT_XS).features("'tnum' 1");
@@ -1597,11 +1621,14 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         })
         .child(text(field(e, "title").to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink().min_w(0.0));
     let mut signals = row().gap(4.0).center_y().shrink().children(super::pr_row::checks(s, t, e, overlays));
-    match field(e, "reviewDecision") {
-        "approved" => signals = signals.child(icon(&i::USER_CHECK, 14.0).color(success(t))),
-        "changes-requested" => signals = signals.child(icon(&i::USER_ROUND_X, 14.0).color(if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) })),
-        "review-required" => signals = signals.child(icon(&i::USER_ROUND, 14.0).color(t.c.muted_foreground.alpha_mul(0.6))),
-        _ => {}
+    let review = match field(e, "reviewDecision") {
+        "approved" => Some((&i::USER_CHECK, success(t), "Approved")),
+        "changes-requested" => Some((&i::USER_ROUND_X, if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) }, "Changes requested")),
+        "review-required" => Some((&i::USER_ROUND, t.c.muted_foreground.alpha_mul(0.6), "Awaiting review")),
+        _ => None,
+    };
+    if let Some((glyph, ink, tip)) = review {
+        signals = signals.child(el().label(tip).help(tip).child(icon(glyph, 14.0).color(ink)));
     }
     line1 = line1.child(signals).child(spacer()).children(super::pr_row::stack(s, t, e, overlays));
     let (add, del) = (e["additions"].as_i64().unwrap_or(0), e["deletions"].as_i64().unwrap_or(0));
@@ -1617,6 +1644,10 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         line1 = line1.child(super::pr_row::breakdown(s, t, e, counts, overlays));
     }
     let login = e["author"]["login"].as_str().unwrap_or("ghost").to_string();
+    let author_tip = match e["author"]["name"].as_str() {
+        Some(name) if !name.is_empty() && name != login => format!("{name} (@{login})"),
+        _ => login.clone(),
+    };
     let meta = theme::TEXT_2XS;
     let matched = matched_elsewhere(e, &parse_query(&s.ui.pages.pull_requests.query.text).0);
     let mut line2 = row()
@@ -1632,6 +1663,7 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
                 .center_y()
                 .shrink()
                 .max_w(160.0)
+                .help(author_tip)
                 .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t))
                 .child(text(login).font(meta).color(t.c.muted_foreground).truncate().shrink()),
         )

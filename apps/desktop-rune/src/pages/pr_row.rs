@@ -349,6 +349,11 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
 
 // ---- close sweep ------------------------------------------------------------------------
 
+/// Escape ends a sweep in progress without closing anything.
+pub(super) fn cancel_sweep(u: &mut Ui) -> bool {
+    u.sweep.take().is_some()
+}
+
 /// The rows of the group `key` is shown in, top to bottom.
 fn group_of(s: &App, key: &str) -> Vec<Value> {
     let list = &s.ui.pages.pull_requests;

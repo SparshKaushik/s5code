@@ -94,7 +94,7 @@ pub fn start(s: &mut App) {
         let src = connect(s, env);
         s.ui.env.parked.push((env.id.clone(), src));
     }
-    s.ui.env.saved = saved;
+    s.ui.env.saved.extend(saved);
 }
 
 /// This machine's server, wherever it is: `App::src` while active, else parked.

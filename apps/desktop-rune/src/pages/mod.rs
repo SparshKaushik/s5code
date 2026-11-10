@@ -218,7 +218,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("pull-requests-close-sweep", |s| {
         open_prs(s, |_| {});
-        pr_row::scene(s, 2481, "sweep");
+        pr_row::scene(s, 2468, "sweep");
     }),
     ("pull-requests-row-actions-read-only", |s| {
         open_prs(s, |_| {});

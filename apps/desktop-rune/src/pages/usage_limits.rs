@@ -1425,6 +1425,7 @@ pub(super) fn pooled_scene(s: &mut App) {
 pub(super) fn environments_scene(s: &mut App) {
     let Some(mut config) = s.state().config.clone() else { return };
     config["environment"]["label"] = json!("Studio Mac");
+    config["environment"]["environmentId"] = json!("studio-env");
     for p in config["providers"].as_array_mut().into_iter().flatten() {
         let driver = field(p, "driver").to_string();
         match driver.as_str() {
