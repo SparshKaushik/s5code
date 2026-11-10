@@ -12,13 +12,14 @@ members = ["net"]
 [dependencies]
 rune = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", features = ["native-file-dialog"] }
 rune-kit = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda", features = ["markdown"] }
+rune-mac = { git = "https://github.com/anomalyco/rune", rev = "47cb857795c3b1dd5097c15d6161719ae738ddda" }
 s5-net = { path = "net" }
 serde_json = "1"
 unicode-normalization = "0.1"
 ureq = { version = "2", default-features = false, features = ["json"] }
 tungstenite = { version = "0.24", default-features = false, features = ["handshake"] }
 base64 = "0.22"
-image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "ico", "gif", "webp", "bmp"] }
 alacritty_terminal = { version = "0.26", default-features = false }
 # Already in the tree through alacritty_terminal; the diff's find.
 regex-automata = "0.4"

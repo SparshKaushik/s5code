@@ -313,7 +313,8 @@ pub fn request(s: &mut App, method: &str, payload: Value) {
         providers::apply_extras(&mut current, &payload);
         s.ui.settings.optimistic_settings = Some(current);
     }
-    if let Some(net) = s.src.net() {
+    let project = payload["projectId"].as_str().unwrap_or_default().to_owned();
+    if let Some(net) = crate::env::net_for(s, &project) {
         let id = net.request(method, payload);
         s.ui.settings.pending.insert(id, method.into());
     }

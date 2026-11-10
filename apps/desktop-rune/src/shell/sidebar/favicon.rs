@@ -26,7 +26,8 @@ enum Fetched {
 }
 
 enum Entry {
-    Asking(u64),
+    /// The request, and the base URL of the environment that owns the project.
+    Asking(u64, String),
     Loading(Arc<Mutex<Option<Option<Fetched>>>>),
     Ready(Image),
     Missing,
@@ -77,27 +78,28 @@ pub fn poll(s: &mut App) -> bool {
         .map(|p| (crate::data::s(p, "id").to_owned(), crate::data::s(p, "workspaceRoot").to_owned(), p["faviconPath"].as_str().map(str::to_owned)))
         .filter(|(id, cwd, _)| !id.is_empty() && !cwd.is_empty())
         .collect();
-    let Some(net) = s.src.net() else { return false };
-    let base = net.base_url().trim_end_matches('/').to_owned();
-    let icons = &mut s.ui.shell.sidebar.favicons;
-    let mut changed = false;
-    let mut in_flight = icons.entries.values().filter(|(_, e)| matches!(e, Entry::Asking(_) | Entry::Loading(_))).count();
+    let mut in_flight = s.ui.shell.sidebar.favicons.entries.values().filter(|(_, e)| matches!(e, Entry::Asking(..) | Entry::Loading(_))).count();
     for (id, cwd, path) in projects {
         let source = format!("{cwd}\u{0}{}", path.as_deref().unwrap_or(""));
-        if icons.entries.get(&id).is_some_and(|(asked, _)| *asked == source) || in_flight >= MAX_IN_FLIGHT {
+        if s.ui.shell.sidebar.favicons.entries.get(&id).is_some_and(|(asked, _)| *asked == source) || in_flight >= MAX_IN_FLIGHT {
             continue;
         }
         let mut resource = json!({"_tag": "project-favicon", "cwd": cwd});
         if let Some(path) = path {
             resource["path"] = json!(path);
         }
+        let Some(net) = crate::env::net_for(s, &id) else { continue };
+        let base = net.base_url().trim_end_matches('/').to_owned();
         let request = net.request("assets.createUrl", json!({ "resource": resource }));
-        icons.entries.insert(id, (source, Entry::Asking(request)));
+        s.ui.shell.sidebar.favicons.entries.insert(id, (source, Entry::Asking(request, base)));
         in_flight += 1;
     }
+    let Some(net) = s.src.net() else { return false };
+    let icons = &mut s.ui.shell.sidebar.favicons;
+    let mut changed = false;
     for (_, entry) in icons.entries.values_mut() {
         match entry {
-            Entry::Asking(request) => {
+            Entry::Asking(request, base) => {
                 let Some(reply) = net.take_reply(*request) else { continue };
                 let url = reply.ok().map(|v| crate::data::s(&v, "relativeUrl").to_owned()).filter(|u| !u.is_empty() && !u.ends_with(MISSING));
                 *entry = match url {

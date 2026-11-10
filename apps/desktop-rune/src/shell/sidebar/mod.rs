@@ -472,7 +472,7 @@ fn patched(mut t: Thread, patches: &HashMap<String, Patch>) -> Thread {
 
 /// Sends one orchestration command (the web's `thread.*` dispatches); fixtures only patch.
 fn dispatch(s: &mut App, kind: &str, id: &str, extra: Value) {
-    if let Some(net) = s.src.net() {
+    if let Some(net) = crate::env::net_for(s, id) {
         let mut cmd = json!({ "type": kind, "commandId": s5_net::uuid(), "threadId": id });
         if let (Some(obj), Value::Object(more)) = (cmd.as_object_mut(), extra) {
             obj.extend(more);
@@ -1114,13 +1114,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
     folders::menu(s, t, overlays);
-    crate::env::sidebar_menu(s, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()
         .w(layout::SIDEBAR_W + 1.0)
         .h_full()
         .child(chrome::header(s, t, inset))
-        .children(crate::env::sidebar_switcher(s, t))
         .child(chrome::search_bar(s, t))
         .child(list)
         .child(chrome::footer(s, &model, t));

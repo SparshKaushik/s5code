@@ -647,7 +647,7 @@ fn add(s: &mut App, raw: &str) {
         return toast(s, "Failed to add project", Some("Relative paths require an active project."));
     }
     let path = resolve(raw, cwd.as_deref());
-    let existing = s.state().projects.iter().find(|p| compare(data::s(p, "workspaceRoot")) == compare(&path)).cloned();
+    let existing = s.state().projects.iter().filter(|p| crate::env::of(s, p) == s.ui.env.active).find(|p| compare(data::s(p, "workspaceRoot")) == compare(&path)).cloned();
     if let Some(project) = existing {
         let id = data::s(&project, "id").to_owned();
         let route = latest_thread(s, &id).map(Route::Thread).unwrap_or(Route::Home { project_id: Some(id.clone()) });

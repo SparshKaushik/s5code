@@ -23,6 +23,12 @@ mod theme;
 mod tokens;
 mod wizard;
 
+/// The entry the desktop shell hands `t3code://new?…` prompt links to: `prompt_link::open(app, url)`.
+pub(crate) use links as prompt_link;
+
+/// The Linux launcher entry (`<APP_ID>.desktop`) the unread badge counts on.
+pub const APP_ID: &str = "in.newsa.s5code.rune-prototype";
+
 use rune::{App as RuneApp, AppSpec, Cx, El, KeyEvent, Tx, Waker};
 
 use crate::data::Source;
@@ -109,6 +115,7 @@ impl App {
         if matches!(route, Route::Home { .. } | Route::Thread(_)) {
             self.ui.pages.main_route = Some(route.clone());
         }
+        env::follow(self, &route);
         if let Route::Thread(id) = &route
             && let Some(net) = self.src.net()
         {
@@ -124,7 +131,7 @@ impl App {
 fn setup(s: &mut App, waker: Waker) {
     s.ui.panel.waker = Some(waker.clone());
     env::start(s);
-    links::start(s);
+    prompt_link::start(s);
     s.host = host::start(move || waker());
 }
 
@@ -151,7 +158,7 @@ fn poll_host(s: &mut App) -> bool {
 
 fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     let mut changed = poll_host(s);
-    changed |= s.src.net().is_some_and(|net| net.drain());
+    changed |= env::drain(s);
     changed |= panel::poll(s, tx);
     changed |= settings::poll(s);
     settings::fonts::follow(s, tx);

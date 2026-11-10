@@ -528,10 +528,10 @@ fn items(s: &App) -> Vec<Item> {
                     .map(|p| data::s(p, "title"))
                     .unwrap_or("");
                 // `ThreadCommandSubtitle`: project, environment, branch, and whether it is open.
-                let environment = s.state().config.as_ref().map(|c| data::s(&c["environment"], "label")).filter(|l| !l.is_empty()).unwrap_or("Local");
+                let environment = crate::env::location(s, v);
                 let mut parts: Vec<&str> = vec![];
                 if !project.is_empty() {
-                    parts.extend([project, environment]);
+                    parts.extend([project, environment.as_str()]);
                 }
                 let branch = data::s(v, "branch").trim();
                 if !branch.is_empty() {
@@ -589,6 +589,9 @@ fn items(s: &App) -> Vec<Item> {
                     Action::OpenProject(data::s(p, "id").into())
                 },
             ));
+            if let Some(row) = out.last_mut() {
+                row.subtitle = Some(format!("{} · {}", crate::env::location(s, p), data::s(p, "workspaceRoot")));
+            }
             if can_pin && let Some(row) = out.last_mut() {
                 row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());
             }
@@ -1363,7 +1366,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                     if let Some(at) = data::iso_ms(&visited) {
                         s.ui.shell.sidebar.visits.claim_open(id, at);
                     }
-                    if let Some(net) = s.src.net() {
+                    if let Some(net) = crate::env::net_for(s, id) {
                         let ack=net.dispatch(serde_json::json!({"type":"thread.visit","threadId":id,"visitedAt":visited,"opened":true,"searchQuery":query}));
                         s.ui.shell.palette.acknowledgements.push(ack);
                     }
