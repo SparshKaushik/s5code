@@ -1,8 +1,10 @@
 mod about;
 mod accent;
+mod acp_icons;
 mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
+mod auth_terminal;
 mod balance;
 pub mod client;
 mod connections;
@@ -50,6 +52,7 @@ pub struct Ui {
     pub task_editor: Option<Value>,
     pub delete_task: Option<(Value, String)>,
     pub auth: auth::Ui,
+    pub acp_icons: acp_icons::AcpIcons,
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
@@ -495,7 +498,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | source_control::poll(s);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();

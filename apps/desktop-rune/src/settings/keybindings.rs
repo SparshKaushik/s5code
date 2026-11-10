@@ -368,20 +368,17 @@ fn conflicts(s: &App, command: &str) -> bool {
         })
 }
 
+/// Web's `whenAstToExpression`: only `&&`/`||` operands get parentheses.
 fn when_expression(ast: &Value) -> String {
+    let wrap = |node: &Value| match node["type"].as_str() {
+        Some("identifier" | "not") => when_expression(node),
+        _ => format!("({})", when_expression(node)),
+    };
     match ast["type"].as_str() {
         Some("identifier") => ast["name"].as_str().unwrap_or("").to_owned(),
-        Some("not") => format!("!({})", when_expression(&ast["node"])),
-        Some("and") => format!(
-            "({}) && ({})",
-            when_expression(&ast["left"]),
-            when_expression(&ast["right"])
-        ),
-        Some("or") => format!(
-            "({}) || ({})",
-            when_expression(&ast["left"]),
-            when_expression(&ast["right"])
-        ),
+        Some("not") => format!("!{}", wrap(&ast["node"])),
+        Some("and") => format!("{} && {}", wrap(&ast["left"]), wrap(&ast["right"])),
+        Some("or") => format!("{} || {}", wrap(&ast["left"]), wrap(&ast["right"])),
         _ => String::new(),
     }
 }
@@ -394,7 +391,9 @@ mod tests {
         let ast = json!({"type":"and","left":{"type":"not","node":{"type":"identifier","name":"terminalFocus"}},"right":{"type":"or","left":{"type":"identifier","name":"isDesktop"},"right":{"type":"identifier","name":"isWeb"}}});
         assert_eq!(
             when_expression(&ast),
-            "(!(terminalFocus)) && ((isDesktop) || (isWeb))"
+            "!terminalFocus && (isDesktop || isWeb)"
         );
+        let negated_group = json!({"type":"not","node":{"type":"and","left":{"type":"identifier","name":"a"},"right":{"type":"identifier","name":"b"}}});
+        assert_eq!(when_expression(&negated_group), "!(a && b)");
     }
 }

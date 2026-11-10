@@ -2,7 +2,7 @@
 //! on the provider page and in Add provider's sign-in step. Starts use the server's own
 //! callback, so a local server catches the redirect and a remote one takes the pasted URL.
 use super::request;
-use crate::theme::{self, AlphaMul, T};
+use crate::theme::{self, T};
 use crate::{App, icons, kit};
 use rune::{El, TextEdit, col, el, row, text};
 use serde_json::{Value, json};
@@ -16,7 +16,7 @@ pub struct Ui {
     reveal_email: bool,
     /// The instance whose sign-out is being confirmed.
     logout: Option<String>,
-    terminal_input: TextEdit,
+    pub(super) terminal: super::auth_terminal::Ui,
 }
 
 pub fn open_url(s: &mut App, url: &str) {
@@ -283,34 +283,7 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
     }
     match interaction["type"].as_str() {
         Some("terminal") => {
-            let output = interaction["output"].as_str().unwrap_or("");
-            let tail: String = output.lines().rev().take(14).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
-            let (send_id, send_state) = (id.clone(), state.clone());
-            out = out.child(
-                col()
-                    .w_full()
-                    .gap(8.0)
-                    .padding(12.0)
-                    .radius(6.0)
-                    .border(1.0, t.c.border)
-                    .fill(t.c.muted.alpha_mul(0.3))
-                    .label("Provider sign-in terminal")
-                    .child(text(strip_ansi(&tail)).font(theme::MONO_XS).color(t.c.foreground).wrap().selectable(true))
-                    .child(
-                        kit::Input::new(&ui.terminal_input)
-                            .size("sm")
-                            .font("mono")
-                            .placeholder("Type a reply and press Enter")
-                            .on_edit(|s: &mut App| &mut s.ui.settings.auth.terminal_input)
-                            .on_submit(move |s: &mut App, _| {
-                                let line = s.ui.settings.auth.terminal_input.text.clone();
-                                s.ui.settings.auth.terminal_input.clear();
-                                respond(s, &send_id, &send_state, json!({"type": "terminal", "data": format!("{line}\r")}));
-                            })
-                            .build(t)
-                            .single_line(),
-                    ),
-            );
+            out = out.child(col().w_full().py(8.0).child(super::auth_terminal::view(s, t, &id, &state)));
         }
         Some("credentials") => {
             let mut form = col().w_full().gap(8.0);
@@ -405,37 +378,6 @@ pub fn view(s: &App, t: &T, p: &Value) -> El {
     out
 }
 
-/// Terminal output without its escape sequences, for the plain-text view of the sign-in PTY.
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\u{1b}' {
-            match chars.next() {
-                Some('[') => {
-                    while let Some(&n) = chars.peek() {
-                        chars.next();
-                        if ('@'..='~').contains(&n) {
-                            break;
-                        }
-                    }
-                }
-                Some(']') => {
-                    while let Some(n) = chars.next() {
-                        if n == '\u{7}' || (n == '\u{1b}' && chars.peek() == Some(&'\\')) {
-                            break;
-                        }
-                    }
-                }
-                _ => {}
-            }
-        } else if c != '\r' {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// The sign-out confirmation (web's `AlertDialog`).
 pub fn confirm(s: &App, t: &T, layers: &mut Vec<El>) {
     let Some(id) = s.ui.settings.auth.logout.clone() else { return };
@@ -488,6 +430,5 @@ mod tests {
         let failed = json!({"phase": "failed"});
         let d = derive(&json!({"driver": "cursor", "setup": {}, "auth": {}}), Some(&failed));
         assert_eq!(start_label(&failed, &d), "Retry sign-in");
-        assert_eq!(strip_ansi("\u{1b}[1;32mOpen\u{1b}[0m this\r\n"), "Open this\n");
     }
 }

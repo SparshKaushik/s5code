@@ -98,6 +98,9 @@ impl Dialog {
             .label(self.title)
             .w_full()
             .max_w(self.width)
+            // Web's `max-h-full`: the panel shrinks to the window and a scrolling body takes the cut.
+            .shrink()
+            .min_h(0.)
             .radius(16.)
             .padding(24.)
             .gap(24.)
@@ -112,8 +115,7 @@ impl Dialog {
             super::motion::layer()
                 .key(format!("{}-layer", self.key))
                 .padding(16.)
-                .center()
-                .child(super::motion::popup(close(panel).modal_click_outside(self.outside))),
+                .child(col().w_full().h_full().center().child(super::motion::popup(close(panel).modal_click_outside(self.outside)))),
         );
     }
 }

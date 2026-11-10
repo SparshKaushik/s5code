@@ -187,10 +187,16 @@ fn unit_of(s: &App, index: usize, minutes: i64) -> (&'static str, i64, &'static 
     }
 }
 
+/// A `[snooze::]<field>::<row>` key's field and row; the prefix is optional so the row's own
+/// controls can pass the key they render with.
+fn field(key: &str) -> Option<(&str, usize)> {
+    let (field, index) = key.trim_start_matches("snooze::").split_once("::")?;
+    Some((field, index.parse().ok()?))
+}
+
 /// The value behind a `snooze::<field>::<row>` key.
 pub fn value(s: &App, key: &str) -> Value {
-    let Some((field, index)) = key.split_once("::") else { return Value::Null };
-    let Some(index) = index.parse::<usize>().ok() else { return Value::Null };
+    let Some((field, index)) = field(key) else { return Value::Null };
     let Some(p) = rows(s).get(index).cloned() else { return Value::Null };
     let minutes = p["minutes"].as_i64().unwrap_or(60);
     match field {
@@ -203,8 +209,7 @@ pub fn value(s: &App, key: &str) -> Value {
 }
 
 pub fn set(s: &mut App, key: &str, next: Value) {
-    let Some((field, index)) = key.split_once("::") else { return };
-    let Some(index) = index.parse::<usize>().ok() else { return };
+    let Some((field, index)) = field(key) else { return };
     let mut list = rows(s);
     let Some(p) = list.get(index).cloned() else { return };
     let minutes = p["minutes"].as_i64().unwrap_or(60);
@@ -404,6 +409,13 @@ mod tests {
     // 2026-11-05 is a Thursday; 10:00 UTC.
     const NOW: i64 = 1_793_872_800_000;
     const UTC: Zone = Zone::Fixed(0);
+
+    #[test]
+    fn row_keys_resolve_with_or_without_the_snooze_prefix() {
+        assert_eq!(field("amount::2"), Some(("amount", 2)));
+        assert_eq!(field("snooze::amount::2"), Some(("amount", 2)), "the stepper and unit labels read the full key");
+        assert_eq!(field("snooze::amount"), None);
+    }
 
     #[test]
     fn labels_follow_the_day_gap() {

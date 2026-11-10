@@ -7,7 +7,7 @@
 //! RPC's `setModelFavorites` / `setModelsHidden` / `setProviderModelOrder` patch keys.
 
 use super::{controls as c, request, server_settings};
-use crate::chat::composer::{provider_icon, provider_icons::STAR_FILLED, providers as live_providers};
+use crate::chat::composer::{provider_icons::STAR_FILLED, providers as live_providers};
 use crate::kit;
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
@@ -32,7 +32,7 @@ const FILTER_THRESHOLD: usize = 8;
 /// What the server sends in place of a secret config field it holds (`SECRET_REDACTED`).
 const SECRET_REDACTED: &str = "\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}\u{2022}";
 const STORED_SECRET: &str = "Stored secret, enter a new value to replace";
-static LOCK_OPEN: rune::Icon = rune::Icon {
+pub(super) static LOCK_OPEN: rune::Icon = rune::Icon {
     name: "lock-open",
     view: 24.0,
     body: "<rect width=\"18\" height=\"11\" x=\"3\" y=\"11\" rx=\"2\" ry=\"2\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/><path d=\"M7 11V7a5 5 0 0 1 9.9-1\" stroke=\"currentColor\" stroke-width=\"2\" stroke-linecap=\"round\" stroke-linejoin=\"round\" fill=\"none\"/>",
@@ -394,7 +394,7 @@ pub fn edit_row(row: &mut Value, part: &str, text: &str) -> bool {
     true
 }
 
-fn valid_env_name(name: &str) -> bool {
+pub(super) fn valid_env_name(name: &str) -> bool {
     let mut chars = name.chars();
     name.len() <= 128
         && chars.next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
@@ -609,7 +609,7 @@ fn list_row(s: &App, t: &T, r: &Row, selected: bool) -> El {
         .label(format!("Select {name}"))
         .cursor(rune::Cursor::Pointer)
         .on_press(move |s: &mut App| select(s, &id))
-        .child(el().size(20.0, 20.0).center().child(provider_icon(t, &r.driver, 16.0)))
+        .child(el().size(20.0, 20.0).center().child(super::acp_icons::instance_mark(s, t, &r.driver, r.explicit.as_ref(), 16.0)))
         .child(col().grow(1.0).min_w(0.0).child(title).child(status_line));
     let mut line = row()
         .key(format!("provider-row-{}", r.id))
@@ -1520,7 +1520,7 @@ fn editor(s: &App, cx: &rune::Cx<App>, t: &T, r: &Row) -> Vec<El> {
         row()
             .gap(8.0)
             .center_y()
-            .child(el().size(20.0, 20.0).center().child(provider_icon(t, &r.driver, 16.0)))
+            .child(el().size(20.0, 20.0).center().child(super::acp_icons::instance_mark(s, t, &r.driver, Some(&instance), 16.0)))
             .child(heading(&name, t)),
         Some(header_action(s, t, r, live, enabled)),
         vec![

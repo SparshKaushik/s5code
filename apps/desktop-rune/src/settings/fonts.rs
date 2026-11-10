@@ -40,6 +40,30 @@ fn field<'a>(values: &'a Map<String, Value>, key: &str) -> &'a str {
     values.get(key).and_then(Value::as_str).unwrap_or("")
 }
 
+fn size(values: &Map<String, Value>, key: &str, (min, max, default): (f64, f64, f64)) -> f32 {
+    let px = values.get(key).and_then(Value::as_f64).filter(|v| v.is_finite()).unwrap_or(default);
+    px.round().clamp(min, max) as f32
+}
+
+/// Web's root font size over its 16px default: the factor rem-sized UI draws at.
+pub fn interface_scale(values: &Map<String, Value>) -> f32 {
+    size(values, "fontSizeInterface", (12.0, 20.0, 16.0)) / 16.0
+}
+
+/// `--font-size-code` in layout points: px in web, so the interface scale doesn't grow it.
+pub fn code_size(values: &Map<String, Value>) -> f32 {
+    size(values, "fontSizeCode", (10.0, 18.0, 13.0)) / interface_scale(values)
+}
+
+/// Web's `resolveTerminalFontSizePreference`, in layout points like [`code_size`].
+pub fn terminal_size(values: &Map<String, Value>) -> f32 {
+    if values.get("typographyAdvanced").and_then(Value::as_bool) == Some(true) {
+        size(values, "fontSizeTerminal", (8.0, 20.0, 12.0)) / interface_scale(values)
+    } else {
+        code_size(values)
+    }
+}
+
 /// The sans and mono slots for these client settings.
 pub fn families(values: &Map<String, Value>) -> (String, String) {
     (css(field(values, "fontFamilySans"), crate::theme::SANS), css(field(values, "fontFamilyCode"), "ui-monospace"))
@@ -159,5 +183,16 @@ mod tests {
         );
         assert_eq!(named("\"Fira Code\", monospace, ,"), ["Fira Code"]);
         assert_eq!(squash("Segoe UI-Bold"), "segoeuibold");
+    }
+
+    #[test]
+    fn sizes_follow_web_clamps_and_the_advanced_terminal_override() {
+        let values = |v: Value| v.as_object().unwrap().clone();
+        let defaults = values(json!({}));
+        assert_eq!((interface_scale(&defaults), code_size(&defaults), terminal_size(&defaults)), (1.0, 13.0, 13.0));
+        let big = values(json!({"fontSizeInterface": 20, "fontSizeCode": 15, "fontSizeTerminal": 11}));
+        assert_eq!((interface_scale(&big), code_size(&big), terminal_size(&big)), (1.25, 12.0, 12.0));
+        let advanced = values(json!({"fontSizeInterface": 99, "fontSizeCode": 2, "fontSizeTerminal": 10, "typographyAdvanced": true}));
+        assert_eq!((interface_scale(&advanced), code_size(&advanced), terminal_size(&advanced)), (1.25, 8.0, 8.0));
     }
 }
