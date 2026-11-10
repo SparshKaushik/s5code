@@ -69,11 +69,18 @@ pub struct Ui {
 }
 
 /// The draft key for a route: the thread id, or `home` for the new-thread draft.
-pub fn draft_key(route: &Route) -> String {
+/// A thread's draft is keyed by its id; a new-thread draft by its project (one per project, as
+/// the web composer draft store keeps them), a bare home route naming the default project.
+pub fn draft_key(s: &App, route: &Route) -> String {
     match route {
         Route::Thread(id) => id.clone(),
-        _ => "home".to_string(),
+        Route::Home { project_id: Some(id) } => home_key(id),
+        _ => crate::chat::home::default_project(s).map_or_else(|| "home".to_owned(), |p| home_key(data::s(p, "id"))),
     }
+}
+
+pub fn home_key(project: &str) -> String {
+    format!("home:{project}")
 }
 
 /// The draft being typed: a queued message under edit keeps its own (`queued-edit:` target),
@@ -81,7 +88,7 @@ pub fn draft_key(route: &Route) -> String {
 fn active_key(s: &App) -> String {
     match (s.frame_route(), &s.ui.chat.composer.editing) {
         (Route::Thread(id), Some((thread, run))) if id == thread => format!("queued-edit:{thread}:{run}"),
-        (route, _) => draft_key(route),
+        (route, _) => draft_key(s, route),
     }
 }
 
@@ -608,7 +615,8 @@ pub fn add_terminal_context(s: &mut App, thread: &str, terminal_id: &str, termin
 
 /// Opening a thread or the new-thread draft puts the caret in its composer (ChatView).
 pub fn focus(s: &mut App, route: &Route) {
-    s.ui.chat.composer.drafts.entry(draft_key(route)).or_default().edit.focused = true;
+    let key = draft_key(s, route);
+    s.ui.chat.composer.drafts.entry(key).or_default().edit.focused = true;
 }
 
 fn stop(s: &mut App) {
@@ -723,15 +731,29 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
     out
 }
 
-/// Reads the stored drafts once connected, then writes them back at most every 300 ms when
-/// they change. A draft already touched this session wins over its stored copy.
+/// Stored drafts with the legacy shared "home" draft under `home` (its project's key), else dropped.
+fn migrated(mut drafts: HashMap<String, Draft>, home: Option<&str>) -> HashMap<String, Draft> {
+    if let (Some(draft), Some(home)) = (drafts.remove("home"), home) {
+        drafts.entry(home.to_owned()).or_insert(draft);
+    }
+    drafts
+}
+
+/// Reads the stored drafts once the shell has loaded (so legacy drafts find their project), then
+/// writes them back at most every 300 ms when they change. A draft already touched this session
+/// wins over its stored copy.
 fn persist(s: &mut App) -> bool {
+    if s.ui.chat.composer.stored.is_none() && !s.state().shell_ready {
+        return false;
+    }
     let path = crate::settings::client::sibling_path("composer-drafts.json");
+    // Drafts once shared one "home" key; that draft moves to the default project's, or goes.
+    let legacy_home = crate::chat::home::default_project(s).map(|p| home_key(data::s(p, "id")));
     let composer = &mut s.ui.chat.composer;
     if composer.stored.is_none() {
         let disk = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
         let mut changed = false;
-        for (key, draft) in disk.as_ref().map(restored).unwrap_or_default() {
+        for (key, draft) in disk.as_ref().map(|d| migrated(restored(d), legacy_home.as_deref())).unwrap_or_default() {
             let slot = composer.drafts.entry(key).or_default();
             if slot.edit.text.is_empty() && slot.attachments.is_empty() {
                 let focused = slot.edit.focused;
@@ -974,10 +996,16 @@ fn footer(s: &App, t: &T) -> El {
     if let Some((instance, model)) = selection(s) {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
         let name = model_name(s, &instance, &model);
-        // ComposerModelEffort with the default effortDisplay "label": the level's name.
+        // ComposerModelEffort: the level's name, or bars when Appearance's effort display says
+        // so; named levels such as Max keep their name.
+        let bars_setting = crate::settings::value(s, "effortDisplay") == "bars";
         let effort = effort(s).and_then(|e| {
             let (_, options) = effort_options(s)?;
-            options.iter().find(|o| data::s(o, "id") == e).map(|o| data::s(o, "label").to_owned())
+            let label = options.iter().find(|o| data::s(o, "id") == e).map(|o| data::s(o, "label").to_owned())?;
+            Some(match effort_bars(&options, &e).filter(|_| bars_setting) {
+                Some((count, filled)) => effort_glyph(count, filled, t.c.muted_foreground),
+                None => text(label).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0),
+            })
         });
         right = right.child(
             row()
@@ -992,12 +1020,38 @@ fn footer(s: &App, t: &T) -> El {
                 .label(name.clone())
                 .child(provider_icon(t, &driver, 16.0))
                 .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
-                .children(effort.map(|e| text(e).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0)))
+                .children(effort)
                 .on_press(|s: &mut App| picker::toggle(s)),
         );
     }
     right = right.children(context::meter(s, t)).child(primary_action(s, t));
     row().w_full().px(8.0).pt(10.0).center_y().child(left).child(spacer()).child(right)
+}
+
+/// resolveEffortGlyph over the selectable levels: `(bars, filled)`, or `None` when the level is
+/// named instead (Max, Ultracode) or the scale has fewer than 2 or more than 7 levels.
+fn effort_bars(options: &[Value], current: &str) -> Option<(usize, usize)> {
+    const NAMED: [&str; 2] = ["ultracode", "max"];
+    if NAMED.contains(&current) {
+        return None;
+    }
+    let levels: Vec<&str> = options.iter().map(|o| data::s(o, "id")).filter(|id| !NAMED.contains(id)).collect();
+    if !(2..=7).contains(&levels.len()) {
+        return None;
+    }
+    let off = matches!(levels[0], "off" | "none");
+    let index = levels.iter().position(|id| *id == current)?;
+    Some((levels.len() - usize::from(off), if off { index } else { index + 1 }))
+}
+
+/// EffortGlyph: rising 2-point bars on a 4-point step, their base 2 points above a 14-point box.
+fn effort_glyph(count: usize, filled: usize, color: Color) -> El {
+    let max_bar = 12.0;
+    let step = ((max_bar / 2.0 / (count.max(2) - 1) as f32).round()).max(1.0);
+    row().h(14.0).pb(2.0).gap(2.0).items_end().a11y_hidden().children((0..count).map(|i| {
+        let h = max_bar - (count - 1 - i) as f32 * step;
+        el().w(2.0).h(h).fill(if i < filled { color } else { color.alpha_mul(0.4) })
+    }))
 }
 
 fn primary_action(s: &App, t: &T) -> El {
@@ -1221,6 +1275,17 @@ fn set_text(s: &mut App, text: &str) {
     d.edit.focused = true;
 }
 
+/// The showcase thread's live turn reporting `used` of a 200k window.
+fn context_scene(s: &mut App, used: f64) {
+    on_replay_showcase(s);
+    let Route::Thread(id) = s.route.clone() else { return };
+    if let data::Source::Fixture(state) = &mut s.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        v.projection["providerTurns"] = json!([{"tokenUsage": {"usedTokens": used, "maxTokens": 200_000, "updatedAt": "2026-12-01T00:00:00.000Z"}}]);
+    }
+}
+
 fn on_replay_showcase(s: &mut App) {
     crate::scene_clock(s);
     if let Some(id) = s.state().threads.iter().find(|t| t["title"] == "Replay showcase").map(|t| data::s(t, "id").to_string()) {
@@ -1237,7 +1302,7 @@ fn on_home(s: &mut App) {
 
 /// Marks the open thread as running, as the server reports a run in flight.
 fn seed_running(s: &mut App) {
-    let id = draft_key(s.frame_route());
+    let id = draft_key(s, s.frame_route());
     if let crate::data::Source::Fixture(state) = &mut s.src
         && let Some(t) = state.threads.iter_mut().find(|t| data::s(t, "id") == id)
     {
@@ -1305,6 +1370,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         d.effort = Some("high".into());
         picker::toggle(s);
     }),
+    ("composer-effort-bars", |s| {
+        on_replay_showcase(s);
+        s.client_settings.values.insert("effortDisplay".into(), json!("bars"));
+        let d = draft_mut(s);
+        d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        d.effort = Some("medium".into());
+    }),
+    ("composer-context", |s| context_scene(s, 42_400.0)),
+    ("composer-context-full", |s| context_scene(s, 186_000.0)),
     ("composer-attachments", |s| {
         on_replay_showcase(s);
         draft_mut(s).attachments = vec!["/home/ubuntu/s5code/README.md".into(), "/home/ubuntu/s5code/package.json".into()];
@@ -1369,13 +1443,47 @@ mod tests {
     }
 
     #[test]
+    fn effort_levels_map_to_bars_like_the_web_glyph() {
+        let levels = |ids: &[&str]| ids.iter().map(|id| json!({"id": id, "label": id})).collect::<Vec<_>>();
+        let codex = levels(&["low", "medium", "high", "xhigh"]);
+        assert_eq!(effort_bars(&codex, "high"), Some((4, 3)));
+        let claude = levels(&["low", "medium", "high", "max", "ultracode"]);
+        assert_eq!(effort_bars(&claude, "low"), Some((3, 1)));
+        assert_eq!(effort_bars(&claude, "max"), None);
+        let off = levels(&["none", "low", "high"]);
+        assert_eq!(effort_bars(&off, "none"), Some((2, 0)));
+        assert_eq!(effort_bars(&off, "high"), Some((2, 2)));
+        assert_eq!(effort_bars(&levels(&["on"]), "on"), None);
+    }
+
+    #[test]
     fn navigating_focuses_the_route_draft() {
         let mut s = App::new();
         let id = data::s(&s.state().threads[0], "id").to_string();
         s.navigate(Route::Thread(id.clone()));
         assert!(s.ui.chat.composer.drafts[&id].edit.focused);
         s.navigate(Route::Home { project_id: None });
-        assert!(s.ui.chat.composer.drafts["home"].edit.focused);
+        let key = draft_key(&s, &Route::Home { project_id: None });
+        assert!(key.starts_with("home:") && s.ui.chat.composer.drafts[&key].edit.focused);
+    }
+
+    #[test]
+    fn each_project_keeps_its_own_new_thread_draft() {
+        let mut s = App::new();
+        let projects = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).take(2).collect::<Vec<_>>();
+        let [a, b] = &projects[..] else { panic!("two sample projects") };
+        s.navigate(Route::Home { project_id: Some(a.clone()) });
+        set_text(&mut s, "for a");
+        s.navigate(Route::Home { project_id: Some(b.clone()) });
+        assert!(draft(&s).is_none_or(|d| d.edit.text.is_empty()));
+        set_text(&mut s, "for b");
+        s.navigate(Route::Home { project_id: Some(a.clone()) });
+        assert_eq!(draft(&s).unwrap().edit.text, "for a");
+
+        let legacy = || HashMap::from([("home".to_owned(), Draft { edit: TextEdit::new("old"), ..Draft::default() })]);
+        let key = home_key(a);
+        assert_eq!(migrated(legacy(), Some(key.as_str()))[&key].edit.text, "old");
+        assert!(migrated(legacy(), None).is_empty());
     }
 
     #[test]

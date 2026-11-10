@@ -10,6 +10,8 @@ use serde_json::Value;
 pub struct Usage {
     pub used: f64,
     pub max: Option<f64>,
+    /// Tokens the thread processed in all, when the provider reports it.
+    pub total: Option<f64>,
 }
 
 impl Usage {
@@ -33,15 +35,19 @@ pub fn usage(p: &Value) -> Option<Usage> {
         }
     }
     if let Some(u) = live {
-        return Some(Usage { used: num(&u["usedTokens"]).unwrap_or(0.0).max(0.0), max: num(&u["maxTokens"]) });
+        return Some(Usage { used: num(&u["usedTokens"]).unwrap_or(0.0).max(0.0), max: num(&u["maxTokens"]), total: None });
     }
     let active = s(&p["thread"], "activeProviderThreadId");
     let provider = p["providerThreads"].as_array().into_iter().flatten().find(|t| !active.is_empty() && s(t, "id") == active);
     if let Some(u) = provider.map(|t| &t["contextUsage"]).filter(|u| u.is_object()) {
-        return Some(Usage { used: num(&u["usedTokens"]).unwrap_or(0.0), max: num(&u["maxTokens"]) });
+        return Some(Usage { used: num(&u["usedTokens"]).unwrap_or(0.0), max: num(&u["maxTokens"]), total: num(&u["totalProcessedTokens"]) });
     }
     let items = p["visibleTurnItems"].as_array().map(|v| v.iter().map(|e| &e["item"]).collect::<Vec<_>>()).unwrap_or_else(|| p["turnItems"].as_array().into_iter().flatten().collect());
-    items.into_iter().rev().filter(|i| s(i, "type") == "compaction").find_map(|i| num(&i["afterTokenCount"]).filter(|n| *n >= 0.0)).map(|used| Usage { used, max: None })
+    items
+        .into_iter()
+        .rev()
+        .filter(|i| s(i, "type") == "compaction")
+        .find_map(|i| Some(Usage { used: num(&i["afterTokenCount"]).filter(|n| *n >= 0.0)?, max: None, total: num(&i["beforeTokenCount"]) }))
 }
 
 /// formatContextWindowTokens: 950, 1.2k, 42k, 1.5m.
@@ -66,12 +72,16 @@ pub fn meter(app: &App, t: &T) -> Option<El> {
     let Route::Thread(id) = app.frame_route() else { return None };
     let u = usage(&app.state().thread_views.get(id)?.projection)?;
     let pct = u.percent();
-    let help = match (pct, u.max) {
-        (Some(p), Some(max)) => format!("Context window {} · {}/{}", percent_label(p), tokens(u.used), tokens(max)),
-        _ => format!("Context window {} tokens used", tokens(u.used)),
+    let (label, mut help) = match (pct, u.max) {
+        (Some(p), Some(max)) => (format!("Context window {} used", percent_label(p)), format!("Context Window  {} · {}/{}", percent_label(p), tokens(u.used), tokens(max))),
+        _ => (format!("Context window {} tokens used", tokens(u.used)), format!("Context Window  {}", tokens(u.used))),
     };
+    if let Some(total) = u.total.filter(|n| *n > 0.0) {
+        help.push_str(&format!("\nTotal processed  {}", tokens(total)));
+    }
     let fraction = (pct.unwrap_or(0.0) / 100.0) as f32;
-    let color = if fraction > 0.9 { t.c.destructive } else { t.c.muted_foreground.alpha_mul(0.72) };
+    // Past 90% the ring turns the error colour (ContextWindowMeter's isOverloaded).
+    let color = if fraction > 0.9 { t.c.error } else { t.c.muted_foreground.alpha_mul(0.72) };
     let circle = |from: f32, to: f32| -> Vec<[f32; 2]> {
         let steps = ((to - from) * 64.0).ceil().max(1.0) as usize;
         (0..=steps)
@@ -82,9 +92,9 @@ pub fn meter(app: &App, t: &T) -> Option<El> {
             })
             .collect()
     };
-    let mut shape = Shape::new().view_box(24.0, 24.0).stroke_with(circle(0.0, 1.0), true, 2.5, LineCap::Round, t.c.muted_foreground.alpha_mul(0.24));
+    let mut shape = Shape::new().view_box(24.0, 24.0).stroke_with(circle(0.0, 1.0), true, 3.0, LineCap::Round, t.c.muted_foreground.alpha_mul(0.24));
     if fraction > 0.0 {
-        shape = shape.stroke_with(circle(0.0, fraction), false, 2.5, LineCap::Round, color);
+        shape = shape.stroke_with(circle(0.0, fraction), false, 3.0, LineCap::Round, color);
     }
     Some(
         el().key("composer-context")
@@ -93,7 +103,7 @@ pub fn meter(app: &App, t: &T) -> Option<El> {
             .radius(crate::theme::layout::CONTROL_RADIUS)
             .hover(t.c.accent)
             .cursor(Cursor::Default)
-            .label(help.clone())
+            .label(label)
             .help(help)
             .child(canvas(shape).size(20.0, 20.0)),
     )
@@ -110,11 +120,11 @@ mod tests {
             {"tokenUsage":{"usedTokens":900,"maxTokens":1000,"updatedAt":"2026-01-01T00:00:02Z"}},
             {"tokenUsage":{"usedTokens":100,"maxTokens":1000,"updatedAt":"2026-01-01T00:00:01Z"}}
         ]});
-        assert_eq!(usage(&live), Some(Usage { used: 900.0, max: Some(1000.0) }));
+        assert_eq!(usage(&live), Some(Usage { used: 900.0, max: Some(1000.0), total: None }));
         let provider = json!({"thread":{"activeProviderThreadId":"p"},"providerThreads":[{"id":"p","contextUsage":{"usedTokens":5,"maxTokens":null}}]});
-        assert_eq!(usage(&provider), Some(Usage { used: 5.0, max: None }));
-        let compacted = json!({"turnItems":[{"type":"compaction","afterTokenCount":42}]});
-        assert_eq!(usage(&compacted), Some(Usage { used: 42.0, max: None }));
+        assert_eq!(usage(&provider), Some(Usage { used: 5.0, max: None, total: None }));
+        let compacted = json!({"turnItems":[{"type":"compaction","afterTokenCount":42,"beforeTokenCount":900}]});
+        assert_eq!(usage(&compacted), Some(Usage { used: 42.0, max: None, total: Some(900.0) }));
         assert_eq!(usage(&json!({})), None);
     }
 
