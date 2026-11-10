@@ -126,8 +126,11 @@ describe("readOpenCodeUsage", () => {
           id: "msg_2",
           sessionId: "ses_a",
           seq: 2,
+          // Older OpenCode messages keep the model and provider at the top level.
           data: assistantData({
-            model: { id: "gpt-5.5", providerID: "openai", variant: "default" },
+            model: undefined,
+            modelID: "gpt-5.5",
+            providerID: "openai",
             tokens: { input: 50, output: 10, reasoning: 0, cache: { read: 0, write: 0 } },
           }),
         },
@@ -152,6 +155,8 @@ describe("readOpenCodeUsage", () => {
         reasoningTokens: 5,
       });
 
+      expect(records[1]!.model).toBe("gpt-5.5");
+      expect(records[1]!.apiProvider).toBe("openai");
       // A zero cost is "OpenCode had no rate", not a real $0.
       expect(records[1]!.reportedCostUsd).toBeNull();
     }).pipe(Effect.provide(NodeServices.layer)),
