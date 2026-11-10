@@ -906,6 +906,23 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+/// The composer's window-wide shortcuts (`modelPicker.toggle`, `composer.effort`,
+/// `composer.mode`), which the web binds outside the terminal. Effort lives in the model picker.
+pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
+    if !matches!(s.frame_route(), Route::Thread(_) | Route::Home { .. }) || crate::panel::terminal_active(s) || ctx(s).project.is_none() {
+        return false;
+    }
+    if crate::panel::shortcut(s, e, "modelPicker.toggle") || crate::panel::shortcut(s, e, "composer.effort") {
+        picker::toggle(s);
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "composer.mode") && supports_plan(s) {
+        toggle_plan(s);
+        return true;
+    }
+    false
+}
+
 /// While an approval waits, the prompt says a message declines it (ChatComposer).
 fn placeholder(s: &App) -> &'static str {
     let pending = approvals(s);

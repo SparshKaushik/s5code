@@ -164,6 +164,19 @@ fn long_message(app: &mut App) {
             "status": "failed", "input": "pnpm test --filter migrations", "createdAt": "2026-01-01T00:00:01Z"}}));
     }
 }
+fn secret_request(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["visibleTurnItems"].as_array_mut())
+    {
+        for (n, (status, label)) in [("saved", "OPENAI_API_KEY"), ("pending", "STRIPE_WEBHOOK_SECRET")].into_iter().enumerate() {
+            items.push(serde_json::json!({"position": 100 + n, "visibility": "local", "item": {"id": format!("scene-secret-{n}"),
+                "type": "secret_request", "threadId": id, "status": "waiting", "secretStatus": status, "label": label,
+                "reason": "The webhook handler verifies signatures with it.", "createdAt": "2026-01-01T00:00:00Z"}}));
+        }
+    }
+}
 fn light(app: &mut App) {
     showcase(app);
     app.appearance = Appearance::Light;
@@ -187,4 +200,5 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-chip-details", chip_details),
     ("timeline-long-message", long_message),
     ("timeline-approval-warning", pending_warning),
+    ("timeline-secret-request", secret_request),
 ];

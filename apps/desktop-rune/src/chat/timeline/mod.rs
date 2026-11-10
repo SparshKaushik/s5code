@@ -14,6 +14,7 @@ mod subagent;
 pub mod requests;
 mod rows;
 mod scenes;
+mod secret;
 
 use crate::data::s;
 use crate::theme::{self, AlphaMul, T};
@@ -28,6 +29,8 @@ pub use scenes::SCENES;
 #[derive(Default)]
 pub struct Ui {
     assets: attachments::Assets,
+    follow: Follow,
+    secrets: secret::State,
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
@@ -65,6 +68,52 @@ fn toggle(app: &mut App, id: &str) {
     if !app.ui.chat.timeline.expanded.remove(id) {
         app.ui.chat.timeline.expanded.insert(id.to_owned());
     }
+}
+
+/// ScrollToEndButton's show state, set from the list's scroll offset without a view run: its
+/// opacity, and an offset that moves it out of reach of the pointer while hidden.
+struct Follow {
+    opacity: rune::Live<f32>,
+    offset: rune::Live<[f32; 2]>,
+}
+
+impl Default for Follow {
+    fn default() -> Self {
+        Follow { opacity: rune::Live::new(0.0), offset: rune::Live::new(HIDDEN) }
+    }
+}
+
+const HIDDEN: [f32; 2] = [0.0, 100_000.0];
+
+/// How far above the end the list must be before the button offers to go back.
+const AWAY: f32 = 96.0;
+
+/// The floating "Scroll to end" button, over the timeline just above the composer.
+pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::details::Lane) -> Option<El> {
+    let crate::Route::Thread(thread) = app.frame_route() else { return None };
+    if is_empty(app, thread) || app.ui.chat.timeline.find.open {
+        return None;
+    }
+    let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
+    let list = format!("timeline-{thread}");
+    let follow = &app.ui.chat.timeline.follow;
+    Some(
+        row()
+            .key("timeline-scroll-to-end")
+            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0))
+            .w(lane.width)
+            .justify_center()
+            .live_opacity(&follow.opacity)
+            .live_offset(&follow.offset)
+            .child(
+                crate::kit::button::Button::new("Scroll to end")
+                    .variant("glass")
+                    .size("xs")
+                    .icon(&icons::CHEVRON_DOWN)
+                    .build(t)
+                    .on_press_tx(move |_: &mut App, tx| tx.scroll_to_bottom(list.clone())),
+            ),
+    )
 }
 
 /// `shouldCollapseUserMessage`: over 600 visible characters or 8 lines.
@@ -191,7 +240,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     }
     if matches!(
         kind,
-        "error" | "system_notice" | "handoff" | "secret_request" | "link_request"
+        "error" | "system_notice" | "handoff" | "link_request"
     ) {
         let detail = [
             s(&item["failure"], "message"),
@@ -242,6 +291,13 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
                 }),
             )
             .child(notice);
+    }
+    if kind == "secret_request" {
+        let thread = match app.frame_route() {
+            crate::Route::Thread(id) => id.as_str(),
+            _ => "",
+        };
+        return secret::view(app, item, thread, t);
     }
     if kind == "proposed_plan" {
         return plan::card(app, item, t);
@@ -412,7 +468,7 @@ fn send(app: &mut App, request: &str, command: Value) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app);
+    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -750,6 +806,14 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         .min_h(0.0)
         .w_full()
         .scroll(ScrollSpec { stick_bottom: true })
+        .on_scroll_offset({
+            let (opacity, offset) = (app.ui.chat.timeline.follow.opacity.clone(), app.ui.chat.timeline.follow.offset.clone());
+            move |at: rune::ScrollPos| {
+                let away = at.max[1] - at.offset[1] > AWAY;
+                opacity.set(if away { 1.0 } else { 0.0 });
+                offset.set(if away { [0.0, 0.0] } else { HIDDEN });
+            }
+        })
         // Rows share the composer's lane, which the details card narrows.
         .pl(lane.left)
         .pt(21.0)
