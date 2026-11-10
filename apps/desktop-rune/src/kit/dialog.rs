@@ -99,6 +99,7 @@ impl Dialog {
             .w_full()
             .max_w(self.width)
             // Web's `max-h-full`: the panel shrinks to the window and a scrolling body takes the cut.
+            .shrink()
             .min_h(0.)
             .radius(16.)
             .padding(24.)
