@@ -173,7 +173,7 @@ pub fn switch(s: &mut App, key: &str) {
 pub fn follow(s: &mut App, route: &Route) {
     let key = match route {
         Route::Thread(id) | Route::Home { project_id: Some(id) } => owner(s, id),
-        Route::Home { project_id: None } => crate::chat::home::most_active_project(s).map_or_else(|| LOCAL.to_owned(), |p| of(s, p)),
+        Route::Home { project_id: None } => crate::chat::home::default_project(s).map_or_else(|| LOCAL.to_owned(), |p| of(s, p)),
         _ => LOCAL.to_owned(),
     };
     switch(s, &key);
