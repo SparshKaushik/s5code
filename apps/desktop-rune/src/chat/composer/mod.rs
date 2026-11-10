@@ -607,10 +607,35 @@ pub fn add_context(s: &mut App, record: Value) {
 
 /// "Add to chat" from a thread's terminal: the selection joins that thread's draft.
 pub fn add_terminal_context(s: &mut App, thread: &str, terminal_id: &str, terminal_label: &str, line_start: usize, line_end: usize, text: &str) {
+    add_thread_context(s, thread, chips::terminal(terminal_id, terminal_label, line_start, line_end, text));
+}
+
+/// Adds `record` to `thread`'s draft, opening the thread first.
+pub fn add_thread_context(s: &mut App, thread: &str, record: Value) {
     if s.frame_route() != &Route::Thread(thread.to_owned()) {
         s.navigate(Route::Thread(thread.to_owned()));
     }
-    add_context(s, chips::terminal(terminal_id, terminal_label, line_start, line_end, text));
+    add_context(s, record);
+}
+
+/// The contexts still in `thread`'s draft (their pill not deleted).
+pub fn thread_contexts<'a>(s: &'a App, thread: &str) -> Vec<&'a Value> {
+    let Some(d) = s.ui.chat.composer.drafts.get(thread) else { return Vec::new() };
+    d.contexts.iter().filter(|c| d.edit.pills().any(|(_, id)| id == chips::pill_id(c))).collect()
+}
+
+/// Takes the context `context_id` and its pill out of `thread`'s draft.
+pub fn remove_context(s: &mut App, thread: &str, context_id: &str) {
+    let Some(d) = s.ui.chat.composer.drafts.get_mut(thread) else { return };
+    let pills: Vec<String> = d.contexts.iter().filter(|c| data::s(c, "contextId") == context_id).map(chips::pill_id).collect();
+    for pill in &pills {
+        let range = d.edit.pills().find(|(_, id)| id == pill).map(|(r, _)| r);
+        if let Some(range) = range {
+            d.edit.set_selection(range.start, range.end);
+            d.edit.insert("");
+        }
+    }
+    d.contexts.retain(|c| data::s(c, "contextId") != context_id);
 }
 
 /// Opening a thread or the new-thread draft puts the caret in its composer (ChatView).

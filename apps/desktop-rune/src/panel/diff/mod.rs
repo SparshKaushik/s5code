@@ -1,6 +1,8 @@
 //! The Diff surface, ported from web's DiffPanel: a scope picker over the same review and
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
+mod comments;
 mod file_menu;
+mod find;
 mod state;
 mod view;
 
@@ -8,7 +10,7 @@ use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::rc::Rc;
 
-use rune::{Color, Cursor, El, Icon, ScrollSpec, Span, Tx, col, el, icon, rich, row, text};
+use rune::{Color, Cursor, El, Icon, ScrollSpec, Span, TextEdit, Tx, col, el, icon, rich, row, text};
 use rune_kit::diff::{FileDiff, FileStatus};
 use serde_json::{Value, json};
 
@@ -40,7 +42,21 @@ pub enum Scope {
     Commit(String),
     /// One turn's checkpoint diff; `None` follows the latest turn.
     Turn(Option<u64>),
+    /// One file_change item's recorded patch ("Open diff" in its inspector).
+    ToolCall { thread: String, item: String },
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Expand {
+    /// More of the gap's bottom, above the hunk after it.
+    Up,
+    /// More of the gap's top, below the hunk before it.
+    Down,
+    All,
+}
+
+/// pierre's `expansionLineCount`.
+pub const EXPAND_STEP: u32 = 100;
 
 #[derive(Clone, Debug, PartialEq)]
 struct Turn {
@@ -67,6 +83,8 @@ struct Source {
     head: Option<String>,
     base: Option<String>,
     subject: Option<String>,
+    /// The git source's kind, as `review.getDiffFileContents` takes it.
+    kind: Option<String>,
     truncated: bool,
 }
 
@@ -115,6 +133,18 @@ pub struct Ui {
     /// A file to open and scroll to once the chosen scope's patch shows (a changed-files row).
     pub reveal: Option<String>,
     file_menu: file_menu::State,
+    /// Each file's new contents by path, loaded to expand its gaps.
+    contents: HashMap<String, Rc<[String]>>,
+    /// Each file's gaps' shown lines, top and bottom, by path.
+    expanded: HashMap<String, HashMap<u32, (u32, u32)>>,
+    /// Contents requested, and the expansion to apply once they arrive.
+    contents_pending: Vec<(u64, Scope, String, usize, Expand)>,
+    comment: Option<comments::Draft>,
+    comment_edit: TextEdit,
+    /// Where comments sent from here sit, by context id (a record only has review indexes).
+    anchors: HashMap<String, (String, state::LineRef)>,
+    find: Option<find::Find>,
+    find_edit: TextEdit,
 }
 
 impl Default for Ui {
@@ -150,6 +180,14 @@ impl Default for Ui {
             partial: HashSet::new(),
             reveal: None,
             file_menu: Default::default(),
+            contents: HashMap::new(),
+            expanded: HashMap::new(),
+            contents_pending: vec![],
+            comment: None,
+            comment_edit: TextEdit::new(""),
+            anchors: HashMap::new(),
+            find: None,
+            find_edit: TextEdit::new(""),
         }
     }
 }
@@ -205,6 +243,11 @@ pub fn open_changes(app: &mut App) {
 /// A turn stays chosen when newer turns land, as web pins the run it opened.
 pub fn open_turn(app: &mut App, count: u64) {
     choose(app, Scope::Turn(Some(count)));
+}
+
+/// A file_change item's "Open diff". The panel loads it when it activates.
+pub fn open_tool_call(app: &mut App, thread: String, item: String) {
+    choose(app, Scope::ToolCall { thread, item });
 }
 
 /// "Latest turn" pins the newest turn now; with none yet it follows the first to land.
@@ -294,6 +337,7 @@ fn signature(app: &App, scope: &Scope) -> u64 {
     app.ui.panel.diff.base_ref.hash(&mut h);
     match scope {
         Scope::Turn(_) => turn_of(scope, &turns(app)).hash(&mut h),
+        Scope::ToolCall { .. } => {}
         _ => {
             if let Some((_, cwd)) = super::context(app) {
                 let local = app.state().vcs.get(&cwd).and_then(|v| v["local"].as_object().cloned()).unwrap_or_default();
@@ -315,6 +359,7 @@ pub fn load(app: &mut App) {
         Scope::Turn(_) => turn_of(&scope, &turns(app)).map(|n| {
             ("orchestration.getTurnDiff", json!({ "threadId": thread, "fromTurnCount": n.saturating_sub(1), "toTurnCount": n, "ignoreWhitespace": ignore_ws }))
         }),
+        Scope::ToolCall { thread, item } => Some(("orchestration.getTurnItem", json!({ "threadId": thread, "itemId": item }))),
         _ => Some(("review.getDiffPreview", preview_request(&cwd, &scope, app.ui.panel.diff.base_ref.as_deref(), ignore_ws))),
     };
     app.ui.panel.diff.seen = signature(app, &scope);
@@ -377,6 +422,79 @@ fn apply(app: &mut App) {
     let files: Vec<FileDiff> = ui.files.iter().filter(|f| !ui.hide_tests || !is_test_file(f.path())).cloned().collect();
     let collapsed = collapsed_for(&mut ui.folds, &ui.state, ui.touched, &files, default_collapsed);
     ui.state.set_files(files, &collapsed);
+    sync_extras(app);
+}
+
+/// Hands the view the loaded contents and expansions of its files.
+fn sync_extras(app: &mut App) {
+    let ui = &mut app.ui.panel.diff;
+    ui.state.expandable = matches!(ui.shown, Some(Scope::Branch | Scope::Unstaged | Scope::Commit(_)));
+    if ui.contents.is_empty() && (0..ui.state.files().len()).all(|f| !ui.state.loaded(f)) {
+        return;
+    }
+    let paths: Vec<String> = ui.state.files().iter().map(|f| f.path().to_owned()).collect();
+    let contents = paths.iter().map(|p| ui.contents.get(p).cloned()).collect();
+    let expanded = paths.iter().map(|p| ui.expanded.get(p).cloned().unwrap_or_default()).collect();
+    ui.state.set_extras(contents, expanded);
+}
+
+/// A separator's expand buttons: loads the file the first time, then shows more of the gap.
+pub fn expand(app: &mut App, f: usize, h: usize, how: Expand) {
+    let ui = &app.ui.panel.diff;
+    let Some(file) = ui.state.files().get(f) else { return };
+    if ui.contents.contains_key(file.path()) {
+        grow(&mut app.ui.panel.diff, f, h, how);
+        sync_extras(app);
+        return;
+    }
+    let Some((_, cwd)) = super::context(app) else { return };
+    let Some(scope) = ui.shown.clone() else { return };
+    let change = match file.status {
+        FileStatus::Added => "new",
+        FileStatus::Deleted => "deleted",
+        FileStatus::Renamed | FileStatus::Copied if file.hunks.is_empty() => "rename-pure",
+        FileStatus::Renamed | FileStatus::Copied => "rename-changed",
+        FileStatus::Modified => "change",
+    };
+    let path = file.path().to_owned();
+    let req = json!({
+        "cwd": cwd,
+        "sourceKind": ui.source.kind.clone().unwrap_or_else(|| source_kind(&scope).to_owned()),
+        "changeType": change,
+        "baseRef": ui.source.base,
+        "headRef": ui.source.head,
+        "oldPath": file.old_path.clone().unwrap_or_else(|| path.clone()),
+        "newPath": path,
+    });
+    let Some(id) = app.src.net().map(|net| net.request("review.getDiffFileContents", req)) else { return };
+    app.ui.panel.diff.contents_pending.push((id, scope, path, h, how));
+}
+
+fn grow(ui: &mut Ui, f: usize, h: usize, how: Expand) {
+    let Some(path) = ui.state.files().get(f).map(|f| f.path().to_owned()) else { return };
+    let n = ui.state.gap_len(f, h);
+    let (top, bottom) = ui.state.gap_shown(f, h);
+    let shown = match how {
+        Expand::All => (n, 0),
+        Expand::Down => (top + EXPAND_STEP, bottom),
+        Expand::Up => (top, bottom + EXPAND_STEP),
+    };
+    ui.expanded.entry(path).or_default().insert(h as u32, shown);
+}
+
+/// The review section comments belong to, as web names it.
+fn section(app: &App) -> (String, String) {
+    let ui = &app.ui.panel.diff;
+    match &ui.scope {
+        Scope::Branch => ("branch".into(), "Changes".into()),
+        Scope::Unstaged => ("unstaged".into(), "Uncommitted".into()),
+        Scope::Commit(sha) => (format!("commit:{sha}"), ui.source.subject.clone().unwrap_or_else(|| format!("Commit {}", short(sha)))),
+        Scope::Turn(_) => {
+            let n = turn_of(&ui.scope, &turns(app)).unwrap_or(0);
+            (format!("turn:{n}"), format!("Turn {n}"))
+        }
+        Scope::ToolCall { thread, item } => (format!("tool-call:{thread}:{item}"), "Tool call".into()),
+    }
 }
 
 fn collapsed_for(folds: &mut HashMap<String, bool>, shown: &DiffState, touched: bool, files: &[FileDiff], default: bool) -> Vec<String> {
@@ -462,11 +580,18 @@ pub fn poll(app: &mut App) -> bool {
         let mut missing = vec![];
         ui.counts.clear();
         ui.partial.clear();
+        ui.contents.clear();
+        ui.expanded.clear();
+        ui.contents_pending.clear();
         match reply {
             Ok(v) => {
                 ui.error = None;
                 let (patch, mut source, meta) = match scope {
                     Scope::Turn(_) => (v["diff"].as_str().unwrap_or("").to_string(), Source::default(), vec![]),
+                    Scope::ToolCall { .. } => {
+                        let (patch, truncated) = tool_patch(&v["item"]);
+                        (patch, Source { truncated, ..Source::default() }, vec![])
+                    }
                     _ => {
                         let src = git_source(&v, &scope);
                         let opt = |k: &str| src[k].as_str().filter(|v| !v.is_empty()).map(str::to_string);
@@ -474,6 +599,7 @@ pub fn poll(app: &mut App) -> bool {
                             head: opt("headRef"),
                             base: opt("baseRef"),
                             subject: opt("commitSubject"),
+                            kind: opt("kind"),
                             truncated: src["truncated"].as_bool().unwrap_or(false) || v["incomplete"].as_bool().unwrap_or(false),
                         };
                         (src["diff"].as_str().unwrap_or("").to_string(), source, file_stats(&src))
@@ -525,6 +651,29 @@ pub fn poll(app: &mut App) -> bool {
         }
         apply(app);
     }
+    for (id, scope, path, h, how) in app.ui.panel.diff.contents_pending.clone() {
+        let Some(reply) = take(app, id) else { continue };
+        let ui = &mut app.ui.panel.diff;
+        ui.contents_pending.retain(|p| p.0 != id);
+        changed = true;
+        if ui.shown.as_ref() != Some(&scope) {
+            continue;
+        }
+        match reply {
+            Ok(v) => {
+                let lines: Rc<[String]> = v["newContents"].as_str().unwrap_or("").lines().map(str::to_owned).collect();
+                ui.contents.insert(path.clone(), lines);
+                sync_extras(app);
+                let ui = &mut app.ui.panel.diff;
+                if let Some(f) = ui.state.files().iter().position(|f| f.path() == path) {
+                    grow(ui, f, h, how);
+                }
+                sync_extras(app);
+            }
+            Err(e) => crate::shell::palette::toast_error(app, "Could not expand the diff", Some(&message(&e))),
+        }
+    }
+    changed |= comments::sync(app) | find::refresh(app);
     if visible(app) && app.ui.panel.diff.pending.is_none() && app.ui.panel.diff.shown.is_some() {
         let scope = app.ui.panel.diff.scope.clone();
         if signature(app, &scope) != app.ui.panel.diff.seen {
@@ -533,6 +682,69 @@ pub fn poll(app: &mut App) -> bool {
         }
     }
     changed
+}
+
+/// web's `toolCallDiff`: a file_change item's recorded patch made whole, and whether the server
+/// cut it short. Codex can record a file's added or deleted contents, or bare hunks.
+fn tool_patch(item: &Value) -> (String, bool) {
+    const CUT: &str = "\n… output truncated for transport";
+    let recorded = data::s(item, "diffStr");
+    let truncated = recorded.ends_with(CUT);
+    let patch = recorded.strip_suffix(CUT).unwrap_or(recorded);
+    if patch.is_empty() {
+        return (String::new(), truncated);
+    }
+    let change = &item["changes"][0];
+    let op = data::s(change, "operation");
+    let raw_op = op == "add" || op == "delete";
+    if patch.starts_with("diff --git ") || patch.starts_with("--- ") {
+        if !raw_op {
+            return (patch.to_owned(), truncated);
+        }
+        let files = rune_kit::diff::parse(patch);
+        let whole = !files.is_empty()
+            && files.iter().all(|file| {
+                let path = file.path().replace('\\', "/");
+                !file.hunks.is_empty()
+                    && item["changes"].as_array().into_iter().flatten().any(|rec| {
+                        let recorded = data::s(rec, "path").replace('\\', "/");
+                        let kinds = match data::s(rec, "operation") {
+                            "add" => file.deletions() == 0,
+                            "delete" => file.additions() == 0,
+                            _ => true,
+                        };
+                        kinds && (recorded == path || recorded.ends_with(&format!("/{path}")))
+                    })
+            });
+        if whole {
+            return (patch.to_owned(), truncated);
+        }
+    }
+    let mut body = patch.to_owned();
+    if raw_op || !patch.trim_start().starts_with("@@ ") {
+        if !raw_op {
+            return (patch.to_owned(), truncated);
+        }
+        let final_newline = patch.ends_with('\n');
+        let mut lines: Vec<&str> = patch.split('\n').collect();
+        if final_newline {
+            lines.pop();
+        }
+        let added = op == "add";
+        let range = format!("1,{}", lines.len());
+        let mark = if added { '+' } else { '-' };
+        let (old, new) = if added { ("0,0", range.as_str()) } else { (range.as_str(), "0,0") };
+        let marked: Vec<String> = lines.iter().map(|l| format!("{mark}{l}")).collect();
+        let eof = if final_newline { "" } else { "\\ No newline at end of file\n" };
+        body = format!("@@ -{old} +{new} @@\n{}\n{eof}", marked.join("\n"));
+    }
+    let name = data::s(item, "fileName");
+    let quote = |p: String| serde_json::to_string(&p).unwrap_or(p);
+    let old = quote(format!("a/{}", change["oldPath"].as_str().unwrap_or(name)));
+    let new = quote(format!("b/{}", change["path"].as_str().unwrap_or(name)));
+    let before = if op == "add" { "/dev/null" } else { old.as_str() };
+    let after = if op == "delete" { "/dev/null" } else { new.as_str() };
+    (format!("diff --git {old} {new}\n--- {before}\n+++ {after}\n{}", body.trim_start()), truncated)
 }
 
 fn commit_list(v: &Value) -> Vec<Commit> {
@@ -723,6 +935,7 @@ fn scope_label(ui: &Ui, turns: &[Turn]) -> String {
             Some(c) => format!("Turn {c}"),
             None => "Latest turn".into(),
         },
+        Scope::ToolCall { .. } => "Tool call".into(),
     }
 }
 
@@ -1073,7 +1286,7 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
                 .child(text(format!("-{}", compact(del))).font(theme::mono(theme::TEXT_2XS)).color(t.c.diff_deletion_foreground)),
         );
     }
-    if !matches!(ui.scope, Scope::Turn(_)) && git_ok {
+    if !matches!(ui.scope, Scope::Turn(_) | Scope::ToolCall { .. }) && git_ok {
         right = right.child(icon_button(t, "panel-diff-refresh", "Refresh diff", &icons::REFRESH_CW, load));
     }
     if !files.is_empty() {
@@ -1216,7 +1429,7 @@ fn body(app: &App, t: &T) -> El {
         }
         return super::notice(t, "Select a thread to inspect turn diffs.");
     };
-    if is_repo(app) == Some(false) {
+    if is_repo(app) == Some(false) && !matches!(ui.scope, Scope::ToolCall { .. }) {
         return super::notice(t, "Turn diffs are unavailable because this project is not a git repository.");
     }
     if matches!(ui.scope, Scope::Turn(_)) && turns(app).is_empty() {
@@ -1228,6 +1441,7 @@ fn body(app: &App, t: &T) -> El {
     if ui.shown.as_ref() != Some(&ui.scope) {
         let label = match ui.scope {
             Scope::Turn(_) => "Loading checkpoint diff...",
+            Scope::ToolCall { .. } => "Loading tool call diff...",
             Scope::Unstaged => "Loading uncommitted changes...",
             Scope::Commit(_) => "Loading commit...",
             Scope::Branch => "Loading changes...",
@@ -1381,6 +1595,22 @@ fn sync_settings(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tool_call_patches_gain_headers_and_wrap_raw_contents() {
+        let item = |diff: &str, op: &str| json!({ "fileName": "src/a.rs", "diffStr": diff, "changes": [{ "path": "src/a.rs", "operation": op }] });
+        let hunk = "@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(tool_patch(&item(hunk, "update")).0, format!("diff --git \"a/src/a.rs\" \"b/src/a.rs\"\n--- \"a/src/a.rs\"\n+++ \"b/src/a.rs\"\n{hunk}"));
+        let whole = "diff --git a/src/a.rs b/src/a.rs\n--- a/src/a.rs\n+++ b/src/a.rs\n@@ -1 +1 @@\n-a\n+b\n";
+        assert_eq!(tool_patch(&item(whole, "update")).0, whole);
+        // An added file's contents become one added hunk; a cut patch says so.
+        let (added, cut) = tool_patch(&item("one\ntwo\n… output truncated for transport", "add"));
+        assert!(cut);
+        assert_eq!(added, "diff --git \"a/src/a.rs\" \"b/src/a.rs\"\n--- /dev/null\n+++ \"b/src/a.rs\"\n@@ -0,0 +1,2 @@\n+one\n+two\n\\ No newline at end of file\n");
+        let files = rune_kit::diff::parse(&added);
+        assert_eq!((files.len(), files[0].path(), files[0].additions()), (1, "src/a.rs", 2));
+        assert_eq!(tool_patch(&item("", "update")).0, "");
+    }
 
     #[test]
     fn base_refs_pair_each_branch_with_its_origin_twin() {

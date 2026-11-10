@@ -11,7 +11,7 @@ use rune::{Color, Cursor, Drag, El, GrowthSpec, Icon, Phase, ScrollSpec, Span, T
 use rune_kit::diff::{FileDiff, FileStatus, LineKind, Side};
 use rune_kit::syntax::SyntaxTheme;
 
-use super::state::{DiffMode, DiffState, HEADER_H, LINE_H, LineRef, NOTE_H, Row, SEP_H};
+use super::state::{DiffMode, DiffState, GAP, HEADER_H, LINE_H, LineRef, NOTE_H, Row, SEP_H};
 use crate::{App, icons, kit, theme, theme::T};
 
 /// The change-type marks pierre draws before a file's name.
@@ -61,6 +61,7 @@ struct Tints {
 }
 
 pub struct Look {
+    pub t: T,
     code: TextStyle,
     title: TextStyle,
     small: TextStyle,
@@ -83,6 +84,8 @@ pub struct Look {
     selected: Color,
     selected_gutter: Color,
     selection: Color,
+    find_match: Color,
+    find_focus: Color,
     syntax: SyntaxTheme,
     version: u64,
 }
@@ -100,6 +103,7 @@ impl Look {
         };
         let modified = c.diff_modified_icon.alpha(1.0);
         let mut look = Look {
+            t: *t,
             code: theme::mono(TextStyle::new(13.0, 400.0).lh(LINE_H)),
             title: theme::TEXT_XS,
             small: theme::TEXT_2XS,
@@ -122,6 +126,9 @@ impl Look {
             selected: mix(bg, modified, 0.85),
             selected_gutter: mix(bg, modified, 0.7),
             selection: kit::theme(t).selection(),
+            // Pierre's ::highlight(diffs-search-match) and -focus.
+            find_match: Color { r: 1.0, g: 0.304987, b: 0.031896, a: if t.dark { 0.4 } else { 0.533 } }, // #ff9632 66 / 88
+            find_focus: c.primary.alpha(0.45),
             syntax: SyntaxTheme::neutral(t.dark),
             version: 0,
         };
@@ -157,6 +164,8 @@ struct Cell<'a> {
     no_newline: bool,
     h: usize,
     i: u32,
+    /// A gap's line (`i` is its index in the gap), shown from the loaded file.
+    gap: bool,
 }
 
 impl Cell<'_> {
@@ -204,7 +213,10 @@ pub fn build(s: &App, look: Rc<Look>) -> El {
     if let Some(f) = st.sticky() {
         root = root.child(file_header(s, &look, f, true).key("sticky").absolute(0.0, 0.0).w_full());
     }
-    root.on_key(|s: &mut App, e, tx| st_mut(s).key(e, tx))
+    if let Some(bar) = super::find::bar(s, &look.t) {
+        root = root.child(bar.pin(None, Some(HEADER_H + 8.0), Some(12.0), None));
+    }
+    root.on_key(|s: &mut App, e, tx| super::find::key(s, e, tx) || st_mut(s).key(e, tx))
 }
 
 fn content_width(l: &Look, st: &DiffState) -> f32 {
@@ -227,6 +239,14 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
         Row::File(f) => file_header(s, l, f as usize, false),
         Row::Note(f) => memo(key, (l.version, st.rev, vw), || note(st, l, f as usize)),
         Row::Sep { f, h } => memo(key, (l.version, st.rev, vw), || separator(st, l, f as usize, h as usize)),
+        Row::Comment { n, .. } => {
+            let mut inner = super::comments::row(s, l, n as usize).key("inner");
+            inner = match view_w(st) {
+                Some(w) => inner.w(w).sticky_left(0.0),
+                None => inner.w_full(),
+            };
+            row().w_full().child(inner)
+        }
         _ => {
             let version = (l.version, st.rev, st.row_selected(i, None), st.selection().map(|s| (s.start.side, s.end.side)));
             memo(key, version, || line(st, l, i))
@@ -237,9 +257,13 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
 fn cells(st: &DiffState, r: Row) -> (Option<Cell<'_>>, Option<Cell<'_>>) {
     let of = |f: u32, h: u32, i: u32| {
         let line = &st.files()[f as usize].hunks[h as usize].lines[i as usize];
-        Cell { kind: line.kind, old: line.old, new: line.new, text: &line.text, no_newline: line.no_newline, h: h as usize, i }
+        Cell { kind: line.kind, old: line.old, new: line.new, text: &line.text, no_newline: line.no_newline, h: h as usize, i, gap: false }
     };
     match r {
+        Row::Gap { f, h, k } => match st.gap_line(f as usize, h as usize, k) {
+            Some((old, new, text)) => (Some(Cell { kind: LineKind::Context, old: Some(old), new: Some(new), text, no_newline: false, h: h as usize, i: k, gap: true }), None),
+            None => (None, None),
+        },
         Row::Line { f, h, i } => (Some(of(f, h, i)), None),
         Row::Pair { f, h, del, add } => (Some(of(f, h, del)), Some(of(f, h, add))),
         _ => (None, None),
@@ -283,13 +307,34 @@ fn gutter(st: &DiffState, l: &Look, i: usize, f: usize, c: &Cell<'_>, side: Side
         b = b.fill(c);
     }
     let n = if side == Side::Old { c.old } else { c.new };
-    row()
+    let mut g = row()
         .key("gutter")
         .self_stretch()
         .items_stretch()
         .fill(fill)
         .child(b)
-        .child(number(st, l, i, f, n, side, c.kind, selected))
+        .child(number(st, l, i, f, n, side, c.kind, selected));
+    // Pierre's gutter utility: a comment on the selected lines, or on this one.
+    if let Some(line) = n.filter(|_| !st.notes().iter().any(|n| n.draft)) {
+        let at = LineRef { side, line };
+        g = g.child(
+            row()
+                .key("comment")
+                .absolute(BAR + 2.0, 2.0)
+                .size(16.0, 16.0)
+                .center()
+                .radius(4.0)
+                .fill(l.modified.alpha(1.0))
+                .cursor(Cursor::Pointer)
+                .role("button")
+                .label("Comment on this line".to_owned())
+                .help("Comment".to_owned())
+                .group_opacity(0.0, 1.0)
+                .child(icon(&icons::PLUS, 12.0).color(Color::WHITE))
+                .on_press(move |s: &mut App| super::comments::begin(s, f, at)),
+        );
+    }
+    g
 }
 
 fn unified(st: &DiffState, l: &Look, i: usize, f: usize, c: Cell<'_>) -> El {
@@ -308,6 +353,7 @@ fn unified(st: &DiffState, l: &Look, i: usize, f: usize, c: Cell<'_>) -> El {
         .items_start()
         .fill(fill)
         .hover(tints.map_or(l.hover, |t| t.hover))
+        .hover_group()
         .role("listitem")
         .label(c.label())
         .child(g)
@@ -324,6 +370,7 @@ fn split<'a>(st: &'a DiffState, l: &Look, i: usize, f: usize, old: Option<Cell<'
         let fill = if selected { l.selected } else { tints.map_or(l.bg, |t| t.line) };
         h.fill(fill)
             .hover(tints.map_or(l.hover, |t| t.hover))
+            .hover_group()
             .role("listitem")
             .label(c.label())
             .child(gutter(st, l, i, f, &c, side, selected))
@@ -371,16 +418,32 @@ fn number(st: &DiffState, l: &Look, i: usize, f: usize, n: Option<u32>, side: Si
 
 /// A line's code: syntax colours, tabs padded to four columns.
 fn code(st: &DiffState, l: &Look, f: usize, c: &Cell<'_>, side: Side) -> El {
-    let syntax: Vec<(Range<usize>, Color)> = st.highlights(f, c.h, c.i, side).into_iter().map(|(r, p)| (r, l.syntax.paint(p))).collect();
-    let spans = syntax
-        .into_iter()
-        .filter(|(r, _)| r.end <= c.text.len())
-        .map(|(r, color)| {
-            let mut sp = Span::new(r.start, r.end);
-            sp.color = Some(color);
-            sp
-        })
-        .collect();
+    let painted = if c.gap { st.gap_highlights(f, c.h, c.i) } else { st.highlights(f, c.h, c.i, side) };
+    let syntax: Vec<(Range<usize>, Color)> = painted.into_iter().map(|(r, p)| (r, l.syntax.paint(p))).filter(|(r, _)| r.end <= c.text.len()).collect();
+    let hits = st.hits_on(f, if c.gap { GAP | c.h as u32 } else { c.h as u32 }, c.i);
+    let spans = if hits.is_empty() {
+        syntax
+            .into_iter()
+            .map(|(r, color)| {
+                let mut sp = Span::new(r.start, r.end);
+                sp.color = Some(color);
+                sp
+            })
+            .collect()
+    } else {
+        segments(c.text.len(), &syntax, hits)
+            .into_iter()
+            .map(|(r, color, hit)| {
+                let mut sp = Span::new(r.start, r.end);
+                sp.color = color;
+                match hit {
+                    Some(true) => sp.bg(l.find_focus, 2.0),
+                    Some(false) => sp.bg(l.find_match, 2.0),
+                    None => sp,
+                }
+            })
+            .collect()
+    };
     let (shown, spans, pads) = tabbed(c.text, spans, st.wraps());
     let mut t = rich(shown, spans).font(l.code).color(l.fg).key("text").selectable(true).selection_color(l.selection);
     t = if st.wraps() { t.w_full() } else { t.single_line() };
@@ -392,15 +455,50 @@ fn code(st: &DiffState, l: &Look, f: usize, c: &Cell<'_>, side: Side) -> El {
     code
 }
 
+/// `text`'s pieces split at syntax and find boundaries: each piece's colour and whether it is a
+/// match (`Some(true)` for the current one). Text layout takes spans that do not overlap.
+fn segments(len: usize, syntax: &[(Range<usize>, Color)], hits: &[(Range<usize>, bool)]) -> Vec<(Range<usize>, Option<Color>, Option<bool>)> {
+    let mut cuts: Vec<usize> = syntax.iter().flat_map(|(r, _)| [r.start, r.end]).chain(hits.iter().flat_map(|(r, _)| [r.start, r.end])).filter(|&b| b <= len).collect();
+    cuts.sort_unstable();
+    cuts.dedup();
+    cuts.windows(2)
+        .filter_map(|w| {
+            let (a, b) = (w[0], w[1]);
+            let color = syntax.iter().find(|(r, _)| r.start <= a && b <= r.end).map(|(_, c)| *c);
+            let hit = hits.iter().find(|(r, _)| r.start <= a && b <= r.end).map(|(_, current)| *current);
+            (color.is_some() || hit.is_some()).then_some((a..b, color, hit))
+        })
+        .collect()
+}
+
 fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
     l.number_w(st.digits(f))
 }
 
 /// The unchanged lines folded away before a hunk: "N unmodified lines".
 fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
-    let n = st.hidden(f, h);
+    let n = st.remaining(f, h);
     let label = if n == 1 { "1 unmodified line".to_owned() } else { format!("{n} unmodified lines") };
-    let mut inner = row().key("inner").h(SEP_H).items_center().pl(gutter_w(st, l, f) + CODE_PAD.0).child(text(label.clone()).font(l.small).color(l.sep_fg));
+    let mut cell = row().key("expand").w(gutter_w(st, l, f)).h(SEP_H).center().gap(2.0);
+    if st.expandable {
+        use super::Expand;
+        let tail = h == st.files()[f].hunks.len();
+        let mut buttons: Vec<(&'static str, &'static str, &'static Icon, Expand)> = vec![];
+        if n <= super::EXPAND_STEP {
+            buttons.push(("all", "Expand all lines", &icons::CHEVRONS_UP_DOWN, Expand::All));
+        } else {
+            if h > 0 {
+                buttons.push(("down", "Expand down", &icons::ARROW_DOWN, Expand::Down));
+            }
+            if !tail {
+                buttons.push(("up", "Expand up", &icons::ARROW_UP, Expand::Up));
+            }
+        }
+        for (key, label, glyph, how) in buttons {
+            cell = cell.child(micro(l, key, label, glyph, 14.0, l.sep_fg).on_press(move |s: &mut App| super::expand(s, f, h, how)));
+        }
+    }
+    let mut inner = row().key("inner").h(SEP_H).items_center().child(cell).child(text(label.clone()).font(l.small).color(l.sep_fg).pl(CODE_PAD.0));
     if let Some(w) = view_w(st) {
         inner = inner.w(w).sticky_left(0.0);
     }
@@ -598,6 +696,13 @@ mod tests {
         let grey = mix(black, white, 0.5);
         assert!((grey.r - 0.2140).abs() < 0.001, "{}", grey.r);
         assert_eq!(mix(black, white, 1.0).r, 0.0);
+    }
+
+    #[test]
+    fn find_matches_split_syntax_spans_without_overlap() {
+        let red = Color { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        let got = segments(10, &[(0..6, red)], &[(4..8, true)]);
+        assert_eq!(got.iter().map(|(r, c, h)| (r.clone(), c.is_some(), *h)).collect::<Vec<_>>(), [(0..4, true, None), (4..6, true, Some(true)), (6..8, false, Some(true))]);
     }
 
     #[test]
