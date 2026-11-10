@@ -1885,7 +1885,8 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         }
         for (label, primary, run) in &notice.actions {
             let run = run.clone();
-            toast = toast.action(&kit::theme(t), label, *primary, move |s: &mut App, tx: &mut Tx| run(s, tx));
+            let button = kit::Button::new(label.clone()).variant(if *primary { "default" } else { "outline" }).size("xs").build(t);
+            toast = toast.button(*primary, button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)));
         }
         if notice.error {
             toast = toast
