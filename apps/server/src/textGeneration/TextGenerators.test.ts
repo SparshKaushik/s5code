@@ -57,15 +57,20 @@ it.effect.each([
   },
 ] as const)("$kind generates structured text with its API's request shape", (api) =>
   Effect.gen(function* () {
-    const upstream = vi.fn<typeof fetch>(async (url, init) => {
-      expect(new URL(String(url)).pathname).toBe(api.path);
-      expect(init?.redirect).toBe("error");
-      expect(new Headers(init?.headers).get(api.auth[0])).toBe(api.auth[1]);
-      const body = JSON.parse(String(init?.body));
-      expect(body.model).toBe("some/model");
-      expect(body.messages).toEqual([{ role: "user", content: "Name this thread." }]);
-      return Response.json(api.reply);
-    });
+    const upstream = vi.fn<typeof fetch>(
+      Object.assign(
+        async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          expect(new URL(String(url)).pathname).toBe(api.path);
+          expect(init?.redirect).toBe("error");
+          expect(new Headers(init?.headers).get(api.auth[0])).toBe(api.auth[1]);
+          const body = JSON.parse(String(init?.body));
+          expect(body.model).toBe("some/model");
+          expect(body.messages).toEqual([{ role: "user", content: "Name this thread." }]);
+          return Response.json(api.reply);
+        },
+        { preconnect: () => {} },
+      ),
+    );
     const generators = yield* TextGenerators.TextGenerators.pipe(
       Effect.provide(layer({ kind: api.kind, apiKey: "secret" })),
     );
@@ -104,17 +109,22 @@ it.effect("a turned-off text generator fails instead of calling its API", () =>
 
 it.effect("lists models once per config, following Anthropic pagination, until refreshed", () =>
   Effect.gen(function* () {
-    const upstream = vi.fn<typeof fetch>(async (url) => {
-      const parsed = new URL(String(url));
-      expect(parsed.pathname).toBe("/v1/models");
-      return parsed.searchParams.get("after_id") === "claude-b"
-        ? Response.json({ data: [{ id: "claude-a" }], has_more: false })
-        : Response.json({
-            data: [{ id: "claude-b", display_name: "Claude B" }],
-            has_more: true,
-            last_id: "claude-b",
-          });
-    });
+    const upstream = vi.fn<typeof fetch>(
+      Object.assign(
+        async (url: Parameters<typeof fetch>[0]) => {
+          const parsed = new URL(String(url));
+          expect(parsed.pathname).toBe("/v1/models");
+          return parsed.searchParams.get("after_id") === "claude-b"
+            ? Response.json({ data: [{ id: "claude-a" }], has_more: false })
+            : Response.json({
+                data: [{ id: "claude-b", display_name: "Claude B" }],
+                has_more: true,
+                last_id: "claude-b",
+              });
+        },
+        { preconnect: () => {} },
+      ),
+    );
     const program = Effect.gen(function* () {
       const generators = yield* TextGenerators.TextGenerators;
       const settings = yield* ServerSettings.ServerSettingsService;
@@ -153,15 +163,20 @@ it.effect("lists models once per config, following Anthropic pagination, until r
 it.effect("checks unsaved settings, keeping the saved key behind a redaction marker", () =>
   Effect.gen(function* () {
     const seen: Array<{ url: string; auth: string | null }> = [];
-    const upstream = vi.fn<typeof fetch>(async (url, init) => {
-      seen.push({ url: String(url), auth: new Headers(init?.headers).get("authorization") });
-      return String(url).endsWith("/chat/completions")
-        ? Response.json({
-            model: JSON.parse(String(init?.body)).model,
-            choices: [{ finish_reason: "stop", message: { content: "OK" } }],
-          })
-        : Response.json({ data: [{ id: "model-a" }] });
-    });
+    const upstream = vi.fn<typeof fetch>(
+      Object.assign(
+        async (url: Parameters<typeof fetch>[0], init?: Parameters<typeof fetch>[1]) => {
+          seen.push({ url: String(url), auth: new Headers(init?.headers).get("authorization") });
+          return String(url).endsWith("/chat/completions")
+            ? Response.json({
+                model: JSON.parse(String(init?.body)).model,
+                choices: [{ finish_reason: "stop", message: { content: "OK" } }],
+              })
+            : Response.json({ data: [{ id: "model-a" }] });
+        },
+        { preconnect: () => {} },
+      ),
+    );
     const generators = yield* TextGenerators.TextGenerators.pipe(
       Effect.provide(layer({ apiKey: "saved-key" })),
     );
