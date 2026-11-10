@@ -157,6 +157,7 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
     settings::fonts::follow(s, tx);
     changed |= chat::timeline::poll(s);
     changed |= chat::composer::poll(s);
+    changed |= chat::remember_route(s);
     changed |= shell::palette::poll(s);
     changed |= shell::sidebar::poll(s);
     changed |= pages::poll(s);
@@ -180,6 +181,11 @@ fn poll(s: &mut App, _: f64, tx: &mut Tx) -> bool {
 }
 
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
+    // Lone modifiers only drive the pull request rows' Shift actions; the other handlers predate
+    // them (the sidebar would hand mod+z back to text fields on the Cmd press alone).
+    if matches!(e.key, rune::Key::Modifier { .. }) {
+        return pages::on_modifier(s, e);
+    }
     shell::quit::on_key(s, e, tx)
         || search::on_key(s, e, tx)
         || settings::on_key(s, e, tx)
@@ -234,7 +240,7 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
-    let app = desktop::configure(RuneApp::new(spec)).on_open_url(links::on_open_url);
+    let app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
     notify::set_window(app.handle());
     instance.serve(app.handle());
     app.run();

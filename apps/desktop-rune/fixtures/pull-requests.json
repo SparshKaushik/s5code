@@ -53,6 +53,7 @@
    "projectTitle": "s5code",
    "repository": "s5labs/s5code",
    "number": 2476,
+   "stack": {"number": 12, "position": 1, "size": 2, "base": "main"},
    "title": "fix(server): checkpoint refs survive a worktree rename",
    "url": "https://github.com/s5labs/s5code/pull/2476",
    "author": {
@@ -117,6 +118,7 @@
    "projectTitle": "s5code",
    "repository": "s5labs/s5code",
    "number": 2479,
+   "stack": {"number": 12, "position": 2, "size": 2, "base": "main"},
    "title": "perf(web): virtualize the diff file tree",
    "url": "https://github.com/s5labs/s5code/pull/2479",
    "author": {

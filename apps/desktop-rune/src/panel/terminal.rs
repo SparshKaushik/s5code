@@ -45,6 +45,8 @@ pub struct Session {
     pub hover: Option<Link>,
     /// The grid the viewport fits, re-sent after an attach snapshot brings the server's own.
     fit: Option<(usize, usize)>,
+    /// The PTY's grid, from the attach snapshot and later activity.
+    grid: Option<(usize, usize)>,
     /// Set once the drawer has acted on the session ending.
     pub ended: bool,
     exit_noted: bool,
@@ -74,6 +76,7 @@ impl Session {
             press: None,
             hover: None,
             fit: None,
+            grid: None,
             ended: false,
             exit_noted: false,
             notify_at: None,
@@ -81,6 +84,26 @@ impl Session {
             attached: false,
             queued: None,
         }
+    }
+
+    /// The grid to draw: the viewport's fit, never past the PTY's own (`applyGrid` in the web's
+    /// ghostty surface), so a wider view waits for the shell instead of reflowing ahead of it.
+    fn drawn(&self) -> Option<(usize, usize)> {
+        match (self.fit, self.grid) {
+            (Some((c, r)), Some((gc, gr))) => Some((c.min(gc), r.min(gr))),
+            (fit, grid) => fit.or(grid),
+        }
+    }
+
+    fn apply_grid(&mut self) {
+        if let Some(size) = self.drawn().filter(|size| *size != self.vt.size()) {
+            self.vt.resize(size.0, size.1);
+        }
+    }
+
+    /// The PTY hears the fit once it settles, unless it already has it.
+    fn schedule_notify(&mut self) {
+        self.notify_at = (self.fit.is_some() && self.fit != self.grid).then(|| Instant::now() + RESIZE_SETTLE);
     }
 
     /// The session's own label, else "Terminal N" from its id (`getTerminalLabel`).
@@ -275,14 +298,18 @@ fn resize(app: &mut App, thread: &str, id: &str, cols: usize, rows: usize) {
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return;
     };
-    session.fit = Some((cols, rows));
-    // Recorded sessions keep the grid they were captured at.
-    if session.vt.size() == (cols, rows) || session.payload.is_none() {
+    if session.fit == Some((cols, rows)) {
         return;
     }
-    // The grid reflows now; the shell only hears settled sizes so a drag doesn't reprint its prompt.
-    session.vt.resize(cols, rows);
-    session.notify_at = Some(Instant::now() + RESIZE_SETTLE);
+    session.fit = Some((cols, rows));
+    // Recorded sessions keep the grid they were captured at.
+    if session.payload.is_none() {
+        return;
+    }
+    // A narrower grid reflows now; the shell only hears settled sizes so a drag doesn't reprint
+    // its prompt.
+    session.apply_grid();
+    session.schedule_notify();
 }
 
 pub fn palette(t: &T) -> Palette {
@@ -331,7 +358,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     });
     let mut writes = vec![];
     let mut ended = vec![];
-    let mut refit = vec![];
     let mut notify = vec![];
     for index in 0..app.ui.panel.terminal.sessions.len() {
         let payload = app.ui.panel.terminal.sessions[index].payload.clone();
@@ -343,11 +369,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         for event in &events {
             apply(session, event);
             changed = true;
-            if data::s(event, "type") == "snapshot"
-                && let Some((cols, rows)) = session.fit
-            {
-                refit.push((session.thread.clone(), session.id.clone(), cols, rows));
-            }
             if session.attached
                 && let Some(queued) = session.queued.take()
             {
@@ -388,8 +409,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             let now = Instant::now();
             if now >= at {
                 session.notify_at = None;
-                let (cols, rows) = session.vt.size();
-                notify.push((session.thread.clone(), session.id.clone(), cols, rows));
+                if let Some((cols, rows)) = session.fit {
+                    notify.push((session.thread.clone(), session.id.clone(), cols, rows));
+                }
             } else {
                 tx.wake_after(at - now);
             }
@@ -406,9 +428,6 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     }
     for (thread, id, data) in writes {
         send(app, &thread, &id, data);
-    }
-    for (thread, id, cols, rows) in refit {
-        resize(app, &thread, &id, cols, rows);
     }
     for (thread, id) in ended {
         super::drawer::session_ended(app, &thread, &id);
@@ -441,9 +460,11 @@ fn apply(session: &mut Session, event: &Value) {
     match kind {
         "snapshot" | "restarted" => {
             let snapshot = &event["snapshot"];
-            let (cols, rows) = session.vt.size();
-            let cols = snapshot["cols"].as_u64().map_or(cols, |v| v as usize);
-            let rows = snapshot["rows"].as_u64().map_or(rows, |v| v as usize);
+            if let (Some(cols), Some(rows)) = (snapshot["cols"].as_u64(), snapshot["rows"].as_u64()) {
+                session.grid = Some((cols as usize, rows as usize));
+            }
+            // History replays at the grid it will be drawn at, as web's surface does.
+            let (cols, rows) = session.drawn().unwrap_or(session.vt.size());
             session.vt = Vt::new(cols, rows);
             session.vt.feed(data::s(snapshot, "history"));
             session.vt.flush_sync(true);
@@ -460,12 +481,15 @@ fn apply(session: &mut Session, event: &Value) {
             session.ended = false;
             session.running = snapshot["hasRunningSubprocess"] == true;
             session.attached = true;
+            // A new attach hears the fit again (`resendSize`).
+            session.schedule_notify();
             note_exit(session);
         }
         "activity" => {
             session.running = event["hasRunningSubprocess"] == true;
             if let (Some(cols), Some(rows)) = (event["cols"].as_u64(), event["rows"].as_u64()) {
-                session.vt.resize(cols as usize, rows as usize);
+                session.grid = Some((cols as usize, rows as usize));
+                session.apply_grid();
             }
         }
         "output" => session.vt.feed(data::s(event, "data")),
@@ -588,6 +612,9 @@ fn key(app: &mut App, tx: &mut Tx, thread: &str, id: &str, e: &KeyEvent) -> bool
     let Some(session) = app.ui.panel.terminal.get_mut(thread, id) else {
         return false;
     };
+    if session.vt.history_key(e, cfg!(target_os = "macos")) {
+        return true;
+    }
     match session.vt.key(e) {
         Some(data) => {
             session.vt.clear_selection();
@@ -605,7 +632,7 @@ struct Metrics {
 }
 
 fn metrics(app: &App) -> Metrics {
-    let size = crate::settings::fonts::terminal_size(&app.client_settings.values);
+    let size = font_size(&app.client_settings.values);
     let cell_h = (size * 1.35).round().max(1.);
     let font = theme::mono(rune::TextStyle::new(size, 400.)).lh(cell_h);
     let cell_w = rune::text::advance("MMMMMMMMMM", font) / 10.;
@@ -614,6 +641,17 @@ fn metrics(app: &App) -> Metrics {
         cell_w: if cell_w > 0. { cell_w } else { size * 0.6 },
         cell_h,
     }
+}
+
+fn in_preview(settings: &serde_json::Map<String, Value>, url: &str, force_browser: bool) -> bool {
+    let web = url.starts_with("http://") || url.starts_with("https://");
+    web && !force_browser && settings.get("browserLinkTarget").and_then(Value::as_str) == Some("app")
+}
+
+/// The code font size, or the terminal's own under advanced typography
+/// (`resolveTerminalFontSizePreference`), in units of the root's interface scale.
+fn font_size(settings: &serde_json::Map<String, Value>) -> f32 {
+    crate::settings::fonts::terminal_size(settings)
 }
 
 fn cell_at(app: &App, thread: &str, id: &str, x: f32, y: f32) -> (usize, usize) {
@@ -687,11 +725,16 @@ fn path_target(text: &str, cwd: &str) -> PathTarget {
     }
 }
 
-/// Opens a clicked link: URLs in the browser, workspace files in the Files panel, other paths
-/// in the preferred editor (`handleLinkActivate`).
-fn open_link(app: &mut App, tx: &mut Tx, link: &Link) {
+/// Opens a clicked link: URLs in the preview when links open in the app (Cmd or Ctrl still
+/// picks the system browser), workspace files in the Files panel, other paths in the preferred
+/// editor (`handleLinkActivate`, `openTerminalLinkInPreview`).
+fn open_link(app: &mut App, tx: &mut Tx, link: &Link, force_browser: bool) {
     if link.kind == links::Kind::Url {
-        let _ = tx.open_url(&link.text);
+        if in_preview(&app.client_settings.values, &link.text, force_browser) && super::context(app).is_some() {
+            super::open_preview(app, &link.text);
+        } else {
+            let _ = tx.open_url(&link.text);
+        }
         return;
     }
     let Some((_, cwd)) = super::context(app) else {
@@ -1005,7 +1048,7 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
                 session.button = None;
                 report = session.vt.mouse(MouseButton::Left, false, false, col, row, mods);
             }
-            Some(Press::Link(link)) if !d.cancelled() => open = Some(link),
+            Some(Press::Link(link)) if !d.cancelled() => open = Some((link, mods.ctrl || mods.cmd)),
             Some(Press::Select { by: SelectBy::Cell, moved: false }) => session.vt.clear_selection(),
             _ => {}
         },
@@ -1013,8 +1056,8 @@ fn drag(s: &mut App, tx: &mut Tx, thread: &str, id: &str, d: &mut rune::Drag) {
     if let Some(data) = report {
         send(s, thread, id, data);
     }
-    if let Some(link) = open {
-        open_link(s, tx, &link);
+    if let Some((link, force_browser)) = open {
+        open_link(s, tx, &link, force_browser);
     }
 }
 
@@ -1086,6 +1129,19 @@ mod tests {
     use super::*;
 
     #[test]
+    fn links_and_fonts_follow_the_settings() {
+        let settings = |v: Value| v.as_object().cloned().unwrap();
+        let app = settings(json!({"browserLinkTarget": "app"}));
+        assert!(in_preview(&app, "https://example.com", false));
+        assert!(!in_preview(&app, "https://example.com", true));
+        assert!(!in_preview(&app, "file:///tmp/a", false));
+        assert!(!in_preview(&settings(json!({"browserLinkTarget": "system"})), "https://example.com", false));
+        assert_eq!(font_size(&settings(json!({}))), 13.);
+        assert_eq!(font_size(&settings(json!({"fontSizeCode": 15, "fontSizeTerminal": 10}))), 15.);
+        assert_eq!(font_size(&settings(json!({"typographyAdvanced": true, "fontSizeCode": 15, "fontSizeTerminal": 10}))), 10.);
+    }
+
+    #[test]
     fn presses_on_the_grid_select_by_drag_and_a_click_clears() {
         fn view(s: &App, _: &mut rune::Cx<App>) -> El {
             el().size(600., 300.).child(viewport(s, &theme::theme(true), "t", "term-1"))
@@ -1133,6 +1189,13 @@ mod tests {
             &json!({"type":"activity","sequence":13,"cols":100,"rows":30}),
         );
         assert_eq!(session.vt.size(), (100, 30));
+        // A wider view waits for the PTY's grid; a narrower one reflows at once (`applyGrid`).
+        session.fit = Some((120, 40));
+        session.apply_grid();
+        assert_eq!(session.vt.size(), (100, 30));
+        session.fit = Some((90, 20));
+        session.apply_grid();
+        assert_eq!(session.vt.size(), (90, 20));
         apply(
             &mut session,
             &json!({"type":"snapshot","snapshot":{"history":"resumed","sequence":20}}),

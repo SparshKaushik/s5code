@@ -75,6 +75,47 @@ fn error(app: &mut App) {
         }
     }
 }
+/// The showcase thread with a failed latest run whose root error is `failure`.
+fn failed_run(app: &mut App, failure: serde_json::Value) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        let p = &mut v.projection;
+        let run = serde_json::json!({"id": "scene-run", "ordinal": 999, "status": "failed", "rootNodeId": "scene-root",
+            "startedAt": "2026-12-01T00:00:00.000Z", "completedAt": "2026-12-01T00:00:01.000Z"});
+        let item = serde_json::json!({"id": "scene-failure", "type": "error", "status": "failed", "runId": "scene-run", "nodeId": "scene-root",
+            "ordinal": 1, "updatedAt": "2026-12-01T00:00:01.000Z", "failure": failure});
+        for (key, value) in [("runs", run), ("turnItems", item)] {
+            match p[key].as_array_mut() {
+                Some(list) => list.push(value),
+                None => p[key] = serde_json::json!([value]),
+            }
+        }
+    }
+}
+fn error_banner(app: &mut App) {
+    failed_run(app, serde_json::json!({"class": "provider_error", "code": null, "retryable": false,
+        "message": "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\",\"message\":\"Overloaded: the provider is temporarily unable to take requests.\"},\"request_id\":\"req_011CScene\"}"}));
+}
+fn error_banner_chatgpt(app: &mut App) {
+    failed_run(app, serde_json::json!({"class": "provider_error", "retryable": false,
+        "code": "subscription_sharing_workplace_individual_usage_limit_exceeded", "message": "You've hit your usage limit."}));
+}
+fn system_notification(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["visibleTurnItems"].as_array_mut())
+    {
+        for (n, (kind, summary)) in [("system", "T3 Code restarted and resumed this turn"), ("command", "Background command finished")].into_iter().enumerate() {
+            items.push(serde_json::json!({"position": 100 + n, "item": {"id": format!("scene-notification-{kind}"), "type": "notification",
+                "status": "completed", "outcome": "updated", "source": {"kind": kind}, "summary": summary, "detail": "Continue",
+                "createdAt": "2026-01-01T00:00:00Z"}}));
+        }
+    }
+}
 fn chip_details(app: &mut App) {
     showcase(app);
     let Route::Thread(id) = app.route.clone() else { return };
@@ -98,6 +139,9 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-pending-approval", pending),
     ("timeline-question", question),
     ("timeline-error", error),
+    ("timeline-error-banner", error_banner),
+    ("timeline-error-banner-chatgpt", error_banner_chatgpt),
+    ("timeline-system-notification", system_notification),
     ("timeline-working", working),
     ("timeline-showcase", showcase),
     ("timeline-todo", todo),

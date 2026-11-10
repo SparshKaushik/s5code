@@ -1,0 +1,33 @@
+{
+  "stack": {
+    "id": "stack_12",
+    "number": 12,
+    "url": "https://github.com/s5labs/s5code/stacks/12",
+    "base": "main",
+    "layers": [
+      {
+        "number": 2476,
+        "title": "fix(server): checkpoint refs survive a worktree rename",
+        "isDraft": false,
+        "headSha": "4f1c9a2e7d3b8a6c5e0f1d2b3a4c5d6e7f8a9b0c",
+        "headBranch": "fix/checkpoint-rename",
+        "state": "open"
+      },
+      {
+        "number": 2479,
+        "title": "perf(web): virtualize the diff file tree",
+        "isDraft": false,
+        "headSha": "9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b",
+        "headBranch": "perf/diff-tree",
+        "state": "open"
+      }
+    ]
+  },
+  "changeBreakdown": {
+    "code": { "additions": 1290, "deletions": 30 },
+    "tests": { "additions": 402, "deletions": 5 },
+    "mocks": { "additions": 0, "deletions": 0 },
+    "generated": { "additions": 96, "deletions": 0 },
+    "docs": { "additions": 54, "deletions": 2 }
+  }
+}

@@ -24,7 +24,7 @@ fn areas(s: &App) -> Vec<Area> {
 }
 
 fn composer_key(s: &App) -> String {
-    composer::draft_key(s.frame_route())
+    composer::draft_key(s, s.frame_route())
 }
 
 fn current(s: &App) -> Option<Area> {
