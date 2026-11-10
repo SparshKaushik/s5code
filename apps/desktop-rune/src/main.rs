@@ -186,6 +186,7 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if matches!(e.key, rune::Key::Modifier { .. }) {
         return pages::on_modifier(s, e);
     }
+    panel::preview::note_focus(s, tx);
     shell::quit::on_key(s, e, tx)
         || search::on_key(s, e, tx)
         || settings::on_key(s, e, tx)
@@ -240,7 +241,8 @@ fn main() {
         scenes: scenes(),
         ..AppSpec::new("S5 Code", desktop::initial_size(), App::new, view)
     };
-    let app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
+    let mut app = desktop::configure(RuneApp::new(spec).modifier_keys()).on_open_url(links::on_open_url);
+    panel::popout::register(&mut app);
     notify::set_window(app.handle());
     instance.serve(app.handle());
     app.run();

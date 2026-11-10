@@ -18,6 +18,9 @@ use crate::{App, Route};
 
 #[cfg(target_os = "macos")]
 pub const APP_NAME: &str = "S5 Code";
+/// The window's Wayland `app_id` / X11 `WM_CLASS`, the macOS bundle id, and the name of the
+/// Linux launcher entry (`assets/<APP_ID>.desktop`), so docks match the window to it.
+pub const APP_ID: &str = "in.newsa.s5code.rune-prototype";
 /// Electron's `minWidth`/`minHeight`.
 pub const MIN_SIZE: (f32, f32) = (840.0, 620.0);
 const DEFAULT_SIZE: (f32, f32) = (1440.0, 900.0);
@@ -48,6 +51,22 @@ impl Ui {
     fn zoom_factor(&self) -> f32 {
         1.2f32.powf(self.zoom_level)
     }
+
+    fn set_zoom_level(&mut self, level: f32) {
+        self.zoom_level = level;
+        ZOOM.with(|z| z.set(self.zoom_factor()));
+    }
+}
+
+thread_local! {
+    /// The app zoom, for code that holds window points but no `App`.
+    static ZOOM: Cell<f32> = const { Cell::new(1.0) };
+}
+
+/// Window points (`PointerPress`, a context menu's anchor) to the zoomed app's layout points.
+pub fn from_window(x: f32, y: f32) -> (f32, f32) {
+    let k = ZOOM.with(Cell::get);
+    (x / k, y / k)
 }
 
 /// Window state that outlives a launch: the app zoom everywhere, the window size where Rune
@@ -76,6 +95,7 @@ fn restore_size(saved: Option<[f32; 2]>) -> (f32, f32) {
 
 /// The app's menu, chrome and window behaviour.
 pub fn configure(app: RuneApp<App>) -> RuneApp<App> {
+    rune::set_app_id(APP_ID);
     // Electron's `trafficLightPosition` under its 52 pt topbar; the titlebar band drags.
     let app = app.chrome(rune::Chrome { full_size_content: true, traffic_lights: Some((16.0, 19.0)), drag_regions: false });
     #[cfg(target_os = "macos")]
@@ -133,11 +153,19 @@ fn reload(s: &mut App, force: bool) {
         ui.settings = Default::default();
         ui.settings.return_route = return_route;
     }
-    if let (Some((url, token)), Some(waker)) = (s.ui.desktop.server.clone(), s.ui.panel.waker.clone()) {
-        *crate::env::local_mut(s) = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
+    if let (Some((url, token)), Some(waker)) = (reload_target(s), s.ui.panel.waker.clone()) {
+        s.src = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
     }
     let route = s.route.clone();
     s.navigate(route);
+}
+
+/// The server on screen (`App::src`): this machine's, or the saved environment switched to.
+fn reload_target(s: &App) -> Option<(String, String)> {
+    if s.ui.env.active == crate::env::LOCAL {
+        return s.ui.desktop.server.clone();
+    }
+    s.ui.env.saved.iter().find(|e| e.id == s.ui.env.active).map(|e| (e.base.clone(), e.bearer.clone()))
 }
 
 /// View › Actual Size (`None`), Zoom In and Zoom Out.
@@ -146,7 +174,7 @@ fn zoom(s: &mut App, tx: &mut Tx, step: Option<f32>) {
     if level == s.ui.desktop.zoom_level {
         return;
     }
-    s.ui.desktop.zoom_level = level;
+    s.ui.desktop.set_zoom_level(level);
     tx.instant();
     let _ = prefs().set("zoomLevel", &level);
 }
@@ -178,7 +206,7 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         ui.prefs_loaded = true;
         let prefs = prefs();
         let level = prefs.get::<f32>("zoomLevel").unwrap_or(0.0);
-        ui.zoom_level = if level.is_finite() { level.clamp(ZOOM_LEVELS.0, ZOOM_LEVELS.1) } else { 0.0 };
+        ui.set_zoom_level(if level.is_finite() { level.clamp(ZOOM_LEVELS.0, ZOOM_LEVELS.1) } else { 0.0 });
         ui.saved_size = prefs.get("windowSize");
         changed = ui.zoom_level != 0.0;
     }
@@ -230,6 +258,27 @@ pub fn frame(s: &App, cx: &mut Cx<App>, mut app: El) -> El {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn reload_reconnects_the_environment_on_screen() {
+        let mut s = App::new();
+        s.ui.desktop.server = Some(("http://127.0.0.1:1".into(), "local".into()));
+        let remote = crate::env::Saved { id: "a".into(), label: "A".into(), base: "https://a.example".into(), bearer: "remote".into() };
+        s.ui.env.saved.push(remote);
+        assert_eq!(reload_target(&s), Some(("http://127.0.0.1:1".into(), "local".into())));
+        s.ui.env.active = "a".into();
+        assert_eq!(reload_target(&s), Some(("https://a.example".into(), "remote".into())));
+    }
+
+    #[test]
+    fn pointer_menus_map_window_points_into_the_zoomed_app() {
+        let mut ui = Ui::default();
+        ui.set_zoom_level(1.0);
+        let (x, y) = from_window(1200.0, 240.0);
+        assert!((x - 1000.0).abs() < 1e-3 && (y - 200.0).abs() < 1e-3);
+        ui.set_zoom_level(0.0);
+        assert_eq!(from_window(1200.0, 240.0), (1200.0, 240.0));
+    }
 
     #[test]
     fn restored_size_keeps_the_minimum_and_ignores_garbage() {

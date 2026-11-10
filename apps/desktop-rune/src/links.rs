@@ -1,4 +1,4 @@
-//! Prompt links (packages/shared/src/promptLinks.ts): `t3code://new?prompt=…&repo=owner/name`,
+//! Prompt links (packages/shared/src/promptLinks.ts): `s5code://new?prompt=…&repo=owner/name`,
 //! or the hosted app's `/new?…`, open a new-thread draft holding the prompt on the repository's
 //! project. Nothing is sent; the person reads the prompt in the composer first. They arrive on
 //! the command line (Linux and Windows hand links to a new process) or through macOS's
@@ -74,7 +74,11 @@ fn repository(value: &str) -> Option<(String, String)> {
 /// prompt link at all; thread links and pull-request links are not handled here.
 pub fn parse(url: &str) -> Option<Result<NewThread, String>> {
     let parsed = s5_net::url::Url::parse(url.trim()).ok()?;
-    let app_scheme = parsed.scheme() == "t3code" || parsed.scheme().strip_prefix("t3code-").is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase()));
+    // `APP_SCHEME`: this fork's `s5code://` (what the app registers) or upstream's `t3code://`.
+    let app_scheme = ["s5code", "t3code"].iter().any(|app| {
+        let scheme = parsed.scheme().strip_prefix(app);
+        scheme == Some("") || scheme.and_then(|s| s.strip_prefix('-')).is_some_and(|s| !s.is_empty() && s.chars().all(|c| c.is_ascii_lowercase()))
+    });
     let is_new = if app_scheme {
         parsed.host_str() == Some("new") && matches!(parsed.path(), "" | "/")
     } else {
@@ -175,6 +179,9 @@ mod tests {
         assert_eq!(link, NewThread { prompt: "Fix the tests".into(), repository: Some(("pingdotgg".into(), "t3code".into())) });
         assert_eq!(ok("https://app.t3.codes/new?prompt=hi&repo=https://github.com/a/b.git").repository, Some(("a".into(), "b".into())));
         assert_eq!(ok("t3code-dev://new/?prompt=%20hi%E2%80%8B%20").prompt, "hi");
+        assert_eq!(ok("s5code://new?prompt=hi").prompt, "hi");
+        assert_eq!(ok("s5code-dev://new?prompt=hi").prompt, "hi");
+        assert!(parse("s5codex://new?prompt=hi").is_none());
         assert_eq!(ok("t3code://new?prompt=a%0D%0Ab").prompt, "a\nb");
         assert_eq!(ok("t3code://new?prompt=%F0%9F%91%A9%E2%80%8D%F0%9F%92%BB").prompt, "\u{1F469}\u{200D}\u{1F4BB}");
         let err = |url: &str| parse(url).expect("a prompt link").unwrap_err();
