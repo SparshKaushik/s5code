@@ -166,7 +166,8 @@ fn go(app: &mut App, tx: &mut Tx, j: usize) {
     }
     let ui = &mut app.ui.panel.diff;
     if let Some(r) = ui.state.row_at(hit.f, hit.side, hit.line) {
-        ui.state.reveal_row(r, tx);
+        // Two rows of headroom keep the match clear of the floating find bar.
+        ui.state.reveal_row(r.saturating_sub(2), tx);
     }
     paint(app);
 }

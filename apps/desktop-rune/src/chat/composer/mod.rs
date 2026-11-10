@@ -631,7 +631,8 @@ pub fn remove_context(s: &mut App, thread: &str, context_id: &str) {
     for pill in &pills {
         let range = d.edit.pills().find(|(_, id)| id == pill).map(|(r, _)| r);
         if let Some(range) = range {
-            d.edit.set_selection(range.start, range.end);
+            let end = range.end + usize::from(d.edit.text[range.end..].starts_with(' '));
+            d.edit.set_selection(range.start, end);
             d.edit.insert("");
         }
     }
@@ -1436,6 +1437,19 @@ mod tests {
         assert!(upload(notes.to_str().unwrap()).is_none());
         assert!(upload(dir.join("gone.png").to_str().unwrap()).is_none());
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn removing_a_context_takes_its_pill_and_trailing_space() {
+        let mut s = App::new();
+        let record = chips::terminal("term-1", "Terminal 1", 1, 2, "ls");
+        let id = data::s(&record, "contextId").to_owned();
+        add_thread_context(&mut s, "t1", record);
+        assert_eq!(thread_contexts(&s, "t1").len(), 1);
+        remove_context(&mut s, "t1", &id);
+        let d = &s.ui.chat.composer.drafts["t1"];
+        assert_eq!(d.edit.text, "");
+        assert!(d.contexts.is_empty());
     }
 
     #[test]
