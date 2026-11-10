@@ -935,6 +935,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     }
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
+    crate::desktop::exposure::confirm(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
     browser_profiles::overlays(s, t, cx.env().scale, &mut overlays);
     scope::menu(s, t, &mut overlays);

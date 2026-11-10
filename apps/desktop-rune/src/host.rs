@@ -32,6 +32,8 @@ const EXIT_MANAGED_POLICY: i32 = 77;
 struct Supervisor {
     child: Mutex<Option<Child>>,
     stopping: AtomicBool,
+    /// The next exit is `restart`'s: start again at once.
+    restarting: AtomicBool,
 }
 
 static SUPERVISOR: Mutex<Option<Arc<Supervisor>>> = Mutex::new(None);
@@ -82,7 +84,7 @@ fn launch(wake: impl Fn() + Send + Sync + 'static) -> Option<Receiver<Event>> {
         return Some(rx);
     }
     let binary = bundled_binary()?;
-    let sup = Arc::new(Supervisor { child: Mutex::new(None), stopping: AtomicBool::new(false) });
+    let sup = Arc::new(Supervisor { child: Mutex::new(None), stopping: AtomicBool::new(false), restarting: AtomicBool::new(false) });
     *SUPERVISOR.lock().unwrap() = Some(sup.clone());
     std::thread::spawn(move || supervise(binary, sup, tx, wake));
     Some(rx)
@@ -126,7 +128,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "noBrowser": true,
             "port": p,
             "t3Home": home.to_string_lossy(),
-            "host": "127.0.0.1",
+            "host": crate::desktop::exposure::bind_host(),
             "desktopBootstrapToken": credential,
             "tailscaleServeEnabled": false,
             "tailscaleServePort": 443,
@@ -173,6 +175,11 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         sup.child.lock().unwrap().take();
         if sup.stopping.load(Ordering::SeqCst) {
             return;
+        }
+        if sup.restarting.swap(false, Ordering::SeqCst) {
+            log(&log_path, "restarting for a settings change");
+            attempt = 0;
+            continue;
         }
         let code = exit.and_then(|s| s.code());
         if code == Some(EXIT_STATE_DIR_OWNED) {
@@ -241,6 +248,19 @@ fn terminate(sup: &Supervisor) {
     let _ = child.kill();
     let _ = child.wait();
     guard.take();
+}
+
+/// Whether this window runs the bundled server, so its settings apply.
+pub fn managed() -> bool {
+    SUPERVISOR.lock().unwrap().is_some()
+}
+
+/// Restart the bundled server on its port, as Electron's relaunch after an exposure change.
+/// Clients resume their sessions once it answers again.
+pub fn restart() {
+    let Some(sup) = SUPERVISOR.lock().unwrap().clone() else { return };
+    sup.restarting.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || terminate(&sup));
 }
 
 pub fn shutdown() {
