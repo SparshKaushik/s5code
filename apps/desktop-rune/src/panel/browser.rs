@@ -70,6 +70,8 @@ pub enum Cmd {
     CopyImage(Value),
     /// `document.execCommand` on the shown page (`selectAll`, `undo`, `redo`).
     Edit(&'static str),
+    /// Silences the tab's media, across its navigations, as Electron's `setAudioMuted`.
+    Mute(TabId, bool),
 }
 
 /// A navigation that never reached a page, as Chrome reports it (`ERR_CONNECTION_REFUSED`).
@@ -98,11 +100,16 @@ pub struct Status {
     /// The picked element's current CSS-pixel rect while `Cmd::Track` follows it.
     pub picked: Option<[f32; 4]>,
     pub recording: bool,
+    /// The page is playing sound (Electron's `isCurrentlyAudible`), muted or not.
+    pub audible: bool,
+    pub muted: bool,
+    /// The page's icon URL (a `<link rel=icon>`, else `/favicon.ico`), once it loaded.
+    pub favicon: Option<String>,
 }
 
 impl Default for Status {
     fn default() -> Self {
-        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false }
+        Status { url: String::new(), title: String::new(), loading: false, can_back: false, can_forward: false, painted: false, failure: None, zoom: 1., device: None, picking: false, hover: None, picked: None, recording: false, audible: false, muted: false, favicon: None }
     }
 }
 
@@ -269,6 +276,8 @@ enum Reply {
     Image,
     /// A key press for the recording, unless the focused field is a password.
     KeyPress(String),
+    MuteScript(TabId),
+    Favicon(TabId),
 }
 
 /// A recording: an encoder page in the same Chrome draws the tab's screencast frames into a
@@ -300,6 +309,8 @@ struct Tab {
     device: Option<(u32, u32)>,
     /// The last document load error, waiting for the error page that reports its URL.
     error: Option<String>,
+    /// The new-document script that keeps a muted tab's next pages muted.
+    mute_script: Option<String>,
 }
 
 struct Worker {
@@ -413,6 +424,10 @@ impl Worker {
             Some(session) => self.send(Some(&session), method, params, reply),
             None => t.queue.push((method, params, reply)),
         }
+    }
+
+    fn muted(&self, tab: TabId) -> bool {
+        self.shared.lock().unwrap().tabs.get(&tab).is_some_and(|s| s.muted)
     }
 
     fn update(&self, tab: TabId, f: impl FnOnce(&mut Status)) {
@@ -711,6 +726,18 @@ impl Worker {
                 let Some(tab) = self.shown else { return };
                 self.call(tab, "Runtime.evaluate", json!({ "expression": format!("document.execCommand('{command}')") }), None);
             }
+            Cmd::Mute(tab, on) => {
+                if self.muted(tab) == on {
+                    return;
+                }
+                self.update(tab, |s| s.muted = on);
+                self.call(tab, "Runtime.evaluate", json!({ "expression": format!("window.__s5Mute && __s5Mute({on})") }), None);
+                if on {
+                    self.call(tab, "Page.addScriptToEvaluateOnNewDocument", json!({ "source": "window.__s5Muted = true" }), Some(Reply::MuteScript(tab)));
+                } else if let Some(identifier) = self.tabs.get_mut(&tab).and_then(|t| t.mute_script.take()) {
+                    self.call(tab, "Page.removeScriptToEvaluateOnNewDocument", json!({ "identifier": identifier }), None);
+                }
+            }
         }
     }
 
@@ -871,20 +898,27 @@ impl Worker {
             }
             "Page.javascriptDialogOpening" => {
                 let kind = p["type"].as_str().unwrap_or("alert").to_string();
-                // Leaving a page is the person's own request; Chrome's prompt would only repeat it.
+                // Electron cancels a leave-page prompt without asking, so the page stays.
                 if kind == "beforeunload" {
-                    self.call(tab, "Page.handleJavaScriptDialog", json!({ "accept": true }), None);
+                    self.call(tab, "Page.handleJavaScriptDialog", json!({ "accept": false }), None);
                 } else {
                     let message = p["message"].as_str().unwrap_or_default().to_string();
                     let default = p["defaultPrompt"].as_str().unwrap_or_default().to_string();
                     self.event(Event::Dialog { tab, kind, message, default });
                 }
             }
+            "Runtime.bindingCalled" if p["name"] == "__s5Audio" => {
+                let audible = p["payload"] == "1";
+                self.update(tab, |s| s.audible = audible);
+            }
             "Page.javascriptDialogClosed" => self.event(Event::DialogClosed(tab)),
             "Page.frameStartedLoading" if main(&p["frameId"]) => self.update(tab, |s| s.loading = true),
             "Page.frameStoppedLoading" | "Page.loadEventFired" if method == "Page.loadEventFired" || main(&p["frameId"]) => {
                 self.update(tab, |s| s.loading = false);
                 self.history(tab);
+                if method == "Page.loadEventFired" {
+                    self.call(tab, "Runtime.evaluate", json!({ "expression": FAVICON_JS, "returnByValue": true }), Some(Reply::Favicon(tab)));
+                }
             }
             "Page.frameNavigated" if p["frame"]["parentId"].is_null() => {
                 let frame = &p["frame"];
@@ -893,6 +927,8 @@ impl Worker {
                 let error = self.tabs.get_mut(&tab).and_then(|t| if unreachable.is_some() { t.error.clone() } else { t.error.take() });
                 self.update(tab, |s| {
                     s.url = url.clone();
+                    s.audible = false;
+                    s.favicon = None;
                     s.failure = unreachable.map(|url| Failure {
                         description: error.or_else(|| s.failure.as_ref().map(|f| f.description.clone())).unwrap_or_default(),
                         url,
@@ -945,6 +981,10 @@ impl Worker {
                 self.sessions.insert(session.clone(), tab);
                 self.send(Some(&session), "Page.enable", json!({}), None);
                 self.send(Some(&session), "Network.enable", json!({}), None);
+                // Bindings only reach pages while the Runtime domain is on.
+                self.send(Some(&session), "Runtime.enable", json!({}), None);
+                self.send(Some(&session), "Runtime.addBinding", json!({ "name": "__s5Audio" }), None);
+                self.send(Some(&session), "Page.addScriptToEvaluateOnNewDocument", json!({ "source": AUDIO_JS, "runImmediately": true }), None);
                 self.metrics(tab);
                 if !self.scheme.is_empty() {
                     self.call(tab, "Emulation.setEmulatedMedia", json!({ "features": [{ "name": "prefers-color-scheme", "value": self.scheme }] }), None);
@@ -1111,6 +1151,21 @@ impl Worker {
             Reply::KeyPress(label) => {
                 if r["result"]["value"] == false {
                     self.rec_eval(format!("__s5Recorder.key({})", Value::String(label)), None);
+                }
+            }
+            Reply::Favicon(tab) => {
+                let icon = r["result"]["value"].as_str().filter(|u| u.len() <= 1 << 20 && (u.starts_with("http") || u.starts_with("data:image/"))).map(str::to_owned);
+                self.update(tab, |s| s.favicon = icon);
+            }
+            Reply::MuteScript(tab) => {
+                let Some(identifier) = r["identifier"].as_str().map(str::to_owned) else { return };
+                if self.muted(tab) {
+                    if let Some(t) = self.tabs.get_mut(&tab) {
+                        t.mute_script = Some(identifier);
+                    }
+                } else {
+                    // Unmuted before Chrome answered.
+                    self.call(tab, "Page.removeScriptToEvaluateOnNewDocument", json!({ "identifier": identifier }), None);
                 }
             }
             Reply::Image => {
@@ -1315,6 +1370,34 @@ fn save_download(from: &std::path::Path, dir: &std::path::Path, name: &str) -> R
 
 /// The encoder page: a canvas fed the tab's JPEG frames and recorded by `MediaRecorder`, as the
 /// server's `recordingEncoderScript`, drawing the person's arrow where web's recording cursor is.
+/// The page's icon as Electron's `page-favicon-updated` names it, else the origin's default.
+const FAVICON_JS: &str = r#"(() => {
+  if (!/^https?:$/.test(location.protocol)) return null;
+  const link = [...document.querySelectorAll('link[rel~="icon" i]')].map((l) => l.href).find((h) => /^(https?:|data:image\/)/.test(h));
+  return link || location.origin + '/favicon.ico';
+})()"#;
+
+/// Reports whether the top page's media is playing sound and mutes it on `__s5Mute`, as a
+/// headless Chrome has neither a tab audio indicator nor a mute switch.
+const AUDIO_JS: &str = r#"(() => {
+  if (window !== top || window.__s5Mute) return;
+  const mine = new WeakSet();
+  let last = false;
+  const media = () => document.querySelectorAll('audio,video');
+  const report = () => {
+    const now = [...media()].some((m) => !m.paused && !m.ended && m.volume > 0 && (!m.muted || mine.has(m)));
+    if (now !== last) { last = now; try { __s5Audio(now ? '1' : '0'); } catch {} }
+  };
+  const quiet = (m) => { if (window.__s5Muted && !m.muted) { m.muted = true; mine.add(m); } };
+  addEventListener('play', (e) => { quiet(e.target); report(); }, true);
+  for (const type of ['playing', 'pause', 'ended', 'volumechange', 'emptied']) addEventListener(type, report, true);
+  window.__s5Mute = (on) => {
+    window.__s5Muted = on;
+    for (const m of media()) on ? quiet(m) : mine.delete(m) && (m.muted = false);
+    report();
+  };
+})()"#;
+
 const ENCODER_JS: &str = r##"(() => {
   const canvas = document.createElement("canvas");
   const context = canvas.getContext("2d");

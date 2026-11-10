@@ -42,6 +42,8 @@ struct Notice {
     until: i64,
     actions: Vec<ToastAction>,
     error: bool,
+    /// Actions reading "Copied!" until their deadline, as web updates a toast after a copy.
+    copied: Vec<(String, i64)>,
 }
 /// A toast button: its label, whether it is the primary one, and what it does.
 pub(crate) type ToastAction = (String, bool, std::rc::Rc<dyn Fn(&mut App, &mut Tx)>);
@@ -290,7 +292,17 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         until: data::now_ms() + 4000,
         actions,
         error: false,
+        copied: Vec::new(),
     });
+}
+/// The open toast's `label` action reads "Copied!", disabled, for 2 s.
+pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
+    let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
+    let until = data::now_ms() + 2000;
+    notice.copied.retain(|(l, _)| l != label);
+    notice.copied.push((label.to_string(), until));
+    notice.until = notice.until.max(until);
+    tx.wake_after(std::time::Duration::from_millis(2000));
 }
 /// An error toast that stays until dismissed (`timeout: 0` on web), so a long hook failure can
 /// be read.
@@ -301,6 +313,7 @@ pub(crate) fn toast_error(s: &mut App, title: &str, description: Option<&str>) {
         until: i64::MAX,
         actions: Vec::new(),
         error: true,
+        copied: Vec::new(),
     });
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -1041,6 +1054,11 @@ pub fn poll(s: &mut App) -> bool {
     {
         s.ui.shell.palette.notice = None;
         changed = true;
+    }
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        let (now, before) = (data::now_ms(), notice.copied.len());
+        notice.copied.retain(|(_, until)| now < *until);
+        changed |= notice.copied.len() != before;
     }
     if let Some(mut restart) = s.ui.shell.palette.restart.take() {
         match s.src.net().and_then(|net| net.take_reply(restart.pending)) {
@@ -1885,8 +1903,13 @@ pub fn overlay(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
         }
         for (label, primary, run) in &notice.actions {
             let run = run.clone();
-            let button = kit::Button::new(label.clone()).variant(if *primary { "default" } else { "outline" }).size("xs").build(t);
-            toast = toast.button(*primary, button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)));
+            let copied = notice.copied.iter().any(|(l, _)| l == label);
+            let button = kit::Button::new(if copied { "Copied!".to_string() } else { label.clone() })
+                .variant(if *primary { "default" } else { "outline" })
+                .size("xs")
+                .disabled(copied)
+                .build(t);
+            toast = toast.button(*primary, if copied { button } else { button.on_press_tx(move |s: &mut App, tx: &mut Tx| run(s, tx)) });
         }
         if notice.error {
             toast = toast

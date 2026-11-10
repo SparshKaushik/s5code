@@ -57,11 +57,15 @@ struct Tab {
     bar: TextEdit,
     focused: bool,
     device: Device,
+    /// The settled `(url, title)` last offered to history.
+    titled: (String, String),
+    /// The icon URL last handed to `favicon`.
+    icon: Option<String>,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default() }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None }
     }
 }
 
@@ -80,12 +84,6 @@ impl Default for Device {
     }
 }
 
-struct Recent {
-    url: String,
-    title: String,
-    at: i64,
-}
-
 #[derive(Default)]
 pub struct Ui {
     browser: browser::Browser,
@@ -97,7 +95,6 @@ pub struct Ui {
     appearance: bool,
     scheme: &'static str,
     details: bool,
-    recents: Vec<Recent>,
     watching: bool,
     /// The tab floating over the chat (web's mini player).
     pub(super) pip: Option<TabId>,
@@ -111,6 +108,7 @@ pub struct Ui {
     /// A picked element waiting for its comment, as web's annotation editor holds it.
     pending: Option<Pending>,
     comment: TextEdit,
+    pub(super) favicons: super::favicon::Favicons,
     /// The floating preview's `[x, y, width]` in the chat area once moved or resized.
     pip_frame: Option<[f32; 3]>,
     /// The `[x, y, w, h]` a PiP drag or resize started from.
@@ -236,6 +234,20 @@ pub fn title(app: &App, tab: TabId) -> String {
     host(&status.url).unwrap_or("Browser").into()
 }
 
+/// A playing tab's speaker: `Some(muted)`, or none while it is silent (web's `tabAudioState`).
+pub fn audio(app: &App, tab: TabId) -> Option<bool> {
+    let status = app.ui.panel.browser.browser.status(tab);
+    status.audible.then_some(status.muted)
+}
+
+pub fn muted(app: &App, tab: TabId) -> bool {
+    app.ui.panel.browser.browser.status(tab).muted
+}
+
+pub fn set_muted(app: &mut App, tab: TabId, on: bool) {
+    send(app, Cmd::Mute(tab, on));
+}
+
 /// The page a tab shows, unless it is blank.
 pub fn url(app: &App, tab: TabId) -> Option<String> {
     let status = app.ui.panel.browser.browser.status(tab);
@@ -272,6 +284,10 @@ pub fn navigate(app: &mut App, tab: TabId, input: &str) {
     match resolve(input, template) {
         Some(url) => {
             bar(app, tab).replace_text(url.clone());
+            super::history::record(app, &url);
+            if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
+                t.titled = Default::default();
+            }
             send(app, Cmd::Navigate(tab, url));
         }
         None => crate::shell::palette::toast(app, "Could not open this address", Some("Enter an http or https URL.")),
@@ -445,6 +461,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
     }
     let now = data::now_ms();
+    if !app.ui.panel.browser.tabs.is_empty() {
+        super::history::ensure_loaded(app);
+    }
     let ui = &mut app.ui.panel.browser;
     if ui.shown != want {
         ui.shown = want;
@@ -461,8 +480,14 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     };
     let mut changed = generation != ui.seen || !events.is_empty();
     ui.seen = generation;
+    let mut settled = vec![];
+    let mut found = vec![];
     for (id, tab) in ui.tabs.iter_mut() {
         let status = statuses.get(id).cloned().unwrap_or_default();
+        if status.favicon.is_some() && status.favicon != tab.icon {
+            tab.icon = status.favicon.clone();
+            found.push((status.url.clone(), status.favicon.clone().unwrap_or_default()));
+        }
         if tab.bar.focused && !tab.focused {
             tab.bar.set_selection(0, tab.bar.text.len());
             changed = true;
@@ -473,17 +498,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             tab.bar.replace_text(live_url);
             changed = true;
         }
-        if !idle(&status) && status.failure.is_none() && !status.loading && status.url.starts_with("http") {
-            let title = status.title.trim();
-            let title = if title == status.url { "" } else { title };
-            match ui.recents.iter_mut().find(|r| r.url == status.url) {
-                Some(r) if r.title != title => r.title = title.to_string(),
-                Some(_) => {}
-                None => {
-                    ui.recents.insert(0, Recent { url: status.url.clone(), title: title.to_string(), at: now });
-                    ui.recents.truncate(8);
-                }
-            }
+        if !idle(&status) && status.failure.is_none() && !status.loading && !status.title.trim().is_empty() && status.title != status.url && tab.titled != (status.url.clone(), status.title.clone()) {
+            tab.titled = (status.url.clone(), status.title.clone());
+            settled.push((*id, tab.titled.clone()));
         }
     }
     if ui.zoom_until != 0 {
@@ -492,6 +509,15 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             changed = true;
         } else {
             tx.wake_after(Duration::from_millis((ui.zoom_until - now) as u64));
+        }
+    }
+    for (page, url) in found {
+        super::favicon::note(app, &page, &url);
+    }
+    changed |= super::favicon::poll(app);
+    for (id, (url, title)) in settled {
+        if app.ui.panel.surfaces.contains(&super::Surface::Browser(id)) || app.ui.panel.browser.pip == Some(id) {
+            super::history::set_title(app, &url, &title);
         }
     }
     for event in events {
@@ -636,7 +662,10 @@ fn recording_saved(app: &mut App, path: std::path::PathBuf) {
                 crate::shell::palette::toast(s, "Unable to reveal recording", Some(&e));
             }
         }),
-        act("Copy path", false, move |_, tx| tx.copy(shown.clone())),
+        act("Copy path", false, move |s, tx| {
+            tx.copy(shown.clone());
+            crate::shell::palette::toast_copied(s, tx, "Copy path");
+        }),
     ];
     crate::shell::palette::toast_with(app, "Recording saved", None, actions);
 }
@@ -670,10 +699,16 @@ fn screenshot_saved(app: &mut App, path: std::path::PathBuf) {
     let (image, shown, revealed) = (path.clone(), path.display().to_string(), path);
     let actions = vec![
         act("Copy image", true, move |s, tx| match std::fs::read(&image).ok().and_then(rune::ClipboardImage::from_png) {
-            Some(png) => tx.copy_rich(rune::ClipboardContent::new("").with_image(png)),
+            Some(png) => {
+                tx.copy_rich(rune::ClipboardContent::new("").with_image(png));
+                crate::shell::palette::toast_copied(s, tx, "Copy image");
+            }
             None => crate::shell::palette::toast(s, "Unable to copy screenshot", Some("The image could not be read.")),
         }),
-        act("Copy path", false, move |_, tx| tx.copy(shown.clone())),
+        act("Copy path", false, move |s, tx| {
+            tx.copy(shown.clone());
+            crate::shell::palette::toast_copied(s, tx, "Copy path");
+        }),
         act(reveal_label(), false, move |s, _| {
             if let Err(e) = reveal(&revealed) {
                 crate::shell::palette::toast(s, "Unable to reveal screenshot", Some(&e));
@@ -1695,7 +1730,6 @@ fn notice_empty(t: &T, title: &str, description: &str) -> El {
 
 /// `PreviewEmptyState`: recent pages and the server's listening ports, else a hint.
 fn empty(app: &App, t: &T, tab: TabId) -> El {
-    let ui = &app.ui.panel.browser;
     let mut servers: Vec<(String, String, u64)> = match &app.src {
         data::Source::Live(net) => net
             .resource(SERVERS, json!({}))
@@ -1714,7 +1748,9 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
         _ => vec![],
     };
     servers.sort_by_key(|v| v.2);
-    if servers.is_empty() && ui.recents.is_empty() {
+    let history = super::history::entries(app);
+    let recents = &history[..history.len().min(8)];
+    if servers.is_empty() && recents.is_empty() {
         return notice_empty(t, "No preview yet", "Type a URL above, or run a dev script. Local servers this thread starts will show up here automatically.");
     }
     let section = |glyph: &'static rune::Icon, title: &str| {
@@ -1734,7 +1770,7 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
         }
         list
     };
-    let entry = |title: &str, description: &str| {
+    let entry = |page: &str, title: &str, description: &str| {
         row()
             .w_full()
             .px(12.)
@@ -1745,13 +1781,7 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
             .role("button")
             .label(title.to_string())
             .focusable(true)
-            .child(
-                el().size(28., 28.)
-                    .radius(6.)
-                    .border(1., t.c.border)
-                    .center()
-                    .child(icon(&icons::GLOBE, 14.).size(14., 14.).color(t.c.muted_foreground)),
-            )
+            .child(super::favicon::icon(app, page, 28., 4.).unwrap_or_else(|| super::favicon::mockup(t, 28.)))
             .child(
                 col()
                     .grow(1.)
@@ -1761,16 +1791,15 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
             )
     };
     let mut body = col().w_full().max_w(576.).gap(24.);
-    if !ui.recents.is_empty() {
-        let rows = ui
-            .recents
+    if !recents.is_empty() {
+        let rows = recents
             .iter()
             .map(|r| {
-                let label = r.url.split_once("://").map_or(r.url.as_str(), |(_, rest)| rest).trim_end_matches('/').to_string();
+                let label = super::history::label(&r.url);
                 let when = crate::pages::pull_requests::relative(r.at, app.now_ms);
                 let (title, description) = if r.title.is_empty() { (label.clone(), when) } else { (r.title.clone(), format!("{label} · {when}")) };
                 let (open, remove) = (r.url.clone(), r.url.clone());
-                entry(&title, &description)
+                entry(&r.url, &title, &description)
                     .hover_group()
                     .on_press(move |s: &mut App| navigate(s, tab, &open))
                     .child(
@@ -1781,7 +1810,7 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
                             .group_opacity(0., 1.)
                             .role("button")
                             .label(format!("Remove {label} from history"))
-                            .on_press(move |s: &mut App| s.ui.panel.browser.recents.retain(|r| r.url != remove))
+                            .on_press(move |s: &mut App| super::history::remove(s, &remove))
                             .child(icon(&icons::X, 14.).size(14., 14.).color(t.c.muted_foreground)),
                     )
             })
@@ -1793,7 +1822,7 @@ fn empty(app: &App, t: &T, tab: TabId) -> El {
             .into_iter()
             .map(|(url, label, _)| {
                 let (title, description) = label.split_once('\n').unwrap_or((label.as_str(), ""));
-                entry(title, description).on_press(move |s: &mut App| navigate(s, tab, &url))
+                entry(&url, title, description).on_press(move |s: &mut App| navigate(s, tab, &url))
             })
             .collect();
         body = body.child(
