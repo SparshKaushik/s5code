@@ -67,6 +67,11 @@ fn toggle(app: &mut App, id: &str) {
     }
 }
 
+/// `shouldCollapseUserMessage`: over 600 visible characters or 8 lines.
+fn collapses(visible: &str) -> bool {
+    !visible.trim().is_empty() && (visible.chars().count() > 600 || visible.split('\n').count() > 8)
+}
+
 /// How long a copy button shows its check (ANCHORED_COPY_TOAST_TIMEOUT_MS).
 const COPIED_MS: i64 = 1000;
 
@@ -74,8 +79,10 @@ fn copied(app: &App, content: &str) -> bool {
     app.ui.chat.timeline.copied.as_ref().is_some_and(|(c, at)| c == content && crate::data::now_ms() - at < COPIED_MS)
 }
 
-pub(super) fn copy_button(app: &App, content: &str, t: &T) -> El {
+/// MessageCopyButton: `label` ("Copy message", "Copy code", ...) is its tooltip until it copies.
+pub(super) fn copy_button(app: &App, content: &str, t: &T, label: &str) -> El {
     let done = copied(app, content);
+    let label = if done { "Copied".to_owned() } else { label.to_owned() };
     let content = content.to_owned();
     row()
         .size(24.0, 24.0)
@@ -85,7 +92,8 @@ pub(super) fn copy_button(app: &App, content: &str, t: &T) -> El {
         .hover(t.c.muted)
         .focusable(true)
         .role("button")
-        .label(if done { "Copied" } else { "Copy" })
+        .label(label.clone())
+        .help(label)
         .on_press_tx(move |app: &mut App, tx| {
             tx.copy(content.clone());
             app.ui.chat.timeline.copied = Some((content.clone(), crate::data::now_ms()));
@@ -276,6 +284,10 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     } else {
         fallback.as_str()
     };
+    // failedToolIconClassName: a failed tool call tints its icon and says so to screen readers.
+    let failed = s(item, "status") == "failed" && kind != "notification";
+    let glyph_color = if failed { t.c.destructive.alpha_mul(0.4) } else { t.c.muted_foreground };
+    let spoken = if failed { format!("{title}, tool call failed") } else { title.to_owned() };
     let mut out = col().w_full().gap(4.0);
     out = out.child(
         row()
@@ -287,13 +299,13 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             .hover(t.c.muted.alpha_mul(0.4))
             .focusable(true)
             .role("button")
-            .label(title)
+            .label(spoken)
             .key(head_key.clone())
             .on_press_tx(move |app: &mut App, tx| {
                 tx.keep_on_screen(head_key.clone());
                 toggle(app, &id)
             })
-            .child(icon(glyph, 16.0).color(t.c.muted_foreground))
+            .child(if failed { icon(glyph, 16.0).color(glyph_color).help("Tool call failed") } else { icon(glyph, 16.0).color(glyph_color) })
             .child(
                 text(title)
                     .font(theme::TEXT_SM)
@@ -369,7 +381,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             col()
                 .px(28.0)
                 .child(markdown::view(app, &detail, s(item, "id"), t))
-                .child(copy_button(app, &detail, t)),
+                .child(copy_button(app, &detail, t, "Copy")),
         );
     }
     out
@@ -474,20 +486,26 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
             .center_y()
             .child(row().gap(4.0).center_y().child(icon(&icons::SHIELD, 12.0).color(t.c.warning)).child(text("Waiting for approval").font(theme::TEXT_XS).color(t.c.warning)))
             .child(text("·").font(theme::TEXT_XS).color(t.c.muted_foreground));
-        let options: Vec<(String, String)> = if array(item, "options").is_empty() {
+        let options: Vec<(String, String, String)> = if array(item, "options").is_empty() {
             [("Cancel", "cancel"), ("Decline", "decline"), ("Always allow this session", "acceptForSession"), ("Approve", "accept")]
                 .iter()
-                .map(|(l, d)| (l.to_string(), d.to_string()))
+                .map(|(l, d)| (l.to_string(), d.to_string(), String::new()))
                 .collect()
         } else {
-            array(item, "options").iter().map(|o| (s(o, "label").to_owned(), s(o, "decision").to_owned())).collect()
+            array(item, "options").iter().map(|o| (s(o, "label").to_owned(), s(o, "decision").to_owned(), s(o, "warning").trim().to_owned())).collect()
         };
         let primary = |d: &str| matches!(d, "accept" | "decline");
-        let has_more = options.iter().any(|(_, d)| !primary(d));
-        let ordered = options.iter().filter(|(_, d)| primary(d)).chain(options.iter().filter(|(_, d)| more && !primary(d)));
-        for (label, decision) in ordered {
+        let has_more = options.iter().any(|(_, d, _)| !primary(d));
+        let ordered = options.iter().filter(|(_, d, _)| primary(d)).chain(options.iter().filter(|(_, d, _)| more && !primary(d)));
+        for (label, decision, warning) in ordered {
             let (thread, r, decision) = (thread_id.to_owned(), request_id.to_owned(), decision.clone());
             let mut b = inline_button(label, decision == "accept", t);
+            // ProviderApprovalOption.warning: a risky choice carries a warning sign and says why.
+            if !warning.is_empty() {
+                b = row().gap(4.0).center_y().focusable(true).role("button").label(label).cursor(rune::Cursor::Pointer).help(warning.clone())
+                    .child(icon(&icons::TRIANGLE_ALERT, 12.0).color(t.c.warning))
+                    .child(text(label.clone()).font(theme::XS_MEDIUM).color(if decision == "accept" { t.c.foreground } else { t.c.muted_foreground }));
+            }
             if !responding {
                 b = b.on_press(move |app: &mut App| respond(app, &thread, &r, json!({"decision":decision})));
             }
@@ -556,6 +574,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         (c.range, chips::style(&c.kind, record))
                     });
                     let highlights = marks.as_ref().map_or_else(Vec::new, |m| m.plain(&shown));
+                    // A find match inside shows the whole message, as web's findReveal does.
+                    let fold_key = format!("user-full:{}", s(item, "id"));
+                    let foldable = collapses(&shown);
+                    let folded = foldable && highlights.is_empty() && !app.ui.chat.timeline.expanded.contains(&fold_key);
                     let mut body = text(shown)
                         .font(theme::TEXT_SM.lh(22.75))
                         .color(t.c.message_foreground)
@@ -569,14 +591,28 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         }
                         body = body.on_link(move |app: &mut App, id: &str, tx: &mut rune::Tx| chip::pressed(app, &pressed, id, &records, tx));
                     }
-                    content = content.child(
-                        col()
-                            .key(chip::bubble_key(s(item, "id")))
-                            .padding(12.0)
-                            .radius(16.0)
-                            .fill(t.c.message_surface)
-                            .child(body),
-                    );
+                    if folded {
+                        body = body.max_lines(7);
+                    }
+                    let mut bubble = col().key(chip::bubble_key(s(item, "id"))).padding(12.0).radius(16.0).fill(t.c.message_surface).child(body);
+                    if foldable {
+                        let label = if folded { "Show full message" } else { "Show less" };
+                        bubble = bubble.child(
+                            row().w_full().justify_end().mt(6.0).child(
+                                crate::kit::button::Button::new(label)
+                                    .variant("ghost-muted")
+                                    .size("xs")
+                                    .on_press(move |app: &mut App| {
+                                        if !app.ui.chat.timeline.expanded.remove(&fold_key) {
+                                            app.ui.chat.timeline.expanded.insert(fold_key.clone());
+                                        }
+                                    })
+                                    .build(t)
+                                    .expanded(!folded),
+                            ),
+                        );
+                    }
+                    content = content.child(bubble);
                 }
                 let bubble = content.max_w(580.0);
                 (
@@ -723,4 +759,18 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
 /// A pending question's panel, docked on top of the composer.
 pub fn composer_requests(app: &App, t: &T) -> Option<El> {
     question::panel(app, t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collapses;
+
+    #[test]
+    fn long_user_messages_fold() {
+        assert!(!collapses("short"));
+        assert!(!collapses(&"a\n".repeat(7)));
+        assert!(collapses(&"line\n".repeat(8)));
+        assert!(collapses(&"x".repeat(601)));
+        assert!(!collapses(&" ".repeat(700)));
+    }
 }
