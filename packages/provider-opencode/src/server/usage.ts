@@ -169,6 +169,8 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
   const kiroContext: KiroContextMap = new Map();
   let found = false;
   let error = false;
+  let databaseRows = 0;
+  let databasePages = 0;
   const append = (records: UsageRecord[], record: UsageRecord | null) => {
     if (record === null || record.timestampMs < sinceMs) return;
     if (record.dedupeKey !== null) {
@@ -235,96 +237,47 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
         );
         const timestamp = columns.has("time_created") ? "time_created" : "NULL";
         const predicates = table === "session_message" ? ["type = 'assistant'"] : [];
-
         if (timestamp !== "NULL") predicates.push("time_created >= ?");
-        predicates.push("rowid > ?", "rowid <= ?");
-        const [range] = yield* sql.unsafe<{
-          readonly first_row_id: number | null;
-          readonly last_row_id: number | null;
-        }>(
-          `SELECT (SELECT MIN(rowid) FROM ${table}) AS first_row_id, (SELECT MAX(rowid) FROM ${table}) AS last_row_id`,
-        );
-        const firstRowId = range?.first_row_id;
-        const lastRowId = range?.last_row_id;
-        if (typeof firstRowId !== "number" || typeof lastRowId !== "number") continue;
-        const windowParams = (after: number) => [
-          ...(timestamp === "NULL" ? [] : [sinceMs]),
-          after,
-          Math.min(after + MESSAGE_PAGE_SIZE, lastRowId),
-        ];
-        const appendRow = (row: {
-          readonly id: unknown;
-          readonly session_id: unknown;
-          readonly data: unknown;
-          readonly created: unknown;
-        }) =>
-          append(
-            file.records,
-            parseOpenCodeMessage(text(row.data), {
-              kiroContext,
-              id: text(row.id),
-              sessionId: text(row.session_id),
-              ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
-            }),
-          );
-        // StatementSync.all materializes results; page by rowid and exclude mid-scan appends.
-        // Omit tracing because large histories require thousands of statements.
-        if (!columns.has("seq")) {
-          for (let after = firstRowId - 1; after < lastRowId; after += MESSAGE_PAGE_SIZE) {
-            const rows = yield* sql
-              .unsafe<{
-                readonly id: unknown;
-                readonly session_id: unknown;
-                readonly data: unknown;
-                readonly created: unknown;
-              }>(
-                `SELECT id, session_id, data, ${timestamp} AS created
-                 FROM ${table} WHERE ${predicates.join(" AND ")} ORDER BY rowid`,
-                windowParams(after),
+        const where = predicates.length ? `WHERE ${predicates.join(" AND ")}` : "";
+        const params = timestamp === "NULL" ? [] : [sinceMs];
+        // List only order keys so SQLite can use time indexes without reading message bodies.
+        // Kiro cache estimates follow native session order, which `seq` keeps after imports.
+        const rowIds = columns.has("seq")
+          ? (yield* sql.unsafe<{
+              readonly row_id: number;
+              readonly order_session: string;
+              readonly order_sequence: number;
+            }>(
+              `SELECT rowid AS row_id, COALESCE(session_id, '') AS order_session,
+                      COALESCE(seq, 0) AS order_sequence
+               FROM ${table} ${where}`,
+              params,
+            ))
+              .toSorted(
+                (left, right) =>
+                  (left.order_session < right.order_session
+                    ? -1
+                    : left.order_session > right.order_session
+                      ? 1
+                      : 0) ||
+                  left.order_sequence - right.order_sequence ||
+                  left.row_id - right.row_id,
               )
-              .pipe(Effect.withTracerEnabled(false));
-            for (const row of rows) appendRow(row);
-            yield* Effect.yieldNow;
-          }
-          continue;
-        }
-        // Kiro cache estimates depend on native session order, which can differ
-        // from insertion order after a session import. Collect the order keys in
-        // the same bounded windows, then read bodies by rowid in that order.
-        const keys: Array<{
-          readonly row_id: number;
-          readonly order_session: string;
-          readonly order_sequence: number;
-        }> = [];
-        for (let after = firstRowId - 1; after < lastRowId; after += MESSAGE_PAGE_SIZE) {
-          keys.push(
-            ...(yield* sql
-              .unsafe<{
-                readonly row_id: number;
-                readonly order_session: string;
-                readonly order_sequence: number;
-              }>(
-                `SELECT rowid AS row_id, COALESCE(session_id, '') AS order_session,
-                        COALESCE(seq, 0) AS order_sequence
-                 FROM ${table} WHERE ${predicates.join(" AND ")}`,
-                windowParams(after),
-              )
-              .pipe(Effect.withTracerEnabled(false))),
-          );
-          yield* Effect.yieldNow;
-        }
-        keys.sort(
-          (left, right) =>
-            (left.order_session < right.order_session
-              ? -1
-              : left.order_session > right.order_session
-                ? 1
-                : 0) ||
-            left.order_sequence - right.order_sequence ||
-            left.row_id - right.row_id,
-        );
-        for (let index = 0; index < keys.length; index += MESSAGE_PAGE_SIZE) {
-          const rowIds = keys.slice(index, index + MESSAGE_PAGE_SIZE).map((key) => key.row_id);
+              .map((key) => key.row_id)
+          : (yield* sql.unsafe<{ readonly row_id: number }>(
+              `SELECT rowid AS row_id FROM ${table} ${where}`,
+              params,
+            ))
+              .map((row) => row.row_id)
+              .toSorted((a, b) => a - b);
+        databaseRows += rowIds.length;
+        // Filter and project in SQLite: user diffs and assistant bodies can be hundreds of MB.
+        const validAssistant = `CASE WHEN typeof(data) = 'text' AND json_valid(data)
+          THEN json_type(data, '$.role') IS NULL OR data ->> '$.role' = 'assistant' END`;
+        // Omit per-page spans; the enclosing scan records row and page counts.
+        for (let start = 0; start < rowIds.length; start += MESSAGE_PAGE_SIZE) {
+          const page = rowIds.slice(start, start + MESSAGE_PAGE_SIZE);
+          databasePages++;
           const rows = yield* sql
             .unsafe<{
               readonly row_id: number;
@@ -333,20 +286,36 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
               readonly data: unknown;
               readonly created: unknown;
             }>(
-              `SELECT rowid AS row_id, id, session_id, data, ${timestamp} AS created
-               FROM ${table} WHERE rowid IN (${rowIds.map(() => "?").join(", ")})`,
-              rowIds,
+              `SELECT rowid AS row_id, id, session_id, ${timestamp} AS created, json_object(
+                 'tokens', data -> '$.tokens', 'cost', data -> '$.cost',
+                 'model', data -> '$.model', 'modelID', data -> '$.modelID',
+                 'providerID', data -> '$.providerID',
+                 'time', data -> '$.time', 'id', data -> '$.id', 'sessionID', data -> '$.sessionID'
+               ) AS data
+               FROM ${table}
+               WHERE rowid IN (${page.map(() => "?").join(", ")}) AND ${validAssistant}`,
+              page,
             )
             .pipe(Effect.withTracerEnabled(false));
           const byRowId = new Map(rows.map((row) => [row.row_id, row]));
-          for (const rowId of rowIds) {
+          for (const rowId of page) {
             const row = byRowId.get(rowId);
-            if (row) appendRow(row);
+            if (!row) continue;
+            append(
+              file.records,
+              parseOpenCodeMessage(text(row.data), {
+                kiroContext,
+                id: text(row.id),
+                sessionId: text(row.session_id),
+                ...(typeof row.created === "number" ? { timestampMs: row.created } : {}),
+              }),
+            );
           }
           yield* Effect.yieldNow;
         }
       }
     }).pipe(
+      (read) => Effect.flatMap(SqlClient.SqlClient, (sql) => sql.withTransaction(read)),
       Effect.provide(NodeSqliteClient.layer({ filename: file.path, readonly: true })),
       Effect.catchTags({
         SqlError: () => {
@@ -426,6 +395,10 @@ export const readOpenCodeUsage = Effect.fn("readOpenCodeUsage")(function* (
       }),
     );
   }
+  yield* Effect.annotateCurrentSpan({
+    "usage.database_rows": databaseRows,
+    "usage.database_pages": databasePages,
+  });
   return { files, missing: !found && !error, error };
 });
 

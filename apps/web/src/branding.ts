@@ -26,3 +26,5 @@ export const APP_DISPLAY_NAME =
   formatAppDisplayName({ baseName: APP_BASE_NAME, stageLabel: APP_STAGE_LABEL });
 export const APP_VERSION = import.meta.env.APP_VERSION || "0.0.0";
 export const DESKTOP_DOWNLOAD_URL = "https://github.com/SparshKaushik/s5code/releases/latest";
+// The Android APK ships on each GitHub release; the fork has no store listing.
+export const MOBILE_APP_URL = "https://github.com/SparshKaushik/s5code/releases/latest";
