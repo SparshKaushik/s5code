@@ -42,7 +42,7 @@ pub fn toggle(s: &mut App) {
 fn close(s: &mut App) {
     s.ui.chat.composer.picker.open = false;
     s.ui.chat.composer.picker.runtime_open = false;
-    let key = super::draft_key(s.frame_route());
+    let key = super::draft_key(s, s.frame_route());
     if let Some(d) = s.ui.chat.composer.drafts.get_mut(&key) {
         d.edit.focused = true;
     }

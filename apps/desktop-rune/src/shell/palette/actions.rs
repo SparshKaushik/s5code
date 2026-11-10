@@ -575,7 +575,8 @@ pub fn poll(s: &mut App) -> bool {
             }
             Some(Ok(v)) => {
                 let route = Route::Home { project_id: Some(data::s(&v, "projectId").to_owned()) };
-                s.ui.chat.composer.drafts.entry(crate::chat::composer::draft_key(&route)).or_default().edit = TextEdit::new(prompt);
+                let key = crate::chat::composer::draft_key(s, &route);
+                s.ui.chat.composer.drafts.entry(key).or_default().edit = TextEdit::new(prompt);
                 crate::shell::sidebar::go(s, route);
                 changed = true;
             }

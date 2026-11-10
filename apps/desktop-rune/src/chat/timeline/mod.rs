@@ -2,6 +2,7 @@ pub mod actions;
 pub mod attachments;
 pub mod chip;
 mod changed;
+pub mod error_banner;
 pub mod find;
 mod markdown;
 
@@ -47,6 +48,7 @@ pub struct Ui {
     pub find: find::Find,
     pub actions: actions::State,
     pub plan: plan::State,
+    pub errors: error_banner::State,
 }
 
 /// A row's stable key in the virtual list; find scrolls to marks inside it.
@@ -102,6 +104,9 @@ pub(super) fn workspace_root(app: &App) -> Option<String> {
     let project = state.projects.iter().find(|p| s(p, "id") == s(thread, "projectId"))?;
     project["workspaceRoot"].as_str().map(str::to_owned)
 }
+
+/// The T3 wordmark (shell brand) centred in a square box, as web's square-sized T3Wordmark draws.
+static T3_MARK: rune::Icon = rune::Icon { name: "t3-mark", view: 94.3941, body: "<path d=\"M 17.92 74.717 V 29.277 H 0 V 18.717 H 48.8 V 29.277 H 30.88 V 74.717 H 17.92 Z M 71.194 75.677 C 67.301 75.677 63.434 75.17 59.594 74.157 C 55.754 73.09 52.501 71.597 49.834 69.677 L 54.874 59.757 C 57.008 61.304 59.488 62.53 62.314 63.437 C 65.141 64.344 67.994 64.797 70.874 64.797 C 74.128 64.797 76.688 64.157 78.554 62.877 C 80.421 61.597 81.354 59.837 81.354 57.597 C 81.354 55.464 80.528 53.784 78.874 52.557 C 77.221 51.33 74.554 50.717 70.874 50.717 H 64.954 V 42.157 L 80.554 24.477 L 81.994 29.117 H 52.634 V 18.717 H 91.834 V 27.117 L 76.314 44.797 L 69.754 41.037 H 73.514 C 80.394 41.037 85.594 42.584 89.114 45.677 C 92.634 48.77 94.394 52.744 94.394 57.597 C 94.394 60.744 93.568 63.704 91.914 66.477 C 90.261 69.197 87.728 71.41 84.314 73.117 C 80.901 74.824 76.528 75.677 71.194 75.677 Z\" fill=\"currentColor\"/>" };
 
 /// TimelineSystemDivider: a rule either side of an icon, a label and an optional action, with
 /// any detail wrapping under it.
@@ -243,8 +248,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             "subagent" | "delegated_task" => &icons::BOT,
             "command" => &icons::TERMINAL,
             "monitor" => &icons::EYE,
-            "background_task" => &icons::ZAP,
-            _ => &icons::INFO,
+            "system" => &T3_MARK,
+            _ => &icons::ZAP,
         },
         "approval_request" | "user_input_request" => &icons::MESSAGE_CIRCLE,
         "reasoning" => &icons::BRAIN,

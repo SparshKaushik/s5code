@@ -395,8 +395,10 @@ fn resolve_text(d: &Value) -> String {
 fn handoff(s: &mut App, text: String, chip: Option<Value>) {
     let project = s.ui.pages.detail.detail.as_ref().map(|d| field(d, "projectId").to_string()).filter(|p| !p.is_empty());
     ui(s).menu = false;
-    crate::shell::sidebar::go(s, Route::Home { project_id: project });
-    let draft = s.ui.chat.composer.drafts.entry("home".into()).or_default();
+    let route = Route::Home { project_id: project };
+    let key = crate::chat::composer::draft_key(s, &route);
+    crate::shell::sidebar::go(s, route);
+    let draft = s.ui.chat.composer.drafts.entry(key).or_default();
     draft.edit.replace_text(&text);
     draft.edit.set_caret(text.len());
     draft.edit.focused = true;

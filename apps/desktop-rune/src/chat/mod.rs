@@ -20,6 +20,63 @@ pub struct Ui {
     pub home: home::Ui,
     pub details: details::Ui,
     pub topbar: topbar::Ui,
+    /// The remembered route was restored (or found stale) once the shell loaded.
+    route_restored: bool,
+}
+
+const LAST_ROUTE: &str = "lastRoute";
+
+/// Web reopens the last thread on restart. The main route is kept in client settings; once the
+/// shell has loaded, a launch still on the bare home route returns to it if it still exists.
+pub fn remember_route(s: &mut App) -> bool {
+    if !matches!(s.src, crate::data::Source::Live(_)) || !s.state().shell_ready {
+        return false;
+    }
+    if !s.ui.chat.route_restored {
+        s.ui.chat.route_restored = true;
+        let stored = s.client_settings.values.get(LAST_ROUTE).and_then(decode_route);
+        if s.route == (Route::Home { project_id: None })
+            && let Some(route) = stored.filter(|r| route_exists(s, r))
+        {
+            s.navigate(route);
+            return true;
+        }
+    }
+    let current = encode_route(s.frame_route());
+    if current.is_some() && s.client_settings.values.get(LAST_ROUTE) != current.as_ref() {
+        s.client_settings.values.insert(LAST_ROUTE.into(), current.unwrap_or_default());
+        s.client_settings.save();
+    }
+    false
+}
+
+fn encode_route(route: &Route) -> Option<serde_json::Value> {
+    match route {
+        Route::Thread(id) => Some(serde_json::json!({"thread": id})),
+        Route::Home { project_id } => Some(serde_json::json!({"home": project_id})),
+        Route::PullRequests => Some(serde_json::json!({"pullRequests": true})),
+        Route::Settings(_) | Route::Usage => None,
+    }
+}
+
+fn decode_route(v: &serde_json::Value) -> Option<Route> {
+    if let Some(id) = v["thread"].as_str() {
+        return Some(Route::Thread(id.to_owned()));
+    }
+    if v["pullRequests"] == true {
+        return Some(Route::PullRequests);
+    }
+    v.get("home").map(|p| Route::Home { project_id: p.as_str().map(str::to_owned) })
+}
+
+fn route_exists(s: &App, route: &Route) -> bool {
+    let state = s.state();
+    let has = |list: &[serde_json::Value], id: &str| list.iter().any(|v| crate::data::s(v, "id") == id);
+    match route {
+        Route::Thread(id) => has(&state.threads, id) || has(&state.archived, id),
+        Route::Home { project_id: Some(id) } => has(&state.projects, id),
+        _ => true,
+    }
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
@@ -64,4 +121,18 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
 /// Chat keys no focused control took: find in thread, then a question's 1-9 shortcuts.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     timeline::attachments::on_key(s, e) || timeline::find::on_key(s, e, tx) || timeline::question::on_key(s, e, tx)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_remembered_route_round_trips() {
+        for route in [Route::Thread("t1".into()), Route::Home { project_id: Some("p".into()) }, Route::Home { project_id: None }, Route::PullRequests] {
+            assert_eq!(encode_route(&route).as_ref().and_then(decode_route), Some(route));
+        }
+        assert_eq!(encode_route(&Route::Usage), None);
+        assert_eq!(decode_route(&serde_json::json!("garbage")), None);
+    }
 }
