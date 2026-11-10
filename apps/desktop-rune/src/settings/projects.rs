@@ -121,7 +121,7 @@ fn chooser(s: &App, t: &T) -> El {
                 .focusable(true)
                 .role("button")
                 .label(title.clone())
-                .child(crate::shell::sidebar::monogram(t, &title, false))
+                .child(crate::shell::sidebar::favicon::view(s, t, project, 16.0))
                 .child(
                     col()
                         .grow(1.0)

@@ -257,6 +257,19 @@ fn bar(app: &mut App, tab: TabId) -> &mut TextEdit {
     &mut app.ui.panel.browser.tabs.entry(tab).or_insert_with(|| Tab::new(Pixels::new())).bar
 }
 
+/// The address bar `workspace.focusNext` lands on in a browser surface.
+pub(super) fn bar_focused(app: &App, tab: TabId) -> bool {
+    app.ui.panel.browser.tabs.get(&tab).is_some_and(|t| t.bar.focused)
+}
+pub(super) fn focus_bar(app: &mut App, tab: Option<TabId>) {
+    for (id, t) in &mut app.ui.panel.browser.tabs {
+        t.bar.focused = Some(*id) == tab;
+    }
+    if let Some(tab) = tab {
+        bar(app, tab).focused = true;
+    }
+}
+
 fn device(app: &mut App, tab: TabId) -> &mut Device {
     &mut app.ui.panel.browser.tabs.entry(tab).or_insert_with(|| Tab::new(Pixels::new())).device
 }

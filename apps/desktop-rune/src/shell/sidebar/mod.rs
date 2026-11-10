@@ -4,7 +4,8 @@
 
 mod brand;
 mod chrome;
-pub(crate) mod favicon;
+pub mod favicon;
+mod folders;
 pub mod logic;
 mod menu;
 mod row;
@@ -68,6 +69,8 @@ pub struct Ui {
     /// Highlighted search result.
     pub highlight: usize,
     pub expanded: HashSet<Shelf>,
+    /// "Show more" pages opened under the Settled shelf (`SETTLED_TAIL_PAGE_SIZE` each).
+    pub settled_pages: usize,
     pub hover: Option<String>,
     /// Rows picked with Cmd/Shift-click for bulk actions.
     pub selected: HashSet<String>,
@@ -90,6 +93,10 @@ pub struct Ui {
     /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
     pub project_scope: Vec<String>,
     pub scope_open: bool,
+    /// The scope picker's group order, frozen while it is open so a pin doesn't move the row.
+    pub scope_order: Vec<String>,
+    /// The boring sidebar's folders: which are folded, hover and the folder menu.
+    pub folders: folders::State,
     pub visits: logic::Visits,
     pub undos: logic::Undos,
     /// The server's message matches for a search: (query, thread ids).
@@ -134,7 +141,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("sidebar-scope", |s| {
         scene_on(s, "Replay showcase");
-        s.ui.shell.sidebar.scope_open = true;
+        toggle_scope(s);
     }),
     ("sidebar-shelves", |s| {
         scene_home(s);
@@ -174,7 +181,55 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         scene_home(s);
         s.appearance = crate::Appearance::Light;
     }),
+    // One provider updating (the pill) and one behind its latest version (the footer button).
+    ("sidebar-updates", |s| {
+        scene_home(s);
+        if let crate::data::Source::Fixture(state) = &mut s.src
+            && let Some(providers) = state.config.as_mut().and_then(|c| c["providers"].as_array_mut())
+        {
+            if let Some(p) = providers.get_mut(0) {
+                p["updateState"] = json!({"status": "running"});
+            }
+            if let Some(p) = providers.get_mut(1) {
+                p["versionAdvisory"] = json!({"status": "behind_latest", "latestVersion": "9.9.9", "canUpdate": true});
+            }
+        }
+    }),
+    ("sidebar-folders", |s| {
+        scene_home(s);
+        s.client_settings.values.insert("boringSidebarEnabled".into(), json!(true));
+    }),
+    ("sidebar-grouped", |s| {
+        scene_home(s);
+        scene_shared_repository(s);
+        s.client_settings.values.insert("boringSidebarEnabled".into(), json!(true));
+    }),
+    ("sidebar-grouped-scope", |s| {
+        scene_home(s);
+        scene_shared_repository(s);
+        toggle_scope(s);
+    }),
 ];
+
+/// The fixture's `server` and `s5code` projects as two checkouts of one repository, the first
+/// pinned, with project organization on so the scope menu offers pins.
+fn scene_shared_repository(s: &mut App) {
+    let crate::data::Source::Fixture(state) = &mut s.src else { return };
+    for p in &mut state.projects {
+        let root = match p["title"].as_str() {
+            Some("server") => "/home/ubuntu/s5code-ref",
+            Some("s5code") => "/home/ubuntu/projects/s5code",
+            _ => continue,
+        };
+        p["repositoryIdentity"] = json!({"canonicalKey": "github.com/s5labs/s5code", "displayName": "s5labs/s5code", "name": "s5code", "provider": "github", "rootPath": root});
+        if p["title"] == "server" {
+            p["pinnedAt"] = json!("2026-01-01T00:00:00.000Z");
+        }
+    }
+    if let Some(config) = state.config.as_mut() {
+        config["environment"]["capabilities"]["projectOrganization"] = json!(true);
+    }
+}
 
 fn thread_titled(s: &App, title: &str) -> Option<String> {
     s.state().threads.iter().find(|t| t["title"].as_str().is_some_and(|x| x.starts_with(title))).map(|t| crate::data::s(t, "id").to_string())
@@ -202,6 +257,38 @@ pub struct Model {
     pub now: i64,
     pub working_shelf: bool,
     pub updates: usize,
+    /// The boring sidebar's project folders, which hold the Active rows; empty otherwise.
+    pub folders: Vec<folders::Folder>,
+}
+
+/// The expanded Settled shelf shows 10 rows, then 25 more per "Show more".
+pub fn settled_limit(ui: &Ui) -> usize {
+    10 + 25 * ui.settled_pages
+}
+
+/// Opens or closes the project scope picker, freezing its order: open groups, pinned first.
+pub fn toggle_scope(s: &mut App) {
+    let open = !s.ui.shell.sidebar.scope_open;
+    if open {
+        let (groups, _) = folders::group_of(s);
+        let threads = Model::build(s).threads;
+        let sort = crate::settings::value(s, "sidebarProjectSortOrder");
+        let order = folders::ordered(&folders::Plan {
+            groups: &groups,
+            projects: &s.state().projects,
+            threads: &threads,
+            active: &[],
+            scope: &HashSet::new(),
+            sort: sort.as_str().unwrap_or("updated_at"),
+        });
+        s.ui.shell.sidebar.scope_order = order.into_iter().map(|n| groups[n].key.clone()).collect();
+    }
+    s.ui.shell.sidebar.scope_open = open;
+}
+
+/// `boringSidebarEnabled`, or the legacy sidebar it replaced.
+pub fn boring(s: &App) -> bool {
+    crate::settings::value(s, "boringSidebarEnabled") == true || crate::settings::value(s, "legacySidebarEnabled") == true
 }
 
 impl Model {
@@ -216,10 +303,29 @@ impl Model {
             .filter(|t| scope.is_empty() || scope.contains(&t.project_id))
             .collect::<Vec<_>>();
         let config = state.config.as_ref();
-        let working_shelf = config.and_then(|c| c["settings"]["sidebarWorkingShelfEnabled"].as_bool()).unwrap_or(true);
+        let boring = boring(s);
+        // The boring sidebar has no Working section.
+        let working_shelf = !boring && config.and_then(|c| c["settings"]["sidebarWorkingShelfEnabled"].as_bool()).unwrap_or(true);
         let providers = config.and_then(|c| c["providers"].as_array()).map(Vec::as_slice).unwrap_or(&[]);
+        let sections = logic::partition(&threads, s.now_ms, working_shelf);
+        let folders = if boring {
+            let (groups, _) = folders::group_of(s);
+            let scope: HashSet<String> = groups.iter().filter(|g| g.members.iter().any(|m| ui.project_scope.contains(m))).map(|g| g.key.clone()).collect();
+            let sort = crate::settings::value(s, "sidebarProjectSortOrder");
+            folders::plan(&folders::Plan {
+                groups: &groups,
+                projects: &state.projects,
+                threads: &threads,
+                active: &sections.active,
+                scope: &scope,
+                sort: sort.as_str().unwrap_or("updated_at"),
+            })
+        } else {
+            vec![]
+        };
         Model {
-            sections: logic::partition(&threads, s.now_ms, working_shelf),
+            folders,
+            sections,
             threads,
             projects: state.projects.iter().map(|p| (crate::data::s(p, "id").to_string(), crate::data::s(p, "title").to_string())).collect(),
             drivers: providers.iter().map(|p| (crate::data::s(p, "instanceId").to_string(), crate::data::s(p, "driver").to_string())).collect(),
@@ -254,7 +360,9 @@ impl Model {
         items.extend(s.pinned.iter().map(|i| row(i, Section::Pinned)));
         items.push(Item::Marker(Marker::PinnedDivider));
         items.push(Item::Marker(Marker::ActivePlaceholder));
-        items.extend(s.active.iter().map(|i| row(i, Section::Active)));
+        if self.folders.is_empty() {
+            items.extend(s.active.iter().map(|i| row(i, Section::Active)));
+        }
         let shelf = |items: &mut Vec<Item>, marker, rows: &[usize], section, shelf| {
             items.push(Item::Marker(marker));
             for i in rows {
@@ -271,8 +379,9 @@ impl Model {
         }
         items.push(Item::Marker(Marker::SettledHeader));
         items.push(Item::Marker(Marker::SettledPlaceholder));
-        for i in &s.settled {
-            if ui.expanded.contains(&Shelf::Settled) || self.route.as_deref() == Some(self.threads[*i].id.as_str()) {
+        let limit = settled_limit(ui);
+        for (n, i) in s.settled.iter().enumerate() {
+            if (ui.expanded.contains(&Shelf::Settled) && n < limit) || self.route.as_deref() == Some(self.threads[*i].id.as_str()) {
                 items.push(row(i, Section::Settled));
             }
         }
@@ -287,13 +396,19 @@ impl Model {
 
     /// Thread ids in the order the list shows them, for keyboard stepping.
     pub fn visible_ids(&self, ui: &Ui) -> Vec<String> {
-        self.items(ui)
-            .into_iter()
-            .filter_map(|i| match i {
-                Item::Thread { key, .. } => Some(key),
-                Item::Marker(_) => None,
-            })
-            .collect()
+        let mut out = vec![];
+        for item in self.items(ui) {
+            match item {
+                Item::Thread { key, .. } => out.push(key),
+                Item::Marker(Marker::ActivePlaceholder) => {
+                    for folder in &self.folders {
+                        out.extend(folders::shown(folder, self, &ui.folders).into_iter().map(|i| self.threads[i].id.clone()));
+                    }
+                }
+                Item::Marker(_) => {}
+            }
+        }
+        out
     }
 
     fn keys(&self, rows: &[usize], key: fn(&Thread) -> &Option<String>) -> Keys {
@@ -610,6 +725,7 @@ pub fn start_rename(s: &mut App, id: &str) {
 /// ThreadRenameInput commits on blur: focus moved off the editor. Also records visits to the
 /// thread on screen.
 pub fn poll(s: &mut App) -> bool {
+    folders::ensure_loaded(s);
     let searched = poll_content(s) | favicon::poll(s) | updates::poll(s);
     let shown = match &s.route {
         Route::Thread(id) => Some(id.clone()),
@@ -911,6 +1027,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
                 open_thread(s, &id.clone());
             }
         }
+        Key::Escape if s.ui.shell.sidebar.folders.menu.is_some() => s.ui.shell.sidebar.folders.menu = None,
         Key::Escape if !s.ui.shell.sidebar.selected.is_empty() => s.ui.shell.sidebar.selected.clear(),
         Key::Escape if s.ui.shell.sidebar.drag.is_some() => s.ui.shell.sidebar.drag = None,
         _ => return false,
@@ -996,6 +1113,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     confirm_dialog(s, &model, t, overlays);
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
+    folders::menu(s, t, overlays);
     crate::env::sidebar_menu(s, t, overlays);
     // 257pt of content and a 1pt border: the web's `w-64` plus its `border-r` and rail.
     let content = col()

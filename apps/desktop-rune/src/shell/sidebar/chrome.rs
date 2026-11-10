@@ -111,39 +111,81 @@ pub fn search_bar(s: &App, t: &T) -> El {
         .child(bar)
         .child(
             row()
-                .child(icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(|s: &mut App| s.ui.shell.sidebar.scope_open ^= true))
+                .child(icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::toggle_scope))
                 .child(icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(crate::shell::palette::open_add_project))
                 .child(icon_button(t, "sb-new-thread", &i::SQUARE_PEN, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::new_thread)),
         )
 }
 
-/// The project scope picker under the filter button: all projects, or any set of them.
+/// The project scope picker under the filter button: all projects, or any set of project groups.
+/// Each group shows its favicon and a pin button (`ProjectPinButton`), shown on the highlighted
+/// row until the group is pinned.
 pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
     let ui = &s.ui.shell.sidebar;
     if !ui.scope_open {
         return;
     }
+    let (groups, _) = super::folders::group_of(s);
+    let can_pin = crate::shell::palette::actions::can_organize_projects(s);
     let mut menu = crate::kit::Menu::new("sb-scope")
         .anchor("sb-filter")
         .placement(crate::kit::Placement::BottomStart)
         .min_width(224.0)
         .open(true)
         .on_close(|s: &mut App| s.ui.shell.sidebar.scope_open = false)
-        .item(crate::kit::MenuItem::new("All projects").icon(&i::FOLDER).checked(ui.project_scope.is_empty()).on_select(|s: &mut App| s.ui.shell.sidebar.project_scope.clear()))
+        .item(crate::kit::MenuItem::new("All projects").icon(&i::FOLDER).checked(ui.project_scope.is_empty()).on_select(|s: &mut App| {
+            let ui = &mut s.ui.shell.sidebar;
+            ui.project_scope.clear();
+            ui.selected.clear();
+            ui.settled_pages = 0;
+        }))
         .separator();
-    for p in s.state().projects.iter().filter(|p| p["archivedAt"].is_null()) {
-        let id = crate::data::s(p, "id").to_string();
-        let on = ui.project_scope.contains(&id);
-        menu = menu.item(crate::kit::MenuItem::new(crate::data::s(p, "title")).checked(on).on_select(move |s: &mut App| {
-            let scope = &mut s.ui.shell.sidebar.project_scope;
-            if on {
-                scope.retain(|x| *x != id);
-            } else {
-                scope.push(id.clone());
+    for key in &ui.scope_order {
+        let Some(g) = groups.iter().find(|g| g.key == *key) else { continue };
+        let on = g.members.iter().all(|m| ui.project_scope.contains(m));
+        let members = g.members.clone();
+        let mut item = crate::kit::MenuItem::new(g.label.clone()).checked(on).on_select(move |s: &mut App| {
+            let ui = &mut s.ui.shell.sidebar;
+            ui.project_scope.retain(|x| !members.contains(x));
+            if !on {
+                ui.project_scope.extend(members.iter().cloned());
             }
-        }));
+            ui.selected.clear();
+            ui.settled_pages = 0;
+        });
+        if let Some(p) = s.state().projects.iter().find(|p| crate::data::s(p, "id") == g.representative) {
+            item = item.leading(super::favicon::view(s, t, p, 16.0));
+        }
+        if can_pin {
+            item = item.trailing(scope_pin(t, g));
+        }
+        menu = menu.item(item);
     }
     menu.overlay(&crate::kit::theme(t), overlays);
+}
+
+/// `ProjectPinButton`: pins every member of the group.
+fn scope_pin(t: &T, g: &super::folders::Group) -> El {
+    let (members, pinned) = (g.members.clone(), g.pinned);
+    let color = t.sb.muted_foreground;
+    let glyph = icon(&i::PIN, 14.0);
+    let glyph = if pinned { glyph.color(color) } else { glyph.color(color.alpha(0.0)).group_color(color) };
+    // The hover fill is a sibling: a `hover` ancestor would take over the glyph's hover group
+    // from the menu row (a `trailing` row is the track), and the pin would only show under the pointer.
+    el().key(format!("sb-scope-pin-{}", g.key))
+        .size(24.0, 24.0)
+        .ml(4.0)
+        .center()
+        .role("button")
+        .label(if pinned { format!("Unpin {}", g.label) } else { format!("Pin {}", g.label) })
+        .cursor(Cursor::Pointer)
+        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(radius::SM).hover(t.sb.sidebar_row_hover))
+        .child(glyph)
+        .on_press(move |s: &mut App| {
+            for m in &members {
+                crate::shell::palette::actions::pin_project(s, m, !pinned);
+            }
+        })
 }
 
 pub fn footer(s: &App, model: &Model, t: &T) -> El {

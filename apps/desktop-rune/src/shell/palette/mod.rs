@@ -527,7 +527,20 @@ fn items(s: &App) -> Vec<Item> {
                     .find(|p| data::s(p, "id") == data::s(v, "projectId"))
                     .map(|p| data::s(p, "title"))
                     .unwrap_or("");
-                row.subtitle = Some(format!("{project} · Local · ∞"));
+                // `ThreadCommandSubtitle`: project, environment, branch, and whether it is open.
+                let environment = s.state().config.as_ref().map(|c| data::s(&c["environment"], "label")).filter(|l| !l.is_empty()).unwrap_or("Local");
+                let mut parts: Vec<&str> = vec![];
+                if !project.is_empty() {
+                    parts.extend([project, environment]);
+                }
+                let branch = data::s(v, "branch").trim();
+                if !branch.is_empty() {
+                    parts.push(branch);
+                }
+                if matches!(&s.route, Route::Thread(id) if id == data::s(v, "id")) {
+                    parts.push("Current thread");
+                }
+                row.subtitle = (!parts.is_empty()).then(|| parts.join(" · "));
                 row.fields.push(SearchTerm::weighted(
                     data::s(v, "branch")
                         .trim_start_matches("t3/")
@@ -711,6 +724,8 @@ fn items(s: &App) -> Vec<Item> {
                     .unwrap_or(0),
             )
         });
+        // Other groups shorten to 3 rows only when threads match too.
+        let threads_match = groups.iter().any(|(_, rows)| rows.iter().any(|(v, _, _)| v.group == "Threads"));
         out = groups
             .into_iter()
             .flat_map(|(_, mut rows)| {
@@ -730,8 +745,10 @@ fn items(s: &App) -> Vec<Item> {
                     usize::MAX
                 } else if rows.first().is_some_and(|(v, _, _)| v.group == "Threads") {
                     20
-                } else {
+                } else if threads_match || rows.first().is_some_and(|(v, _, _)| v.group == "Suggestions") {
                     3
+                } else {
+                    usize::MAX
                 };
                 rows.into_iter().take(limit).map(|(v, _, _)| v)
             })
@@ -781,7 +798,7 @@ fn items(s: &App) -> Vec<Item> {
                     .unwrap_or("Thread");
                 let mut row = item(
                     title,
-                    "Messages",
+                    "In messages",
                     &icons::MESSAGE_SQUARE,
                     "",
                     Action::Navigate(Route::Thread(id.into())),
@@ -1800,9 +1817,13 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
             None => text(description).font(theme::TEXT_XS).color(color).truncate(),
         });
     }
-    let glyph = v
-        .brand
-        .and_then(|b| add_project::brand(b, 16., t.c.contrast_icon_muted))
+    let project = match &v.action {
+        Action::OpenProject(id) | Action::Navigate(Route::Home { project_id: Some(id) }) => s.state().projects.iter().find(|p| p["id"] == *id),
+        _ => None,
+    };
+    let glyph = project
+        .map(|p| crate::shell::sidebar::favicon::view(s, t, p, 16.))
+        .or_else(|| v.brand.and_then(|b| add_project::brand(b, 16., t.c.contrast_icon_muted)))
         .unwrap_or_else(|| icon(v.glyph, 16.).color(t.c.contrast_icon_muted));
     let selected = ui.selected == i && (!raw || ui.picked);
     let mut entry = row()
@@ -2101,9 +2122,9 @@ mod tests {
         s.ui.shell.palette.message_query = "old".into();
         s.ui.shell.palette.message_matches =
             vec![serde_json::json!({"threadId":"other","snippet":"old needle"})];
-        assert!(!items(&s).iter().any(|v| v.group == "Messages"));
+        assert!(!items(&s).iter().any(|v| v.group == "In messages"));
         s.ui.shell.palette.message_query = "needle".into();
-        assert!(items(&s).iter().any(|v| v.group == "Messages"));
+        assert!(items(&s).iter().any(|v| v.group == "In messages"));
     }
     #[test]
     fn configured_shortcut_replaces_default_and_requires_exact_modifiers() {

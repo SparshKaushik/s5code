@@ -1,12 +1,13 @@
-//! Project favicons (`ProjectFavicon`): `assets.createUrl` names the project's icon file, which
-//! downloads off the UI thread. A project with none, or one that fails to load, keeps its
-//! monogram, as does every project until its icon has decoded.
+//! Project favicons (`ProjectFavicon`): a chosen `projectIcon` wins; otherwise
+//! `assets.createUrl` names the project's icon file, which downloads off the UI thread. A project
+//! with none, or one that fails to load, keeps its monogram, as does every project until its icon
+//! has decoded.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 use rune::{El, Image, ImageCache, Waker, el};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::App;
 use crate::theme::T;
@@ -72,6 +73,7 @@ pub fn poll(s: &mut App) -> bool {
         .state()
         .projects
         .iter()
+        .filter(|p| !has_override(p))
         .map(|p| (crate::data::s(p, "id").to_owned(), crate::data::s(p, "workspaceRoot").to_owned(), p["faviconPath"].as_str().map(str::to_owned)))
         .filter(|(id, cwd, _)| !id.is_empty() && !cwd.is_empty())
         .collect();
@@ -133,8 +135,21 @@ pub fn poll(s: &mut App) -> bool {
     changed
 }
 
+/// A Lucide icon, emoji or monogram the user picked in Settings.
+fn has_override(project: &Value) -> bool {
+    matches!(project["projectIcon"]["kind"].as_str(), Some("lucide" | "emoji" | "monogram"))
+}
+
+/// `ProjectFavicon` for a project record, for surfaces outside the sidebar.
+pub fn view(s: &App, t: &T, project: &Value, size: f32) -> El {
+    mark(s, t, crate::data::s(project, "id"), crate::data::s(project, "title"), false, size)
+}
+
 /// The project's icon at `size`, rounded like the web's `rounded-[25%]`, or its monogram.
 pub fn mark(s: &App, t: &T, project_id: &str, name: &str, dim: bool, size: f32) -> El {
+    if let Some(project) = s.state().projects.iter().find(|p| p["id"] == project_id).filter(|p| has_override(p)) {
+        return crate::settings::project_icon::preview(t, project, size).shrink().opacity(if dim { 0.4 } else { 1.0 });
+    }
     let image = match s.ui.shell.sidebar.favicons.entries.get(project_id) {
         Some((_, Entry::Ready(image))) if image.is_ready() && image.error().is_none() => image,
         _ => return super::row::monogram_at(t, name, dim, size),

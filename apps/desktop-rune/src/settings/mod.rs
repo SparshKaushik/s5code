@@ -14,7 +14,7 @@ mod models;
 mod host_logos;
 mod icon_index;
 mod pages;
-mod project_icon;
+pub(crate) mod project_icon;
 mod projects;
 mod providers;
 mod scope;

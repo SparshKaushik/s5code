@@ -709,6 +709,23 @@ fn editor(ui: &Ui, t: &T) -> El {
     )
 }
 
+/// The field `workspace.focusNext` lands on: the search, or the open file's editor. `None`
+/// while neither is drawn (a truncated file shows as plain text).
+pub(super) fn field_focused(app: &App) -> Option<bool> {
+    let ui = &app.ui.panel.files;
+    if ui.selected.is_empty() {
+        Some(ui.query.focused)
+    } else {
+        (!ui.truncated).then_some(ui.editor.focused)
+    }
+}
+pub(super) fn focus_field(app: &mut App, on: bool) {
+    let ui = &mut app.ui.panel.files;
+    let search = ui.selected.is_empty();
+    ui.query.focused = on && search;
+    ui.editor.focused = on && !search && !ui.truncated;
+}
+
 fn header(ui: &Ui, t: &T) -> El {
     let button = |label: &str, glyph: &'static rune::Icon| kit::Button::new(label).icon(glyph).variant("ghost-muted").size("icon-xs");
     let reload = button("Refresh workspace files", &icons::REFRESH_CW).on_press(refresh).build(t).help("Refresh files");

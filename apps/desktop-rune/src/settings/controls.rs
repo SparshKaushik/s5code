@@ -25,7 +25,7 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
         .on_toggle(move |s: &mut App| {
             let key = owned.as_str();
             let v = if key == "sidebarProjectGroupingMode" {
-                json!(if on { "separate" } else { "repository" })
+                json!(toggle_grouping(value(s, key).as_str().unwrap_or("repository"), on))
             } else {
                 json!(!on)
             };
@@ -36,6 +36,26 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
         })
         .build(&crate::kit::theme(t))
         .key(format!("setting-{key}"))
+}
+
+/// `projectGroupingModeFromToggle`: grouping switched back on restores the mode it was switched
+/// off from, which the web keeps in local storage.
+fn grouping_from_toggle(enabled: bool, last: &str) -> &'static str {
+    match (enabled, last) {
+        (false, _) => "separate",
+        (true, "repository_path") => "repository_path",
+        _ => "repository",
+    }
+}
+
+fn toggle_grouping(current: &str, on: bool) -> &'static str {
+    let path = (!cfg!(test)).then(|| crate::settings::client::sibling_path("last-project-grouping-mode"));
+    if on && current != "separate" && let Some(p) = &path {
+        let _ = p.parent().map(std::fs::create_dir_all);
+        let _ = std::fs::write(p, current);
+    }
+    let last = path.and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    grouping_from_toggle(!on, last.trim())
 }
 
 pub fn select_width(key: &str) -> f32 {
@@ -476,4 +496,17 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
                 .on_change(move |s: &mut App, n, _| update(s, &key, json!(n)))
                 .build(t),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grouping_from_toggle;
+
+    #[test]
+    fn grouping_back_on_restores_the_path_mode() {
+        assert_eq!(grouping_from_toggle(false, "repository_path"), "separate");
+        assert_eq!(grouping_from_toggle(true, "repository_path"), "repository_path");
+        assert_eq!(grouping_from_toggle(true, "separate"), "repository");
+        assert_eq!(grouping_from_toggle(true, ""), "repository");
+    }
 }

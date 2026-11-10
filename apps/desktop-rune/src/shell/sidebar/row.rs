@@ -108,7 +108,7 @@ fn verb_badge(t: &T, v: Verb) -> El {
 }
 
 /// A small text action that appears over the time on hover (Snooze, Settle, Wake, Un-settle).
-fn hover_action(t: &T, key: String, glyph: &'static rune::Icon, size: f32, label: Option<&str>, px: f32) -> El {
+pub(super) fn hover_action(t: &T, key: String, glyph: &'static rune::Icon, size: f32, label: Option<&str>, px: f32) -> El {
     let mut b = row()
         .key(key)
         .h_full()
@@ -133,6 +133,8 @@ pub struct RowCtx<'a> {
     pub over: Option<&'a str>,
     /// Where the drag projection moves this row, or `None` while it hides it.
     pub shift: Option<f32>,
+    /// A row under a boring-sidebar project folder: indented, without a favicon.
+    pub folder: bool,
 }
 
 /// Applies the drag: the dragged row follows the pointer above the rest, peers slide to their
@@ -186,6 +188,8 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
             let far = d.dx.hypot(d.dy) >= super::DRAG_DISTANCE;
             match d.phase {
                 Phase::Down => s.ui.shell.sidebar.card = None,
+                // The boring sidebar's rows don't drag.
+                Phase::Move if super::boring(s) => {}
                 Phase::Move => {
                     let ui = &mut s.ui.shell.sidebar;
                     if ui.drag.is_some() || far {
@@ -270,24 +274,11 @@ pub fn hover_card(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
 }
 
 fn click(s: &mut App, id: &str, mods: rune::Mods) {
+    let ordered = if mods.shift { Model::build(s).ordered_ids() } else { vec![] };
     let ui = &mut s.ui.shell.sidebar;
-    if mods.cmd {
-        if !ui.selected.remove(id) {
-            ui.selected.insert(id.to_string());
-        }
-        ui.anchor = Some(id.to_string());
-        return;
+    if !logic::select_click(&mut ui.selected, &mut ui.anchor, &ordered, id, mods.cmd, mods.shift) {
+        super::open_thread(s, id);
     }
-    if mods.shift
-        && let Some(anchor) = ui.anchor.clone()
-    {
-        let ids = Model::build(s).visible_ids(&s.ui.shell.sidebar);
-        if let (Some(a), Some(b)) = (ids.iter().position(|x| *x == anchor), ids.iter().position(|x| x == id)) {
-            s.ui.shell.sidebar.selected = ids[a.min(b)..=a.max(b)].iter().cloned().collect();
-            return;
-        }
-    }
-    super::open_thread(s, id);
 }
 
 /// Source-over in sRGB, as the browser composites (colours are stored linear).
@@ -496,7 +487,9 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     let (unread, woke) = (th.unread(), th.woke(model.now));
     let receded = logic::recedes(status, unread, woke, active, selected);
     let settled = rc.section == Section::Settled;
-    let title_color = if hovered || active || woke || matches!(status, Status::Input | Status::Request) {
+    let title_color = if rc.folder {
+        if receded && !hovered { t.sb.foreground.alpha_mul(0.75) } else { t.sb.foreground }
+    } else if hovered || active || woke || matches!(status, Status::Input | Status::Request) {
         t.sb.foreground
     } else if settled || receded {
         t.sb.secondary_label
@@ -505,13 +498,12 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     } else {
         t.sb.secondary_label.alpha_mul(0.7)
     };
-    let mut r = row()
-        .h(36.0)
-        .px(10.0)
-        .gap(10.0)
-        .center_y()
-        .child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0))
-        .child(title(s, th, t, theme::TEXT_SM, title_color));
+    let mut r = row().h(36.0).px(10.0).gap(10.0).center_y();
+    r = if rc.folder {
+        r.pl(36.0).child(title(s, th, t, if receded && !hovered { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color))
+    } else {
+        r.child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0)).child(title(s, th, t, theme::TEXT_SM, title_color))
+    };
     if th.pinned {
         r = r.child(icon(&i::PIN, 12.0).color(t.sb.muted_foreground.alpha_mul(0.65)).shrink());
     }
@@ -523,6 +515,8 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         let rest = if rc.section == Section::Snoozed {
             let at = th.snoozed_until.unwrap_or(model.now);
             row().gap(4.0).center_y().child(icon(&i::ALARM_CLOCK, 12.0).color(t.sb.info_foreground)).child(text(wake_label(at, model.now, crate::data::Zone::Local)).font(theme::TEXT_XS).color(t.sb.info_foreground))
+        } else if let Some((glyph, label, color)) = top_status(t, model, th, status).filter(|_| rc.folder) {
+            row().gap(4.0).center_y().child(icon(glyph, 16.0).color(color)).child(text(label).font(theme::XS_MEDIUM).color(color))
         } else {
             let at = if settled { th.settled_time() } else { th.card_time() };
             row().child(text(logic::relative_label(at, model.now)).font(theme::TEXT_XS.features("'tnum' 1")).color(t.sb.secondary_label))
@@ -758,7 +752,9 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let min_dy = drag.and_then(|d| Some(cx.layout(&marker_key(Marker::PinnedHeader))?[1] + LABEL_H - cx.layout(&format!("sb-li-{}", d.key))?[1]));
     let viewport = cx.layout("sb-scroll").map_or(0.0, |r| r[3]);
 
-    if items.iter().all(|it| matches!(it, Item::Marker(_))) && model.sections.settled.is_empty() {
+    let s_all = &model.sections;
+    let nothing = [&s_all.pinned, &s_all.active, &s_all.working, &s_all.snoozed, &s_all.settled].iter().all(|v| v.is_empty());
+    if nothing && model.folders.is_empty() {
         let muted = t.sb.muted_foreground.alpha_mul(0.6);
         let mut empty = col().w_full().px(8.0).py(24.0).gap(8.0).center();
         if s.state().projects.is_empty() {
@@ -779,9 +775,11 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                 .on_press(crate::shell::palette::open_add_project);
             empty = empty.child(text("No projects yet").font(theme::TEXT_XS).color(muted)).child(add);
         } else {
-            let label = match ui.project_scope.as_slice() {
+            let (groups, _) = super::folders::group_of(s);
+            let scoped: Vec<&super::folders::Group> = groups.iter().filter(|g| g.members.iter().any(|m| ui.project_scope.contains(m))).collect();
+            let label = match scoped.as_slice() {
                 [] => "No threads yet".to_string(),
-                [one] => format!("No threads in {} yet", model.projects.get(one).map(String::as_str).unwrap_or("this project")),
+                [one] => format!("No threads in {} yet", one.label),
                 _ => "No threads in these projects yet".to_string(),
             };
             empty = empty.child(text(label).font(theme::TEXT_XS).color(muted));
@@ -799,7 +797,7 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
             Item::Thread { key, section } => {
                 let Some(th) = model.thread(key) else { continue };
                 let dragging = drag.filter(|d| &d.key == key).map(|d| (min_dy.map_or(d.dy, |m| d.dy.max(m)), verb));
-                let rc = RowCtx { section: *section, hovered: ui.hover.as_deref() == Some(key.as_str()), dragging, over: over.as_deref(), shift };
+                let rc = RowCtx { section: *section, hovered: ui.hover.as_deref() == Some(key.as_str()), dragging, over: over.as_deref(), shift, folder: false };
                 let e = if matches!(section, Section::Snoozed | Section::Settled) { slim(s, model, th, t, &rc) } else { card(s, model, th, t, &rc) };
                 let e = if first { e } else { e.mt(1.0) };
                 first = false;
@@ -814,6 +812,17 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
                         let (label, section) = if *m == Marker::PinnedHeader { ("Pinned", Section::Pinned) } else { ("Active", Section::Active) };
                         let e = base(0.0);
                         if dragging { e.child(chrome::boundary(t, label, target_section == Some(section))) } else { e }
+                    }
+                    Marker::ActivePlaceholder if !model.folders.is_empty() => {
+                        let row_of = |i: usize| {
+                            let th = &model.threads[i];
+                            let rc = RowCtx { section: Section::Active, hovered: ui.hover.as_deref() == Some(th.id.as_str()), dragging: None, over: None, shift: Some(0.0), folder: true };
+                            slim(s, model, th, t, &rc).mt(1.0)
+                        };
+                        let e = el().key(key.clone()).w_full().child(super::folders::view(s, t, model, &row_of));
+                        let e = if first { e } else { e.mt(8.0) };
+                        first = false;
+                        e
                     }
                     Marker::ActivePlaceholder | Marker::SettledPlaceholder => {
                         let (label, section, rows) =
@@ -853,6 +862,30 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
             }
         };
         content = content.child(child);
+    }
+    let hidden = s_.settled.len().saturating_sub(super::settled_limit(ui));
+    if ui.expanded.contains(&Shelf::Settled) && hidden > 0 && drag.is_none() {
+        let label = format!("Show {} more", hidden.min(25));
+        content = content.child(
+            row()
+                .key("sb-settled-more")
+                .role("button")
+                .label(label.clone())
+                .w_full()
+                .h(28.0)
+                .mt(1.0)
+                .px(10.0)
+                .gap(6.0)
+                .center_y()
+                .radius(radius::MD)
+                .hover(t.sb.sidebar_row_hover)
+                .cursor(Cursor::Pointer)
+                .focusable(true)
+                .focus_ring(2.0, -2.0, t.sb.ring)
+                .child(icon(&i::CHEVRON_DOWN, 12.0).color(t.sb.muted_foreground))
+                .child(text(label).font(theme::TEXT_XS).color(t.sb.muted_foreground))
+                .on_press(|s: &mut App| s.ui.shell.sidebar.settled_pages += 1),
+        );
     }
     el().key("sb-scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(content)
 }

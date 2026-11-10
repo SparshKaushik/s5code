@@ -119,7 +119,7 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
     let key = |s: &str| s.parse::<Shortcut>().expect("valid accelerator");
     app.standard_menus()
         .menu_item(MenuItem::new(SETTINGS_TITLE, |s: &mut App, _: &mut Tx| open_settings(s)).id("settings").key_equivalent(key("cmd+,")).keys_first())
-        .menu_item(MenuItem::new(QUIT_TITLE, |_: &mut App, tx: &mut Tx| tx.quit()).id("quit").key_equivalent(key("cmd+q")).keys_first())
+        .menu_item(MenuItem::new(QUIT_TITLE, |s: &mut App, tx: &mut Tx| crate::shell::quit::menu_quit(s, tx)).id("quit").key_equivalent(key("cmd+q")).keys_first())
         .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
         .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
         .menu_item(MenuItem::new("Force Reload", |s: &mut App, _: &mut Tx| reload(s, true)).id("force-reload").menu("View").key_equivalent(key("cmd+shift+r")).keys_first())
