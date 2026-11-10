@@ -529,6 +529,7 @@ impl Menu {
         }
         let dismiss = self.dismiss.take();
         let (anchor, place, gap) = if let Some((x, y)) = self.at {
+            let (x, y) = crate::desktop::from_window(x, y);
             let point = format!("{}-point", self.key);
             layer.push(el().key(point.clone()).absolute(x, y).size(0., 0.));
             (point, Placement::BottomStart, 0.)
