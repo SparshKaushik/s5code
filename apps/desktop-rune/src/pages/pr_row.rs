@@ -299,8 +299,10 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
     let key = row_key(e);
     let sweeping = u.sweep.as_ref().is_some_and(|w| w.started && w.swept.contains(&key));
     let busy = sweeping || u.acting.iter().any(|a| a.key == key);
+    // The sweep's own Close keeps its drag until release, even once Shift is let go.
+    let origin = u.sweep.as_ref().is_some_and(|w| w.origin == key);
     let actions = quick_actions(e, &host_actions(result, e));
-    if actions.is_empty() || !(u.speed || busy) {
+    if actions.is_empty() || !(u.speed || busy || origin) {
         return None;
     }
     let writable = can_write(s);
@@ -319,7 +321,7 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
             "close" => "Close immediately, or drag across rows to close several".to_string(),
             _ => format!("{label} immediately"),
         };
-        let disabled = !writable || busy || (action == "merge" && stacked);
+        let disabled = !writable || (busy && !(origin && action == "close")) || (action == "merge" && stacked);
         let mut button = kit::Button::new(label)
             .variant(if action == "close" { "destructive-outline" } else { "outline" })
             .size("xs")
