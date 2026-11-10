@@ -128,7 +128,7 @@ pub fn mockup(t: &T, size: f32) -> El {
     col()
         .size(size, size)
         .shrink()
-        .p(4.)
+        .padding(4.)
         .gap(2.)
         .radius(2.)
         .border(1., t.c.border.alpha_mul(0.6))
