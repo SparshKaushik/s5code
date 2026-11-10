@@ -617,7 +617,7 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
-        // The Changes row hides with the quiet git row; a draft shows it disabled.
+        // The Changes row hides with the quiet git row; on a draft it opens the project's changes.
         let Some(git) = git::view(s, t, v, draft) else { return Some(card.child(section)) };
         section = section.child(git);
         let (add, del) = git::changes_totals(v);
@@ -630,7 +630,7 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .child(text(format!("+{add}")).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
                     .child(text(format!("-{del}")).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
             );
-        section = section.child(if draft { changes.opacity(0.64) } else { changes.on_press(|s: &mut App| crate::panel::open_changes(s)) });
+        section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
         card = card.child(section);
     }
     Some(card)

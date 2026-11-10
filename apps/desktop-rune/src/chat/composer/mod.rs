@@ -610,9 +610,9 @@ pub fn add_terminal_context(s: &mut App, thread: &str, terminal_id: &str, termin
     add_thread_context(s, thread, chips::terminal(terminal_id, terminal_label, line_start, line_end, text));
 }
 
-/// Adds `record` to `thread`'s draft, opening the thread first.
+/// Adds `record` to `thread`'s draft (a thread id or a new-thread draft's key), opening it first.
 pub fn add_thread_context(s: &mut App, thread: &str, record: Value) {
-    if s.frame_route() != &Route::Thread(thread.to_owned()) {
+    if draft_key(s, s.frame_route()) != thread {
         s.navigate(Route::Thread(thread.to_owned()));
     }
     add_context(s, record);

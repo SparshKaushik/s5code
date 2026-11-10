@@ -162,6 +162,7 @@ pub fn begin(app: &mut App, f: usize, at: LineRef) {
     };
     let id = format!("file-comment-{}-{}", data::now_ms(), SEQ.fetch_add(1, Ordering::Relaxed));
     ui.comment = Some(Draft { id, path, start, end });
+    ui.state.hushed = Some((f, at));
     ui.comment_edit = rune::TextEdit::new("");
     ui.comment_edit.focused = true;
     sync(app);
@@ -185,7 +186,7 @@ fn submit(app: &mut App) {
     if body.trim().is_empty() {
         return;
     }
-    let Some((thread, _)) = super::super::context(app) else { return };
+    let Some((thread, _)) = super::super::diff_context(app) else { return };
     let st = &ui.state;
     let Some(f) = st.files().iter().position(|f| f.path() == draft.path) else { return };
     let lines = review_lines(st, f);
@@ -202,14 +203,14 @@ fn submit(app: &mut App) {
 }
 
 fn delete(app: &mut App, context_id: &str) {
-    let Some((thread, _)) = super::super::context(app) else { return };
+    let Some((thread, _)) = super::super::diff_context(app) else { return };
     composer::remove_context(app, &thread, context_id);
     sync(app);
 }
 
 /// The draft's review comments on the shown section: id, file, text and last review line.
 fn comments(app: &App) -> Vec<(String, String, String, Option<u64>)> {
-    let Some((thread, _)) = super::super::context(app) else { return vec![] };
+    let Some((thread, _)) = super::super::diff_context(app) else { return vec![] };
     let reviews: Vec<&Value> = composer::thread_contexts(app, &thread).into_iter().filter(|c| data::s(c, "kind") == "review-comment").collect();
     if reviews.is_empty() {
         return vec![];
