@@ -271,9 +271,17 @@ pub fn toggle_scope(s: &mut App) {
     let open = !s.ui.shell.sidebar.scope_open;
     if open {
         let (groups, _) = folders::group_of(s);
-        let mut order: Vec<&folders::Group> = groups.iter().filter(|g| !g.archived).collect();
-        order.sort_by_key(|g| !g.pinned);
-        s.ui.shell.sidebar.scope_order = order.into_iter().map(|g| g.key.clone()).collect();
+        let threads = Model::build(s).threads;
+        let sort = crate::settings::value(s, "sidebarProjectSortOrder");
+        let order = folders::ordered(&folders::Plan {
+            groups: &groups,
+            projects: &s.state().projects,
+            threads: &threads,
+            active: &[],
+            scope: &HashSet::new(),
+            sort: sort.as_str().unwrap_or("updated_at"),
+        });
+        s.ui.shell.sidebar.scope_order = order.into_iter().map(|n| groups[n].key.clone()).collect();
     }
     s.ui.shell.sidebar.scope_open = open;
 }

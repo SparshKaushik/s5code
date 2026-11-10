@@ -175,6 +175,18 @@ fn project_time(p: &Plan, group: &Group) -> i64 {
     })
 }
 
+/// `sortSidebarV2ProjectGroups`: unarchived groups, pinned first, then by Project order. The
+/// folders and the project scope menu share it.
+pub fn ordered(p: &Plan) -> Vec<usize> {
+    let mut open: Vec<usize> = (0..p.groups.len()).filter(|n| !p.groups[*n].archived).collect();
+    if p.sort != "manual" {
+        let times: Vec<i64> = p.groups.iter().map(|g| project_time(p, g)).collect();
+        open.sort_by(|a, b| times[*b].cmp(&times[*a]).then_with(|| p.groups[*a].label.cmp(&p.groups[*b].label)).then_with(|| p.groups[*a].key.cmp(&p.groups[*b].key)));
+    }
+    open.sort_by_key(|n| !p.groups[*n].pinned);
+    open
+}
+
 /// The folder list: open groups pinned first then by Project order, then archived groups that
 /// still hold active threads. Empty folders show only when scoped or pinned.
 pub fn plan(p: &Plan) -> Vec<Folder> {
@@ -188,12 +200,7 @@ pub fn plan(p: &Plan) -> Vec<Folder> {
     for list in &mut rows {
         list.sort_by(|a, b| folder_time(&p.threads[*b]).cmp(&folder_time(&p.threads[*a])).then_with(|| p.threads[*a].id.cmp(&p.threads[*b].id)));
     }
-    let mut open: Vec<usize> = (0..p.groups.len()).filter(|n| !p.groups[*n].archived).collect();
-    if p.sort != "manual" {
-        let times: Vec<i64> = p.groups.iter().map(|g| project_time(p, g)).collect();
-        open.sort_by(|a, b| times[*b].cmp(&times[*a]).then_with(|| p.groups[*a].label.cmp(&p.groups[*b].label)).then_with(|| p.groups[*a].key.cmp(&p.groups[*b].key)));
-    }
-    open.sort_by_key(|n| !p.groups[*n].pinned);
+    let mut open = ordered(p);
     open.extend((0..p.groups.len()).filter(|n| p.groups[*n].archived && !rows[*n].is_empty()));
     open.retain(|n| p.scope.is_empty() || p.scope.contains(&p.groups[*n].key));
     open.retain(|n| !rows[*n].is_empty() || !p.scope.is_empty() || (p.groups[*n].pinned && !p.groups[*n].archived));
