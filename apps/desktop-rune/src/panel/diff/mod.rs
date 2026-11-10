@@ -87,6 +87,12 @@ pub struct Ui {
     touched: bool,
     /// Those choices by path, kept while a file is out of the list (hidden, or its patch loading).
     folds: HashMap<String, bool>,
+    /// Each thread and scope's fold choices, back when it shows again (`collapsedFileKeysByScopeKey`).
+    remembered: HashMap<(String, Scope), HashMap<String, bool>>,
+    /// The panel's own wrap and whitespace toggles; until pressed they follow the settings,
+    /// which pressing leaves alone (web's DiffPanel seeds local state from them).
+    wrap: Option<bool>,
+    ignore_ws: Option<bool>,
     menu_open: bool,
     sub: Option<Sub>,
     commits: Option<Result<(Vec<Commit>, bool), String>>,
@@ -123,6 +129,9 @@ impl Default for Ui {
             seen: 0,
             touched: false,
             folds: HashMap::new(),
+            remembered: HashMap::new(),
+            wrap: None,
+            ignore_ws: None,
             menu_open: false,
             sub: None,
             commits: None,
@@ -146,17 +155,42 @@ fn setting(app: &App, key: &str, default: bool) -> bool {
     app.client_settings.values.get(key).and_then(Value::as_bool).unwrap_or(default)
 }
 
+fn wrap_on(app: &App) -> bool {
+    app.ui.panel.diff.wrap.unwrap_or_else(|| setting(app, "wordWrap", true))
+}
+
+fn ignore_ws(app: &App) -> bool {
+    app.ui.panel.diff.ignore_ws.unwrap_or_else(|| setting(app, "diffIgnoreWhitespace", true))
+}
+
 fn save_setting(app: &mut App, key: &str, value: Value) {
     app.client_settings.values.insert(key.into(), value);
     app.client_settings.save();
 }
 
 /// A new thread starts on "Changes"; the view preferences stay.
-pub fn reset(app: &mut App) {
-    let old = std::mem::take(&mut app.ui.panel.diff);
+pub fn reset(app: &mut App, previous: &str) {
+    let mut old = std::mem::take(&mut app.ui.panel.diff);
+    remember(&mut old, previous);
     let ui = &mut app.ui.panel.diff;
     ui.hide_tests = old.hide_tests;
     ui.tree_open = old.tree_open;
+    ui.remembered = old.remembered;
+}
+
+/// Keeps the shown scope's fold choices for when it shows again.
+fn remember(ui: &mut Ui, thread: &str) {
+    let Some(shown) = ui.shown.clone() else { return };
+    capture(&mut ui.folds, &ui.state, ui.touched);
+    if !ui.folds.is_empty() {
+        ui.remembered.insert((thread.to_owned(), shown), std::mem::take(&mut ui.folds));
+    }
+}
+
+/// Starts `scope` from its remembered fold choices, or the default.
+fn recall(ui: &mut Ui, thread: &str, scope: &Scope) {
+    ui.touched = false;
+    ui.folds = ui.remembered.get(&(thread.to_owned(), scope.clone())).cloned().unwrap_or_default();
 }
 
 /// The git card's "Changes" row (`openChangesFromThreadPanel` selects the branch scope).
@@ -165,19 +199,25 @@ pub fn open_changes(app: &mut App) {
     choose(app, Scope::Branch);
 }
 
+/// A turn stays chosen when newer turns land, as web pins the run it opened.
 pub fn open_turn(app: &mut App, count: u64) {
-    let latest = turns(app).first().map(|t| t.count);
-    choose(app, if latest == Some(count) { Scope::Turn(None) } else { Scope::Turn(Some(count)) });
+    choose(app, Scope::Turn(Some(count)));
+}
+
+/// "Latest turn" pins the newest turn now; with none yet it follows the first to land.
+fn latest_turn(app: &App) -> Scope {
+    Scope::Turn(turns(app).first().map(|t| t.count))
 }
 
 fn choose(app: &mut App, scope: Scope) {
+    let thread = app.ui.panel.thread.clone();
     let ui = &mut app.ui.panel.diff;
     ui.menu_open = false;
     ui.sub = None;
     if ui.scope != scope {
+        remember(ui, &thread);
+        recall(ui, &thread, &scope);
         ui.scope = scope;
-        ui.touched = false;
-        ui.folds.clear();
     }
 }
 
@@ -247,7 +287,7 @@ fn source_kind(scope: &Scope) -> &'static str {
 fn signature(app: &App, scope: &Scope) -> u64 {
     let mut h = std::hash::DefaultHasher::new();
     scope.hash(&mut h);
-    setting(app, "diffIgnoreWhitespace", true).hash(&mut h);
+    ignore_ws(app).hash(&mut h);
     app.ui.panel.diff.base_ref.hash(&mut h);
     match scope {
         Scope::Turn(_) => turn_of(scope, &turns(app)).hash(&mut h),
@@ -267,7 +307,7 @@ pub fn load(app: &mut App) {
     sync_settings(app);
     let Some((thread, cwd)) = super::context(app) else { return };
     let scope = app.ui.panel.diff.scope.clone();
-    let ignore_ws = setting(app, "diffIgnoreWhitespace", true);
+    let ignore_ws = ignore_ws(app);
     let request = match &scope {
         Scope::Turn(_) => turn_of(&scope, &turns(app)).map(|n| {
             ("orchestration.getTurnDiff", json!({ "threadId": thread, "fromTurnCount": n.saturating_sub(1), "toTurnCount": n, "ignoreWhitespace": ignore_ws }))
@@ -337,13 +377,18 @@ fn apply(app: &mut App) {
 }
 
 fn collapsed_for(folds: &mut HashMap<String, bool>, shown: &DiffState, touched: bool, files: &[FileDiff], default: bool) -> Vec<String> {
+    capture(folds, shown, touched);
+    files.iter().map(|f| f.path()).filter(|p| folds.get(*p).copied().unwrap_or(default)).map(str::to_string).collect()
+}
+
+/// Records the shown files' folds once the user has changed any.
+fn capture(folds: &mut HashMap<String, bool>, shown: &DiffState, touched: bool) {
     if touched {
         let collapsed = shown.collapsed_paths();
         for f in shown.files() {
             folds.insert(f.path().to_string(), collapsed.iter().any(|p| p == f.path()));
         }
     }
-    files.iter().map(|f| f.path()).filter(|p| folds.get(*p).copied().unwrap_or(default)).map(str::to_string).collect()
 }
 
 fn take(app: &mut App, id: u64) -> Option<Result<Value, Value>> {
@@ -401,14 +446,14 @@ pub fn poll(app: &mut App) -> bool {
     if let Some((id, scope)) = app.ui.panel.diff.pending.clone()
         && let Some(reply) = take(app, id)
     {
+        let thread = app.ui.panel.thread.clone();
         let ui = &mut app.ui.panel.diff;
         ui.pending = None;
         if scope != ui.scope {
             return true;
         }
         if ui.shown.as_ref() != Some(&scope) {
-            ui.touched = false;
-            ui.folds.clear();
+            recall(ui, &thread, &scope);
         }
         ui.shown = Some(scope.clone());
         let mut missing = vec![];
@@ -536,7 +581,7 @@ fn incomplete(files: &[FileDiff], meta: &[FileStat]) -> Vec<FileStat> {
 /// Asks for each file's own patch, as web's lazy per-file loads do (`input.file`).
 fn fetch_files(app: &mut App, scope: &Scope, files: Vec<FileStat>) {
     let Some((_, cwd)) = super::context(app) else { return };
-    let ignore_ws = setting(app, "diffIgnoreWhitespace", true);
+    let ignore_ws = ignore_ws(app);
     let base = app.ui.panel.diff.base_ref.clone();
     let mut ids = vec![];
     if let Some(net) = app.src.net() {
@@ -682,11 +727,20 @@ fn short(sha: &str) -> &str {
     &sha[..sha.len().min(7)]
 }
 
-/// "9:00 AM", as the sidebar prints times.
-fn clock(ms: i64) -> String {
-    let mins = ms.rem_euclid(86_400_000) / 60_000;
+/// "9:00 AM" in local time, or "09:00" under the 24-hour setting (`formatShortTimestamp`).
+fn clock(app: &App, ms: i64) -> String {
+    let hour12 = app.client_settings.values.get("timestampFormat").and_then(Value::as_str) != Some("24-hour");
+    clock_at(data::Zone::Local.wall(ms), hour12)
+}
+
+fn clock_at(wall: i64, hour12: bool) -> String {
+    let mins = wall.rem_euclid(86_400_000) / 60_000;
     let (h, m) = (mins / 60, mins % 60);
-    format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+    if hour12 {
+        format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" })
+    } else {
+        format!("{h:02}:{m:02}")
+    }
 }
 
 /// A header toggle: ghost `sm` button that shows pressed with the accent fill.
@@ -967,14 +1021,14 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
         ));
     }
     right = right.child(layout_group(app, t));
-    let wrap = setting(app, "wordWrap", true);
+    let wrap = wrap_on(app);
     right = right.child(toggle(t, "panel-diff-wrap", if wrap { "Disable line wrapping" } else { "Enable line wrapping" }, &icons::TEXT_WRAP, wrap, move |s: &mut App| {
-        save_setting(s, "wordWrap", json!(!wrap));
+        s.ui.panel.diff.wrap = Some(!wrap);
         s.ui.panel.diff.state.set_wrap(!wrap);
     }));
-    let ignore = setting(app, "diffIgnoreWhitespace", true);
+    let ignore = ignore_ws(app);
     right = right.child(toggle(t, "panel-diff-whitespace", if ignore { "Show whitespace changes" } else { "Hide whitespace changes" }, &icons::PILCROW, ignore, move |s: &mut App| {
-        save_setting(s, "diffIgnoreWhitespace", json!(!ignore));
+        s.ui.panel.diff.ignore_ws = Some(!ignore);
         load(s);
     }));
     if ui.files.iter().any(|f| is_test_file(f.path())) {
@@ -1165,7 +1219,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
             MenuEntry::item(
                 MenuItem::new(format!("Turn {n}"))
                     .radio(matches!(ui.scope, Scope::Turn(_)) && current == Some(n))
-                    .shortcut(clock(turn.at))
+                    .shortcut(clock(app, turn.at))
                     .on_select(move |s: &mut App| {
                         open_turn(s, n);
                         load(s);
@@ -1208,7 +1262,7 @@ fn scope_menu(app: &App, t: &T, layer: &mut Vec<El>) {
         })
         .item(MenuItem::new("Changes").radio(ui.scope == Scope::Branch).on_select(|s: &mut App| select(s, Scope::Branch)))
         .item(MenuItem::new("Uncommitted").radio(ui.scope == Scope::Unstaged).on_select(|s: &mut App| select(s, Scope::Unstaged)))
-        .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, Scope::Turn(None))))
+        .item(MenuItem::new("Latest turn").radio(latest).on_select(|s: &mut App| select(s, latest_turn(s))))
         .item(MenuItem::new("Turn").submenu(turn_entries, sub == Some(Sub::Turns)).on_submenu_change(|s: &mut App, on| {
             s.ui.panel.diff.sub = if on { Some(Sub::Turns) } else { None };
         }))
@@ -1244,10 +1298,10 @@ pub fn fixture(app: &mut App) {
     apply(app);
 }
 
-/// The persisted layout and wrap settings, which other clients may change too.
+/// The persisted layout setting, which other clients may change too, and the wrap toggle.
 fn sync_settings(app: &mut App) {
     let split = app.client_settings.values.get("diffLayout").and_then(Value::as_str) == Some("split");
-    let wrap = setting(app, "wordWrap", true);
+    let wrap = wrap_on(app);
     let st = &mut app.ui.panel.diff.state;
     st.set_mode(if split { DiffMode::Split } else { DiffMode::Unified });
     st.set_wrap(wrap);
@@ -1306,6 +1360,8 @@ mod tests {
         assert_eq!(turn_of(&Scope::Turn(None), &turns), Some(2));
         assert_eq!(turn_of(&Scope::Turn(Some(1)), &turns), Some(1));
         assert_eq!(turn_of(&Scope::Turn(Some(9)), &turns), Some(2));
+        assert_eq!((clock_at(0, true), clock_at(13 * 3_600_000 + 5 * 60_000, true)), ("12:00 AM".into(), "1:05 PM".into()));
+        assert_eq!(clock_at(13 * 3_600_000 + 5 * 60_000, false), "13:05");
         assert_eq!(turn_of(&Scope::Branch, &turns), None);
     }
 
@@ -1336,6 +1392,16 @@ mod tests {
         state.set_files(b, &collapsed);
         let abc = patch(&["a.ts", "b.ts", "c.ts"]);
         assert_eq!(collapsed_for(&mut folds, &state, true, &abc, true), vec!["b.ts", "c.ts"]);
+
+        // Each thread's scope gets its folds back when it shows again.
+        let mut ui = Ui { shown: Some(Scope::Branch), folds, ..Ui::default() };
+        remember(&mut ui, "t1");
+        recall(&mut ui, "t1", &Scope::Unstaged);
+        assert!(ui.folds.is_empty() && !ui.touched);
+        recall(&mut ui, "t1", &Scope::Branch);
+        assert_eq!(ui.folds.get("a.ts"), Some(&false));
+        recall(&mut ui, "t2", &Scope::Branch);
+        assert!(ui.folds.is_empty());
     }
 
     #[test]

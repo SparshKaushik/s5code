@@ -42,7 +42,7 @@ pub fn toggle(s: &mut App) {
 fn close(s: &mut App) {
     s.ui.chat.composer.picker.open = false;
     s.ui.chat.composer.picker.runtime_open = false;
-    let key = super::draft_key(s.frame_route());
+    let key = super::draft_key(s, s.frame_route());
     if let Some(d) = s.ui.chat.composer.drafts.get_mut(&key) {
         d.edit.focused = true;
     }
@@ -78,7 +78,11 @@ fn rows(s: &App) -> Vec<(String, String, String)> {
 }
 
 fn pick(s: &mut App, instance: String, slug: String) {
-    draft_mut(s).model = Some((instance, slug));
+    let d = draft_mut(s);
+    if d.model.as_ref() != Some(&(instance.clone(), slug.clone())) {
+        d.effort = None;
+    }
+    d.model = Some((instance, slug));
     close(s);
 }
 
@@ -226,23 +230,37 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
 
     // Effort: the selected model's effort options, when it has any.
     let effort_label = current.as_ref().map(|(i, m)| super::model_name(s, i, m)).unwrap_or_default();
-    let efforts: Vec<String> = current
-        .as_ref()
-        .and_then(|(i, m)| provider(s, i)?["models"].as_array()?.iter().find(|x| data::s(x, "slug") == m).cloned())
-        .and_then(|m| m["capabilities"]["optionDescriptors"].as_array().cloned())
-        .unwrap_or_default()
-        .iter()
-        .filter(|d| data::s(d, "id") == "effort" || data::s(d, "id") == "reasoningEffort")
-        .flat_map(|d| d["options"].as_array().cloned().unwrap_or_default())
-        .map(|o| data::s(&o, "label").to_string())
-        .filter(|l| !l.is_empty())
-        .collect();
+    let efforts = super::effort_options(s).map(|(_, o)| o).unwrap_or_default();
+    let chosen = super::effort(s);
     let mut effort_body = col().w_full().px(9.0).mt(21.0);
     if efforts.is_empty() {
         effort_body = effort_body.child(row().h(32.0).px(8.0).center_y().child(text("No effort levels").font(theme::TEXT_SM).color(t.c.muted_foreground)));
     }
-    for e in efforts {
-        effort_body = effort_body.child(row().h(32.0).px(8.0).center_y().radius(theme::layout::CONTROL_RADIUS).hover(t.c.accent).child(text(e).font(theme::TEXT_SM).color(t.c.foreground)));
+    for o in efforts {
+        let id = data::s(&o, "id").to_owned();
+        let selected = chosen.as_deref() == Some(id.as_str());
+        let mut r = row()
+            .key(format!("picker-effort-{id}"))
+            .h(32.0)
+            .px(8.0)
+            .gap(6.0)
+            .center_y()
+            .radius(theme::layout::CONTROL_RADIUS)
+            .hover(t.c.accent)
+            .cursor(Cursor::Pointer)
+            .role("menuitemradio")
+            .child(text(data::s(&o, "label").to_owned()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink());
+        if o["isDefault"] == true {
+            r = r.child(text("Default").font(theme::TEXT_XS).color(t.c.muted_foreground));
+        }
+        r = r.child(spacer());
+        if selected {
+            r = r.fill(t.c.accent).child(icon(&icons::CHECK, 14.0).color(t.c.foreground));
+        }
+        if !data::s(&o, "description").is_empty() {
+            r = r.help(data::s(&o, "description").to_owned());
+        }
+        effort_body = effort_body.child(r.on_press(move |s: &mut App| draft_mut(s).effort = Some(id.clone())));
     }
     let effort = col()
         .w(192.0)
@@ -265,7 +283,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T) -> Vec<El> {
 
     // Footer: the permissions toggle.
     let mode = runtime_mode(s);
-    let (_, mode_label, _, mode_icon) = RUNTIME_MODES.iter().find(|m| m.0 == mode).copied().unwrap_or(RUNTIME_MODES[3]);
+    let (_, mode_label, _, mode_icon) = RUNTIME_MODES.iter().find(|m| m.0 == mode).copied().unwrap_or(RUNTIME_MODES[0]);
     let footer = row()
         .w_full()
         .h(45.0)

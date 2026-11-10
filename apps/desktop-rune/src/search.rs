@@ -139,9 +139,9 @@ fn open_match(s: &mut App, index: usize) {
     if pending || s.ui.search.results.error.is_some() {
         return;
     }
-    let Some(path) = matches.get(index).map(|m| data::s(m, "path").to_string()) else { return };
+    let Some((path, line)) = matches.get(index).map(|m| (data::s(m, "path").to_string(), m["lineNumber"].as_u64().map(|n| n as usize))) else { return };
     close(s);
-    crate::panel::open_file(s, path);
+    crate::panel::open_file_at(s, path, line);
 }
 
 fn on_input_key(s: &mut App, e: &KeyEvent, _tx: &mut Tx) -> bool {

@@ -13,6 +13,11 @@ impl Toast {
         self.0 = self.0.description(value);
         self
     }
+    /// A 16 point leading element, such as a status icon.
+    pub fn lead(mut self, value: El) -> Self {
+        self.0 = self.0.lead(value);
+        self
+    }
     pub fn on_close<S: 'static>(mut self, f: impl Fn(&mut S) + 'static) -> Self {
         self.0 = self.0.on_close(f);
         self
@@ -56,6 +61,8 @@ impl ToastRegion {
             .role("region")
             .label("Notifications")
             .transition(rune::Transition::none())
+            // Above modal popovers and dialogs, as sonner sits above them on web.
+            .raise()
             .pin(
                 None,
                 if self.top { Some(24.) } else { None },

@@ -390,9 +390,9 @@ pub fn link_dialog(s: &App, t: &T, layer: &mut Vec<El>) {
 // File picker.
 
 fn files_context(s: &App) -> Option<(String, String)> {
-    let thread = thread(s)?;
-    let project = s.state().projects.iter().find(|p| p["id"] == thread["projectId"])?;
-    let cwd = thread["worktreePath"].as_str().filter(|v| !v.is_empty()).unwrap_or(data::s(project, "workspaceRoot"));
+    let ctx = crate::chat::composer::ctx(s);
+    let project = ctx.project?;
+    let cwd = ctx.thread.and_then(|t| t["worktreePath"].as_str()).filter(|v| !v.is_empty()).unwrap_or(data::s(project, "workspaceRoot"));
     Some((data::s(project, "title").to_owned(), cwd.to_owned()))
 }
 /// Debounces the search 120 ms after the query settles, as the web picker does.
@@ -575,7 +575,8 @@ pub fn poll(s: &mut App) -> bool {
             }
             Some(Ok(v)) => {
                 let route = Route::Home { project_id: Some(data::s(&v, "projectId").to_owned()) };
-                s.ui.chat.composer.drafts.entry(crate::chat::composer::draft_key(&route)).or_default().edit = TextEdit::new(prompt);
+                let key = crate::chat::composer::draft_key(s, &route);
+                s.ui.chat.composer.drafts.entry(key).or_default().edit = TextEdit::new(prompt);
                 crate::shell::sidebar::go(s, route);
                 changed = true;
             }

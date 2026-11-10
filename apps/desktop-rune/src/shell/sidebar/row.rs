@@ -56,7 +56,7 @@ fn provider_icon(t: &T, model: &Model, th: &Thread, text_color: Color) -> Option
                 .child(icon(&brand::OPENCODE, 14.0).color(rune::color::hex(frame).unwrap_or(text_color)).absolute(0.0, 0.0))
                 .child(icon(&brand::OPENCODE_INNER, 14.0).color(rune::color::hex(inner).unwrap_or(text_color)).absolute(0.0, 0.0))
         }
-        _ => return None,
+        _ => crate::chat::composer::provider_mark(t, driver, 14.0)?,
     };
     Some(mark.shrink().opacity(0.6))
 }

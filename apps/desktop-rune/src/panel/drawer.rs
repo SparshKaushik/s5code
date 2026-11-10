@@ -225,7 +225,7 @@ impl Ui {
 }
 
 /// Reads the saved layouts once, then writes them whenever they change (a drag, once it ends).
-fn persist(app: &mut App) {
+pub(super) fn persist(app: &mut App) {
     if cfg!(test) {
         return;
     }
@@ -245,13 +245,7 @@ fn persist(app: &mut App) {
     if ui.saved.as_ref() == Some(&next) {
         return;
     }
-    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-    let written = serde_json::to_vec(&next).ok().is_some_and(|bytes| {
-        path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok())
-            && std::fs::write(&temporary, bytes).is_ok()
-            && std::fs::rename(&temporary, &path).is_ok()
-    });
-    if written {
+    if super::write_state(&path, &next) {
         ui.saved = Some(next);
     }
 }
@@ -450,6 +444,20 @@ pub fn open_panel(app: &mut App) {
     let ids: Vec<String> = app.ui.panel.drawer.panel[&thread].ids().cloned().collect();
     for id in &ids {
         start(app, &thread, id, false);
+    }
+}
+
+/// An activated Terminal surface takes the keyboard (web's `focusTerminal`).
+pub fn focus_panel(app: &mut App) {
+    let Some(thread) = current_thread(app) else {
+        return;
+    };
+    let Some(groups) = app.ui.panel.drawer.groups(Owner::Panel, &thread) else {
+        return;
+    };
+    let active = Some(&groups.active).filter(|a| groups.ids().any(|id| id == *a)).or_else(|| groups.ids().next()).cloned();
+    if let Some(id) = active {
+        terminal::focus(app, &thread, &id);
     }
 }
 

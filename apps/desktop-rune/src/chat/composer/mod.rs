@@ -33,8 +33,8 @@ pub struct Draft {
     pub model: Option<(String, String)>,
     pub runtime_mode: Option<String>,
     pub interaction_mode: Option<String>,
-    /// Context records (`ComposerContextRecord`, such as a picked preview element) to send.
-    pub context: Vec<Value>,
+    /// An effort level picked in this draft (the model's effort option), overriding the thread's.
+    pub effort: Option<String>,
     /// Records behind the prompt's context chips (`chips::pill_id`); a chip deleted from the
     /// prompt leaves its record unsent.
     pub contexts: Vec<Value>,
@@ -42,7 +42,7 @@ pub struct Draft {
 
 impl Default for Draft {
     fn default() -> Draft {
-        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, context: Vec::new(), contexts: Vec::new() }
+        Draft { edit: TextEdit::new(""), attachments: Vec::new(), model: None, runtime_mode: None, interaction_mode: None, effort: None, contexts: Vec::new() }
     }
 }
 
@@ -69,11 +69,18 @@ pub struct Ui {
 }
 
 /// The draft key for a route: the thread id, or `home` for the new-thread draft.
-pub fn draft_key(route: &Route) -> String {
+/// A thread's draft is keyed by its id; a new-thread draft by its project (one per project, as
+/// the web composer draft store keeps them), a bare home route naming the default project.
+pub fn draft_key(s: &App, route: &Route) -> String {
     match route {
         Route::Thread(id) => id.clone(),
-        _ => "home".to_string(),
+        Route::Home { project_id: Some(id) } => home_key(id),
+        _ => crate::chat::home::default_project(s).map_or_else(|| "home".to_owned(), |p| home_key(data::s(p, "id"))),
     }
+}
+
+pub fn home_key(project: &str) -> String {
+    format!("home:{project}")
 }
 
 /// The draft being typed: a queued message under edit keeps its own (`queued-edit:` target),
@@ -81,7 +88,7 @@ pub fn draft_key(route: &Route) -> String {
 fn active_key(s: &App) -> String {
     match (s.frame_route(), &s.ui.chat.composer.editing) {
         (Route::Thread(id), Some((thread, run))) if id == thread => format!("queued-edit:{thread}:{run}"),
-        (route, _) => draft_key(route),
+        (route, _) => draft_key(s, route),
     }
 }
 
@@ -254,6 +261,58 @@ fn selection_of(v: &Value) -> Option<(String, String)> {
     (!instance.is_empty()).then(|| (instance.to_string(), data::s(v, "model").to_string()))
 }
 
+/// The selected model's effort descriptor (`effort` or `reasoningEffort`) and its options,
+/// without the values a prompt keyword turns on (ultrathink).
+pub fn effort_options(s: &App) -> Option<(String, Vec<Value>)> {
+    let (instance, slug) = selection(s)?;
+    let model = provider(s, &instance)?["models"].as_array()?.iter().find(|x| data::s(x, "slug") == slug)?.clone();
+    let descriptors = model["capabilities"]["optionDescriptors"].as_array()?;
+    let d = descriptors.iter().find(|d| matches!(data::s(d, "id"), "effort" | "reasoningEffort"))?;
+    let injected: Vec<&str> = d["promptInjectedValues"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    let options = d["options"].as_array()?.iter().filter(|o| !injected.contains(&data::s(o, "id"))).cloned().collect();
+    Some((data::s(d, "id").to_owned(), options))
+}
+
+/// The options the selection already carries: the thread's (or, on a home draft, the source the
+/// model came from) when the draft keeps that model, as `[{id, value}]`.
+fn source_options(s: &App) -> Vec<Value> {
+    let Some(thread) = ctx(s).thread else { return Vec::new() };
+    let selection = &thread["modelSelection"];
+    if draft(s).and_then(|d| d.model.clone()).is_some_and(|m| Some(m) != selection_of(selection)) {
+        return Vec::new();
+    }
+    match &selection["options"] {
+        Value::Array(a) => a.clone(),
+        Value::Object(o) => o.iter().map(|(id, value)| json!({"id": id, "value": value})).collect(),
+        _ => Vec::new(),
+    }
+}
+
+/// The effort the next message runs at: the draft's pick, the thread's, else the default.
+pub fn effort(s: &App) -> Option<String> {
+    let (id, options) = effort_options(s)?;
+    if let Some(e) = draft(s).and_then(|d| d.effort.clone()).filter(|e| options.iter().any(|o| data::s(o, "id") == e)) {
+        return Some(e);
+    }
+    let thread = source_options(s).into_iter().find(|o| data::s(o, "id") == id).and_then(|o| o["value"].as_str().map(str::to_owned));
+    thread.or_else(|| options.iter().find(|o| o["isDefault"] == true).map(|o| data::s(o, "id").to_owned()))
+}
+
+/// The modelSelection to send: the model plus its options, a picked effort replacing the thread's.
+fn model_selection(s: &App) -> Option<Value> {
+    let (instance, model) = selection(s)?;
+    let mut options = source_options(s);
+    if let (Some(e), Some((id, _))) = (draft(s).and_then(|d| d.effort.clone()), effort_options(s)) {
+        options.retain(|o| data::s(o, "id") != id);
+        options.push(json!({"id": id, "value": e}));
+    }
+    let mut v = json!({"instanceId": instance, "model": model});
+    if !options.is_empty() {
+        v["options"] = Value::Array(options);
+    }
+    Some(v)
+}
+
 /// The model the next message goes to: the draft's pick, the thread's, else (on the home draft)
 /// the project's most recent, its default, the settings default, then the first ready provider.
 pub fn selection(s: &App) -> Option<(String, String)> {
@@ -366,9 +425,7 @@ fn send(s: &mut App, alternate: bool) {
     let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
     let mut text = text.trim().to_string();
     // A file that can no longer be read keeps the draft as it is.
-    let Some(uploads) = d.attachments.iter().map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
-    // Picked elements ride as records plus a text reference; chips are already links in the text.
-    let picks = d.context.clone();
+    let Some(uploads) = d.attachments.iter().filter(|p| chips::keeps_attachment(p, &contexts)).map(|p| upload(p)).collect::<Option<Vec<_>>>() else { return };
     if let Route::Thread(thread) = s.frame_route().clone()
         && !text.is_empty()
     {
@@ -376,7 +433,7 @@ fn send(s: &mut App, alternate: bool) {
         if !pending.is_empty() {
             use crate::chat::timeline::requests;
             let pending: Vec<&Value> = pending.iter().collect();
-            match requests::redirect(&thread, &pending, &text, !uploads.is_empty() || !contexts.is_empty() || !picks.is_empty()) {
+            match requests::redirect(&thread, &pending, &text, !uploads.is_empty() || !contexts.is_empty()) {
                 Err(message) => {
                     crate::shell::palette::toast(s, message, None);
                     return;
@@ -399,7 +456,6 @@ fn send(s: &mut App, alternate: bool) {
     if text.is_empty()
         && uploads.is_empty()
         && contexts.is_empty()
-        && picks.is_empty()
         && let (Some((plan_id, markdown)), Route::Thread(id)) = (plan::follow_up(s), s.frame_route().clone())
     {
         // resolvePlanFollowUpSubmission: implementing leaves plan mode.
@@ -407,13 +463,10 @@ fn send(s: &mut App, alternate: bool) {
         plan_ref = Some(json!({"threadId": id, "planId": plan_id}));
         set_interaction_mode(s, "default");
     }
-    if text.is_empty() && uploads.is_empty() && contexts.is_empty() && picks.is_empty() {
+    if text.is_empty() && uploads.is_empty() && contexts.is_empty() {
         return;
     }
-    let text = with_context_references(&picks, &text);
-    let mut contexts = contexts;
-    contexts.extend(picks);
-    let model = selection(s).map(|(instance, model)| json!({"instanceId": instance, "model": model}));
+    let model = model_selection(s);
     let (runtime, interaction) = (runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
@@ -538,7 +591,6 @@ fn sent(s: &mut App) {
     } else {
         d.edit.clear();
         d.attachments.clear();
-        d.context.clear();
         d.contexts.clear();
     }
 }
@@ -563,7 +615,8 @@ pub fn add_terminal_context(s: &mut App, thread: &str, terminal_id: &str, termin
 
 /// Opening a thread or the new-thread draft puts the caret in its composer (ChatView).
 pub fn focus(s: &mut App, route: &Route) {
-    s.ui.chat.composer.drafts.entry(draft_key(route)).or_default().edit.focused = true;
+    let key = draft_key(s, route);
+    s.ui.chat.composer.drafts.entry(key).or_default().edit.focused = true;
 }
 
 fn stop(s: &mut App) {
@@ -618,13 +671,13 @@ pub fn poll(s: &mut App) -> bool {
 }
 
 /// Drafts on disk, as the web composer draft store persists them: each draft's prompt with its
-/// pill ranges, attachments, picks and context records. Empty drafts and queued-message edits
+/// pill ranges, attachments and context records. Empty drafts and queued-message edits
 /// stay out.
 fn stored(drafts: &HashMap<String, Draft>) -> Value {
     let mut out = serde_json::Map::new();
     for (key, d) in drafts {
         let blank = d.edit.text.trim().is_empty() && d.attachments.is_empty();
-        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none()) {
+        if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none() && d.effort.is_none()) {
             continue;
         }
         let pills: Vec<Value> = d.edit.pills().map(|(r, id)| json!([r.start, r.end, id])).collect();
@@ -633,7 +686,7 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
             key.clone(),
             json!({
                 "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
-                "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "contexts": contexts,
+                "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
             }),
         );
     }
@@ -670,7 +723,7 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
                 model: (model.len() == 2).then(|| (model[0].clone(), model[1].clone())),
                 runtime_mode: text(&d["runtimeMode"]),
                 interaction_mode: text(&d["interactionMode"]),
-                context: Vec::new(),
+                effort: text(&d["effort"]),
                 contexts: d["contexts"].as_array().cloned().unwrap_or_default(),
             },
         );
@@ -678,15 +731,29 @@ fn restored(v: &Value) -> HashMap<String, Draft> {
     out
 }
 
-/// Reads the stored drafts once connected, then writes them back at most every 300 ms when
-/// they change. A draft already touched this session wins over its stored copy.
+/// Stored drafts with the legacy shared "home" draft under `home` (its project's key), else dropped.
+fn migrated(mut drafts: HashMap<String, Draft>, home: Option<&str>) -> HashMap<String, Draft> {
+    if let (Some(draft), Some(home)) = (drafts.remove("home"), home) {
+        drafts.entry(home.to_owned()).or_insert(draft);
+    }
+    drafts
+}
+
+/// Reads the stored drafts once the shell has loaded (so legacy drafts find their project), then
+/// writes them back at most every 300 ms when they change. A draft already touched this session
+/// wins over its stored copy.
 fn persist(s: &mut App) -> bool {
+    if s.ui.chat.composer.stored.is_none() && !s.state().shell_ready {
+        return false;
+    }
     let path = crate::settings::client::sibling_path("composer-drafts.json");
+    // Drafts once shared one "home" key; that draft moves to the default project's, or goes.
+    let legacy_home = crate::chat::home::default_project(s).map(|p| home_key(data::s(p, "id")));
     let composer = &mut s.ui.chat.composer;
     if composer.stored.is_none() {
         let disk = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok());
         let mut changed = false;
-        for (key, draft) in disk.as_ref().map(restored).unwrap_or_default() {
+        for (key, draft) in disk.as_ref().map(|d| migrated(restored(d), legacy_home.as_deref())).unwrap_or_default() {
             let slot = composer.drafts.entry(key).or_default();
             if slot.edit.text.is_empty() && slot.attachments.is_empty() {
                 let focused = slot.edit.focused;
@@ -857,8 +924,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     if !t.dark {
         body = body.shadow(1.0, 2.0, Color::BLACK.alpha(0.05));
     }
-    if !d.attachments.is_empty() || !d.context.is_empty() {
-        body = body.child(attachment_chips(t, &d.attachments, &d.context));
+    if !d.attachments.is_empty() {
+        body = body.child(attachment_chips(t, &d.attachments));
     }
     let body = body.child(editor).child(footer(s, t));
 
@@ -878,7 +945,32 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 
 /// The composer's own overlays (the model picker), attached after the body so they draw above.
 pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
-    picker::view(s, cx, t)
+    let mut layers = picker::view(s, cx, t);
+    layers.extend(chip_details(s, t));
+    layers
+}
+
+/// A context chip's details while the caret rests against it (a click on a chip lands the caret
+/// on its edge), above the composer as web's chip popover opens above the chip.
+fn chip_details(s: &App, t: &T) -> Option<El> {
+    if s.ui.chat.composer.picker.open || menu::open_menu(s).is_some() {
+        return None;
+    }
+    let d = draft(s)?;
+    let record = chip_at_caret(d)?;
+    let card = crate::chat::timeline::chip::card(t, record, None);
+    Some(card.anchored("composer", rune::Side::Top, rune::Align::Start, 8.0))
+}
+
+/// The record of the chip the caret touches, for the kinds whose details have a body.
+fn chip_at_caret(d: &Draft) -> Option<&Value> {
+    if !d.edit.focused || d.edit.anchor != d.edit.focus {
+        return None;
+    }
+    let caret = d.edit.focus;
+    let (_, id) = d.edit.pills().find(|(r, _)| r.start == caret || r.end == caret)?;
+    let record = d.contexts.iter().find(|r| chips::pill_id(r) == id)?;
+    matches!(data::s(record, "kind"), "terminal" | "element" | "preview-annotation" | "review-comment").then_some(record)
 }
 
 fn composer_fill(t: &T) -> Color {
@@ -904,6 +996,17 @@ fn footer(s: &App, t: &T) -> El {
     if let Some((instance, model)) = selection(s) {
         let driver = provider(s, &instance).map(|p| data::s(p, "driver").to_string()).unwrap_or_default();
         let name = model_name(s, &instance, &model);
+        // ComposerModelEffort: the level's name, or bars when Appearance's effort display says
+        // so; named levels such as Max keep their name.
+        let bars_setting = crate::settings::value(s, "effortDisplay") == "bars";
+        let effort = effort(s).and_then(|e| {
+            let (_, options) = effort_options(s)?;
+            let label = options.iter().find(|o| data::s(o, "id") == e).map(|o| data::s(o, "label").to_owned())?;
+            Some(match effort_bars(&options, &e).filter(|_| bars_setting) {
+                Some((count, filled)) => effort_glyph(count, filled, t.c.muted_foreground),
+                None => text(label).font(theme::SM_MEDIUM).color(t.c.muted_foreground).truncate().max_w(96.0),
+            })
+        });
         right = right.child(
             row()
                 .key("composer-model-chip")
@@ -917,11 +1020,38 @@ fn footer(s: &App, t: &T) -> El {
                 .label(name.clone())
                 .child(provider_icon(t, &driver, 16.0))
                 .child(text(name).font(theme::SM_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(224.0))
+                .children(effort)
                 .on_press(|s: &mut App| picker::toggle(s)),
         );
     }
     right = right.children(context::meter(s, t)).child(primary_action(s, t));
     row().w_full().px(8.0).pt(10.0).center_y().child(left).child(spacer()).child(right)
+}
+
+/// resolveEffortGlyph over the selectable levels: `(bars, filled)`, or `None` when the level is
+/// named instead (Max, Ultracode) or the scale has fewer than 2 or more than 7 levels.
+fn effort_bars(options: &[Value], current: &str) -> Option<(usize, usize)> {
+    const NAMED: [&str; 2] = ["ultracode", "max"];
+    if NAMED.contains(&current) {
+        return None;
+    }
+    let levels: Vec<&str> = options.iter().map(|o| data::s(o, "id")).filter(|id| !NAMED.contains(id)).collect();
+    if !(2..=7).contains(&levels.len()) {
+        return None;
+    }
+    let off = matches!(levels[0], "off" | "none");
+    let index = levels.iter().position(|id| *id == current)?;
+    Some((levels.len() - usize::from(off), if off { index } else { index + 1 }))
+}
+
+/// EffortGlyph: rising 2-point bars on a 4-point step, their base 2 points above a 14-point box.
+fn effort_glyph(count: usize, filled: usize, color: Color) -> El {
+    let max_bar = 12.0;
+    let step = ((max_bar / 2.0 / (count.max(2) - 1) as f32).round()).max(1.0);
+    row().h(14.0).pb(2.0).gap(2.0).items_end().a11y_hidden().children((0..count).map(|i| {
+        let h = max_bar - (count - 1 - i) as f32 * step;
+        el().w(2.0).h(h).fill(if i < filled { color } else { color.alpha_mul(0.4) })
+    }))
 }
 
 fn primary_action(s: &App, t: &T) -> El {
@@ -935,7 +1065,7 @@ fn primary_action(s: &App, t: &T) -> El {
     if let Some(action) = plan::action(s, t, typed) {
         return action;
     }
-    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty() || !d.context.is_empty());
+    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable {
         return stop_button(t);
     }
@@ -981,42 +1111,8 @@ fn send_button(s: &App, t: &T, sendable: bool) -> El {
     b
 }
 
-fn attachment_chips(t: &T, paths: &[String], context: &[Value]) -> El {
+fn attachment_chips(t: &T, paths: &[String]) -> El {
     let mut chips = row().flex_wrap().gap(6.0).px(12.0).pt(12.0);
-    for (i, record) in context.iter().enumerate() {
-        let element = &record["elements"][0];
-        let tag = data::s(element, "tagName");
-        let name = if tag.is_empty() { data::s(record, "label").to_string() } else { format!("<{tag}> {}", data::s(record, "label")) };
-        chips = chips.child(
-            row()
-                .key(format!("composer-context-{i}"))
-                .h(28.0)
-                .pl(8.0)
-                .pr(4.0)
-                .gap(6.0)
-                .center_y()
-                .radius(theme::layout::CONTROL_RADIUS)
-                .fill(t.c.foreground.alpha_mul(0.06))
-                .help(data::s(element, "selector").to_string())
-                .child(icon(&icons::MOUSE_POINTER_CLICK, 14.0).color(t.c.muted_foreground))
-                .child(text(name).font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)).truncate().max_w(220.0))
-                .child(
-                    el().size(20.0, 20.0)
-                        .center()
-                        .radius(radius::SM)
-                        .hover(t.c.accent)
-                        .cursor(Cursor::Pointer)
-                        .label("Remove context")
-                        .child(icon(&icons::X, 12.0).color(t.c.muted_foreground))
-                        .on_press(move |s: &mut App| {
-                            let d = draft_mut(s);
-                            if i < d.context.len() {
-                                d.context.remove(i);
-                            }
-                        }),
-                ),
-        );
-    }
     for (i, path) in paths.iter().enumerate() {
         let name = path.rsplit('/').next().unwrap_or(path).to_string();
         chips = chips.child(
@@ -1112,8 +1208,16 @@ pub fn provider_icon(t: &T, driver: &str, size: f32) -> El {
                 .child(icon(&OPENCODE_INNER, size).color(srgb(inner)).absolute(0.0, 0.0))
                 .child(icon(&OPENCODE, size).color(srgb(outer)).absolute(0.0, 0.0))
         }
-        _ => icon(&icons::BOT, size).color(t.c.muted_foreground),
+        _ => provider_mark(t, driver, size).unwrap_or_else(|| icon(&icons::BOT, size).color(t.c.muted_foreground)),
     }
+}
+
+/// A provider package's layered mark (cursor, grok, kiro, ...), if the driver has one.
+pub fn provider_mark(t: &T, driver: &str, size: f32) -> Option<El> {
+    let layers = provider_icons::layers(driver)?;
+    Some(layers.iter().fold(el().size(size, size), |mark, &(glyph, light, dark)| {
+        mark.child(icon(glyph, size).color(srgb(if t.dark { dark } else { light })).absolute(0.0, 0.0))
+    }))
 }
 
 /// Gives the open route's composer the caret, or takes it away (the find bar holds it).
@@ -1124,27 +1228,39 @@ pub fn set_focus(s: &mut App, focused: bool) {
     }
 }
 
-/// Queues a context record (and its image, sent as an attachment) on the open route's draft.
-pub fn add_picked_context(s: &mut App, record: Value, image: Option<String>) {
-    let d = draft_mut(s);
-    d.context.push(record);
-    d.attachments.extend(image);
-    d.edit.focused = true;
-}
-
-/// `formatComposerContextReference` links ahead of the typed text, as web's chips sit inline.
-fn with_context_references(context: &[Value], text: &str) -> String {
-    let mut out: Vec<String> = context
-        .iter()
-        .map(|r| format!("[{}](t3-context://v1/{}/{})", data::s(r, "label"), data::s(r, "kind"), data::s(r, "contextId")))
-        .collect();
-    if !text.is_empty() {
-        out.push(text.to_string());
-    }
-    out.join(" ")
+/// Adds a file to the open route's draft, as a picked element's crop rides beside its chip.
+pub fn attach_path(s: &mut App, path: String) {
+    draft_mut(s).attachments.push(path);
 }
 
 /// Puts `text` back into the open route's draft after what is already there.
+/// Sent-form text appended to the draft after `gap` (a rewound prompt, a file's "Add to chat"):
+/// file links become mentions and context links chips, with the `records` they were sent with.
+pub fn append_with_chips(s: &mut App, text: &str, records: &[Value], gap: &str) {
+    let (shown_text, shown) = chips::display(text);
+    let d = draft_mut(s);
+    d.edit.set_caret(d.edit.text.len());
+    if !d.edit.text.trim().is_empty() && !d.edit.text.ends_with(gap) {
+        d.edit.insert(gap);
+    }
+    let mut at = 0;
+    for c in &shown {
+        d.edit.insert(&shown_text[at..c.range.start]);
+        let label = &shown_text[c.range.clone()];
+        match records.iter().find(|r| data::s(r, "contextId") == c.id) {
+            _ if c.kind == "mention" => d.edit.insert_pill(c.id.clone(), label),
+            Some(record) => {
+                d.edit.insert_pill(chips::pill_id(record), &chips::sanitize_label(data::s(record, "label"), data::s(record, "kind")));
+                d.contexts.push(record.clone());
+            }
+            None => d.edit.insert(label),
+        }
+        at = c.range.end;
+    }
+    d.edit.insert(&shown_text[at..]);
+    d.edit.focused = true;
+}
+
 pub fn append_to_draft(s: &mut App, text: &str) {
     let d = draft_mut(s);
     let next = if d.edit.text.trim().is_empty() { text.to_owned() } else { format!("{}\n\n{text}", d.edit.text.trim_end()) };
@@ -1157,6 +1273,17 @@ fn set_text(s: &mut App, text: &str) {
     d.edit.replace_text(text);
     d.edit.set_caret(text.len());
     d.edit.focused = true;
+}
+
+/// The showcase thread's live turn reporting `used` of a 200k window.
+fn context_scene(s: &mut App, used: f64) {
+    on_replay_showcase(s);
+    let Route::Thread(id) = s.route.clone() else { return };
+    if let data::Source::Fixture(state) = &mut s.src
+        && let Some(v) = state.thread_views.get_mut(&id)
+    {
+        v.projection["providerTurns"] = json!([{"tokenUsage": {"usedTokens": used, "maxTokens": 200_000, "updatedAt": "2026-12-01T00:00:00.000Z"}}]);
+    }
 }
 
 fn on_replay_showcase(s: &mut App) {
@@ -1175,7 +1302,7 @@ fn on_home(s: &mut App) {
 
 /// Marks the open thread as running, as the server reports a run in flight.
 fn seed_running(s: &mut App) {
-    let id = draft_key(s.frame_route());
+    let id = draft_key(s, s.frame_route());
     if let crate::data::Source::Fixture(state) = &mut s.src
         && let Some(t) = state.threads.iter_mut().find(|t| data::s(t, "id") == id)
     {
@@ -1221,6 +1348,37 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             add_context(s, record);
         }
     }),
+    ("composer-chip-details", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Why does ");
+        for record in chips::samples() {
+            add_context(s, record);
+        }
+        let d = draft_mut(s);
+        let end = d.edit.pills().map(|(r, _)| r.end).next().unwrap_or(0);
+        d.edit.set_caret(end);
+    }),
+    ("composer-pr", |s| {
+        on_replay_showcase(s);
+        set_text(s, "Review #");
+        menu::refresh(s);
+    }),
+    ("composer-effort", |s| {
+        on_replay_showcase(s);
+        let d = draft_mut(s);
+        d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        d.effort = Some("high".into());
+        picker::toggle(s);
+    }),
+    ("composer-effort-bars", |s| {
+        on_replay_showcase(s);
+        s.client_settings.values.insert("effortDisplay".into(), json!("bars"));
+        let d = draft_mut(s);
+        d.model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        d.effort = Some("medium".into());
+    }),
+    ("composer-context", |s| context_scene(s, 42_400.0)),
+    ("composer-context-full", |s| context_scene(s, 186_000.0)),
     ("composer-attachments", |s| {
         on_replay_showcase(s);
         draft_mut(s).attachments = vec!["/home/ubuntu/s5code/README.md".into(), "/home/ubuntu/s5code/package.json".into()];
@@ -1256,24 +1414,76 @@ mod tests {
     }
 
     #[test]
+    fn a_picked_effort_rides_in_the_model_selection() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        draft_mut(&mut s).model = Some(("claudeAgent".into(), "claude-opus-5-5".into()));
+        assert_eq!(effort(&s).as_deref(), Some("medium"));
+        let ids: Vec<String> = effort_options(&s).unwrap().1.iter().map(|o| data::s(o, "id").to_owned()).collect();
+        assert!(!ids.contains(&"ultrathink".to_owned()) && ids.contains(&"max".to_owned()));
+        assert_eq!(model_selection(&s).unwrap(), json!({"instanceId": "claudeAgent", "model": "claude-opus-5-5"}));
+        draft_mut(&mut s).effort = Some("high".into());
+        assert_eq!(effort(&s).as_deref(), Some("high"));
+        assert_eq!(model_selection(&s).unwrap()["options"], json!([{"id": "effort", "value": "high"}]));
+    }
+
+    #[test]
+    fn a_rewound_prompt_returns_with_its_chips() {
+        let mut s = App::new();
+        s.navigate(Route::Home { project_id: None });
+        set_text(&mut s, "draft");
+        let pr = chips::samples().into_iter().find(|r| data::s(r, "kind") == "review-comment").unwrap();
+        let sent = format!("open [a.rs](src/a.rs) and [{}](t3-context://v1/review-comment/{})", data::s(&pr, "label"), data::s(&pr, "contextId"));
+        append_with_chips(&mut s, &sent, std::slice::from_ref(&pr), "\n\n");
+        let d = draft(&s).unwrap();
+        assert_eq!(d.edit.pills().count(), 2);
+        let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
+        assert_eq!(text, format!("draft\n\n{sent}"));
+        assert_eq!(contexts.len(), 1);
+    }
+
+    #[test]
+    fn effort_levels_map_to_bars_like_the_web_glyph() {
+        let levels = |ids: &[&str]| ids.iter().map(|id| json!({"id": id, "label": id})).collect::<Vec<_>>();
+        let codex = levels(&["low", "medium", "high", "xhigh"]);
+        assert_eq!(effort_bars(&codex, "high"), Some((4, 3)));
+        let claude = levels(&["low", "medium", "high", "max", "ultracode"]);
+        assert_eq!(effort_bars(&claude, "low"), Some((3, 1)));
+        assert_eq!(effort_bars(&claude, "max"), None);
+        let off = levels(&["none", "low", "high"]);
+        assert_eq!(effort_bars(&off, "none"), Some((2, 0)));
+        assert_eq!(effort_bars(&off, "high"), Some((2, 2)));
+        assert_eq!(effort_bars(&levels(&["on"]), "on"), None);
+    }
+
+    #[test]
     fn navigating_focuses_the_route_draft() {
         let mut s = App::new();
         let id = data::s(&s.state().threads[0], "id").to_string();
         s.navigate(Route::Thread(id.clone()));
         assert!(s.ui.chat.composer.drafts[&id].edit.focused);
         s.navigate(Route::Home { project_id: None });
-        assert!(s.ui.chat.composer.drafts["home"].edit.focused);
+        let key = draft_key(&s, &Route::Home { project_id: None });
+        assert!(key.starts_with("home:") && s.ui.chat.composer.drafts[&key].edit.focused);
     }
 
     #[test]
-    fn context_records_lead_the_message_as_reference_links() {
-        let record = json!({"kind": "preview-annotation", "contextId": "preview-annotation_1", "label": "Demo"});
-        assert_eq!(
-            with_context_references(&[record.clone()], "make it blue"),
-            "[Demo](t3-context://v1/preview-annotation/preview-annotation_1) make it blue"
-        );
-        assert_eq!(with_context_references(&[record], ""), "[Demo](t3-context://v1/preview-annotation/preview-annotation_1)");
-        assert_eq!(with_context_references(&[], "hi"), "hi");
+    fn each_project_keeps_its_own_new_thread_draft() {
+        let mut s = App::new();
+        let projects = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).take(2).collect::<Vec<_>>();
+        let [a, b] = &projects[..] else { panic!("two sample projects") };
+        s.navigate(Route::Home { project_id: Some(a.clone()) });
+        set_text(&mut s, "for a");
+        s.navigate(Route::Home { project_id: Some(b.clone()) });
+        assert!(draft(&s).is_none_or(|d| d.edit.text.is_empty()));
+        set_text(&mut s, "for b");
+        s.navigate(Route::Home { project_id: Some(a.clone()) });
+        assert_eq!(draft(&s).unwrap().edit.text, "for a");
+
+        let legacy = || HashMap::from([("home".to_owned(), Draft { edit: TextEdit::new("old"), ..Draft::default() })]);
+        let key = home_key(a);
+        assert_eq!(migrated(legacy(), Some(key.as_str()))[&key].edit.text, "old");
+        assert!(migrated(legacy(), None).is_empty());
     }
 
     #[test]

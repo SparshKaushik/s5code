@@ -1,6 +1,8 @@
 pub mod actions;
 pub mod attachments;
+pub mod chip;
 mod changed;
+pub mod error_banner;
 pub mod find;
 mod markdown;
 
@@ -26,6 +28,8 @@ pub use scenes::SCENES;
 #[derive(Default)]
 pub struct Ui {
     assets: attachments::Assets,
+    /// The sent chip whose details are open: message id and context id.
+    pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
     responding: HashMap<String, u64>,
     response_errors: HashMap<String, String>,
@@ -44,6 +48,7 @@ pub struct Ui {
     pub find: find::Find,
     pub actions: actions::State,
     pub plan: plan::State,
+    pub errors: error_banner::State,
 }
 
 /// A row's stable key in the virtual list; find scrolls to marks inside it.
@@ -100,6 +105,30 @@ pub(super) fn workspace_root(app: &App) -> Option<String> {
     project["workspaceRoot"].as_str().map(str::to_owned)
 }
 
+/// The T3 wordmark (shell brand) centred in a square box, as web's square-sized T3Wordmark draws.
+static T3_MARK: rune::Icon = rune::Icon { name: "t3-mark", view: 94.3941, body: "<path d=\"M 17.92 74.717 V 29.277 H 0 V 18.717 H 48.8 V 29.277 H 30.88 V 74.717 H 17.92 Z M 71.194 75.677 C 67.301 75.677 63.434 75.17 59.594 74.157 C 55.754 73.09 52.501 71.597 49.834 69.677 L 54.874 59.757 C 57.008 61.304 59.488 62.53 62.314 63.437 C 65.141 64.344 67.994 64.797 70.874 64.797 C 74.128 64.797 76.688 64.157 78.554 62.877 C 80.421 61.597 81.354 59.837 81.354 57.597 C 81.354 55.464 80.528 53.784 78.874 52.557 C 77.221 51.33 74.554 50.717 70.874 50.717 H 64.954 V 42.157 L 80.554 24.477 L 81.994 29.117 H 52.634 V 18.717 H 91.834 V 27.117 L 76.314 44.797 L 69.754 41.037 H 73.514 C 80.394 41.037 85.594 42.584 89.114 45.677 C 92.634 48.77 94.394 52.744 94.394 57.597 C 94.394 60.744 93.568 63.704 91.914 66.477 C 90.261 69.197 87.728 71.41 84.314 73.117 C 80.901 74.824 76.528 75.677 71.194 75.677 Z\" fill=\"currentColor\"/>" };
+
+/// TimelineSystemDivider: a rule either side of an icon, a label and an optional action, with
+/// any detail wrapping under it.
+fn divider(t: &T, glyph: &'static rune::Icon, label: String, color: rune::Color, detail: Option<String>, action: Option<El>) -> El {
+    let rule = || el().grow(1.0).h(1.0).fill(t.c.border.alpha_mul(0.7));
+    let line = row()
+        .w_full()
+        .gap(12.0)
+        .center_y()
+        .child(rule())
+        .child(icon(glyph, 12.0).color(color))
+        .child(text(label).font(theme::TEXT_XS).color(color))
+        .children(action)
+        .child(rule());
+    col()
+        .w_full()
+        .py(4.0)
+        .gap(4.0)
+        .child(line)
+        .children(detail.map(|d| row().w_full().justify_center().child(text(d).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())))
+}
+
 fn item_view(app: &App, item: &Value, t: &T) -> El {
     let kind = s(item, "type");
     let id = s(item, "id").to_owned();
@@ -127,18 +156,34 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         } else {
             t.c.muted_foreground
         };
-        return row()
-            .w_full()
-            .gap(12.0)
-            .py(4.0)
-            .child(el().grow(1.0).h(1.0).fill(t.c.border.alpha_mul(0.7)))
-            .child(icon(&icons::MINIMIZE_2, 12.0).color(color))
-            .child(text(label).font(theme::TEXT_XS).color(color))
-            .child(el().grow(1.0).h(1.0).fill(t.c.border.alpha_mul(0.7)));
+        return divider(t, &icons::MINIMIZE_2, label, color, None, None);
+    }
+    // V2LifecycleRow.
+    if kind == "run_interrupt_result" {
+        let detail = Some(s(item, "message").to_owned()).filter(|m| !m.is_empty());
+        return divider(t, &icons::CIRCLE_STOP, "Run interrupted".into(), t.c.muted_foreground, detail, None);
+    }
+    if kind == "fork" {
+        let from_run = s(&item["source"], "type") == "run";
+        let (label, action, target) = if from_run {
+            ("Forked from conversation", "Open source conversation", s(&item["source"], "threadId"))
+        } else {
+            ("Conversation fork", "Open fork", s(item, "targetThreadId"))
+        };
+        let open = (!target.is_empty()).then(|| {
+            let target = target.to_owned();
+            text(action)
+                .font(theme::XS_MEDIUM)
+                .color(t.c.foreground.alpha_mul(0.8))
+                .cursor(rune::Cursor::Pointer)
+                .role("button")
+                .on_press(move |app: &mut App| app.navigate(crate::Route::Thread(target.clone())))
+        });
+        return divider(t, &icons::GIT_FORK, label.into(), t.c.muted_foreground, None, open);
     }
     if matches!(
         kind,
-        "error" | "notification" | "system_notice" | "fork" | "handoff" | "secret_request" | "link_request"
+        "error" | "system_notice" | "handoff" | "secret_request" | "link_request"
     ) {
         let detail = [
             s(&item["failure"], "message"),
@@ -197,6 +242,15 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
         return subagent::view(app, item, t);
     }
     let glyph = match kind {
+        // workEntryIconName: a notification's icon names its source.
+        "notification" if s(item, "outcome") == "failed" => &icons::CIRCLE_ALERT,
+        "notification" => match s(&item["source"], "kind") {
+            "subagent" | "delegated_task" => &icons::BOT,
+            "command" => &icons::TERMINAL,
+            "monitor" => &icons::EYE,
+            "system" => &T3_MARK,
+            _ => &icons::ZAP,
+        },
         "approval_request" | "user_input_request" => &icons::MESSAGE_CIRCLE,
         "reasoning" => &icons::BRAIN,
         "command_execution" => &icons::TERMINAL,
@@ -288,6 +342,8 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     } else if expanded {
         let detail = if kind == "reasoning" {
             s(item, "text").to_owned()
+        } else if kind == "notification" {
+            s(item, "detail").to_owned()
         } else {
             ["input", "output", "fileName"]
                 .iter()
@@ -485,7 +541,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         let (_, body) = match r {
             Row::User(item) => {
                 let mut content = col().gap(8.0);
-                for attachment in array(item, "attachments") {
+                // A picked element's crop shows in its chip's details, not as an image (TimelineUserMessageRow).
+                for attachment in array(item, "attachments").iter().filter(|a| !s(a, "name").starts_with("preview-annotation-")) {
                     content = content.child(attachments::view(app, attachment, t));
                 }
                 if !s(item, "text").is_empty() {
@@ -493,24 +550,32 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                     // Context links read as their chips (ContextChip inline in the bubble).
                     let (shown, links) = chips::display(s(item, "text"));
                     let records = array(&item["context"], "records");
+                    let chip_links = chip::links(&links, records);
                     let pills = links.into_iter().map(|c| {
                         let record = records.iter().find(|r| s(r, "contextId") == c.id);
                         (c.range, chips::style(&c.kind, record))
                     });
                     let highlights = marks.as_ref().map_or_else(Vec::new, |m| m.plain(&shown));
+                    let mut body = text(shown)
+                        .font(theme::TEXT_SM.lh(22.75))
+                        .color(t.c.message_foreground)
+                        .selectable(true)
+                        .pills(pills)
+                        .text_highlights(highlights);
+                    if !chip_links.is_empty() {
+                        let (pressed, records) = (s(item, "id").to_owned(), records.to_vec());
+                        for link in chip_links {
+                            body = body.link(link);
+                        }
+                        body = body.on_link(move |app: &mut App, id: &str, tx: &mut rune::Tx| chip::pressed(app, &pressed, id, &records, tx));
+                    }
                     content = content.child(
                         col()
+                            .key(chip::bubble_key(s(item, "id")))
                             .padding(12.0)
                             .radius(16.0)
                             .fill(t.c.message_surface)
-                            .child(
-                                text(shown)
-                                    .font(theme::TEXT_SM.lh(22.75))
-                                    .color(t.c.message_foreground)
-                                    .selectable(true)
-                                    .pills(pills)
-                                    .text_highlights(highlights),
-                            ),
+                            .child(body),
                     );
                 }
                 let bubble = content.max_w(580.0);

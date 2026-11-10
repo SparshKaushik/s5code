@@ -93,8 +93,8 @@ fn action(live: &Value, enabled: bool, a: &Advisory) -> Option<Option<String>> {
     candidate.then_some(None)
 }
 
-/// The header's advisory trigger, mounted under the popover's anchor key.
-pub fn trigger(s: &App, t: &T, id: &str, live: Option<&Value>, enabled: bool) -> Option<El> {
+/// An advisory trigger (the list row's or the header's), mounted under its popover's anchor key.
+pub fn trigger(s: &App, t: &T, id: &str, live: Option<&Value>, enabled: bool, place: &'static str) -> Option<El> {
     let live = live?;
     let a = advisory(live, enabled)?;
     let busy = updating(live);
@@ -106,19 +106,19 @@ pub fn trigger(s: &App, t: &T, id: &str, live: Option<&Value>, enabled: bool) ->
     } else {
         &icons::CIRCLE_ARROW_UP
     };
-    let open = s.ui.settings.provider_advisory.as_deref() == Some(id);
-    let owned = id.to_owned();
+    let this = (id.to_owned(), place);
+    let open = s.ui.settings.provider_advisory.as_ref() == Some(&this);
     let button = kit::Button::new(format!("{}, view details", if busy { "Updating" } else { a.title }))
         .variant("ghost-muted")
-        .size("icon-xs")
+        .size(if place == "row" { "icon-micro" } else { "icon-xs" })
         .on_press(move |s: &mut App| {
             let current = &mut s.ui.settings.provider_advisory;
-            *current = if current.as_deref() == Some(owned.as_str()) { None } else { Some(owned.clone()) };
+            *current = if current.as_ref() == Some(&this) { None } else { Some(this.clone()) };
         })
         .build(t)
         .expanded(open)
         .child(rune::icon(glyph, 14.0).color(if warn { t.c.warning } else { t.c.muted_foreground }));
-    Some(row().key(format!("advisory-{id}-trigger")).child(button))
+    Some(row().key(format!("advisory-{place}-{id}-trigger")).child(button))
 }
 
 fn panel(t: &T, id: &str, live: &Value, enabled: bool, name: &str, a: &Advisory) -> El {
@@ -206,13 +206,13 @@ fn panel(t: &T, id: &str, live: &Value, enabled: bool, name: &str, a: &Advisory)
 }
 
 pub fn popover(s: &App, t: &T, layer: &mut Vec<El>) {
-    let Some(id) = &s.ui.settings.provider_advisory else { return };
+    let Some((id, place)) = &s.ui.settings.provider_advisory else { return };
     let Some(live) = crate::chat::composer::provider(s, id) else { return };
     let instance = &super::server_settings(s)["providerInstances"][id.as_str()];
     let enabled = if instance.is_object() { super::providers::resolve_enabled(instance) } else { live["enabled"] != false };
     let Some(a) = advisory(live, enabled) else { return };
     let name = live["displayName"].as_str().unwrap_or(id.as_str()).to_owned();
-    let _trigger = kit::Popover::new(format!("advisory-{id}"))
+    let _trigger = kit::Popover::new(format!("advisory-{place}-{id}"))
         .open(true)
         .padding(0.0)
         .gutter(6.0)

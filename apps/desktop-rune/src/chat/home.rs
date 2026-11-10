@@ -44,12 +44,17 @@ pub fn take_workspace(s: &mut App, project: &str) -> Value {
 
 /// The project the draft belongs to: the route's, else the one with the latest activity.
 pub fn draft_project(s: &App) -> Option<&Value> {
-    let st = s.state();
     if let Route::Home { project_id: Some(id) } = s.frame_route()
         && let Some(p) = composer::project_by_id(s, id)
     {
         return Some(p);
     }
+    default_project(s)
+}
+
+/// The project a bare new-thread draft opens in: the most recently active one.
+pub fn default_project(s: &App) -> Option<&Value> {
+    let st = s.state();
     // sortScopedProjectsForSidebar by "updated_at": a project with threads ranks by its latest
     // user message, else by its own timestamps; ties go by title.
     let thread_ts = |t: &Value| data::ts(t, "latestUserMessageAt").or_else(|| data::ts(t, "updatedAt")).or_else(|| data::ts(t, "createdAt")).unwrap_or(i64::MIN);
@@ -83,10 +88,18 @@ pub fn view(cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 }
 
 /// The provider status banner, floating at the top of the lane on any chat route.
+/// ChatBannerLane: the provider status banner, then the thread's error banner.
 pub fn banner(s: &App, t: &T, lane: &Lane) -> Option<El> {
-    let banner = provider_banner(s, t)?;
+    let provider = provider_banner(s, t);
+    let error = crate::chat::timeline::error_banner::view(s, t);
+    if provider.is_none() && error.is_none() {
+        return None;
+    }
     let right_inset = (lane.left * 2.0 + lane.width).max(0.0);
-    Some(row().pin(Some(0.0), Some(0.0), None, None).w(right_inset).pt(12.0).justify_center().child(banner))
+    let center = |b: El| row().w_full().pt(12.0).justify_center().child(b);
+    // ThreadErrorBanner: w-fit, at most min(48rem, 100% − 2rem).
+    let error = error.map(|b| center(b.max_w((right_inset - 32.0).min(768.0))));
+    Some(col().pin(Some(0.0), Some(0.0), None, None).w(right_inset).children(provider.map(center)).children(error))
 }
 
 /// ProviderStatusBanner: the selected provider is unauthenticated or failing.

@@ -7,35 +7,7 @@ use rune::{El, col, el, row, text};
 use serde_json::{Value, json};
 
 pub fn view(s: &App, t: &T) -> El {
-    let environment = &s.state().config.as_ref().unwrap_or(&Value::Null)["environment"];
-    let mut page = col().w_full().gap(32.0).child(c::section(
-        "Environments",
-        vec![
-            col()
-                .padding(16.0)
-                .gap(4.0)
-                .child(
-                    text(
-                        environment["label"]
-                            .as_str()
-                            .unwrap_or("Environment")
-                            .to_owned(),
-                    )
-                    .font(theme::SM_MEDIUM)
-                    .color(t.c.foreground),
-                )
-                .child(
-                    text(format!(
-                        "{} · {}",
-                        environment["platform"]["os"].as_str().unwrap_or(""),
-                        environment["serverVersion"].as_str().unwrap_or("")
-                    ))
-                    .font(theme::TEXT_XS)
-                    .color(t.c.muted_foreground),
-                ),
-        ],
-        t,
-    ));
+    let mut page = col().w_full().gap(32.0).child(c::section("Environments", crate::env::settings_rows(s, t), t));
     let mut links = Vec::new();
     if let Some(result) = s.ui.settings.results.get("peerLinks.list") {
         for link in result["links"].as_array().into_iter().flatten() {

@@ -1,6 +1,6 @@
 //! First run: `NoProjectsHero`, which `/` shows instead of a draft once the shell has loaded and
 //! the workspace has no projects (routes/_chat.index.tsx), and `FirstRunRecovery`, which replaces
-//! the app while the shell never arrives. The web's setup wizard (`/welcome`) is not ported; this
+//! the app while the shell never arrives. The setup wizard (`/welcome`) lives in `wizard.rs`; this
 //! hero is what it leaves behind when dismissed.
 
 use std::time::{Duration, Instant};

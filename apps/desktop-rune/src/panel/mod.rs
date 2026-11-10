@@ -14,7 +14,7 @@ use crate::{
     theme::{self, AlphaMul, T},
 };
 use rune::{Cx, El, Key, KeyEvent, Phase, Tx, Waker, col, el, icon, row, text};
-use serde_json::Value;
+use serde_json::{Map, Value, json};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Surface {
@@ -57,6 +57,8 @@ pub struct Ui {
     /// alive while their thread is in the background.
     stash: std::collections::HashMap<String, Stash>,
     stash_key: String,
+    /// What `right-panel.json` holds; `None` until the first poll reads it.
+    saved: Option<Value>,
     pub waker: Option<Waker>,
 }
 #[derive(Default)]
@@ -82,6 +84,7 @@ impl Default for Ui {
             closed: Default::default(),
             stash: Default::default(),
             stash_key: String::new(),
+            saved: None,
             waker: None,
         }
     }
@@ -101,6 +104,14 @@ fn context(app: &App) -> Option<(String, String)> {
         .filter(|v| !v.is_empty())
         .unwrap_or(data::s(project, "workspaceRoot"));
     Some((id.clone(), cwd.to_string()))
+}
+/// The Files surface's root: the thread's workspace, or on a new-thread draft its project's.
+fn workspace(app: &App) -> Option<String> {
+    if let Some((_, cwd)) = context(app) {
+        return Some(cwd);
+    }
+    let Route::Home { .. } = &app.route else { return None };
+    crate::chat::home::draft_project(app).map(|p| data::s(p, "workspaceRoot").to_string()).filter(|cwd| !cwd.is_empty())
 }
 /// The launcher's entries; Browser always opens a new tab, as web's.
 const LAUNCH: [(Surface, &str); 4] = [
@@ -127,7 +138,10 @@ fn activate(app: &mut App, surface: Surface) {
     match surface {
         Surface::Diff => diff::load(app),
         Surface::Files => files::load(app, "".into()),
-        Surface::Terminal => drawer::open_panel(app),
+        Surface::Terminal => {
+            drawer::open_panel(app);
+            drawer::focus_panel(app);
+        }
         _ => {}
     }
 }
@@ -237,8 +251,8 @@ fn reopen_closed(app: &mut App) -> bool {
         // Swap in that thread's panel and switch its thread now, so the next poll neither
         // stashes nor resets what reopens here.
         switch_thread(app);
-        app.ui.panel.thread = c.thread;
-        diff::reset(app);
+        let previous = std::mem::replace(&mut app.ui.panel.thread, c.thread);
+        diff::reset(app, &previous);
         files::reset(app);
     }
     match c.view {
@@ -257,12 +271,16 @@ fn remove_surface(app: &mut App, surface: Surface) {
 }
 /// Opens a workspace file in the Files surface (the palette's "Go to file").
 pub fn open_file(app: &mut App, path: String) {
+    open_file_at(app, path, None);
+}
+/// Opens `path` in the Files surface and centres 1-based `line` once it loads.
+pub fn open_file_at(app: &mut App, path: String, line: Option<usize>) {
     app.ui.shell.panel_open = true;
     if !app.ui.panel.surfaces.contains(&Surface::Files) {
         app.ui.panel.surfaces.push(Surface::Files);
     }
     app.ui.panel.active = Some(Surface::Files);
-    files::open(app, path);
+    files::open(app, path, line);
 }
 pub fn open_diff(app: &mut App, checkpoint: Value) {
     app.ui.chat.timeline.diff_target = Some(checkpoint.clone());
@@ -288,6 +306,92 @@ pub fn open_diff(app: &mut App, checkpoint: Value) {
     diff::open_turn(app, turn);
     activate(app, Surface::Diff);
 }
+const STATE_FILE: &str = "right-panel.json";
+
+impl Surface {
+    /// Browser tabs are live pages, so only these surfaces outlive a restart.
+    fn saved_id(self) -> Option<&'static str> {
+        match self {
+            Self::Terminal => Some("terminal"),
+            Self::Files => Some("files"),
+            Self::Diff => Some("diff"),
+            Self::Browser(_) => None,
+        }
+    }
+    fn from_saved_id(id: &str) -> Option<Self> {
+        [Self::Terminal, Self::Files, Self::Diff].into_iter().find(|s| s.saved_id() == Some(id))
+    }
+}
+
+impl Ui {
+    /// Web's `t3code:right-panel-state`: each thread's open flag, surfaces and active surface.
+    fn to_json(&self, open: bool) -> Value {
+        let entry = |surfaces: &[Surface], active: Option<Surface>, open: bool| {
+            let ids: Vec<&str> = surfaces.iter().filter_map(|s| s.saved_id()).collect();
+            (!ids.is_empty()).then(|| json!({"isOpen": open, "activeSurfaceId": active.and_then(Surface::saved_id), "surfaces": ids}))
+        };
+        let mut threads = Map::new();
+        for (key, stash) in &self.stash {
+            if let Some(v) = entry(&stash.surfaces, stash.active, stash.open).filter(|_| !key.is_empty()) {
+                threads.insert(key.clone(), v);
+            }
+        }
+        if let Some(v) = entry(&self.surfaces, self.active, open).filter(|_| !self.stash_key.is_empty()) {
+            threads.insert(self.stash_key.clone(), v);
+        }
+        json!({"version": 1, "byThreadKey": threads})
+    }
+
+    /// Fills the stash, so the first switch to a thread brings its saved panel back.
+    fn restore(&mut self, v: &Value) {
+        for (key, entry) in v["byThreadKey"].as_object().into_iter().flatten() {
+            if key.is_empty() || *key == self.stash_key || self.stash.contains_key(key) {
+                continue;
+            }
+            let mut surfaces = vec![];
+            for surface in entry["surfaces"].as_array().into_iter().flatten().filter_map(|v| v.as_str().and_then(Surface::from_saved_id)) {
+                if !surfaces.contains(&surface) {
+                    surfaces.push(surface);
+                }
+            }
+            let Some(&last) = surfaces.last() else { continue };
+            let active = entry["activeSurfaceId"].as_str().and_then(Surface::from_saved_id).filter(|s| surfaces.contains(s)).unwrap_or(last);
+            let open = entry["isOpen"].as_bool().unwrap_or(false);
+            self.stash.insert(key.clone(), Stash { surfaces, active: Some(active), open, pip: None });
+        }
+    }
+}
+
+/// Writes `value` to `path` through a temporary file, so a crash never leaves half a file.
+pub(crate) fn write_state(path: &std::path::Path, value: &Value) -> bool {
+    let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
+    serde_json::to_vec(value).ok().is_some_and(|bytes| {
+        path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok())
+            && std::fs::write(&temporary, bytes).is_ok()
+            && std::fs::rename(&temporary, path).is_ok()
+    })
+}
+
+fn persist(app: &mut App) {
+    if cfg!(test) {
+        return;
+    }
+    let path = app.client_settings.sibling(STATE_FILE);
+    let open = app.ui.shell.panel_open;
+    let ui = &mut app.ui.panel;
+    if ui.saved.is_none() {
+        if let Some(v) = std::fs::read(&path).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) {
+            ui.restore(&v);
+        }
+        ui.saved = Some(ui.to_json(open));
+        return;
+    }
+    let next = ui.to_json(open);
+    if ui.saved.as_ref() != Some(&next) && write_state(&path, &next) {
+        ui.saved = Some(next);
+    }
+}
+
 /// Puts the panel away with the thread it belonged to and brings back the next thread's.
 fn switch_thread(app: &mut App) -> bool {
     let key = match app.frame_route() {
@@ -334,11 +438,14 @@ pub fn open_diff_at(app: &mut App, checkpoint: Value, path: &str) {
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut context_changed = false;
     if matches!(app.src, crate::data::Source::Live(_)) {
+        // Terminal layouts load first, so a restored Terminal surface reuses its saved ids.
+        drawer::persist(app);
+        persist(app);
         context_changed |= switch_thread(app);
         let thread = context(app).map(|(id, _)| id).unwrap_or_default();
         if app.ui.panel.thread != thread {
-            app.ui.panel.thread = thread;
-            diff::reset(app);
+            let previous = std::mem::replace(&mut app.ui.panel.thread, thread);
+            diff::reset(app, &previous);
             files::reset(app);
             if app.ui.shell.panel_open {
                 match app.ui.panel.active {
@@ -858,6 +965,20 @@ mod tests {
         assert_eq!(app.ui.panel.browser.pip, Some(1));
         assert!(!switch_thread(&mut app));
 
+        // A restart brings each thread's surfaces back, less its browser tabs.
+        let saved = app.ui.panel.to_json(app.ui.shell.panel_open);
+        let mut restarted = App::new();
+        restarted.ui.panel.restore(&saved);
+        restarted.ui.panel.restore(&json!({"byThreadKey": {"bad": {"surfaces": ["browser:1", 7]}, "dupes": {"surfaces": ["diff", "files", "diff"], "activeSurfaceId": "terminal"}}}));
+        restarted.navigate(Route::Thread(ids[0].clone()));
+        assert!(switch_thread(&mut restarted));
+        assert!(restarted.ui.panel.surfaces == vec![Surface::Terminal] && restarted.ui.panel.active == Some(Surface::Terminal));
+        assert!(restarted.ui.shell.panel_open);
+        let panel = &restarted.ui.panel;
+        assert!(panel.stash[&ids[1]].surfaces == vec![Surface::Diff] && !panel.stash[&ids[1]].open);
+        assert!(!panel.stash.contains_key("bad"));
+        assert!(panel.stash["dupes"].surfaces == vec![Surface::Diff, Surface::Files] && panel.stash["dupes"].active == Some(Surface::Files));
+
         app.navigate(Route::Home { project_id: None });
         assert!(switch_thread(&mut app));
         app.ui.panel.surfaces = vec![Surface::Browser(2)];
@@ -865,6 +986,17 @@ mod tests {
         app.navigate(Route::Thread("thread:launched".into()));
         assert!(!switch_thread(&mut app));
         assert!(app.ui.panel.surfaces == vec![Surface::Browser(2)]);
+    }
+
+    #[test]
+    fn a_new_thread_draft_roots_the_files_surface_at_its_project() {
+        let mut app = App::new();
+        let project = app.state().projects[0].clone();
+        app.navigate(Route::Home { project_id: Some(data::s(&project, "id").to_string()) });
+        assert_eq!(context(&app), None);
+        assert_eq!(workspace(&app).as_deref(), Some(data::s(&project, "workspaceRoot")));
+        app.navigate(Route::PullRequests);
+        assert_eq!(workspace(&app), None);
     }
 
     #[test]
