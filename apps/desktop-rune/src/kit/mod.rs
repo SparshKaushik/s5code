@@ -157,7 +157,10 @@ pub fn empty(title: &str, description: &str, t: &T) -> El {
         .child(
             text(description)
                 .font(theme::TEXT_SM)
-                .color(t.c.contrast_muted_foreground),
+                .color(t.c.contrast_muted_foreground)
+                .align(rune::Align::Center)
+                .wrap()
+                .max_w(384.),
         )
 }
 /// Six-pixel app scrollbar, including the distinct hover token.

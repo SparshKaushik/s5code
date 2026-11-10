@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=S5 Code (Rune)
+Comment=A minimal GUI for coding agents
+Exec=s5code-rune %U
+Terminal=false
+Categories=Development;
+StartupWMClass=in.newsa.s5code.rune-prototype
+MimeType=x-scheme-handler/s5code;
