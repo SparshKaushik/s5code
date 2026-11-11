@@ -371,11 +371,18 @@ fn pick(s: &mut App, id: &str) {
     }
 }
 
-/// The menu opens on fresh status (`requestVcsStatusRefresh`).
+/// The menu opens on fresh status (`requestVcsStatusRefresh`); a failed stream resubscribes.
 pub fn refresh(s: &mut App) {
     if let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) {
+        net.retry_vcs(&cwd);
         net.request("vcs.refreshStatus", json!({"cwd": cwd}));
     }
+}
+
+/// Why the status stream failed, as the menu shows it (`gitStatusError`).
+pub fn status_error(s: &App) -> Option<String> {
+    let error = s.state().vcs.get(&cwd(s)?)?.get("error")?;
+    Some(palette::error_message(error, "The environment request failed."))
 }
 
 fn init(s: &mut App) {
@@ -483,20 +490,29 @@ fn finish(s: &mut App, reply: s5_net::Reply) {
             return palette::toast_error(s, "Action failed", Some(&message));
         }
     };
-    // `syncThreadBranchAfterGitAction`: a feature branch the action made becomes the thread's.
-    if result["branch"]["status"] == "created"
-        && let Some(branch) = result["branch"]["name"].as_str()
-        && let Some(thread) = composer::ctx(s).thread
-    {
-        let (id, worktree) = (data::s(thread, "id").to_string(), thread["worktreePath"].clone());
-        if let Some(net) = s.src.net() {
-            net.dispatch(json!({"type": "thread.metadata.update", "threadId": id, "branch": branch, "worktreePath": worktree}));
-        }
-    }
+    sync_branch(s, &result);
     let created = result["pr"]["status"] == "created";
     let title = if created { format!("Created {}", terms(status(s).as_ref()).short) } else { data::s(&result["toast"], "title").to_string() };
     let description = if created { None } else { result["toast"]["description"].as_str().map(str::to_string) };
     s.ui.chat.details.git.success = Some(Success { cwd: r.cwd, title, description, until });
+}
+
+/// `syncThreadBranchAfterGitAction`: a feature branch the action made becomes the thread's, or
+/// the draft's, so a new worktree then starts from the commit.
+pub(super) fn sync_branch(s: &mut App, result: &Value) {
+    let Some(branch) = result["branch"]["name"].as_str().filter(|_| result["branch"]["status"] == "created") else { return };
+    let Some(thread) = composer::ctx(s).thread else {
+        let run = super::draft_run_mut(s);
+        (run.base, run.from_origin) = (Some(branch.to_string()), false);
+        return;
+    };
+    if thread["branch"] == branch {
+        return;
+    }
+    let (id, worktree) = (data::s(thread, "id").to_string(), thread["worktreePath"].clone());
+    if let Some(net) = s.src.net() {
+        net.dispatch(json!({"type": "thread.metadata.update", "threadId": id, "branch": branch, "worktreePath": worktree}));
+    }
 }
 
 fn quick_icon(q: &Quick) -> &'static Icon {
@@ -547,7 +563,7 @@ pub fn view(s: &App, t: &T, local: &Value, draft: bool) -> Option<El> {
     let here = cwd(s);
     let running = git.running.as_ref().filter(|r| Some(&r.cwd) == here.as_ref());
     let success = git.success.as_ref().filter(|v| Some(&v.cwd) == here.as_ref());
-    if quiet(s, draft) && running.is_none() && q.disabled && changes_totals(local) == (0, 0) {
+    if quiet(s, draft) && running.is_none() && q.disabled && changes_totals(local) == (0, 0) && status_error(s).is_none() {
         return None;
     }
     let group = row().key("details-git").w_full().radius(theme::layout::CONTROL_RADIUS);
@@ -617,6 +633,9 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
         if let Some(note) = note {
             rows.push(text(note).font(theme::TEXT_XS).color(t.c.warning).wrap().px(8.0).py(6.0));
         }
+    }
+    if let Some(error) = status_error(s) {
+        rows.push(text(error).font(theme::TEXT_XS).color(t.c.destructive).wrap().px(8.0).py(6.0));
     }
     rows
 }

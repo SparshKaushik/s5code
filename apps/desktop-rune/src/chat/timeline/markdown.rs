@@ -20,7 +20,8 @@ fn style(t: &T) -> MarkdownStyle {
         .strong_weight(600.0)
         .list(20.0, 4.0)
         .code_block(code_background(t), rune::Color::TRANSPARENT)
-        .code_block_font(theme::MONO_XS.lh(19.25))
+        // Tuned at 12/19.25 for the default 13px code size; both follow the setting.
+        .code_block_font(theme::mono(rune::TextStyle::new(12.0 * t.code / 13.0, 400.0).lh(19.25 * t.code / 13.0)))
         .code_block_padding(14.4, 12.8)
         .table_outline(None)
         .table_rules(t.c.border.alpha_mul(0.6))
@@ -169,7 +170,7 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
             .w_full()
             .justify_end()
             .pt(2.0)
-            .child(copy_button(app, source, t)),
+            .child(copy_button(app, source, t, "Copy table")),
     )
 }
 
@@ -186,7 +187,7 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, unwrapped, copied);
+    let version = (source, t.dark, colors, unwrapped, copied, t.code.to_bits());
     rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None))
 }
 
@@ -233,7 +234,8 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
             .trim_end_matches('\n')
             .to_owned();
         let key = format!("{id}-fence-{fence_index}");
-        let wrap = !app.ui.chat.timeline.wrapped.contains(&key);
+        // `wrapped` holds the blocks toggled away from the wordWrap setting.
+        let wrap = (crate::settings::value(app, "wordWrap").as_bool() != Some(false)) != app.ui.chat.timeline.wrapped.contains(&key);
         let wrap_key = key.clone();
         let head = row()
             .w_full()
@@ -257,14 +259,15 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
                     .color(t.c.muted_foreground)
                     .focusable(true)
                     .role("button")
-                    .label(if wrap { "Unwrap code" } else { "Wrap code" })
+                    .label(if wrap { "Disable line wrap" } else { "Wrap lines" })
+                    .help(if wrap { "Disable line wrap" } else { "Wrap lines" })
                     .on_press(move |app: &mut App| {
                         if !app.ui.chat.timeline.wrapped.remove(&wrap_key) {
                             app.ui.chat.timeline.wrapped.insert(wrap_key.clone());
                         }
                     }),
             )
-            .child(copy_button(app, &code, t));
+            .child(copy_button(app, &code, t, "Copy code"));
         let fenced = format!("```{language}\n{code}\n```");
         let code_view = Markdown::new(fenced.clone())
             .selectable(true)

@@ -273,7 +273,7 @@ pub(crate) fn run(
                                 } else if let Some(route) = subs
                                     .iter()
                                     .find(|(route, s)| {
-                                        matches!(route, Route::Resource(..)) && s.id == id
+                                        matches!(route, Route::Resource(..) | Route::Vcs(_)) && s.id == id
                                     })
                                     .map(|(r, _)| r.clone())
                                 {

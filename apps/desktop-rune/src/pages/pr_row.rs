@@ -1,10 +1,12 @@
-//! A `/pull-requests` row's own controls (PullRequestRow): the quick actions Shift reveals, the
-//! stack menu, the checks popover, the change breakdown on hover and the description-match badge.
+//! A `/pull-requests` row's own controls (PullRequestRow): the quick actions Shift reveals and the
+//! close sweep across rows, the stack menu, the checks popover, the change breakdown on hover, the
+//! description-match badge and the provider mark.
 
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use std::time::Duration;
 
-use rune::{Color, Cursor, El, Key, KeyEvent, ScrollSpec, Tx, col, el, icon, row, spacer, text};
+use rune::{Color, Cursor, Drag, El, Key, KeyEvent, Phase, ScrollSpec, Tx, col, el, icon, row, spacer, text};
 use serde_json::{Value, json};
 
 use super::pr_detail::{action_payload, reference};
@@ -19,6 +21,14 @@ const STALE_MS: i64 = 60_000;
 /// readableFailure's FAILURE_DETAIL_MAX_LENGTH.
 const FAILURE_MAX: usize = 320;
 const BREAKDOWN_KINDS: [(&str, &str); 5] = [("code", "Code"), ("tests", "Tests"), ("mocks", "Mocks"), ("generated", "Generated"), ("docs", "Docs")];
+/// The quick actions' runAction grant (AuthSourceControlWriteScope).
+const SOURCE_CONTROL_WRITE: &str = "source-control:write";
+/// A close sweep starts once the pointer has moved this far (the sweep sensor's `distance`).
+const SWEEP_DISTANCE: f32 = 6.0;
+/// A list row (56px) and the 2px under it, and the xs Close button's top in the row: rows in a
+/// group are all one height, so the row under the pointer follows from how far it moved.
+const ROW_PITCH: f32 = 58.0;
+const CLOSE_TOP: f32 = 16.0;
 
 /// One row's lazily read answer: `pullRequests.stack`, `.detail` (for its checks) or `.changeBreakdown`.
 #[derive(Default)]
@@ -42,15 +52,39 @@ pub struct Ui {
     pub checks_open: Option<String>,
     pub checks_all: bool,
     pub hovered: Option<String>,
+    /// The connection's session (`GET /api/auth/session`), read for its write grant.
+    pub session: Read,
+    sweep: Option<Sweep>,
+    batches: Vec<Batch>,
 }
 
-/// A quick action on its way: merging reads the detail (and stack) before it runs.
+/// A quick action on its way: merging reads the detail (and stack) before it runs. A close from a
+/// sweep belongs to its batch.
 struct Acting {
     key: String,
     entry: Value,
     action: &'static str,
     step: Step,
     id: u64,
+    batch: Option<u64>,
+}
+
+/// A press on Close, and once it moved far enough, the rows it swept (startCloseSweep).
+struct Sweep {
+    origin: String,
+    /// The origin's group as shown when pressed, top to bottom.
+    rows: Vec<Value>,
+    started: bool,
+    target: Option<usize>,
+    swept: Vec<String>,
+}
+
+/// Closes sent together, reported in one toast once all answered (usePullRequestCloseBatch).
+struct Batch {
+    id: u64,
+    size: usize,
+    closed: usize,
+    failures: Vec<String>,
 }
 
 enum Step {
@@ -145,6 +179,21 @@ pub fn poll(s: &mut App) -> bool {
                 }
             }
         }
+        if let Some(reply) = u.session.pending.and_then(|id| net.take_reply(id)) {
+            u.session.pending = None;
+            u.session.at = now;
+            match reply {
+                Ok(v) => {
+                    u.session.data = Some(v);
+                    u.session.error = None;
+                }
+                Err(e) => u.session.error = Some(super::pull_requests::error_text(&e, "")),
+            }
+            changed = true;
+        }
+        if u.session.pending.is_none() && (u.session.at == 0 || now - u.session.at >= STALE_MS) {
+            u.session.pending = Some(net.http_request("GET", "/api/auth/session", json!({})));
+        }
         let mut n = 0;
         while n < u.acting.len() {
             match net.take_reply(u.acting[n].id) {
@@ -213,17 +262,53 @@ fn quick_actions(e: &Value, host: &[String]) -> Vec<&'static str> {
     for_state.iter().copied().filter(|a| host.iter().any(|h| h == a)).collect()
 }
 
-/// PullRequestSpeedActions: the row's quick actions while Shift is held or one is running.
+/// sessionGrantsScope: the session's permissions when it lists them, else its scopes, where a
+/// legacy credential's `orchestration:operate` still grants source control writes.
+fn grants(session: &Value, scope: &str) -> bool {
+    let has = |list: &Value, scope: &str| list.as_array().is_some_and(|l| l.iter().any(|v| v == scope));
+    if session["authenticated"] != true {
+        return false;
+    }
+    if session.get("permissions").is_some_and(|p| !p.is_null()) {
+        return has(&session["permissions"], scope);
+    }
+    if has(&session["scopes"], scope) {
+        return true;
+    }
+    if session["auth"].get("serverUpdateScope").is_some() {
+        return false;
+    }
+    scope == SOURCE_CONTROL_WRITE && has(&session["scopes"], "orchestration:operate")
+}
+
+/// runAction's permissionAtom: whether this connection may act on pull requests. Unknown until the
+/// session answers; the recorded scenes may.
+fn can_write(s: &App) -> bool {
+    let session = &s.ui.pages.pull_requests.row.session;
+    match (&session.data, &session.error) {
+        (_, Some(_)) => false,
+        (Some(v), None) => grants(v, SOURCE_CONTROL_WRITE),
+        (None, None) => !matches!(s.src, crate::data::Source::Live(_)),
+    }
+}
+
+/// PullRequestSpeedActions: the row's quick actions while Shift is held, one is running, or a close
+/// sweep passes over the row. They stay disabled while the connection can't write.
 pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
     let u = &s.ui.pages.pull_requests.row;
     let key = row_key(e);
-    let busy = u.acting.iter().any(|a| a.key == key);
+    let sweeping = u.sweep.as_ref().is_some_and(|w| w.started && w.swept.contains(&key));
+    let busy = sweeping || u.acting.iter().any(|a| a.key == key);
+    // The sweep's own Close keeps its drag until release, even once Shift is let go.
+    let origin = u.sweep.as_ref().is_some_and(|w| w.origin == key);
     let actions = quick_actions(e, &host_actions(result, e));
-    if actions.is_empty() || !(u.speed || busy) {
+    if actions.is_empty() || !(u.speed || busy || origin) {
         return None;
     }
+    let writable = can_write(s);
     let stacked = e["stack"].is_object();
-    let mut group = row().key(format!("pr-speed-{key}")).shrink().gap(4.0).pr(12.0).center_y().role("group").label(format!("Quick actions for {} #{}", term(e), e["number"]));
+    let (term, number) = (term(e), &e["number"]);
+    let mut group = row().key(format!("pr-speed-{key}")).shrink().gap(4.0).pr(12.0).center_y().role("group").label(format!("Quick actions for {term} #{number}"));
     for action in actions {
         let (label, glyph): (&str, &'static rune::Icon) = match action {
             "close" => ("Close", &i::GIT_PULL_REQUEST_CLOSED),
@@ -231,18 +316,165 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
             "ready" => ("Ready for review", &i::GIT_PULL_REQUEST_ARROW),
             _ => ("Reopen", &i::GIT_PULL_REQUEST_ARROW),
         };
-        let entry = e.clone();
-        group = group.child(
-            kit::Button::new(label)
-                .variant(if action == "close" { "destructive-outline" } else { "outline" })
-                .size("xs")
-                .icon(if busy { &i::LOADER_CIRCLE } else { glyph })
-                .disabled(busy || (action == "merge" && stacked))
-                .on_press(move |s: &mut App| perform(s, &entry, action))
-                .build(t),
-        );
+        let tip = match action {
+            "merge" if stacked => format!("Open this {term} to merge its stack"),
+            "close" => "Close immediately, or drag across rows to close several".to_string(),
+            _ => format!("{label} immediately"),
+        };
+        let disabled = !writable || (busy && !(origin && action == "close")) || (action == "merge" && stacked);
+        let mut button = kit::Button::new(label)
+            .variant(if action == "close" { "destructive-outline" } else { "outline" })
+            .size("xs")
+            .icon(if busy { &i::LOADER_CIRCLE } else { glyph })
+            .disabled(disabled);
+        // Close acts on release instead, so a drag from it can sweep other rows.
+        if action != "close" {
+            let entry = e.clone();
+            button = button.on_press(move |s: &mut App| perform(s, &entry, action));
+        }
+        let mut control = button.build(t).label(format!("{label} #{number}")).help(tip);
+        if action == "close" && !disabled {
+            let (dragged, keyed) = (e.clone(), e.clone());
+            control = control.on_drag(move |s: &mut App, d: &mut Drag, _: &mut Tx| sweep(s, &dragged, d)).on_key(move |s: &mut App, k: &KeyEvent, _: &mut Tx| {
+                match k.key {
+                    Key::Enter => perform(s, &keyed, "close"),
+                    Key::Text(ref c) if c == " " => perform(s, &keyed, "close"),
+                    _ => return false,
+                }
+                true
+            });
+        }
+        group = group.child(control);
     }
     Some(group)
+}
+
+// ---- close sweep ------------------------------------------------------------------------
+
+/// Escape ends a sweep in progress without closing anything.
+pub(super) fn cancel_sweep(u: &mut Ui) -> bool {
+    u.sweep.take().is_some()
+}
+
+/// The rows of the group `key` is shown in, top to bottom.
+fn group_of(s: &App, key: &str) -> Vec<Value> {
+    let list = &s.ui.pages.pull_requests;
+    let Some(result) = list.result.as_ref() else { return Vec::new() };
+    super::pull_requests::groups(list, result).into_iter().map(|(_, rows)| rows).find(|rows| rows.iter().any(|r| row_key(r) == key)).unwrap_or_default()
+}
+
+/// The sweep's canClose: an open row its host can close, with no action of its own on the way.
+fn closable(u: &Ui, result: &Value, e: &Value) -> bool {
+    let key = row_key(e);
+    field(e, "state") == "open" && host_actions(result, e).iter().any(|a| a == "close") && !u.acting.iter().any(|a| a.key == key)
+}
+
+/// The row under the pointer, `y` below the top of the origin row at `at`, within its group: past
+/// either end the whole rest of the group is swept, as rows outside it never close.
+fn sweep_target(len: usize, at: usize, y: f32) -> usize {
+    (at as f32 + (y / ROW_PITCH).floor()).clamp(0.0, len.saturating_sub(1) as f32) as usize
+}
+
+/// startCloseSweep: a drag from a row's Close closes the open rows it passes in that row's group,
+/// all at once on release; a press that doesn't move closes the row alone.
+fn sweep(s: &mut App, e: &Value, d: &Drag) {
+    let key = row_key(e);
+    match d.phase {
+        Phase::Down => {
+            let rows = group_of(s, &key);
+            ui(s).sweep = Some(Sweep { origin: key, rows, started: false, target: None, swept: Vec::new() });
+        }
+        Phase::Move => {
+            let list = &s.ui.pages.pull_requests;
+            let Some(w) = list.row.sweep.as_ref().filter(|w| w.origin == key) else { return };
+            if !w.started && d.dx.hypot(d.dy) < SWEEP_DISTANCE {
+                return;
+            }
+            let (Some(at), Some(result)) = (w.rows.iter().position(|r| row_key(r) == key), list.result.as_ref()) else { return };
+            let target = sweep_target(w.rows.len(), at, CLOSE_TOP + d.y);
+            if w.started && w.target == Some(target) {
+                return;
+            }
+            let swept: Vec<String> = w.rows[at.min(target)..=at.max(target)].iter().filter(|r| closable(&list.row, result, r)).map(row_key).collect();
+            if let Some(w) = ui(s).sweep.as_mut() {
+                w.started = true;
+                w.target = Some(target);
+                w.swept = swept;
+            }
+        }
+        Phase::Up => {
+            let Some(w) = ui(s).sweep.take().filter(|w| w.origin == key) else { return };
+            if d.cancelled() {
+                return;
+            }
+            if !w.started {
+                return perform(s, e, "close");
+            }
+            let rows = group_of(s, &key);
+            let list = &s.ui.pages.pull_requests;
+            let batch: Vec<Value> = match list.result.as_ref() {
+                Some(result) => rows.into_iter().filter(|r| w.swept.contains(&row_key(r)) && closable(&list.row, result, r)).collect(),
+                None => Vec::new(),
+            };
+            close_batch(s, batch);
+        }
+    }
+}
+
+/// usePullRequestCloseBatch: closes the open rows at once; each leaves the open list as it closes,
+/// and one toast reports them all.
+fn close_batch(s: &mut App, entries: Vec<Value>) {
+    let acting = &s.ui.pages.pull_requests.row.acting;
+    let batch: Vec<Value> = entries.into_iter().filter(|e| field(e, "state") == "open" && !acting.iter().any(|a| a.key == row_key(e))).collect();
+    if batch.is_empty() {
+        return;
+    }
+    let mut sent = Vec::new();
+    if let Some(net) = s.src.net() {
+        for e in batch {
+            let id = net.request("pullRequests.runAction", action_payload(&e, "close", None));
+            sent.push(Acting { key: row_key(&e), entry: e, action: "close", step: Step::Run, id, batch: None });
+        }
+    }
+    let Some(id) = sent.first().map(|a| a.id) else {
+        return crate::shell::palette::toast(s, "Actions need a connected environment.", None);
+    };
+    let u = ui(s);
+    u.batches.push(Batch { id, size: sent.len(), closed: 0, failures: Vec::new() });
+    u.acting.extend(sent.into_iter().map(|a| Acting { batch: Some(id), ..a }));
+}
+
+/// One close of a batch answered: a closed row leaves the open list at once, and the last answer
+/// reports the batch.
+fn settle(s: &mut App, batch: u64, a: &Acting, reply: Result<Value, Value>) {
+    let failure = match reply {
+        Ok(_) => {
+            super::pull_requests::after_action(&mut s.ui.pages.pull_requests, &a.key, "close", crate::data::now_ms());
+            None
+        }
+        Err(e) => Some(format!("#{}: {}", a.entry["number"], readable(&super::pull_requests::error_text(&e, ""), failure_text("close", term(&a.entry)).1))),
+    };
+    let u = ui(s);
+    let Some(n) = u.batches.iter().position(|b| b.id == batch) else { return };
+    let b = &mut u.batches[n];
+    match failure {
+        Some(f) => b.failures.push(f),
+        None => b.closed += 1,
+    }
+    if b.closed + b.failures.len() < b.size {
+        return;
+    }
+    let b = u.batches.remove(n);
+    let (title, description) = batch_summary(b.size, b.closed, &b.failures);
+    crate::shell::palette::toast(s, &title, description.as_deref());
+}
+
+/// The batch toast: how many closed, and the first three failures.
+fn batch_summary(size: usize, closed: usize, failures: &[String]) -> (String, Option<String>) {
+    if failures.is_empty() {
+        return (format!("Closed {closed} pull request{}", if closed == 1 { "" } else { "s" }), None);
+    }
+    (format!("Closed {closed} of {size} pull requests"), Some(failures.iter().take(3).cloned().collect::<Vec<_>>().join("\n")))
 }
 
 /// usePullRequestActionRunner: one action per row at a time; a merge first reads the detail to
@@ -252,7 +484,7 @@ fn perform(s: &mut App, e: &Value, action: &'static str) {
     if ui(s).acting.iter().any(|a| a.key == key) {
         return;
     }
-    let a = Acting { key, entry: e.clone(), action, step: Step::Run, id: 0 };
+    let a = Acting { key, entry: e.clone(), action, step: Step::Run, id: 0, batch: None };
     if action == "merge" {
         let mut fresh = reference(e);
         fresh["allowStale"] = json!(false);
@@ -275,6 +507,9 @@ fn send(s: &mut App, mut a: Acting, step: Step, method: &str, payload: Value) {
 }
 
 fn advance(s: &mut App, mut a: Acting, reply: Result<Value, Value>) {
+    if let Some(batch) = a.batch {
+        return settle(s, batch, &a, reply);
+    }
     let answer = match reply {
         Ok(v) => v,
         Err(e) => return failed(s, &a, &super::pull_requests::error_text(&e, "")),
@@ -336,8 +571,13 @@ fn succeeded(s: &mut App, a: &Acting) {
 }
 
 fn failed(s: &mut App, a: &Acting, raw: &str) {
-    let term = term(&a.entry);
-    let (title, hint) = match a.action {
+    let (title, hint) = failure_text(a.action, term(&a.entry));
+    crate::shell::palette::toast(s, &title, Some(&readable(raw, hint)));
+}
+
+/// actionFailureLabels and actionFailureHints.
+fn failure_text(action: &str, term: &str) -> (String, &'static str) {
+    match action {
         "merge" => (
             format!("Could not merge this {term}"),
             "The host refused the merge. Check that you have write access, that the checks it requires have passed, and that the branch is not conflicting.",
@@ -345,8 +585,7 @@ fn failed(s: &mut App, a: &Acting, raw: &str) {
         "ready" => ("Could not mark this ready for review".to_string(), "The host refused it. Check that you have write access to this repository."),
         "close" => (format!("Could not close this {term}"), "The host refused it. Check that you have write access, or that you opened it."),
         _ => (format!("Could not reopen this {term}"), "The host refused it. Check that you have write access, and that the branch still exists."),
-    };
-    crate::shell::palette::toast(s, &title, Some(&readable(raw, hint)));
+    }
 }
 
 /// readableFailure: the host's own words without the operation prefix, or the hint when they
@@ -508,7 +747,16 @@ fn checks_body(t: &T, checks: &[Value], all: bool) -> El {
             .gap(8.0)
             .center_y()
             .child(icon(glyph, 14.0).color(ink))
-            .child(text(field(c, "name").to_string()).font(theme::TEXT_XS).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0))
+            .child(
+                text(field(c, "name").to_string())
+                    .font(theme::TEXT_XS)
+                    .color(t.c.foreground)
+                    .truncate()
+                    .grow(1.0)
+                    .shrink()
+                    .min_w(0.0)
+                    .help(c["description"].as_str().unwrap_or(field(c, "name")).to_string()),
+            )
             .child(text(status).font(theme::TEXT_XS).color(t.c.muted_foreground));
         if let Some(url) = c["url"].as_str().map(str::to_string) {
             line = line.child(text("Details").font(theme::TEXT_XS).color(t.c.primary).cursor(Cursor::Pointer).role("link").on_press_tx(move |_: &mut App, tx: &mut Tx| {
@@ -568,13 +816,55 @@ fn select_layer(s: &mut App, tx: &mut Tx, e: &Value, number: i64) {
     }
 }
 
-/// pullRequestStackView's notice: whether the held stack is stale, or still refreshing.
-fn stack_notice(read: &Read) -> Option<bool> {
-    match (&read.error, read.pending) {
-        (Some(_), _) => Some(true),
-        (None, Some(_)) => Some(false),
-        _ => None,
+/// savedPullRequestStack: this row's stack as the newest thread link saved it (the row's own link,
+/// else one whose stack holds the row), with each layer's saved title. Saved membership only
+/// navigates; it never carries the heads an action needs.
+fn saved_stack<'a>(links: impl Iterator<Item = &'a Value>, e: &Value) -> Option<Value> {
+    let host = field(e, "host").to_lowercase();
+    if host.is_empty() {
+        return None;
     }
+    let repository = field(e, "repository").to_lowercase();
+    let number = &e["number"];
+    let matching: Vec<&Value> = links.filter(|l| field(l, "host").to_lowercase() == host && field(l, "repository").to_lowercase() == repository).collect();
+    let synced = |l: &&Value| Reverse(crate::data::iso_ms(l["snapshot"]["syncedAt"].as_str().unwrap_or(field(l, "linkedAt"))).unwrap_or(i64::MIN));
+    let holds = |stack: &Value, n: &Value| stack["layers"].as_array().is_some_and(|layers| layers.iter().any(|layer| &layer["number"] == n));
+    let exact: Vec<&Value> = matching.iter().copied().filter(|l| &l["number"] == number).collect();
+    let candidates = if exact.is_empty() { matching.iter().copied().filter(|l| holds(&l["stack"], number)).collect() } else { exact };
+    let stack = &candidates.into_iter().min_by_key(synced)?["stack"];
+    if !holds(stack, number) {
+        return None;
+    }
+    let layers: Vec<Value> = stack["layers"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .map(|layer| {
+            let mut layer = layer.clone();
+            let n = layer["number"].clone();
+            if let Some(snapshot) = matching.iter().copied().filter(|l| l["number"] == n).min_by_key(synced).map(|l| &l["snapshot"]).filter(|v| v.is_object()) {
+                layer["title"] = snapshot["title"].clone();
+                layer["isDraft"] = snapshot["isDraft"].clone();
+            }
+            layer
+        })
+        .collect();
+    Some(json!({"id": stack["id"], "number": stack["number"], "url": stack["url"], "base": stack["base"], "layers": layers}))
+}
+
+/// pullRequestStackView: the host's answer once it succeeded, else what it last held or the saved
+/// stack; with its notice, whether that may be stale (true) or is refreshing (false).
+fn stack_view(read: Option<&Read>, saved: Option<Value>) -> (Option<Value>, Option<bool>) {
+    let success = read.is_some_and(|r| r.data.is_some() && r.error.is_none());
+    let held = read.and_then(|r| r.data.clone()).filter(Value::is_object);
+    let data = if success { held } else { held.or(saved) };
+    let notice = match read {
+        _ if data.is_none() => None,
+        Some(Read { error: Some(_), .. }) => Some(true),
+        _ if !success || read.is_some_and(|r| r.pending.is_some()) => Some(false),
+        _ => None,
+    };
+    (data, notice)
 }
 
 /// PullRequestStackPopover: the row's layer in its stack, opening the stack's layers.
@@ -592,6 +882,7 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
         .cursor(Cursor::Pointer)
         .role("button")
         .label(format!("Stack {number}, layer {position} of {size}"))
+        .help(format!("View stack #{number}, layer {position} of {size}"))
         .child(icon(&i::LAYERS, 12.0).color(muted))
         .child(text(format!("{position}/{size}")).font(theme::TEXT_XS).color(muted))
         .on_press(move |s: &mut App| toggle_stack(s, &entry));
@@ -606,12 +897,15 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
                 .center_y()
                 .child(text(format!("Stack #{n}")).font(theme::XS_MEDIUM).color(muted))
                 .child(spacer())
-                .children(notice.map(|stale| text(if stale { "May be stale" } else { "Refreshing…" }).font(theme::TEXT_XS).color(muted)))
+                .children(notice.map(|stale| {
+                    let (label, tip) = if stale { ("May be stale", "Stack data may be stale. We couldn’t refresh it.") } else { ("Refreshing…", "Refreshing stack… Showing saved data.") };
+                    text(label).font(theme::TEXT_XS).color(muted).role("status").help(tip)
+                }))
         };
         let read = u.stacks.get(&key);
-        match read.and_then(|r| r.data.as_ref()).filter(|d| d.is_object()) {
-            Some(stack) => {
-                let notice = read.and_then(stack_notice);
+        let saved = saved_stack(s.state().threads.iter().flat_map(|th| th["pullRequests"].as_array().into_iter().flatten()), e);
+        match stack_view(read, saved) {
+            (Some(stack), notice) => {
                 menu = menu.row(header(&stack["number"], notice));
                 if notice == Some(true) {
                     let entry = e.clone();
@@ -620,9 +914,9 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
                 for layer in stack["layers"].as_array().into_iter().flatten().rev() {
                     menu = menu.row(layer_row(t, e, layer));
                 }
-                menu = menu.group_label(format!("↳ {}", field(stack, "base")));
+                menu = menu.group_label(format!("↳ {}", field(&stack, "base")));
             }
-            None => {
+            (None, _) => {
                 let status = match read {
                     Some(Read { error: Some(error), .. }) => error.clone(),
                     Some(Read { data: Some(_), .. }) => "This pull request is no longer in a stack.".to_string(),
@@ -748,12 +1042,38 @@ pub fn matched_badge(t: &T) -> El {
         .center_y()
         .shrink()
         .label("matched in the description")
+        .help("Matched in the description")
         .child(icon(&i::SEARCH, 12.0).color(t.c.muted_foreground))
         .child(text("matched in the description").font(theme::TEXT_3XS).color(t.c.muted_foreground).truncate().shrink())
 }
 
-// One-colour source control marks for menus (getSourceControlPresentationForKind's Icon). Bitbucket
-// and Azure DevOps marks are gradients; they keep the generic glyph, as the palette's brands do.
+/// PullRequestRow's provider mark, with its name as the tooltip, once the list spans more than one
+/// host (showProvider).
+pub fn provider_mark(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
+    let kept = &s.ui.pages.pull_requests.hosts;
+    let hosts = if kept.is_empty() { result["providers"].as_array().map_or(0, Vec::len) } else { kept.len() };
+    if hosts < 2 {
+        return None;
+    }
+    let (kind, name) = (field(e, "provider"), provider_name(field(e, "provider")));
+    Some(el().label(name).help(name).child(icon(host_icon(kind), 12.0).color(t.c.muted_foreground)))
+}
+
+/// The source control definition's label for a provider kind.
+fn provider_name(kind: &str) -> &'static str {
+    match kind {
+        "github" => "GitHub",
+        "gitlab" => "GitLab",
+        "bitbucket" => "Bitbucket",
+        "azure-devops" => "Azure DevOps",
+        "gitcafe" => "GitCafe",
+        "forgejo" => "Forgejo",
+        _ => "source control",
+    }
+}
+
+// One-colour source control marks (getSourceControlPresentationForKind's Icon): each host's own
+// silhouette, without the gradients Bitbucket and Azure DevOps paint theirs with.
 static GITHUB: rune::Icon = rune::Icon {
     name: "pr-host-github",
     view: 16.0,
@@ -771,13 +1091,26 @@ static FORGEJO: rune::Icon = rune::Icon {
     body: "<path d=\"M64 174 v-98 a50 50 0 0 1 50-50 h20\" stroke=\"currentColor\" stroke-width=\"25\" fill=\"none\"/><path d=\"M130 26 a18 18 0 1 0 36 0 a18 18 0 1 0 -36 0z\" stroke=\"currentColor\" stroke-width=\"15\" fill=\"none\"/><path d=\"M64 174 v-30 a50 50 0 0 1 50-50 h20\" stroke=\"currentColor\" stroke-width=\"25\" fill=\"none\"/><path d=\"M130 94 a18 18 0 1 0 36 0 a18 18 0 1 0 -36 0z\" stroke=\"currentColor\" stroke-width=\"15\" fill=\"none\"/><path d=\"M46 186 a18 18 0 1 0 36 0 a18 18 0 1 0 -36 0z\" stroke=\"currentColor\" stroke-width=\"15\" fill=\"none\"/>",
 };
 
-/// The host picker's mark for a provider kind.
+static BITBUCKET: rune::Icon = rune::Icon {
+    name: "pr-host-bitbucket",
+    view: 2481.29,
+    body: "<path d=\"M80.52 125.05C36.62 124.48 0.57 159.61 0.01 203.51c-0.06 4.61 0.28 9.22 1.02 13.77l337.48 2048.72c8.68 51.75 53.26 89.8 105.74 90.24h1619.03c39.38 0.5 73.19 -27.9 79.49 -66.78l337.49 -2071.78c7.03 -43.34 -22.41 -84.17 -65.75 -91.2c-4.55 -0.74 -9.15 -1.08 -13.76 -1.02L80.52 125.05zM1501.59 1605.74H984.84l-139.92 -731h781.89L1501.59 1605.74z\" fill=\"currentColor\" fill-rule=\"evenodd\"/>",
+};
+static AZURE_DEVOPS: rune::Icon = rune::Icon {
+    name: "pr-host-azure-devops",
+    view: 512.0,
+    body: "<path d=\"M116.1 73.4c-5.8 5.8-13.7 13.8-13.7 22.6v216.4c0 8.9-3.3 17.3-9 23.4s-13.3 9.2-21.1 8.5l-42.7-3.1c-7.9-.5-15-3.9-20.3-9.3-5.7-5.7-9.3-13.7-9.3-22.6V202.7c0-8.9 3.6-16.9 9.4-22.6l2-1.9z\" fill=\"currentColor\"/><path d=\"m500.5 366-128 106.7c-5.5 4.6-12.7 7.4-20.5 7.4q-2.4 0-4.8-.3l-112.5-16.9v27.8c0 11.7-9.6 21.3-21.3 21.3-7.3 0-13.5-3.6-17.5-9.1l-36.2-51.4-5.4-7.6-36.6-51.9-7-10c-2.6-3.5-3.9-7.8-3.9-12.3 0-6 2.5-11.6 6.8-15.7 3.8-3.7 9.1-5.8 14.5-5.8.4 0 1 .1 1.5.1l105.2 7.5L384 366.5l93.7 6.7c.7.1 1.6.1 2.3.1 7.8 0 14.9-2.7 20.5-7.3\" fill=\"currentColor\"/><path d=\"M512 170.7v170.7c0 9.9-4.5 18.8-11.5 24.6l-128 106.7c7-5.9 11.5-14.7 11.5-24.6V175.3c0-16.7 13-30.7 29.8-31.9l63.9-4.6c.7-.1 1.6-.1 2.3-.1 7.8 0 14.9 2.8 20.5 7.4 7 5.8 11.5 14.6 11.5 24.6\" fill=\"currentColor\"/><path d=\"M384 125.5c0 11.2-8.6 20.5-19.8 21.3-.5 0-1.1.1-1.6.1l-127.9 9.2-132.3 9.1-72.7 5.5c-6.9.4-13.2 3.1-18.2 7.4L116.1 73.4c4.7-4.7 10.9-8 17.8-9.1l100.8-15.1V21.3C234.7 9.6 244.3 0 256 0c5.8 0 11.1 2.3 14.9 6.1l33.4 32.6 16.9 16.5 40.3 39.3 16.1 15.8c4.1 3.9 6.4 9.4 6.4 15.2\" fill=\"currentColor\"/>",
+};
+
+/// The host's mark for a provider kind, as the host picker and rows show it.
 pub fn host_icon(kind: &str) -> &'static rune::Icon {
     match kind {
         "github" => &GITHUB,
         "gitlab" => &GITLAB,
         "gitcafe" => &GITCAFE,
         "forgejo" => &FORGEJO,
+        "bitbucket" => &BITBUCKET,
+        "azure-devops" => &AZURE_DEVOPS,
         _ => &i::GIT_PULL_REQUEST_ARROW,
     }
 }
@@ -794,9 +1127,42 @@ pub fn scene(s: &mut App, number: i64, part: &str) {
             want(s, Kind::Stack, &e);
             ui(s).stack_open = Some(key);
         }
+        "stack-saved" => {
+            // Dismissed links still save the stack, and leave the recorded sidebar as it was.
+            let stack = recorded(Kind::Stack);
+            let links: Vec<Value> = stack["layers"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|layer| {
+                    json!({"host": e["host"], "repository": e["repository"], "number": layer["number"], "url": e["url"], "source": "stack-dismissed", "linkedAt": "2026-11-08T09:00:00.000Z",
+                        "snapshot": {"state": "open", "title": layer["title"], "headBranch": layer["headBranch"], "baseBranch": stack["base"], "isDraft": false, "updatedAt": null, "syncedAt": "2026-11-08T09:00:00.000Z"},
+                        "stack": {"kind": "native", "id": stack["id"], "number": stack["number"], "url": stack["url"], "base": stack["base"], "layers": stack["layers"]}})
+                })
+                .collect();
+            if let crate::data::Source::Fixture(state) = &mut s.src
+                && let Some(thread) = state.threads.first_mut()
+            {
+                thread["pullRequests"] = json!(links);
+            }
+            let u = ui(s);
+            u.stacks.insert(key.clone(), Read { pending: Some(0), ..Read::default() });
+            u.stack_open = Some(key);
+        }
         "checks" => {
             want(s, Kind::Checks, &e);
             ui(s).checks_open = Some(key);
+        }
+        "sweep" => {
+            let rows = group_of(s, &key);
+            let Some(at) = rows.iter().position(|r| row_key(r) == key) else { return };
+            let target = sweep_target(rows.len(), at, CLOSE_TOP + 2.0 * ROW_PITCH);
+            let list = &s.ui.pages.pull_requests;
+            let swept: Vec<String> = match list.result.as_ref() {
+                Some(result) => rows[at..=target].iter().filter(|r| closable(&list.row, result, r)).map(row_key).collect(),
+                None => return,
+            };
+            ui(s).sweep = Some(Sweep { origin: key, rows, started: true, target: Some(target), swept });
         }
         _ => {
             want(s, Kind::Breakdown, &e);
@@ -889,7 +1255,89 @@ mod tests {
         assert_eq!(count(1234567), "1,234,567");
         assert_eq!(layer_url("https://github.com/a/b/pull/7", &json!(7), 9).as_deref(), Some("https://github.com/a/b/pull/9"));
         let held = Read { data: Some(json!({})), error: Some("offline".into()), pending: None, at: 0 };
-        assert_eq!(stack_notice(&held), Some(true));
+        assert_eq!(stack_view(Some(&held), None).1, Some(true));
         assert_eq!(row_key(&entry(json!({}))), "github.com:acme/app#7");
+    }
+    #[test]
+    fn quick_actions_need_the_source_control_write_grant() {
+        let w = SOURCE_CONTROL_WRITE;
+        assert!(grants(&json!({"authenticated": true, "scopes": [w]}), w));
+        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {}}), w));
+        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "server:update"}}), w));
+        assert!(!grants(&json!({"authenticated": true, "scopes": [w], "permissions": ["orchestration:read"]}), w));
+        assert!(!grants(&json!({"authenticated": false, "scopes": [w]}), w));
+        let mut s = App::new();
+        assert!(can_write(&s), "the recorded scenes may act");
+        s.ui.pages.pull_requests.row.session.data = Some(json!({"authenticated": true, "scopes": ["orchestration:read"]}));
+        assert!(!can_write(&s));
+        s.ui.pages.pull_requests.row.session.data = Some(json!({"authenticated": true, "permissions": [w]}));
+        assert!(can_write(&s));
+        s.ui.pages.pull_requests.row.session.error = Some("offline".into());
+        assert!(!can_write(&s));
+    }
+
+    #[test]
+    fn a_close_sweep_takes_the_closable_rows_from_the_origin_to_the_pointer() {
+        assert_eq!(sweep_target(5, 2, CLOSE_TOP), 2);
+        assert_eq!(sweep_target(5, 2, -1.0), 1);
+        assert_eq!(sweep_target(5, 2, ROW_PITCH * 2.0 + 1.0), 4);
+        assert_eq!(sweep_target(5, 2, ROW_PITCH * 9.0), 4);
+        assert_eq!(sweep_target(5, 0, -500.0), 0);
+        let mut u = Ui::default();
+        let result = json!({"providers": [{"host": "github.com"}]});
+        let open = entry(json!({}));
+        assert!(closable(&u, &result, &open));
+        assert!(closable(&u, &result, &entry(json!({"isDraft": true}))));
+        assert!(!closable(&u, &result, &entry(json!({"state": "closed"}))));
+        assert!(!closable(&u, &json!({"providers": [{"host": "github.com", "actions": ["merge"]}]}), &open));
+        u.acting.push(Acting { key: row_key(&open), entry: open.clone(), action: "merge", step: Step::Detail, id: 1, batch: None });
+        assert!(!closable(&u, &result, &open));
+    }
+
+    #[test]
+    fn a_batch_closes_each_row_as_it_answers_and_reports_once() {
+        let mut s = App::new();
+        let rows = [entry(json!({})), entry(json!({"number": 8})), entry(json!({"number": 9}))];
+        s.ui.pages.pull_requests.result = Some(json!({"entries": rows}));
+        let acting = |e: &Value| Acting { key: row_key(e), entry: e.clone(), action: "close", step: Step::Run, id: 0, batch: Some(1) };
+        ui(&mut s).batches.push(Batch { id: 1, size: 3, closed: 0, failures: Vec::new() });
+        settle(&mut s, 1, &acting(&rows[0]), Ok(Value::Null));
+        let refused = json!({"_tag": "PullRequestOperationError", "operation": "runAction", "detail": "Not allowed."});
+        settle(&mut s, 1, &acting(&rows[1]), Err(refused));
+        let states = |s: &App| s.ui.pages.pull_requests.result.as_ref().map(|r| r["entries"].as_array().into_iter().flatten().map(|e| field(e, "state").to_string()).collect::<Vec<_>>());
+        assert_eq!(states(&s), Some(vec!["closed".into(), "open".into(), "open".into()]));
+        let b = &s.ui.pages.pull_requests.row.batches[0];
+        assert_eq!((b.closed, b.failures.as_slice()), (1, ["#8: Not allowed.".to_string()].as_slice()));
+        settle(&mut s, 1, &acting(&rows[2]), Ok(Value::Null));
+        assert!(s.ui.pages.pull_requests.row.batches.is_empty());
+        assert_eq!(batch_summary(3, 2, &["#8: Not allowed.".into()]), ("Closed 2 of 3 pull requests".to_string(), Some("#8: Not allowed.".to_string())));
+        assert_eq!(batch_summary(1, 1, &[]), ("Closed 1 pull request".to_string(), None));
+        let failures: Vec<String> = (1..=5).map(|n| format!("#{n}: refused")).collect();
+        assert_eq!(batch_summary(5, 0, &failures).1.map(|d| d.lines().count()), Some(3));
+    }
+
+    #[test]
+    fn the_stack_menu_falls_back_to_the_newest_saved_link() {
+        let layers = json!([{"number": 6, "headBranch": "base-fix", "state": "open"}, {"number": 7, "headBranch": "top", "state": "open"}]);
+        let stack = |n: i64| json!({"kind": "native", "id": "s", "number": n, "url": "u", "base": "main", "layers": layers});
+        let link = |number: i64, at: &str, stack: Value, title: &str| {
+            json!({"host": "GitHub.com", "repository": "Acme/App", "number": number, "linkedAt": at, "snapshot": {"title": title, "isDraft": false, "syncedAt": at}, "stack": stack})
+        };
+        let links = [link(7, "2026-01-01T00:00:00Z", stack(1), "old"), link(7, "2026-02-01T00:00:00Z", stack(2), "seven"), link(6, "2026-01-01T00:00:00Z", Value::Null, "six")];
+        let saved = saved_stack(links.iter(), &entry(json!({}))).expect("saved stack");
+        assert_eq!((&saved["number"], &saved["layers"][0]["title"], &saved["layers"][1]["title"]), (&json!(2), &json!("six"), &json!("seven")));
+        // The row's own link without a stack wins over another link's stack holding it.
+        assert!(saved_stack(links.iter(), &entry(json!({"number": 6}))).is_none());
+        assert_eq!(saved_stack(links[..2].iter(), &entry(json!({"number": 6}))).map(|s| s["number"].clone()), Some(json!(2)));
+        assert!(saved_stack(links.iter(), &entry(json!({"number": 5}))).is_none());
+
+        let read = |data: Option<Value>, error: Option<&str>, pending: Option<u64>| Read { data, error: error.map(str::to_string), pending, at: 0 };
+        let saved = Some(json!({"number": 2}));
+        assert_eq!(stack_view(Some(&read(None, None, Some(1))), saved.clone()), (saved.clone(), Some(false)));
+        assert_eq!(stack_view(Some(&read(None, Some("offline"), None)), saved.clone()), (saved.clone(), Some(true)));
+        assert_eq!(stack_view(Some(&read(Some(json!({"number": 3})), Some("offline"), None)), saved.clone()), (Some(json!({"number": 3})), Some(true)));
+        assert_eq!(stack_view(Some(&read(Some(Value::Null), None, None)), saved.clone()), (None, None));
+        assert_eq!(stack_view(Some(&read(Some(json!({"number": 3})), None, None)), None), (Some(json!({"number": 3})), None));
+        assert_eq!(stack_view(None, None), (None, None));
     }
 }

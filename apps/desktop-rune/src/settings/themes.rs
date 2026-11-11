@@ -61,6 +61,7 @@ pub fn apply(s: &App, t: T) -> T {
     let percent = |key: &str, default: f64| s.client_settings.values.get(key).and_then(Value::as_f64).unwrap_or(default) as f32;
     crate::kit::menu::set_glass_opacity(percent("glassOpacity", 80.0));
     let mut t = apply_theme(s, t);
+    t.code = super::fonts::code_size(&s.client_settings.values);
     let contrast = percent("appearanceContrast", 100.0);
     if contrast != 100.0 {
         let target = if t.dark { rune::Color::WHITE } else { rune::Color::BLACK };

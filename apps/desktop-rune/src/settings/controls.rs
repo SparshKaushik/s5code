@@ -25,7 +25,7 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
         .on_toggle(move |s: &mut App| {
             let key = owned.as_str();
             let v = if key == "sidebarProjectGroupingMode" {
-                json!(if on { "separate" } else { "repository" })
+                json!(toggle_grouping(value(s, key).as_str().unwrap_or("repository"), on))
             } else {
                 json!(!on)
             };
@@ -36,6 +36,26 @@ pub fn switch(s: &App, t: &T, key: &str, label: &str) -> El {
         })
         .build(&crate::kit::theme(t))
         .key(format!("setting-{key}"))
+}
+
+/// `projectGroupingModeFromToggle`: grouping switched back on restores the mode it was switched
+/// off from, which the web keeps in local storage.
+fn grouping_from_toggle(enabled: bool, last: &str) -> &'static str {
+    match (enabled, last) {
+        (false, _) => "separate",
+        (true, "repository_path") => "repository_path",
+        _ => "repository",
+    }
+}
+
+fn toggle_grouping(current: &str, on: bool) -> &'static str {
+    let path = (!cfg!(test)).then(|| crate::settings::client::sibling_path("last-project-grouping-mode"));
+    if on && current != "separate" && let Some(p) = &path {
+        let _ = p.parent().map(std::fs::create_dir_all);
+        let _ = std::fs::write(p, current);
+    }
+    let last = path.and_then(|p| std::fs::read_to_string(p).ok()).unwrap_or_default();
+    grouping_from_toggle(!on, last.trim())
 }
 
 pub fn select_width(key: &str) -> f32 {
@@ -134,10 +154,26 @@ fn links(copy: &str) -> (String, Vec<(std::ops::Range<usize>, String)>) {
     (plain, links)
 }
 
+/// Web's follow-up copy names the shortcut that flips queue/steer under the chosen send key.
+fn follow_up_description(send_shortcut: Option<&str>, modifier: &str) -> String {
+    let flip = match send_shortcut {
+        Some("mod-enter-multiline") => {
+            format!("Press {modifier} + Enter for single-line prompts or {modifier} + Shift + Enter for multiline prompts to do the opposite for one message.")
+        }
+        Some("mod-enter") => format!("Press {modifier} + Shift + Enter to do the opposite for one message."),
+        _ => format!("Press {modifier} + Enter to do the opposite for one message."),
+    };
+    format!("Queue follow-ups while the agent runs or steer the current run. {flip}")
+}
+
 pub fn setting_row(s: &App, cx: &rune::Cx<App>, t: &T, spec: &Value) -> El {
     let key = spec["key"].as_str().unwrap_or("");
     let title = spec["title"].as_str().unwrap_or(key);
     let dynamic = super::models::description(s, key).or_else(|| {
+        if key == "followUpBehavior" {
+            let modifier = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl" };
+            return Some(follow_up_description(value(s, "sendShortcut").as_str(), modifier));
+        }
         let text = match (key, value(s, key).as_str()) {
             ("responseStreamingMode", Some("turn")) => "Text appears once the agent finishes its turn.",
             ("responseStreamingMode", _) => "Each paragraph or code block appears as soon as it is complete.",
@@ -476,4 +512,29 @@ fn slider(s: &App, t: &T, key: &str, title: &str) -> El {
                 .on_change(move |s: &mut App, n, _| update(s, &key, json!(n)))
                 .build(t),
         )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn grouping_back_on_restores_the_path_mode() {
+        assert_eq!(grouping_from_toggle(false, "repository_path"), "separate");
+        assert_eq!(grouping_from_toggle(true, "repository_path"), "repository_path");
+        assert_eq!(grouping_from_toggle(true, "separate"), "repository");
+        assert_eq!(grouping_from_toggle(true, ""), "repository");
+    }
+
+    #[test]
+    fn follow_up_copy_names_the_opposite_shortcut_for_each_send_key() {
+        let tail = |shortcut| follow_up_description(shortcut, "Ctrl").split_once("run. ").unwrap().1.to_owned();
+        assert_eq!(tail(None), "Press Ctrl + Enter to do the opposite for one message.");
+        assert_eq!(tail(Some("enter")), "Press Ctrl + Enter to do the opposite for one message.");
+        assert_eq!(tail(Some("mod-enter")), "Press Ctrl + Shift + Enter to do the opposite for one message.");
+        assert_eq!(
+            tail(Some("mod-enter-multiline")),
+            "Press Ctrl + Enter for single-line prompts or Ctrl + Shift + Enter for multiline prompts to do the opposite for one message."
+        );
+    }
 }

@@ -39,6 +39,7 @@ pub fn empty_state() -> State {
         shell_sequence: 0,
         thread_views: HashMap::new(),
         vcs: HashMap::new(),
+        shell_revision: 0,
     }
 }
 

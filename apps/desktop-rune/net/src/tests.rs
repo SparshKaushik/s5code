@@ -204,6 +204,16 @@ fn shell_config_and_vcs() {
         json!({"_tag":"remoteUpdated","remote":null}),
     );
     assert!(s.vcs["/repo"]["remote"].is_null());
+    s.fold(
+        Route::Vcs("/repo".into()),
+        json!({"error":{"_tag":"Failure","cause":{"message":"git failed"}}}),
+    );
+    assert_eq!(s.vcs["/repo"]["error"]["cause"]["message"], "git failed");
+    s.fold(
+        Route::Vcs("/repo".into()),
+        json!({"_tag":"snapshot","local":{"isRepo":true},"remote":null}),
+    );
+    assert!(s.vcs["/repo"].get("error").is_none());
 }
 #[test]
 fn pairing_and_uuid() {
@@ -278,17 +288,15 @@ fn access_snapshot_keeps_other_clients_and_ignores_stale_events() {
     );
 }
 
-#[test]
-fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
-    let (tx, _commands) = mpsc::channel();
+fn offline() -> (Net, mpsc::Sender<Incoming>, mpsc::Receiver<Command>) {
+    let (tx, commands) = mpsc::channel();
     let (incoming, rx) = mpsc::channel();
-    let mut net = Net {
+    let net = Net {
         state: State::default(),
         tx,
         rx,
         replies: HashMap::new(),
         chunks: HashMap::new(),
-        next_id: 0,
         resources: HashMap::new(),
         resource_events: HashMap::new(),
         base_url: String::new(),
@@ -296,6 +304,35 @@ fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
         incoming_tx: incoming.clone(),
         wake: Arc::new(|| {}),
     };
+    (net, incoming, commands)
+}
+
+#[test]
+fn replies_from_any_environment_reach_the_client_on_screen() {
+    let (mut remote, incoming, _commands) = offline();
+    let (mut shown, _, _keep) = offline();
+    let asked = remote.request("projects.readFile", json!({}));
+    assert_ne!(shown.request("projects.readFile", json!({})), asked, "ids never collide across clients");
+    incoming.send(Incoming::Reply(asked, Ok(json!("contents")))).unwrap();
+    incoming.send(Incoming::Chunk(asked, vec![json!(1)])).unwrap();
+    remote.drain();
+    remote.hand_off(&mut shown);
+    assert_eq!(shown.take_chunks(asked), vec![json!(1)]);
+    assert_eq!(shown.take_reply(asked), Some(Ok(json!("contents"))));
+    assert_eq!(remote.take_reply(asked), None);
+}
+
+#[test]
+fn shell_items_bump_the_revision_merged_lists_watch() {
+    let mut state = State::default();
+    state.fold(Route::Shell, json!({"kind":"project.updated","project":{"id":"p"}}));
+    state.fold(Route::Shell, json!({"kind":"synchronized"}));
+    assert_eq!(state.shell_revision, 2);
+}
+
+#[test]
+fn terminal_stream_preserves_bursts_and_discards_unwatched_events() {
+    let (mut net, incoming, _commands) = offline();
     let payload = json!({"threadId":"t","terminalId":"term-1"});
     net.watch_resource("terminal.attach", payload.clone());
     let route = Route::Resource("terminal.attach".into(), payload.to_string());

@@ -48,6 +48,8 @@ pub struct State {
     pub thread_views: HashMap<String, ThreadView>,
     /// `subscribeVcsStatus` state per cwd: the latest merged snapshot.
     pub vcs: HashMap<String, Value>,
+    /// Bumps whenever a shell item touches `projects`, `threads` or `archived`.
+    pub shell_revision: u64,
 }
 
 /// A finished one-shot request: `Ok(value)` for `Exit Success`, `Err(cause)` for a failure.
@@ -71,7 +73,6 @@ pub struct Net {
     rx: Receiver<Incoming>,
     replies: HashMap<u64, Reply>,
     chunks: HashMap<u64, Vec<Value>>,
-    next_id: u64,
     resources: HashMap<Route, Value>,
     resource_events: HashMap<Route, Vec<Value>>,
     base_url: String,
@@ -91,8 +92,15 @@ impl Default for State {
             shell_sequence: 0,
             thread_views: HashMap::new(),
             vcs: HashMap::new(),
+            shell_revision: 0,
         }
     }
+}
+
+/// Process-wide, so a reply can be handed between environments' clients without colliding.
+fn next_id() -> u64 {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 impl Net {
     pub fn connect(base_url: &str, token: &str, wake: impl Fn() + Send + Sync + 'static) -> Net {
@@ -114,7 +122,6 @@ impl Net {
             rx,
             replies: HashMap::new(),
             chunks: HashMap::new(),
-            next_id: 0,
             resources: HashMap::new(),
             resource_events: HashMap::new(),
             base_url: base_url.to_owned(),
@@ -171,6 +178,16 @@ impl Net {
     pub fn state(&self) -> &State {
         &self.state
     }
+    pub fn state_mut(&mut self) -> &mut State {
+        &mut self.state
+    }
+    /// Moves finished replies and stream chunks to `to`, where the UI polls for them.
+    pub fn hand_off(&mut self, to: &mut Net) {
+        to.replies.extend(self.replies.drain());
+        for (id, values) in self.chunks.drain() {
+            to.chunks.entry(id).or_default().extend(values);
+        }
+    }
     pub fn watch_thread(&mut self, thread_id: &str) {
         if self.state.thread_views.contains_key(thread_id) {
             return;
@@ -194,6 +211,12 @@ impl Net {
         }
         self.state.vcs.insert(cwd.to_owned(), json!({"local":null,"remote":null}));
         let _ = self.tx.send(Command::Watch(Route::Vcs(cwd.to_owned())));
+    }
+    /// Resubscribes a status stream that ended in an error, keeping the error until a snapshot lands.
+    pub fn retry_vcs(&mut self, cwd: &str) {
+        if self.state.vcs.get(cwd).is_some_and(|v| v.get("error").is_some()) {
+            let _ = self.tx.send(Command::Watch(Route::Vcs(cwd.to_owned())));
+        }
     }
     pub fn unwatch_vcs(&mut self, cwd: &str) {
         self.state.vcs.remove(cwd);
@@ -226,8 +249,7 @@ impl Net {
     }
     /// Authenticated HTTP operations share the RPC reply channel and never block the UI.
     pub fn http_request(&mut self, method: &str, path: &str, payload: Value) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = next_id();
         let base = self.base_url.clone();
         let bearer = self.bearer.clone();
         let method = method.to_owned();
@@ -271,8 +293,7 @@ impl Net {
         id
     }
     pub fn request(&mut self, tag: &str, payload: Value) -> u64 {
-        let id = self.next_id;
-        self.next_id += 1;
+        let id = next_id();
         if self
             .tx
             .send(Command::Request(id, tag.to_owned(), payload))
@@ -427,6 +448,7 @@ impl State {
                     }
                     self.shell_sequence = sequence;
                 }
+                self.shell_revision += 1;
                 match item["kind"].as_str().unwrap_or("") {
                     "snapshot" => {
                         let s = &item["snapshot"];
@@ -516,6 +538,13 @@ impl State {
                 for key in ["local", "remote"] {
                     if let Some(part) = item.get(key) {
                         value[key] = part.clone();
+                    }
+                }
+                if let Some(error) = item.get("error") {
+                    value["error"] = error.clone();
+                } else if !value["local"].is_null() {
+                    if let Some(map) = value.as_object_mut() {
+                        map.remove("error");
                     }
                 }
             }

@@ -1065,10 +1065,54 @@ pub fn next_card<'a>(order: &'a [String], parked: &HashSet<String>, parking: &Ha
     order[at + 1..].iter().chain(&order[..at]).map(String::as_str).find(|id| *id != current && !parked.contains(*id) && !parking.contains(*id))
 }
 
+/// `threadSelectionStore` for a modified click: Cmd toggles the row (the anchor follows only a
+/// row it selects); Shift adds anchor-to-row over every row in order, or just the row with no
+/// anchor. Returns false for a plain click, which opens the thread.
+pub fn select_click(selected: &mut HashSet<String>, anchor: &mut Option<String>, ordered: &[String], id: &str, cmd: bool, shift: bool) -> bool {
+    if cmd {
+        if selected.remove(id) {
+            return true;
+        }
+        selected.insert(id.to_string());
+        *anchor = Some(id.to_string());
+        return true;
+    }
+    if !shift {
+        return false;
+    }
+    let range = anchor.as_ref().and_then(|a| Some((ordered.iter().position(|x| x == a)?, ordered.iter().position(|x| x == id)?)));
+    match range {
+        Some((a, b)) => selected.extend(ordered[a.min(b)..=a.max(b)].iter().cloned()),
+        None => {
+            selected.insert(id.to_string());
+            *anchor = Some(id.to_string());
+        }
+    }
+    true
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn modified_clicks_extend_the_selection() {
+        let ordered: Vec<String> = ["a", "b", "c", "d", "e"].map(String::from).to_vec();
+        let (mut selected, mut anchor) = (HashSet::new(), None);
+        assert!(select_click(&mut selected, &mut anchor, &ordered, "b", false, true), "shift with no anchor selects the row");
+        assert_eq!((selected.len(), anchor.as_deref()), (1, Some("b")));
+        assert!(select_click(&mut selected, &mut anchor, &ordered, "e", true, false));
+        assert!(select_click(&mut selected, &mut anchor, &ordered, "e", true, false), "cmd on a selected row clears it");
+        assert_eq!(anchor.as_deref(), Some("e"), "and leaves the anchor");
+        anchor = Some("b".into());
+        select_click(&mut selected, &mut anchor, &ordered, "d", false, true);
+        assert_eq!(selected, HashSet::from(["b", "c", "d"].map(String::from)));
+        selected.insert("a".into());
+        select_click(&mut selected, &mut anchor, &ordered, "c", false, true);
+        assert!(selected.contains("a") && selected.contains("d"), "a range adds to the selection");
+        assert!(!select_click(&mut selected, &mut anchor, &ordered, "c", false, false), "a plain click opens");
+    }
 
     #[test]
     fn pr_badge_reads_one_link_several_links_and_a_stack() {

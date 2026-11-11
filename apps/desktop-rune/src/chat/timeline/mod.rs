@@ -14,6 +14,7 @@ mod subagent;
 pub mod requests;
 mod rows;
 mod scenes;
+mod secret;
 
 use crate::data::s;
 use crate::theme::{self, AlphaMul, T};
@@ -28,6 +29,8 @@ pub use scenes::SCENES;
 #[derive(Default)]
 pub struct Ui {
     assets: attachments::Assets,
+    follow: Follow,
+    secrets: secret::State,
     /// The sent chip whose details are open: message id and context id.
     pub chip: Option<(String, String)>,
     pub diff_target: Option<Value>,
@@ -67,6 +70,57 @@ fn toggle(app: &mut App, id: &str) {
     }
 }
 
+/// ScrollToEndButton's show state, set from the list's scroll offset without a view run: its
+/// opacity, and an offset that moves it out of reach of the pointer while hidden.
+struct Follow {
+    opacity: rune::Live<f32>,
+    offset: rune::Live<[f32; 2]>,
+}
+
+impl Default for Follow {
+    fn default() -> Self {
+        Follow { opacity: rune::Live::new(0.0), offset: rune::Live::new(HIDDEN) }
+    }
+}
+
+const HIDDEN: [f32; 2] = [0.0, 100_000.0];
+
+/// How far above the end the list must be before the button offers to go back.
+const AWAY: f32 = 96.0;
+
+/// The floating "Scroll to end" button, over the timeline just above the composer.
+pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::details::Lane) -> Option<El> {
+    let crate::Route::Thread(thread) = app.frame_route() else { return None };
+    if is_empty(app, thread) || app.ui.chat.timeline.find.open {
+        return None;
+    }
+    let composer_h = cx.layout_with("composer-lane", |r| r[3].round()).unwrap_or(112.0);
+    let list = format!("timeline-{thread}");
+    let follow = &app.ui.chat.timeline.follow;
+    Some(
+        row()
+            .key("timeline-scroll-to-end")
+            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0))
+            .w(lane.width)
+            .justify_center()
+            .live_opacity(&follow.opacity)
+            .live_offset(&follow.offset)
+            .child(
+                crate::kit::button::Button::new("Scroll to end")
+                    .variant("glass")
+                    .size("xs")
+                    .icon(&icons::CHEVRON_DOWN)
+                    .build(t)
+                    .on_press_tx(move |_: &mut App, tx| tx.scroll_to_bottom(list.clone())),
+            ),
+    )
+}
+
+/// `shouldCollapseUserMessage`: over 600 visible characters or 8 lines.
+fn collapses(visible: &str) -> bool {
+    !visible.trim().is_empty() && (visible.chars().count() > 600 || visible.split('\n').count() > 8)
+}
+
 /// How long a copy button shows its check (ANCHORED_COPY_TOAST_TIMEOUT_MS).
 const COPIED_MS: i64 = 1000;
 
@@ -74,8 +128,10 @@ fn copied(app: &App, content: &str) -> bool {
     app.ui.chat.timeline.copied.as_ref().is_some_and(|(c, at)| c == content && crate::data::now_ms() - at < COPIED_MS)
 }
 
-pub(super) fn copy_button(app: &App, content: &str, t: &T) -> El {
+/// MessageCopyButton: `label` ("Copy message", "Copy code", ...) is its tooltip until it copies.
+pub(super) fn copy_button(app: &App, content: &str, t: &T, label: &str) -> El {
     let done = copied(app, content);
+    let label = if done { "Copied".to_owned() } else { label.to_owned() };
     let content = content.to_owned();
     row()
         .size(24.0, 24.0)
@@ -85,7 +141,8 @@ pub(super) fn copy_button(app: &App, content: &str, t: &T) -> El {
         .hover(t.c.muted)
         .focusable(true)
         .role("button")
-        .label(if done { "Copied" } else { "Copy" })
+        .label(label.clone())
+        .help(label)
         .on_press_tx(move |app: &mut App, tx| {
             tx.copy(content.clone());
             app.ui.chat.timeline.copied = Some((content.clone(), crate::data::now_ms()));
@@ -183,7 +240,7 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     }
     if matches!(
         kind,
-        "error" | "system_notice" | "handoff" | "secret_request" | "link_request"
+        "error" | "system_notice" | "handoff" | "link_request"
     ) {
         let detail = [
             s(&item["failure"], "message"),
@@ -235,6 +292,13 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             )
             .child(notice);
     }
+    if kind == "secret_request" {
+        let thread = match app.frame_route() {
+            crate::Route::Thread(id) => id.as_str(),
+            _ => "",
+        };
+        return secret::view(app, item, thread, t);
+    }
     if kind == "proposed_plan" {
         return plan::card(app, item, t);
     }
@@ -276,6 +340,10 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
     } else {
         fallback.as_str()
     };
+    // failedToolIconClassName: a failed tool call tints its icon and says so to screen readers.
+    let failed = s(item, "status") == "failed" && kind != "notification";
+    let glyph_color = if failed { t.c.destructive.alpha_mul(0.4) } else { t.c.muted_foreground };
+    let spoken = if failed { format!("{title}, tool call failed") } else { title.to_owned() };
     let mut out = col().w_full().gap(4.0);
     out = out.child(
         row()
@@ -287,13 +355,13 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             .hover(t.c.muted.alpha_mul(0.4))
             .focusable(true)
             .role("button")
-            .label(title)
+            .label(spoken)
             .key(head_key.clone())
             .on_press_tx(move |app: &mut App, tx| {
                 tx.keep_on_screen(head_key.clone());
                 toggle(app, &id)
             })
-            .child(icon(glyph, 16.0).color(t.c.muted_foreground))
+            .child(if failed { icon(glyph, 16.0).color(glyph_color).help("Tool call failed") } else { icon(glyph, 16.0).color(glyph_color) })
             .child(
                 text(title)
                     .font(theme::TEXT_SM)
@@ -369,8 +437,25 @@ fn item_view(app: &App, item: &Value, t: &T) -> El {
             col()
                 .px(28.0)
                 .child(markdown::view(app, &detail, s(item, "id"), t))
-                .child(copy_button(app, &detail, t)),
+                .child(copy_button(app, &detail, t, "Copy")),
         );
+        if kind == "file_change" {
+            let route_thread = match app.frame_route() {
+                crate::Route::Thread(id) => id.clone(),
+                _ => String::new(),
+            };
+            let thread = Some(s(item, "sourceThreadId")).filter(|v| !v.is_empty()).map_or(route_thread, str::to_owned);
+            let target = Some(s(item, "sourceItemId")).filter(|v| !v.is_empty()).unwrap_or(s(item, "id")).to_owned();
+            out = out.child(
+                row().px(28.0).child(
+                    crate::kit::Button::new("Open diff")
+                        .variant("outline")
+                        .size("xs")
+                        .on_press(move |app: &mut App| crate::panel::open_tool_diff(app, thread.clone(), target.clone()))
+                        .build(t),
+                ),
+            );
+        }
     }
     out
 }
@@ -400,7 +485,7 @@ fn send(app: &mut App, request: &str, command: Value) {
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app);
+    let mut changed = attachments::poll(app) | question::poll(app) | actions::poll(app) | plan::poll(app) | secret::poll(app);
     let Some(net) = app.src.net() else {
         return changed;
     };
@@ -474,20 +559,26 @@ fn request_view(app: &App, thread_id: &str, request: &Value, item: Option<&Value
             .center_y()
             .child(row().gap(4.0).center_y().child(icon(&icons::SHIELD, 12.0).color(t.c.warning)).child(text("Waiting for approval").font(theme::TEXT_XS).color(t.c.warning)))
             .child(text("·").font(theme::TEXT_XS).color(t.c.muted_foreground));
-        let options: Vec<(String, String)> = if array(item, "options").is_empty() {
+        let options: Vec<(String, String, String)> = if array(item, "options").is_empty() {
             [("Cancel", "cancel"), ("Decline", "decline"), ("Always allow this session", "acceptForSession"), ("Approve", "accept")]
                 .iter()
-                .map(|(l, d)| (l.to_string(), d.to_string()))
+                .map(|(l, d)| (l.to_string(), d.to_string(), String::new()))
                 .collect()
         } else {
-            array(item, "options").iter().map(|o| (s(o, "label").to_owned(), s(o, "decision").to_owned())).collect()
+            array(item, "options").iter().map(|o| (s(o, "label").to_owned(), s(o, "decision").to_owned(), s(o, "warning").trim().to_owned())).collect()
         };
         let primary = |d: &str| matches!(d, "accept" | "decline");
-        let has_more = options.iter().any(|(_, d)| !primary(d));
-        let ordered = options.iter().filter(|(_, d)| primary(d)).chain(options.iter().filter(|(_, d)| more && !primary(d)));
-        for (label, decision) in ordered {
+        let has_more = options.iter().any(|(_, d, _)| !primary(d));
+        let ordered = options.iter().filter(|(_, d, _)| primary(d)).chain(options.iter().filter(|(_, d, _)| more && !primary(d)));
+        for (label, decision, warning) in ordered {
             let (thread, r, decision) = (thread_id.to_owned(), request_id.to_owned(), decision.clone());
             let mut b = inline_button(label, decision == "accept", t);
+            // ProviderApprovalOption.warning: a risky choice carries a warning sign and says why.
+            if !warning.is_empty() {
+                b = row().gap(4.0).center_y().focusable(true).role("button").label(label).cursor(rune::Cursor::Pointer).help(warning.clone())
+                    .child(icon(&icons::TRIANGLE_ALERT, 12.0).color(t.c.warning))
+                    .child(text(label.clone()).font(theme::XS_MEDIUM).color(if decision == "accept" { t.c.foreground } else { t.c.muted_foreground }));
+            }
             if !responding {
                 b = b.on_press(move |app: &mut App| respond(app, &thread, &r, json!({"decision":decision})));
             }
@@ -556,6 +647,10 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         (c.range, chips::style(&c.kind, record))
                     });
                     let highlights = marks.as_ref().map_or_else(Vec::new, |m| m.plain(&shown));
+                    // A find match inside shows the whole message, as web's findReveal does.
+                    let fold_key = format!("user-full:{}", s(item, "id"));
+                    let foldable = collapses(&shown);
+                    let folded = foldable && highlights.is_empty() && !app.ui.chat.timeline.expanded.contains(&fold_key);
                     let mut body = text(shown)
                         .font(theme::TEXT_SM.lh(22.75))
                         .color(t.c.message_foreground)
@@ -569,14 +664,29 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
                         }
                         body = body.on_link(move |app: &mut App, id: &str, tx: &mut rune::Tx| chip::pressed(app, &pressed, id, &records, tx));
                     }
-                    content = content.child(
-                        col()
-                            .key(chip::bubble_key(s(item, "id")))
-                            .padding(12.0)
-                            .radius(16.0)
-                            .fill(t.c.message_surface)
-                            .child(body),
-                    );
+                    if folded {
+                        body = body.max_lines(7);
+                    }
+                    let mut bubble = col().key(chip::bubble_key(s(item, "id"))).padding(12.0).radius(16.0).fill(t.c.message_surface).child(body);
+                    if foldable {
+                        let label = if folded { "Show full message" } else { "Show less" };
+                        // A full-width row here would let the text measure at its unwrapped width.
+                        bubble = bubble.child(
+                            crate::kit::button::Button::new(label)
+                                .variant("ghost-muted")
+                                .size("xs")
+                                .on_press(move |app: &mut App| {
+                                    if !app.ui.chat.timeline.expanded.remove(&fold_key) {
+                                        app.ui.chat.timeline.expanded.insert(fold_key.clone());
+                                    }
+                                })
+                                .build(t)
+                                .expanded(!folded)
+                                .self_end()
+                                .mt(6.0),
+                        );
+                    }
+                    content = content.child(bubble);
                 }
                 let bubble = content.max_w(580.0);
                 (
@@ -714,6 +824,14 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         .min_h(0.0)
         .w_full()
         .scroll(ScrollSpec { stick_bottom: true })
+        .on_scroll_offset({
+            let (opacity, offset) = (app.ui.chat.timeline.follow.opacity.clone(), app.ui.chat.timeline.follow.offset.clone());
+            move |at: rune::ScrollPos| {
+                let away = at.max[1] - at.offset[1] > AWAY;
+                opacity.set(if away { 1.0 } else { 0.0 });
+                offset.set(if away { [0.0, 0.0] } else { HIDDEN });
+            }
+        })
         // Rows share the composer's lane, which the details card narrows.
         .pl(lane.left)
         .pt(21.0)
@@ -723,4 +841,18 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
 /// A pending question's panel, docked on top of the composer.
 pub fn composer_requests(app: &App, t: &T) -> Option<El> {
     question::panel(app, t)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::collapses;
+
+    #[test]
+    fn long_user_messages_fold() {
+        assert!(!collapses("short"));
+        assert!(!collapses(&"a\n".repeat(7)));
+        assert!(collapses(&"line\n".repeat(8)));
+        assert!(collapses(&"x".repeat(601)));
+        assert!(!collapses(&" ".repeat(700)));
+    }
 }
