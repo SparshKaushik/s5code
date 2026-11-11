@@ -90,7 +90,7 @@ impl Dimensions for Size {
 }
 
 /// Lines of scrollback, as the web terminal keeps.
-const SCROLLBACK: usize = 5000;
+const SCROLLBACK: usize = 10_000;
 
 pub struct Vt {
     term: Term<Listener>,
@@ -700,7 +700,8 @@ impl Vt {
             return Wheel::Scrolled(false);
         }
         let mode = *self.term.mode();
-        if !mods.shift && mode.intersects(TermMode::MOUSE_MODE) {
+        // Shift, Ctrl or Cmd scroll the view instead (`shouldReportTerminalMouse`).
+        if !(mods.shift || mods.ctrl || mods.cmd || mods.logo) && mode.intersects(TermMode::MOUSE_MODE) {
             let button = if steps > 0 {
                 MouseButton::WheelUp
             } else {
@@ -1105,6 +1106,10 @@ mod tests {
         // Alternate screen with alternate scroll (1007, on by default) sends arrows.
         vt.feed("\x1b[?1049h");
         assert_eq!(vt.wheel(-1., 0, 0, none), Wheel::Send("\x1b[B".into()));
+        vt.feed("\x1b[?1049l\x1b[?1000h\x1b[?1006h");
+        assert!(matches!(vt.wheel(1., 0, 0, none), Wheel::Send(_)), "a program reading the mouse hears the wheel");
+        let ctrl = rune::Mods { ctrl: true, ..none };
+        assert_eq!(vt.wheel(1., 0, 0, ctrl), Wheel::Scrolled(true), "Ctrl+wheel scrolls the scrollback");
     }
 
     #[test]

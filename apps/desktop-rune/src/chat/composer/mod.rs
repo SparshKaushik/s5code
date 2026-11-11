@@ -516,7 +516,7 @@ fn send(s: &mut App, alternate: bool) {
         }
         _ => {
             let Some(project_id) = project_id else { return };
-            let thread_id = format!("thread:project:{project_id}:{}", s5_net::uuid());
+            let thread_id = crate::panel::drawer::take_draft_thread(s, &project_id).unwrap_or_else(|| format!("thread:project:{project_id}:{}", s5_net::uuid()));
             let preset = crate::chat::home::take_workspace(s, &project_id);
             let draft_run = crate::chat::details::take_draft_workspace(s);
             // A sidebar "new thread on branch" preset wins over the details card's env mode.

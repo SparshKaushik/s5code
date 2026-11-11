@@ -253,6 +253,10 @@ pub fn terminal_active(app: &App) -> bool {
     app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Terminal)
 }
 fn close(app: &mut App, surface: Surface) {
+    if surface == Surface::Terminal {
+        drawer::request_close_panel(app);
+        return;
+    }
     let view = match surface {
         Surface::Files => Some(closed::View::Files(files::selected(app))),
         Surface::Diff => Some(closed::View::Diff),
@@ -263,7 +267,6 @@ fn close(app: &mut App, surface: Surface) {
         app.ui.panel.closed.record(closed::Closed { thread, view });
     }
     match surface {
-        Surface::Terminal => drawer::close_panel(app),
         Surface::Files => files::flush(app),
         Surface::Browser(tab) => preview::close(app, tab),
         _ => {}

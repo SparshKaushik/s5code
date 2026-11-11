@@ -124,6 +124,16 @@ impl Session {
         }
     }
 
+    /// Input sent before the attach snapshot waits for it, or the shell starting up drops it;
+    /// a recorded session (no attach) never waits.
+    fn hold(&mut self, data: String) -> Option<String> {
+        if self.payload.is_none() || self.attached {
+            return Some(data);
+        }
+        self.queued.get_or_insert_default().push_str(&data);
+        None
+    }
+
     fn wake_cursor(&mut self) {
         self.blink_origin = Instant::now();
         self.cursor_blinks = false;
@@ -211,6 +221,10 @@ pub struct Ui {
     path_requests: Vec<(u64, String)>,
     /// A path link pressed before its check came back: opens if it exists.
     open_when_known: Option<(String, String)>,
+    /// Every terminal the server runs (`subscribeTerminalMetadata`'s summaries).
+    known: Vec<Value>,
+    /// Closed here and not yet gone from `known`, so the drawer doesn't bring them back.
+    gone: Vec<(String, String)>,
 }
 
 impl Ui {
@@ -230,13 +244,21 @@ impl Ui {
     }
 }
 
+/// Where a terminal starts: its cwd, the thread's worktree and the project root its scripts see.
+pub struct Launch<'a> {
+    pub cwd: &'a str,
+    pub worktree: Option<&'a str>,
+    pub root: Option<&'a str>,
+}
+
 /// Attaches (opening when missing) the session for a terminal id, once.
-pub fn ensure(app: &mut App, thread: &str, id: &str, cwd: &str, worktree: Option<&str>) {
+pub fn ensure(app: &mut App, thread: &str, id: &str, at: &Launch) {
     if app.ui.panel.terminal.get(thread, id).is_some() {
         return;
     }
+    app.ui.panel.terminal.gone.retain(|(t, i)| !(t == thread && i == id));
     let mut session = Session::new(thread, id);
-    let payload = attach_payload(thread, id, cwd, worktree);
+    let payload = attach_payload(thread, id, at);
     if let Some(net) = app.src.net() {
         net.watch_resource("terminal.attach", payload.clone());
         session.payload = Some(payload);
@@ -245,22 +267,72 @@ pub fn ensure(app: &mut App, thread: &str, id: &str, cwd: &str, worktree: Option
 }
 
 /// Types `data` into the terminal, attaching it first when needed (`runProjectScript`).
-pub fn run(app: &mut App, thread: &str, id: &str, cwd: &str, worktree: Option<&str>, data: String) {
-    ensure(app, thread, id, cwd, worktree);
-    match app.ui.panel.terminal.get_mut(thread, id) {
-        Some(session) if !session.attached => session.queued = Some(data),
-        _ => send(app, thread, id, data),
-    }
+pub fn run(app: &mut App, thread: &str, id: &str, at: &Launch, data: String) {
+    ensure(app, thread, id, at);
+    send(app, thread, id, data);
 }
 
 /// No `resume`, like the web's first attach: the server answers a resumed attach to an id it
 /// closed with `closed`, so a new terminal reusing that id would end as soon as it opened.
-fn attach_payload(thread: &str, id: &str, cwd: &str, worktree: Option<&str>) -> Value {
-    let mut payload = json!({"threadId":thread,"terminalId":id,"cwd":cwd});
-    if let Some(path) = worktree {
+/// The project's scripts read `T3CODE_PROJECT_ROOT` and `T3CODE_WORKTREE_PATH` (`projectScriptRuntimeEnv`).
+fn attach_payload(thread: &str, id: &str, at: &Launch) -> Value {
+    let mut payload = json!({"threadId":thread,"terminalId":id,"cwd":at.cwd});
+    if let Some(path) = at.worktree {
         payload["worktreePath"] = json!(path);
     }
+    if let Some(root) = at.root {
+        payload["env"] = json!({"T3CODE_PROJECT_ROOT": root});
+        if let Some(path) = at.worktree {
+            payload["env"]["T3CODE_WORKTREE_PATH"] = json!(path);
+        }
+    }
     payload
+}
+
+/// Folds a `subscribeTerminalMetadata` event into the server's terminal list.
+fn fold_known(known: &mut Vec<Value>, event: &Value) {
+    let same = |a: &Value, b: &Value| a["threadId"] == b["threadId"] && a["terminalId"] == b["terminalId"];
+    match data::s(event, "type") {
+        "snapshot" => *known = event["terminals"].as_array().cloned().unwrap_or_default(),
+        "upsert" => {
+            let terminal = &event["terminal"];
+            match known.iter_mut().find(|k| same(k, terminal)) {
+                Some(k) => *k = terminal.clone(),
+                None => known.push(terminal.clone()),
+            }
+        }
+        "remove" => known.retain(|k| !same(k, event)),
+        _ => {}
+    }
+}
+
+/// The thread's terminals the server knows, in id order (`selectKnownTerminalSessions`).
+pub fn known(app: &App, thread: &str) -> Vec<(String, String, bool)> {
+    let mut out: Vec<(String, String, bool)> = app
+        .ui
+        .panel
+        .terminal
+        .known
+        .iter()
+        .filter(|k| data::s(k, "threadId") == thread)
+        .filter(|k| !app.ui.panel.terminal.gone.iter().any(|(t, i)| t == thread && i == data::s(k, "terminalId")))
+        .map(|k| (data::s(k, "terminalId").to_string(), data::s(k, "label").trim().to_string(), k["hasRunningSubprocess"] == true))
+        .collect();
+    out.sort_by_key(|(id, ..)| (number(id).and_then(|n| n.parse::<u64>().ok()).unwrap_or(u64::MAX), id.clone()));
+    out
+}
+
+/// How many of the thread's terminals run a process (`useThreadRunningTerminalIds`).
+pub fn running(app: &App, thread: &str) -> usize {
+    known(app, thread).iter().filter(|(.., running)| *running).count()
+}
+
+/// A terminal's label: the attached session's, else the server's, else "Terminal N".
+pub fn title(app: &App, thread: &str, id: &str) -> String {
+    if let Some(session) = app.ui.panel.terminal.get(thread, id) {
+        return session.title();
+    }
+    known(app, thread).into_iter().find(|(k, ..)| k == id).map(|(_, label, _)| label).filter(|l| !l.is_empty()).unwrap_or_else(|| label_for(id))
 }
 
 /// Stops the process and deletes its history; a failed close falls back to typing `exit`.
@@ -274,6 +346,7 @@ pub fn close(app: &mut App, thread: &str, id: &str) {
         return;
     };
     let session = ui.sessions.remove(index);
+    ui.gone.push((thread.to_string(), id.to_string()));
     if let Some(net) = app.src.net() {
         if let Some(payload) = session.payload {
             net.unwatch_resource("terminal.attach", payload);
@@ -297,11 +370,15 @@ fn send(app: &mut App, thread: &str, id: &str, data: String) {
     if data.is_empty() {
         return;
     }
-    if let Some(session) = app.ui.panel.terminal.get_mut(thread, id) {
-        session.vt.scroll_to_bottom();
-        session.wake_cursor();
-    }
-    let Some(net) = app.src.net() else { return };
+    let data = match app.ui.panel.terminal.get_mut(thread, id) {
+        Some(session) => {
+            session.vt.scroll_to_bottom();
+            session.wake_cursor();
+            session.hold(data)
+        }
+        None => Some(data),
+    };
+    let (Some(data), Some(net)) = (data, app.src.net()) else { return };
     // The server caps one write at 64 KiB.
     let mut rest = data.as_str();
     while !rest.is_empty() {
@@ -350,6 +427,17 @@ pub fn palette(t: &T) -> Palette {
 /// Drains attach streams, replies and IME text, and runs the focused cursor's blink.
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = poll_links(app);
+    if let Some(net) = app.src.net() {
+        net.watch_resource("subscribeTerminalMetadata", json!({}));
+        let events = net.take_resource_events("subscribeTerminalMetadata", json!({}));
+        let ui = &mut app.ui.panel.terminal;
+        for event in &events {
+            fold_known(&mut ui.known, event);
+            changed = true;
+        }
+        let known = &ui.known;
+        ui.gone.retain(|(t, i)| known.iter().any(|k| data::s(k, "threadId") == t && data::s(k, "terminalId") == i));
+    }
     if let Some(p) = app.ui.panel.terminal.popup.as_ref() {
         let now = Instant::now();
         if now >= p.due {
@@ -548,6 +636,9 @@ fn apply(session: &mut Session, event: &Value) {
         }
         "activity" => {
             session.running = event["hasRunningSubprocess"] == true;
+            if let Some(label) = event["label"].as_str() {
+                session.label = label.into();
+            }
             if let (Some(cols), Some(rows)) = (event["cols"].as_u64(), event["rows"].as_u64()) {
                 session.grid = Some((cols as usize, rows as usize));
                 session.apply_grid();
@@ -1394,9 +1485,10 @@ mod tests {
         assert_eq!(session.vt.text(), "$ xx");
         apply(
             &mut session,
-            &json!({"type":"activity","sequence":13,"cols":100,"rows":30}),
+            &json!({"type":"activity","sequence":13,"cols":100,"rows":30,"label":"vim","hasRunningSubprocess":true}),
         );
         assert_eq!(session.vt.size(), (100, 30));
+        assert_eq!((session.title().as_str(), session.running), ("vim", true), "activity renames the tab");
         // A wider view waits for the PTY's grid; a narrower one reflows at once (`applyGrid`).
         session.fit = Some((120, 40));
         session.apply_grid();
@@ -1424,6 +1516,18 @@ mod tests {
     }
 
     #[test]
+    fn input_before_the_attach_waits_for_it() {
+        let mut session = Session::new("t", "term-1");
+        assert_eq!(session.hold("ls".into()).as_deref(), Some("ls"), "a recorded session sends at once");
+        session.payload = Some(json!({"threadId":"t","terminalId":"term-1","cwd":"/p"}));
+        assert_eq!(session.hold("l".into()), None);
+        assert_eq!(session.hold("s\r".into()), None);
+        apply(&mut session, &json!({"type":"snapshot","snapshot":{"history":"$ ","sequence":1}}));
+        assert_eq!(session.queued.take().as_deref(), Some("ls\r"), "the first keystroke is kept");
+        assert_eq!(session.hold("x".into()).as_deref(), Some("x"));
+    }
+
+    #[test]
     fn recorded_full_screen_programs_replay() {
         for (recorded, expect) in [
             (include_str!("../../fixtures/panel/terminal-vim.json"), "fn main"),
@@ -1440,11 +1544,34 @@ mod tests {
     }
 
     #[test]
-    fn attach_opens_a_closed_id_again() {
-        let payload = attach_payload("t", "term-2", "/repo", Some("/wt"));
+    fn attach_opens_a_closed_id_again_with_the_project_env() {
+        let payload = attach_payload("t", "term-2", &Launch { cwd: "/wt", worktree: Some("/wt"), root: Some("/repo") });
         assert!(payload.get("resume").is_none(), "{payload}");
         assert_eq!(payload["worktreePath"], "/wt");
-        assert!(attach_payload("t", "term-2", "/repo", None).get("worktreePath").is_none());
+        assert_eq!(payload["env"], json!({"T3CODE_PROJECT_ROOT": "/repo", "T3CODE_WORKTREE_PATH": "/wt"}));
+        let local = attach_payload("t", "term-2", &Launch { cwd: "/repo", worktree: None, root: Some("/repo") });
+        assert!(local.get("worktreePath").is_none());
+        assert_eq!(local["env"], json!({"T3CODE_PROJECT_ROOT": "/repo"}));
+    }
+
+    #[test]
+    fn server_terminals_fold_from_the_metadata_stream() {
+        let summary = |thread: &str, id: &str, label: &str, running: bool| json!({"threadId": thread, "terminalId": id, "label": label, "hasRunningSubprocess": running});
+        let mut known = vec![];
+        fold_known(&mut known, &json!({"type": "snapshot", "terminals": [summary("t", "term-10", "", false), summary("t", "term-2", "vim", true), summary("u", "term-1", "", false)]}));
+        fold_known(&mut known, &json!({"type": "upsert", "terminal": summary("t", "term-10", "npm run dev", true)}));
+        fold_known(&mut known, &json!({"type": "upsert", "terminal": summary("t", "term-3", "", false)}));
+        fold_known(&mut known, &json!({"type": "remove", "threadId": "u", "terminalId": "term-1"}));
+        let mut app = App::new();
+        app.ui.panel.terminal.known = known;
+        let ids: Vec<String> = super::known(&app, "t").into_iter().map(|(id, ..)| id).collect();
+        assert_eq!(ids, ["term-2", "term-3", "term-10"]);
+        assert_eq!(running(&app, "t"), 2);
+        assert!(super::known(&app, "u").is_empty());
+        assert_eq!(title(&app, "t", "term-10"), "npm run dev");
+        assert_eq!(title(&app, "t", "term-3"), "Terminal 3");
+        app.ui.panel.terminal.gone.push(("t".into(), "term-2".into()));
+        assert_eq!(super::known(&app, "t").len(), 2, "a terminal closed here waits for the server's remove");
     }
 
     #[test]
