@@ -123,6 +123,8 @@ pub struct Ui {
     dialog: Option<Dialog>,
     /// The page's right-click menu.
     context: Option<Context>,
+    /// Chrome starts after a failed start; part of the viewport key so the new worker gets it.
+    restarts: u32,
     /// The tab the separate preview window mirrors, and the title it was given.
     popout: Option<TabId>,
     popout_title: String,
@@ -183,6 +185,24 @@ pub fn import(app: &mut App, scale: f32, source: &'static browser_import::Source
         ui.browser.send(Cmd::Viewport { w: 0., h: 0., scale });
     }
     Some(browser_import::start(source, directory, ui.browser.sender()?, waker))
+}
+
+/// "Try again" after Chrome failed: a fresh worker, with the open tabs back on blank pages.
+fn restart(app: &mut App) {
+    let Some(waker) = app.ui.panel.waker.clone() else { return };
+    let ui = &mut app.ui.panel.browser;
+    ui.browser = browser::Browser::default();
+    ui.browser.start(waker);
+    ui.restarts += 1;
+    // The new worker hasn't been told which tab shows or is tracked; poll resends both.
+    ui.shown = None;
+    ui.tracked = None;
+    let tabs: Vec<TabId> = ui.tabs.keys().copied().collect();
+    for tab in tabs {
+        let pixels = Pixels::new();
+        ui.tabs.insert(tab, Tab::new(pixels.clone()));
+        ui.browser.send(Cmd::Open(tab, pixels));
+    }
 }
 
 /// Chrome could not start or its connection dropped, so an import's writes never land.
@@ -1037,6 +1057,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     let fatal = ui.browser.shared.lock().unwrap().fatal.clone();
     let content = if let Some(error) = fatal {
         notice_empty(t, "The browser could not start", &error)
+            .child(kit::Button::new("Try again").variant("outline").size("sm").on_press(restart).build(t).mt(16.))
     } else if let Some(failure) = &status.failure {
         unreachable(t, tab, failure, ui.details)
     } else if idle(&status) {
@@ -1067,7 +1088,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     body.child(
         // A new key when the scale changes re-reports the layout, so Chrome re-renders at it.
         col()
-            .key(format!("browser-viewport-{scale}"))
+            .key(format!("browser-viewport-{scale}-{}", ui.restarts))
             .grow(1.)
             .min_h(0.)
             .w_full()

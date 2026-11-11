@@ -57,6 +57,26 @@ fn expanded(app: &mut App) {
 fn pending(app: &mut App) {
     thread(app, "Timeline approval fixture");
 }
+fn pending_warning(app: &mut App) {
+    pending(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(view) = state.thread_views.get_mut(&id)
+    {
+        let options = serde_json::json!([
+            {"decision": "decline", "label": "Decline"},
+            {"decision": "accept", "label": "Approve", "warning": "This runs outside the sandbox with full disk access."},
+            {"decision": "acceptForSession", "label": "Always allow this session"}]);
+        for list in ["visibleTurnItems", "turnItems"] {
+            for entry in view.projection[list].as_array_mut().into_iter().flatten() {
+                let item = if entry["item"].is_object() { &mut entry["item"] } else { entry };
+                if item["type"] == "approval_request" {
+                    item["options"] = options.clone();
+                }
+            }
+        }
+    }
+}
 fn question(app: &mut App) {
     thread(app, "Timeline question fixture");
 }
@@ -131,6 +151,36 @@ fn chip_details(app: &mut App) {
     }
     app.ui.chat.timeline.chip = Some(("scene-chips".into(), open));
 }
+fn long_message(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    let text = (1..=20).map(|n| format!("Step {n}: check the {n}th migration and note anything odd.")).collect::<Vec<_>>().join("\n");
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["visibleTurnItems"].as_array_mut())
+    {
+        items.push(serde_json::json!({"position": 100, "item": {"id": "scene-long", "type": "user_message", "text": text,
+            "createdAt": "2026-01-01T00:00:00Z", "attachments": []}}));
+        items.push(serde_json::json!({"position": 101, "item": {"id": "scene-failed-tool", "type": "command_execution",
+            "status": "failed", "input": "pnpm test --filter migrations", "createdAt": "2026-01-01T00:00:01Z"}}));
+    }
+}
+fn secret_request(app: &mut App) {
+    showcase(app);
+    let Route::Thread(id) = app.route.clone() else { return };
+    if let crate::data::Source::Fixture(state) = &mut app.src
+        && let Some(items) = state.thread_views.get_mut(&id).and_then(|v| v.projection["visibleTurnItems"].as_array_mut())
+    {
+        for (n, (status, label)) in [("saved", "OPENAI_API_KEY"), ("pending", "STRIPE_WEBHOOK_SECRET")].into_iter().enumerate() {
+            items.push(serde_json::json!({"position": 100 + n, "visibility": "local", "item": {"id": format!("scene-secret-{n}"),
+                "type": "secret_request", "threadId": id, "status": "waiting", "secretStatus": status, "label": label,
+                "reason": "The webhook handler verifies signatures with it.", "createdAt": "2026-01-01T00:00:00Z"}}));
+        }
+    }
+}
+fn long_message_open(app: &mut App) {
+    long_message(app);
+    app.ui.chat.timeline.expanded.insert("user-full:scene-long".into());
+}
 fn light(app: &mut App) {
     showcase(app);
     app.appearance = Appearance::Light;
@@ -152,4 +202,8 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("timeline-expanded", expanded),
     ("timeline-light", light),
     ("timeline-chip-details", chip_details),
+    ("timeline-long-message", long_message),
+    ("timeline-long-message-open", long_message_open),
+    ("timeline-approval-warning", pending_warning),
+    ("timeline-secret-request", secret_request),
 ];

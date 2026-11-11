@@ -57,8 +57,11 @@ pub struct Ui {
     mention: menu::Mention,
     launches: Vec<(u64, String)>,
     /// Messages waiting on `assets.persistChatAttachments`: the request, the command or launch
-    /// payload, and the thread a launch starts.
-    uploads: Vec<(u64, Value, Option<String>)>,
+    /// payload, the thread a launch starts, and the send it belongs to.
+    uploads: Vec<(u64, Value, Option<String>, Outgoing)>,
+    /// Commands whose failure shows in the route's error banner (setThreadError).
+    sends: Vec<(u64, Outgoing)>,
+    pub context: context::Hover,
     /// The queued run being rewritten in the composer: thread and run.
     editing: Option<(String, String)>,
     /// The prompt Up last recalled: the draft it went into, the message, and the text.
@@ -66,6 +69,13 @@ pub struct Ui {
     /// Drafts on disk: read once connected, then the last written copy and the next write check.
     stored: Option<String>,
     store_at: Option<std::time::Instant>,
+}
+
+/// A dispatched command's draft key, and the draft it sent (`stored_draft`) to put back when it
+/// fails, or null when nothing was cleared.
+struct Outgoing {
+    key: String,
+    draft: Value,
 }
 
 /// The draft key for a route: the thread id, or `home` for the new-thread draft.
@@ -415,13 +425,16 @@ fn send(s: &mut App, alternate: bool) {
             return;
         }
         if let Some(net) = s.src.net() {
-            net.dispatch(json!({"type": "queued-run.edit", "commandId": s5_net::uuid(), "threadId": thread, "runId": run, "text": text}));
+            let request = net.dispatch(json!({"type": "queued-run.edit", "commandId": s5_net::uuid(), "threadId": thread, "runId": run, "text": text}));
+            s.ui.chat.composer.sends.push((request, Outgoing { key: thread, draft: Value::Null }));
         }
         cancel_queued_edit(s);
         return;
     }
     let mode = mode_for(s, alternate);
+    let key = active_key(s);
     let Some(d) = draft(s) else { return };
+    let snapshot = stored_draft(d);
     let (text, contexts) = chips::outgoing(&d.edit, &d.contexts);
     let mut text = text.trim().to_string();
     // A file that can no longer be read keeps the draft as it is.
@@ -441,7 +454,8 @@ fn send(s: &mut App, alternate: bool) {
                 Ok(commands) => {
                     let Some(net) = s.src.net() else { return };
                     for command in commands {
-                        net.dispatch(command);
+                        let request = net.dispatch(command);
+                        s.ui.chat.composer.sends.push((request, Outgoing { key: key.clone(), draft: Value::Null }));
                     }
                     // Feedback is the whole reply; otherwise the declines go first, then the steer.
                     if requests::takes_feedback(&pending) {
@@ -512,16 +526,18 @@ fn send(s: &mut App, alternate: bool) {
         }
     };
     let launch = launch.then(|| thread_id.clone());
+    crate::chat::timeline::error_banner::set_local(s, &key, None);
+    let outgoing = Outgoing { key, draft: snapshot };
     let Some(net) = s.src.net() else { return };
     let composer = &mut s.ui.chat.composer;
     if uploads.is_empty() {
-        deliver(net, &mut composer.launches, payload, launch, json!([]));
+        deliver(net, composer, payload, launch, json!([]), outgoing);
     } else {
         let request = net.request(
             "assets.persistChatAttachments",
             json!({"threadId": thread_id, "messageId": message_id, "attachments": uploads}),
         );
-        composer.uploads.push((request, payload, launch));
+        composer.uploads.push((request, payload, launch, outgoing));
     }
     sent(s);
 }
@@ -568,17 +584,20 @@ fn upload(path: &str) -> Option<Value> {
 }
 
 /// Sends a message, or launches the thread it starts, with its stored attachments.
-fn deliver(net: &mut s5_net::Net, launches: &mut Vec<(u64, String)>, mut payload: Value, launch: Option<String>, attachments: Value) {
-    match launch {
+fn deliver(net: &mut s5_net::Net, composer: &mut Ui, mut payload: Value, launch: Option<String>, attachments: Value, outgoing: Outgoing) {
+    let request = match launch {
         Some(thread_id) => {
             payload["initialMessage"]["attachments"] = attachments;
-            launches.push((net.request("orchestration.launchThread", payload), thread_id));
+            let request = net.request("orchestration.launchThread", payload);
+            composer.launches.push((request, thread_id));
+            request
         }
         None => {
             payload["attachments"] = attachments;
-            net.dispatch(payload);
+            net.dispatch(payload)
         }
-    }
+    };
+    composer.sends.push((request, outgoing));
 }
 
 /// A sent home draft starts the next one fresh, so it picks up the new thread's model and the
@@ -649,11 +668,12 @@ fn stop(s: &mut App) {
     let Some(t) = ctx(s).thread else { return };
     let (id, run) = (data::s(t, "id").to_string(), data::s(t, "activeRunId").to_string());
     let Some(net) = s.src.net() else { return };
-    if run.is_empty() {
-        net.dispatch(json!({"type": "thread.stop", "commandId": s5_net::uuid(), "threadId": id}));
+    let request = if run.is_empty() {
+        net.dispatch(json!({"type": "thread.stop", "commandId": s5_net::uuid(), "threadId": id}))
     } else {
-        net.dispatch(json!({"type": "run.interrupt", "commandId": s5_net::uuid(), "threadId": id, "runId": run}));
-    }
+        net.dispatch(json!({"type": "run.interrupt", "commandId": s5_net::uuid(), "threadId": id, "runId": run}))
+    };
+    s.ui.chat.composer.sends.push((request, Outgoing { key: id, draft: Value::Null }));
 }
 
 /// Folds server replies the composer waits on (launches, file searches). Called from `poll`.
@@ -664,29 +684,41 @@ pub fn poll(s: &mut App) -> bool {
     let mut changed = persist(s);
     let Some(net) = s.src.net() else { return false };
     let composer = &mut s.ui.chat.composer;
+    let mut failed = Vec::new();
     let mut i = 0;
     while i < composer.uploads.len() {
         let Some(reply) = net.take_reply(composer.uploads[i].0) else {
             i += 1;
             continue;
         };
-        let (_, payload, launch) = composer.uploads.remove(i);
+        let (_, payload, launch, outgoing) = composer.uploads.remove(i);
         match reply {
-            Ok(v) => deliver(net, &mut composer.launches, payload, launch, v["attachments"].clone()),
-            Err(e) => eprintln!("composer: storing attachments failed: {e}"),
+            Ok(v) => deliver(net, composer, payload, launch, v["attachments"].clone(), outgoing),
+            Err(e) => failed.push((outgoing, e)),
         }
         changed = true;
     }
     let mut opened = None;
-    s.ui.chat.composer.launches.retain(|(request, thread_id)| match net.take_reply(*request) {
-        Some(reply) => {
-            if let Ok(v) = reply {
-                opened = Some(v["threadId"].as_str().unwrap_or(thread_id).to_string());
-            }
-            false
+    let composer = &mut s.ui.chat.composer;
+    let mut i = 0;
+    while i < composer.sends.len() {
+        let Some(reply) = net.take_reply(composer.sends[i].0) else {
+            i += 1;
+            continue;
+        };
+        let (request, outgoing) = composer.sends.remove(i);
+        let launch = composer.launches.iter().position(|(r, _)| *r == request).map(|at| composer.launches.remove(at).1);
+        match (reply, launch) {
+            (Ok(v), Some(thread_id)) => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
+            (Ok(_), None) => {}
+            (Err(e), _) => failed.push((outgoing, e)),
         }
-        None => true,
-    });
+        changed = true;
+    }
+    for (outgoing, error) in failed {
+        send_failed(s, outgoing, &error);
+    }
+    let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
     if let Some(id) = opened {
         crate::panel::adopt(s, &id);
@@ -706,17 +738,36 @@ fn stored(drafts: &HashMap<String, Draft>) -> Value {
         if key.starts_with("queued-edit:") || (blank && d.model.is_none() && d.runtime_mode.is_none() && d.interaction_mode.is_none() && d.effort.is_none()) {
             continue;
         }
-        let pills: Vec<Value> = d.edit.pills().map(|(r, id)| json!([r.start, r.end, id])).collect();
-        let contexts: Vec<&Value> = d.contexts.iter().filter(|c| d.edit.pills().any(|(_, id)| id == chips::pill_id(c))).collect();
-        out.insert(
-            key.clone(),
-            json!({
-                "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
-                "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
-            }),
-        );
+        out.insert(key.clone(), stored_draft(d));
     }
     Value::Object(out)
+}
+
+fn stored_draft(d: &Draft) -> Value {
+    let pills: Vec<Value> = d.edit.pills().map(|(r, id)| json!([r.start, r.end, id])).collect();
+    let contexts: Vec<&Value> = d.contexts.iter().filter(|c| d.edit.pills().any(|(_, id)| id == chips::pill_id(c))).collect();
+    json!({
+        "prompt": d.edit.text, "pills": pills, "attachments": d.attachments, "model": d.model,
+        "runtimeMode": d.runtime_mode, "interactionMode": d.interaction_mode, "effort": d.effort, "contexts": contexts,
+    })
+}
+
+/// Shows a command's failure in the banner of `key`'s route.
+fn watch(s: &mut App, request: u64, key: &str) {
+    s.ui.chat.composer.sends.push((request, Outgoing { key: key.to_owned(), draft: Value::Null }));
+}
+
+/// A failed send shows in its route's banner, and its draft comes back unless a new one was started.
+fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value) {
+    let message = crate::shell::palette::error_message(error, "Failed to send message.");
+    crate::chat::timeline::error_banner::set_local(s, &outgoing.key, Some(&message));
+    if outgoing.draft.is_null() {
+        return;
+    }
+    let blank = s.ui.chat.composer.drafts.get(&outgoing.key).is_none_or(|d| d.edit.text.trim().is_empty() && d.attachments.is_empty());
+    if blank && let Some(draft) = restored(&json!({"draft": outgoing.draft})).remove("draft") {
+        s.ui.chat.composer.drafts.insert(outgoing.key, draft);
+    }
 }
 
 fn restored(v: &Value) -> HashMap<String, Draft> {
@@ -810,6 +861,7 @@ fn persist(s: &mut App) -> bool {
 }
 
 /// Keys inside the editor: the open menu's arrows, Return and Tab, Escape, and Shift+Tab for plan.
+/// Escape never stops a turn; the stop button does (composerCommandKey).
 fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     if s.ui.chat.composer.picker.open {
         return false;
@@ -876,12 +928,25 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
             }
             true
         }
-        Key::Escape if running(s) => {
-            stop(s);
-            true
-        }
         _ => false,
     }
+}
+
+/// The composer's window-wide shortcuts (`modelPicker.toggle`, `composer.effort`,
+/// `composer.mode`), which the web binds outside the terminal. Effort lives in the model picker.
+pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
+    if !matches!(s.frame_route(), Route::Thread(_) | Route::Home { .. }) || crate::panel::terminal_active(s) || ctx(s).project.is_none() {
+        return false;
+    }
+    if crate::panel::shortcut(s, e, "modelPicker.toggle") || crate::panel::shortcut(s, e, "composer.effort") {
+        picker::toggle(s);
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "composer.mode") && supports_plan(s) {
+        toggle_plan(s);
+        return true;
+    }
+    false
 }
 
 /// While an approval waits, the prompt says a message declines it (ChatComposer).
@@ -973,6 +1038,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 pub fn overlays(s: &App, cx: &mut Cx<App>, t: &T) -> Vec<El> {
     let mut layers = picker::view(s, cx, t);
     layers.extend(chip_details(s, t));
+    layers.extend(context::popover(s, t));
     layers
 }
 
@@ -1011,12 +1077,13 @@ fn footer(s: &App, t: &T) -> El {
     let mut left = row().gap(4.0).center_y().child(
         icon_button(t, &icons::PAPERCLIP, "Attach images", false, t.c.muted_foreground).key("composer-attach").on_press_tx(|_: &mut App, tx| attach(tx)),
     );
-    if interaction_mode(s) == "plan" {
-        left = left.child(
-            control(t, &icons::PENCIL_RULER, "Plan", t.c.foreground.alpha_mul(0.8))
-                .help("Plan mode. Click to return to normal build mode")
-                .on_press(toggle_plan),
-        );
+    if supports_plan(s) {
+        let (glyph, label, help) = if interaction_mode(s) == "plan" {
+            (&icons::PENCIL_RULER, "Plan", "Plan mode. Click to return to normal build mode")
+        } else {
+            (&icons::BOT, "Build", "Default mode. Click to enter plan mode")
+        };
+        left = left.child(control(t, glyph, label, t.c.foreground.alpha_mul(0.8)).key("composer-interaction-mode").help(help).on_press(toggle_plan));
     }
     let mut right = row().h(28.0).gap(8.0).center_y();
     if let Some((instance, model)) = selection(s) {
@@ -1405,6 +1472,19 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("composer-context", |s| context_scene(s, 42_400.0)),
     ("composer-context-full", |s| context_scene(s, 186_000.0)),
+    ("composer-context-popover", |s| {
+        on_replay_showcase(s);
+        let Route::Thread(id) = s.route.clone() else { return };
+        if let data::Source::Fixture(state) = &mut s.src
+            && let Some(v) = state.thread_views.get_mut(&id)
+        {
+            v.projection["thread"]["activeProviderThreadId"] = json!("scene-provider-thread");
+            v.projection["providerThreads"] = json!([{"id": "scene-provider-thread", "contextUsage": {
+                "usedTokens": 128_400, "maxTokens": 200_000, "totalProcessedTokens": 1_240_000,
+                "compactsAutomatically": true, "cost": {"amount": 1.284, "currency": "USD"}}}]);
+        }
+        s.ui.chat.composer.context.trigger = true;
+    }),
     ("composer-attachments", |s| {
         on_replay_showcase(s);
         draft_mut(s).attachments = vec!["/home/ubuntu/s5code/README.md".into(), "/home/ubuntu/s5code/package.json".into()];

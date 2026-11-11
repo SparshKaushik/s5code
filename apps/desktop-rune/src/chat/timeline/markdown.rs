@@ -170,7 +170,7 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
             .w_full()
             .justify_end()
             .pt(2.0)
-            .child(copy_button(app, source, t)),
+            .child(copy_button(app, source, t, "Copy table")),
     )
 }
 
@@ -234,7 +234,8 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
             .trim_end_matches('\n')
             .to_owned();
         let key = format!("{id}-fence-{fence_index}");
-        let wrap = !app.ui.chat.timeline.wrapped.contains(&key);
+        // `wrapped` holds the blocks toggled away from the wordWrap setting.
+        let wrap = (crate::settings::value(app, "wordWrap").as_bool() != Some(false)) != app.ui.chat.timeline.wrapped.contains(&key);
         let wrap_key = key.clone();
         let head = row()
             .w_full()
@@ -258,14 +259,15 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
                     .color(t.c.muted_foreground)
                     .focusable(true)
                     .role("button")
-                    .label(if wrap { "Unwrap code" } else { "Wrap code" })
+                    .label(if wrap { "Disable line wrap" } else { "Wrap lines" })
+                    .help(if wrap { "Disable line wrap" } else { "Wrap lines" })
                     .on_press(move |app: &mut App| {
                         if !app.ui.chat.timeline.wrapped.remove(&wrap_key) {
                             app.ui.chat.timeline.wrapped.insert(wrap_key.clone());
                         }
                     }),
             )
-            .child(copy_button(app, &code, t));
+            .child(copy_button(app, &code, t, "Copy code"));
         let fenced = format!("```{language}\n{code}\n```");
         let code_view = Markdown::new(fenced.clone())
             .selectable(true)
