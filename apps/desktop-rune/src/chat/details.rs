@@ -478,6 +478,9 @@ fn poll_branch(s: &mut App) -> bool {
 fn open_in_editor(s: &mut App, editor: Option<String>) {
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| editors(s).first().map(|e| e.0.clone()))) else { return };
     let Some(editor) = editor else { return };
+    if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
+        return;
+    }
     if let Some(net) = s.src.net() {
         net.request("shell.openInEditor", json!({"cwd": cwd, "editor": editor}));
     }
@@ -485,6 +488,9 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
 
 /// `(id, label)` for each editor the server found.
 fn editors(s: &App) -> Vec<(String, String)> {
+    if let Some(remote) = crate::env::ssh::editors(s) {
+        return remote;
+    }
     s.state()
         .config
         .as_ref()

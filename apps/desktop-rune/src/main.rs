@@ -260,5 +260,6 @@ fn main() {
     app.run();
     panel::browser::shutdown();
     host::shutdown();
+    env::ssh::shutdown();
     drop(instance);
 }

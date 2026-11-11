@@ -13,7 +13,7 @@ pub mod exposure;
 pub mod locale;
 pub mod recovery;
 #[cfg(unix)]
-mod shell_path;
+pub mod shell_path;
 pub mod single;
 #[cfg(target_os = "linux")]
 mod url_handler;
