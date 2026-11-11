@@ -68,8 +68,6 @@ impl ToastRegion {
             .role("region")
             .label("Notifications")
             .transition(rune::Transition::none())
-            // Above modal popovers and dialogs, as sonner sits above them on web.
-            .raise()
             .pin(
                 None,
                 if self.top { Some(24.) } else { None },
