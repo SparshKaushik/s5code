@@ -505,10 +505,10 @@ fn brand_left(inset: f32) -> f32 {
 
 /// `SidebarSectionHeader`: a shelf's label, count and chevron.
 pub fn shelf_header(t: &T, shelf: Shelf, count: usize, expanded: bool, tone: Tone) -> El {
-    let (label, key) = match shelf {
-        Shelf::Working => ("Working", "working"),
-        Shelf::Snoozed => ("Snoozed", "snoozed"),
-        Shelf::Settled => ("Settled", "settled"),
+    let label = match shelf {
+        Shelf::Working => "Working",
+        Shelf::Snoozed => "Snoozed",
+        Shelf::Settled => "Settled",
     };
     let color = match tone {
         Tone::Muted => t.sb.sidebar_muted_foreground,
@@ -516,7 +516,9 @@ pub fn shelf_header(t: &T, shelf: Shelf, count: usize, expanded: bool, tone: Ton
         Tone::Accent => t.sb.primary,
     };
     row()
-        .key(format!("sb-shelf-{key}"))
+        .key(shelf.key())
+        .role("button")
+        .label(label)
         .mx(2.0)
         .h(32.0)
         .px(8.0)
@@ -526,17 +528,35 @@ pub fn shelf_header(t: &T, shelf: Shelf, count: usize, expanded: bool, tone: Ton
         .hover(t.sb.sidebar_row_hover)
         .hover_group()
         .cursor(Cursor::Pointer)
+        .focusable(true)
+        .focus_ring(2.0, -2.0, t.sb.ring)
         .expanded(expanded)
         .child(text(label).font(theme::XS_MEDIUM).color(color).group_color(t.sb.sidebar_foreground))
         .child(spacer())
         .child(text(count.to_string()).font(theme::TEXT_XS.features("'tnum' 1")).color(color).group_color(t.sb.sidebar_foreground))
         .child(icon(&i::CHEVRON_DOWN, 12.0).color(color).group_color(t.sb.sidebar_foreground).rotate(if expanded { 0.0 } else { -std::f32::consts::FRAC_PI_2 }))
         .on_press(move |s: &mut App| {
-            let ui = &mut s.ui.shell.sidebar;
-            let open = !ui.expanded.remove(&shelf) && ui.expanded.insert(shelf);
-            if shelf == Shelf::Settled {
-                ui.folders.set_settled(open);
+            let open = !s.ui.shell.sidebar.expanded.contains(&shelf);
+            super::set_shelf(s, shelf, open);
+        })
+        // `sidebarTree`: Right opens the shelf, then enters it; Left folds it.
+        .on_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| {
+            if e.mods.shift || e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd {
+                return false;
             }
+            let open = s.ui.shell.sidebar.expanded.contains(&shelf);
+            match e.key {
+                rune::Key::Right if !open => super::set_shelf(s, shelf, true),
+                rune::Key::Right => {
+                    if let Some(row) = super::shelf_child(&super::Model::build(s), &s.ui.shell.sidebar, shelf) {
+                        super::focus_row(s, row, tx);
+                    }
+                }
+                rune::Key::Left if open => super::set_shelf(s, shelf, false),
+                rune::Key::Left => {}
+                _ => return false,
+            }
+            true
         })
 }
 

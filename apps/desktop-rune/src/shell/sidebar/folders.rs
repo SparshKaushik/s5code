@@ -214,6 +214,10 @@ pub fn plan(p: &Plan) -> Vec<Folder> {
 pub struct State {
     collapsed: HashSet<String>,
     settled: bool,
+    /// The scope picker's choice as group keys (`sidebarProjectScopeKeys`).
+    scope: Vec<String>,
+    /// `project_scope` as last restored or saved; `None` until restored.
+    scope_seen: Option<Vec<String>>,
     loaded: bool,
     pub hover: Option<String>,
     /// The folder context menu: group key and the point it opened at.
@@ -234,7 +238,8 @@ impl State {
         }
         let saved = Self::path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         self.collapsed = saved.iter().flat_map(|v| v["collapsed"].as_array().into_iter().flatten()).filter_map(|k| k.as_str().map(str::to_string)).collect();
-        self.settled = saved.is_some_and(|v| v["settledExpanded"] == true);
+        self.settled = saved.as_ref().is_some_and(|v| v["settledExpanded"] == true);
+        self.scope = saved.iter().flat_map(|v| v["scope"].as_array().into_iter().flatten()).filter_map(|k| k.as_str().map(str::to_string)).collect();
         true
     }
 
@@ -259,7 +264,7 @@ impl State {
         let mut keys: Vec<&String> = self.collapsed.iter().collect();
         keys.sort();
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        let ok = serde_json::to_vec(&json!({"collapsed": keys, "settledExpanded": self.settled})).ok().is_some_and(|bytes| {
+        let ok = serde_json::to_vec(&json!({"collapsed": keys, "settledExpanded": self.settled, "scope": self.scope})).ok().is_some_and(|bytes| {
             path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok()) && std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, &path).is_ok()
         });
         if !ok {
@@ -274,6 +279,35 @@ pub fn ensure_loaded(s: &mut App) {
     if ui.folders.load() && ui.folders.settled {
         ui.expanded.insert(super::Shelf::Settled);
     }
+}
+
+/// `sidebarProjectScopeKeys`: the scope outlives a restart as group keys, restored once the
+/// projects are in. A saved key whose project is gone stays saved, so the scope returns with it.
+pub fn sync_scope(s: &mut App) {
+    let ready = s.state().shell_ready && s.state().config.is_some();
+    let ui = &mut s.ui.shell.sidebar;
+    if !ready || ui.folders.scope_seen.as_ref() == Some(&ui.project_scope) {
+        return;
+    }
+    let (groups, _) = group_of(s);
+    let ui = &mut s.ui.shell.sidebar;
+    ui.folders.load();
+    if ui.folders.scope_seen.is_none() {
+        ui.project_scope = scope_members(&groups, &ui.folders.scope);
+    } else {
+        ui.folders.scope = scope_keys(&groups, &ui.project_scope);
+        ui.folders.save();
+    }
+    ui.folders.scope_seen = Some(ui.project_scope.clone());
+}
+
+/// The member projects of the saved groups still listed; archived ones read as all projects.
+fn scope_members(groups: &[Group], keys: &[String]) -> Vec<String> {
+    groups.iter().filter(|g| !g.archived && keys.contains(&g.key)).flat_map(|g| g.members.iter().cloned()).collect()
+}
+
+fn scope_keys(groups: &[Group], scope: &[String]) -> Vec<String> {
+    groups.iter().filter(|g| g.members.iter().any(|m| scope.contains(m))).map(|g| g.key.clone()).collect()
 }
 
 /// Rows a folder shows: all when open, else only the open thread.
@@ -361,17 +395,23 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
             }
         })
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| s.ui.shell.sidebar.folders.menu = Some((menu_key.clone(), at.x, at.y)))
-        // `sidebarTree`: Right opens a folder, Left folds it.
-        .on_key(move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
+        // `sidebarTree`: Right opens a folder, then enters it; Left folds it.
+        .on_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| {
             if e.mods.shift || e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd {
                 return false;
             }
-            let open = match e.key {
-                rune::Key::Right => true,
-                rune::Key::Left => false,
+            let open = s.ui.shell.sidebar.folders.expanded(&key_key);
+            match e.key {
+                rune::Key::Right if !open => s.ui.shell.sidebar.folders.toggle(&key_key, true),
+                rune::Key::Right => {
+                    if let Some(row) = super::folder_child(&Model::build(s), &s.ui.shell.sidebar, &key_key) {
+                        super::focus_row(s, row, tx);
+                    }
+                }
+                rune::Key::Left if open => s.ui.shell.sidebar.folders.toggle(&key_key, false),
+                rune::Key::Left => {}
                 _ => return false,
-            };
-            s.ui.shell.sidebar.folders.toggle(&key_key, open);
+            }
             true
         });
     let mut li = el().key(format!("sb-folder-li-{}", g.key)).w_full().child(button);
@@ -469,6 +509,23 @@ mod tests {
         let mut overridden = grouping("repository");
         overridden.overrides = json!({"env:/src/app/apps/web": "separate"});
         assert_eq!(overridden.key(&nested), "env:/src/app/apps/web");
+    }
+
+    #[test]
+    fn the_scope_saves_as_group_keys_and_restores_their_members() {
+        let identity = |root: &str| json!({"canonicalKey": "github.com/acme/app", "name": "app", "rootPath": root});
+        let mut old = project("x", "Old", "/x", Value::Null);
+        old["archivedAt"] = json!("2026-01-01T00:00:00Z");
+        let projects = vec![project("c", "app", "/src/app", identity("/src/app")), project("w", "app", "/w/app", identity("/w/app")), project("o", "Other", "/o", Value::Null), old];
+        let groups = groups(&projects, &grouping("repository"));
+        // One member picked (the thread menu's "Filter by") saves its whole group.
+        let keys = scope_keys(&groups, &["w".to_string()]);
+        assert_eq!(keys, vec!["github.com/acme/app".to_string()]);
+        assert_eq!(scope_members(&groups, &keys), vec!["c".to_string(), "w".to_string()]);
+        // A key whose project is gone, or archived, restores nothing; the rest still applies.
+        let saved = vec!["env:/gone".to_string(), "env:/x".to_string(), "env:/o".to_string()];
+        assert_eq!(scope_members(&groups, &saved), vec!["o".to_string()]);
+        assert!(scope_members(&groups, &[]).is_empty(), "no keys is all projects");
     }
 
     #[test]
