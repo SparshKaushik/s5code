@@ -248,7 +248,7 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
             row().w_full().child(inner)
         }
         _ => {
-            let version = (l.version, st.rev, st.row_selected(i, None), st.selection().map(|s| (s.start.side, s.end.side)));
+            let version = (l.version, st.rev, st.row_selected(i, None), st.selection().map(|s| (s.start.side, s.end.side)), st.hushed);
             memo(key, version, || line(st, l, i))
         }
     }
