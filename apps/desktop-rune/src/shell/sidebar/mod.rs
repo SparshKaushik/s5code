@@ -102,7 +102,8 @@ pub struct Ui {
     /// The server's message matches for a search: (query, thread ids).
     pub content: (String, Vec<String>),
     content_due: Option<(i64, String)>,
-    content_req: Option<(u64, String)>,
+    /// One request per connected environment, and the query they answer.
+    content_req: Option<(Vec<u64>, String)>,
     favicons: favicon::Favicons,
     provider_updates: updates::State,
 }
@@ -745,8 +746,8 @@ pub fn poll(s: &mut App) -> bool {
     searched
 }
 
-/// Asks the server which threads' messages match the search, 200ms after typing stops, as the
-/// web's sidebar does through `orchestration.searchThreads`.
+/// Asks every environment which threads' messages match the search, 200ms after typing stops, as
+/// the web's sidebar does through `orchestration.searchThreads`; matches show as each answers.
 fn poll_content(s: &mut App) -> bool {
     let now = crate::data::now_ms();
     let ui = &mut s.ui.shell.sidebar;
@@ -755,19 +756,35 @@ fn poll_content(s: &mut App) -> bool {
     if *wanted != query {
         ui.content_due = (!query.is_empty()).then(|| (now + 200, query));
     }
-    if let Some((_, q)) = ui.content_due.take_if(|(due, _)| now >= *due)
-        && let Some(net) = s.src.net()
-    {
-        let id = net.request("orchestration.searchThreads", json!({ "query": q.chars().take(200).collect::<String>(), "limit": 20 }));
-        s.ui.shell.sidebar.content_req = Some((id, q));
+    if let Some((_, q)) = ui.content_due.take_if(|(due, _)| now >= *due) {
+        let ids = crate::env::request_all(s, "orchestration.searchThreads", &json!({ "query": q.chars().take(200).collect::<String>(), "limit": 20 }));
+        s.ui.shell.sidebar.content_req = Some((ids, q));
     }
-    let Some(id) = s.ui.shell.sidebar.content_req.as_ref().map(|r| r.0) else { return false };
-    let Some(reply) = s.src.net().and_then(|net| net.take_reply(id)) else { return false };
+    let Some((pending, q)) = s.ui.shell.sidebar.content_req.take() else { return false };
+    let Some(net) = s.src.net() else {
+        s.ui.shell.sidebar.content_req = Some((pending, q));
+        return false;
+    };
+    let (mut answered, mut waiting) = (vec![], vec![]);
+    for id in pending {
+        match net.take_reply(id) {
+            Some(reply) => answered.push(reply),
+            None => waiting.push(id),
+        }
+    }
     let ui = &mut s.ui.shell.sidebar;
-    let (_, q) = ui.content_req.take().unwrap_or_default();
-    let ids = reply.ok().and_then(|v| v["matches"].as_array().map(|m| m.iter().filter_map(|m| m["threadId"].as_str().map(str::to_string)).collect::<Vec<_>>()));
-    ui.content = (q, ids.unwrap_or_default());
-    true
+    let changed = !answered.is_empty();
+    if changed && ui.content.0 != q {
+        ui.content = (q.clone(), vec![]);
+    }
+    for reply in answered {
+        let matches = reply.ok().and_then(|v| v["matches"].as_array().cloned()).unwrap_or_default();
+        ui.content.1.extend(matches.iter().filter_map(|m| m["threadId"].as_str().map(str::to_string)));
+    }
+    if !waiting.is_empty() {
+        ui.content_req = Some((waiting, q));
+    }
+    changed
 }
 
 pub fn commit_rename(s: &mut App) {

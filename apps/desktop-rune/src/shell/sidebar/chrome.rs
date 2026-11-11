@@ -155,9 +155,9 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
         });
         if let Some(p) = s.state().projects.iter().find(|p| crate::data::s(p, "id") == g.representative) {
             item = item.leading(super::favicon::view(s, t, p, 16.0));
-            if let Some(remote) = crate::env::remote_label(s, p) {
-                item = item.trailing_icon(&i::SERVER, format!("On {remote}"));
-            }
+        }
+        if let Some(badge) = crate::env::badge(s, &g.members) {
+            item = item.trailing_icon(&i::SERVER, badge);
         }
         if can_pin {
             item = item.trailing(scope_pin(t, g));
