@@ -8,6 +8,15 @@ use crate::{App, Route, icons};
 use rune::{Cursor, El, icon, row, text};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::sync::mpsc::{Receiver, TryRecvError};
+
+const FAILED: &str = "Failed to revert thread state.";
+const CHANGED: &str = "The thread has changed. Select a message to rewind again.";
+const TIMEOUT_MS: i64 = 120_000;
+/// PROVIDER_SEND_TURN_MAX_ATTACHMENTS.
+const MAX_ATTACHMENTS: usize = 100;
+const BOOTSTRAP_PROMPT: &str =
+    "[User attached one or more files without additional text. Respond using the conversation context and the attached files.]";
 
 /// A prompt waiting on the "Edit from here?" dialog.
 #[derive(Clone)]
@@ -15,19 +24,57 @@ pub struct Rewind {
     thread: String,
     text: String,
     records: Vec<Value>,
+    attachments: Vec<Value>,
     scope: String,
     checkpoint: String,
 }
 
+/// What a sent rollback waits for in the thread projection (waitForRevertedMessage).
+struct Watch {
+    command: String,
+    turn_count: i64,
+    /// The latest settled run after the target, which the rollback marks rolled back.
+    witness: String,
+    thread: String,
+    provider_thread: Option<String>,
+    instance: Option<String>,
+    /// Provider threads before the rollback; rewinding Claude to the start makes a new one.
+    known: Vec<String>,
+}
+
+enum Step {
+    /// `assets.createUrl` for each attachment, in order, and the URL once it answers.
+    Urls(Vec<(u64, Option<String>)>),
+    Download(Receiver<Result<Vec<String>, String>>),
+    /// The rollback until the server accepts it (`rpc` taken), then until the projection settles.
+    Rollback { rpc: Option<u64>, watch: Watch, started: i64 },
+}
+
+struct Pending {
+    rewind: Rewind,
+    restore_files: bool,
+    /// The message's attachments, downloaded for the composer.
+    files: Vec<String>,
+    step: Step,
+}
+
+enum Outcome {
+    Waiting,
+    Moved,
+    Failed(String),
+    Done,
+}
+
 #[derive(Default)]
 pub struct State {
-    confirm: Option<Rewind>,
-    /// In-flight rollbacks, by RPC: the prompt (and its context records) that returns to the
-    /// composer once it lands.
-    rewinds: HashMap<u64, (String, Vec<Value>)>,
-    /// In-flight forks, by RPC: the thread to open once it lands.
-    forks: HashMap<u64, String>,
-    pub error: Option<String>,
+    /// The "Edit from here?" dialog by thread, with why it can't go ahead yet.
+    confirm: HashMap<String, (Rewind, Option<String>)>,
+    /// Rewinds in flight, by thread.
+    rewinds: HashMap<String, Pending>,
+    /// In-flight forks, by RPC: the source thread and the thread to open once it lands.
+    forks: HashMap<u64, (String, String)>,
+    /// A failed revert or fork, by thread.
+    errors: HashMap<String, String>,
 }
 
 /// "9:41 AM", "yesterday at 9:41 AM" or "3/14 9:41 AM" (formatDayAwareTimestamp, in UTC as
@@ -93,6 +140,12 @@ fn running(app: &App, thread: &str) -> bool {
     })
 }
 
+/// A rewind of `thread` is in flight: its prompts can't be rewound again and Send waits
+/// ("Rewinding conversation").
+pub fn rewinding(app: &App, thread: &str) -> bool {
+    app.ui.chat.timeline.actions.rewinds.contains_key(thread)
+}
+
 /// Whether the thread's provider can rewind its conversation (supportsConversationRollback).
 fn rolls_back(app: &App) -> bool {
     let composer = crate::chat::composer::ctx(app);
@@ -100,28 +153,55 @@ fn rolls_back(app: &App) -> bool {
     crate::chat::composer::provider(app, instance).is_none_or(|p| p["supportsConversationRollback"] != false)
 }
 
+/// Why the environment can't take a revert now, when it is not connected.
+fn offline(app: &App) -> Option<String> {
+    (app.state().conn != s5_net::Conn::Open)
+        .then(|| format!("Reconnect {} before reverting checkpoints.", crate::env::label(app, &app.ui.env.active)))
+}
+
 /// The row under a prompt: timestamp, "Edit from here" when it can be rewound, copy.
 pub fn user(app: &App, thread: &str, item: &Value, targets: &HashMap<String, (String, String)>, t: &T) -> El {
     let mut buttons = row().gap(2.0).center_y();
     if let Some((scope, checkpoint)) = targets.get(s(item, "id")) {
-        let records = rows::array(&item["context"], "records").to_vec();
-        let rewind = Rewind { thread: thread.to_owned(), text: s(item, "text").to_owned(), records, scope: scope.clone(), checkpoint: checkpoint.clone() };
-        buttons = buttons.child(ghost(t, format!("edit-from-{}", s(item, "id")), &icons::PENCIL, "Edit from here").on_press(move |app: &mut App| {
-            if !rolls_back(app) {
-                app.ui.chat.timeline.actions.error =
-                    Some("This provider does not support reverting conversation history. Start a new thread instead.".into());
-                return;
-            }
-            if running(app, &rewind.thread) {
-                app.ui.chat.timeline.actions.error = Some("Interrupt the current turn before reverting checkpoints.".into());
-                return;
-            }
-            app.ui.chat.timeline.actions.error = None;
-            app.ui.chat.timeline.actions.confirm = Some(rewind.clone());
-        }));
+        let edit = ghost(t, format!("edit-from-{}", s(item, "id")), &icons::PENCIL, "Edit from here");
+        buttons = buttons.child(if running(app, thread) || rewinding(app, thread) {
+            edit.disabled(true).opacity(0.64)
+        } else {
+            let rewind = Rewind {
+                thread: thread.to_owned(),
+                text: s(item, "text").to_owned(),
+                records: rows::array(&item["context"], "records").to_vec(),
+                attachments: rows::array(item, "attachments").to_vec(),
+                scope: scope.clone(),
+                checkpoint: checkpoint.clone(),
+            };
+            edit.on_press(move |app: &mut App| ask(app, &rewind))
+        });
     }
     buttons = buttons.child(super::copy_button(app, s(item, "text"), t));
     row().gap(8.0).center_y().child(stamp(app, first_time(item, &["createdAt", "startedAt", "completedAt"]), t)).child(buttons)
+}
+
+fn ask(app: &mut App, rewind: &Rewind) {
+    let blocked = if !rolls_back(app) {
+        Some("This provider does not support reverting conversation history. Start a new thread instead.".to_owned())
+    } else if let Some(offline) = offline(app) {
+        Some(offline)
+    } else if running(app, &rewind.thread) {
+        Some("Interrupt the current turn before reverting checkpoints.".to_owned())
+    } else {
+        None
+    };
+    let state = &mut app.ui.chat.timeline.actions;
+    match blocked {
+        Some(message) => {
+            state.errors.insert(rewind.thread.clone(), message);
+        }
+        None => {
+            state.errors.remove(&rewind.thread);
+            state.confirm.insert(rewind.thread.clone(), (rewind.clone(), None));
+        }
+    }
 }
 
 /// The row under a finished reply: copy, fork, timestamp.
@@ -153,83 +233,342 @@ fn fork_from(app: &mut App, thread: &str, run: &str) {
         "sourceThreadId": thread, "targetThreadId": target, "sourcePoint": {"type": "run", "runId": run},
         "title": format!("{title} fork"),
     }));
-    app.ui.chat.timeline.actions.error = None;
-    app.ui.chat.timeline.actions.forks.insert(rpc, target);
+    app.ui.chat.timeline.actions.errors.remove(thread);
+    app.ui.chat.timeline.actions.forks.insert(rpc, (thread.to_owned(), target));
 }
 
-fn rewind(app: &mut App, restore_files: bool) {
-    let Some(r) = app.ui.chat.timeline.actions.confirm.take() else { return };
-    let Some(net) = app.src.net() else { return };
+/// A failed request's message, else `fallback`.
+fn failure(cause: &Value, fallback: &str) -> String {
+    let reasons = cause.as_array().map(Vec::as_slice).unwrap_or(std::slice::from_ref(cause));
+    reasons
+        .iter()
+        .find_map(|reason| {
+            let error = if reason["_tag"] == "Fail" { &reason["error"] } else { reason };
+            error.as_str().or(error["message"].as_str()).filter(|m| !m.trim().is_empty()).map(str::to_owned)
+        })
+        .unwrap_or_else(|| fallback.to_owned())
+}
+
+/// "Revert files too" / "Revert and keep changes" (rewindToMessage): the message's images come
+/// down first, then the rollback goes out, and the prompt returns once the projection shows it.
+fn rewind(app: &mut App, thread: &str, restore_files: bool) {
+    let Some((rewind, _)) = app.ui.chat.timeline.actions.confirm.get(thread).cloned() else { return };
+    if rewinding(app, thread) {
+        return;
+    }
+    if let Some(offline) = offline(app) {
+        if let Some(confirm) = app.ui.chat.timeline.actions.confirm.get_mut(thread) {
+            confirm.1 = Some(offline);
+        }
+        return;
+    }
+    app.ui.chat.timeline.actions.confirm.remove(thread);
+    app.ui.chat.timeline.actions.errors.remove(thread);
+    match start(app, rewind, restore_files) {
+        Ok(pending) => {
+            app.ui.chat.timeline.actions.rewinds.insert(thread.to_owned(), pending);
+        }
+        Err(message) => {
+            app.ui.chat.timeline.actions.errors.insert(thread.to_owned(), message);
+        }
+    }
+}
+
+fn start(app: &mut App, rewind: Rewind, restore_files: bool) -> Result<Pending, String> {
+    if rewind.attachments.iter().any(|a| s(a, "type") != "image" || image_ext(s(a, "mimeType")).is_none()) {
+        return Err("This message has an attachment that cannot be restored.".into());
+    }
+    let key = crate::chat::composer::draft_key(app, &Route::Thread(rewind.thread.clone()));
+    if crate::chat::composer::draft_attachment_count(app, &key) + rewind.attachments.len() > MAX_ATTACHMENTS {
+        return Err("Make room for this message's attachments in the composer before rewinding.".into());
+    }
+    let step = if rewind.attachments.is_empty() {
+        roll_back(app, &rewind, restore_files)?
+    } else {
+        let net = app.src.net().ok_or_else(|| "The environment is not connected.".to_owned())?;
+        Step::Urls(
+            rewind
+                .attachments
+                .iter()
+                .map(|a| {
+                    let resource = json!({"_tag": "attachment", "attachmentId": s(a, "id"), "fileName": s(a, "name"), "mimeType": s(a, "mimeType")});
+                    (net.request("assets.createUrl", json!({"resource": resource})), None)
+                })
+                .collect(),
+        )
+    };
+    Ok(Pending { rewind, restore_files, files: Vec::new(), step })
+}
+
+/// The run ordinal a checkpoint rewinds to: the run it was taken after, 0 for the thread start.
+fn turn_count(p: &Value, checkpoint: &str) -> Option<i64> {
+    rows::array(p, "checkpoints").iter().find(|c| s(c, "id") == checkpoint).map(|c| c["appRunOrdinal"].as_i64().unwrap_or(0))
+}
+
+fn roll_back(app: &mut App, rewind: &Rewind, restore_files: bool) -> Result<Step, String> {
+    let command = s5_net::uuid();
+    let projection = &app.state().thread_views.get(&rewind.thread).ok_or_else(|| CHANGED.to_owned())?.projection;
+    let turns = turn_count(projection, &rewind.checkpoint).ok_or_else(|| CHANGED.to_owned())?;
+    let watch = watch(projection, &command, turns).ok_or_else(|| CHANGED.to_owned())?;
+    let net = app.src.net().ok_or_else(|| "The environment is not connected.".to_owned())?;
     let rpc = net.dispatch(json!({
-        "type": "checkpoint.rollback", "commandId": s5_net::uuid(), "threadId": r.thread,
-        "scopeId": r.scope, "checkpointId": r.checkpoint, "restoreFiles": restore_files,
+        "type": "checkpoint.rollback", "commandId": command, "threadId": rewind.thread,
+        "scopeId": rewind.scope, "checkpointId": rewind.checkpoint, "restoreFiles": restore_files,
     }));
-    app.ui.chat.timeline.actions.rewinds.insert(rpc, (r.text, r.records));
+    Ok(Step::Rollback { rpc: Some(rpc), watch, started: crate::data::now_ms() })
+}
+
+/// The projection just before a rollback to `turn_count`: None when no settled run after it is
+/// left to roll back.
+fn watch(p: &Value, command: &str, turn_count: i64) -> Option<Watch> {
+    let witness = rows::array(p, "runs")
+        .iter()
+        .filter(|r| {
+            r["ordinal"].as_i64().is_some_and(|o| o > turn_count) && matches!(s(r, "status"), "completed" | "interrupted" | "failed" | "cancelled")
+        })
+        .max_by_key(|r| r["ordinal"].as_i64())?;
+    let thread = &p["thread"];
+    let provider_thread = thread["activeProviderThreadId"].as_str().map(str::to_owned);
+    let providers = rows::array(p, "providerThreads");
+    let instance = providers.iter().find(|t| provider_thread.as_deref() == Some(s(t, "id"))).map(|t| s(t, "providerInstanceId").to_owned());
+    Some(Watch {
+        command: command.to_owned(),
+        turn_count,
+        witness: s(witness, "id").to_owned(),
+        thread: s(thread, "id").to_owned(),
+        provider_thread,
+        instance,
+        known: providers.iter().map(|t| s(t, "id").to_owned()).collect(),
+    })
+}
+
+/// Whether a rollback the server has (`accepted`) or hasn't yet acknowledged has landed, failed,
+/// or is still going (None).
+fn settled(p: &Value, w: &Watch, accepted: bool) -> Option<Result<(), String>> {
+    let failure = &p["thread"]["rollbackFailure"];
+    if s(failure, "requestId") == w.command {
+        return Some(Err(Some(s(failure, "message")).filter(|m| !m.is_empty()).unwrap_or(FAILED).to_owned()));
+    }
+    if !accepted {
+        return None;
+    }
+    let at_target = |t: &Value| if w.turn_count == 0 { t["lastRunOrdinal"].is_null() } else { t["lastRunOrdinal"].as_i64() == Some(w.turn_count) };
+    let rewound = rows::array(p, "providerThreads").iter().any(|t| {
+        let id = s(t, "id");
+        let fresh_root = w.turn_count == 0
+            && t["ownerNodeId"].is_null()
+            && s(t, "appThreadId") == w.thread
+            && w.instance.as_deref() == Some(s(t, "providerInstanceId"))
+            && !w.known.iter().any(|k| k == id);
+        (w.provider_thread.as_deref() == Some(id) || fresh_root) && at_target(t)
+    });
+    let rolled = rows::array(p, "runs").iter().any(|r| s(r, "id") == w.witness && s(r, "status") == "rolled_back");
+    (rewound && rolled).then_some(Ok(()))
+}
+
+/// The extension the composer reads `mime` back from, for the image types it sends.
+fn image_ext(mime: &str) -> Option<&'static str> {
+    match mime.to_ascii_lowercase().as_str() {
+        "image/png" => Some("png"),
+        "image/jpeg" | "image/jpg" => Some("jpg"),
+        "image/gif" => Some("gif"),
+        "image/webp" => Some("webp"),
+        _ => None,
+    }
+}
+
+/// Downloads `(url, name, mime)` into temporary files, all or none, waking the app when done.
+fn download(jobs: Vec<(String, String, String)>, waker: Option<rune::Waker>) -> Receiver<Result<Vec<String>, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let dir = std::env::temp_dir().join(format!("s5-rewind-{}", s5_net::uuid()));
+        let result = jobs
+            .iter()
+            .enumerate()
+            .map(|(i, (url, name, mime))| fetch(&dir.join(i.to_string()), url, name, mime).ok_or_else(|| format!("Could not restore attachment: {name}")))
+            .collect();
+        let _ = tx.send(result);
+        if let Some(wake) = waker {
+            wake();
+        }
+    });
+    rx
+}
+
+fn fetch(dir: &std::path::Path, url: &str, name: &str, mime: &str) -> Option<String> {
+    use std::io::Read;
+    let response = ureq::get(url).timeout(std::time::Duration::from_secs(30)).call().ok()?;
+    let mut bytes = Vec::new();
+    response.into_reader().take(20 * 1024 * 1024).read_to_end(&mut bytes).ok()?;
+    let base = std::path::Path::new(name).file_name().and_then(|n| n.to_str()).filter(|n| !n.is_empty()).unwrap_or("attachment");
+    let ext = image_ext(mime)?;
+    let known = base.rsplit_once('.').is_some_and(|(_, e)| matches!(e.to_ascii_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp"));
+    let file = if known { base.to_owned() } else { format!("{base}.{ext}") };
+    std::fs::create_dir_all(dir).ok()?;
+    let path = dir.join(file);
+    std::fs::write(&path, bytes).ok()?;
+    Some(path.display().to_string())
+}
+
+fn step(app: &mut App, p: &mut Pending) -> Outcome {
+    let next = match &mut p.step {
+        Step::Urls(urls) => {
+            let Some(net) = app.src.net() else { return Outcome::Waiting };
+            let base = net.base_url().trim_end_matches('/').to_owned();
+            let mut moved = false;
+            for (rpc, url) in urls.iter_mut().filter(|(_, url)| url.is_none()) {
+                match net.take_reply(*rpc) {
+                    None => {}
+                    Some(Ok(reply)) => {
+                        *url = Some(format!("{base}{}", s(&reply, "relativeUrl")));
+                        moved = true;
+                    }
+                    Some(Err(e)) => return Outcome::Failed(failure(&e, FAILED)),
+                }
+            }
+            if urls.iter().any(|(_, url)| url.is_none()) {
+                return if moved { Outcome::Moved } else { Outcome::Waiting };
+            }
+            let jobs = urls
+                .iter()
+                .zip(&p.rewind.attachments)
+                .map(|((_, url), a)| (url.clone().unwrap_or_default(), s(a, "name").to_owned(), s(a, "mimeType").to_owned()))
+                .collect();
+            Step::Download(download(jobs, app.ui.panel.waker.clone()))
+        }
+        Step::Download(rx) => match rx.try_recv() {
+            Ok(Ok(files)) => {
+                p.files = files;
+                match roll_back(app, &p.rewind, p.restore_files) {
+                    Ok(step) => step,
+                    Err(message) => return Outcome::Failed(message),
+                }
+            }
+            Ok(Err(message)) => return Outcome::Failed(message),
+            Err(TryRecvError::Empty) => return Outcome::Waiting,
+            Err(TryRecvError::Disconnected) => return Outcome::Failed(FAILED.into()),
+        },
+        Step::Rollback { rpc, watch, started } => {
+            let mut moved = false;
+            if let Some(id) = *rpc {
+                let Some(net) = app.src.net() else { return Outcome::Waiting };
+                match net.take_reply(id) {
+                    None => {}
+                    Some(Ok(_)) => {
+                        *rpc = None;
+                        moved = true;
+                    }
+                    Some(Err(e)) => return Outcome::Failed(failure(&e, FAILED)),
+                }
+            }
+            let projection = app.state().thread_views.get(&p.rewind.thread).map(|v| &v.projection);
+            return match projection.and_then(|projection| settled(projection, watch, rpc.is_none())) {
+                Some(Ok(())) => Outcome::Done,
+                Some(Err(message)) => Outcome::Failed(message),
+                None if crate::data::now_ms() - *started >= TIMEOUT_MS => Outcome::Failed("Timed out waiting for the thread to rewind.".into()),
+                None if moved => Outcome::Moved,
+                None => Outcome::Waiting,
+            };
+        }
+    };
+    p.step = next;
+    Outcome::Moved
+}
+
+/// The rewound prompt and its images go back into the thread's draft; the caret follows only
+/// while that thread is still open.
+fn land(app: &mut App, p: Pending) {
+    let thread = p.rewind.thread;
+    let key = crate::chat::composer::draft_key(app, &Route::Thread(thread.clone()));
+    let focus = matches!(app.frame_route(), Route::Thread(open) if *open == thread);
+    crate::chat::composer::restore_rewound(app, &key, &recallable(&p.rewind.text), &p.rewind.records, p.files, focus);
 }
 
 pub fn poll(app: &mut App) -> bool {
-    let Some(net) = app.src.net() else { return false };
-    let state = &mut app.ui.chat.timeline.actions;
-    let mut landed = Vec::new();
-    let mut opened = None;
     let mut changed = false;
-    state.rewinds.retain(|rpc, prompt| {
-        let Some(reply) = net.take_reply(*rpc) else { return true };
-        changed = true;
-        match reply {
-            Ok(_) => landed.push(std::mem::take(prompt)),
-            Err(e) => state.error = Some(e.to_string()),
+    let threads: Vec<String> = app.ui.chat.timeline.actions.rewinds.keys().cloned().collect();
+    for thread in threads {
+        let Some(mut pending) = app.ui.chat.timeline.actions.rewinds.remove(&thread) else { continue };
+        match step(app, &mut pending) {
+            Outcome::Waiting => {
+                app.ui.chat.timeline.actions.rewinds.insert(thread, pending);
+            }
+            Outcome::Moved => {
+                app.ui.chat.timeline.actions.rewinds.insert(thread, pending);
+                changed = true;
+            }
+            Outcome::Failed(message) => {
+                app.ui.chat.timeline.actions.errors.insert(thread, message);
+                changed = true;
+            }
+            Outcome::Done => {
+                land(app, pending);
+                changed = true;
+            }
         }
-        false
-    });
-    state.forks.retain(|rpc, target| {
+    }
+    let Some(net) = app.src.net() else { return changed };
+    let state = &mut app.ui.chat.timeline.actions;
+    let mut opened = None;
+    state.forks.retain(|rpc, (source, target)| {
         let Some(reply) = net.take_reply(*rpc) else { return true };
         changed = true;
         match reply {
             Ok(_) => opened = Some(std::mem::take(target)),
-            Err(e) => state.error = Some(format!("Failed to fork this response. {e}")),
+            Err(e) => {
+                state.errors.insert(source.clone(), failure(&e, "Failed to fork this response."));
+            }
         }
         false
     });
-    for (prompt, records) in landed {
-        if !prompt.trim().is_empty() {
-            crate::chat::composer::append_with_chips(app, prompt.trim(), &records, "\n\n");
-        }
-    }
     if let Some(target) = opened {
         crate::shell::sidebar::open_thread(app, &target);
     }
     changed
 }
 
-/// "Edit from here?" (RevertConfirmHost), over the chat.
+/// "Edit from here?" (RevertConfirmHost), over its thread.
 pub fn overlays(app: &App, t: &T) -> Vec<El> {
     let mut layers = Vec::new();
-    if app.ui.chat.timeline.actions.confirm.is_none() || !matches!(app.frame_route(), Route::Thread(_)) {
-        return layers;
-    }
-    let cancel = |app: &mut App| app.ui.chat.timeline.actions.confirm = None;
-    crate::kit::Dialog::new("revert-confirm", "Edit from here?")
+    let Route::Thread(thread) = app.frame_route() else { return layers };
+    let Some((_, notice)) = app.ui.chat.timeline.actions.confirm.get(thread) else { return layers };
+    let cancel = {
+        let thread = thread.clone();
+        move |app: &mut App| {
+            app.ui.chat.timeline.actions.confirm.remove(&thread);
+        }
+    };
+    let confirm = |restore_files: bool| {
+        let thread = thread.clone();
+        move |app: &mut App| rewind(app, &thread, restore_files)
+    };
+    let mut dialog = crate::kit::Dialog::new("revert-confirm", "Edit from here?")
         .open(true)
         .alert()
         .description("Rewind chat to before this message. Your prompt and attachments return to the composer. “Revert files too” also undoes your own edits.")
-        .on_close(cancel)
+        .on_close(cancel.clone());
+    if let Some(notice) = notice {
+        dialog = dialog.child(text(notice.clone()).font(theme::TEXT_SM).color(t.c.destructive).wrap());
+    }
+    dialog
         .child(
             row()
                 .w_full()
                 .justify_end()
                 .gap(8.0)
                 .child(crate::kit::Button::new("Cancel").variant("outline").on_press(cancel).build(t))
-                .child(crate::kit::Button::new("Revert files too").variant("destructive-outline").on_press(|app: &mut App| rewind(app, true)).build(t))
-                .child(crate::kit::Button::new("Revert and keep changes").on_press(|app: &mut App| rewind(app, false)).build(t)),
+                .child(crate::kit::Button::new("Revert files too").variant("destructive-outline").on_press(confirm(true)).build(t))
+                .child(crate::kit::Button::new("Revert and keep changes").on_press(confirm(false)).build(t)),
         )
         .build(t, &mut layers);
     layers
 }
 
-/// A failed revert or fork, above the timeline's end (setThreadError).
+/// The open thread's failed revert or fork, above the timeline's end (setThreadError).
 pub fn error(app: &App, t: &T) -> Option<El> {
-    let message = app.ui.chat.timeline.actions.error.clone()?;
+    let Route::Thread(thread) = app.frame_route() else { return None };
+    let message = app.ui.chat.timeline.actions.errors.get(thread)?.clone();
+    let thread = thread.clone();
     Some(
         row()
             .key("timeline-action-error")
@@ -242,8 +581,142 @@ pub fn error(app: &App, t: &T) -> Option<El> {
             .border(1.0, t.c.destructive.alpha(0.3))
             .child(icon(&icons::CIRCLE_ALERT, 16.0).color(t.c.destructive))
             .child(text(message).font(theme::TEXT_SM).color(t.c.destructive).wrap().grow(1.0).shrink().min_w(0.0))
-            .child(ghost(t, "timeline-action-error-close".into(), &icons::X, "Dismiss").on_press(|app: &mut App| app.ui.chat.timeline.actions.error = None)),
+            .child(ghost(t, "timeline-action-error-close".into(), &icons::X, "Dismiss").on_press(move |app: &mut App| {
+                app.ui.chat.timeline.actions.errors.remove(&thread);
+            })),
     )
+}
+
+/// The prompt a rewind puts back (recallableComposerPrompt): without Claude's ultrathink prefix,
+/// trailing review comments or legacy context blocks, and empty for a bootstrap or plan prompt.
+/// Context chips stay, as their records come back with them.
+pub fn recallable(text: &str) -> String {
+    let text = text.trim();
+    let mut prompt = text.strip_prefix("Ultrathink:\n").unwrap_or(text).to_owned();
+    while !prompt.is_empty() {
+        if let Some(cut) = review_comments_cut(&prompt) {
+            prompt.truncate(cut);
+            prompt.truncate(prompt.trim_end().len());
+            continue;
+        }
+        let Some((at, tag, body)) = trailing_context(&prompt) else { break };
+        let lines: Vec<&str> = body.split('\n').collect();
+        if tag == "preview_annotation"
+            && lines.iter().any(|l| l.trim_end() == "<preview_annotation>")
+            && !lines.iter().any(|l| ["Id: ", "Page: ", "Comment: ", "Targets: "].iter().any(|k| l.starts_with(k)))
+        {
+            break;
+        }
+        let headers: Vec<String> =
+            lines.iter().filter_map(|l| l.strip_prefix("- ")?.strip_suffix(':').filter(|h| !h.is_empty()).map(str::to_owned)).collect();
+        if tag != "preview_annotation" && headers.is_empty() {
+            break;
+        }
+        let kept = prompt[..at].trim_end();
+        prompt = if tag == "terminal_context" { strip_terminal_labels(kept, &headers) } else { kept.to_owned() };
+    }
+    let trimmed = prompt.trim();
+    if trimmed == BOOTSTRAP_PROMPT || trimmed.starts_with(super::plan::IMPLEMENTATION_PREFIX) {
+        return String::new();
+    }
+    trimmed.to_owned()
+}
+
+/// Where trailing `<review_comment>` blocks (only whitespace between them and the end) start.
+fn review_comments_cut(p: &str) -> Option<usize> {
+    const OPEN: &str = "<review_comment";
+    const CLOSE: &str = "</review_comment>";
+    let mut blocks = Vec::new();
+    let mut from = 0;
+    while let Some(at) = p[from..].find(OPEN).map(|i| from + i) {
+        let after = at + OPEN.len();
+        let end = p[after..]
+            .starts_with(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .then(|| p[after..].find('>'))
+            .flatten()
+            .and_then(|gt| p[after + gt + 1..].find(CLOSE).map(|close| after + gt + 1 + close + CLOSE.len()));
+        match end {
+            Some(end) => {
+                blocks.push((at, end));
+                from = end;
+            }
+            None => from = after,
+        }
+    }
+    let mut cut = p.len();
+    for &(start, end) in blocks.iter().rev() {
+        if !p[end..cut].trim().is_empty() {
+            break;
+        }
+        cut = start;
+    }
+    (cut < p.len()).then_some(cut)
+}
+
+/// A legacy context block closing the prompt: where it starts, its tag and its body.
+fn trailing_context(p: &str) -> Option<(usize, &'static str, &str)> {
+    let p = p.trim_end();
+    ["terminal_context", "element_context", "preview_annotation"].into_iter().find_map(|tag| {
+        let body_end = p.strip_suffix(format!("\n</{tag}>").as_str())?.len();
+        let open = format!("<{tag}>\n");
+        let at = p.find(open.as_str())?;
+        let body_start = at + open.len();
+        (body_start <= body_end).then(|| (at, tag, &p[body_start..body_end]))
+    })
+}
+
+/// Drops each terminal header's inline `@terminal-1:3-5` mention and a space beside it.
+fn strip_terminal_labels(prompt: &str, headers: &[String]) -> String {
+    let mut out = prompt.to_owned();
+    for header in headers {
+        let Some((head, range)) = header.rsplit_once(' ') else { continue };
+        let digits = |d: &str| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit());
+        let range_ok = match range.split_once('-') {
+            Some((a, b)) => digits(a) && digits(b),
+            None => digits(range),
+        };
+        let Some(name) = head.strip_suffix(" lines").or_else(|| head.strip_suffix(" line")).filter(|n| !n.is_empty()) else { continue };
+        if !range_ok {
+            continue;
+        }
+        let label = format!("@{}:{range}", name.trim().to_lowercase().split_whitespace().collect::<Vec<_>>().join("-"));
+        let found = out.match_indices(label.as_str()).map(|(i, _)| i).find(|&i| {
+            let before = out[..i].chars().next_back();
+            let after = out[i + label.len()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '@' | '.' | '-'))
+                && !after.is_some_and(|c| c.is_ascii_digit() || c == '-')
+        });
+        let Some(i) = found else { continue };
+        let (mut start, mut end) = (i, i + label.len());
+        if out[end..].starts_with(' ') {
+            end += 1;
+        } else if out[..start].ends_with(' ') {
+            start -= 1;
+        }
+        out.replace_range(start..end, "");
+    }
+    out
+}
+
+/// Whether a settled run's changes are big enough to open the diff on their own
+/// (resolveProactiveTurnDiffAction): a ready checkpoint with 3 or more files or 50 or more changed
+/// lines. False too while its checkpoint hasn't arrived, which the web defers on.
+pub fn proactive_changes(projection: &Value, run_id: &str) -> bool {
+    let Some(checkpoint) = rows::array(projection, "checkpoints").iter().rfind(|c| s(c, "runId") == run_id && !c["appRunOrdinal"].is_null()) else {
+        return false;
+    };
+    let files = rows::array(checkpoint, "files");
+    if s(checkpoint, "status") != "ready" || files.is_empty() {
+        return false;
+    }
+    let lines = |v: &Value| v["additions"].as_u64().unwrap_or(0) + v["deletions"].as_u64().unwrap_or(0);
+    let totals = &checkpoint["filesTotal"];
+    let (count, changed) = if totals.is_object() {
+        (totals["count"].as_u64().unwrap_or(0), lines(totals))
+    } else {
+        (files.len() as u64, files.iter().map(lines).sum())
+    };
+    count >= 3 || changed >= 50
 }
 
 #[cfg(test)]
@@ -257,5 +730,67 @@ mod tests {
         assert_eq!(timestamp("2026-11-07T00:30:00.000Z", now), "yesterday at 12:30 AM");
         assert_eq!(timestamp("2026-03-14T13:41:00.000Z", now), "3/14 1:41 PM");
         assert_eq!(timestamp("2025-12-31T23:59:00.000Z", now), "12/31/25 11:59 PM");
+    }
+
+    #[test]
+    fn a_rollback_settles_once_the_provider_and_the_witness_run_rewind() {
+        let before = json!({
+            "thread": {"id": "t", "activeProviderThreadId": "pt"},
+            "providerThreads": [{"id": "pt", "providerInstanceId": "codex", "lastRunOrdinal": 2}],
+            "runs": [
+                {"id": "r1", "ordinal": 1, "status": "completed"},
+                {"id": "r2", "ordinal": 2, "status": "interrupted"},
+                {"id": "r3", "ordinal": 3, "status": "running"},
+            ],
+        });
+        let w = watch(&before, "cmd", 1).unwrap();
+        assert_eq!(w.witness, "r2");
+        assert!(watch(&before, "cmd", 2).is_none(), "nothing settled is left after the last settled run");
+        assert_eq!(settled(&before, &w, true), None);
+        let mut after = before.clone();
+        after["providerThreads"][0]["lastRunOrdinal"] = json!(1);
+        after["runs"][1]["status"] = json!("rolled_back");
+        assert_eq!(settled(&after, &w, false), None, "not before the server accepts it");
+        assert_eq!(settled(&after, &w, true), Some(Ok(())));
+        let mut failed = before.clone();
+        failed["thread"]["rollbackFailure"] = json!({"requestId": "cmd", "message": "Checkpoint is gone."});
+        assert_eq!(settled(&failed, &w, false), Some(Err("Checkpoint is gone.".to_owned())));
+        failed["thread"]["rollbackFailure"]["requestId"] = json!("other");
+        assert_eq!(settled(&failed, &w, true), None);
+        // Claude rewinds to the start on a fresh root provider thread.
+        let w = watch(&before, "cmd", 0).unwrap();
+        let mut fresh = before.clone();
+        fresh["providerThreads"] = json!([
+            {"id": "pt", "providerInstanceId": "codex", "lastRunOrdinal": 2},
+            {"id": "pt2", "providerInstanceId": "codex", "appThreadId": "t", "ownerNodeId": null, "lastRunOrdinal": null},
+        ]);
+        fresh["runs"][1]["status"] = json!("rolled_back");
+        assert_eq!(settled(&fresh, &w, true), Some(Ok(())));
+    }
+
+    #[test]
+    fn a_recalled_prompt_drops_ultrathink_review_comments_and_legacy_context() {
+        assert_eq!(recallable("Ultrathink:\nFix it"), "Fix it");
+        assert_eq!(recallable("Fix it\n\n<review_comment file=\"a.rs\">nit</review_comment>\n<review_comment>x</review_comment>\n"), "Fix it");
+        assert_eq!(recallable("<review_comment>x</review_comment> then this"), "<review_comment>x</review_comment> then this");
+        let terminal = "Look @terminal-1:3-5 here\n\n<terminal_context>\n- Terminal 1 lines 3-5:\n  ls\n</terminal_context>";
+        assert_eq!(recallable(terminal), "Look here");
+        let headless = "Hi\n<terminal_context>\nplain\n</terminal_context>";
+        assert_eq!(recallable(headless), headless);
+        assert_eq!(recallable("PLEASE IMPLEMENT THIS PLAN:\n# Plan"), "");
+        assert_eq!(recallable(BOOTSTRAP_PROMPT), "");
+    }
+
+    #[test]
+    fn big_changes_open_the_diff_on_their_own() {
+        let p = |files: Value, total: Value, status: &str| json!({"checkpoints": [{"runId": "r", "appRunOrdinal": 1, "status": status, "files": files, "filesTotal": total}]});
+        let three = json!([{"path": "a"}, {"path": "b"}, {"path": "c"}]);
+        assert!(proactive_changes(&p(three.clone(), Value::Null, "ready"), "r"));
+        assert!(!proactive_changes(&p(three, Value::Null, "missing"), "r"));
+        let one = json!([{"path": "a", "additions": 30, "deletions": 19}]);
+        assert!(!proactive_changes(&p(one.clone(), Value::Null, "ready"), "r"));
+        assert!(proactive_changes(&p(one, json!({"count": 1, "additions": 40, "deletions": 10}), "ready"), "r"));
+        assert!(!proactive_changes(&p(json!([]), json!({"count": 9}), "ready"), "r"));
+        assert!(!proactive_changes(&json!({}), "r"));
     }
 }

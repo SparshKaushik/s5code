@@ -141,6 +141,17 @@ fn apply_theme(s: &App, mut t: T) -> T {
     let p = palette(selected, t.dark);
     macro_rules! set {($($field:ident => $role:literal),* $(,)?)=>{$(t.c.$field=paint(p,$role);)*};}
     set!(background=>"canvas",foreground=>"text",contrast_foreground=>"text",muted_foreground=>"textMuted",contrast_muted_foreground=>"textMuted",card=>"surface",contrast_card_foreground=>"text",popover=>"surfaceOverlay",popover_foreground=>"text",contrast_popover_foreground=>"text",border=>"border",contrast_border=>"border",input=>"input",contrast_input=>"input",primary=>"accent",primary_foreground=>"accentForeground",accent=>"accentSurface",accent_foreground=>"accentSurfaceForeground",contrast_accent_foreground=>"accentSurfaceForeground",secondary=>"secondary",secondary_foreground=>"secondaryForeground",contrast_secondary_foreground=>"secondaryForeground",muted=>"muted",ring=>"focus",sidebar=>"sidebar",sidebar_foreground=>"sidebarForeground",surface_raised=>"surfaceRaised");
+    // A custom theme saved before the terminal roles keeps the base terminal colours.
+    for (slot, role) in [
+        (&mut t.c.terminal_background, "terminalBackground"),
+        (&mut t.c.terminal_foreground, "terminalForeground"),
+        (&mut t.c.terminal_cursor, "terminalCursor"),
+        (&mut t.c.terminal_selection_background, "terminalSelection"),
+    ] {
+        if p[role].is_string() {
+            *slot = paint(p, role);
+        }
+    }
     t.sb = t.c;
     t.sb.sidebar = paint(p, "sidebar");
     t.sb.foreground = paint(p, "sidebarForeground");
@@ -756,5 +767,18 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_theme_recolours_the_terminal() {
+        let mut app = App::new();
+        app.client_settings.values.insert("themeDark".into(), json!("grove"));
+        let grove = builtins().iter().find(|v| v["id"] == "grove").unwrap();
+        let t = apply_theme(&app, crate::theme::theme(true));
+        let p = palette(grove, true);
+        assert_eq!(t.c.terminal_background, paint(p, "terminalBackground"));
+        assert_eq!(t.c.terminal_foreground, paint(p, "terminalForeground"));
+        assert_eq!(t.c.terminal_cursor, paint(p, "terminalCursor"));
+        assert_eq!(t.c.terminal_selection_background, paint(p, "terminalSelection"));
     }
 }
