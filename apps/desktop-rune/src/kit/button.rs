@@ -88,7 +88,10 @@ impl Button {
         let c = t.c;
         let (h, px, gap, radius, font, glyph_size) = match self.size.as_str() {
             "compact" => (28., 7., 4., 6., theme::XS_MEDIUM, 14.),
-            "micro" | "icon-micro" => (20., 5., 4., 4., theme::weight(theme::TEXT_2XS, 500.), 12.),
+            "micro" | "icon-micro" => {
+                let font = theme::weight(theme::TEXT_2XS, 500.);
+                (20., 5., 4., 4., rune::TextStyle { size: 11.0 * t.px, ..font }, 12.)
+            }
             "icon-tiny" => (16., 0., 0., 8., theme::SM_MEDIUM, 12.),
             "xs" | "icon-xs" => (24., 7., 4., 8., theme::XS_MEDIUM, 14.),
             "sm" | "sm-multiline" | "icon-sm" => (28., 9., 6., 8., theme::SM_MEDIUM, 16.),

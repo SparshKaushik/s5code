@@ -894,7 +894,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     }
     let w = &s.ui.settings.add_provider;
     let environment = environment(s);
-    let mut panel = col().w_full().shrink().min_h(0.0).gap(16.0).px(24.0).py(20.0).radius(12.0).fill(t.c.background.alpha_mul(0.8)).border(1.0, t.c.foreground.alpha_mul(0.05));
+    let mut panel = col().w_full().gap(16.0).px(24.0).py(20.0).radius(12.0).fill(t.c.background.alpha_mul(0.8)).border(1.0, t.c.foreground.alpha_mul(0.05));
     let body = match (w.step, &w.created) {
         (_, Some(id)) => sign_in(s, t, id),
         (0, _) => {
@@ -949,8 +949,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         }
         _ => config(s, t),
     };
-    // Web's `WizardPopup` scrolls once the dialog reaches the window's height.
-    panel = panel.child(col().key("add-provider-body").w_full().shrink().min_h(0.0).scroll(rune::ScrollSpec { stick_bottom: false }).child(body));
+    panel = panel.child(body);
     if let Some(error) = &s.ui.settings.error {
         panel = panel.child(notice(t, error));
     }
@@ -1005,6 +1004,7 @@ pub fn dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     kit::Dialog::new("add-provider", "Add provider")
         .open(true)
         .width(768.0)
+        .scroll_all()
         .description(format!("Add an account or configure a provider on {environment}."))
         .on_close(|s: &mut App| {
             super::accent::close(s);
@@ -1085,6 +1085,7 @@ fn chatgpt_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     kit::Dialog::new("add-chatgpt-account", title)
         .open(true)
         .width(512.0)
+        .scroll_all()
         .description("Each account has its own Codex instance and sign-in. Choose the other account on the sign-in page.")
         .on_close(close)
         .child(body)

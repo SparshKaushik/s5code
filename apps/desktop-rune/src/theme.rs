@@ -19,11 +19,13 @@ pub struct T {
     pub sb: Tokens,
     /// `--font-size-code` for chat code blocks, in layout points.
     pub code: f32,
+    /// One CSS `px` in layout points: px-literal sizes ignore the interface size, as on web.
+    pub px: f32,
 }
 
 pub fn theme(dark: bool) -> T {
     use crate::tokens::*;
-    if dark { T { dark, c: DARK, sb: SIDEBAR_DARK, code: 13.0 } } else { T { dark, c: LIGHT, sb: SIDEBAR_LIGHT, code: 13.0 } }
+    if dark { T { dark, c: DARK, sb: SIDEBAR_DARK, code: 13.0, px: 1.0 } } else { T { dark, c: LIGHT, sb: SIDEBAR_LIGHT, code: 13.0, px: 1.0 } }
 }
 
 /// Tailwind's `color/NN` opacity modifier: multiplies the token's own alpha.
