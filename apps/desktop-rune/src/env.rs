@@ -430,10 +430,6 @@ pub fn poll(s: &mut App) -> bool {
     true
 }
 
-pub fn keys(s: &App) -> Vec<String> {
-    std::iter::once(LOCAL.to_owned()).chain(s.ui.env.saved.iter().map(|e| e.id.clone())).collect()
-}
-
 /// Settings > Connections > Environments: this machine, each saved environment, and the pairing form.
 pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
     let mut rows = Vec::new();

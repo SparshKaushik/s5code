@@ -897,7 +897,7 @@ pub fn poll(s: &mut App) -> bool {
             }
             if let Some(i) = publish
                 && let Some((_, owner, _)) = publish_target(s)
-                && let Some(net) = net(s)
+                && let Some(net) = self::net(s)
             {
                 let pending = net.request("sourceControl.publishRepository", json!({
                     "cwd": root, "provider": PROVIDERS[i].kind, "repository": new_repository(&owner, &root), "visibility": "private",
