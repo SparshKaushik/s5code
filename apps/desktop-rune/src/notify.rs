@@ -98,7 +98,8 @@ struct ThreadToast {
 pub struct Ui {
     gate: Gate,
     previous: HashMap<String, Observation>,
-    sequence: Option<u64>,
+    /// The focused shell's sequence and `env::Ui::merges` last observed: a thread on any environment notifies.
+    sequence: Option<(u64, u64)>,
     /// The native window is in the background (`document.hasFocus()` is false).
     pub background: bool,
     toasts: Vec<ThreadToast>,
@@ -195,10 +196,10 @@ fn observe(s: &mut App, now: i64) -> bool {
         return false;
     }
     let st = s.state();
-    if !matches!(s.src, data::Source::Live(_)) || !st.shell_ready || s.ui.notify.sequence == Some(st.shell_sequence) {
+    let sequence = (st.shell_sequence, s.ui.env.merges);
+    if !matches!(s.src, data::Source::Live(_)) || !st.shell_ready || s.ui.notify.sequence == Some(sequence) {
         return false;
     }
-    let sequence = st.shell_sequence;
     let rows: Vec<_> = st.threads.iter().chain(st.archived.iter()).map(|row| (observe_row(row), row["latestRunStopRequested"] == true)).collect();
     let mut presented = vec![];
     let ui = &mut s.ui.notify;
