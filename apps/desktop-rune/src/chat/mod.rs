@@ -101,7 +101,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .w_full()
         .child(body)
         .children(timeline::scroll_to_end(s, cx, t, &lane))
-        .children(home::banner(s, t, &lane))
+        .children(timeline::banners::lane(s, t, &lane))
+        .children(timeline::banners::stack(s, cx, t, &lane))
         .child(composer::view(s, cx, t, &lane))
         .children(details::view(s, cx, t, shown, w))
         .children({

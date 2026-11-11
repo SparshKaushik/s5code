@@ -292,6 +292,42 @@ impl Net {
         });
         id
     }
+    /// POSTs a file's bytes to an `attachments.createUploadUrl` URL, on the RPC reply channel.
+    pub fn upload_file(&mut self, relative_url: &str, path: &std::path::Path, mime: &str) -> u64 {
+        let id = next_id();
+        let url = upload_url(&self.base_url, relative_url);
+        let bearer = self.bearer.clone();
+        let path = path.to_owned();
+        let mime = mime.to_owned();
+        let tx = self.incoming_tx.clone();
+        let wake = self.wake.clone();
+        std::thread::spawn(move || {
+            let result = (|| {
+                let url = url?;
+                let bytes = std::fs::read(&path).map_err(|e| json!({"message":e.to_string()}))?;
+                let response = ureq::AgentBuilder::new()
+                    .redirects(0)
+                    .timeout(std::time::Duration::from_secs(600))
+                    .build()
+                    .post(&url)
+                    .set("Authorization", &format!("Bearer {bearer}"))
+                    .set("Content-Type", &mime)
+                    .send_bytes(&bytes);
+                match response {
+                    Ok(_) => Ok(Value::Null),
+                    Err(ureq::Error::Status(code, response)) => Err(json!({"message": response
+                        .into_string()
+                        .ok()
+                        .filter(|t| !t.trim().is_empty())
+                        .unwrap_or_else(|| format!("HTTP {code}"))})),
+                    Err(error) => Err(json!({"message":error.to_string()})),
+                }
+            })();
+            let _ = tx.send(Incoming::Reply(id, result));
+            wake();
+        });
+        id
+    }
     pub fn request(&mut self, tag: &str, payload: Value) -> u64 {
         let id = next_id();
         if self
@@ -333,6 +369,16 @@ impl Drop for Net {
     fn drop(&mut self) {
         let _ = self.tx.send(Command::Stop);
     }
+}
+/// The absolute URL of a signed upload path; nothing outside the server's upload route.
+pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {
+    if !relative_url.starts_with("/api/attachments/upload/") {
+        return Err(json!({"message":"Unsupported upload path"}));
+    }
+    url::Url::parse(base)
+        .and_then(|base| base.join(relative_url))
+        .map(|url| url.to_string())
+        .map_err(|e| json!({"message":e.to_string()}))
 }
 pub fn uuid() -> String {
     ::uuid::Uuid::new_v4().to_string()

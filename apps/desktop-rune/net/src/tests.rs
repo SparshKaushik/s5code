@@ -227,6 +227,19 @@ fn pairing_and_uuid() {
     assert_eq!(&id[14..15], "4");
 }
 #[test]
+fn signed_upload_paths_join_the_server_origin() {
+    assert_eq!(
+        upload_url("http://host:3773", "/api/attachments/upload/abc.sig").unwrap(),
+        "http://host:3773/api/attachments/upload/abc.sig"
+    );
+    assert_eq!(
+        upload_url("https://relay.example/env/", "/api/attachments/upload/x").unwrap(),
+        "https://relay.example/api/attachments/upload/x"
+    );
+    assert!(upload_url("http://host", "/api/auth/session").is_err());
+    assert!(upload_url("http://host", "https://elsewhere/api/attachments/upload/x").is_err());
+}
+#[test]
 fn enrichment_preserves_shell_rows_and_resume_sequence() {
     let mut s = State::default();
     s.fold(Route::Shell,json!({"kind":"snapshot","snapshot":{"snapshotSequence":10,"threads":[{"id":"t"}],"archivedThreads":[],"projects":[{"id":"p","workspaceRoot":"/p","title":"original","repositoryIdentity":null}]}}));

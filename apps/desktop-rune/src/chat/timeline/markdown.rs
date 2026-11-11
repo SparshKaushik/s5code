@@ -1,13 +1,18 @@
 use super::find::Marks;
-use super::{copy_button, language_icons};
+use super::{copy_button, language_icons, md_links};
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
 use rune::{El, col, el, icon, row};
 use rune_kit::markdown::{Markdown, MarkdownStyle};
 
-fn style(t: &T) -> MarkdownStyle {
+/// Reply text: foreground at 90%.
+fn ink(t: &T) -> rune::Color {
+    t.c.foreground.alpha_mul(0.9)
+}
+
+fn style(t: &T, ink: rune::Color) -> MarkdownStyle {
     MarkdownStyle::neutral(t.dark)
-        .text(t.c.foreground.alpha_mul(0.9))
+        .text(ink)
         .muted(t.c.muted_foreground)
         .link(t.c.info_foreground)
         .body_font(theme::TEXT_SM.lh(22.75))
@@ -50,7 +55,7 @@ fn marks_for(marks: Option<&Marks>, src: &str) -> Vec<(Vec<std::ops::Range<usize
     marks.map_or_else(Vec::new, |m| m.markdown(src))
 }
 
-fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
+fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
     let mut out = col().w_full().gap(10.4);
     for (index, block) in source
         .trim()
@@ -58,7 +63,7 @@ fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
         .filter(|s| !s.trim().is_empty())
         .enumerate()
     {
-        let mut block_style = style(t);
+        let mut block_style = style(t, ink);
         if block.starts_with("####") {
             block_style =
                 block_style.heading_font(3, theme::weight(theme::TEXT_SM.lh(18.2), 600.0));
@@ -68,14 +73,14 @@ fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
             .nth(1)
             .is_some_and(|line| line.contains("---") && line.contains('|'));
         let content = if is_table {
-            table(app, block, t, marks)
+            table(app, block, t, marks, ink)
         } else {
             let content = Markdown::new(block)
                 .selectable(true)
                 .highlights(marks_for(marks, block))
-                .on_link_tx(|_: &mut App, url, tx| {
-                    let _ = tx.open_url(url);
-                })
+                .on_link_tx(md_links::open)
+                .link_style(md_links::look(t))
+                .link_help(md_links::help)
                 .render(&block_style);
             if index > 0 && block.starts_with('#') { col().pt(9.6).child(content) } else { content }
         };
@@ -84,15 +89,15 @@ fn prose(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
     out
 }
 
-fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
+fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
     if source.contains("\\|") || source.lines().nth(1).is_some_and(|line| line.contains(':')) {
         return Markdown::new(source)
             .selectable(true)
             .highlights(marks_for(marks, source))
-            .on_link_tx(|_: &mut App, url, tx| {
-                let _ = tx.open_url(url);
-            })
-            .render(&style(t));
+            .on_link_tx(md_links::open)
+            .link_style(md_links::look(t))
+            .link_help(md_links::help)
+            .render(&style(t, ink));
     }
     let lines: Vec<Vec<&str>> = source
         .lines()
@@ -153,11 +158,11 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
                     .child(
                         Markdown::new(*cell)
                             .highlights(marks_for(marks, cell))
-                            .on_link_tx(|_: &mut App, url, tx| {
-                                let _ = tx.open_url(url);
-                            })
+                            .on_link_tx(md_links::open)
+                            .link_style(md_links::look(t))
+                            .link_help(md_links::help)
                             .selectable(true)
-                            .render(&style(t).body_font(font)),
+                            .render(&style(t, ink).body_font(font)),
                     ),
             );
         }
@@ -177,6 +182,10 @@ fn table(app: &App, source: &str, t: &T, marks: Option<&Marks>) -> El {
 /// Parsing and highlighting a message is the costliest part of a timeline build, and the view
 /// rebuilds at least once a second (relative times), so each message builds once per version.
 pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
+    memoized(app, source, id, t, ink(t))
+}
+
+fn memoized(app: &App, source: &str, id: &str, t: &T, ink: rune::Color) -> El {
     let ui = &app.ui.chat.timeline;
     let fence = format!("{id}-fence-");
     let mut unwrapped: Vec<&String> = ui.wrapped.iter().filter(|k| k.starts_with(&fence)).collect();
@@ -187,19 +196,51 @@ pub fn view(app: &App, source: &str, id: &str, t: &T) -> El {
         "{:?}",
         (c.foreground, c.background, c.muted_foreground, c.info_foreground, c.border, c.primary, c.secondary, c.input)
     );
-    let version = (source, t.dark, colors, unwrapped, copied, t.code.to_bits());
-    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None))
+    let version = (source, t.dark, colors, format!("{ink:?}"), unwrapped, copied, t.code.to_bits());
+    rune::memo(format!("md-{id}"), version, || build(app, source, id, t, None, ink))
 }
 
 /// [`view`] with find-in-thread matches painted; rows with marks build fresh while the bar is open.
 pub fn view_marked(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
     match marks {
         None => view(app, source, id, t),
-        Some(_) => build(app, source, id, t, marks),
+        Some(_) => build(app, source, id, t, marks, ink(t)),
     }
 }
 
-fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
+/// A user message in its bubble's ink, each newline a line break (ChatMarkdown `lineBreaks`).
+pub fn user(app: &App, text: &str, id: &str, t: &T, marks: Option<&Marks>) -> El {
+    let source = user_source(text);
+    match marks {
+        None => memoized(app, &source, id, t, t.c.message_foreground),
+        Some(_) => build(app, &source, id, t, marks, t.c.message_foreground),
+    }
+}
+
+/// `text` with every newline outside a code fence made a hard break; find counts matches in this.
+pub fn user_source(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut fence: Option<&str> = None;
+    for line in text.split_inclusive('\n') {
+        let opens = ["```", "~~~"].into_iter().find(|m| line.trim_start().starts_with(*m));
+        match (fence, opens) {
+            (None, Some(marker)) => fence = Some(marker),
+            (Some(open), Some(marker)) if open == marker => fence = None,
+            (None, None) => {
+                if let Some(body) = line.strip_suffix('\n').filter(|b| !b.trim().is_empty()) {
+                    out.push_str(body.trim_end_matches('\r'));
+                    out.push_str("  \n");
+                    continue;
+                }
+            }
+            _ => {}
+        }
+        out.push_str(line);
+    }
+    out
+}
+
+fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>, ink: rune::Color) -> El {
     let mut out = col().w_full().gap(10.4);
     let lines: Vec<_> = source.split_inclusive('\n').collect();
     let mut start = 0;
@@ -216,7 +257,7 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
             continue;
         };
         if i > start {
-            out = out.child(prose(app, &lines[start..i].concat(), t, marks));
+            out = out.child(prose(app, &lines[start..i].concat(), t, marks, ink));
         }
         let language = line
             .trim_start_matches(marker)
@@ -274,7 +315,7 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
             .highlights(marks_for(marks, &fenced))
             .scroll_wide(!wrap)
             .render(
-                &style(t)
+                &style(t, ink)
                     .code_block(rune::Color::TRANSPARENT, rune::Color::TRANSPARENT)
                     .code_block_padding(15.4, 11.8),
             );
@@ -301,10 +342,23 @@ fn build(app: &App, source: &str, id: &str, t: &T, marks: Option<&Marks>) -> El 
         start = i;
     }
     if start < lines.len() {
-        out = out.child(prose(app, &lines[start..].concat(), t, marks));
+        out = out.child(prose(app, &lines[start..].concat(), t, marks, ink));
     }
     if source.is_empty() {
         out = out.child(icon(&icons::ELLIPSIS, 16.0).color(t.c.muted_foreground));
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::user_source;
+
+    #[test]
+    fn user_text_keeps_its_line_breaks_outside_code() {
+        assert_eq!(user_source("a\nb"), "a  \nb");
+        assert_eq!(user_source("a\n\nb\n"), "a  \n\nb  \n");
+        assert_eq!(user_source("x\n```\nfn a()\nfn b()\n```\ny"), "x  \n```\nfn a()\nfn b()\n```\ny");
+        assert_eq!(user_source("~~~\n```\n~~~\nz"), "~~~\n```\n~~~\nz");
+    }
 }

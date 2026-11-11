@@ -105,7 +105,11 @@ fn commit_rename(s: &mut App) {
     let Some(edit) = s.ui.chat.topbar.rename.take() else { return };
     let next = edit.text.trim().to_string();
     let Route::Thread(id) = s.frame_route().clone() else { return };
-    if next.is_empty() || next == title(s) {
+    if next.is_empty() {
+        crate::shell::palette::toast(s, "Thread title cannot be empty", None);
+        return;
+    }
+    if next == title(s) {
         return;
     }
     match &mut s.src {
