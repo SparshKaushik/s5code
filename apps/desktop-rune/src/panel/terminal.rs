@@ -197,10 +197,10 @@ struct Popup {
 pub struct Ui {
     sessions: Vec<Session>,
     pub menu: Option<Menu>,
-    pending: Vec<u64>,
+    /// Requests whose failure is written into their terminal, as web's `writeSystemMessage`.
+    pending: Vec<(u64, String, String)>,
     /// `terminal.close` requests, to type `exit` when one fails.
     closing: Vec<(u64, String, String)>,
-    pub error: Option<String>,
     /// The palette last drawn with, for colour queries answered outside the view.
     palette: std::cell::Cell<Option<Palette>>,
     /// Edits for a field whose session closed under it.
@@ -282,7 +282,7 @@ pub fn close(app: &mut App, thread: &str, id: &str) {
             "terminal.close",
             json!({"threadId":thread,"terminalId":id,"deleteHistory":true}),
         );
-        ui.pending.push(request);
+        ui.pending.push((request, thread.to_string(), id.to_string()));
         ui.closing.push((request, thread.to_string(), id.to_string()));
     }
 }
@@ -313,7 +313,7 @@ fn send(app: &mut App, thread: &str, id: &str, data: String) {
             "terminal.write",
             json!({"threadId":thread,"terminalId":id,"data":&rest[..end]}),
         );
-        app.ui.panel.terminal.pending.push(request);
+        app.ui.panel.terminal.pending.push((request, thread.to_string(), id.to_string()));
         rest = &rest[end..];
     }
 }
@@ -363,9 +363,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         }
     }
     let pending = std::mem::take(&mut app.ui.panel.terminal.pending);
-    for request in pending {
+    for (request, thread, id) in pending {
         match app.src.net().and_then(|net| net.take_reply(request)) {
-            None => app.ui.panel.terminal.pending.push(request),
+            None => app.ui.panel.terminal.pending.push((request, thread, id)),
             Some(result) => {
                 let closing = app
                     .ui
@@ -375,12 +375,15 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                     .iter()
                     .position(|(r, ..)| *r == request);
                 if let Some(index) = closing {
-                    let (_, thread, id) = app.ui.panel.terminal.closing.remove(index);
+                    app.ui.panel.terminal.closing.remove(index);
                     if result.is_err() {
                         fallback_exit(app, &thread, &id);
                     }
-                } else if let Err(error) = result {
-                    app.ui.panel.terminal.error = Some(data::s(&error, "message").to_string());
+                } else if let Err(error) = result
+                    && let Some(session) = app.ui.panel.terminal.get_mut(&thread, &id)
+                {
+                    let message = data::s(&error, "message");
+                    system_line(session, if message.is_empty() { "Terminal request failed" } else { message });
                     changed = true;
                 }
             }
@@ -459,7 +462,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
                 "terminal.resize",
                 json!({"threadId":thread,"terminalId":id,"cols":cols,"rows":rows}),
             );
-            app.ui.panel.terminal.pending.push(request);
+            app.ui.panel.terminal.pending.push((request, thread, id));
         }
     }
     for (thread, id, data) in writes {
@@ -500,13 +503,13 @@ fn fallback_exit(app: &mut App, thread: &str, id: &str) {
             "terminal.write",
             json!({"threadId":thread,"terminalId":id,"data":"exit\n"}),
         );
-        app.ui.panel.terminal.pending.push(request);
+        app.ui.panel.terminal.pending.push((request, thread.to_string(), id.to_string()));
     }
 }
 
 fn apply(session: &mut Session, event: &Value) {
     if !event["error"].is_null() {
-        session.status = data::s(&event["error"], "message").into();
+        fail(session, data::s(&event["error"], "message"));
         return;
     }
     let sequence = event["sequence"].as_u64();
@@ -563,12 +566,24 @@ fn apply(session: &mut Session, event: &Value) {
             session.status = "closed".into();
             note_exit(session);
         }
-        "error" => session.status = data::s(event, "message").into(),
+        "error" => fail(session, data::s(event, "message")),
         _ => {}
     }
     if sequence.is_some() {
         session.sequence = sequence;
     }
+}
+
+/// An attach or process error, written once into the terminal as web does.
+fn fail(session: &mut Session, message: &str) {
+    if session.status != message {
+        session.status = message.into();
+        system_line(session, message);
+    }
+}
+
+fn system_line(session: &mut Session, message: &str) {
+    session.vt.feed(&format!("\r\n\x1b[90m[terminal] {message}\x1b[0m\r\n"));
 }
 
 /// Writes the web's system line once when the process is gone.
@@ -582,9 +597,7 @@ fn note_exit(session: &mut Session) {
     } else {
         "Process exited"
     };
-    session
-        .vt
-        .feed(&format!("\r\n\x1b[90m[terminal] {message}\x1b[0m\r\n"));
+    system_line(session, message);
 }
 
 /// The terminal's own clipboard chords (`isTerminalCopyShortcut`, `isTerminalPasteShortcut`,
@@ -721,7 +734,8 @@ struct Metrics {
 fn metrics(app: &App) -> Metrics {
     let size = font_size(&app.client_settings.values);
     let cell_h = (size * 1.35).round().max(1.);
-    let font = theme::mono(rune::TextStyle::new(size, 400.)).lh(cell_h);
+    let family = crate::settings::fonts::terminal_family(&app.client_settings.values);
+    let font = rune::TextStyle::new(size, 400.).family(family).lh(cell_h);
     let cell_w = rune::text::advance("MMMMMMMMMM", font) / 10.;
     Metrics {
         font,
@@ -1401,6 +1415,12 @@ mod tests {
         );
         assert!(session.vt.text().ends_with("[terminal] Process exited"));
         assert!(session.exit_noted);
+        // An attach error is written once, however often the stream repeats it.
+        let failed = json!({"error":{"message":"Terminal attach failed"}});
+        apply(&mut session, &failed);
+        apply(&mut session, &failed);
+        assert!(session.vt.text().ends_with("[terminal] Terminal attach failed"));
+        assert_eq!(session.vt.text().matches("Terminal attach failed").count(), 1);
     }
 
     #[test]

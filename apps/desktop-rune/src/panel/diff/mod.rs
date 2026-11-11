@@ -273,13 +273,13 @@ fn select(app: &mut App, scope: Scope) {
 }
 
 fn is_repo(app: &App) -> Option<bool> {
-    let (_, cwd) = super::context(app)?;
+    let (_, cwd) = super::diff_context(app)?;
     app.state().vcs.get(&cwd).and_then(|v| v["local"]["isRepo"].as_bool())
 }
 
 /// The thread's turns with a checkpoint, newest first, one per turn count.
 fn turns(app: &App) -> Vec<Turn> {
-    let rows = super::context(app)
+    let rows = super::diff_context(app)
         .and_then(|(id, _)| app.state().thread_views.get(&id))
         .and_then(|v| v.projection["checkpoints"].as_array().cloned())
         .unwrap_or_default();
@@ -339,7 +339,7 @@ fn signature(app: &App, scope: &Scope) -> u64 {
         Scope::Turn(_) => turn_of(scope, &turns(app)).hash(&mut h),
         Scope::ToolCall { .. } => {}
         _ => {
-            if let Some((_, cwd)) = super::context(app) {
+            if let Some((_, cwd)) = super::diff_context(app) {
                 let local = app.state().vcs.get(&cwd).and_then(|v| v["local"].as_object().cloned()).unwrap_or_default();
                 for (k, v) in local.iter().filter(|(k, _)| !k.ends_with("At")) {
                     (k, v.to_string()).hash(&mut h);
@@ -352,7 +352,7 @@ fn signature(app: &App, scope: &Scope) -> u64 {
 
 pub fn load(app: &mut App) {
     sync_settings(app);
-    let Some((thread, cwd)) = super::context(app) else { return };
+    let Some((thread, cwd)) = super::diff_context(app) else { return };
     let scope = app.ui.panel.diff.scope.clone();
     let ignore_ws = ignore_ws(app);
     let request = match &scope {
@@ -407,7 +407,7 @@ fn load_refs(app: &mut App, cwd: &str) {
 }
 
 fn load_commits(app: &mut App) {
-    let Some((_, cwd)) = super::context(app) else { return };
+    let Some((_, cwd)) = super::diff_context(app) else { return };
     let mut req = json!({ "cwd": cwd });
     if let Some(base) = &app.ui.panel.diff.base_ref {
         req["baseRef"] = json!(base);
@@ -447,7 +447,7 @@ pub fn expand(app: &mut App, f: usize, h: usize, how: Expand) {
         sync_extras(app);
         return;
     }
-    let Some((_, cwd)) = super::context(app) else { return };
+    let Some((_, cwd)) = super::diff_context(app) else { return };
     let Some(scope) = ui.shown.clone() else { return };
     let change = match file.status {
         FileStatus::Added => "new",
@@ -795,7 +795,7 @@ fn incomplete(files: &[FileDiff], meta: &[FileStat]) -> Vec<FileStat> {
 
 /// Asks for each file's own patch, as web's lazy per-file loads do (`input.file`).
 fn fetch_files(app: &mut App, scope: &Scope, files: Vec<FileStat>) {
-    let Some((_, cwd)) = super::context(app) else { return };
+    let Some((_, cwd)) = super::diff_context(app) else { return };
     let ignore_ws = ignore_ws(app);
     let base = app.ui.panel.diff.base_ref.clone();
     let mut ids = vec![];
@@ -1253,7 +1253,7 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
     }
     let git_ok = is_repo(app) != Some(false);
     if ui.scope == Scope::Branch && git_ok {
-        let head = ui.source.head.clone().or_else(|| super::context(app).and_then(|(_, cwd)| app.state().vcs.get(&cwd).and_then(|v| v["local"]["refName"].as_str().map(str::to_string)))).unwrap_or_else(|| "HEAD".into());
+        let head = ui.source.head.clone().or_else(|| super::diff_context(app).and_then(|(_, cwd)| app.state().vcs.get(&cwd).and_then(|v| v["local"]["refName"].as_str().map(str::to_string)))).unwrap_or_else(|| "HEAD".into());
         let base = ui.source.base.clone().or(ui.base_ref.clone()).unwrap_or_else(|| "Automatic".into());
         let mut refs = row().min_w(0.0).shrink().gap(8.0).center_y().label(format!("Comparing {head} against {base}"));
         // Too narrow for both refs: keep the target readable and drop the head, the thread's own branch.
@@ -1406,7 +1406,12 @@ fn tree_pane(app: &App, t: &T) -> El {
                 .label(file.path().to_string())
                 .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground))
                 .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink())
-                .on_press_tx(move |s: &mut App, tx| s.ui.panel.diff.state.scroll_to_file(f, tx))
+                .on_press_tx(move |s: &mut App, tx| {
+                    let ui = &mut s.ui.panel.diff;
+                    ui.touched = true;
+                    ui.state.set_collapsed(f, false);
+                    ui.state.scroll_to_file(f, tx);
+                })
         };
         list = list.child(line);
     }
@@ -1423,7 +1428,7 @@ fn tree_pane(app: &App, t: &T) -> El {
 
 fn body(app: &App, t: &T) -> El {
     let ui = &app.ui.panel.diff;
-    let Some(_) = super::context(app) else {
+    let Some(_) = super::diff_context(app) else {
         if !ui.state.files().is_empty() {
             return diff_body(app, t);
         }
