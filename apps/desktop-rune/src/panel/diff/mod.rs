@@ -1,7 +1,7 @@
 //! The Diff surface, ported from web's DiffPanel: a scope picker over the same review and
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
 mod comments;
-mod file_menu;
+pub(crate) mod file_menu;
 mod find;
 mod state;
 mod view;
@@ -1573,7 +1573,6 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     if ui.refs_combo.open && ui.scope == Scope::Branch {
         refs_combo(app, t, &mut layer);
     }
-    file_menu::overlay(app, t, &mut layer);
     layer
 }
 

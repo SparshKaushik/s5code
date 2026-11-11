@@ -596,7 +596,11 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
         .shrink()
         .key("title")
         .cursor(Cursor::Pointer)
-        .on_press(move |s: &mut App| crate::panel::open_file(s, open.clone()))
+        .on_press(move |s: &mut App| {
+            if let Some(path) = crate::panel::workspace_path(s, &open) {
+                crate::panel::open_file(s, path);
+            }
+        })
         .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut Tx| super::file_menu::open(s, menu.clone(), (at.x, at.y)));
     let mut name = row().key("name").items_center().gap(6.0).min_w(0.0).shrink();
     if let (FileStatus::Renamed | FileStatus::Copied, Some(old)) = (file.status, file.old_path.as_deref()) {

@@ -5,6 +5,7 @@ mod diff;
 pub mod drawer;
 mod files;
 pub mod popout;
+mod proactive;
 pub(crate) mod preview;
 pub mod browser_import;
 pub(crate) mod terminal;
@@ -61,6 +62,7 @@ pub struct Ui {
     /// What `right-panel.json` holds; `None` until the first poll reads it.
     saved: Option<Value>,
     pub waker: Option<Waker>,
+    proactive: proactive::Watch,
 }
 #[derive(Default)]
 struct Stash {
@@ -87,6 +89,7 @@ impl Default for Ui {
             stash_key: String::new(),
             saved: None,
             waker: None,
+            proactive: Default::default(),
         }
     }
 }
@@ -113,6 +116,27 @@ fn diff_context(app: &App) -> Option<(String, String)> {
     }
     let cwd = workspace(app)?;
     Some((crate::chat::composer::draft_key(app, &app.route), cwd))
+}
+/// A diff's file path inside the open workspace (`resolveDiffPathForWorkspace`), or `None` when
+/// it lies outside. A checkout thread reads repository-relative paths against the project's
+/// repository root; a worktree thread is its own root.
+pub(crate) fn workspace_path(app: &App, file_path: &str) -> Option<String> {
+    let cwd = workspace(app);
+    let thread = match &app.route {
+        Route::Thread(id) => app.state().threads.iter().find(|v| v["id"] == *id),
+        _ => None,
+    };
+    let project = match thread {
+        Some(t) => app.state().projects.iter().find(|p| p["id"] == t["projectId"]),
+        None => crate::chat::home::draft_project(app),
+    };
+    let in_worktree = thread.is_some_and(|t| !data::s(t, "worktreePath").is_empty());
+    let root = project.map(|p| data::s(&p["repositoryIdentity"], "rootPath")).filter(|r| !in_worktree && !r.is_empty());
+    diff::file_menu::resolve_diff_path(file_path, cwd.as_deref(), root)
+}
+/// The changed-files card's right-click menu: the diff file menu, outside the panel.
+pub fn file_menu(app: &mut App, path: String, at: (f32, f32)) {
+    diff::file_menu::open(app, path, at);
 }
 /// The Files surface's root: the thread's workspace, or on a new-thread draft its project's.
 fn workspace(app: &App) -> Option<String> {
@@ -473,6 +497,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         if app.ui.panel.active == Some(Surface::Terminal) {
             drawer::open_panel(app);
         }
+        context_changed |= proactive::poll(app);
     }
 
     let changed = diff::poll(app)
@@ -912,6 +937,7 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
     if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
         out.extend(diff::overlays(app, t));
     }
+    diff::file_menu::overlay(app, t, &mut out);
     terminal::overlays(app, t, &mut out);
     drawer::overlays(app, t, &mut out);
     if app.ui.shell.panel_open {
