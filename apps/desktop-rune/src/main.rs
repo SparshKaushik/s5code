@@ -141,10 +141,15 @@ fn poll_host(s: &mut App) -> bool {
         host::Event::Ready { url, token } => {
             let waker = s.ui.panel.waker.clone().expect("setup stores the waker");
             s.ui.desktop.server = Some((url.clone(), token.clone()));
+            s.ui.desktop.startup_failure = None;
             *env::local_mut(s) = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
             if s.ui.env.active == env::LOCAL {
                 s.navigate(s.route.clone());
             }
+        }
+        // Electron keeps the first failure's details while later attempts retry.
+        host::Event::Failing(failure) => {
+            s.ui.desktop.startup_failure.get_or_insert(failure);
         }
         host::Event::Failed(reason) => {
             eprintln!("s5code-rune: {reason}");
