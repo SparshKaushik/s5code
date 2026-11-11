@@ -9,6 +9,7 @@ mod folders;
 pub mod logic;
 mod menu;
 mod row;
+pub mod share;
 mod snooze;
 mod updates;
 
@@ -39,6 +40,13 @@ pub struct Dragging {
     pub key: String,
     pub section: Section,
     pub dy: f32,
+    /// Dragged out of the list sideways (or from Working): the rows go to the composer as
+    /// thread context instead of moving.
+    pub context: bool,
+    /// The pointer, in layout points.
+    pub at: (f32, f32),
+    /// The list's top when the drag began, so the row keeps under the pointer as it scrolls.
+    pub scroll: Option<f32>,
 }
 
 /// A client-side write the server has not echoed yet, dropped once the row's `updatedAt` moves.
@@ -76,6 +84,14 @@ pub struct Ui {
     pub selected: HashSet<String>,
     pub anchor: Option<String>,
     pub drag: Option<Dragging>,
+    /// The pressed row's rect and the press point, in layout points.
+    pub press: Option<([f32; 4], f32, f32)>,
+    /// Last frame's layout, read by drag handlers: the hovered row, the list top, the edge the
+    /// pointer sits near (-1 top, 1 bottom) and the drop target with its stickiness applied.
+    pub hover_rect: std::cell::Cell<Option<[f32; 4]>>,
+    pub list_y: std::cell::Cell<f32>,
+    pub drag_edge: std::cell::Cell<i8>,
+    pub drag_target: std::cell::RefCell<Option<logic::DropTarget>>,
     pub menu: Option<menu::Menu>,
     pub patches: HashMap<String, Patch>,
     pub back: Vec<Route>,
@@ -86,6 +102,10 @@ pub struct Ui {
     pub delete: Option<String>,
     /// Archive, unpin and bulk-delete confirmations (`dialogs.confirm`).
     pub confirm: Option<Confirm>,
+    /// The open "Share with guest" dialog.
+    pub guest: Option<share::Guest>,
+    /// A pending `projects.createFromThread` and the thread's title for its toast.
+    pub to_project: Option<(u64, String)>,
     /// The Custom… snooze dialog and the threads it snoozes.
     pub custom_snooze: Option<snooze::Custom>,
     /// The row whose hover card (`ThreadHoverCard`) is showing.
@@ -95,6 +115,9 @@ pub struct Ui {
     pub scope_open: bool,
     /// The scope picker's group order, frozen while it is open so a pin doesn't move the row.
     pub scope_order: Vec<String>,
+    /// The picker's search and its highlighted row ("all" or a group key; first when `None`).
+    pub scope_search: TextEdit,
+    pub scope_active: Option<String>,
     /// The boring sidebar's folders: which are folded, hover and the folder menu.
     pub folders: folders::State,
     pub visits: logic::Visits,
@@ -174,7 +197,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("sidebar-drag", |s| {
         scene_home(s);
         if let Some(id) = thread_titled(s, "Todo list replay") {
-            s.ui.shell.sidebar.drag = Some(Dragging { key: id, section: Section::Active, dy: -250.0 });
+            s.ui.shell.sidebar.drag = Some(Dragging { key: id, section: Section::Active, dy: -250.0, context: false, at: (0.0, 0.0), scroll: None });
         }
     }),
     ("sidebar-light", |s| {
@@ -283,7 +306,11 @@ pub fn toggle_scope(s: &mut App) {
         });
         s.ui.shell.sidebar.scope_order = order.into_iter().map(|n| groups[n].key.clone()).collect();
     }
-    s.ui.shell.sidebar.scope_open = open;
+    let ui = &mut s.ui.shell.sidebar;
+    ui.scope_open = open;
+    ui.scope_search = TextEdit::default();
+    ui.scope_search.focused = open;
+    ui.scope_active = None;
 }
 
 /// `boringSidebarEnabled`, or the legacy sidebar it replaced.
@@ -726,7 +753,7 @@ pub fn start_rename(s: &mut App, id: &str) {
 /// thread on screen.
 pub fn poll(s: &mut App) -> bool {
     folders::ensure_loaded(s);
-    let searched = poll_content(s) | favicon::poll(s) | updates::poll(s);
+    let searched = poll_content(s) | favicon::poll(s) | updates::poll(s) | share::poll(s);
     let shown = match &s.route {
         Route::Thread(id) => Some(id.clone()),
         _ => None,
@@ -831,6 +858,67 @@ fn confirm_dialog(s: &App, model: &Model, t: &T, overlays: &mut Vec<El>) {
         .child(row().w_full().gap(8.0).justify_end().child(cancel).child(confirm_button))
         .on_close(|s: &mut App| s.ui.shell.sidebar.confirm = None)
         .build(t, overlays);
+}
+
+/// The rows a drag carries: the selection when the dragged row is in it, else that row.
+pub fn dragged_ids(s: &App, model: &Model, key: &str) -> Vec<String> {
+    let ui = &s.ui.shell.sidebar;
+    if !ui.selected.contains(key) {
+        return vec![key.to_string()];
+    }
+    let items = model.items(ui);
+    items.iter().filter_map(|it| match it {
+        Item::Thread { key, .. } if ui.selected.contains(key) => Some(key.clone()),
+        _ => None,
+    }).collect()
+}
+
+/// A sidebar drag dropped on the composer: each thread joins the draft as a context chip.
+pub fn add_thread_contexts(s: &mut App, ids: &[String]) {
+    let environment = s.state().config.as_ref().map(|c| crate::data::s(&c["environment"], "environmentId").to_string()).unwrap_or_default();
+    let model = Model::build(s);
+    let records: Vec<Value> = ids
+        .iter()
+        .filter_map(|id| model.thread(id))
+        .map(|th| {
+            json!({
+                "version": 1, "kind": "thread", "contextId": crate::chat::composer::chips::context_id("thread", &th.id),
+                "label": crate::chat::composer::chips::sanitize_label(&th.title, "thread"),
+                "title": th.title, "environmentId": environment, "threadId": th.id,
+            })
+        })
+        .collect();
+    for record in records {
+        crate::chat::composer::add_context(s, record);
+    }
+}
+
+/// The context drag's feedback: the composer lights up as the drop target and a ghost follows
+/// the pointer (`SidebarThreadDragOverlay`).
+fn drag_ghost(s: &App, model: &Model, cx: &mut Cx<App>, t: &T, d: &Dragging, overlays: &mut Vec<El>) {
+    use crate::theme::{self, AlphaMul, radius};
+    if let Some(r) = cx.layout("composer") {
+        overlays.push(el().absolute(r[0], r[1]).size(r[2], r[3]).radius(radius::XL).fill(t.c.accent.alpha_mul(0.2)).border(2.0, t.c.primary.alpha_mul(0.7)).a11y_hidden());
+    }
+    let n = dragged_ids(s, model, &d.key).len();
+    let title = model.thread(&d.key).map(|t| t.title.clone()).unwrap_or_default();
+    let mut ghost = row()
+        .key("sb-drag-ghost")
+        .absolute(d.at.0 + 12.0, d.at.1 + 12.0)
+        .max_w(260.0)
+        .gap(8.0)
+        .px(10.0)
+        .py(6.0)
+        .center_y()
+        .radius(radius::LG)
+        .fill(t.c.popover)
+        .border(1.0, t.c.border)
+        .child(rune::icon(&crate::icons::MESSAGES_SQUARE, 14.0).color(t.c.muted_foreground))
+        .child(rune::text(title).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink());
+    if n > 1 {
+        ghost = ghost.child(rune::text(format!("+{}", n - 1)).font(theme::XS_MEDIUM).color(t.c.muted_foreground));
+    }
+    overlays.push(ghost.a11y_hidden());
 }
 
 fn reorder(s: &mut App, kind: &str, assignments: &[(String, String)]) {
@@ -1098,6 +1186,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
             }
             delete_dialog(s, &model, t, overlays);
         }
+        share::dialog(s, t, overlays);
         return el().key("sidebar").w(0.0).h_full();
     }
     let model = Model::build(s);
@@ -1109,8 +1198,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         overlays.extend(menu::view(s, cx, &model, th, m, t));
     }
     row::hover_card(s, &model, t, overlays);
+    if let Some(d) = ui.drag.as_ref().filter(|d| d.context) {
+        drag_ghost(s, &model, cx, t, d, overlays);
+    }
     delete_dialog(s, &model, t, overlays);
     confirm_dialog(s, &model, t, overlays);
+    share::dialog(s, t, overlays);
     snooze::dialog(s, t, overlays);
     chrome::scope_menu(s, &model, t, overlays);
     folders::menu(s, t, overlays);
