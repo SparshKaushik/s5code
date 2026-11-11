@@ -681,8 +681,8 @@ fn search_results(s: &App, t: &T, query: &str) -> El {
                 .gap(8.0)
                 .items_start()
                 .radius(8.0)
-                .fill(if index == active { t.sb.sidebar_row_selected } else { t.c.sidebar })
-                .hover(t.sb.sidebar_row_hover)
+                .fill(if index == active { t.c.sidebar_row_selected } else { t.c.sidebar })
+                .hover(t.c.sidebar_row_hover)
                 .role("option")
                 .label(item.title.clone())
                 .on_hover(move |s: &mut App| s.ui.settings.search_active = index)
@@ -813,11 +813,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .center_y()
                     .radius(8.0)
                     .fill(if active {
-                        t.sb.sidebar_row_selected
+                        t.c.sidebar_row_selected
                     } else {
                         t.c.sidebar
                     })
-                    .hover(t.sb.sidebar_row_hover)
+                    .hover(t.c.sidebar_row_hover)
                     .focusable(true)
                     .role("link")
                     .label(*title)

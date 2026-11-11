@@ -314,7 +314,11 @@ fn pair(host: String, code: String) -> Result<Saved, String> {
     Ok(Saved { id, label, base, bearer })
 }
 
-fn add(s: &mut App) {
+pub fn pairing(s: &App) -> bool {
+    s.ui.env.pairing.is_some()
+}
+
+pub(crate) fn add(s: &mut App) {
     if s.ui.env.pairing.is_some() {
         return;
     }

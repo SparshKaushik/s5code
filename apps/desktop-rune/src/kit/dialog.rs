@@ -120,10 +120,8 @@ impl Dialog {
                 .shrink()
                 .min_h(0.)
                 .scroll(rune::ScrollSpec { stick_bottom: false })
-                .padding(24.)
-                .gap(24.)
-                .child(content)
-                .children(self.body);
+                // Padding on the scroller itself is not part of its scroll extent.
+                .child(col().w_full().padding(24.).gap(24.).child(content).children(self.body));
             panel.child(scroll)
         } else {
             panel.padding(24.).gap(24.).child(content).children(self.body)

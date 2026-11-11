@@ -324,20 +324,26 @@ fn saved_row(s: &App, t: &T, saved: &Saved) -> El {
 
 /// Web `EmptyRemoteEnvironments` without T3 Connect.
 fn empty(t: &T) -> El {
+    // `EmptyMedia variant="icon"`: two tilted cards behind the icon tile.
+    let card = || el().size(36.0, 36.0).absolute(0.0, 0.0).radius(theme::radius::MD).border(1.0, t.c.border).fill(t.c.card);
+    let media = el()
+        .size(36.0, 36.0)
+        // `mb-6` plus `Empty`'s `gap-6` before the header.
+        .mb(48.0)
+        .child(card().origin(0.0, 1.0).rotate(-10f32.to_radians()).scale(0.84).offset(-2.0, -1.0))
+        .child(card().origin(1.0, 1.0).rotate(10f32.to_radians()).scale(0.84).offset(2.0, -1.0))
+        .child(
+            card()
+                .center()
+                .shadow(1.0, 2.0, rune::Color::BLACK.alpha(0.05))
+                .child(icon(&icons::CHEVRONS_LEFT_RIGHT_ELLIPSIS, 18.0).color(t.c.foreground)),
+        );
     col()
         .w_full()
         .min_h(208.0)
-        .padding(24.0)
+        .padding(48.0)
         .center()
-        .child(
-            el().size(36.0, 36.0)
-                .mb(24.0)
-                .radius(6.0)
-                .border(1.0, t.c.border)
-                .fill(t.c.card)
-                .center()
-                .child(icon(&icons::CHEVRONS_LEFT_RIGHT_ELLIPSIS, 18.0).color(t.c.foreground)),
-        )
+        .child(media)
         .child(
             text("No saved remote environments")
                 .font(theme::weight(theme::TEXT_XL, theme::SEMIBOLD))
@@ -440,8 +446,39 @@ fn add_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         .width(768.0)
         .on_close(|s: &mut App| s.ui.settings.connections.adding = None)
         .child(row().w_full().gap(12.0).child(card).child(el().grow(1.0)))
-        .child(env::pairing_form(s, t))
+        .child(remote_fields(s, t))
         .build(t, layers);
+}
+
+/// Web `renderRemoteModeBody` without the T3 Connect route offer.
+fn remote_fields(s: &App, t: &T) -> El {
+    let env = &s.ui.env;
+    let pairing = env::pairing(s);
+    let field = |label: &str, input: El| col().gap(6.0).child(text(label.to_owned()).font(theme::XS_MEDIUM).color(t.c.foreground)).child(input);
+    let host = kit::Input::new(&env.host).placeholder("backend.example.com").on_edit(|s: &mut App| &mut s.ui.env.host).on_submit(|s: &mut App, _| env::add(s)).build(t).single_line();
+    let code = kit::Input::new(&env.code).placeholder("PAIRCODE").on_edit(|s: &mut App| &mut s.ui.env.code).on_submit(|s: &mut App, _| env::add(s)).build(t).single_line();
+    let mut body = col()
+        .w_full()
+        .gap(16.0)
+        .child(
+            col()
+                .w_full()
+                .gap(12.0)
+                .child(row().w_full().gap(12.0).child(field("Host", host).grow(1.0).shrink().min_w(0.0)).child(field("Pairing code", code).w(160.0)))
+                .child(text("Paste a full pairing URL here to fill both fields automatically.").font(theme::TEXT_2XS).color(t.c.muted_foreground).mt(4.0)),
+        );
+    if let Some(error) = &env.error {
+        body = body.child(text(error.clone()).font(theme::TEXT_XS).color(t.c.destructive).wrap());
+    }
+    body.child(
+        kit::Button::new(if pairing { "Adding…" } else { "Add environment" })
+            .variant("outline")
+            .icon(&icons::PLUS)
+            .disabled(pairing)
+            .on_press(env::add)
+            .build(t)
+            .w_full(),
+    )
 }
 
 /// Web `offersLinkedEnvironments`.
