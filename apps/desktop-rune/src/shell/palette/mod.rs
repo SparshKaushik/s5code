@@ -76,6 +76,8 @@ enum Action {
     ContentSearch,
     OpenFile(String),
     ProjectSettings(String),
+    /// A message match: open its thread with find on the matched words.
+    FindMessage(String, String),
 }
 enum Trailing {
     None,
@@ -498,7 +500,7 @@ fn items(s: &App) -> Vec<Item> {
             .state()
             .threads
             .iter()
-            .filter(|v| v["archivedAt"].is_null() && !(browsing && open_thread == Some(data::s(v, "id"))))
+            .filter(|v| v["archivedAt"].is_null() && listed(v) && !(browsing && open_thread == Some(data::s(v, "id"))))
             .collect();
         threads.sort_by_key(|v| std::cmp::Reverse(recent_use(v)));
 
@@ -792,19 +794,17 @@ fn items(s: &App) -> Vec<Item> {
                 ) {
                     continue;
                 }
-                let title = s
-                    .state()
-                    .threads
-                    .iter()
-                    .find(|v| data::s(v, "id") == id)
-                    .map(|v| data::s(v, "title"))
-                    .unwrap_or("Thread");
+                let thread = subject(hit);
+                if thread.is_some_and(|v| !listed(v)) {
+                    continue;
+                }
+                let snippet = data::s(hit, "snippet");
                 let mut row = item(
-                    title,
+                    thread.map(|v| data::s(v, "title")).unwrap_or("Thread"),
                     "In messages",
                     &icons::MESSAGE_SQUARE,
                     "",
-                    Action::Navigate(Route::Thread(id.into())),
+                    Action::FindMessage(id.into(), find_query(snippet, &query)),
                 );
                 row.subtitle = Some(data::s(hit, "snippet").into());
                 out.push(row);
@@ -813,6 +813,31 @@ fn items(s: &App) -> Vec<Item> {
     }
     out
 }
+/// The palette lists top-level threads and forks, not subagents or side chats.
+fn listed(thread: &serde_json::Value) -> bool {
+    thread["lineage"]["relationshipToParent"] != "subagent" && thread["lineage"]["sideChat"] != true
+}
+
+/// `findForMessageMatch`: the snippet's own spelling of the whole query when it appears there,
+/// else of its longest word, preferring a whole-word occurrence.
+fn find_query(snippet: &str, query: &str) -> String {
+    use crate::chat::timeline::find::find_plain;
+    let phrase = query.split_whitespace().collect::<Vec<_>>().join(" ");
+    if let Some(r) = find_plain(snippet, &phrase).into_iter().next().filter(|_| phrase.contains(' ')) {
+        return snippet[r].to_string();
+    }
+    let word = query.split_whitespace().filter(|w| w.chars().count() >= 3).fold("", |a, w| if w.chars().count() > a.chars().count() { w } else { a });
+    let word = if word.is_empty() { phrase.as_str() } else { word };
+    let ranges = find_plain(snippet, word);
+    let whole = ranges.iter().find(|r| !snippet[r.end..].chars().next().is_some_and(char::is_alphanumeric)).or(ranges.first());
+    whole.map_or_else(|| word.to_string(), |r| snippet[r.clone()].to_string())
+}
+
+/// `isThreadSearchPending`: message search is debouncing or in flight for a root query.
+fn searching_messages(ui: &Ui) -> bool {
+    ui.page.is_empty() && !ui.query.text.starts_with('>') && !ui.query.text.trim().is_empty() && (ui.search_due.is_some() || !ui.searches.is_empty())
+}
+
 /// A root query starting with ">" searches actions only, by the text after it.
 fn actions_filter(ui: &Ui) -> (bool, &str) {
     match ui.query.text.strip_prefix('>') {
@@ -1040,8 +1065,8 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     {
         return;
     }
-    s.ui.shell.palette.search_due = Some(data::now_ms() + 200);
-    tx.wake_after(std::time::Duration::from_millis(200));
+    s.ui.shell.palette.search_due = Some(data::now_ms() + 120);
+    tx.wake_after(std::time::Duration::from_millis(120));
 }
 pub fn poll(s: &mut App) -> bool {
     let mut changed = add_project::poll(s);
@@ -1373,6 +1398,13 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
                 }
             }
             crate::shell::sidebar::go(s, route)
+        }
+        Action::FindMessage(thread, query) => {
+            execute(s, Action::Navigate(Route::Thread(thread)), tx);
+            let find = &mut s.ui.chat.timeline.find;
+            find.edit = rune::TextEdit::new(query);
+            find.active = 0;
+            crate::chat::timeline::find::open(s);
         }
         Action::ProjectSettings(project) => {
             s.ui.settings.project = Some(project);
@@ -1726,6 +1758,9 @@ fn empty_text(s: &App) -> Option<String> {
     if actions_filter(ui).0 {
         return Some("No matching actions.".into());
     }
+    if searching_messages(ui) {
+        return Some("Searching thread messages…".into());
+    }
     (ui.page.is_empty() || add_project::page_is_flow(&ui.page)).then(|| "No matching commands, projects, or threads.".into())
 }
 fn note(label: String, t: &T) -> El {
@@ -1777,6 +1812,9 @@ fn footer(s: &App, rows: &[Item], t: &T) -> El {
         .border(1., t.c.contrast_foreground.alpha_mul(0.07))
         .child(hints)
         .child(el().grow(1.));
+    if !rows.is_empty() && searching_messages(ui) && !add_project::browsing(s) {
+        bar = bar.child(text("Searching messages…").font(theme::TEXT_XS).color(t.c.muted_foreground));
+    }
     if add_project::browsing(s) {
         let manager = if cfg!(target_os = "macos") {
             "Finder"
@@ -2128,6 +2166,21 @@ mod tests {
         assert!(!items(&s).iter().any(|v| v.group == "In messages"));
         s.ui.shell.palette.message_query = "needle".into();
         assert!(items(&s).iter().any(|v| v.group == "In messages"));
+    }
+    #[test]
+    fn message_matches_skip_subagents_and_open_find_on_the_snippets_spelling() {
+        let mut s = App::new();
+        s.ui.shell.palette.query = TextEdit::new("needle");
+        s.ui.shell.palette.message_query = "needle".into();
+        if let crate::data::Source::Fixture(state) = &mut s.src {
+            state.threads.push(serde_json::json!({"id":"sub","title":"Sub","lineage":{"relationshipToParent":"subagent"}}));
+        }
+        s.ui.shell.palette.message_matches = vec![serde_json::json!({"threadId":"sub","snippet":"a needle"})];
+        assert!(!items(&s).iter().any(|v| v.group == "In messages"));
+        assert_eq!(find_query("The Quick brown fox", "quick BROWN"), "Quick brown");
+        assert_eq!(find_query("Cafeteria near the Café", "the cafe"), "Cafe");
+        assert_eq!(find_query("needles and a Needle.", "needle"), "Needle");
+        assert_eq!(find_query("nothing here", "zz"), "zz");
     }
     #[test]
     fn configured_shortcut_replaces_default_and_requires_exact_modifiers() {

@@ -186,34 +186,66 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
         })
         .on_drag(move |s: &mut App, d: &mut Drag, tx: &mut Tx| {
             let far = d.dx.hypot(d.dy) >= super::DRAG_DISTANCE;
+            // Layout points per window point (the app zoom).
+            let per = crate::desktop::from_window(1.0, 1.0).0;
             match d.phase {
-                Phase::Down => s.ui.shell.sidebar.card = None,
+                Phase::Down => {
+                    let ui = &mut s.ui.shell.sidebar;
+                    ui.card = None;
+                    ui.press = ui.hover_rect.get().map(|r| (r, r[0] + d.start_x, r[1] + d.start_y));
+                }
                 // The boring sidebar's rows don't drag.
                 Phase::Move if super::boring(s) => {}
                 Phase::Move => {
                     let ui = &mut s.ui.shell.sidebar;
                     if ui.drag.is_some() || far {
-                        ui.drag = Some(Dragging { key: id.clone(), section, dy: d.dy });
+                        let at = ui.press.map_or((0.0, 0.0), |(_, x, y)| (x + d.dx * per, y + d.dy * per));
+                        // `isOutsideSidebarList`: leaving the list sideways turns the drag into context.
+                        let context = ui.press.is_some_and(|(r, _, _)| section == Section::Working || at.0 < r[0] || at.0 > r[0] + r[2]);
+                        let scroll = ui.drag.as_ref().map_or(Some(ui.list_y.get()), |g| g.scroll);
+                        let edge = ui.drag_edge.get();
+                        ui.drag = Some(Dragging { key: id.clone(), section, dy: d.dy, context, at, scroll });
                         ui.hover = None;
+                        // Auto-scroll: near an edge, each move reveals the next item past the target.
+                        if edge != 0 && !context
+                            && let Some(over) = &over
+                        {
+                            let model = Model::build(s);
+                            let items = model.items(&s.ui.shell.sidebar);
+                            if let Some(n) = items.iter().position(|it| it.id() == *over) {
+                                let next = (n as isize + edge as isize).clamp(0, items.len() as isize - 1) as usize;
+                                tx.scroll_into_view(item_key(&items[next]));
+                            }
+                        }
                     }
                 }
                 Phase::Up => {
-                    let was = s.ui.shell.sidebar.drag.take();
+                    let ui = &mut s.ui.shell.sidebar;
+                    let was = ui.drag.take();
+                    let target = ui.drag_target.take();
+                    ui.press = None;
                     if d.cancelled() {
                         return;
                     }
-                    match (was, &over) {
-                        (Some(_), Some(over)) => {
-                            let model = Model::build(s);
-                            let items = model.items(&s.ui.shell.sidebar);
-                            if let Some(target) = logic::drop_target(&items, &id, over) {
+                    match was {
+                        Some(g) if g.context => {
+                            tx.instant();
+                            let ids = super::dragged_ids(s, &Model::build(s), &id);
+                            tx.element_at_in("composer", g.at.0 / per, g.at.1 / per, move |s: &mut App, picked: Option<rune::Picked>, _: &mut Tx| {
+                                if picked.is_some() {
+                                    super::add_thread_contexts(s, &ids);
+                                }
+                            });
+                        }
+                        Some(_) => {
+                            if let Some(target) = target {
+                                let model = Model::build(s);
                                 let plan = model.plan(&id, section, &target);
                                 super::apply_plan(s, &id, plan);
                             }
                             tx.instant();
                         }
-                        (Some(_), None) => tx.instant(),
-                        (None, _) => click(s, &id, tx.mods()),
+                        None => click(s, &id, tx.mods()),
                     }
                 }
             }
@@ -561,6 +593,21 @@ fn meta_line(t: &T, model: &Model, th: &Thread) -> El {
     meta
 }
 
+/// `SidebarDragBoundary` hysteresis: crossing between Pinned and Active waits until the row
+/// passes the Active label (above its bottom for Pinned, below its top for Active).
+fn sticky(next: Option<logic::DropTarget>, prev: Option<logic::DropTarget>, center: Option<f32>, label: Option<(f32, f32)>) -> Option<logic::DropTarget> {
+    match (next, prev) {
+        (Some(next), Some(prev)) if matches!((prev.section, next.section), (Section::Pinned, Section::Active) | (Section::Active, Section::Pinned)) => {
+            let crossed = match (center, label) {
+                (Some(c), Some((top, bottom))) => if next.section == Section::Pinned { c < bottom } else { c > top },
+                _ => true,
+            };
+            Some(if crossed { next } else { prev })
+        }
+        (next, _) => next,
+    }
+}
+
 fn marker_key(m: Marker) -> String {
     format!("sb-marker-{}", m.name())
 }
@@ -734,9 +781,25 @@ pub fn project(p: &Projection) -> Vec<Option<f32>> {
 pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
     let ui = &s.ui.shell.sidebar;
     let items = model.items(ui);
-    let drag = ui.drag.as_ref();
+    if let Some(h) = &ui.hover {
+        ui.hover_rect.set(cx.layout(&format!("sb-row-{h}")).map(|r| [r[0], r[1], r[2], r[3]]));
+    }
+    let list_y = cx.layout("sb-list").map_or(0.0, |r| r[1]);
+    ui.list_y.set(list_y);
+    // A context drag leaves the rows in place; a reorder keeps the row under the pointer as
+    // the list scrolls.
+    let reorder = ui.drag.as_ref().filter(|d| !d.context).map(|d| Dragging { dy: d.dy + d.scroll.map_or(0.0, |y0| y0 - list_y), ..d.clone() });
+    let drag = reorder.as_ref();
+    ui.drag_edge.set(match (drag, cx.layout("sb-scroll")) {
+        (Some(d), Some(v)) if d.scroll.is_some() && d.at.1 < v[1] + v[3] * 0.2 => -1,
+        (Some(d), Some(v)) if d.scroll.is_some() && d.at.1 > v[1] + v[3] * 0.8 => 1,
+        _ => 0,
+    });
     let over = drag.and_then(|d| drag_over(cx, &items, d));
     let target = drag.zip(over.as_deref()).and_then(|(d, o)| logic::drop_target(&items, &d.key, o));
+    let center = drag.and_then(|d| cx.layout(&format!("sb-li-{}", d.key)).map(|r| r[1] + r[3] / 2.0 + d.dy));
+    let target = sticky(target, ui.drag_target.borrow().clone(), center, cx.layout(&marker_key(Marker::PinnedDivider)).map(|r| (r[1], r[1] + r[3])));
+    *ui.drag_target.borrow_mut() = target.clone();
     let target_section = target.as_ref().map(|t| t.section);
     let verb = drag.and_then(|d| logic::drop_verb(d.section, target_section));
     let s_ = &model.sections;
@@ -911,4 +974,23 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
         );
     }
     el().key("sb-scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(content)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crossing_between_pinned_and_active_waits_for_the_label() {
+        let at = |section| Some(logic::DropTarget { section, pinned_order: Vec::new(), active_order: Vec::new() });
+        let label = Some((100.0, 124.0));
+        // Closest-centre flicker on the wrong side of the label keeps the section.
+        assert_eq!(sticky(at(Section::Active), at(Section::Pinned), Some(95.0), label), at(Section::Pinned));
+        assert_eq!(sticky(at(Section::Pinned), at(Section::Active), Some(130.0), label), at(Section::Active));
+        // Past the far edge it switches.
+        assert_eq!(sticky(at(Section::Active), at(Section::Pinned), Some(126.0), label), at(Section::Active));
+        assert_eq!(sticky(at(Section::Pinned), at(Section::Active), Some(98.0), label), at(Section::Pinned));
+        // Other sections are not sticky.
+        assert_eq!(sticky(at(Section::Settled), at(Section::Pinned), Some(110.0), label), at(Section::Settled));
+    }
 }
