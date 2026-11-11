@@ -46,6 +46,7 @@ pub fn view(f: &StartupFailure, t: &T) -> El {
                         text(if output.is_empty() { "The server wrote no output.".to_owned() } else { output.to_owned() })
                             .font(theme::mono(theme::TEXT_XS))
                             .color(t.c.foreground)
+                            .w_full()
                             .wrap()
                             .padding(10.0),
                     ),

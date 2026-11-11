@@ -243,7 +243,9 @@ fn exit_reason(status: Option<std::process::ExitStatus>) -> String {
 fn output_tail(log_path: &PathBuf, from: u64) -> String {
     let bytes = std::fs::read(log_path).unwrap_or_default();
     let text = String::from_utf8_lossy(bytes.get(from as usize..).unwrap_or_default());
-    tail_chars(&text, STARTUP_FAILURE_OUTPUT_CHARS).to_owned()
+    // Only what the server wrote, as Electron captures; the app's own notes share the log.
+    let server: String = text.split_inclusive('\n').filter(|l| !l.starts_with("[desktop-rune] ")).collect();
+    tail_chars(&server, STARTUP_FAILURE_OUTPUT_CHARS).to_owned()
 }
 
 fn tail_chars(text: &str, n: usize) -> &str {
@@ -399,7 +401,7 @@ mod tests {
         assert_eq!(tail_chars("ab", 4000), "ab");
         assert_eq!(tail_chars("", 10), "");
         let path = std::env::temp_dir().join(format!("s5-host-tail-{}.log", std::process::id()));
-        std::fs::write(&path, "first launch\nsecond: boom\n").unwrap();
+        std::fs::write(&path, "first launch\nsecond: boom\n[desktop-rune] server exited (Some(3)); restarting\n").unwrap();
         assert_eq!(output_tail(&path, "first launch\n".len() as u64), "second: boom\n");
         assert_eq!(output_tail(&path, 999), "");
         let _ = std::fs::remove_file(&path);
