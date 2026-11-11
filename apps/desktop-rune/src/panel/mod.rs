@@ -796,7 +796,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
             .grow(1.)
             .min_h(0.)
             .child(drawer::surface(app, t, drawer::Owner::Panel, width - 1.)),
-        Some(Surface::Browser(tab)) => preview::view(app, t, tab, cx.env().scale),
+        // The app zoom magnifies the page too; Chrome renders at the pixels it ends up on.
+        Some(Surface::Browser(tab)) => preview::view(app, t, tab, cx.env().scale * app.ui.desktop.zoom_factor()),
     };
     row()
         .key("right-panel")
