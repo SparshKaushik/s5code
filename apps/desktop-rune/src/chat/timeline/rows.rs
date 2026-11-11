@@ -10,7 +10,7 @@ pub fn groupable(item: &Value) -> bool {
     )
 }
 
-pub fn active(item: &Value) -> bool {
+pub fn item_active(item: &Value) -> bool {
     matches!(s(item, "status"), "pending" | "running" | "waiting")
 }
 
@@ -260,7 +260,7 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
         for run in array(p, "runs").iter().filter(|r| run_active(r)) {
             let id = s(run, "id");
             let last = latest.get(id).copied();
-            if last.is_some_and(|i| active(i) || i["streaming"] == true) {
+            if last.is_some_and(|i| item_active(i) || i["streaming"] == true) {
                 continue;
             }
             let start = ts(run, "startedAt").or_else(|| ts(run, "requestedAt"));

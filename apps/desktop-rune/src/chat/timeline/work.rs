@@ -23,7 +23,7 @@ pub enum Action {
     Update,
 }
 
-pub use super::rows::{active, groupable};
+pub use super::rows::{groupable, item_active as active};
 
 /// `workEntryDisplayIndicatesToolFailure`, from the fields the wire keeps.
 pub fn failed(item: &Value) -> bool {
