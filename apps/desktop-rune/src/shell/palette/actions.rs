@@ -147,6 +147,10 @@ pub fn tail_items(s: &App) -> Vec<Item> {
         "gitcafe", "forgejo", "gitea", "bitbucket", "azure", "devops", "url", "environment",
     ]);
     out.push(add);
+    // Electron's App and Help menu item, which Rune has as a native menu only on macOS.
+    let mut updates = item("Check for Updates", "Actions", &icons::DOWNLOAD, "", Action::CheckForUpdates);
+    updates.fields = keywords(&["check for updates", "update", "upgrade", "new version", "release"]);
+    out.push(updates);
     out
 }
 
