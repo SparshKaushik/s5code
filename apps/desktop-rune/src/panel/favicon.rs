@@ -70,7 +70,12 @@ pub fn note(app: &mut App, page: &str, icon: &str) {
     let waker = app.ui.panel.waker.clone();
     let icons = &mut app.ui.panel.browser.favicons;
     icons.by_origin.insert(origin, icon.to_string());
-    if icons.icons.contains_key(icon) {
+    // A failed icon is fetched again on the page's next load, as the site may have added it since.
+    if icons.icons.get(icon).is_some_and(|e| match e {
+        Entry::Loading(_) => true,
+        Entry::Ready(image) => image.error().is_none(),
+        Entry::Missing => false,
+    }) {
         return;
     }
     if icons.icons.len() >= MAX_ICONS {

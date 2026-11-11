@@ -484,9 +484,10 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut found = vec![];
     for (id, tab) in ui.tabs.iter_mut() {
         let status = statuses.get(id).cloned().unwrap_or_default();
-        if status.favicon.is_some() && status.favicon != tab.icon {
+        // Navigation clears the icon, so each load reports it afresh.
+        if status.favicon != tab.icon {
             tab.icon = status.favicon.clone();
-            found.push((status.url.clone(), status.favicon.clone().unwrap_or_default()));
+            found.extend(status.favicon.clone().map(|icon| (status.url.clone(), icon)));
         }
         if tab.bar.focused && !tab.focused {
             tab.bar.set_selection(0, tab.bar.text.len());

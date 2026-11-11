@@ -1048,8 +1048,11 @@ impl Worker {
                 self.event(Event::Picked { tab, element, image });
             }
             Reply::Navigated(tab, url) => {
-                // A navigation that turned into a download, or was stopped, leaves the page as it was.
-                let Some(text) = r["errorText"].as_str().filter(|e| !e.is_empty() && net_error(e) != "ERR_ABORTED") else { return };
+                let Some(text) = r["errorText"].as_str().filter(|e| !e.is_empty()) else { return };
+                if net_error(text) == "ERR_ABORTED" {
+                    let current = self.tabs.get(&tab).and_then(|t| t.history.get(t.index)).map(|(_, u)| u.clone());
+                    return self.update(tab, |s| abandon(s, &url, current));
+                }
                 let description = net_error(text);
                 self.update(tab, |s| {
                     s.loading = false;
@@ -1587,6 +1590,18 @@ fn show(pixels: &Pixels, data: Option<&str>) -> bool {
     true
 }
 
+/// A navigation that turned into a download, was stopped, or met a cancelled leave-page prompt
+/// leaves the page as it was, unless a newer navigation already took over.
+fn abandon(s: &mut Status, aborted: &str, current: Option<String>) {
+    if s.url != aborted {
+        return;
+    }
+    s.loading = false;
+    if let Some(url) = current {
+        s.url = url;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1657,5 +1672,15 @@ mod tests {
     #[test]
     fn chrome_net_errors_lose_their_prefix() {
         assert_eq!(net_error("net::ERR_CONNECTION_REFUSED"), "ERR_CONNECTION_REFUSED");
+    }
+
+    #[test]
+    fn an_abandoned_navigation_restores_the_page_url() {
+        let mut s = Status { url: "http://a/two".into(), loading: true, ..Default::default() };
+        abandon(&mut s, "http://a/two", Some("http://a/leave".into()));
+        assert_eq!((s.url.as_str(), s.loading), ("http://a/leave", false));
+        let mut newer = Status { url: "http://b/".into(), loading: true, ..Default::default() };
+        abandon(&mut newer, "http://a/two", Some("http://a/leave".into()));
+        assert_eq!((newer.url.as_str(), newer.loading), ("http://b/", true));
     }
 }
