@@ -329,12 +329,12 @@ impl MenuItem {
                     }),
             );
         }
+        if self.radio && !native {
+            e = e.child(mark(self.checked == Some(true)));
+        }
         if let Some(trailing) = self.trailing {
             // The row is the hover track, so a trailing control can reveal itself on row hover.
             e = e.hover_group().child(trailing);
-        }
-        if self.radio && !native {
-            e = e.child(mark(self.checked == Some(true)));
         }
         if let Some((entries, open)) = self.sub {
             e = e

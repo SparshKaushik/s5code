@@ -78,7 +78,7 @@ struct Bounds {
 }
 
 impl Ui {
-    fn zoom_factor(&self) -> f32 {
+    pub(crate) fn zoom_factor(&self) -> f32 {
         1.2f32.powf(self.zoom_level)
     }
 

@@ -17,6 +17,8 @@ pub struct Select {
     key: String,
     options: Vec<String>,
     current: Option<String>,
+    display: Option<String>,
+    leading: Option<(El, f32)>,
     disabled_options: Vec<String>,
     placeholder: String,
     label: Option<String>,
@@ -37,6 +39,8 @@ impl Select {
             key: key.into(),
             options: options.iter().map(|v| v.as_ref().into()).collect(),
             current: None,
+            display: None,
+            leading: None,
             disabled_options: vec![],
             placeholder: "Select".into(),
             label: None,
@@ -58,6 +62,17 @@ impl Select {
     }
     pub fn current(mut self, value: Option<&str>) -> Self {
         self.current = value.map(str::to_owned);
+        self
+    }
+    /// Trigger text when it differs from the chosen option's label (web's `SelectValue` children).
+    pub fn display(mut self, value: impl Into<String>) -> Self {
+        self.display = Some(value.into());
+        self
+    }
+    /// Shown before the trigger text, such as a status icon or colour dots.
+    /// Content before the value, `width` wide, which auto-sized triggers make room for.
+    pub fn leading(mut self, value: El, width: f32) -> Self {
+        self.leading = Some((value, width));
         self
     }
     pub fn placeholder(mut self, value: impl Into<String>) -> Self {
@@ -136,11 +151,11 @@ impl Select {
             "lg" => (36., 11., 8., 8., theme::TEXT_SM),
             _ => (32., 11., 8., 8., theme::TEXT_SM),
         };
-        let name = self.current.as_deref().unwrap_or(&self.placeholder);
+        let name = self.display.as_deref().or(self.current.as_deref()).unwrap_or(&self.placeholder);
         let width = if self.width > 0. {
             self.width
         } else {
-            text_width(name, font) + padding * 2. + gap + 14. + 2.
+            text_width(name, font) + padding * 2. + gap + 14. + 2. + self.leading.as_ref().map_or(0., |(_, w)| w + gap)
         };
         let mut trigger = row()
             .role("combobox")
@@ -171,6 +186,7 @@ impl Select {
             )
             .focus_ring(2., -2., k.c.border_focus)
             .hover(k.c.hover)
+            .children(self.leading.map(|(e, _)| e))
             .child(
                 text(name)
                     .font(font)

@@ -25,10 +25,6 @@ const BREAKDOWN_KINDS: [(&str, &str); 5] = [("code", "Code"), ("tests", "Tests")
 const SOURCE_CONTROL_WRITE: &str = "source-control:write";
 /// A close sweep starts once the pointer has moved this far (the sweep sensor's `distance`).
 const SWEEP_DISTANCE: f32 = 6.0;
-/// A list row (56px) and the 2px under it, and the xs Close button's top in the row: rows in a
-/// group are all one height, so the row under the pointer follows from how far it moved.
-const ROW_PITCH: f32 = 58.0;
-const CLOSE_TOP: f32 = 16.0;
 
 /// One row's lazily read answer: `pullRequests.stack`, `.detail` (for its checks) or `.changeBreakdown`.
 #[derive(Default)]
@@ -299,8 +295,9 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
     let key = row_key(e);
     let sweeping = u.sweep.as_ref().is_some_and(|w| w.started && w.swept.contains(&key));
     let busy = sweeping || u.acting.iter().any(|a| a.key == key);
-    // The sweep's own Close keeps its drag until release, even once Shift is let go.
-    let origin = u.sweep.as_ref().is_some_and(|w| w.origin == key);
+    // The sweep's own Close keeps its drag until release, even once Shift is let go or it dims.
+    let held = u.sweep.as_ref().filter(|w| w.origin == key);
+    let origin = held.is_some();
     let actions = quick_actions(e, &host_actions(result, e));
     if actions.is_empty() || !(u.speed || busy || origin) {
         return None;
@@ -321,7 +318,7 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
             "close" => "Close immediately, or drag across rows to close several".to_string(),
             _ => format!("{label} immediately"),
         };
-        let disabled = !writable || (busy && !(origin && action == "close")) || (action == "merge" && stacked);
+        let disabled = !writable || busy || (action == "merge" && stacked);
         let mut button = kit::Button::new(label)
             .variant(if action == "close" { "destructive-outline" } else { "outline" })
             .size("xs")
@@ -333,9 +330,16 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
             button = button.on_press(move |s: &mut App| perform(s, &entry, action));
         }
         let mut control = button.build(t).label(format!("{label} #{number}")).help(tip);
+        // A swept origin dims as disabled, yet its drag still runs the sweep to release.
+        if action == "close" && (!disabled || origin) {
+            let close = format!("pr-close-{key}");
+            let reach = held.and_then(|w| reach_of(w, &close));
+            let dragged = e.clone();
+            control = control.key(close).on_drag(move |s: &mut App, d: &mut Drag, _: &mut Tx| sweep(s, &dragged, reach.as_ref(), d));
+        }
         if action == "close" && !disabled {
-            let (dragged, keyed) = (e.clone(), e.clone());
-            control = control.on_drag(move |s: &mut App, d: &mut Drag, _: &mut Tx| sweep(s, &dragged, d)).on_key(move |s: &mut App, k: &KeyEvent, _: &mut Tx| {
+            let keyed = e.clone();
+            control = control.on_key(move |s: &mut App, k: &KeyEvent, _: &mut Tx| {
                 match k.key {
                     Key::Enter => perform(s, &keyed, "close"),
                     Key::Text(ref c) if c == " " => perform(s, &keyed, "close"),
@@ -356,6 +360,16 @@ pub(super) fn cancel_sweep(u: &mut Ui) -> bool {
     u.sweep.take().is_some()
 }
 
+#[cfg(test)]
+pub(super) fn start_sweep(u: &mut Ui) {
+    u.sweep = Some(Sweep { origin: String::new(), rows: Vec::new(), started: true, target: None, swept: Vec::new() });
+}
+
+/// A sweep has started moving, so the list takes no hover (`pointer-events-none`).
+pub(super) fn sweeping(u: &Ui) -> bool {
+    u.sweep.as_ref().is_some_and(|w| w.started)
+}
+
 /// The rows of the group `key` is shown in, top to bottom.
 fn group_of(s: &App, key: &str) -> Vec<Value> {
     let list = &s.ui.pages.pull_requests;
@@ -369,15 +383,34 @@ fn closable(u: &Ui, result: &Value, e: &Value) -> bool {
     field(e, "state") == "open" && host_actions(result, e).iter().any(|a| a == "close") && !u.acting.iter().any(|a| a.key == key)
 }
 
-/// The row under the pointer, `y` below the top of the origin row at `at`, within its group: past
-/// either end the whole rest of the group is swept, as rows outside it never close.
-fn sweep_target(len: usize, at: usize, y: f32) -> usize {
-    (at as f32 + (y / ROW_PITCH).floor()).clamp(0.0, len.saturating_sub(1) as f32) as usize
+/// Where the sweep's rows lie, in the origin Close's own points as `Drag::y` gives them: each row's
+/// top, and the span of the list's viewport.
+struct Reach {
+    tops: Vec<f32>,
+    lo: f32,
+    hi: f32,
+}
+
+impl Reach {
+    /// The sweep's onMove: the last row whose top is above the pointer, the pointer held inside the
+    /// viewport so rows scrolled out of view are never swept.
+    fn row_at(&self, y: f32) -> usize {
+        let y = y.max(self.lo).min(self.hi);
+        self.tops.iter().skip(1).take_while(|top| **top <= y).count()
+    }
+}
+
+/// The held sweep's rows as laid out. Row offsets ignore scrolling; the viewport is placed from
+/// where the Close is drawn now.
+fn reach_of(w: &Sweep, close: &str) -> Option<Reach> {
+    let (at, drawn, viewport) = (rune::memo::layout(close)?, rune::memo::window_layout(close)?, rune::memo::window_layout("pr-scroll")?);
+    let tops = w.rows.iter().map(|r| rune::memo::layout(&format!("pr-{}", field(r, "url"))).map(|b| b[1] - at[1])).collect::<Option<Vec<f32>>>()?;
+    Some(Reach { tops, lo: viewport[1] - drawn[1], hi: viewport[1] + viewport[3] - 1.0 - drawn[1] })
 }
 
 /// startCloseSweep: a drag from a row's Close closes the open rows it passes in that row's group,
 /// all at once on release; a press that doesn't move closes the row alone.
-fn sweep(s: &mut App, e: &Value, d: &Drag) {
+fn sweep(s: &mut App, e: &Value, reach: Option<&Reach>, d: &Drag) {
     let key = row_key(e);
     match d.phase {
         Phase::Down => {
@@ -391,7 +424,8 @@ fn sweep(s: &mut App, e: &Value, d: &Drag) {
                 return;
             }
             let (Some(at), Some(result)) = (w.rows.iter().position(|r| row_key(r) == key), list.result.as_ref()) else { return };
-            let target = sweep_target(w.rows.len(), at, CLOSE_TOP + d.y);
+            // Before the view has read the rows' layout the sweep holds at its origin (onStart).
+            let target = reach.map_or(at, |r| r.row_at(d.y).min(w.rows.len() - 1));
             if w.started && w.target == Some(target) {
                 return;
             }
@@ -759,8 +793,10 @@ fn checks_body(t: &T, checks: &[Value], all: bool) -> El {
             )
             .child(text(status).font(theme::TEXT_XS).color(t.c.muted_foreground));
         if let Some(url) = c["url"].as_str().map(str::to_string) {
-            line = line.child(text("Details").font(theme::TEXT_XS).color(t.c.primary).cursor(Cursor::Pointer).role("link").on_press_tx(move |_: &mut App, tx: &mut Tx| {
-                let _ = tx.open_url(&url);
+            line = line.child(text("Details").font(theme::TEXT_XS).color(t.c.primary).cursor(Cursor::Pointer).role("link").on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                if tx.open_url(&url).is_err() {
+                    crate::shell::palette::toast(s, "Unable to open check details", None);
+                }
             }));
         }
         list = list.child(line);
@@ -795,25 +831,45 @@ fn layer_state(t: &T, layer: &Value) -> (&'static rune::Icon, Color, &'static st
 }
 
 /// The stack layer's page on its host, from this row's own link.
-fn layer_url(url: &str, from: &Value, to: i64) -> Option<String> {
+fn layer_url(url: &str, from: &Value, to: &Value) -> Option<String> {
     url.strip_suffix(&format!("/{from}")).map(|base| format!("{base}/{to}"))
 }
 
-/// A layer shown in the list opens in the detail; one the list doesn't hold opens on its host.
-fn select_layer(s: &mut App, tx: &mut Tx, e: &Value, number: i64) {
+/// PullRequestStackPopover's onSelect: the layer opens in the detail by its reference, as the
+/// list's own row when it holds one, else read by number like any other pull request.
+fn select_layer(s: &mut App, e: &Value, layer: &Value) {
     ui(s).stack_open = None;
+    let number = &layer["number"];
     let list = &mut s.ui.pages.pull_requests;
     let listed = list.result.as_ref().and_then(|r| {
-        r["entries"].as_array()?.iter().find(|x| field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && x["number"] == number).map(|x| field(x, "url").to_string())
+        r["entries"].as_array()?.iter().find(|x| field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && &x["number"] == number).map(|x| field(x, "url").to_string())
     });
-    match listed {
-        Some(url) => list.selected = Some(url),
-        None => {
-            if let Some(url) = layer_url(field(e, "url"), &e["number"], number) {
-                let _ = tx.open_url(&url);
-            }
+    if let Some(url) = listed {
+        list.selected = Some(url);
+        return;
+    }
+    let Some(url) = layer_url(field(e, "url"), &e["number"], number) else { return };
+    list.selected = Some(url.clone());
+    let detail = &mut s.ui.pages.detail;
+    let tab = detail.tab;
+    *detail = Default::default();
+    detail.tab = tab;
+    detail.entry = Some(layer_entry(e, layer, url));
+    super::pr_detail::refresh(s);
+}
+
+/// The reference the detail reads an unlisted layer by: the row's repository and host with the
+/// layer's own number, its title and state shown until the detail answers.
+fn layer_entry(e: &Value, layer: &Value, url: String) -> Value {
+    let title = layer["title"].as_str().filter(|v| !v.is_empty()).unwrap_or(field(layer, "headBranch"));
+    let draft = layer["isDraft"] == true;
+    let mut entry = json!({"url": url, "number": layer["number"], "title": title, "state": layer["state"], "isDraft": draft, "headBranch": layer["headBranch"]});
+    for key in ["provider", "host", "projectId", "projectTitle", "repository", "environmentId"] {
+        if !e[key].is_null() {
+            entry[key] = e[key].clone();
         }
     }
+    entry
 }
 
 /// savedPullRequestStack: this row's stack as the newest thread link saved it (the row's own link,
@@ -934,7 +990,7 @@ fn layer_row(t: &T, e: &Value, layer: &Value) -> El {
     let (glyph, tone, label) = layer_state(t, layer);
     let number = layer["number"].as_i64().unwrap_or(0);
     let title = layer["title"].as_str().filter(|v| !v.is_empty()).unwrap_or(field(layer, "headBranch")).to_string();
-    let entry = e.clone();
+    let (entry, chosen) = (e.clone(), layer.clone());
     row()
         .key(format!("pr-stack-layer-{number}"))
         .w_full()
@@ -956,7 +1012,7 @@ fn layer_row(t: &T, e: &Value, layer: &Value) -> El {
                 .child(text(format!("#{number} · {} · {label}", field(layer, "headBranch"))).font(theme::TEXT_XS).color(t.c.muted_foreground).truncate()),
         )
         .children((layer["number"] == e["number"]).then(|| icon(&i::CHECK, 14.0).color(t.c.foreground)))
-        .on_press_tx(move |s: &mut App, tx: &mut Tx| select_layer(s, tx, &entry, number))
+        .on_press(move |s: &mut App| select_layer(s, &entry, &chosen))
 }
 
 // ---- change breakdown -------------------------------------------------------------------
@@ -1118,7 +1174,7 @@ pub fn host_icon(kind: &str) -> &'static rune::Icon {
 // ---- scenes -----------------------------------------------------------------------------
 
 /// Scene state: the fixture row numbered `number` with its stack menu, checks popover or change
-/// breakdown showing.
+/// breakdown showing, a close sweep held over it, or another layer of its stack opened.
 pub fn scene(s: &mut App, number: i64, part: &str) {
     let Some(e) = s.ui.pages.pull_requests.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| e["number"] == number).cloned()) else { return };
     let key = row_key(&e);
@@ -1126,6 +1182,12 @@ pub fn scene(s: &mut App, number: i64, part: &str) {
         "stack" => {
             want(s, Kind::Stack, &e);
             ui(s).stack_open = Some(key);
+        }
+        "stack-unlisted" => {
+            let stack = recorded(Kind::Stack);
+            if let Some(layer) = stack["layers"].as_array().and_then(|layers| layers.iter().find(|l| l["number"] != e["number"])) {
+                select_layer(s, &e, layer);
+            }
         }
         "stack-saved" => {
             // Dismissed links still save the stack, and leave the recorded sidebar as it was.
@@ -1156,7 +1218,7 @@ pub fn scene(s: &mut App, number: i64, part: &str) {
         "sweep" => {
             let rows = group_of(s, &key);
             let Some(at) = rows.iter().position(|r| row_key(r) == key) else { return };
-            let target = sweep_target(rows.len(), at, CLOSE_TOP + 2.0 * ROW_PITCH);
+            let target = (at + 2).min(rows.len() - 1);
             let list = &s.ui.pages.pull_requests;
             let swept: Vec<String> = match list.result.as_ref() {
                 Some(result) => rows[at..=target].iter().filter(|r| closable(&list.row, result, r)).map(row_key).collect(),
@@ -1253,7 +1315,19 @@ mod tests {
         let b = json!({"code": {"additions": 1290, "deletions": 30}, "tests": {"additions": 0, "deletions": 0}, "docs": {"additions": 4, "deletions": 0}});
         assert_eq!(breakdown_rows(&b), [("Code", 1290, 30), ("Docs", 4, 0)]);
         assert_eq!(count(1234567), "1,234,567");
-        assert_eq!(layer_url("https://github.com/a/b/pull/7", &json!(7), 9).as_deref(), Some("https://github.com/a/b/pull/9"));
+        assert_eq!(layer_url("https://github.com/a/b/pull/7", &json!(7), &json!(9)).as_deref(), Some("https://github.com/a/b/pull/9"));
+        let mut s = App::new();
+        let own = entry(json!({"url": "https://github.com/acme/app/pull/7", "projectId": "p"}));
+        let listed = entry(json!({"number": 6, "url": "https://github.com/acme/app/pull/6", "projectId": "p"}));
+        s.ui.pages.pull_requests.result = Some(json!({"entries": [own, listed]}));
+        select_layer(&mut s, &own, &json!({"number": 6, "headBranch": "base", "state": "open"}));
+        assert_eq!((s.ui.pages.pull_requests.selected.as_deref(), s.ui.pages.detail.entry.is_none()), (Some("https://github.com/acme/app/pull/6"), true));
+        // A layer the list doesn't hold opens in the detail too, read by its reference.
+        select_layer(&mut s, &own, &json!({"number": 9, "title": "", "headBranch": "top", "state": "open", "isDraft": true}));
+        assert_eq!(s.ui.pages.pull_requests.selected.as_deref(), Some("https://github.com/acme/app/pull/9"));
+        let opened = s.ui.pages.detail.entry.as_ref().expect("the unlisted layer opens");
+        assert_eq!(reference(opened), json!({"projectId": "p", "host": "github.com", "repository": "acme/app", "number": 9}));
+        assert_eq!((&opened["title"], &opened["isDraft"], &opened["provider"]), (&json!("top"), &json!(true), &json!("github")));
         let held = Read { data: Some(json!({})), error: Some("offline".into()), pending: None, at: 0 };
         assert_eq!(stack_view(Some(&held), None).1, Some(true));
         assert_eq!(row_key(&entry(json!({}))), "github.com:acme/app#7");
@@ -1278,11 +1352,15 @@ mod tests {
 
     #[test]
     fn a_close_sweep_takes_the_closable_rows_from_the_origin_to_the_pointer() {
-        assert_eq!(sweep_target(5, 2, CLOSE_TOP), 2);
-        assert_eq!(sweep_target(5, 2, -1.0), 1);
-        assert_eq!(sweep_target(5, 2, ROW_PITCH * 2.0 + 1.0), 4);
-        assert_eq!(sweep_target(5, 2, ROW_PITCH * 9.0), 4);
-        assert_eq!(sweep_target(5, 0, -500.0), 0);
+        // Row tops from the origin Close (row 2), the fourth row taller than the rest, the first
+        // partly scrolled out above the viewport and the last below it.
+        let reach = Reach { tops: vec![-130.0, -74.0, -16.0, 42.0, 130.0], lo: -100.0, hi: 120.0 };
+        assert_eq!(reach.row_at(4.0), 2);
+        assert_eq!(reach.row_at(-17.0), 1);
+        assert_eq!(reach.row_at(110.0), 3);
+        assert_eq!(reach.row_at(-500.0), 0);
+        assert_eq!(reach.row_at(500.0), 3, "rows below the viewport are never reached");
+        assert_eq!(Reach { lo: -60.0, ..reach }.row_at(-500.0), 1, "nor rows scrolled out above it");
         let mut u = Ui::default();
         let result = json!({"providers": [{"host": "github.com"}]});
         let open = entry(json!({}));

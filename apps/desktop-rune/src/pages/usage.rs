@@ -1,12 +1,13 @@
 //! `/usage` (UsagePage): a route modal over the frame with subscription limits per provider
-//! account, and local cost or token usage from `server.getUsageSummary` with its chart, totals,
-//! share bars and breakdown tables.
+//! account, and cost or token usage from each environment's `server.getUsageSummary`, merged
+//! across the selected environments, with its chart, totals, share bars and breakdown tables.
 
 use std::collections::HashMap;
 
 use rune::{Color, El, LineCap, Path, ScrollSpec, Shape, Tx, canvas, col, el, icon, row, spacer, text};
 use serde_json::{Value, json};
 
+use super::usage_merge::{self, Mismatch};
 use crate::chat::composer::provider_icon;
 use crate::data::{Zone, iso_ms, s as field};
 use crate::icons as i;
@@ -14,13 +15,34 @@ use crate::kit::{self, Menu, MenuItem, Placement, ToggleGroup};
 use crate::theme::{self, AlphaMul, T, radius};
 use crate::{App, Route};
 
+/// One environment's `server.getUsageSummary` (usageByWindowAtom's query for it).
+#[derive(Default)]
+pub struct Scan {
+    key: String,
+    /// The input and scan settings last asked for; cleared to ask again.
+    sent: Option<(Value, Value)>,
+    /// The request in flight and the window key it asks for.
+    pending: Option<(u64, Value)>,
+    /// The request in flight waits for sources that were still refreshing (`awaitRefresh`).
+    awaiting: bool,
+    summary: Option<Value>,
+    /// The window key `summary` answers.
+    answered: Option<Value>,
+    error: Option<String>,
+    /// `server.refreshUsageRates` in flight before a rescan.
+    rates: Option<u64>,
+    /// The header's Refresh is still running here (refreshUsage).
+    refreshing: bool,
+    /// Bumped whenever this scan's answer changes.
+    generation: u64,
+}
+
 pub struct Ui {
     pub metric: &'static str,
     /// Days in the window; 1 is the hourly "Past 24h".
     pub window_days: i64,
+    /// The selected environments' merged usage on screen (useUsage's `shown`), as one summary.
     pub summary: Option<Value>,
-    pub error: Option<String>,
-    pub pending: Option<u64>,
     pub requested: Option<Value>,
     pub hidden: Vec<&'static str>,
     pub menu: Option<&'static str>,
@@ -40,19 +62,21 @@ pub struct Ui {
     pub tags: super::usage_tags::Ui,
     /// The caption's "Unpriced usage details" popover.
     pub unpriced_tip: bool,
-    /// `server.refreshUsageRates` in flight.
-    refreshing: Option<u64>,
-    /// Rates refreshed; the rescanned summary is still on its way.
-    reloading: bool,
-    /// The request the shown summary answers, kept on screen while another window loads.
+    pub scans: Vec<Scan>,
+    /// The window the shown summary answers, kept on screen while another window loads.
     pub answered: Option<Value>,
-    /// Price, mapping and filter settings the summary was scanned under (usageScanSettingsAtom).
-    scan: Option<Value>,
+    /// What `summary` was last merged from, so it merges again only when that changes.
+    merged_from: String,
+    /// The last merge any selected environment answered, with its selection and hidden providers
+    /// and its window (useUsage's `lastAnswered`).
+    kept: Option<(String, Value, Value)>,
+    /// `summary` is `kept` while the current window still scans (`showingKept`).
+    showing_kept: bool,
     pub preferences_read: bool,
     /// The environment filter's checked environments; `None` is "All environments".
     pub environments: Option<Vec<String>>,
-    /// `server.updateSettings` opting into Cursor's keychain login, in flight.
-    pub cursor_enabling: Option<u64>,
+    /// `server.updateSettings` opting an environment into Cursor's keychain login, in flight.
+    pub cursor_enabling: Vec<(String, u64)>,
 }
 
 impl Default for Ui {
@@ -62,8 +86,6 @@ impl Default for Ui {
             metric: "limits",
             window_days: 30,
             summary: None,
-            error: None,
-            pending: None,
             requested: None,
             hidden: Vec::new(),
             menu: None,
@@ -79,13 +101,14 @@ impl Default for Ui {
             limits: Default::default(),
             tags: Default::default(),
             unpriced_tip: false,
-            refreshing: None,
-            reloading: false,
+            scans: Vec::new(),
             answered: None,
-            scan: None,
+            merged_from: String::new(),
+            kept: None,
+            showing_kept: false,
             preferences_read: false,
             environments: None,
-            cursor_enabling: None,
+            cursor_enabling: Vec::new(),
         }
     }
 }
@@ -309,11 +332,20 @@ pub(super) fn input(u: &Ui, now: i64, aliases: &Value) -> Value {
     json!({"sinceDay": day_of(u.zone.wall(now) - (u.window_days - 1) * DAY), "untilDay": day(now), "timeZone": u.zone_name, "modelAliases": aliases, "resolution": "day"})
 }
 
-/// The settings a scan depends on: prices, mappings and the Cursor keychain opt-in refetch the
-/// summary when they change, and `usageModelFilter` rides along in the request (usageSummaryInput).
-fn scan_settings(s: &App) -> Value {
-    let settings = s.state().config.as_ref().map(|c| &c["settings"]).unwrap_or(&Value::Null);
+/// usageScanSettingsAtom: prices, mappings and the Cursor keychain opt-in rescan an environment
+/// when they change, and `usageModelFilter` rides along in its request.
+fn scan_settings(config: Option<&Value>) -> Value {
+    let settings = config.map(|c| &c["settings"]).unwrap_or(&Value::Null);
     json!([settings["usagePriceOverrides"], settings["usageModelAliases"], settings["cursorKeychainUsageEnabled"], settings["usageModelFilter"]])
+}
+
+/// usageSummaryInput: each environment is asked with its own model filter.
+fn scan_input(requested: &Value, settings: &Value) -> Value {
+    let mut input = requested.clone();
+    if !settings[3].is_null() {
+        input["modelFilter"] = settings[3].clone();
+    }
+    input
 }
 
 /// What a fetched summary answers; the rolling hour bounds alone don't refetch.
@@ -321,6 +353,27 @@ fn window_key(input: &Value) -> Value {
     json!([input["sinceDay"], input["resolution"], input["timeZone"], input["modelAliases"]])
 }
 
+fn env_net<'a>(s: &'a mut App, key: &str) -> Option<&'a mut s5_net::Net> {
+    crate::env::source_mut(s, key).and_then(|src| src.net())
+}
+
+fn config<'a>(s: &'a App, key: &str) -> Option<&'a Value> {
+    crate::env::source(s, key).and_then(|src| src.state().config.as_ref())
+}
+
+fn scan_at(s: &mut App, key: &str) -> usize {
+    let scans = &mut ui(s).scans;
+    match scans.iter().position(|x| x.key == key) {
+        Some(at) => at,
+        None => {
+            scans.push(Scan { key: key.to_string(), ..Scan::default() });
+            scans.len() - 1
+        }
+    }
+}
+
+/// Every environment is scanned, selected or not, like usageByWindowAtom; the selection only
+/// picks which answers merge.
 pub fn poll(s: &mut App) -> bool {
     if !matches!(s.route, Route::Usage) {
         return false;
@@ -331,71 +384,119 @@ pub fn poll(s: &mut App) -> bool {
         apply_preferences(ui(s), &saved);
         changed = true;
     }
-    if let Some(id) = s.ui.pages.usage.refreshing
-        && let Some(_) = s.src.net().and_then(|n| n.take_reply(id))
-    {
-        let u = ui(s);
-        u.refreshing = None;
-        // Rates landed (a failed refresh still rescans, like refreshUsage): fetch again.
-        u.requested = None;
-        u.reloading = true;
+    let wanted = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
+    if s.ui.pages.usage.requested.as_ref().map(window_key) != Some(window_key(&wanted)) {
+        ui(s).requested = Some(wanted);
         changed = true;
     }
-    if let Some(id) = s.ui.pages.usage.cursor_enabling
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
-    {
-        ui(s).cursor_enabling = None;
-        // The opt-in is a scan setting, so the summary refetches when it lands; limits refresh here.
-        if reply.is_ok() {
-            super::usage_limits::refresh(s, false);
+    for key in crate::env::keys(s) {
+        changed |= poll_scan(s, &key);
+    }
+    for (key, id) in std::mem::take(&mut ui(s).cursor_enabling) {
+        match env_net(s, &key).map(|n| n.take_reply(id)) {
+            Some(None) => ui(s).cursor_enabling.push((key, id)),
+            reply => {
+                if matches!(reply, Some(Some(Ok(_)))) {
+                    refresh_usage(s, false);
+                    super::usage_limits::refresh(s, false);
+                }
+                changed = true;
+            }
         }
+    }
+    changed | remerge(s)
+}
+
+/// One environment's `server.getUsageSummary` (the usageSummary atom): an answer with sources
+/// still refreshing shows and is asked again with `awaitRefresh`, and a failed second ask keeps it.
+fn poll_scan(s: &mut App, key: &str) -> bool {
+    let at = scan_at(s, key);
+    let mut changed = false;
+    if let Some(id) = s.ui.pages.usage.scans[at].rates
+        && env_net(s, key).is_none_or(|n| n.take_reply(id).is_some())
+    {
+        let scan = &mut ui(s).scans[at];
+        scan.rates = None;
+        scan.sent = None;
         changed = true;
     }
-    if let Some(id) = s.ui.pages.usage.pending
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
+    if let Some((id, window)) = s.ui.pages.usage.scans[at].pending.clone()
+        && let Some(reply) = env_net(s, key).and_then(|n| n.take_reply(id))
     {
-        let u = ui(s);
-        u.pending = None;
-        u.reloading = false;
+        changed = true;
+        let scan = &mut ui(s).scans[at];
+        scan.pending = None;
+        let awaited = std::mem::take(&mut scan.awaiting);
+        let mut again = None;
         match reply {
             Ok(summary) => {
-                u.summary = Some(summary);
-                u.answered = u.requested.clone();
-                u.error = None;
-            }
-            Err(_) => {
-                u.summary = None;
-                u.error = Some("This environment could not report usage.".into());
-            }
-        }
-        changed = true;
-    }
-    let scan = scan_settings(s);
-    let mut wanted = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
-    if !scan[3].is_null() {
-        wanted["modelFilter"] = scan[3].clone();
-    }
-    let current = s.ui.pages.usage.requested.as_ref().map(window_key);
-    if current != Some(window_key(&wanted)) || s.ui.pages.usage.scan.as_ref() != Some(&scan) {
-        s.ui.pages.usage.requested = Some(wanted.clone());
-        s.ui.pages.usage.scan = Some(scan);
-        match s.src.net() {
-            // The last summary stays up, dimmed, until this one answers (useUsage's `shown`).
-            Some(net) => {
-                let id = net.request("server.getUsageSummary", wanted);
-                ui(s).pending = Some(id);
-            }
-            None if !crate::host::live() => {
-                if s.ui.pages.usage.summary.is_none() {
-                    s.ui.pages.usage.summary = super::fixture("usage.json").map(|f| f["summary"].clone());
+                let refreshing = summary["sources"].as_array().into_iter().flatten().any(|src| src["refreshing"] == true);
+                if refreshing && !awaited {
+                    again = scan.sent.as_ref().map(|(input, _)| {
+                        let mut input = input.clone();
+                        input["awaitRefresh"] = json!(true);
+                        input
+                    });
+                } else {
+                    scan.refreshing = false;
                 }
-                s.ui.pages.usage.answered = s.ui.pages.usage.requested.clone();
+                scan.summary = Some(summary);
+                scan.answered = Some(window.clone());
+                scan.error = None;
             }
-            None => {}
+            Err(_) if awaited => scan.refreshing = false,
+            Err(_) => {
+                scan.summary = None;
+                scan.answered = None;
+                scan.error = Some("This environment could not report usage.".into());
+                scan.refreshing = false;
+            }
         }
+        scan.generation += 1;
+        if let Some(input) = again
+            && let Some(net) = env_net(s, key)
+        {
+            let id = net.request("server.getUsageSummary", input);
+            let scan = &mut ui(s).scans[at];
+            scan.pending = Some((id, window));
+            scan.awaiting = true;
+        }
+    }
+    let Some(requested) = s.ui.pages.usage.requested.clone() else { return changed };
+    let settings = scan_settings(config(s, key));
+    let want = (scan_input(&requested, &settings), settings);
+    let connected = crate::env::status(s, key) == "Connected";
+    let scan = &s.ui.pages.usage.scans[at];
+    if !connected && scan.refreshing {
+        ui(s).scans[at].refreshing = false;
         changed = true;
     }
-    changed
+    let scan = &s.ui.pages.usage.scans[at];
+    if !connected || scan.rates.is_some() || scan.sent.as_ref() == Some(&want) {
+        return changed;
+    }
+    let window = window_key(&want.0);
+    match env_net(s, key) {
+        Some(net) => {
+            let id = net.request("server.getUsageSummary", want.0.clone());
+            let scan = &mut ui(s).scans[at];
+            scan.pending = Some((id, window));
+            scan.awaiting = false;
+            scan.error = None;
+        }
+        None if key == crate::env::LOCAL && !crate::host::live() => {
+            let recorded = super::fixture("usage.json").map(|f| f["summary"].clone());
+            let scan = &mut ui(s).scans[at];
+            if scan.summary.is_none() {
+                scan.summary = recorded;
+            }
+            scan.answered = Some(window);
+            scan.generation += 1;
+        }
+        None => {}
+    }
+    ui(s).scans[at].sent = Some(want);
+    true
 }
 
 /// The metric, window and hidden providers survive a restart (usagePagePreferences).
@@ -436,17 +537,43 @@ fn refresh(s: &mut App) {
         super::usage_limits::refresh(s, false);
         return;
     }
-    match s.src.net() {
-        Some(net) => {
-            let id = net.request("server.refreshUsageRates", json!({}));
-            ui(s).refreshing = Some(id);
+    let now = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
+    ui(s).requested = Some(now);
+    refresh_usage(s, true);
+}
+
+/// refreshUsage: each selected connected environment refreshes its model rates, then rescans.
+fn refresh_usage(s: &mut App, from_header: bool) {
+    for key in selected_environments(s) {
+        if crate::env::status(s, &key) != "Connected" {
+            continue;
         }
-        None => ui(s).requested = None,
+        let Some(net) = env_net(s, &key) else { continue };
+        let id = net.request("server.refreshUsageRates", json!({}));
+        let at = scan_at(s, &key);
+        let scan = &mut ui(s).scans[at];
+        scan.rates = Some(id);
+        scan.refreshing |= from_header;
     }
 }
 
+/// A saved setting changed on `key`: ask it again (the usageSummary atom's refreshTrigger).
+pub(super) fn rescan(s: &mut App, key: &str) {
+    let at = scan_at(s, key);
+    ui(s).scans[at].sent = None;
+}
+
 fn refreshing(u: &Ui) -> bool {
-    u.refreshing.is_some() || u.reloading || super::usage_limits::busy(&u.limits)
+    u.scans.iter().any(|x| x.refreshing) || super::usage_limits::busy(&u.limits)
+}
+
+/// UsagePage's `refreshingUsage`: the header's usage refresh, which reads every figure as stale.
+fn refreshing_usage(u: &Ui) -> bool {
+    u.metric != "limits" && u.scans.iter().any(|x| x.refreshing)
+}
+
+fn is_selected(u: &Ui, key: &str) -> bool {
+    u.environments.as_ref().is_none_or(|c| c.iter().any(|k| k == key))
 }
 
 /// The environments the filter leaves in, in the app's order (`selectedEnvironments`).
@@ -456,7 +583,7 @@ pub(super) fn selected_environments(s: &App) -> Vec<String> {
 }
 
 /// UsageEnvironmentFilter's checkbox: checking every environment again reads as "All".
-fn toggle_environment(all: &[String], selected: &[String], key: &str, on: bool) -> Option<Vec<String>> {
+pub(super) fn toggle_environment(all: &[String], selected: &[String], key: &str, on: bool) -> Option<Vec<String>> {
     let mut next: Vec<String> = selected.iter().filter(|k| *k != key).cloned().collect();
     if on {
         next.push(key.to_string());
@@ -473,38 +600,288 @@ fn shares_chatgpt(provider: &Value) -> bool {
 
 pub(super) const CURSOR_KEYCHAIN_COPY: &str = "Requires access to your Cursor login in macOS Keychain.";
 
-/// needsCursorKeychainAccess through cursorKeychainAccessEnvironments: the scan asks for the
-/// keychain and Cursor is ready, unless a scan already reads a Cursor account.
+/// needsCursorKeychainAccess: the scan asks for the keychain and Cursor is ready.
 fn needs_cursor_keychain(summary: &Value, providers: &Value) -> bool {
-    let sources = summary["sources"].as_array().map(Vec::as_slice).unwrap_or(&[]);
-    let reads_account = sources.iter().any(|src| src["fingerprint"]["provider"] == "cursor" && src["fingerprint"]["hostId"] == "cursor.com");
-    !reads_account
-        && sources.iter().any(|src| src["action"] == "enableCursorKeychain")
+    summary["sources"].as_array().into_iter().flatten().any(|src| src["action"] == "enableCursorKeychain")
         && providers.as_array().into_iter().flatten().any(|p| p["driver"] == "cursor" && p["status"] == "ready")
 }
 
-/// The label of the environment on screen when it should offer the Cursor keychain opt-in. Only
-/// that environment's usage is scanned, so it is the only one that can ask.
-pub(super) fn cursor_access(s: &App) -> Option<String> {
-    let u = &s.ui.pages.usage;
-    let active = &s.ui.env.active;
-    let providers = s.state().config.as_ref().map(|c| &c["providers"])?;
-    let selected = u.metric != "limits" || selected_environments(s).contains(active);
-    (!u.hidden.contains(&"cursor") && selected && needs_cursor_keychain(u.summary.as_ref()?, providers)).then(|| crate::env::label(s, active))
+fn reads_cursor_account(summary: &Value) -> bool {
+    summary["sources"].as_array().into_iter().flatten().any(|src| src["fingerprint"]["provider"] == "cursor" && src["fingerprint"]["hostId"] == "cursor.com")
 }
 
-/// CursorEnableButton: `server.updateSettings` turns `cursorKeychainUsageEnabled` on.
-pub(super) fn enable_cursor(s: &mut App) {
-    if s.ui.pages.usage.cursor_enabling.is_some() {
+/// EnvironmentUsageStatus: one environment's connection and its answer for the requested window.
+struct EnvUsage<'a> {
+    key: String,
+    label: String,
+    connected: bool,
+    pending: bool,
+    error: Option<String>,
+    summary: Option<&'a Value>,
+    needs_cursor: bool,
+}
+
+/// usageByWindowAtom: every environment; one still connecting is pending and a lost one reports
+/// an error (resolveUsageAccess).
+fn environments(s: &App) -> Vec<EnvUsage<'_>> {
+    let u = &s.ui.pages.usage;
+    let window = u.requested.as_ref().map(window_key);
+    crate::env::keys(s)
+        .into_iter()
+        .map(move |key| {
+            let status = crate::env::status(s, &key);
+            let label = crate::env::label(s, &key);
+            if status != "Connected" {
+                let pending = status != "Not connected";
+                let error = (!pending).then(|| "This environment is not connected.".to_string());
+                return EnvUsage { key, label, connected: false, pending, error, summary: None, needs_cursor: false };
+            }
+            let scan = u.scans.iter().find(|x| x.key == key);
+            let summary = scan.filter(|x| x.answered.is_some() && x.answered == window).and_then(|x| x.summary.as_ref());
+            let error = scan.and_then(|x| x.error.clone());
+            let pending = scan.is_none_or(|x| x.pending.is_some() || (summary.is_none() && x.error.is_none()));
+            let providers = config(s, &key).map(|c| &c["providers"]).unwrap_or(&Value::Null);
+            let needs_cursor = summary.is_some_and(|v| needs_cursor_keychain(v, providers));
+            EnvUsage { key, label, connected: true, pending, error, summary, needs_cursor }
+        })
+        .collect()
+}
+
+fn selected_usage(s: &App) -> Vec<EnvUsage<'_>> {
+    let u = &s.ui.pages.usage;
+    environments(s).into_iter().filter(|e| is_selected(u, &e.key)).collect()
+}
+
+#[derive(Debug, PartialEq)]
+enum Phase {
+    Inactive,
+    Loading,
+    Stale,
+    Partway(Vec<String>),
+    Ready,
+}
+
+/// usageEnvironmentProgress
+fn progress(e: &EnvUsage<'_>, refreshing: bool) -> Phase {
+    if !e.connected || e.error.is_some() {
+        return Phase::Inactive;
+    }
+    let Some(summary) = e.summary else { return Phase::Loading };
+    if refreshing {
+        return Phase::Stale;
+    }
+    if !e.pending {
+        return Phase::Ready;
+    }
+    let mut providers: Vec<String> = Vec::new();
+    for src in summary["sources"].as_array().into_iter().flatten().filter(|src| src["refreshing"] == true) {
+        let provider = field(&src["fingerprint"], "provider").to_string();
+        if !providers.contains(&provider) {
+            providers.push(provider);
+        }
+    }
+    if providers.is_empty() { Phase::Stale } else { Phase::Partway(providers) }
+}
+
+/// updatingProvidersLabel
+fn updating(providers: &[String]) -> String {
+    match providers {
+        [one] => format!("Updating {}…", presentation(one).0),
+        many => format!("Updating {} providers…", many.len()),
+    }
+}
+
+/// UsageEnvironmentFilter's status beside each environment.
+fn status_label(e: &EnvUsage<'_>, refreshing: bool) -> String {
+    let outdated = e.summary.is_some_and(|v| !usage_merge::compatible(v["contractVersion"].as_i64().unwrap_or(0), usage_merge::CONTRACT_VERSION));
+    if e.error.is_some() {
+        return "Unavailable".into();
+    }
+    if outdated {
+        return "Update required".into();
+    }
+    if !e.connected {
+        return "Connecting…".into();
+    }
+    match progress(e, refreshing) {
+        Phase::Loading => "Scanning…".into(),
+        Phase::Stale => "Refreshing…".into(),
+        Phase::Partway(providers) => updating(&providers),
+        Phase::Inactive | Phase::Ready => "Ready".into(),
+    }
+}
+
+/// useUsage's counts over the selected environments: (answered, still reporting).
+fn reporting(selected: &[EnvUsage<'_>]) -> (usize, usize) {
+    let answered = selected.iter().filter(|e| e.summary.is_some()).count();
+    let still = selected.iter().filter(|e| e.summary.is_none() && e.error.is_none()).count();
+    (answered, still)
+}
+
+/// usageLoading: whether every provider's figures wait, and which visible providers still update.
+fn loading(selected: &[EnvUsage<'_>], refreshing: bool, showing_kept: bool, hidden: &[&str]) -> (bool, Vec<String>) {
+    if showing_kept {
+        return (true, Vec::new());
+    }
+    let mut every = false;
+    let mut providers: Vec<String> = Vec::new();
+    for e in selected {
+        match progress(e, refreshing) {
+            Phase::Loading | Phase::Stale => every = true,
+            Phase::Partway(kinds) => {
+                for kind in kinds {
+                    if !hidden.contains(&kind.as_str()) && !providers.contains(&kind) {
+                        providers.push(kind);
+                    }
+                }
+            }
+            Phase::Inactive | Phase::Ready => {}
+        }
+    }
+    (every, providers)
+}
+
+/// UsageCoverageNotice: failed environments, excluded contracts and directories counted once.
+fn coverage_lines(selected: &[EnvUsage<'_>], merged: &Value) -> Vec<String> {
+    let mut lines: Vec<String> = selected.iter().filter_map(|e| Some(format!("{}: {}", e.label, e.error.as_ref()?))).collect();
+    for e in selected {
+        if let Some(m) = merged["mismatches"].as_array().into_iter().flatten().find(|m| m["environment"] == e.key.as_str()) {
+            lines.push(usage_merge::mismatch_line(&e.label, &Mismatch { environment: e.key.clone(), server_behind: m["serverBehind"] == true }));
+        }
+    }
+    let duplicates: Vec<&str> = merged["duplicates"].as_array().into_iter().flatten().filter_map(Value::as_str).collect();
+    if !duplicates.is_empty() {
+        lines.push(format!("Counted once across environments sharing a transcript directory: {}", duplicates.join(", ")));
+    }
+    lines
+}
+
+/// mergeAnsweredUsage after withoutProviders, as one summary for `window`: the merged buckets,
+/// every answer's visible sources, sessions per provider, and what the merge left out.
+fn merged_summary(selected: &[EnvUsage<'_>], hidden: &[&str], window: &Value) -> Value {
+    let shown = |provider: &Value| !hidden.contains(&provider.as_str().unwrap_or(""));
+    let trimmed: Vec<_> = selected
+        .iter()
+        .filter_map(|e| {
+            let mut summary = e.summary?.clone();
+            if let Some(buckets) = summary["buckets"].as_array_mut() {
+                buckets.retain(|b| shown(&b["provider"]));
+            }
+            if let Some(sources) = summary["sources"].as_array_mut() {
+                sources.retain(|src| shown(&src["fingerprint"]["provider"]));
+            }
+            Some((e, summary))
+        })
+        .collect();
+    let usages: Vec<_> = trimmed.iter().map(|(e, summary)| usage_merge::Usage { id: &e.key, label: &e.label, summary }).collect();
+    let merged = usage_merge::merge_usage(&usages, usage_merge::CONTRACT_VERSION);
+    let sources: Vec<Value> = trimmed.iter().flat_map(|(_, v)| v["sources"].as_array().cloned().unwrap_or_default()).collect();
+    let sessions: serde_json::Map<String, Value> = merged.sessions.iter().map(|(p, n)| (p.clone(), json!(n))).collect();
+    let mismatches: Vec<Value> = merged.mismatches.iter().map(|m| json!({"environment": m.environment, "serverBehind": m.server_behind})).collect();
+    json!({
+        "sinceDay": window["sinceDay"], "untilDay": window["untilDay"], "buckets": merged.buckets, "sources": sources,
+        "sessions": sessions, "duplicates": merged.duplicates, "mismatches": mismatches,
+    })
+}
+
+/// useUsage's `shown`: the selected environments' merged answers; while none has answered, the
+/// last merge for this selection (`kept`), or nothing while they still scan.
+fn remerge(s: &mut App) -> bool {
+    let u = &s.ui.pages.usage;
+    let Some(window) = u.requested.clone() else { return false };
+    let selected = selected_usage(s);
+    let answers: Vec<Value> = selected
+        .iter()
+        .map(|e| json!([e.key, u.scans.iter().find(|x| x.key == e.key).map_or(0, |x| x.generation), e.summary.is_some(), e.error, e.pending]))
+        .collect();
+    let from = json!([u.environments, u.hidden, window_key(&window), answers]).to_string();
+    if from == u.merged_from {
+        return false;
+    }
+    let selection = json!([u.environments, u.hidden]).to_string();
+    let (answered, still) = reporting(&selected);
+    let merged = merged_summary(&selected, &u.hidden, &window);
+    let u = ui(s);
+    u.merged_from = from;
+    if answered > 0 {
+        u.kept = Some((selection, merged.clone(), window.clone()));
+        u.summary = Some(merged);
+        u.answered = Some(window);
+        u.showing_kept = false;
+    } else if let Some((_, summary, kept_window)) = u.kept.as_ref().filter(|k| k.0 == selection) {
+        u.summary = Some(summary.clone());
+        u.answered = Some(kept_window.clone());
+        u.showing_kept = true;
+    } else {
+        u.summary = (still == 0).then_some(merged);
+        u.answered = Some(window);
+        u.showing_kept = false;
+    }
+    true
+}
+
+/// cursorKeychainAccessEnvironments as (key, label): none while Cursor is hidden, or once any
+/// selected environment reads a Cursor account, which already reports every machine's history.
+fn cursor_access_environments(selected: &[EnvUsage<'_>], hidden: &[&str]) -> Vec<(String, String)> {
+    if hidden.contains(&"cursor") || selected.iter().any(|e| e.summary.is_some_and(reads_cursor_account)) {
+        return Vec::new();
+    }
+    selected.iter().filter(|e| e.needs_cursor).map(|e| (e.key.clone(), e.label.clone())).collect()
+}
+
+/// The selected environments that offer the Cursor keychain opt-in, as (key, label).
+pub(super) fn cursor_access(s: &App) -> Vec<(String, String)> {
+    cursor_access_environments(&selected_usage(s), &s.ui.pages.usage.hidden)
+}
+
+pub(super) fn cursor_enabling(s: &App, key: &str) -> bool {
+    s.ui.pages.usage.cursor_enabling.iter().any(|e| e.0 == key)
+}
+
+/// CursorEnableButton: `server.updateSettings` turns `cursorKeychainUsageEnabled` on for `key`.
+pub(super) fn enable_cursor(s: &mut App, key: &str) {
+    if cursor_enabling(s, key) {
         return;
     }
-    if let Some(net) = s.src.net() {
+    if let Some(net) = env_net(s, key) {
         let id = net.request("server.updateSettings", json!({"patch": {"cursorKeychainUsageEnabled": true}}));
-        ui(s).cursor_enabling = Some(id);
+        ui(s).cursor_enabling.push((key.to_string(), id));
     }
 }
 
-/// The `usage-cursor-keychain` scenes: Cursor is ready and its scan asks for the keychain.
+/// Scenes: `key` asked for the requested window, answered with `summary` or still scanning.
+pub(super) fn scene_scan(s: &mut App, key: &str, summary: Option<Value>) {
+    let Some(requested) = s.ui.pages.usage.requested.clone() else { return };
+    let settings = scan_settings(config(s, key));
+    let input = scan_input(&requested, &settings);
+    let at = scan_at(s, key);
+    let scan = &mut ui(s).scans[at];
+    scan.answered = summary.is_some().then(|| window_key(&input));
+    scan.summary = summary;
+    scan.sent = Some((input, settings));
+    scan.generation += 1;
+    remerge(s);
+}
+
+fn scene_summary(s: &mut App, key: &str) -> Option<Value> {
+    let at = scan_at(s, key);
+    ui(s).scans[at].summary.clone()
+}
+
+/// The `usage-error` scene: this machine's scan failed with nothing kept, so the overview is
+/// empty and the filter warns.
+pub(super) fn error_scene(s: &mut App) {
+    let at = scan_at(s, crate::env::LOCAL);
+    let scan = &mut ui(s).scans[at];
+    scan.summary = None;
+    scan.answered = None;
+    scan.error = Some("This environment could not report usage.".into());
+    scan.generation += 1;
+    ui(s).kept = None;
+    remerge(s);
+}
+
+/// The `usage-cursor-keychain` scenes: Cursor is ready and this machine's scan asks for the keychain.
 pub(super) fn cursor_scene(s: &mut App) {
     if let crate::data::Source::Fixture(state) = &mut s.src
         && let Some(providers) = state.config.as_mut().and_then(|c| c["providers"].as_array_mut())
@@ -515,22 +892,78 @@ pub(super) fn cursor_scene(s: &mut App) {
             }
         }
     }
-    if let Some(sources) = s.ui.pages.usage.summary.as_mut().and_then(|v| v["sources"].as_array_mut()) {
+    let mut summary = scene_summary(s, crate::env::LOCAL);
+    if let Some(sources) = summary.as_mut().and_then(|v| v["sources"].as_array_mut()) {
         sources.push(json!({
             "fingerprint": {"provider": "cursor", "hostId": "devbox"}, "status": "missing", "scannedFiles": 0, "skippedFiles": 0,
             "malformedRecords": 0, "distinctSessions": 0, "message": null, "action": "enableCursorKeychain",
         }));
     }
+    scene_scan(s, crate::env::LOCAL, summary);
+}
+
+/// A second environment for the multi-environment scenes: the `usage-limits-environments`
+/// "Studio Mac", answering with this machine's summary changed by `edit`, or still scanning.
+pub(super) fn studio_scene(s: &mut App, edit: Option<fn(&mut Value)>) {
+    super::usage_limits::environments_scene(s);
+    let summary = edit.and_then(|edit| {
+        let mut summary = scene_summary(s, crate::env::LOCAL)?;
+        edit(&mut summary);
+        Some(summary)
+    });
+    scene_scan(s, "studio", summary);
+}
+
+/// The `usage-cursor-keychain-environments` scene: both machines ask for Cursor's keychain;
+/// Studio Mac copies this machine's config after Cursor turned ready.
+pub(super) fn cursor_environments_scene(s: &mut App) {
+    cursor_scene(s);
+    studio_scene(s, Some(|summary| {
+        for src in summary["sources"].as_array_mut().into_iter().flatten() {
+            src["fingerprint"]["hostId"] = json!("studio");
+        }
+    }));
+}
+
+/// The `usage-provider-loading` scenes: this machine answered with Claude Code still refreshing
+/// and Grok Build not read yet, and is asked again with `awaitRefresh`.
+pub(super) fn updating_scene(s: &mut App) {
+    let mut summary = scene_summary(s, crate::env::LOCAL);
+    if let Some(sources) = summary.as_mut().and_then(|v| v["sources"].as_array_mut()) {
+        for src in sources.iter_mut().filter(|src| src["fingerprint"]["provider"] == "claude") {
+            src["refreshing"] = json!(true);
+        }
+        sources.push(json!({
+            "fingerprint": {"provider": "grok", "hostId": "devbox", "resolvedHomePath": "/home/ubuntu/.grok", "volumeId": "66306:1"}, "status": "ok",
+            "scannedFiles": 0, "skippedFiles": 0, "malformedRecords": 0, "distinctSessions": 0, "message": null, "refreshing": true,
+        }));
+    }
+    scene_scan(s, crate::env::LOCAL, summary);
+    let at = scan_at(s, crate::env::LOCAL);
+    let scan = &mut ui(s).scans[at];
+    scan.pending = scan.answered.clone().map(|window| (0, window));
+    scan.awaiting = true;
+    scan.generation += 1;
+    remerge(s);
+}
+
+/// The `usage-offline` scene: only a saved environment that is not connected is selected.
+pub(super) fn offline_scene(s: &mut App) {
+    s.ui.env.saved.push(crate::env::Saved { id: "lab".into(), label: "Lab server".into(), base: "https://lab.example".into(), bearer: "scene".into() });
+    ui(s).environments = Some(vec!["lab".into()]);
+    remerge(s);
 }
 
 /// CursorEnableRow: the overview's Cursor line, with an inline "Enable" in place of figures.
-fn cursor_enable_row(s: &App, t: &T, label: &str) -> El {
+fn cursor_enable_row(s: &App, t: &T, key: &str, label: &str, show_environment: bool) -> El {
     let mut enable = row()
         .role("button")
         .label(format!("Enable Cursor usage from {label}"))
         .help(CURSOR_KEYCHAIN_COPY)
         .child(text("Enable").font(theme::SM_MEDIUM).color(t.c.foreground));
-    enable = if s.ui.pages.usage.cursor_enabling.is_some() { enable.opacity(0.64) } else { enable.cursor(rune::Cursor::Pointer).focusable(true).on_press(enable_cursor) };
+    let key = key.to_string();
+    enable = if cursor_enabling(s, &key) { enable.opacity(0.64) } else { enable.cursor(rune::Cursor::Pointer).focusable(true).on_press(move |s: &mut App| enable_cursor(s, &key)) };
+    let name = if show_environment { format!("Cursor · {label}") } else { "Cursor".to_string() };
     row()
         .w_full()
         .gap(8.0)
@@ -538,14 +971,9 @@ fn cursor_enable_row(s: &App, t: &T, label: &str) -> El {
         .center_y()
         .child(el().size(8.0, 8.0).radius(radius::FULL).fill(color(t, "cursor")))
         .child(provider_icon(t, "cursor", 16.0))
-        .child(text("Cursor").font(theme::TEXT_SM).color(t.c.foreground))
+        .child(text(name).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink())
         .child(spacer())
         .child(enable)
-}
-
-/// Figures from another window, or mid-refresh, read as stale (`figureClass`).
-fn stale(u: &Ui) -> bool {
-    u.reloading || (u.pending.is_some() && u.answered.as_ref().map(window_key) != u.requested.as_ref().map(window_key))
 }
 
 /// UsagePage's metric and period shortcuts: `c`/`t`/`l` and Mod+Shift+1..4 by default.
@@ -666,6 +1094,8 @@ struct Merged {
     ultrafast: f64,
     premium: f64,
     unpriced_tokens: f64,
+    /// Distinct sessions over the visible providers (merged.sessions).
+    sessions: i64,
     hourly: bool,
     clock: Clock,
     providers: Vec<(&'static str, Totals, i64)>,
@@ -747,9 +1177,19 @@ fn merge(summary: &Value, hidden: &[&str], window: Option<&Value>, model: Option
         add(m.by_period.entry(period).or_default().entry(kind).or_default());
     }
     let mut sessions: HashMap<&str, i64> = HashMap::new();
-    for src in summary["sources"].as_array().into_iter().flatten() {
-        *sessions.entry(field(&src["fingerprint"], "provider")).or_default() += src["distinctSessions"].as_i64().unwrap_or(0);
+    match summary["sessions"].as_object() {
+        Some(merged) => {
+            for (provider, n) in merged {
+                sessions.insert(provider, n.as_i64().unwrap_or(0));
+            }
+        }
+        None => {
+            for src in summary["sources"].as_array().into_iter().flatten() {
+                *sessions.entry(field(&src["fingerprint"], "provider")).or_default() += src["distinctSessions"].as_i64().unwrap_or(0);
+            }
+        }
     }
+    m.sessions = sessions.iter().filter(|(p, _)| !hidden.contains(p)).map(|(_, n)| n).sum();
     m.providers = PROVIDERS.iter().filter_map(|p| providers.get(p.0).map(|t| (p.0, *t, sessions.get(p.0).copied().unwrap_or(0)))).collect();
     m.models = models.into_values().collect();
     m.models.sort_by(|a, b| b.totals.cost.total_cmp(&a.totals.cost).then(b.totals.tokens.total_cmp(&a.totals.tokens)));
@@ -782,17 +1222,25 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
     let mut overlays = Vec::new();
     let header = header(s, t, &mut overlays);
     let mut page = col().w_full().max_w(1024.0).px(24.0).pt(24.0).pb(48.0).gap(24.0);
-    let connected = s.state().config.is_some();
-    page = if !connected {
-        page.child(muted_line(t, if u.metric == "limits" { "Connect an environment to see limits." } else { "Connect an environment to see usage." }))
-    } else if u.metric == "limits" && selected_environments(s).is_empty() {
-        page.child(muted_line(t, "Select an environment to see limits."))
+    let selected = selected_usage(s);
+    let noun = if u.metric == "limits" { "limits" } else { "usage" };
+    page = if selected.is_empty() {
+        let none = crate::env::keys(s).iter().all(|k| config(s, k).is_none());
+        page.child(muted_line(t, &if none { format!("Connect an environment to see {noun}.") } else { format!("Select an environment to see {noun}.") }))
     } else if u.metric == "limits" {
         page.child(super::usage_limits::view(s, cx, t, &mut overlays))
-    } else if let Some(error) = u.error.as_ref().filter(|_| u.summary.is_none()) {
-        page.child(col().w_full().py(48.0).items_center().child(text(error.clone()).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center)))
     } else if let Some(summary) = &u.summary {
-        overview(s, t, summary, page, &mut overlays)
+        if selected.iter().any(|e| e.connected) {
+            overview(s, t, summary, page, &mut overlays)
+        } else {
+            let mut lines = col().w_full().py(48.0).gap(8.0).items_center();
+            for e in &selected {
+                let prefix = if selected.len() > 1 { format!("{}: ", e.label) } else { String::new() };
+                let line = format!("{prefix}{}", e.error.as_deref().unwrap_or(""));
+                lines = lines.child(text(line).font(theme::TEXT_SM).color(t.c.muted_foreground).wrap().align(rune::Align::Center));
+            }
+            page.child(lines)
+        }
     } else {
         skeleton(t, page)
     };
@@ -887,16 +1335,16 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
             save_preferences(s);
         }));
     }
-    // Limits read every environment; cost and tokens scan only the one on screen.
-    let limits_mode = u.metric == "limits";
-    let all = crate::env::keys(s);
-    let selected = selected_environments(s);
-    let env_label = match (limits_mode, &u.environments, selected.as_slice()) {
-        (true, Some(_), [one]) => crate::env::label(s, one),
-        (true, Some(_), many) => format!("{} environments", many.len()),
-        _ => "All environments".to_string(),
+    let show_status = u.metric != "limits";
+    let all = environments(s);
+    let selected = selected_usage(s);
+    let env_label = match (&u.environments, selected.as_slice()) {
+        (None, _) => "All environments".to_string(),
+        (Some(_), [one]) => one.label.clone(),
+        (Some(_), many) => format!("{} environments", many.len()),
     };
-    let issue = !limits_mode && u.error.is_some();
+    let merged = u.summary.as_ref().unwrap_or(&Value::Null);
+    let issue = show_status && (selected.iter().any(|e| e.error.is_some()) || merged["mismatches"].as_array().is_some_and(|m| !m.is_empty()));
     let env_trigger = row()
         .gap(4.0)
         .center_y()
@@ -913,36 +1361,42 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .min_width(220.0)
         .open(u.menu == Some("environments"))
         .on_close(|s: &mut App| ui(s).menu = None)
-        .item(MenuItem::new("All environments").checked(!limits_mode || u.environments.is_none()).on_select(move |s: &mut App| {
+        .item(MenuItem::new("All environments").checked(u.environments.is_none()).on_select(|s: &mut App| {
             let u = ui(s);
-            if limits_mode {
-                u.environments = if u.environments.is_none() { Some(Vec::new()) } else { None };
-            }
+            u.environments = if u.environments.is_none() { Some(Vec::new()) } else { None };
             u.menu = Some("environments");
         }))
         .separator();
-    if limits_mode {
-        for key in &all {
-            let checked = selected.contains(key);
-            let (all, selected, key) = (all.clone(), selected.clone(), key.clone());
-            envs = envs.item(MenuItem::new(crate::env::label(s, &key)).checked(checked).on_select(move |s: &mut App| {
-                let u = ui(s);
-                u.environments = toggle_environment(&all, &selected, &key, !checked);
-                u.menu = Some("environments");
-            }));
+    let keys: Vec<String> = all.iter().map(|e| e.key.clone()).collect();
+    let checked_keys: Vec<String> = selected.iter().map(|e| e.key.clone()).collect();
+    let rescanning = refreshing_usage(u);
+    for e in &all {
+        let checked = checked_keys.contains(&e.key);
+        let (keys, checked_keys, key) = (keys.clone(), checked_keys.clone(), e.key.clone());
+        let mut item = MenuItem::new(e.label.clone()).checked(checked).on_select(move |s: &mut App| {
+            let u = ui(s);
+            u.environments = toggle_environment(&keys, &checked_keys, &key, !checked);
+            u.menu = Some("environments");
+        });
+        if show_status {
+            let ink = if e.error.is_some() { t.c.destructive } else { t.c.muted_foreground };
+            item = item.trailing(text(status_label(e, rescanning)).font(theme::TEXT_XS).color(ink).ml(12.0));
         }
-    } else {
-        let status = if u.error.is_some() {
-            "Unavailable"
-        } else if u.pending.is_some() && u.summary.is_none() {
-            "Scanning…"
-        } else if u.pending.is_some() || refreshing(u) {
-            "Refreshing…"
-        } else {
-            "Ready"
-        };
-        let label = super::usage_prices::target(s).label;
-        envs = envs.item(MenuItem::new(label).checked(true).shortcut(status).on_select(|s: &mut App| ui(s).menu = Some("environments")));
+        envs = envs.item(item);
+    }
+    let note = |line: String| text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap();
+    let can_read = selected.iter().any(|e| e.connected);
+    let (answered, still) = reporting(&selected);
+    if show_status && answered > 0 && still > 0 {
+        envs = envs.row(col().max_w(280.0).px(8.0).py(8.0).child(note("Totals are partial while selected environments scan.".into())));
+    }
+    let coverage = if show_status { coverage_lines(&selected, merged) } else { Vec::new() };
+    if !coverage.is_empty() {
+        let mut notice = col().max_w(280.0).gap(4.0).px(8.0).py(8.0);
+        for line in coverage {
+            notice = notice.child(note(line));
+        }
+        envs = envs.separator().row(notice);
     }
     envs = envs.separator().item(MenuItem::new("Model prices").icon(&i::SLIDERS_HORIZONTAL).on_select(|s: &mut App| {
         ui(s).menu = None;
@@ -1008,7 +1462,7 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 .variant("ghost")
                 .size("icon-sm")
                 .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
-                .disabled(refreshing(u))
+                .disabled(refreshing(u) || (!limits && !can_read))
                 .on_press(refresh)
                 .build(t),
         )
@@ -1026,9 +1480,10 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
     let value = |x: Totals| if tokens_view { x.tokens } else { x.cost };
     let fmt = |v: f64| if tokens_view { tokens(v) } else { usd(v) };
     let tnum = |style: rune::tok::TextStyle| style.features("'tnum' 1");
-    let dim = if stale(u) { 0.4 } else { 1.0 };
-
-    let sessions: i64 = m.providers.iter().map(|p| p.2).sum();
+    let selected = selected_usage(s);
+    let (every, partway) = loading(&selected, refreshing_usage(u), u.showing_kept, &u.hidden);
+    let dim = if every || !partway.is_empty() { 0.4 } else { 1.0 };
+    let sessions = m.sessions;
     let mut caption = row().gap(4.0).center_y().child(
         text(format!("{} sessions{}", grouped(sessions), if tokens_view { "" } else { " · API estimate" })).font(theme::TEXT_XS).color(t.c.muted_foreground),
     );
@@ -1063,7 +1518,8 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
                 .child(text(fmt(if tokens_view { m.tokens } else { m.cost })).font(tnum(theme::weight(TEXT_4XL, theme::SEMIBOLD))).color(t.c.foreground).opacity(dim))
                 .child(caption.opacity(dim)),
         );
-    if !u.hidden.contains(&"codex") && s.state().config.as_ref().is_some_and(|c| c["providers"].as_array().into_iter().flatten().any(shares_chatgpt)) {
+    let chatgpt = selected.iter().any(|e| config(s, &e.key).is_some_and(|c| c["providers"].as_array().into_iter().flatten().any(shares_chatgpt)));
+    if !u.hidden.contains(&"codex") && chatgpt {
         left = left.child(
             row()
                 .w_full()
@@ -1076,18 +1532,27 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
                 })),
         );
     }
-    let mut cursor = cursor_access(s).map(|label| cursor_enable_row(s, t, &label));
-    let cursor_at = ["codex", "claude"].iter().map(|k| m.providers.iter().position(|p| p.0 == *k).map_or(0, |at| at + 1)).max().unwrap_or(0);
+    let with_data = |kind: &str| m.providers.iter().any(|p| p.0 == kind && (p.1.tokens > 0.0 || p.1.cost > 0.0));
+    let active: Vec<&str> = PROVIDERS.iter().map(|p| p.0).filter(|k| with_data(*k) || partway.iter().any(|x| x == k)).collect();
+    let loading_kinds: Vec<&str> = active.iter().copied().filter(|k| every || partway.iter().any(|x| x == k)).collect();
+    let cursor_at = ["codex", "claude"].iter().map(|k| active.iter().position(|p| p == k).map_or(0, |at| at + 1)).max().unwrap_or(0);
+    let show_environment = selected.len() > 1;
+    let cursor: Vec<El> = cursor_access_environments(&selected, &u.hidden).iter().map(|(key, label)| cursor_enable_row(s, t, key, label, show_environment)).collect();
+    let mut cursor = Some(cursor);
     let mut rows = col().gap(16.0);
-    for (n, &(kind, totals, sessions)) in m.providers.iter().enumerate() {
+    for (n, &kind) in active.iter().enumerate() {
         if n == cursor_at
-            && let Some(line) = cursor.take()
+            && let Some(lines) = cursor.take()
         {
-            rows = rows.child(line);
+            rows = rows.children(lines);
         }
+        let (totals, sessions) = m.providers.iter().find(|p| p.0 == kind).map_or((Totals::default(), 0), |p| (p.1, p.2));
+        let figure = if loading_kinds.contains(&kind) { 0.4 } else { 1.0 };
+        let awaiting = loading_kinds.contains(&kind) && !with_data(kind);
         let (label, driver) = presentation(kind);
         let share = if tokens_view { totals.tokens / m.tokens.max(1.0) } else { totals.cost / m.cost.max(f64::MIN_POSITIVE) };
         let sub = if tokens_view { format!("{} of tokens · {}", percent(share), usd(totals.cost)) } else { format!("{} of cost · {} tokens", percent(share), tokens(totals.tokens)) };
+        let detail = if awaiting { 0.0 } else { figure };
         rows = rows.child(
             col()
                 .gap(4.0)
@@ -1100,14 +1565,14 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
                         .child(el().size(8.0, 8.0).radius(radius::FULL).fill(color(t, kind)))
                         .child(provider_icon(t, driver, 16.0))
                         .child(text(label).font(theme::TEXT_SM).color(t.c.foreground))
-                        .child(text(sessions_label(sessions)).font(theme::TEXT_2XS).color(t.c.muted_foreground).opacity(dim))
+                        .child(text(sessions_label(sessions)).font(theme::TEXT_2XS).color(t.c.muted_foreground).opacity(detail))
                         .child(spacer())
-                        .child(text(fmt(value(totals))).font(tnum(theme::SM_MEDIUM)).color(t.c.foreground).opacity(dim)),
+                        .child(text(if awaiting { "-".to_string() } else { fmt(value(totals)) }).font(tnum(theme::SM_MEDIUM)).color(t.c.foreground).opacity(figure)),
                 )
-                .child(text(sub).font(theme::TEXT_XS).color(t.c.muted_foreground).opacity(dim)),
+                .child(text(sub).font(theme::TEXT_XS).color(t.c.muted_foreground).opacity(detail)),
         );
     }
-    left = left.child(rows.children(cursor));
+    left = left.child(rows.children(cursor.into_iter().flatten()));
     let hourly = m.hourly;
     let chart_title = match (hourly, tokens_view) {
         (false, false) => "Daily cost",
@@ -1115,7 +1580,7 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
         (true, false) => "Hourly cost",
         (true, true) => "Hourly processed tokens",
     };
-    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, u.hover, u.plot_w, false));
+    let right = col().grow(1.0).shrink().min_w(0.0).gap(12.0).child(h2(t, chart_title)).child(chart(t, &m, tokens_view, u.hover, u.plot_w, false, &loading_kinds));
     let top = row().w_full().gap(24.0).child(left).child(right);
 
     let metric = |label: &str, v: String| {
@@ -1194,7 +1659,7 @@ fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<E
         shares = shares.child(share_bar(t, "Cost by type", &cost_parts(t, &m), usd, None));
     }
     shares = shares.child(share_bar(t, "Tokens by type", &token_parts(t, &m), tokens, None));
-    let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, u.model_hover, u.model_plot_w, true)).child(shares);
+    let mut body = col().w_full().gap(32.0).child(grid).child(chart(t, &m, tokens_view, u.model_hover, u.model_plot_w, true, &[])).child(shares);
     if let Some(parts) = speed_parts(t, &m) {
         body = body.child(row().w_full().child(share_bar(t, "Cost by speed", &parts, usd, Some(m.premium))));
     }
@@ -1461,14 +1926,17 @@ fn slot(u: &mut Ui, dialog: bool) -> (&mut Option<(usize, f32, f32)>, &mut f32) 
     if dialog { (&mut u.model_hover, &mut u.model_plot_w) } else { (&mut u.hover, &mut u.plot_w) }
 }
 
-fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>, plot_w: f32, dialog: bool) -> El {
+/// UsageProviderChart; `loading` providers' series dim, and with nothing to plot yet the axis
+/// keeps unlabeled placeholder ticks (chartScale).
+fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>, plot_w: f32, dialog: bool, loading: &[&str]) -> El {
     let value = |x: &Totals| if tokens_view { x.tokens } else { x.cost };
     let peak = m.by_period.values().flat_map(|p| p.values()).map(value).fold(0.0, f64::max);
-    let (max, ticks) = nice_scale(peak);
+    let labeled = peak > 0.0 || loading.is_empty();
+    let (max, ticks) = if labeled { nice_scale(peak) } else { (4.0, vec![0.0, 1.0, 2.0, 3.0, 4.0]) };
     let to_y = |v: f64| if max == 0.0 { VIEW_H } else { VIEW_H - (v / max) as f32 * (VIEW_H - PLOT_TOP) };
     let plot_h = 224.0;
     let mut axis = el().w(56.0).h(plot_h).shrink();
-    for tick in &ticks {
+    for tick in ticks.iter().filter(|_| labeled) {
         let label = if *tick == 0.0 { "0".to_string() } else if tokens_view { tokens(*tick) } else { usd(*tick) };
         let y = to_y(*tick) / VIEW_H * plot_h;
         axis = axis.child(row().absolute(0.0, y - 7.0).w(56.0).h(14.0).justify_end().child(text(label).font(theme::TEXT_3XS.features("'tnum' 1")).color(t.c.muted_foreground)));
@@ -1492,7 +1960,7 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, hover: Option<(usize, f32, f32)>,
         if pts.len() < 2 {
             continue;
         }
-        let c = color(t, kind);
+        let c = if loading.contains(kind) { color(t, kind).alpha_mul(0.4) } else { color(t, kind) };
         let line = curve(&pts);
         let area = curve(&pts).line_to([VIEW_W, VIEW_H]).line_to([0.0, VIEW_H]).close();
         shape = shape.fill_path(&area, c.alpha_mul(0.12));
@@ -1917,8 +2385,83 @@ mod tests {
         let ready = json!([{"driver": "cursor", "status": "ready"}]);
         assert!(needs_cursor_keychain(&asking, &ready));
         assert!(!needs_cursor_keychain(&asking, &json!([{"driver": "cursor", "status": "disabled"}])));
-        let mut reading = asking.clone();
-        reading["sources"].as_array_mut().unwrap().push(json!({"fingerprint": {"provider": "cursor", "hostId": "cursor.com"}, "status": "ok"}));
-        assert!(!needs_cursor_keychain(&reading, &ready));
+        let account = json!({"sources": [{"fingerprint": {"provider": "cursor", "hostId": "cursor.com"}, "status": "ok"}]});
+        let studio = EnvUsage { needs_cursor: true, ..env("studio", Some(&asking)) };
+        assert_eq!(cursor_access_environments(&[env("", None), studio], &[]), [("studio".to_string(), "STUDIO".to_string())]);
+        let studio = EnvUsage { needs_cursor: true, ..env("studio", Some(&asking)) };
+        assert!(cursor_access_environments(&[env("", Some(&account)), studio], &[]).is_empty());
+        let studio = EnvUsage { needs_cursor: true, ..env("studio", Some(&asking)) };
+        assert!(cursor_access_environments(&[studio], &["cursor"]).is_empty());
+    }
+
+    fn env<'a>(key: &str, summary: Option<&'a Value>) -> EnvUsage<'a> {
+        EnvUsage { key: key.into(), label: key.to_uppercase(), connected: true, pending: false, error: None, summary, needs_cursor: false }
+    }
+
+    fn answering(providers: &[&str]) -> Value {
+        let sources: Vec<Value> = providers.iter().map(|p| json!({"fingerprint": {"provider": p}, "refreshing": true})).collect();
+        json!({"contractVersion": usage_merge::CONTRACT_VERSION, "sources": sources})
+    }
+
+    #[test]
+    fn the_filter_status_follows_each_environments_scan() {
+        let (none, one, two, old) = (answering(&[]), answering(&["claude"]), answering(&["claude", "codex"]), json!({"contractVersion": 3, "sources": []}));
+        let failed = EnvUsage { error: Some("This environment could not report usage.".into()), ..env("a", None) };
+        assert_eq!(status_label(&failed, false), "Unavailable");
+        assert_eq!(progress(&failed, false), Phase::Inactive);
+        assert_eq!(status_label(&env("a", Some(&old)), false), "Update required");
+        assert_eq!(status_label(&EnvUsage { connected: false, pending: true, ..env("a", None) }, false), "Connecting…");
+        assert_eq!(status_label(&EnvUsage { pending: true, ..env("a", None) }, false), "Scanning…");
+        assert_eq!(status_label(&env("a", Some(&none)), true), "Refreshing…");
+        assert_eq!(status_label(&EnvUsage { pending: true, ..env("a", Some(&none)) }, false), "Refreshing…");
+        assert_eq!(status_label(&EnvUsage { pending: true, ..env("a", Some(&one)) }, false), "Updating Claude Code…");
+        assert_eq!(progress(&EnvUsage { pending: true, ..env("a", Some(&two)) }, false), Phase::Partway(vec!["claude".into(), "codex".into()]));
+        assert_eq!(status_label(&EnvUsage { pending: true, ..env("a", Some(&two)) }, false), "Updating 2 providers…");
+        assert_eq!(status_label(&env("a", Some(&two)), false), "Ready");
+    }
+
+    #[test]
+    fn totals_are_partial_while_a_selected_environment_scans_and_its_providers_wait() {
+        let grok = answering(&["grok"]);
+        let answered = || EnvUsage { pending: true, ..env("a", Some(&grok)) };
+        let scanning = || EnvUsage { pending: true, ..env("b", None) };
+        let failed = || EnvUsage { error: Some("This environment is not connected.".into()), connected: false, ..env("c", None) };
+        assert_eq!(reporting(&[answered(), scanning(), failed()]), (1, 1));
+        assert_eq!(reporting(&[failed()]), (0, 0));
+        assert_eq!(loading(&[answered(), failed()], false, false, &[]), (false, vec!["grok".to_string()]));
+        assert_eq!(loading(&[answered()], false, false, &["grok"]), (false, Vec::<String>::new()));
+        assert_eq!(loading(&[answered(), scanning()], false, false, &[]), (true, vec!["grok".to_string()]));
+        assert_eq!(loading(&[answered()], false, true, &[]), (true, Vec::<String>::new()));
+    }
+
+    #[test]
+    fn the_coverage_notice_names_failures_excluded_contracts_and_shared_directories() {
+        let failed = EnvUsage { error: Some("This environment could not report usage.".into()), ..env("a", None) };
+        let merged = json!({"mismatches": [{"environment": "b", "serverBehind": true}], "duplicates": ["B: /home/.claude", "B: /home/.codex"]});
+        assert_eq!(
+            coverage_lines(&[failed, env("b", None)], &merged),
+            [
+                "A: This environment could not report usage.",
+                "B runs an older server version and is excluded from totals.",
+                "Counted once across environments sharing a transcript directory: B: /home/.claude, B: /home/.codex",
+            ]
+        );
+        assert!(coverage_lines(&[env("a", None)], &Value::Null).is_empty());
+    }
+
+    #[test]
+    fn selected_answers_merge_without_hidden_providers_counting_a_shared_directory_once() {
+        let source = |provider: &str| json!({"fingerprint": {"hostId": "mac", "provider": provider, "resolvedHomePath": format!("/{provider}"), "volumeId": "v"}, "status": "ok", "distinctSessions": 3});
+        let bucket = |provider: &str, cost: f64| json!({"day": "2026-11-01", "provider": provider, "model": "m", "apiProvider": "", "totals": {"outputTokens": 10}, "costUsd": cost, "records": 1, "unpricedRecords": 0});
+        let summary = json!({"contractVersion": usage_merge::CONTRACT_VERSION, "readAt": "2026-11-02T00:00:00.000Z", "buckets": [bucket("codex", 1.0), bucket("claude", 2.0)], "sources": [source("codex"), source("claude")]});
+        let window = json!({"sinceDay": "2026-11-01", "untilDay": "2026-11-02"});
+        let merged = merged_summary(&[env("a", Some(&summary)), env("b", Some(&summary))], &["claude"], &window);
+        assert_eq!(merged["buckets"].as_array().map(Vec::len), Some(1));
+        assert_eq!(merged["sources"].as_array().map(Vec::len), Some(2));
+        assert_eq!(merged["sessions"], json!({"codex": 3}));
+        assert_eq!(merged["duplicates"], json!(["B: /codex"]));
+        let m = merge(&merged, &[], None, None);
+        assert_eq!((m.cost, m.sessions, m.periods.len()), (1.0, 3, 2));
+        assert!(merged_summary(&[env("a", None)], &[], &window)["buckets"].as_array().is_some_and(Vec::is_empty));
     }
 }

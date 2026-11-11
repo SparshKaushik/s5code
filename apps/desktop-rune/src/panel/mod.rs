@@ -3,7 +3,9 @@ pub mod browser;
 mod closed;
 mod diff;
 pub mod drawer;
+mod favicon;
 mod files;
+mod history;
 pub mod popout;
 mod proactive;
 pub(crate) mod preview;
@@ -53,6 +55,8 @@ pub struct Ui {
     drawer: drawer::Ui,
     browser: preview::Ui,
     add_menu: bool,
+    /// The tab strip's right-click menu: its tab and window point.
+    tab_menu: Option<(Surface, (f32, f32))>,
     thread: String,
     closed: closed::Store,
     /// Each thread's surfaces, as web's right panel state is per thread; browser tabs stay
@@ -63,6 +67,7 @@ pub struct Ui {
     saved: Option<Value>,
     pub waker: Option<Waker>,
     proactive: proactive::Watch,
+    history: history::History,
 }
 #[derive(Default)]
 struct Stash {
@@ -83,6 +88,7 @@ impl Default for Ui {
             drawer: Default::default(),
             browser: Default::default(),
             add_menu: false,
+            tab_menu: None,
             thread: String::new(),
             closed: Default::default(),
             stash: Default::default(),
@@ -90,6 +96,7 @@ impl Default for Ui {
             saved: None,
             waker: None,
             proactive: Default::default(),
+            history: Default::default(),
         }
     }
 }
@@ -745,7 +752,13 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
             .absolute(2., 2.)
             .size(12., 12.)
             .group_opacity(1., 0.)
-            .child(icon(surface.glyph(), 12.).size(12., 12.).color(fg));
+            .child(
+                match surface {
+                    Surface::Browser(tab) => preview::url(app, tab).and_then(|url| favicon::icon(app, &url, 12., 2.)),
+                    _ => None,
+                }
+                .unwrap_or_else(|| icon(surface.glyph(), 12.).size(12., 12.).color(fg)),
+            );
         if surface == Surface::Files && files::pending(app) {
             glyph = glyph.child(el().absolute(8., 8.).size(5., 5.).radius(2.5).fill(t.c.muted_foreground));
         }
@@ -766,6 +779,20 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .group_opacity(0., 1.)
                     .child(icon(&icons::X, 12.).size(12., 12.).color(fg)),
             );
+        // Web's speaker on a playing browser tab; a press mutes or unmutes it.
+        let speaker = match surface {
+            Surface::Browser(tab) => preview::audio(app, tab).map(|muted| {
+                el().size(16., 16.)
+                    .radius(4.)
+                    .center()
+                    .hover(t.c.muted)
+                    .role("button")
+                    .label(format!("{} {title}", if muted { "Unmute" } else { "Mute" }))
+                    .on_press(move |s: &mut App| preview::set_muted(s, tab, !muted))
+                    .child(icon(if muted { &icons::VOLUME_OFF } else { &icons::VOLUME_2 }, 12.).size(12., 12.).color(fg))
+            }),
+            _ => None,
+        };
         tabs = tabs.child(
             row()
                 .h(24.)
@@ -782,7 +809,9 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
                 .label(title.clone())
                 .focusable(true)
                 .on_press(move |s: &mut App| s.ui.panel.active = Some(surface))
+                .on_secondary_press(move |s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| s.ui.panel.tab_menu = Some((surface, (at.x, at.y))))
                 .child(close_button)
+                .children(speaker)
                 .child(
                     text(title)
                         .font(theme::TEXT_XS)
@@ -815,7 +844,8 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T) -> El {
             .grow(1.)
             .min_h(0.)
             .child(drawer::surface(app, t, drawer::Owner::Panel, width - 1.)),
-        Some(Surface::Browser(tab)) => preview::view(app, t, tab, cx.env().scale),
+        // The app zoom magnifies the page too; Chrome renders at the pixels it ends up on.
+        Some(Surface::Browser(tab)) => preview::view(app, t, tab, cx.env().scale * app.ui.desktop.zoom_factor()),
     };
     row()
         .key("right-panel")
@@ -959,8 +989,43 @@ pub fn overlays(app: &App, t: &T) -> Vec<El> {
         if app.ui.panel.add_menu {
             add_menu(app, t, &mut out);
         }
+        if let Some((surface, at)) = app.ui.panel.tab_menu {
+            tab_menu(app, t, surface, at, &mut out);
+        }
     }
     out
+}
+
+/// Web's tab context menu: mute for a browser tab, then the close actions.
+fn tab_menu(app: &App, t: &T, surface: Surface, at: (f32, f32), out: &mut Vec<El>) {
+    let done = |s: &mut App| s.ui.panel.tab_menu = None;
+    let surfaces = &app.ui.panel.surfaces;
+    let Some(index) = surfaces.iter().position(|&s| s == surface) else { return };
+    let mut menu = kit::Menu::new("panel-tab-menu").native(true).width(198.).open(true).at(at.0, at.1).on_close(done);
+    if let Surface::Browser(tab) = surface {
+        let muted = preview::muted(app, tab);
+        menu = menu.item(kit::MenuItem::new(if muted { "Unmute tab" } else { "Mute tab" }).on_select(move |s: &mut App| {
+            done(s);
+            preview::set_muted(s, tab, !muted);
+        }));
+    }
+    let close_where = move |keep: fn(usize, usize) -> bool| {
+        move |s: &mut App| {
+            done(s);
+            let doomed: Vec<Surface> = s.ui.panel.surfaces.iter().enumerate().filter(|&(i, _)| !keep(i, index)).map(|(_, &v)| v).collect();
+            for v in doomed {
+                close(s, v);
+            }
+        }
+    };
+    menu.item(kit::MenuItem::new("Close").on_select(move |s: &mut App| {
+        done(s);
+        close(s, surface);
+    }))
+    .item(kit::MenuItem::new("Close others").disabled(surfaces.len() <= 1).on_select(close_where(|i, index| i == index)))
+    .item(kit::MenuItem::new("Close to the right").disabled(index + 1 >= surfaces.len()).on_select(close_where(|i, index| i <= index)))
+    .item(kit::MenuItem::new("Close all").on_select(close_where(|_, _| false)))
+    .overlay(&kit::theme(t), out);
 }
 
 /// The tab strip's + menu (web's add-surface menu).

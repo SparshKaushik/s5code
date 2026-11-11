@@ -328,6 +328,9 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         item("Regenerate title", with(|s, id| super::dispatch(s, "thread.metadata.update", id, serde_json::json!({ "regenerateTitle": true })))),
     ));
     out.push(leaf(item("Mark unread", with(|s, id| super::dispatch(s, "thread.mark-unread", id, serde_json::json!({}))))));
+    if super::share::can_share_with_guest(s) {
+        out.push(leaf(item("Share with guest", with(super::share::open_guest))));
+    }
     let project = th.project_id.clone();
     let scoped = s.ui.shell.sidebar.project_scope.contains(&project);
     let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", model.project(th)) };
@@ -338,6 +341,14 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
             close(s);
         }),
     ));
+    if super::share::can_turn_into_project(s, th) {
+        let (thread, title) = (th.id.clone(), th.title.clone());
+        let turn = item("Turn into project", move |s, _| {
+            close(s);
+            super::share::turn_into_project(s, &thread, &title);
+        });
+        out.push(leaf(if th.running() { todo("Turn into project") } else { turn }));
+    }
     out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
     out.push(MenuEntry::Separator);
     out.push(sub_item("Copy", Sub::Copy));

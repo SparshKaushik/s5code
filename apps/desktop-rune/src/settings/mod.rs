@@ -1,15 +1,19 @@
 mod about;
+mod access;
 mod accent;
 mod acp_icons;
 mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
 mod auth_terminal;
+mod background;
 mod balance;
 pub mod client;
 mod connections;
 mod controls;
 mod devices;
+mod devices_editor;
+mod diff_scheme;
 pub mod fonts;
 mod keybindings;
 mod models;
@@ -23,6 +27,7 @@ mod scope;
 mod search;
 mod snooze;
 mod source_control;
+mod storage;
 mod browser_profiles;
 mod tasks;
 pub(crate) mod themes;
@@ -82,10 +87,7 @@ pub struct Ui {
     pub error: Option<String>,
     /// Open `AdvancedSettings` folds by page; like web's per-fold state, leaving a page closes them.
     pub advanced: std::collections::HashSet<String>,
-    pub keybinding_editor: Option<String>,
-    pub binding_when: TextEdit,
-    pub shortcut: Option<String>,
-    pub binding_target: Option<Value>,
+    pub keybindings: keybindings::Ui,
     pub keybinding_search: TextEdit,
     pub return_route: Option<Route>,
     pub models: models::Picker,
@@ -93,6 +95,9 @@ pub struct Ui {
     pub profiles: browser_profiles::Ui,
     pub providers_ui: providers::Ui,
     pub source_control: source_control::Ui,
+    pub connections: connections::Ui,
+    pub maintenance: storage::Maintenance,
+    pub devices: devices::Ui,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -228,6 +233,12 @@ pub fn value(s: &App, key: &str) -> Value {
     if let Some(key) = key.strip_prefix("schost::") {
         return source_control::value(s, key);
     }
+    if let Some(key) = key.strip_prefix("bg::") {
+        return background::value(s, key);
+    }
+    if let Some(key) = key.strip_prefix("storage::") {
+        return storage::value(s, key);
+    }
     if let Some(key) = key.strip_prefix("provider::") {
         if let Some((id, field)) = key.split_once("::") {
             return providers::field_value(s, id, field);
@@ -278,6 +289,14 @@ pub fn update(s: &mut App, key: &str, value: Value) {
     }
     if let Some(key) = key.strip_prefix("schost::") {
         source_control::update(s, key, value);
+        return;
+    }
+    if let Some(key) = key.strip_prefix("bg::") {
+        background::set(s, key, value);
+        return;
+    }
+    if let Some(key) = key.strip_prefix("storage::") {
+        storage::set(s, key, value);
         return;
     }
     if let Some(key) = key.strip_prefix("provider::") {
@@ -466,6 +485,7 @@ pub fn poll(s: &mut App) -> bool {
             "scheduled-tasks" => wanted.push(("scheduledTasks.subscribe".to_owned(), json!({}))),
             "access" => wanted.push(("subscribeAuthAccess".to_owned(), json!({}))),
             "devices" => wanted.push(("subscribeDeviceState".to_owned(), json!({}))),
+            "maintenance" | "storage" => wanted.extend(storage::report_resource(s)),
 
             _ => {}
         }
@@ -498,7 +518,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -510,9 +530,8 @@ pub fn poll(s: &mut App) -> bool {
                     if method == "scheduledTasks.upsert" {
                         s.ui.settings.task_editor = None;
                     }
-                    if method == "server.upsertKeybinding" {
-                        s.ui.settings.keybinding_editor = None;
-                        s.ui.settings.shortcut = None;
+                    if matches!(method.as_str(), "server.upsertKeybinding" | "server.removeKeybinding") {
+                        keybindings::saved(s, method == "server.upsertKeybinding");
                     }
                     if matches!(method.as_str(), "peerLinks.link" | "peerLinks.unlink") {
                         request(s, "peerLinks.list", json!({}));
@@ -662,8 +681,8 @@ fn search_results(s: &App, t: &T, query: &str) -> El {
                 .gap(8.0)
                 .items_start()
                 .radius(8.0)
-                .fill(if index == active { t.sb.sidebar_row_active } else { t.c.sidebar })
-                .hover(t.sb.sidebar_row_hover)
+                .fill(if index == active { t.c.sidebar_row_selected } else { t.c.sidebar })
+                .hover(t.c.sidebar_row_hover)
                 .role("option")
                 .label(item.title.clone())
                 .on_hover(move |s: &mut App| s.ui.settings.search_active = index)
@@ -794,11 +813,11 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                     .center_y()
                     .radius(8.0)
                     .fill(if active {
-                        t.sb.sidebar_row_active
+                        t.c.sidebar_row_selected
                     } else {
                         t.c.sidebar
                     })
-                    .hover(t.sb.sidebar_row_hover)
+                    .hover(t.c.sidebar_row_hover)
                     .focusable(true)
                     .role("link")
                     .label(*title)
@@ -826,9 +845,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .h_full()
         .fill(t.c.sidebar)
         .child(col().w_full().px(8.0).pt(8.0).pb(8.0).child(search_row))
+        // `SidebarContent`'s `scrollFade` at `--fade-size: 0.75rem`.
         .child(nav.grow(1.0).min_h(0.0).scroll(rune::ScrollSpec {
             stick_bottom: false,
-        }))
+        }).scroll_edge_fade(12.0))
         .child(el().h(1.0).w_full().fill(t.c.border));
     let mut header = row()
         .h(47.0)
@@ -938,14 +958,15 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         crate::chat::details::scripts::overlays(s, t, &mut overlays);
     }
     tasks::editor(s, t, &mut overlays);
+    background::overlays(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
     crate::desktop::exposure::confirm(s, t, &mut overlays);
+    connections::overlays(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
     browser_profiles::overlays(s, t, cx.env().scale, &mut overlays);
     scope::menu(s, t, &mut overlays);
-    if let Some(editor) = keybindings::editor(s, t) {
-        overlays.push(crate::kit::motion::layer().center().child(crate::kit::motion::popup(editor)));
-    }
+    devices::overlays(s, t, &mut overlays);
+    keybindings::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()
@@ -966,7 +987,13 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         controls::select_menu(s, t, key, options, controls::select_width(key), &mut overlays);
     }
     rune_kit::root(
-        crate::kit::motion::scrim(t).padding(40.0).center().child(crate::kit::motion::popup(modal)),
+        // Web dims to `bg-background/60` under a 4 px blur that leaves the app barely legible;
+        // without the blur only a deeper dim reads the same.
+        crate::kit::motion::layer()
+            .fill(t.c.background.alpha_mul(if t.dark { 0.9 } else { 0.85 }))
+            .padding(40.0)
+            .center()
+            .child(crate::kit::motion::popup(modal)),
         overlays,
     )
     .transition(rune::Transition::none())
@@ -1055,7 +1082,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("settings-keybindings-editor", |s| {
         scene(s, "keybindings");
-        s.ui.settings.keybinding_editor = Some("New thread".into());
+        keybindings::scene_editor(s);
     }),
     ("settings-threads-light", |s| {
         scene(s, "threads");
@@ -1262,11 +1289,13 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
             || s.ui.settings.icon_picker.take().is_some()
             || accent::close(s)
             || browser_profiles::escape(s)
+            || connections::escape(s)
+            || devices::escape(s)
             || s.ui.settings.providers_ui.confirm.take().is_some()
         {
             return true;
         }
-        if s.ui.settings.open_select.take().is_some() {
+        if s.ui.settings.open_select.take().is_some() || background::escape(s) {
             return true;
         }
         if s.ui.settings.theme_import_open {
@@ -1295,52 +1324,10 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
         if s.ui.settings.open_select.take().is_some() {
             return true;
         }
-        if s.ui.settings.keybinding_editor.take().is_some() {
+        if keybindings::escape(s) {
             return true;
         }
         close(s);
-        return true;
-    }
-    if s.ui.settings.keybinding_editor.is_some()
-        && s.ui.settings.open_select.is_none()
-        && s.ui.settings.shortcut.is_none()
-        && !s.ui.settings.binding_when.focused
-    {
-        let key = match &e.key {
-            rune::Key::Text(s) => {
-                if s == " " {
-                    "space".into()
-                } else {
-                    s.to_lowercase()
-                }
-            }
-            rune::Key::Command(c) => c.to_string(),
-            rune::Key::Function(n) => format!("f{n}"),
-            rune::Key::Enter => "enter".into(),
-            rune::Key::Tab => "tab".into(),
-            rune::Key::Backspace => "backspace".into(),
-            rune::Key::Delete => "delete".into(),
-            rune::Key::Up => "up".into(),
-            rune::Key::Down => "down".into(),
-            rune::Key::Left => "left".into(),
-            rune::Key::Right => "right".into(),
-            _ => return false,
-        };
-        let mut parts = Vec::new();
-        if e.mods.cmd {
-            parts.push("mod".to_owned());
-        }
-        if e.mods.ctrl && !e.mods.cmd {
-            parts.push("ctrl".to_owned());
-        }
-        if e.mods.alt {
-            parts.push("alt".to_owned());
-        }
-        if e.mods.shift {
-            parts.push("shift".to_owned());
-        }
-        parts.push(key);
-        s.ui.settings.shortcut = Some(parts.join("+"));
         return true;
     }
     false
