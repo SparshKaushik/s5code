@@ -360,6 +360,10 @@ pub fn check() -> i32 {
             eprintln!("check-server: {e}");
             1
         }
+        Ok(Event::Failing(f)) => {
+            eprintln!("check-server: {}\n{}", f.reason, f.output);
+            1
+        }
         Err(_) => {
             eprintln!("check-server: timed out waiting for the server");
             1
