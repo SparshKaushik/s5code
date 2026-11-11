@@ -1181,8 +1181,9 @@ mod tests {
         assert!(reconcile_ids(&mut g, &s(&["term-1", "term-2", "term-3"])), "another client opened term-3");
         assert_eq!(ids(&g), vec![vec!["term-1", "term-2"], vec!["term-3"]]);
         assert_eq!(g.active, "term-2", "focus stays put");
-        assert!(reconcile_ids(&mut g, &s(&["term-1", "term-3"])), "term-2 ended elsewhere");
-        assert_eq!(ids(&g), vec![vec!["term-1"], vec!["term-3"]]);
+        assert!(!reconcile_ids(&mut g, &s(&["term-1", "term-3"])), "a strict subset reads as lag; term-2's own exit closes it");
+        assert!(reconcile_ids(&mut g, &s(&["term-1", "term-3", "term-4"])), "term-2 ended elsewhere, term-4 opened");
+        assert_eq!(ids(&g), vec![vec!["term-1"], vec!["term-3"], vec!["term-4"]]);
         let mut empty = Groups::default();
         assert!(reconcile_ids(&mut empty, &s(&["term-5"])));
         assert_eq!(empty.active, "term-5");
