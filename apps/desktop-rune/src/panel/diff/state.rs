@@ -109,6 +109,8 @@ pub struct DiffState {
     pub expandable: bool,
     /// Bumped when the files or their contents change, so find searches again.
     pub files_rev: u64,
+    /// The line whose comment button was just pressed: its tooltip stays down until the pointer leaves.
+    pub hushed: Option<(usize, LineRef)>,
     digits: Vec<u32>,
     columns: u32,
     pub rows: Vec<Row>,
@@ -173,6 +175,7 @@ impl DiffState {
             hits: HashMap::new(),
             expandable: false,
             files_rev: 0,
+            hushed: None,
             digits: Vec::new(),
             columns: 0,
             rows: Vec::new(),

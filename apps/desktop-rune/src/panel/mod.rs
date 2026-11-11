@@ -113,6 +113,14 @@ fn context(app: &App) -> Option<(String, String)> {
         .unwrap_or(data::s(project, "workspaceRoot"));
     Some((id.clone(), cwd.to_string()))
 }
+/// The diff's repository: the thread's, or on a new-thread draft its project's, keyed by the draft.
+fn diff_context(app: &App) -> Option<(String, String)> {
+    if let Some(c) = context(app) {
+        return Some(c);
+    }
+    let cwd = workspace(app)?;
+    Some((crate::chat::composer::draft_key(app, &app.route), cwd))
+}
 /// The Files surface's root: the thread's workspace, or on a new-thread draft its project's.
 fn workspace(app: &App) -> Option<String> {
     if let Some((_, cwd)) = context(app) {
@@ -455,7 +463,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         drawer::persist(app);
         persist(app);
         context_changed |= switch_thread(app);
-        let thread = context(app).map(|(id, _)| id).unwrap_or_default();
+        let thread = diff_context(app).map(|(id, _)| id).unwrap_or_default();
         if app.ui.panel.thread != thread {
             let previous = std::mem::replace(&mut app.ui.panel.thread, thread);
             diff::reset(app, &previous);
@@ -568,7 +576,7 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         toggle_terminal(app);
         return true;
     }
-    if context(app).is_some() && shortcut(app, e, "diff.toggle") {
+    if diff_context(app).is_some() && shortcut(app, e, "diff.toggle") {
         if app.ui.shell.panel_open && app.ui.panel.active == Some(Surface::Diff) {
             app.ui.shell.panel_open = false;
         } else {
@@ -618,7 +626,11 @@ fn picker(app: &App, t: &T) -> El {
             .mb(10.),
     );
     for (surface, key) in LAUNCH {
-        let available = matches!(surface, Surface::Browser(_)) || context(app).is_some();
+        let available = match surface {
+            Surface::Browser(_) => true,
+            Surface::Diff => diff_context(app).is_some(),
+            _ => context(app).is_some(),
+        };
         list = list.child(
             row()
                 .h(32.)
@@ -988,7 +1000,11 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
         .open(true)
         .on_close(|s: &mut App| s.ui.panel.add_menu = false);
     for (surface, key) in LAUNCH {
-        let available = matches!(surface, Surface::Browser(_)) || context(app).is_some();
+        let available = match surface {
+            Surface::Browser(_) => true,
+            Surface::Diff => diff_context(app).is_some(),
+            _ => context(app).is_some(),
+        };
         menu = menu.item(
             kit::MenuItem::new(surface.title())
                 .icon(surface.glyph())
@@ -1067,8 +1083,11 @@ mod tests {
         app.navigate(Route::Home { project_id: Some(data::s(&project, "id").to_string()) });
         assert_eq!(context(&app), None);
         assert_eq!(workspace(&app).as_deref(), Some(data::s(&project, "workspaceRoot")));
+        let key = crate::chat::composer::home_key(data::s(&project, "id"));
+        assert_eq!(diff_context(&app), Some((key, data::s(&project, "workspaceRoot").to_string())));
         app.navigate(Route::PullRequests);
         assert_eq!(workspace(&app), None);
+        assert_eq!(diff_context(&app), None);
     }
 
     #[test]
