@@ -208,10 +208,12 @@ pub fn plan(p: &Plan) -> Vec<Folder> {
 }
 
 /// Collapsed folders (the web's `projectExpandedById`); folders start open. Kept beside the
-/// client settings so they outlive a restart.
+/// client settings so they outlive a restart, with the Settled shelf's open state
+/// (`t3code:sidebar:settled-expanded`).
 #[derive(Default)]
 pub struct State {
     collapsed: HashSet<String>,
+    settled: bool,
     loaded: bool,
     pub hover: Option<String>,
     /// The folder context menu: group key and the point it opened at.
@@ -225,12 +227,15 @@ impl State {
         (!cfg!(test)).then(|| crate::settings::client::sibling_path(FILE))
     }
 
-    fn load(&mut self) {
+    /// True on the call that read the file.
+    fn load(&mut self) -> bool {
         if std::mem::replace(&mut self.loaded, true) {
-            return;
+            return false;
         }
         let saved = Self::path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         self.collapsed = saved.iter().flat_map(|v| v["collapsed"].as_array().into_iter().flatten()).filter_map(|k| k.as_str().map(str::to_string)).collect();
+        self.settled = saved.is_some_and(|v| v["settledExpanded"] == true);
+        true
     }
 
     pub fn expanded(&self, key: &str) -> bool {
@@ -240,11 +245,21 @@ impl State {
     pub fn toggle(&mut self, key: &str, open: bool) {
         self.load();
         if open { self.collapsed.remove(key) } else { self.collapsed.insert(key.to_string()) };
+        self.save();
+    }
+
+    pub fn set_settled(&mut self, open: bool) {
+        self.load();
+        self.settled = open;
+        self.save();
+    }
+
+    fn save(&self) {
         let Some(path) = Self::path() else { return };
         let mut keys: Vec<&String> = self.collapsed.iter().collect();
         keys.sort();
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        let ok = serde_json::to_vec(&json!({"collapsed": keys})).ok().is_some_and(|bytes| {
+        let ok = serde_json::to_vec(&json!({"collapsed": keys, "settledExpanded": self.settled})).ok().is_some_and(|bytes| {
             path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok()) && std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, &path).is_ok()
         });
         if !ok {
@@ -255,7 +270,10 @@ impl State {
 
 /// Reads the saved folder state once, before the first frame that shows folders.
 pub fn ensure_loaded(s: &mut App) {
-    s.ui.shell.sidebar.folders.load();
+    let ui = &mut s.ui.shell.sidebar;
+    if ui.folders.load() && ui.folders.settled {
+        ui.expanded.insert(super::Shelf::Settled);
+    }
 }
 
 /// Rows a folder shows: all when open, else only the open thread.
@@ -345,6 +363,9 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| s.ui.shell.sidebar.folders.menu = Some((menu_key.clone(), at.x, at.y)))
         // `sidebarTree`: Right opens a folder, Left folds it.
         .on_key(move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
+            if e.mods.shift || e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd {
+                return false;
+            }
             let open = match e.key {
                 rune::Key::Right => true,
                 rune::Key::Left => false,
@@ -359,6 +380,7 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
         let new = super::row::hover_action(t, format!("sb-folder-new-{}", g.key), &i::SQUARE_PEN, 14.0, None, 6.0)
             .role("button")
             .label(format!("New thread in {}", g.label))
+            .help(format!("New thread in {}", g.label))
             .on_press(move |s: &mut App| new_thread_in(s, &project));
         li = li.child(new.pin(None, Some(4.0), Some(24.0), None));
     }

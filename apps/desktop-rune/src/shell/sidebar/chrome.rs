@@ -111,15 +111,40 @@ pub fn search_bar(s: &App, t: &T) -> El {
         .child(bar)
         .child(
             row()
-                .child(icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::toggle_scope))
+                .child(filter_button(s, t))
                 .child(icon_button(t, "sb-add-project", &i::FOLDER_PLUS, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(crate::shell::palette::open_add_project))
                 .child(icon_button(t, "sb-new-thread", &i::SQUARE_PEN, 28.0, 16.0, t.sb.sidebar_icon_color, false).on_press(super::new_thread)),
         )
 }
 
-/// The project scope picker under the filter button: all projects, or any set of project groups.
-/// Each group shows its favicon and a pin button (`ProjectPinButton`), shown on the highlighted
-/// row until the group is pinned.
+/// The scope trigger: the filter glyph, or the scoped groups' favicons (two at most, overlapped).
+fn filter_button(s: &App, t: &T) -> El {
+    let scope = &s.ui.shell.sidebar.project_scope;
+    let mut b = icon_button(t, "sb-filter", &i::LIST_FILTER, 28.0, 16.0, t.sb.sidebar_icon_color, s.ui.shell.sidebar.scope_open).role("button");
+    if scope.is_empty() {
+        return b.label("Filter threads by project").on_press(super::toggle_scope);
+    }
+    let (groups, _) = super::folders::group_of(s);
+    let scoped: Vec<_> = groups.iter().filter(|g| g.members.iter().any(|m| scope.contains(m))).collect();
+    let names: Vec<&str> = scoped.iter().map(|g| g.label.as_str()).collect();
+    let face = |g: &super::folders::Group, size: f32| match s.state().projects.iter().find(|p| crate::data::s(p, "id") == g.representative) {
+        Some(p) => super::favicon::view(s, t, p, size),
+        None => super::favicon::mark(s, t, &g.representative, &g.label, false, size),
+    };
+    let faces = match scoped.as_slice() {
+        [] => None,
+        [one] => Some(row().child(face(one, 16.0))),
+        [a, b, ..] => Some(row().child(face(a, 14.0)).child(face(b, 14.0).ml(-6.0))),
+    };
+    if let Some(faces) = faces {
+        b = el().key("sb-filter").size(28.0, 28.0).radius(layout::CONTROL_RADIUS).center().hover(t.sb.sidebar_row_hover).press(t.sb.sidebar_row_active).cursor(Cursor::Pointer).role("button").child(faces);
+    }
+    b.label(format!("Filter threads by project: {}", names.join(", "))).on_press(super::toggle_scope)
+}
+
+/// The project scope picker under the filter button (the web's project scope `Combobox`): a
+/// search field over "All projects" and the project groups. A plain pick scopes to one group,
+/// Shift adds or removes one, and each group row carries its pin and settings buttons.
 pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
     let ui = &s.ui.shell.sidebar;
     if !ui.scope_open {
@@ -127,65 +152,258 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
     }
     let (groups, _) = super::folders::group_of(s);
     let can_pin = crate::shell::palette::actions::can_organize_projects(s);
-    let mut menu = crate::kit::Menu::new("sb-scope")
-        .anchor("sb-filter")
-        .placement(crate::kit::Placement::BottomStart)
-        .min_width(224.0)
-        .open(true)
-        .on_close(|s: &mut App| s.ui.shell.sidebar.scope_open = false)
-        .item(crate::kit::MenuItem::new("All projects").icon(&i::FOLDER).checked(ui.project_scope.is_empty()).on_select(|s: &mut App| {
-            let ui = &mut s.ui.shell.sidebar;
-            ui.project_scope.clear();
-            ui.selected.clear();
-            ui.settled_pages = 0;
-        }))
-        .separator();
-    for key in &ui.scope_order {
-        let Some(g) = groups.iter().find(|g| g.key == *key) else { continue };
-        let on = g.members.iter().all(|m| ui.project_scope.contains(m));
-        let members = g.members.clone();
-        let mut item = crate::kit::MenuItem::new(g.label.clone()).checked(on).on_select(move |s: &mut App| {
-            let ui = &mut s.ui.shell.sidebar;
+    let ordered: Vec<&super::folders::Group> = ui.scope_order.iter().filter_map(|k| groups.iter().find(|g| g.key == *k)).collect();
+    let shown = scope_items(&ordered.iter().map(|g| g.label.as_str()).collect::<Vec<_>>(), &ui.scope_search.text);
+    let keys: Vec<String> = shown.iter().map(|n| n.map_or_else(|| ALL.to_string(), |n| ordered[n].key.clone())).collect();
+    let active = ui.scope_active.as_ref().and_then(|k| keys.iter().position(|v| v == k)).or((!keys.is_empty()).then_some(0));
+    let pin_label = crate::shell::palette::shortcut_label(s, "thread.pin");
+    let k = crate::kit::theme(t);
+
+    let mut rows = col().w_full().padding(4.0);
+    for (n, item) in shown.iter().enumerate() {
+        let key = keys[n].clone();
+        let highlighted = active == Some(n);
+        let (label, selected, glyph) = match item {
+            None => ("All projects".to_string(), ui.project_scope.is_empty(), icon(&i::FOLDER, 16.0).color(t.c.muted_foreground)),
+            Some(g) => {
+                let g = ordered[*g];
+                let on = !g.members.is_empty() && g.members.iter().all(|m| ui.project_scope.contains(m));
+                let mark = match s.state().projects.iter().find(|p| crate::data::s(p, "id") == g.representative) {
+                    Some(p) => super::favicon::view(s, t, p, 16.0),
+                    None => super::favicon::mark(s, t, &g.representative, &g.label, false, 16.0),
+                };
+                (g.label.clone(), on, mark)
+            }
+        };
+        let mut entry = row()
+            .key(format!("sb-scope-{key}"))
+            .role("option")
+            .label(label.clone())
+            .checked(selected)
+            .focus_selected(highlighted)
+            .w_full()
+            .h(28.0)
+            .px(8.0)
+            .gap(8.0)
+            .center_y()
+            .radius(4.0)
+            .fill(if highlighted { t.c.foreground.alpha_mul(0.09) } else { Color::TRANSPARENT })
+            .cursor(Cursor::Pointer)
+            .child(scope_icon(t, glyph, selected))
+            .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).grow(1.0).truncate());
+        if let Some(g) = item.map(|n| ordered[n]) {
+            if can_pin {
+                entry = entry.child(scope_pin(t, g, highlighted, &pin_label));
+            }
+            entry = entry.child(scope_settings(t, g));
+            let project = g.representative.clone();
+            entry = entry.on_secondary_press(move |s: &mut App, _: rune::PointerPress, _: &mut Tx| open_project_settings(s, &project));
+        }
+        let (hover_key, members) = (key.clone(), item.map(|n| ordered[n].members.clone()));
+        entry = entry
+            .on_hover(move |s: &mut App| s.ui.shell.sidebar.scope_active = Some(hover_key.clone()))
+            .on_press_tx(move |s: &mut App, tx: &mut Tx| pick_scope(s, members.as_deref(), tx.mods().shift));
+        rows = rows.child(entry);
+    }
+    let list = col()
+        .key("sb-scope-results")
+        .w_full()
+        .min_h(0.0)
+        .shrink()
+        .role("listbox")
+        .label("Projects")
+        .preserve_focus_on_press(true)
+        .scroll(ScrollSpec { stick_bottom: false })
+        .child(if shown.is_empty() {
+            row().w_full().padding(8.0).justify_center().child(text("No matching projects.").font(theme::TEXT_SM).color(t.c.muted_foreground))
+        } else {
+            rows
+        });
+
+    let (field_keys, field_groups) = (keys.clone(), ordered.iter().map(|g| (g.key.clone(), g.members.clone(), g.representative.clone(), g.pinned)).collect::<Vec<_>>());
+    let mut field = text_input(&ui.scope_search, theme::TEXT_SM)
+        .key("sb-scope-search")
+        .w_full()
+        .h(26.0)
+        .pl(20.0)
+        .py(3.0)
+        .color(t.c.foreground)
+        .placeholder("Search projects...", t.c.muted_foreground)
+        .label("Search projects");
+    if let Some(n) = active {
+        field = field.active_descendant(format!("sb-scope-{}", keys[n]));
+    }
+    let field = field
+        .on_edit(|s: &mut App| &mut s.ui.shell.sidebar.scope_search)
+        .on_input_change(|s: &mut App, _: &mut Tx| s.ui.shell.sidebar.scope_active = None)
+        .on_input_key(move |s: &mut App, e: &rune::KeyEvent, tx: &mut Tx| {
+            if s.ui.shell.sidebar.scope_search.preedit.is_some() {
+                return false;
+            }
+            let at = active.map(|n| field_keys[n].clone());
+            let group = at.as_ref().and_then(|k| field_groups.iter().find(|g| g.0 == *k));
+            if let Some((_, members, _, pinned)) = group
+                && can_pin
+                && crate::panel::shortcut(s, e, "thread.pin")
+            {
+                for m in members {
+                    crate::shell::palette::actions::pin_project(s, m, !pinned);
+                }
+                return true;
+            }
+            if e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd {
+                return false;
+            }
+            match &e.key {
+                rune::Key::Escape => {
+                    if !tx.key_repeat() {
+                        super::toggle_scope(s);
+                    }
+                }
+                rune::Key::Enter if !tx.key_repeat() => {
+                    if at.is_some() {
+                        pick_scope(s, group.map(|g| g.1.as_slice()), e.mods.shift);
+                    }
+                }
+                rune::Key::Down | rune::Key::Up if !field_keys.is_empty() => {
+                    let step = if e.key == rune::Key::Down { 1 } else { -1 };
+                    let next = (active.unwrap_or(0) as isize + step).rem_euclid(field_keys.len() as isize) as usize;
+                    tx.scroll_into_view(format!("sb-scope-{}", field_keys[next]));
+                    s.ui.shell.sidebar.scope_active = Some(field_keys[next].clone());
+                }
+                rune::Key::Function(10) if e.mods.shift => {
+                    if let Some((_, _, project, _)) = group {
+                        open_project_settings(s, project);
+                    }
+                }
+                _ => return false,
+            }
+            true
+        });
+    let search = col()
+        .w_full()
+        .px(12.0)
+        .pt(10.0)
+        .child(
+            row()
+                .w_full()
+                .pb(6.0)
+                .child(icon(&i::SEARCH, 16.0).absolute(0.0, 6.0).color(t.c.muted_foreground.alpha_mul(0.55)))
+                .child(field),
+        )
+        .child(el().w_full().h(1.0).fill(t.c.ring));
+    let body = col().key("sb-scope").role("dialog").label("Filter threads by project").w(288.0).min_h(0.0).max_h(360.0).child(search).child(list);
+    let close = |s: &mut App| {
+        if s.ui.shell.sidebar.scope_open {
+            super::toggle_scope(s);
+        }
+    };
+    overlays.push(rune_kit::scrim("sb-scope-scrim", close));
+    let surface = crate::kit::menu::glass(body, &k, false).focus_return("sb-filter").modal(true, close);
+    overlays.push(crate::kit::motion::popup(rune_kit::popover::anchored(&k, surface, "sb-filter", rune_kit::Placement::BottomStart, 4.0)));
+}
+
+const ALL: &str = "all";
+
+/// `filterProjectScopeItems`: every row for an empty query, else the groups whose name contains
+/// it, without "All projects". `None` is "All projects", `Some(n)` the nth group.
+pub fn scope_items(labels: &[&str], query: &str) -> Vec<Option<usize>> {
+    let query = query.trim().to_lowercase();
+    if query.is_empty() {
+        return std::iter::once(None).chain((0..labels.len()).map(Some)).collect();
+    }
+    (0..labels.len()).filter(|n| labels[*n].to_lowercase().contains(&query)).map(Some).collect()
+}
+
+/// A plain pick scopes to the group (or all projects) and closes; Shift adds or removes the
+/// group and keeps the picker open.
+fn pick_scope(s: &mut App, members: Option<&[String]>, shift: bool) {
+    let ui = &mut s.ui.shell.sidebar;
+    match (members, shift) {
+        (Some(members), true) => {
+            let on = members.iter().all(|m| ui.project_scope.contains(m));
             ui.project_scope.retain(|x| !members.contains(x));
             if !on {
                 ui.project_scope.extend(members.iter().cloned());
             }
-            ui.selected.clear();
-            ui.settled_pages = 0;
-        });
-        if let Some(p) = s.state().projects.iter().find(|p| crate::data::s(p, "id") == g.representative) {
-            item = item.leading(super::favicon::view(s, t, p, 16.0));
         }
-        if can_pin {
-            item = item.trailing(scope_pin(t, g));
-        }
-        menu = menu.item(item);
+        (Some(members), false) => ui.project_scope = members.to_vec(),
+        (None, _) => ui.project_scope.clear(),
     }
-    menu.overlay(&crate::kit::theme(t), overlays);
+    ui.selected.clear();
+    ui.settled_pages = 0;
+    if !(shift && members.is_some()) {
+        super::toggle_scope(s);
+    }
 }
 
-/// `ProjectPinButton`: pins every member of the group.
-fn scope_pin(t: &T, g: &super::folders::Group) -> El {
+fn open_project_settings(s: &mut App, project: &str) {
+    if s.ui.shell.sidebar.scope_open {
+        super::toggle_scope(s);
+    }
+    s.ui.settings.project = Some(project.to_string());
+    super::go(s, Route::Settings("projects".into()));
+}
+
+/// `ProjectScopeRowIcon`: the row's icon, badged with a check while that scope is on.
+fn scope_icon(t: &T, glyph: El, selected: bool) -> El {
+    let mut e = el().shrink().child(glyph);
+    if selected {
+        let badge = el()
+            .size(12.0, 12.0)
+            .radius(6.0)
+            .center()
+            .fill(t.c.primary)
+            .border(2.0, t.c.popover)
+            .child(icon(&i::CHECK, 8.0).color(t.c.primary_foreground));
+        e = e.child(badge.pin(None, None, Some(-4.0), Some(-4.0)));
+    }
+    e
+}
+
+/// `ProjectPinButton`: pins every member of the group. Unpinned it shows on the highlighted
+/// row; pinned it stays and turns into PinOff under the pointer.
+fn scope_pin(t: &T, g: &super::folders::Group, highlighted: bool, shortcut: &str) -> El {
     let (members, pinned) = (g.members.clone(), g.pinned);
-    let color = t.sb.muted_foreground;
-    let glyph = icon(&i::PIN, 14.0);
-    let glyph = if pinned { glyph.color(color) } else { glyph.color(color.alpha(0.0)).group_color(color) };
-    // The hover fill is a sibling: a `hover` ancestor would take over the glyph's hover group
-    // from the menu row (a `trailing` row is the track), and the pin would only show under the pointer.
+    let color = t.c.muted_foreground;
+    let action = if pinned { "Unpin" } else { "Pin" };
+    let tip = if shortcut.is_empty() { format!("{action} {}", g.label) } else { format!("{action} {} ({shortcut})", g.label) };
+    let glyph = |glyph| icon(glyph, 14.0).color(color).group_color(t.c.foreground);
+    let face = if pinned {
+        el().child(glyph(&i::PIN).group_opacity(1.0, 0.0)).child(glyph(&i::PIN_OFF).group_opacity(0.0, 1.0).pin(Some(0.0), Some(0.0), None, None))
+    } else {
+        el().child(glyph(&i::PIN)).opacity(if highlighted { 1.0 } else { 0.0 })
+    };
     el().key(format!("sb-scope-pin-{}", g.key))
         .size(24.0, 24.0)
         .ml(4.0)
         .center()
-        .role("button")
-        .label(if pinned { format!("Unpin {}", g.label) } else { format!("Pin {}", g.label) })
+        .radius(radius::SM)
+        .hover(t.c.foreground.alpha_mul(0.09))
+        .hover_group()
         .cursor(Cursor::Pointer)
-        .child(el().pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0)).radius(radius::SM).hover(t.sb.sidebar_row_hover))
-        .child(glyph)
+        .help(tip)
+        .child(face)
         .on_press(move |s: &mut App| {
             for m in &members {
                 crate::shell::palette::actions::pin_project(s, m, !pinned);
             }
         })
+}
+
+/// The row's settings button: opens the project's settings and closes the picker.
+fn scope_settings(t: &T, g: &super::folders::Group) -> El {
+    let project = g.representative.clone();
+    el().key(format!("sb-scope-settings-{}", g.key))
+        .size(24.0, 24.0)
+        .center()
+        .radius(radius::SM)
+        .hover(t.c.foreground.alpha_mul(0.09))
+        .hover_group()
+        .cursor(Cursor::Pointer)
+        .help(format!("Project settings for {}", g.label))
+        .child(icon(&i::SETTINGS, 14.0).color(t.c.muted_foreground).group_color(t.c.foreground))
+        .on_press(move |s: &mut App| open_project_settings(s, &project))
 }
 
 pub fn footer(s: &App, model: &Model, t: &T) -> El {
@@ -310,9 +528,10 @@ pub fn shelf_header(t: &T, shelf: Shelf, count: usize, expanded: bool, tone: Ton
         .child(text(count.to_string()).font(theme::TEXT_XS.features("'tnum' 1")).color(color).group_color(t.sb.sidebar_foreground))
         .child(icon(&i::CHEVRON_DOWN, 12.0).color(color).group_color(t.sb.sidebar_foreground).rotate(if expanded { 0.0 } else { -std::f32::consts::FRAC_PI_2 }))
         .on_press(move |s: &mut App| {
-            let e = &mut s.ui.shell.sidebar.expanded;
-            if !e.remove(&shelf) {
-                e.insert(shelf);
+            let ui = &mut s.ui.shell.sidebar;
+            let open = !ui.expanded.remove(&shelf) && ui.expanded.insert(shelf);
+            if shelf == Shelf::Settled {
+                ui.folders.set_settled(open);
             }
         })
 }
@@ -388,4 +607,18 @@ pub fn search_results(s: &App, model: &Model, t: &T) -> El {
         list = list.child(r);
     }
     el().key("sb-scroll").w_full().grow(1.0).shrink().scroll(ScrollSpec { stick_bottom: false }).child(list)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::scope_items;
+
+    #[test]
+    fn scope_search_drops_all_projects_and_matches_names_anywhere() {
+        let labels = ["acme/demo", "Other", "s5labs/s5code"];
+        assert_eq!(scope_items(&labels, "  "), vec![None, Some(0), Some(1), Some(2)]);
+        assert_eq!(scope_items(&labels, "O"), vec![Some(0), Some(1), Some(2)]);
+        assert_eq!(scope_items(&labels, "labs"), vec![Some(2)]);
+        assert_eq!(scope_items(&labels, "all"), Vec::<Option<usize>>::new());
+    }
 }

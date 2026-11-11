@@ -498,9 +498,11 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
     } else {
         t.sb.secondary_label.alpha_mul(0.7)
     };
-    let mut r = row().h(36.0).px(10.0).gap(10.0).center_y();
+    // `boringSidebarMultilineRows`: a folder row moves its branch and PR onto a second line.
+    let two_line = rc.folder && (th.branch.is_some() || th.pr.is_some()) && crate::settings::value(s, "boringSidebarMultilineRows") == true;
+    let mut r = if two_line { row().h(24.0).gap(10.0).center_y() } else { row().h(36.0).px(10.0).gap(10.0).center_y() };
     r = if rc.folder {
-        r.pl(36.0).child(title(s, th, t, if receded && !hovered { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color))
+        if two_line { r } else { r.pl(36.0) }.child(title(s, th, t, if receded && !hovered { theme::TEXT_SM } else { theme::SM_MEDIUM }, title_color))
     } else {
         r.child(super::favicon::mark(s, t, &th.project_id, model.project(th), !(hovered || (active && !settled)), 16.0)).child(title(s, th, t, theme::TEXT_SM, title_color))
     };
@@ -533,9 +535,30 @@ fn slim(s: &App, model: &Model, th: &Thread, t: &T, rc: &RowCtx) -> El {
         }
         r = r.child(slot);
     }
-    let e = surface(r.w_full(), t, active, selected, hovered, rc.dragging.is_some());
+    let body = if two_line { col().px(10.0).py(6.0).pl(36.0).child(r.w_full()).child(meta_line(t, model, th)) } else { r };
+    let e = surface(body.w_full(), t, active, selected, hovered, rc.dragging.is_some());
     let over = rc.over.map(str::to_string);
     place(card_trigger(el().key(format!("sb-li-{}", th.id)).w_full(), &th.id).child(interactive(e, t, th, rc.section, over)), rc)
+}
+
+/// The two-line folder row's second line: worktree branch, PR badge, then the provider.
+fn meta_line(t: &T, model: &Model, th: &Thread) -> El {
+    let mut meta = row().mt(2.0).h(16.0).gap(6.0).center_y();
+    if let Some(branch) = &th.branch {
+        if th.worktree.as_deref().is_some_and(|w| !w.trim().is_empty()) {
+            meta = meta.child(icon(&i::FOLDER_GIT_2, 14.0).color(t.sb.icon_muted).shrink());
+        }
+        meta = meta.child(text(branch.clone()).font(theme::TEXT_XS).color(t.sb.secondary_label).truncate().grow(1.0).shrink());
+    } else {
+        meta = meta.child(spacer());
+    }
+    if let Some(pr) = &th.pr {
+        meta = meta.child(pr_badge(t, &th.id, pr));
+    }
+    if let Some(p) = provider_icon(t, model, th, t.sb.secondary_label) {
+        meta = meta.child(p);
+    }
+    meta
 }
 
 fn marker_key(m: Marker) -> String {

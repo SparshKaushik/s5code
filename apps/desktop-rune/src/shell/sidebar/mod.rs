@@ -95,6 +95,9 @@ pub struct Ui {
     pub scope_open: bool,
     /// The scope picker's group order, frozen while it is open so a pin doesn't move the row.
     pub scope_order: Vec<String>,
+    /// The picker's search and its highlighted row ("all" or a group key; first when `None`).
+    pub scope_search: TextEdit,
+    pub scope_active: Option<String>,
     /// The boring sidebar's folders: which are folded, hover and the folder menu.
     pub folders: folders::State,
     pub visits: logic::Visits,
@@ -283,7 +286,11 @@ pub fn toggle_scope(s: &mut App) {
         });
         s.ui.shell.sidebar.scope_order = order.into_iter().map(|n| groups[n].key.clone()).collect();
     }
-    s.ui.shell.sidebar.scope_open = open;
+    let ui = &mut s.ui.shell.sidebar;
+    ui.scope_open = open;
+    ui.scope_search = TextEdit::default();
+    ui.scope_search.focused = open;
+    ui.scope_active = None;
 }
 
 /// `boringSidebarEnabled`, or the legacy sidebar it replaced.
