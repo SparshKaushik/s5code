@@ -1,8 +1,10 @@
 mod about;
 mod accent;
+mod acp_icons;
 mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
+mod auth_terminal;
 mod balance;
 pub mod client;
 mod connections;
@@ -14,7 +16,7 @@ mod models;
 mod host_logos;
 mod icon_index;
 mod pages;
-mod project_icon;
+pub(crate) mod project_icon;
 mod projects;
 mod providers;
 mod scope;
@@ -50,6 +52,7 @@ pub struct Ui {
     pub task_editor: Option<Value>,
     pub delete_task: Option<(Value, String)>,
     pub auth: auth::Ui,
+    pub acp_icons: acp_icons::AcpIcons,
     pub auth_response: TextEdit,
     pub auth_fields: HashMap<String, TextEdit>,
     pub update_version: Option<String>,
@@ -313,7 +316,8 @@ pub fn request(s: &mut App, method: &str, payload: Value) {
         providers::apply_extras(&mut current, &payload);
         s.ui.settings.optimistic_settings = Some(current);
     }
-    if let Some(net) = s.src.net() {
+    let project = payload["projectId"].as_str().unwrap_or_default().to_owned();
+    if let Some(net) = crate::env::net_for(s, &project) {
         let id = net.request(method, payload);
         s.ui.settings.pending.insert(id, method.into());
     }
@@ -494,7 +498,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | source_control::poll(s);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -935,6 +939,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     }
     tasks::editor(s, t, &mut overlays);
     about::update_dialog(s, t, &mut overlays);
+    crate::desktop::exposure::confirm(s, t, &mut overlays);
     models::popover(s, t, &mut overlays);
     browser_profiles::overlays(s, t, cx.env().scale, &mut overlays);
     scope::menu(s, t, &mut overlays);

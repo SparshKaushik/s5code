@@ -185,9 +185,10 @@ pub fn access(s: &App, t: &T) -> El {
                 .color(t.c.muted_foreground),
         );
     }
-    col()
-        .w_full()
-        .gap(32.0)
-        .child(c::section("Pairing links", links, t))
+    let mut page = col().w_full().gap(32.0);
+    if let Some(network) = crate::desktop::exposure::network_row(s, t) {
+        page = page.child(c::section("This machine", vec![network], t));
+    }
+    page.child(c::section("Pairing links", links, t))
         .child(c::section("Authorized clients", clients, t))
 }

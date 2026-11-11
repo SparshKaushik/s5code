@@ -129,7 +129,8 @@ pub fn view(s: &App, t: &T) -> El {
     if children.is_empty() {
         children.push(
             col()
-                .padding(16.0)
+                .px(16.0)
+                .py(12.0)
                 .gap(4.0)
                 .child(
                     text("No scheduled tasks")
@@ -137,7 +138,7 @@ pub fn view(s: &App, t: &T) -> El {
                         .color(t.c.foreground),
                 )
                 .child(
-                    text("Schedule agent work to run automatically.")
+                    text("No tasks match this environment and project selection.")
                         .font(theme::TEXT_XS)
                         .color(t.c.muted_foreground),
                 ),

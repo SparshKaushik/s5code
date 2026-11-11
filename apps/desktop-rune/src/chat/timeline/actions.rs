@@ -2,7 +2,7 @@
 //! timestamp, "Edit from here" and copy; a reply's copy, "Fork from this response" and timestamp.
 
 use super::rows;
-use crate::data::{iso_ms, s};
+use crate::data::{Zone, iso_ms, s};
 use crate::theme::{self, T};
 use crate::{App, Route, icons};
 use rune::{Cursor, El, icon, row, text};
@@ -77,14 +77,20 @@ pub struct State {
     errors: HashMap<String, String>,
 }
 
-/// "9:41 AM", "yesterday at 9:41 AM" or "3/14 9:41 AM" (formatDayAwareTimestamp, in UTC as
-/// the rest of the app's clocks are).
-pub fn timestamp(iso: &str, now: i64) -> String {
-    const DAY: i64 = 86_400_000;
-    let Some(ms) = iso_ms(iso) else { return String::new() };
-    let mins = ms.rem_euclid(DAY) / 60_000;
+const DAY: i64 = 86_400_000;
+
+/// "9:41 AM" or, under the 24-hour setting, "09:41", for a wall-clock instant.
+fn clock(wall: i64, hour12: bool) -> String {
+    let mins = wall.rem_euclid(DAY) / 60_000;
     let (h, m) = (mins / 60, mins % 60);
-    let time = format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" });
+    if hour12 { format!("{}:{m:02} {}", if h % 12 == 0 { 12 } else { h % 12 }, if h < 12 { "AM" } else { "PM" }) } else { format!("{h:02}:{m:02}") }
+}
+
+/// "9:41 AM", "yesterday at 9:41 AM" or "3/14 9:41 AM" (formatDayAwareTimestamp) in `zone`.
+pub fn timestamp(iso: &str, now: i64, zone: Zone, hour12: bool) -> String {
+    let Some(ms) = iso_ms(iso).map(|ms| zone.wall(ms)) else { return String::new() };
+    let now = zone.wall(now);
+    let time = clock(ms, hour12);
     match now.div_euclid(DAY) - ms.div_euclid(DAY) {
         ..=0 => time,
         1 => format!("yesterday at {time}"),
@@ -94,6 +100,26 @@ pub fn timestamp(iso: &str, now: i64) -> String {
             if year == this_year { format!("{month}/{day} {time}") } else { format!("{month}/{day}/{} {time}", year % 100) }
         }
     }
+}
+
+/// "9:41 AM, 3rd March 2026" (formatChatTimestampTooltip).
+pub fn full_timestamp(iso: &str, zone: Zone, hour12: bool) -> String {
+    const MONTHS: [&str; 12] = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+    let Some(ms) = iso_ms(iso).map(|ms| zone.wall(ms)) else { return String::new() };
+    let (year, month, day) = civil(ms.div_euclid(DAY));
+    let suffix = match (day % 10, day % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{}, {day}{suffix} {} {year}", clock(ms, hour12), MONTHS[(month - 1) as usize])
+}
+
+/// The `timestampFormat` setting: 12-hour unless it says 24-hour.
+pub fn hour12(app: &App) -> bool {
+    crate::settings::value(app, "timestampFormat").as_str() != Some("24-hour")
 }
 
 /// Days since 1970-01-01 to (year, month, day), Howard Hinnant's civil_from_days.
@@ -131,7 +157,8 @@ fn first_time<'a>(item: &'a Value, keys: &[&str]) -> &'a str {
 }
 
 fn stamp(app: &App, iso: &str, t: &T) -> El {
-    text(timestamp(iso, app.now_ms)).font(theme::TEXT_XS).color(t.c.muted_foreground)
+    let h12 = hour12(app);
+    text(timestamp(iso, app.now_ms, Zone::Local, h12)).font(theme::TEXT_XS).color(t.c.muted_foreground).help(full_timestamp(iso, Zone::Local, h12))
 }
 
 fn running(app: &App, thread: &str) -> bool {
@@ -178,7 +205,7 @@ pub fn user(app: &App, thread: &str, item: &Value, targets: &HashMap<String, (St
             edit.on_press(move |app: &mut App| ask(app, &rewind))
         });
     }
-    buttons = buttons.child(super::copy_button(app, s(item, "text"), t));
+    buttons = buttons.child(super::copy_button(app, s(item, "text"), t, "Copy message"));
     row().gap(8.0).center_y().child(stamp(app, first_time(item, &["createdAt", "startedAt", "completedAt"]), t)).child(buttons)
 }
 
@@ -209,7 +236,7 @@ pub fn assistant(app: &App, thread: &str, item: &Value, t: &T) -> El {
     let streaming = item["streaming"] == true;
     let mut out = row().gap(8.0).center_y();
     if !streaming {
-        out = out.child(super::copy_button(app, s(item, "text"), t));
+        out = out.child(super::copy_button(app, s(item, "text"), t, "Copy message"));
     }
     let run = s(item, "runId");
     if !run.is_empty() && !streaming && item["visibility"] != "inherited" {
@@ -726,10 +753,17 @@ mod tests {
     #[test]
     fn timestamps_name_the_day_only_when_it_is_not_today() {
         let now = iso_ms("2026-11-08T15:00:00.000Z").unwrap();
-        assert_eq!(timestamp("2026-11-08T09:05:00.000Z", now), "9:05 AM");
-        assert_eq!(timestamp("2026-11-07T00:30:00.000Z", now), "yesterday at 12:30 AM");
-        assert_eq!(timestamp("2026-03-14T13:41:00.000Z", now), "3/14 1:41 PM");
-        assert_eq!(timestamp("2025-12-31T23:59:00.000Z", now), "12/31/25 11:59 PM");
+        let utc = Zone::Fixed(0);
+        assert_eq!(timestamp("2026-11-08T09:05:00.000Z", now, utc, true), "9:05 AM");
+        assert_eq!(timestamp("2026-11-07T00:30:00.000Z", now, utc, true), "yesterday at 12:30 AM");
+        assert_eq!(timestamp("2026-03-14T13:41:00.000Z", now, utc, true), "3/14 1:41 PM");
+        assert_eq!(timestamp("2025-12-31T23:59:00.000Z", now, utc, true), "12/31/25 11:59 PM");
+        assert_eq!(timestamp("2026-11-08T09:05:00.000Z", now, utc, false), "09:05");
+        // Days turn at local midnight: 00:30 UTC is still yesterday evening in New York.
+        let new_york = Zone::Fixed(-5 * 3_600_000);
+        assert_eq!(timestamp("2026-11-08T00:30:00.000Z", now, new_york, true), "yesterday at 7:30 PM");
+        assert_eq!(full_timestamp("2026-03-03T09:41:00.000Z", utc, true), "9:41 AM, 3rd March 2026");
+        assert_eq!(full_timestamp("2026-03-11T21:41:00.000Z", utc, false), "21:41, 11th March 2026");
     }
 
     #[test]

@@ -92,6 +92,14 @@ fn is_quit(e: &KeyEvent) -> bool {
     e.key == Key::Command('q') && !e.mods.alt && !e.mods.shift
 }
 
+/// The native app menu's Quit (`MenuItem::new(title, quit::menu_quit)`). With the item's
+/// `keys_first`, Cmd+Q reaches `on_key` and its hold first, so this runs only when Quit is picked
+/// in the menu, which quits at once as Electron's `role: "quit"` does.
+pub fn menu_quit(s: &mut App, tx: &mut Tx) {
+    s.ui.shell.quit.cancel();
+    tx.quit();
+}
+
 /// Runs before every other key handler, so the press never reaches a text field.
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     let now = crate::data::now_ms();

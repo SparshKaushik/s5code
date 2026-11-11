@@ -18,8 +18,8 @@ use crate::theme::{self, AlphaMul, T, radius};
 const MINUTE: i64 = 60_000;
 const DAY: i64 = 86_400_000;
 
-/// Rune talks to one environment; its native accounts key as `environmentId:instanceId`.
-const ENVIRONMENT: &str = "local";
+/// Where a reset credit is redeemed: the environment's key and `provider.consumeResetCredit`'s input.
+type Redeem = (String, Value);
 
 #[derive(Default)]
 pub struct Ui {
@@ -27,24 +27,99 @@ pub struct Ui {
     pub segment: Option<String>,
     over_popup: bool,
     email_shown: bool,
-    /// The segment and `provider.consumeResetCredit` input awaiting "Use a reset credit?".
-    pub confirm: Option<(String, Value)>,
-    redeeming: Option<(u64, String)>,
+    /// The segment and redemption awaiting "Use a reset credit?".
+    pub confirm: Option<(String, Redeem)>,
+    /// The request, its segment and its environment.
+    redeeming: Option<(u64, String, String)>,
     /// What each segment's last redemption said (useResetCredit's status).
     status: HashMap<String, String>,
+    /// `server.refreshProviders` in flight per environment, and whether the header asked for it.
+    refreshing: Vec<(String, u64)>,
+    manual: bool,
+    /// When each environment may refresh on its own again (refreshUsageLimits' five minutes).
+    refresh_after: HashMap<String, i64>,
+    /// The connected environments the last automatic refresh covered.
+    connected: String,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.usage.limits
 }
 
+fn env_net<'a>(s: &'a mut App, environment: &str) -> Option<&'a mut s5_net::Net> {
+    crate::env::source_mut(s, environment).and_then(|src| src.net())
+}
+
 pub fn poll(s: &mut App) -> bool {
-    let Some((id, key)) = s.ui.pages.usage.limits.redeeming.clone() else { return false };
-    let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) else { return false };
-    let u = ui(s);
-    u.redeeming = None;
-    u.status.insert(key, redeemed(&reply));
-    true
+    let mut changed = false;
+    if let Some((id, key, environment)) = s.ui.pages.usage.limits.redeeming.clone()
+        && let Some(reply) = env_net(s, &environment).and_then(|n| n.take_reply(id))
+    {
+        let u = ui(s);
+        u.redeeming = None;
+        u.status.insert(key, redeemed(&reply));
+        changed = true;
+    }
+    let now = s.now_ms;
+    for (environment, id) in std::mem::take(&mut ui(s).refreshing) {
+        if env_net(s, &environment).is_none_or(|n| n.take_reply(id).is_some()) {
+            ui(s).refresh_after.insert(environment, now + 5 * 60_000);
+            changed = true;
+        } else {
+            ui(s).refreshing.push((environment, id));
+        }
+    }
+    if ui(s).refreshing.is_empty() {
+        ui(s).manual = false;
+    }
+    // Like the page's effect: entering Limits, or the connected set changing, refreshes them.
+    let set = if s.ui.pages.usage.metric == "limits" { connected(s).join(",") } else { String::new() };
+    if set != s.ui.pages.usage.limits.connected {
+        ui(s).connected = set.clone();
+        if !set.is_empty() {
+            refresh(s, true);
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// The selected environments that are connected and have sent their config.
+fn connected(s: &App) -> Vec<String> {
+    let mut keys: Vec<String> = super::usage::selected_environments(s)
+        .into_iter()
+        .filter(|k| crate::env::status(s, k) == "Connected" && crate::env::source(s, k).is_some_and(|src| src.state().config.is_some()))
+        .collect();
+    keys.sort();
+    keys
+}
+
+/// refreshLimits: `server.refreshProviders` on each selected connected environment that has none
+/// in flight; an automatic refresh skips one refreshed in the last five minutes.
+pub(super) fn refresh(s: &mut App, automatic: bool) {
+    let now = s.now_ms;
+    for environment in connected(s) {
+        let u = &s.ui.pages.usage.limits;
+        if u.refreshing.iter().any(|(k, _)| *k == environment) || (automatic && u.refresh_after.get(&environment).is_some_and(|at| now < *at)) {
+            continue;
+        }
+        let Some(net) = env_net(s, &environment) else { continue };
+        let id = net.request("server.refreshProviders", json!({}));
+        ui(s).refreshing.push((environment, id));
+    }
+    if !automatic && !s.ui.pages.usage.limits.refreshing.is_empty() {
+        ui(s).manual = true;
+    }
+}
+
+/// Leaving the page: coming back to Limits refreshes them again, as a remount does.
+pub(super) fn closed(u: &mut Ui) {
+    u.connected.clear();
+}
+
+/// The header's spinner: a refresh the user asked for is still out.
+pub(super) fn busy(u: &Ui) -> bool {
+    u.manual
 }
 
 /// Escape closes the reset confirmation, then an open segment popover.
@@ -110,10 +185,18 @@ struct Account {
     email: Option<String>,
     plan: Option<String>,
     accent: Option<String>,
-    environments: Vec<String>,
+    /// Where the login is signed in, as (environment key, label).
+    environments: Vec<(String, String)>,
     source_label: Option<String>,
-    redeem: Option<Value>,
+    redeem: Option<Redeem>,
     limits: Value,
+}
+
+/// One selected environment's limits presentation: its key, label and visible config.
+struct Env {
+    key: String,
+    label: String,
+    config: Value,
 }
 
 fn list(v: &Value) -> &[Value] {
@@ -238,7 +321,7 @@ struct Merger {
 impl Merger {
     fn merge(&mut self, key: String, next: Account) {
         let fresher_than = |seen: Option<&Account>| seen.is_none_or(|p| newer(&next.limits, &p.limits));
-        if next.redeem.as_ref().is_some_and(|r| r.get("sourceId").is_some()) && fresher_than(self.hubs.get(&key)) {
+        if next.redeem.as_ref().is_some_and(|r| r.1.get("sourceId").is_some()) && fresher_than(self.hubs.get(&key)) {
             self.hubs.insert(key.clone(), next.clone());
         }
         if next.limits["resetCredits"].is_object() && fresher_than(self.credits.get(&key)) {
@@ -253,7 +336,7 @@ impl Merger {
         };
         let previous = &self.accounts[at].1;
         let mut environments = previous.environments.clone();
-        environments.extend(next.environments.iter().filter(|e| !previous.environments.contains(e)).cloned());
+        environments.extend(next.environments.iter().filter(|e| !previous.environments.iter().any(|seen| seen.0 == e.0)).cloned());
         let winner = if newer(&next.limits, &previous.limits) { &next } else { previous };
         let credit = self.credits.get(&key);
         // A hub e-mail names the account better than the driver's default instance name.
@@ -292,90 +375,103 @@ impl Merger {
     }
 }
 
-/// collectLimitAccounts over one environment's providers and limit sources.
-fn collect_accounts(config: &Value, environment: &str) -> Vec<Account> {
-    let providers = list(&config["providers"]);
-    let sources = list(&config["usageLimitSources"]);
-    let keys = Keys::new(
-        providers.iter().filter(|p| p["enabled"] == true).map(Report::native).chain(sources.iter().flat_map(|src| list(&src["accounts"])).map(Report::hub)),
-    );
+/// collectLimitAccounts over the selected environments' providers and limit sources.
+fn collect_accounts(envs: &[Env]) -> Vec<Account> {
+    let keys = Keys::new(envs.iter().flat_map(|e| {
+        let sources = list(&e.config["usageLimitSources"]);
+        list(&e.config["providers"]).iter().filter(|p| p["enabled"] == true).map(Report::native).chain(sources.iter().flat_map(|src| list(&src["accounts"])).map(Report::hub))
+    }));
     let mut merged = Merger::default();
-    for p in providers.iter().filter(|p| reports_limits(p)) {
-        if limits_notice(&p["usageLimits"]).is_some() {
-            continue;
-        }
-        let instance = field(p, "instanceId");
-        let own = format!("{ENVIRONMENT}:{instance}");
-        let key = keys.resolve(&Report::native(p)).unwrap_or_else(|| own.clone());
-        merged.merge(
-            key,
-            Account {
-                key: own,
-                driver: field(p, "driver").to_string(),
-                display_name: p["displayName"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string),
-                email: text_of(&p["auth"]["email"]),
-                plan: text_of(&p["auth"]["label"]),
-                accent: text_of(&p["accentColor"]),
-                environments: vec![environment.to_string()],
-                source_label: None,
-                redeem: Some(json!({"instanceId": instance})),
-                limits: p["usageLimits"].clone(),
-            },
-        );
-    }
-    for src in sources {
-        for a in list(&src["accounts"]) {
-            let limits = &a["usageLimits"];
-            if limits_notice(limits).is_some() {
+    for e in envs {
+        let id = if e.key == crate::env::LOCAL { "local" } else { e.key.as_str() };
+        for p in list(&e.config["providers"]).iter().filter(|p| reports_limits(p)) {
+            if limits_notice(&p["usageLimits"]).is_some() {
                 continue;
             }
-            let id = field(a, "id");
-            let key = match a["workspaceId"].as_str().filter(|w| !w.is_empty()) {
-                Some(workspace) => format!("{}:{id}:{workspace}", field(src, "id")),
-                None => format!("{}:{id}", field(src, "id")),
-            };
-            let email = text_of(&a["email"]);
-            let redeem = limits["resetCredits"]["nextCreditId"].as_str().filter(|c| !c.is_empty()).map(|credit| json!({"sourceId": src["id"], "accountId": id, "creditId": credit}));
-            let resolved = keys.resolve(&Report::hub(a)).unwrap_or_else(|| key.clone());
+            let instance = field(p, "instanceId");
+            let own = format!("{id}:{instance}");
+            let key = keys.resolve(&Report::native(p)).unwrap_or_else(|| own.clone());
             merged.merge(
-                resolved,
+                key,
                 Account {
-                    key,
-                    driver: field(a, "driver").to_string(),
-                    display_name: email.is_none().then(|| hub_name(id)),
-                    email,
-                    plan: text_of(&a["plan"]),
-                    accent: None,
-                    environments: Vec::new(),
-                    source_label: Some(field(src, "label").to_string()),
-                    redeem,
-                    limits: limits.clone(),
+                    key: own,
+                    driver: field(p, "driver").to_string(),
+                    display_name: p["displayName"].as_str().map(str::trim).filter(|n| !n.is_empty()).map(str::to_string),
+                    email: text_of(&p["auth"]["email"]),
+                    plan: text_of(&p["auth"]["label"]),
+                    accent: text_of(&p["accentColor"]),
+                    environments: vec![(e.key.clone(), e.label.clone())],
+                    source_label: None,
+                    redeem: Some((e.key.clone(), json!({"instanceId": instance}))),
+                    limits: p["usageLimits"].clone(),
                 },
             );
+        }
+    }
+    let labelled = envs.len() > 1;
+    for e in envs {
+        for src in list(&e.config["usageLimitSources"]) {
+            let source_label = if labelled { format!("{} · {}", e.label, field(src, "label")) } else { field(src, "label").to_string() };
+            for a in list(&src["accounts"]) {
+                let limits = &a["usageLimits"];
+                if limits_notice(limits).is_some() {
+                    continue;
+                }
+                let id = field(a, "id");
+                let key = match a["workspaceId"].as_str().filter(|w| !w.is_empty()) {
+                    Some(workspace) => format!("{}:{id}:{workspace}", field(src, "id")),
+                    None => format!("{}:{id}", field(src, "id")),
+                };
+                let email = text_of(&a["email"]);
+                let redeem = limits["resetCredits"]["nextCreditId"]
+                    .as_str()
+                    .filter(|c| !c.is_empty())
+                    .map(|credit| (e.key.clone(), json!({"sourceId": src["id"], "accountId": id, "creditId": credit})));
+                let resolved = keys.resolve(&Report::hub(a)).unwrap_or_else(|| key.clone());
+                merged.merge(
+                    resolved,
+                    Account {
+                        key,
+                        driver: field(a, "driver").to_string(),
+                        display_name: email.is_none().then(|| hub_name(id)),
+                        email,
+                        plan: text_of(&a["plan"]),
+                        accent: None,
+                        environments: Vec::new(),
+                        source_label: Some(source_label.clone()),
+                        redeem,
+                        limits: limits.clone(),
+                    },
+                );
+            }
         }
     }
     merged.accounts.into_iter().map(|(_, a)| a).collect()
 }
 
-/// collectLimitNotices: limits a provider or source could not read.
-fn collect_notices(config: &Value) -> Vec<String> {
+/// collectLimitNotices: limits a provider or source could not read, named by environment when
+/// more than one is selected.
+fn collect_notices(envs: &[Env]) -> Vec<String> {
+    let named = |env: &Env, subject: &str| if envs.len() > 1 { format!("{} · {subject}", env.label) } else { subject.to_string() };
     let mut out = Vec::new();
-    for p in list(&config["providers"]).iter().filter(|p| reports_limits(p)) {
-        let limits = &p["usageLimits"];
-        if limits["unavailable"]["reason"] == "unsupported" {
-            continue;
+    for e in envs {
+        for p in list(&e.config["providers"]).iter().filter(|p| reports_limits(p)) {
+            let limits = &p["usageLimits"];
+            if limits["unavailable"]["reason"] == "unsupported" {
+                continue;
+            }
+            if let Some(notice) = limits_notice(limits) {
+                let name = p["displayName"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(field(p, "driver"));
+                out.push(format!("{}: {notice}", named(e, name)));
+            }
         }
-        if let Some(notice) = limits_notice(limits) {
-            let name = p["displayName"].as_str().map(str::trim).filter(|n| !n.is_empty()).unwrap_or(field(p, "driver"));
-            out.push(format!("{name}: {notice}"));
-        }
-    }
-    for src in list(&config["usageLimitSources"]) {
-        let label = field(src, "label");
-        if let Some(error) = src["error"].as_str() {
-            out.push(format!("{label}: {error}"));
-        } else if list(&src["accounts"]).is_empty() {
-            out.push(format!("{label}: No accounts reported."));
+        for src in list(&e.config["usageLimitSources"]) {
+            let label = named(e, field(src, "label"));
+            if let Some(error) = src["error"].as_str() {
+                out.push(format!("{label}: {error}"));
+            } else if list(&src["accounts"]).is_empty() {
+                out.push(format!("{label}: No accounts reported."));
+            }
         }
     }
     out
@@ -389,25 +485,27 @@ struct Link {
 }
 
 /// collectExternalUsageLinks: one card per usage page, naming every login it covers.
-fn collect_links(config: &Value, environment: &str) -> Vec<Link> {
+fn collect_links(envs: &[Env]) -> Vec<Link> {
     let mut links: Vec<Link> = Vec::new();
-    for p in list(&config["providers"]).iter().filter(|p| reports_limits(p)) {
-        let external = &p["usageLimits"]["externalUsage"];
-        if !external.is_object() || p["auth"]["status"] != "authenticated" {
-            continue;
-        }
-        let account = format!("{} on {environment}", p["displayName"].as_str().unwrap_or(field(p, "instanceId")));
-        let (label, url) = (field(external, "label").to_string(), field(external, "url").to_string());
-        let message = text_of(&p["usageLimits"]["unavailable"]["message"]);
-        match links.iter_mut().find(|l| l.url == url) {
-            Some(link) => {
-                link.label = label;
-                link.message = message;
-                if !link.accounts.contains(&account) {
-                    link.accounts.push(account);
-                }
+    for e in envs {
+        for p in list(&e.config["providers"]).iter().filter(|p| reports_limits(p)) {
+            let external = &p["usageLimits"]["externalUsage"];
+            if !external.is_object() || p["auth"]["status"] != "authenticated" {
+                continue;
             }
-            None => links.push(Link { label, url, message, accounts: vec![account] }),
+            let account = format!("{} on {}", p["displayName"].as_str().unwrap_or(field(p, "instanceId")), e.label);
+            let (label, url) = (field(external, "label").to_string(), field(external, "url").to_string());
+            let message = text_of(&p["usageLimits"]["unavailable"]["message"]);
+            match links.iter_mut().find(|l| l.url == url) {
+                Some(link) => {
+                    link.label = label;
+                    link.message = message;
+                    if !link.accounts.contains(&account) {
+                        link.accounts.push(account);
+                    }
+                }
+                None => links.push(Link { label, url, message, accounts: vec![account] }),
+            }
         }
     }
     links
@@ -797,23 +895,43 @@ fn accent(a: &Account) -> Option<Color> {
 
 // ---- view -------------------------------------------------------------------------------
 
-/// UsageLimitsPooled for the environment's visible providers.
+/// The selected environments with their visible providers, in the app's order. Every connected
+/// environment keeps its own config, so parked ones count as on the web.
+fn presentations(s: &App) -> Vec<Env> {
+    let hidden = &s.ui.pages.usage.hidden;
+    super::usage::selected_environments(s)
+        .into_iter()
+        .map(|key| {
+            let config = crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()).map_or(Value::Null, |c| presentation(c, hidden));
+            Env { label: crate::env::label(s, &key), key, config }
+        })
+        .collect()
+}
+
+/// UsageLimitsPooled for the selected environments' visible providers, with the Cursor keychain
+/// prompt after the Codex and Claude pools.
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
-    let u = &s.ui.pages.usage;
     let now = s.now_ms;
-    let empty = Value::Null;
-    let config = s.state().config.as_ref().unwrap_or(&empty);
-    let environment = config["environment"]["label"].as_str().unwrap_or("This environment");
-    let visible = presentation(config, &u.hidden);
-    let pools = collect_pools(collect_accounts(&visible, environment), now);
-    let notices = collect_notices(&visible);
-    let links = collect_links(&visible, environment);
+    let envs = presentations(s);
+    let pools = collect_pools(collect_accounts(&envs), now);
+    let notices = collect_notices(&envs);
+    let links = collect_links(&envs);
+    let mut cursor = super::usage::cursor_access(s).map(|label| cursor_prompt(s, t, &label));
     let mut out = col().w_full().gap(32.0);
-    if pools.is_empty() && notices.is_empty() && links.is_empty() {
+    if pools.is_empty() && notices.is_empty() && cursor.is_none() && links.is_empty() {
         out = out.child(super::usage::muted_line(t, "No provider on the selected environments reports subscription limits."));
     }
-    for pool in &pools {
+    let cursor_at = ["codex", "claudeAgent"].iter().map(|d| pools.iter().position(|p| p.driver == *d).map_or(0, |at| at + 1)).max().unwrap_or(0);
+    for (n, pool) in pools.iter().enumerate() {
+        if n == cursor_at
+            && let Some(prompt) = cursor.take()
+        {
+            out = out.child(prompt);
+        }
         out = out.child(pool_section(s, cx, t, overlays, pool, now));
+    }
+    if let Some(prompt) = cursor {
+        out = out.child(prompt);
     }
     for link in links {
         out = out.child(link_card(t, link));
@@ -838,6 +956,32 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     }
     confirm_dialog(s, t, overlays);
     out
+}
+
+/// CursorEnableLimits for the one environment whose scan asks for the keychain.
+fn cursor_prompt(s: &App, t: &T, label: &str) -> El {
+    col()
+        .w_full()
+        .gap(12.0)
+        .child(row().gap(8.0).center_y().child(el().size(20.0, 20.0).center().child(provider_icon(t, "cursor", 16.0))).child(text("Cursor").font(theme::SM_MEDIUM).color(t.c.foreground)))
+        .child(
+            col()
+                .w_full()
+                .gap(12.0)
+                .radius(radius::LG)
+                .border(1.0, t.c.border.alpha_mul(0.6))
+                .padding(16.0)
+                .child(text(super::usage::CURSOR_KEYCHAIN_COPY).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())
+                .child(row().child(
+                    kit::Button::new("Enable")
+                        .variant("outline")
+                        .size("sm")
+                        .disabled(s.ui.pages.usage.cursor_enabling.is_some())
+                        .on_press(super::usage::enable_cursor)
+                        .build(t)
+                        .label(format!("Enable Cursor usage from {label}")),
+                )),
+        )
 }
 
 fn link_card(t: &T, link: Link) -> El {
@@ -1193,7 +1337,8 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
         who.push(info_row(t, "Plan", plan.clone()));
     }
     let signed_in = !a.environments.is_empty();
-    if let Some(place) = if signed_in { Some(a.environments.join(", ")) } else { a.source_label.clone() } {
+    let places = a.environments.iter().map(|e| e.1.as_str()).collect::<Vec<_>>().join(", ");
+    if let Some(place) = if signed_in { Some(places) } else { a.source_label.clone() } {
         who.push(info_row(t, if signed_in { "Signed in" } else { "Via" }, place));
     }
     body = body.child(divided(t, who));
@@ -1209,7 +1354,7 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
         figures.push(info_row(t, "Restores", format!("+{}% of pool", reset.restores)));
     }
     body = body.child(divided(t, figures));
-    if let Some(input) = a.redeem.clone().filter(|_| credit_count(a) > 0) {
+    if let Some(target) = a.redeem.clone().filter(|_| credit_count(a) > 0) {
         let busy = u.limits.redeeming.as_ref().is_some_and(|r| r.1 == seg.key);
         let key = seg.key.clone();
         let line = row()
@@ -1226,7 +1371,7 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
                     .on_press(move |s: &mut App| {
                         let u = ui(s);
                         u.segment = None;
-                        u.confirm = Some((key.clone(), input.clone()));
+                        u.confirm = Some((key.clone(), target.clone()));
                     })
                     .build(t),
             );
@@ -1237,9 +1382,9 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
 
 /// ResetCreditDialog: redemption spends a credit, so it asks first.
 fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
-    let Some((key, input)) = s.ui.pages.usage.limits.confirm.clone() else { return };
+    let Some((key, target)) = s.ui.pages.usage.limits.confirm.clone() else { return };
     let cancel = kit::Button::new("Cancel").variant("outline").on_press(|s: &mut App| ui(s).confirm = None).build(t);
-    let confirm = kit::Button::new("Use credit").on_press(move |s: &mut App| redeem(s, &key, &input)).build(t);
+    let confirm = kit::Button::new("Use credit").on_press(move |s: &mut App| redeem(s, &key, &target)).build(t);
     kit::Dialog::new("usage-reset-credit", "Use a reset credit?")
         .alert()
         .width(448.0)
@@ -1250,13 +1395,14 @@ fn confirm_dialog(s: &App, t: &T, overlays: &mut Vec<El>) {
         .build(t, overlays);
 }
 
-fn redeem(s: &mut App, key: &str, input: &Value) {
+/// Spends the credit on the environment that reported it.
+fn redeem(s: &mut App, key: &str, (environment, input): &Redeem) {
     ui(s).confirm = None;
-    let Some(net) = s.src.net() else { return };
+    let Some(net) = env_net(s, environment) else { return };
     let id = net.request("provider.consumeResetCredit", input.clone());
     let u = ui(s);
     u.status.remove(key);
-    u.redeeming = Some((id, key.to_string()));
+    u.redeeming = Some((id, key.to_string(), environment.clone()));
 }
 
 /// The `usage-limits-pooled` scenes: a second Codex login, a CLI proxy account and a failing
@@ -1272,6 +1418,28 @@ pub(super) fn pooled_scene(s: &mut App) {
         }
         config["usageLimitSources"] = pooled["usageLimitSources"].clone();
     }
+}
+
+/// The `usage-limits-environments` scenes: a saved "Studio Mac" where the same Codex login is
+/// signed in, with a Claude login of its own.
+pub(super) fn environments_scene(s: &mut App) {
+    let Some(mut config) = s.state().config.clone() else { return };
+    config["environment"]["label"] = json!("Studio Mac");
+    config["environment"]["environmentId"] = json!("studio-env");
+    for p in config["providers"].as_array_mut().into_iter().flatten() {
+        let driver = field(p, "driver").to_string();
+        match driver.as_str() {
+            "codex" => p["usageLimits"]["checkedAt"] = json!("2026-11-06T10:20:00.000Z"),
+            "claudeAgent" => p["auth"]["email"] = json!("studio@example.com"),
+            _ => {}
+        }
+    }
+    let mut state = crate::data::empty_state();
+    state.conn = s5_net::Conn::Open;
+    state.shell_ready = true;
+    state.config = Some(config);
+    s.ui.env.saved.push(crate::env::Saved { id: "studio".into(), label: "Studio Mac".into(), base: "https://studio.example".into(), bearer: "scene".into() });
+    crate::env::park(s, "studio", crate::data::Source::Fixture(state));
 }
 
 #[cfg(test)]
@@ -1296,6 +1464,10 @@ mod tests {
         json!({"id": id, "kind": kind, "label": id, "usedPercent": used, "resetsAt": resets, "windowDurationMins": 300})
     }
 
+    fn env(key: &str, label: &str, config: Value) -> Env {
+        Env { key: key.into(), label: label.into(), config }
+    }
+
     #[test]
     fn logins_merge_across_instances_and_hub_accounts() {
         let mut second = provider("codex_2", "codex", " Me@Example.com ", json!([window("primary", "session", 50.0, "2026-11-06T12:00:00.000Z")]));
@@ -1308,16 +1480,36 @@ mod tests {
                 {"id": "other.json", "driver": "claudeAgent", "usageLimits": {"checkedAt": "2026-11-06T09:00:00.000Z", "credentialFingerprint": "fp", "windows": [window("five_hour", "session", 5.0, "2026-11-06T12:00:00.000Z")]}},
             ]}],
         });
-        let accounts = collect_accounts(&config, "Laptop");
+        let accounts = collect_accounts(&[env("", "Laptop", config)]);
         assert_eq!(accounts.len(), 2);
         let me = &accounts[0];
         // The freshest read's windows, the hub's redemption, and its e-mail over "Codex".
         assert_eq!(used(&windows(&me.limits)[0]), 50.0);
-        assert_eq!(me.redeem, Some(json!({"sourceId": "hub", "accountId": "me.JSON", "creditId": "c1"})));
+        assert_eq!(me.redeem, Some((String::new(), json!({"sourceId": "hub", "accountId": "me.JSON", "creditId": "c1"}))));
         assert_eq!(me.limits["resetCredits"]["availableCount"], 1);
         assert_eq!((me.display_name.as_deref(), me.plan.as_deref(), me.source_label.as_deref()), (None, Some("Pro"), None));
-        assert_eq!(me.environments, vec!["Laptop".to_string()]);
+        assert_eq!(me.environments, vec![(String::new(), "Laptop".to_string())]);
         assert_eq!((accounts[1].display_name.as_deref(), accounts[1].source_label.as_deref()), (Some("other"), Some("CLI Proxy")));
+    }
+
+    #[test]
+    fn one_login_on_two_environments_is_signed_in_on_both() {
+        let local = provider("codex", "codex", "me@example.com", json!([window("primary", "session", 10.0, NOW)]));
+        let mut remote = provider("codex", "codex", "Me@example.com", json!([window("primary", "session", 30.0, NOW)]));
+        remote["usageLimits"]["checkedAt"] = json!("2026-11-06T10:20:00.000Z");
+        remote["usageLimits"]["resetCredits"] = json!({"availableCount": 1});
+        let hub = json!([{"id": "hub", "label": "CLI Proxy", "accounts": [], "error": "Offline."}]);
+        let envs = [env("", "Laptop", json!({"providers": [local]})), env("studio", "Studio Mac", json!({"providers": [remote], "usageLimitSources": hub}))];
+        let accounts = collect_accounts(&envs);
+        assert_eq!(accounts.len(), 1);
+        let me = &accounts[0];
+        assert_eq!(me.key, "local:codex");
+        assert_eq!(me.environments.iter().map(|e| e.1.as_str()).collect::<Vec<_>>(), ["Laptop", "Studio Mac"]);
+        // The credit is spent on the environment that reported it; the freshest read shows.
+        assert_eq!(me.redeem, Some(("studio".to_string(), json!({"instanceId": "codex"}))));
+        assert_eq!(used(&windows(&me.limits)[0]), 30.0);
+        assert_eq!(collect_notices(&envs), ["Studio Mac · CLI Proxy: Offline."]);
+        assert_eq!(collect_links(&envs).len(), 0);
     }
 
     #[test]
@@ -1327,7 +1519,7 @@ mod tests {
         let mut b = provider("codex_b", "codex", "me@example.com", json!([window("primary", "session", 20.0, NOW)]));
         b["auth"]["workspaceId"] = json!("w2");
         let c = provider("codex_c", "codex", "me@example.com", json!([window("primary", "session", 30.0, NOW)]));
-        let keys = |config: Value| collect_accounts(&config, "L").into_iter().map(|a| a.key).collect::<Vec<_>>();
+        let keys = |config: Value| collect_accounts(&[env("", "L", config)]).into_iter().map(|a| a.key).collect::<Vec<_>>();
         assert_eq!(keys(json!({"providers": [a.clone(), b, c.clone()]})), ["local:codex", "local:codex_b", "local:codex_c"]);
         // One known workspace claims the login that names none.
         assert_eq!(keys(json!({"providers": [a, c]})), ["local:codex"]);
@@ -1345,10 +1537,11 @@ mod tests {
             "providers": [failing, unsupported, linked],
             "usageLimitSources": [{"id": "a", "label": "Hub", "accounts": [], "error": "Offline."}, {"id": "b", "label": "Empty", "accounts": []}],
         });
-        assert_eq!(collect_notices(&config), ["Claude: Could not read limits.", "Codex: No limits reported.", "Hub: Offline.", "Empty: No accounts reported."]);
-        let links = collect_links(&config, "Laptop");
-        assert_eq!((links.len(), links[0].accounts.clone()), (1, vec!["Codex on Laptop".to_string()]));
         let hidden = presentation(&config, &["codex"]);
+        let envs = [env("", "Laptop", config)];
+        assert_eq!(collect_notices(&envs), ["Claude: Could not read limits.", "Codex: No limits reported.", "Hub: Offline.", "Empty: No accounts reported."]);
+        let links = collect_links(&envs);
+        assert_eq!((links.len(), links[0].accounts.clone()), (1, vec!["Codex on Laptop".to_string()]));
         assert_eq!(list(&hidden["providers"]).len(), 2);
         assert_eq!(list(&hidden["usageLimitSources"]).len(), 2);
     }
@@ -1361,7 +1554,7 @@ mod tests {
             email: None,
             plan: None,
             accent: None,
-            environments: vec!["L".into()],
+            environments: vec![(String::new(), "L".into())],
             source_label: None,
             redeem: None,
             limits: json!({"checkedAt": "2026-11-06T10:00:00.000Z", "windows": windows}),

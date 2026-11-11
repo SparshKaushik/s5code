@@ -20,6 +20,8 @@ const MAX_PAGE: u64 = 500;
 const DEBOUNCE: Duration = Duration::from_millis(250);
 /// `pullRequests.listStats` takes at most this many refs per call.
 const MAX_STATS_REFS: usize = 500;
+/// Bumped by the server whenever a turn may have changed pull requests.
+const REFRESHES: &str = "pullRequests.subscribeRefreshes";
 
 #[derive(Default)]
 pub struct Ui {
@@ -56,6 +58,13 @@ pub struct Ui {
     pub menu: Option<&'static str>,
     pub submenu: Option<&'static str>,
     pub selected: Option<String>,
+    /// The pull request the panel toggle hid, which it reopens.
+    hidden: Option<String>,
+    /// The detail fills the page (RightPanelMaximizeControl); only while it is open.
+    pub maximized: bool,
+    /// `pullRequests.subscribeRefreshes` is watched, and the revision last seen from it.
+    watching: bool,
+    turn: Option<u64>,
     pub context: Option<(String, f32, f32)>,
     /// The rows' quick actions, stack, checks and change breakdown.
     pub row: super::pr_row::Ui,
@@ -83,9 +92,11 @@ impl Default for Filters {
 }
 
 impl Filters {
-    /// The Filters badge: one per narrowed menu, and one per chosen label.
-    fn count(&self) -> usize {
-        let set = [self.state != "open", self.involvement != "all", self.draft != "all", self.review != "all", self.checks != "all", self.author.is_some(), self.project.is_some(), self.host.is_some()];
+    /// The Filters badge: one per narrowed menu, and one per chosen label; a typed `draft:` shows
+    /// in place of the menu's Draft.
+    fn count(&self, query: &str) -> usize {
+        let draft = typed_draft(query).unwrap_or(self.draft);
+        let set = [self.state != "open", self.involvement != "all", draft != "all", self.review != "all", self.checks != "all", self.author.is_some(), self.project.is_some(), self.host.is_some()];
         set.iter().filter(|b| **b).count() + self.labels.len()
     }
 
@@ -329,6 +340,36 @@ fn merged_filters(f: &Filters, typed: &Map<String, Value>) -> Map<String, Value>
     out
 }
 
+/// The Draft a `draft:` qualifier in `query` asks for.
+fn typed_draft(query: &str) -> Option<&'static str> {
+    match parse_query(query).1.get("draft")?.as_str()? {
+        "only" => Some("only"),
+        "hide" => Some("hide"),
+        _ => None,
+    }
+}
+
+/// applyPullRequestDraftFilterChange: a Draft picked over a typed `draft:` drops the qualifier,
+/// which would outrank it, and keeps the rest of the query; picking the Draft already shown
+/// changes nothing. The rewritten query, if any, and the menu's Draft.
+fn draft_change(query: &str, menu: &'static str, next: &'static str) -> (Option<String>, &'static str) {
+    let typed = typed_draft(query);
+    if next == typed.unwrap_or(menu) {
+        return (None, menu);
+    }
+    let rewritten = typed.map(|_| runs(query.trim(), char::is_whitespace).into_iter().filter(|token| typed_draft(token).is_none()).collect::<Vec<_>>().join(" "));
+    (rewritten, next)
+}
+
+/// The Filters menu's Draft pick, rewriting the search as `draft_change` says.
+fn pick_draft(u: &mut Ui, next: &'static str) {
+    let (query, draft) = draft_change(&u.query.text, u.filters.draft, next);
+    u.filters.draft = draft;
+    if let Some(query) = query {
+        u.query.replace_text(&query);
+    }
+}
+
 /// `pullRequests.list`'s input within the toolbar's project and host.
 fn scoped(f: &Filters, state: &str, involvement: &str, limit: u64, filters: Map<String, Value>) -> Value {
     let mut v = json!({"state": state, "involvement": involvement, "limit": limit});
@@ -381,20 +422,20 @@ pub(super) fn key(e: &Value) -> String {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) {
-        return false;
+    let on = matches!(s.frame_route(), Route::PullRequests);
+    let mut changed = watch_refreshes(s, on);
+    if !on {
+        return changed;
     }
-    let mut changed = debounce(s);
+    settle_panel(ui(s));
+    changed |= debounce(s);
     if let Some(id) = s.ui.pages.pull_requests.invalidating
         && s.src.net().and_then(|n| n.take_reply(id)).is_some()
     {
         // Host caches are dropped (or the call failed, which web also ignores): ask again.
         let u = ui(s);
         u.invalidating = None;
-        u.requested = None;
-        for read in [&mut u.baseline, &mut u.facets].into_iter().chain(u.partitions.iter_mut()) {
-            read.asked = None;
-        }
+        reread(u);
         changed = true;
     }
     if let Some(id) = s.ui.pages.pull_requests.stats_pending
@@ -465,6 +506,65 @@ pub fn poll(s: &mut App) -> bool {
     changed |= super::pr_filters::poll(s);
     want_stats(s);
     changed
+}
+
+/// Every read asks again on its next poll, keeping what it shows until the answer lands.
+fn reread(u: &mut Ui) {
+    u.requested = None;
+    for read in [&mut u.baseline, &mut u.facets].into_iter().chain(u.partitions.iter_mut()) {
+        read.asked = None;
+    }
+}
+
+/// Watches `pullRequests.subscribeRefreshes` while the page shows; a new revision means a turn
+/// finished somewhere, so the list and the open detail read again (the queries' refreshTrigger).
+fn watch_refreshes(s: &mut App, on: bool) -> bool {
+    if !on {
+        let u = ui(s);
+        let was = std::mem::take(&mut u.watching);
+        u.turn = None;
+        if was && let Some(net) = s.src.net() {
+            net.unwatch_resource(REFRESHES, json!({}));
+        }
+        return false;
+    }
+    let Some(net) = s.src.net() else { return false };
+    net.watch_resource(REFRESHES, json!({}));
+    let revision = net.resource(REFRESHES, json!({})).and_then(Value::as_u64);
+    let u = ui(s);
+    u.watching = true;
+    if !turned(&mut u.turn, revision) {
+        return false;
+    }
+    after_turn(u);
+    super::pr_detail::refresh(s);
+    true
+}
+
+/// Whether `now` is a revision other than the one last seen, which it becomes.
+fn turned(seen: &mut Option<u64>, now: Option<u64>) -> bool {
+    let Some(now) = now else { return false };
+    seen.replace(now) != Some(now)
+}
+
+/// The rows already read per listing a continuation reads from (one per host, or per GitLab repository).
+fn largest_read(entries: &[Value]) -> u64 {
+    let mut counts: HashMap<String, u64> = HashMap::new();
+    for e in entries {
+        let repository = if field(e, "provider") == "github" { String::new() } else { field(e, "repository").to_lowercase() };
+        *counts.entry(format!("{} {repository}", field(e, "host").to_lowercase())).or_default() += 1;
+    }
+    counts.into_values().max().unwrap_or(0)
+}
+
+/// A turn rereads the first page, grown to hold what "Load more" had shown (PullRequestsPage's
+/// continuation collapse), and re-measures sizes.
+fn after_turn(u: &mut Ui) {
+    let read = u.result.as_ref().and_then(|r| r["entries"].as_array()).map_or(0, |e| largest_read(e));
+    let grown = u.limit.unwrap_or(PAGE).max(read.div_ceil(PAGE) * PAGE).min(MAX_PAGE);
+    u.limit = (grown != PAGE).then_some(grown);
+    u.stats_asked.clear();
+    reread(u);
 }
 
 /// What the page reads beside the list: the baseline while a search or longer page replaces it,
@@ -652,6 +752,9 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     }
     if matches!(e.key, rune::Key::Escape) {
         let u = ui(s);
+        if super::pr_row::cancel_sweep(&mut u.row) {
+            return true;
+        }
         if u.context.take().is_some() || u.menu.take().is_some() {
             u.submenu = None;
             return true;
@@ -671,7 +774,31 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         return true;
     }
     if crate::panel::shortcut(s, e, "rightPanel.close") {
-        return ui(s).selected.take().is_some();
+        let repeat = tx.key_repeat();
+        let u = ui(s);
+        return if repeat { u.selected.is_some() } else { u.selected.take().is_some() };
+    }
+    if crate::panel::shortcut(s, e, "rightPanel.toggle") {
+        let repeat = tx.key_repeat();
+        let u = ui(s);
+        if !panel_available(u) {
+            return false;
+        }
+        if !repeat {
+            toggle_panel(u);
+        }
+        return true;
+    }
+    if crate::panel::shortcut(s, e, "rightPanel.toggleMaximized") {
+        let repeat = tx.key_repeat();
+        let u = ui(s);
+        if u.selected.is_none() {
+            return false;
+        }
+        if !repeat {
+            toggle_maximized(u);
+        }
+        return true;
     }
     if crate::panel::shortcut(s, e, "thread.copyReference")
         && let Some(url) = ui(s).selected.clone()
@@ -824,7 +951,7 @@ fn blocked_tier(e: &Value, group: Group) -> u8 {
 }
 
 #[derive(Clone, Copy, PartialEq)]
-enum Group {
+pub(super) enum Group {
     Authored,
     Review,
     Others,
@@ -920,7 +1047,7 @@ fn partitioned(rows: Vec<Value>, authored: Vec<Value>, review: Vec<Value>) -> [(
 
 /// The rows as shown: measured sizes filled in, narrowed by the menu and the typed qualifiers
 /// and text, in their base order, then grouped by involvement and ranked by the sort.
-fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
+pub(super) fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
     let (typed_text, typed) = parse_query(&u.query.text);
     let (sent_text, _) = parse_query(&u.sent_query);
     let filters = merged_filters(&u.filters, &typed);
@@ -977,11 +1104,81 @@ fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
         .collect()
 }
 
+
+// ---- panel ------------------------------------------------------------------------------
+
+/// rightPanelAvailable: a pull request is open, or hidden by the toggle.
+fn panel_available(u: &Ui) -> bool {
+    u.selected.is_some() || u.hidden.is_some()
+}
+
+/// toggleRightPanel: hides the open pull request, or reopens the hidden one.
+pub(super) fn toggle_panel(u: &mut Ui) {
+    match u.selected.take() {
+        Some(url) => u.hidden = Some(url),
+        None => u.selected = u.hidden.take(),
+    }
+}
+
+/// toggleRightPanelMaximized: only an open panel maximizes.
+pub(super) fn toggle_maximized(u: &mut Ui) {
+    if u.selected.is_some() {
+        u.maximized = !u.maximized;
+    }
+}
+
+/// An opened pull request replaces the hidden one, and a closed panel is never maximized.
+fn settle_panel(u: &mut Ui) {
+    if u.selected.is_some() {
+        u.hidden = None;
+    } else {
+        u.maximized = false;
+    }
+}
+
+/// A ghost toggle in the panel strip (PanelLayoutControls); a disabled one keeps its tip.
+fn panel_button(t: &T, glyph: &'static rune::Icon, label: &str, tip: String, on: bool, press: Option<fn(&mut Ui)>) -> El {
+    let ink = if on { t.c.foreground } else { t.c.muted_foreground };
+    let b = el().size(28.0, 28.0).center().radius(layout::CONTROL_RADIUS).label(label.to_string()).help(tip).child(icon(glyph, 16.0).color(ink));
+    let b = if on { b.fill(t.c.accent) } else { b };
+    match press {
+        Some(press) => b.hover(t.c.accent).press(t.c.accent).cursor(Cursor::Pointer).on_press(move |s: &mut App| press(ui(s))),
+        None => b.disabled(true).opacity(0.64),
+    }
+}
+
+/// RightPanelMaximizeControl.
+pub(super) fn maximize_control(s: &App, t: &T) -> El {
+    let on = s.ui.pages.pull_requests.maximized;
+    let (glyph, label) = if on { (&i::MINIMIZE_2, "Restore panel size") } else { (&i::MAXIMIZE_2, "Maximize panel") };
+    panel_button(t, glyph, label, label.into(), on, Some(toggle_maximized))
+}
+
+/// PanelLayoutControls' right panel toggle, unavailable until a pull request is picked.
+pub(super) fn panel_control(s: &App, t: &T) -> El {
+    let u = &s.ui.pages.pull_requests;
+    if !panel_available(u) {
+        return panel_button(t, &i::PANEL_RIGHT, "Toggle right panel", "Select a pull request first".into(), false, None);
+    }
+    let shortcut = crate::shell::palette::shortcut_label(s, "rightPanel.toggle");
+    let tip = if shortcut.is_empty() { "Toggle right panel".to_string() } else { format!("Toggle right panel ({shortcut})") };
+    panel_button(t, &i::PANEL_RIGHT, "Toggle right panel", tip, u.selected.is_some(), Some(toggle_panel))
+}
+
 // ---- view -------------------------------------------------------------------------------
 
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
     let _ = cx;
     let u = &s.ui.pages.pull_requests;
+    if let Some((url, x, y)) = &u.context
+        && let Some(e) = u.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| field(e, "url") == url))
+    {
+        context_menu(t, e, &u.hosts, *x, *y, overlays);
+    }
+    let main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background);
+    if u.selected.is_some() && u.maximized {
+        return main.child(super::pr_detail::view(s, t, overlays));
+    }
     let header = row()
         .key("pr-header")
         .w_full()
@@ -990,7 +1187,9 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
         .px(20.0)
         .center_y()
         .window_drag()
-        .child(text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground));
+        .child(text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(spacer())
+        .children(u.selected.is_none().then(|| panel_control(s, t)));
     let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(toolbar(s, t, overlays));
     match (&u.result, &u.error) {
         (None, None) => content = content.child(ghost(t, 7, Some("Loading pull requests…".into()))),
@@ -1019,17 +1218,12 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
         col().key("pr-scroll").grow(1.0).min_h(0.0).w_full().items_center().scroll(ScrollSpec { stick_bottom: false }).child(content),
         t,
     );
-    if let Some((url, x, y)) = &u.context
-        && let Some(e) = u.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| field(e, "url") == url))
-    {
-        context_menu(t, e, &u.hosts, *x, *y, overlays);
-    }
     let list = col().key("pr-list").grow(1.0).shrink().min_w(0.0).h_full().fill(t.c.background).child(header).child(body);
-    let mut main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background).child(list);
-    if u.selected.is_some() {
-        main = main.child(el().w(1.0).h_full().shrink().fill(t.c.border)).child(super::pr_detail::view(s, t, overlays));
+    let main = main.child(list);
+    if u.selected.is_none() {
+        return main;
     }
-    main
+    main.child(el().w(1.0).h_full().shrink().fill(t.c.border)).child(super::pr_detail::view(s, t, overlays))
 }
 
 /// `Button` with the outline look the toolbar and states use throughout.
@@ -1050,6 +1244,8 @@ impl Button {
 fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     let u = &s.ui.pages.pull_requests;
     let k = kit::theme(t);
+    let typed = u.query.text.trim();
+    let busy = !typed.is_empty() && (typed != u.sent_query.trim() || u.pending.is_some_and(|p| !p.1));
     let search = row()
         .key("pr-search")
         .grow(1.0)
@@ -1061,7 +1257,7 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .center_y()
         .pl(11.0)
         .pr(8.0)
-        .child(icon(&i::SEARCH, 16.0).color(t.c.muted_foreground.alpha_mul(0.8)))
+        .child(icon(if busy { &i::LOADER_CIRCLE } else { &i::SEARCH }, 16.0).color(t.c.muted_foreground.alpha_mul(0.8)))
         .child(
             text_input(&u.query, theme::TEXT_SM)
                 .key("pr-search-input")
@@ -1101,33 +1297,36 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
     }
 
     let mut filters_trigger = Button("Filters", Some(&i::LIST_FILTER)).with("default").on_press(toggle("filters")).build(t);
-    let count = u.filters.count();
+    let count = u.filters.count(&u.query.text);
     if count > 0 {
         filters_trigger = filters_trigger.child(row().h(16.0).px(6.0).radius(radius::FULL).fill(t.c.muted).center().child(text(count.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground)));
     }
-    let filters = Menu::new("pr-filters").trigger(filters_trigger).placement(Placement::BottomStart).min_width(208.0).open(open("filters")).on_close(close).entries(filter_entries(s, t));
+    let filters = Menu::new("pr-filters").trigger(filters_trigger).placement(Placement::BottomEnd).min_width(208.0).open(open("filters")).on_close(close).entries(filter_entries(s, t));
 
     let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
     let entries = if u.hosts.is_empty() { &expected } else { &u.hosts };
     let hosts: Vec<(String, String, Option<String>)> = entries.iter().map(|p| (field(p, "host").to_string(), host_label(entries, p), unavailable_host(p))).collect();
-    let host_label = u.filters.host.as_ref().map(|h| hosts.iter().find(|x| &x.0 == h).map(|x| x.1.clone()).unwrap_or_else(|| h.clone())).unwrap_or_else(|| "All".into());
+    let chosen = u.filters.host.as_ref().map(|h| hosts.iter().find(|x| &x.0 == h).map(|x| x.1.clone()).unwrap_or_else(|| h.clone()));
+    // PullRequestCompactFilterMenu: icon-only, titled with the choice, once a host is chosen.
+    let host_trigger = match &chosen {
+        Some(name) => {
+            let kind = entries.iter().find(|p| Some(field(p, "host")) == u.filters.host.as_deref()).map_or("", |p| field(p, "kind"));
+            let tip = format!("Filter by provider: {name}");
+            kit::Button::new(tip.clone()).variant("outline").size("icon").icon(super::pr_row::host_icon(kind)).on_press(toggle("host")).build(t).help(tip)
+        }
+        None => kit::Button::new("All").variant("outline").icon(&i::PLUG_2).on_press(toggle("host")).build(t).label("Filter by provider: All"),
+    };
     let mut host = Menu::new("pr-host")
-        .trigger(kit::Button::new(host_label).variant("outline").icon(&i::PLUG_2).on_press(toggle("host")).build(t))
+        .trigger(host_trigger)
         .placement(Placement::BottomStart)
         .min_width(180.0)
         .open(open("host"))
         .on_close(close)
-        .item(MenuItem::new("All").icon(&i::PLUG_2).radio(u.filters.host.is_none()).on_select(move |s: &mut App| {
-            ui(s).filters.host = None;
-            close(s);
-        }));
+        .item(MenuItem::new("All").icon(&i::PLUG_2).radio(u.filters.host.is_none()).on_select(|s: &mut App| ui(s).filters.host = None));
     for (h, label, unavailable) in hosts {
         let checked = u.filters.host.as_deref() == Some(h.as_str());
         let glyph = super::pr_row::host_icon(entries.iter().find(|p| field(p, "host") == h.as_str()).map_or("", |p| field(p, "kind")));
-        let mut item = MenuItem::new(label).icon(glyph).radio(checked).on_select(move |s: &mut App| {
-            ui(s).filters.host = Some(h.clone());
-            close(s);
-        });
+        let mut item = MenuItem::new(label).icon(glyph).radio(checked).on_select(move |s: &mut App| ui(s).filters.host = Some(h.clone()));
         if unavailable.is_some() {
             item = item.shortcut("Unavailable").disabled(true);
         }
@@ -1144,7 +1343,7 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .child(filters.build(&k, overlays))
         .child(host.build(&k, overlays))
         .child(
-            kit::Button::new(if refreshing(u) { "Refreshing pull requests" } else { "Refresh pull requests" })
+            kit::Button::new("Refresh pull requests")
                 .variant("outline")
                 .size("icon")
                 .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
@@ -1162,7 +1361,7 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     let sub = u.submenu;
     let sub_item = |label: &str, glyph: &'static rune::Icon, value: String, name: &'static str, entries: Vec<MenuEntry>| {
         // The host rows carry an "Unavailable" tag beside the name, which the default width clips.
-        let width = if name == "host" { 240. } else { 160. };
+        let width = if matches!(name, "host" | "project") { 240. } else { 160. };
         MenuEntry::item(MenuItem::new(label).icon(glyph).shortcut(value).submenu(entries, sub == Some(name)).submenu_min_width(width).on_submenu_change(move |s: &mut App, on| {
             let u = ui(s);
             if on && u.submenu != Some(name) && matches!(name, "author" | "labels") {
@@ -1172,11 +1371,11 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
         }))
     };
     type Options = &'static [(&'static str, &'static str, &'static rune::Icon)];
-    let radios = |label: &'static str, name: &'static str, options: Options, current: &str, set: fn(&mut Filters, &'static str)| {
+    let radios = |label: &'static str, name: &'static str, options: Options, current: &str, set: fn(&mut Ui, &'static str)| {
         let (_, value, glyph) = options.iter().find(|o| o.0 == current).copied().unwrap_or(options[0]);
         let mut entries = vec![MenuEntry::Label(label.into())];
         for &(id, title, glyph) in options {
-            entries.push(MenuEntry::item(MenuItem::new(title).icon(glyph).radio(current == id).on_select(move |s: &mut App| set(&mut ui(s).filters, id))));
+            entries.push(MenuEntry::item(MenuItem::new(title).icon(glyph).radio(current == id).on_select(move |s: &mut App| set(ui(s), id))));
         }
         sub_item(label, glyph, value.to_string(), name, entries)
     };
@@ -1193,14 +1392,14 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     };
     let label_value = if f.labels.is_empty() { "Any".to_string() } else { format!("{} selected", f.labels.len()) };
     let mut out = vec![
-        radios("State", "state", STATES, f.state, |f, v| f.state = v),
-        radios("Involvement", "involvement", INVOLVEMENTS, f.involvement, |f, v| f.involvement = v),
+        radios("State", "state", STATES, f.state, |u, v| u.filters.state = v),
+        radios("Involvement", "involvement", INVOLVEMENTS, f.involvement, |u, v| u.filters.involvement = v),
         MenuEntry::Separator,
         sub_item("Author", &i::USER_ROUND, f.author.clone().unwrap_or_else(|| "Anyone".into()), "author", super::pr_filters::author_entries(s, t, &authors)),
         sub_item("Labels", &i::TAG, label_value, "labels", super::pr_filters::label_entries(s, t, &labels)),
-        radios("Draft", "draft", DRAFTS, f.draft, |f, v| f.draft = v),
-        radios("Review", "review", REVIEWS, f.review, |f, v| f.review = v),
-        radios("Checks", "checks", CHECKS, f.checks, |f, v| f.checks = v),
+        radios("Draft", "draft", DRAFTS, typed_draft(&u.query.text).unwrap_or(f.draft), pick_draft),
+        radios("Review", "review", REVIEWS, f.review, |u, v| u.filters.review = v),
+        radios("Checks", "checks", CHECKS, f.checks, |u, v| u.filters.checks = v),
     ];
 
     let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
@@ -1224,18 +1423,13 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
         out.extend([MenuEntry::Separator, sub_item("Host", glyph, value, "host", entries)]);
     }
 
-    let mut projects: Vec<(String, String)> = s.state().projects.iter().map(|p| (field(p, "id").to_string(), field(p, "title").to_string())).collect();
-    projects.sort_by_key(|p| p.1.to_lowercase());
-    let project_value = projects.iter().find(|p| Some(p.0.as_str()) == f.project.as_deref()).map_or("All projects".to_string(), |p| p.1.clone());
-    let mut entries = vec![
-        MenuEntry::Label("Project".into()),
-        MenuEntry::item(MenuItem::new("All projects").icon(&i::LAYERS).radio(f.project.is_none()).on_select(|s: &mut App| ui(s).filters.project = None)),
-    ];
-    for (id, title) in projects {
-        let checked = f.project.as_deref() == Some(id.as_str());
-        entries.push(MenuEntry::item(MenuItem::new(title).icon(&i::FOLDER_GIT_2).radio(checked).on_select(move |s: &mut App| ui(s).filters.project = Some(id.clone()))));
-    }
+    let listed = u.baseline.answer_for(&baseline_input(f)).or(u.result.as_ref());
+    let errors = listed.and_then(|r| r["errors"].as_array()).map_or(&[][..], Vec::as_slice);
+    let server = crate::env::label(s, &s.ui.env.active);
+    let projects = super::pr_filters::projects(&s.state().projects, f.project.as_deref(), &server, errors);
+    let project_value = projects.iter().find(|p| Some(p.id.as_str()) == f.project.as_deref()).map_or("All projects".to_string(), |p| p.title.clone());
     let project_glyph = if f.project.is_some() { &i::FOLDER_GIT_2 } else { &i::LAYERS };
+    let entries = super::pr_filters::project_entries(s, t, &projects);
     out.extend([MenuEntry::Separator, sub_item("Project", project_glyph, project_value, "project", entries)]);
     out
 }
@@ -1347,6 +1541,16 @@ fn state_glyph(t: &T, e: &Value) -> (&'static rune::Icon, Color) {
     }
 }
 
+/// PULL_REQUEST_STATE_PRESENTATION's label.
+fn state_label(e: &Value) -> &'static str {
+    match field(e, "state") {
+        "open" if e["isDraft"].as_bool().unwrap_or(false) => "Draft",
+        "merged" => "Merged",
+        "closed" => "Closed",
+        _ => "Open",
+    }
+}
+
 fn success(t: &T) -> Color {
     if t.dark { tw::EMERALD_300.alpha_mul(0.9) } else { tw::EMERALD_600 }
 }
@@ -1385,10 +1589,21 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
     let url = field(e, "url").to_string();
     let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
     let (glyph, ink) = state_glyph(t, e);
-    let mut mark = el().size(16.0, 16.0).child(icon(glyph, 16.0).color(ink));
+    let mut mark = el().size(16.0, 16.0).child(icon(glyph, 16.0).color(ink)).label(state_label(e)).help(state_label(e));
     if conflicting(e) && open(e) && !e["isDraft"].as_bool().unwrap_or(false) {
+        let tip = match field(e, "baseBranch") {
+            "" => "Has conflicts".to_string(),
+            base => format!("Conflicts with {base}"),
+        };
         mark = mark.child(
-            el().absolute(8.0, 8.0).size(12.0, 12.0).center().radius(radius::FULL).fill(t.c.background).child(icon(&i::TRIANGLE_ALERT, 12.0).color(t.c.destructive)),
+            el().absolute(8.0, 8.0)
+                .size(12.0, 12.0)
+                .center()
+                .radius(radius::FULL)
+                .fill(t.c.background)
+                .label(tip.clone())
+                .help(tip)
+                .child(icon(&i::TRIANGLE_ALERT, 12.0).color(t.c.destructive)),
         );
     }
     let mono = theme::mono(theme::TEXT_XS).features("'tnum' 1");
@@ -1406,11 +1621,14 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         })
         .child(text(field(e, "title").to_string()).font(theme::TEXT_SM).color(t.c.foreground).truncate().shrink().min_w(0.0));
     let mut signals = row().gap(4.0).center_y().shrink().children(super::pr_row::checks(s, t, e, overlays));
-    match field(e, "reviewDecision") {
-        "approved" => signals = signals.child(icon(&i::USER_CHECK, 14.0).color(success(t))),
-        "changes-requested" => signals = signals.child(icon(&i::USER_ROUND_X, 14.0).color(if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) })),
-        "review-required" => signals = signals.child(icon(&i::USER_ROUND, 14.0).color(t.c.muted_foreground.alpha_mul(0.6))),
-        _ => {}
+    let review = match field(e, "reviewDecision") {
+        "approved" => Some((&i::USER_CHECK, success(t), "Approved")),
+        "changes-requested" => Some((&i::USER_ROUND_X, if t.dark { tw::AMBER_400.alpha_mul(0.8) } else { tw::AMBER_600.alpha_mul(0.9) }, "Changes requested")),
+        "review-required" => Some((&i::USER_ROUND, t.c.muted_foreground.alpha_mul(0.6), "Awaiting review")),
+        _ => None,
+    };
+    if let Some((glyph, ink, tip)) = review {
+        signals = signals.child(el().label(tip).help(tip).child(icon(glyph, 14.0).color(ink)));
     }
     line1 = line1.child(signals).child(spacer()).children(super::pr_row::stack(s, t, e, overlays));
     let (add, del) = (e["additions"].as_i64().unwrap_or(0), e["deletions"].as_i64().unwrap_or(0));
@@ -1426,6 +1644,10 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         line1 = line1.child(super::pr_row::breakdown(s, t, e, counts, overlays));
     }
     let login = e["author"]["login"].as_str().unwrap_or("ghost").to_string();
+    let author_tip = match e["author"]["name"].as_str() {
+        Some(name) if !name.is_empty() && name != login => format!("{name} (@{login})"),
+        _ => login.clone(),
+    };
     let meta = theme::TEXT_2XS;
     let matched = matched_elsewhere(e, &parse_query(&s.ui.pages.pull_requests.query.text).0);
     let mut line2 = row()
@@ -1434,12 +1656,14 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         .gap(6.0)
         .center_y()
         .children(matched.then(|| super::pr_row::matched_badge(t)))
+        .children(super::pr_row::provider_mark(s, t, result, e))
         .child(
             row()
                 .gap(4.0)
                 .center_y()
                 .shrink()
                 .max_w(160.0)
+                .help(author_tip)
                 .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t))
                 .child(text(login).font(meta).color(t.c.muted_foreground).truncate().shrink()),
         )
@@ -1493,15 +1717,19 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
 }
 
 /// showPullRequestLinkContextMenu: copy the link, or open it on its host.
-fn context_menu(t: &T, e: &Value, hosts: &[Value], x: f32, y: f32, overlays: &mut Vec<El>) {
-    let url = field(e, "url").to_string();
-    let close = |s: &mut App| ui(s).context = None;
-    let provider = field(e, "provider");
-    let name = match host_label(&[], &json!({"kind": provider, "host": ""})) {
+/// openOnHostLabel for a row's provider.
+pub(super) fn open_label(e: &Value, hosts: &[Value]) -> String {
+    let name = match host_label(&[], &json!({"kind": field(e, "provider"), "host": ""})) {
         n if n.is_empty() => hosts.iter().find(|h| field(h, "host") == field(e, "host")).map(|h| host_label(&[], h)).filter(|n| n != field(e, "host")).unwrap_or_default(),
         n => n,
     };
-    let open_label = if name.is_empty() { "Open on host".to_string() } else { format!("Open on {name}") };
+    if name.is_empty() { "Open on host".to_string() } else { format!("Open on {name}") }
+}
+
+fn context_menu(t: &T, e: &Value, hosts: &[Value], x: f32, y: f32, overlays: &mut Vec<El>) {
+    let url = field(e, "url").to_string();
+    let close = |s: &mut App| ui(s).context = None;
+    let open_label = open_label(e, hosts);
     let open_url = url.clone();
     let copy_url = url.clone();
     Menu::new("pr-context")
@@ -1626,7 +1854,7 @@ fn state_block(t: &T, top: El, title: &str, description: &str, actions: El) -> E
 }
 
 fn unavailable(t: &T, error: &str, retrying: bool) -> El {
-    let retry = kit::Button::new(if retrying { "Retrying..." } else { "Retry" })
+    let retry = kit::Button::new("Retry")
         .variant("outline")
         .size("sm")
         .icon(if retrying { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
@@ -1660,6 +1888,10 @@ fn empty(s: &App, t: &T, result: &Value) -> El {
     // The typed search hasn't reached the hosts yet, or its answer is still on the way.
     if !query.is_empty() && (query != u.sent_query || u.pending.is_some()) {
         return ghost(t, 5, Some(format!("Searching every host for “{shown}”")));
+    }
+    // carriedToNothing: a cleared search waits for the scope's own answer, not an empty state.
+    if query.trim().is_empty() && !u.sent_query.trim().is_empty() {
+        return ghost(t, 7, None);
     }
     let mut actions = row().gap(8.0);
     let (title, description) = if !query.is_empty() {
@@ -1729,7 +1961,7 @@ mod tests {
         assert_eq!((v["limit"].as_u64(), v["involvement"].as_str()), (Some(PAGE), Some("all")));
 
         u.filters.labels = vec!["bug".into(), "ui".into()];
-        assert_eq!(u.filters.count(), 4);
+        assert_eq!(u.filters.count(""), 4);
         let base = baseline_input(&u.filters);
         assert_eq!(base, json!({"state": "open", "involvement": "all", "limit": PAGE, "filters": {"draft": "only", "checks": "passing", "labels": [["bug"], ["ui"]]}}));
         assert_eq!(partition_input(&u.filters, "reviewing"), json!({"state": "open", "involvement": "reviewing", "limit": PAGE, "filters": base["filters"]}));
@@ -1737,6 +1969,79 @@ mod tests {
         assert_eq!(facet_input(&u.filters), json!({"state": "all", "involvement": "all", "limit": PAGE, "projectId": "p1"}));
         u.sent_query.clear();
         assert_eq!(input(&u), baseline_input(&u.filters));
+    }
+
+    #[test]
+    fn picking_draft_in_the_menu_rewrites_a_typed_draft_qualifier() {
+        assert_eq!(draft_change(r#"draft:false fix label:"needs design""#, "all", "only"), (Some(r#"fix label:"needs design""#.to_string()), "only"));
+        assert_eq!(draft_change(r#"draft:true "draft:false" fix"#, "only", "all"), (Some(r#""draft:false" fix"#.to_string()), "all"));
+        assert_eq!(draft_change("draft:false fix", "only", "hide"), (None, "only"));
+        assert_eq!(draft_change("fix", "all", "hide"), (None, "hide"));
+
+        let mut u = Ui::default();
+        u.query.replace_text("draft:true crash");
+        assert_eq!(u.filters.count(&u.query.text), 1);
+        pick_draft(&mut u, "hide");
+        assert_eq!((u.query.text.as_str(), u.filters.draft), ("crash", "hide"));
+        assert_eq!(u.filters.count(&u.query.text), 1);
+        pick_draft(&mut u, "all");
+        assert_eq!((u.query.text.as_str(), u.filters.count(&u.query.text)), ("crash", 0));
+    }
+
+    #[test]
+    fn the_panel_toggle_hides_and_reopens_and_only_an_open_panel_maximizes() {
+        let mut u = Ui::default();
+        toggle_panel(&mut u);
+        toggle_maximized(&mut u);
+        assert!(!panel_available(&u) && u.selected.is_none() && !u.maximized);
+
+        u.selected = Some("https://github.com/acme/app/pull/7".into());
+        toggle_maximized(&mut u);
+        assert!(u.maximized);
+        toggle_panel(&mut u);
+        settle_panel(&mut u);
+        assert_eq!((u.selected.as_deref(), u.hidden.as_deref(), u.maximized), (None, Some("https://github.com/acme/app/pull/7"), false));
+        assert!(panel_available(&u));
+        toggle_maximized(&mut u);
+        assert!(!u.maximized);
+
+        toggle_panel(&mut u);
+        settle_panel(&mut u);
+        assert_eq!((u.selected.as_deref(), u.hidden.as_deref()), (Some("https://github.com/acme/app/pull/7"), None));
+        toggle_panel(&mut u);
+        u.selected = Some("https://github.com/acme/app/pull/8".into());
+        settle_panel(&mut u);
+        assert_eq!(u.hidden, None);
+    }
+
+    #[test]
+    fn a_finished_turn_rereads_the_whole_loaded_list() {
+        let mut seen = None;
+        assert!(!turned(&mut seen, None));
+        assert!(turned(&mut seen, Some(3)));
+        assert!(!turned(&mut seen, Some(3)));
+        assert!(turned(&mut seen, Some(4)));
+
+        let rows = |n: u64, host: &str, provider: &str, repository: &str| (0..n).map(|i| json!({"host": host, "provider": provider, "repository": repository, "number": i})).collect::<Vec<_>>();
+        let mut gitlab = rows(30, "GitLab.com", "gitlab", "acme/a");
+        gitlab.extend(rows(40, "gitlab.com", "gitlab", "acme/b"));
+        gitlab.extend(rows(60, "github.com", "github", "acme/c"));
+        gitlab.extend(rows(5, "github.com", "github", "acme/d"));
+        assert_eq!(largest_read(&gitlab), 65);
+
+        let mut u = Ui::default();
+        u.result = Some(json!({"entries": rows(150, "github.com", "github", "acme/app")}));
+        u.requested = Some(json!({}));
+        u.baseline.asked = Some(json!({}));
+        u.stats_asked.insert("k".into());
+        after_turn(&mut u);
+        assert_eq!(u.limit, Some(2 * PAGE));
+        assert!(u.requested.is_none() && u.baseline.asked.is_none() && u.stats_asked.is_empty());
+
+        u.limit = None;
+        u.result = Some(json!({"entries": rows(1, "github.com", "github", "acme/app")}));
+        after_turn(&mut u);
+        assert_eq!(u.limit, None);
     }
 
     #[test]

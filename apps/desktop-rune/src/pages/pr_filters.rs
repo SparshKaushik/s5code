@@ -220,6 +220,91 @@ fn label_hex(color: Option<&str>) -> Option<String> {
     (hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| format!("#{hex}"))
 }
 
+/// One Project filter choice: the project, the title the menu shows, and why its listing failed.
+#[derive(Clone, Debug, PartialEq)]
+pub struct ProjectChoice {
+    pub id: String,
+    pub title: String,
+    pub unavailable: Option<String>,
+}
+
+/// pullRequestFilterProjects then PullRequestFiltersMenu's order: one project per repository (the
+/// chosen one where two share it), shared titles told apart by server, then folder, then id,
+/// sorted by title, and the projects whose listing failed last.
+pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, errors: &[Value]) -> Vec<ProjectChoice> {
+    let mut kept: Vec<&Value> = Vec::new();
+    let mut at: HashMap<String, usize> = HashMap::new();
+    for p in projects.iter().filter(|p| p["isScratch"] != true) {
+        let id = field(p, "id");
+        let k = match p["repositoryIdentity"]["canonicalKey"].as_str().filter(|r| !r.is_empty()) {
+            Some(repository) => format!("repository\0{}", repository.to_lowercase()),
+            None => format!("project\0{id}"),
+        };
+        match at.get(&k) {
+            Some(&n) if selected == Some(id) => kept[n] = p,
+            Some(_) => {}
+            None => {
+                at.insert(k, kept.len());
+                kept.push(p);
+            }
+        }
+    }
+    let mut titled: Vec<(String, &Value)> = kept.into_iter().map(|p| (field(p, "title").to_string(), p)).collect();
+    for stage in 0..3 {
+        let mut counts: HashMap<String, usize> = HashMap::new();
+        for (title, _) in &titled {
+            *counts.entry(title.clone()).or_default() += 1;
+        }
+        for (title, p) in titled.iter_mut() {
+            if counts.get(title.as_str()).copied().unwrap_or(0) > 1 {
+                let suffix = match stage {
+                    0 => server,
+                    1 => field(p, "workspaceRoot"),
+                    _ => field(p, "id"),
+                };
+                *title = format!("{title} · {suffix}");
+            }
+        }
+    }
+    titled.sort_by(|a, b| by_name(&a.0, &b.0));
+    let mut out: Vec<ProjectChoice> = titled
+        .into_iter()
+        .map(|(title, p)| {
+            let id = field(p, "id").to_string();
+            let unavailable = errors.iter().find(|e| field(e, "projectId") == id).map(|e| field(e, "message").to_string());
+            ProjectChoice { id, title, unavailable }
+        })
+        .collect();
+    out.sort_by_key(|c| c.unavailable.is_some());
+    out
+}
+
+/// The Project submenu: "All projects", then each project under its favicon; one whose listing
+/// failed is greyed out with the reason on hover. Picking keeps the menu open.
+pub fn project_entries(s: &App, t: &T, choices: &[ProjectChoice]) -> Vec<MenuEntry> {
+    let chosen = s.ui.pages.pull_requests.filters.project.as_deref();
+    let mut out = vec![
+        MenuEntry::Label("Project".into()),
+        MenuEntry::item(MenuItem::new("All projects").icon(&i::LAYERS).radio(chosen.is_none()).on_select(|s: &mut App| s.ui.pages.pull_requests.filters.project = None)),
+    ];
+    for c in choices {
+        let checked = chosen == Some(c.id.as_str());
+        let mut line = choice(t, format!("pr-project-{}", c.id), "menuitemradio", c.title.clone(), checked)
+            .fill(if checked { t.c.foreground.alpha_mul(0.08) } else { Color::TRANSPARENT })
+            .child(crate::shell::sidebar::favicon::mark(s, t, &c.id, &c.title, false, 14.0))
+            .child(text(c.title.clone()).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0));
+        line = match &c.unavailable {
+            Some(why) => line.child(text("· Unavailable").font(theme::TEXT_SM).color(t.c.foreground).shrink()).child(tick(t, checked)).disabled(true).focusable(false).opacity(0.64).help(why.clone()),
+            None => {
+                let id = c.id.clone();
+                line.child(tick(t, checked)).on_press(move |s: &mut App| s.ui.pages.pull_requests.filters.project = Some(id.clone()))
+            }
+        };
+        out.push(MenuEntry::Row(line));
+    }
+    out
+}
+
 /// The search sent for `text`: trimmed and capped at the input's 100 characters.
 fn typed(text: &str) -> String {
     text.trim().chars().take(100).collect::<String>().trim_end().to_string()
@@ -496,6 +581,26 @@ mod tests {
         assert_eq!(toggled(&full, "extra", true).len(), 10);
         assert_eq!(label_hex(Some("#0075CA")).as_deref(), Some("#0075CA"));
         assert_eq!(label_hex(Some("blue")), None);
+    }
+
+    #[test]
+    fn project_choices_keep_one_per_repository_tell_titles_apart_and_put_failures_last() {
+        let p = |id: &str, title: &str, key: Option<&str>, root: &str| json!({"id": id, "title": title, "workspaceRoot": root, "repositoryIdentity": key.map(|k| json!({"canonicalKey": k}))});
+        let list = [
+            p("a", "web", Some("github.com/acme/web"), "/w/web"),
+            p("b", "web copy", Some("GitHub.com/acme/web"), "/w/web2"),
+            p("c", "api", None, "/w/api"),
+            p("d", "api", None, "/x/api"),
+            p("e", "Docs", None, "/w/docs"),
+            json!({"id": "s", "title": "Scratch", "isScratch": true}),
+        ];
+        let errors = [json!({"projectId": "c", "projectTitle": "api", "message": "gh is not authenticated."})];
+        let choices = projects(&list, None, "This machine", &errors);
+        let shown: Vec<(&str, &str)> = choices.iter().map(|c| (c.id.as_str(), c.title.as_str())).collect();
+        assert_eq!(shown, [("d", "api · This machine · /x/api"), ("e", "Docs"), ("a", "web"), ("c", "api · This machine · /w/api")]);
+        assert_eq!(choices[3].unavailable.as_deref(), Some("gh is not authenticated."));
+        let chosen: Vec<String> = projects(&list, Some("b"), "This machine", &[]).into_iter().map(|c| c.id).collect();
+        assert_eq!(chosen, ["c", "d", "e", "b"]);
     }
 
     #[test]

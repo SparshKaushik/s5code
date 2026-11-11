@@ -177,7 +177,12 @@
               "{mod} + Enter always"
             ]
           ]
-        },
+        }
+      ]
+    },
+    {
+      "title": "Advanced",
+      "rows": [
         {
           "key": "showSkillsInSlashMenu",
           "title": "Show skills in slash menu",
@@ -193,7 +198,7 @@
         {
           "key": "followUpBehavior",
           "title": "Follow-up behavior",
-          "description": "Queue follow-ups while the agent runs or steer the current run. ",
+          "description": "Queue follow-ups while the agent runs or steer the current run.",
           "kind": "select",
           "options": [
             [

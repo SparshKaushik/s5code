@@ -33,22 +33,25 @@ pub fn view(s: &App, t: &T) -> El {
                 .on_press(move |s: &mut App| s.ui.settings.update_version = Some(target.clone())),
         );
     }
+    let mut app = vec![about_row(
+        t,
+        &format!("S5 Code {}", env!("CARGO_PKG_VERSION")),
+        &match target {
+            Some(v) if v != version => format!("Native client · Server {version} · Latest release: {v}"),
+            _ => format!("Native client · Server {version}"),
+        },
+        controls,
+    )];
+    // Web's `CliCommandSettingsRow`, desktop only.
+    #[cfg(unix)]
+    if let Some(cli) = crate::desktop::cli::row(s) {
+        let button = c::button(cli.action, t).disabled(cli.disabled).on_press(crate::desktop::cli::press);
+        app.push(about_row(t, "t3 command", &cli.description, button));
+    }
     col()
         .w_full()
         .gap(32.0)
-        .child(c::section(
-            "App",
-            vec![about_row(
-                t,
-                &format!("S5 Code {}", env!("CARGO_PKG_VERSION")),
-                &match target {
-                    Some(v) if v != version => format!("Native client · Server {version} · Latest release: {v}"),
-                    _ => format!("Native client · Server {version}"),
-                },
-                controls,
-            )],
-            t,
-        ))
+        .child(c::section("App", app, t))
         .child(c::section(
             "Legal",
             vec![
