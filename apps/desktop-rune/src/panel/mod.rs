@@ -134,6 +134,10 @@ pub(crate) fn workspace_path(app: &App, file_path: &str) -> Option<String> {
     let root = project.map(|p| data::s(&p["repositoryIdentity"], "rootPath")).filter(|r| !in_worktree && !r.is_empty());
     diff::file_menu::resolve_diff_path(file_path, cwd.as_deref(), root)
 }
+/// Diff is offered in Git repositories only; until the status arrives it stays available.
+fn diff_available(app: &App) -> bool {
+    diff_context(app).is_some() && diff::is_repo(app) != Some(false)
+}
 /// The changed-files card's right-click menu: the diff file menu, outside the panel.
 pub fn file_menu(app: &mut App, path: String, at: (f32, f32)) {
     diff::file_menu::open(app, path, at);
@@ -617,7 +621,9 @@ pub fn on_key(app: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
         if let Key::Text(v) = &e.key {
             let key = v.to_uppercase();
             if let Some(&(surface, _)) = LAUNCH.iter().find(|(_, k)| *k == key) {
-                add(app, surface);
+                if surface != Surface::Diff || diff_available(app) {
+                    add(app, surface);
+                }
                 return true;
             }
         }
@@ -646,9 +652,10 @@ fn picker(app: &App, t: &T) -> El {
     for (surface, key) in LAUNCH {
         let available = match surface {
             Surface::Browser(_) => true,
-            Surface::Diff => diff_context(app).is_some(),
+            Surface::Diff => diff_available(app),
             _ => context(app).is_some(),
         };
+        let hint = (surface == Surface::Diff && !available && diff_context(app).is_some()).then_some("Available for Git repositories.");
         list = list.child(
             row()
                 .h(32.)
@@ -673,6 +680,7 @@ fn picker(app: &App, t: &T) -> El {
                         .grow(1.),
                 )
                 .child(text(key).font(theme::MONO_XS).color(t.c.muted_foreground))
+                .help(hint.unwrap_or_default())
                 .on_press(move |s: &mut App| add(s, surface)),
         );
     }
@@ -963,7 +971,7 @@ fn add_menu(app: &App, t: &T, out: &mut Vec<El>) {
     for (surface, key) in LAUNCH {
         let available = match surface {
             Surface::Browser(_) => true,
-            Surface::Diff => diff_context(app).is_some(),
+            Surface::Diff => diff_available(app),
             _ => context(app).is_some(),
         };
         menu = menu.item(
