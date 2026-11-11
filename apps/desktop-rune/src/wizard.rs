@@ -39,6 +39,8 @@ pub struct Ui {
     step: Step,
     pairing_open: bool,
     scan: Option<u64>,
+    /// The environment scanned, so the import lands there whatever is focused by then.
+    scan_env: String,
     candidates: Option<Vec<Value>>,
     truncated: bool,
     scan_error: Option<String>,
@@ -51,6 +53,7 @@ pub struct Ui {
 
 /// One candidate at a time: create its project when it has none, then import its history.
 struct Import {
+    env: String,
     queue: Vec<(Value, Option<String>)>,
     stage: Option<Stage>,
     first_project: Option<String>,
@@ -158,21 +161,25 @@ pub fn poll(s: &mut App) -> bool {
 }
 
 fn poll_import(s: &mut App) -> bool {
-    let Some(net) = s.src.net() else { return false };
-    let Some(import) = s.ui.wizard.import.as_mut() else { return false };
+    let Some(mut import) = s.ui.wizard.import.take() else { return false };
     let mut changed = false;
-    let history = |net: &mut s5_net::Net, project: &str, path: &str| net.request("agentSessions.import", json!({"projectId": project, "expectedWorkspaceRoot": path}));
+    let reply = |s: &mut App, id: u64| s.src.net().and_then(|n| n.take_reply(id));
+    let send = |s: &mut App, env: &str, method: &str, params: Value| crate::env::net_of(s, env).map(|n| n.request(method, params));
+    let history = |s: &mut App, env: &str, project: &str, path: &str| send(s, env, "agentSessions.import", json!({"projectId": project, "expectedWorkspaceRoot": path}));
     loop {
         match import.stage.take() {
-            Some(Stage::Create(id, project, path)) => match net.take_reply(id) {
+            Some(Stage::Create(id, project, path)) => match reply(s, id) {
                 None => {
                     import.stage = Some(Stage::Create(id, project, path));
                     break;
                 }
-                Some(Ok(_)) => import.stage = Some(Stage::History(history(net, &project, &path), project)),
+                Some(Ok(_)) => match history(s, &import.env, &project, &path) {
+                    Some(id) => import.stage = Some(Stage::History(id, project)),
+                    None => import.failed += 1,
+                },
                 Some(Err(_)) => import.failed += 1,
             },
-            Some(Stage::History(id, project)) => match net.take_reply(id) {
+            Some(Stage::History(id, project)) => match reply(s, id) {
                 None => {
                     import.stage = Some(Stage::History(id, project));
                     break;
@@ -192,8 +199,8 @@ fn poll_import(s: &mut App) -> bool {
             None => {
                 let Some((candidate, project)) = import.queue.pop() else { break };
                 let path = data::s(&candidate, "path").to_owned();
-                import.stage = Some(match project {
-                    Some(project) => Stage::History(history(net, &project, &path), project),
+                let stage = match project {
+                    Some(project) => history(s, &import.env, &project, &path).map(|id| Stage::History(id, project)),
                     None => {
                         let project = s5_net::uuid();
                         let command = json!({
@@ -205,14 +212,22 @@ fn poll_import(s: &mut App) -> bool {
                             "createWorkspaceRootIfMissing": false,
                             "defaultModelSelection": null,
                         });
-                        Stage::Create(net.request("projects.mutate", command), project, path)
+                        crate::env::adopt(s, &project, &import.env);
+                        send(s, &import.env, "projects.mutate", command).map(|id| Stage::Create(id, project, path))
                     }
-                });
+                };
+                match stage {
+                    Some(stage) => import.stage = Some(stage),
+                    None => import.failed += 1,
+                }
             }
         }
     }
     if import.stage.is_none() && import.queue.is_empty() {
-        let Import { first_project, imported, skipped, failed, .. } = s.ui.wizard.import.take().expect("checked above");
+        let Import { env, first_project, imported, skipped, failed, .. } = import;
+        if let Some(project) = &first_project {
+            crate::env::adopt(s, project, &env);
+        }
         let plural = |n: u64| if n == 1 { "thread" } else { "threads" };
         let warning = if skipped > 0 || failed > 0 {
             Some(if imported > 0 && skipped > 0 {
@@ -233,6 +248,7 @@ fn poll_import(s: &mut App) -> bool {
         }
         return true;
     }
+    s.ui.wizard.import = Some(import);
     changed
 }
 
@@ -261,6 +277,7 @@ fn go(s: &mut App, step: Step) {
 fn scan(s: &mut App) {
     s.ui.wizard.scan_error = None;
     s.ui.wizard.scan = s.src.net().map(|n| n.request("agentSessions.scan", json!({})));
+    s.ui.wizard.scan_env = s.ui.env.active.clone();
 }
 
 /// `partitionOnboardingProjects`' `recent`, which starts selected: a git repository with a few
@@ -483,12 +500,16 @@ fn start_import(s: &mut App) {
         .rev()
         .map(|c| {
             let existing = c["projectId"].as_str().map(str::to_owned).or_else(|| {
-                s.state().projects.iter().find(|p| data::s(p, "workspaceRoot") == data::s(&c, "path") && p["archivedAt"].is_null()).map(|p| data::s(p, "id").to_owned())
+                s.state()
+                    .projects
+                    .iter()
+                    .find(|p| data::s(p, "workspaceRoot") == data::s(&c, "path") && p["archivedAt"].is_null() && crate::env::owner(s, data::s(p, "id")) == ui.scan_env)
+                    .map(|p| data::s(p, "id").to_owned())
             });
             (c, existing)
         })
         .collect();
-    s.ui.wizard.import = Some(Import { queue, stage: None, first_project: None, imported: 0, skipped: 0, failed: 0 });
+    s.ui.wizard.import = Some(Import { env: s.ui.wizard.scan_env.clone(), queue, stage: None, first_project: None, imported: 0, skipped: 0, failed: 0 });
 }
 
 fn heading(title: &str, description: Option<&str>, t: &T) -> El {
