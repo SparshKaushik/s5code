@@ -12,6 +12,7 @@ pub struct Dialog {
     open: bool,
     width: f32,
     outside: bool,
+    scroll_all: bool,
     close: Option<Box<dyn FnOnce(El) -> El>>,
     button: Option<Box<dyn FnOnce(El) -> El>>,
 }
@@ -25,6 +26,7 @@ impl Dialog {
             open: false,
             width: 512.,
             outside: true,
+            scroll_all: false,
             close: None,
             button: None,
         }
@@ -43,6 +45,11 @@ impl Dialog {
     }
     pub fn width(mut self, width: f32) -> Self {
         self.width = width;
+        self
+    }
+    /// Web's `WizardPopup`: header, body and footer scroll together once the window cuts the panel.
+    pub fn scroll_all(mut self) -> Self {
+        self.scroll_all = true;
         self
     }
     /// Alert dialogs require an explicit choice; Escape still dismisses through Rune.
@@ -88,6 +95,7 @@ impl Dialog {
                     .wrap(),
             );
         }
+        let content = row().w_full().items_start().child(heading);
         let panel = col()
             .key(format!("{}-dialog", self.key))
             .role(if self.outside {
@@ -102,14 +110,25 @@ impl Dialog {
             .shrink()
             .min_h(0.)
             .radius(16.)
-            .padding(24.)
-            .gap(24.)
             // Web's dialog-glass without backdrop blur falls back to an opaque popover; Rune has no blur.
             .fill(t.c.popover)
-            .border(1., t.c.contrast_foreground.alpha_mul(0.1))
-            .child(row().w_full().items_start().child(heading))
-            .children(self.body)
-            .children(dismiss);
+            .border(1., t.c.contrast_foreground.alpha_mul(0.1));
+        let panel = if self.scroll_all {
+            let scroll = col()
+                .key(format!("{}-scroll", self.key))
+                .w_full()
+                .shrink()
+                .min_h(0.)
+                .scroll(rune::ScrollSpec { stick_bottom: false })
+                .padding(24.)
+                .gap(24.)
+                .child(content)
+                .children(self.body);
+            panel.child(scroll)
+        } else {
+            panel.padding(24.).gap(24.).child(content).children(self.body)
+        }
+        .children(dismiss);
         layer.push(super::motion::scrim(t).key(format!("{}-backdrop", self.key)));
         layer.push(
             super::motion::layer()

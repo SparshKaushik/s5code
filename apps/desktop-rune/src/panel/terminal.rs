@@ -721,7 +721,8 @@ struct Metrics {
 fn metrics(app: &App) -> Metrics {
     let size = font_size(&app.client_settings.values);
     let cell_h = (size * 1.35).round().max(1.);
-    let font = theme::mono(rune::TextStyle::new(size, 400.)).lh(cell_h);
+    let family = crate::settings::fonts::terminal_family(&app.client_settings.values);
+    let font = rune::TextStyle { family, ..rune::TextStyle::new(size, 400.) }.lh(cell_h);
     let cell_w = rune::text::advance("MMMMMMMMMM", font) / 10.;
     Metrics {
         font,

@@ -104,11 +104,12 @@ impl Look {
         let modified = c.diff_modified_icon.alpha(1.0);
         let mut look = Look {
             t: *t,
-            code: theme::mono(TextStyle::new(13.0, 400.0).lh(LINE_H)),
+            // Web's `--diffs-font-size` follows the code size; Pierre's line height stays.
+            code: theme::mono(TextStyle::new(t.code, 400.0).lh(LINE_H)),
             title: theme::TEXT_XS,
             small: theme::TEXT_2XS,
             count: theme::mono(theme::TEXT_2XS),
-            adv: 0.6 * 13.0,
+            adv: 0.6 * t.code,
             bg,
             fg,
             muted: c.muted_foreground,
@@ -137,6 +138,7 @@ impl Look {
             [c.r, c.g, c.b, c.a].map(f32::to_bits).hash(&mut h);
         }
         t.dark.hash(&mut h);
+        t.code.to_bits().hash(&mut h);
         look.version = h.finish();
         look
     }

@@ -105,8 +105,23 @@ pub fn select(
     let owned = key.to_owned();
     let choices = options.to_vec();
     // The kit wraps its trigger in a `self_start` row; this row lets the setting row centre it.
-    row().child(crate::kit::Select::new(format!("setting-{key}"), &labels(options))
-        .current(Some(&current_label(s, key, options)))
+    let mut select = crate::kit::Select::new(format!("setting-{key}"), &labels(options)).current(Some(&current_label(s, key, options)));
+    match (key, value(s, key).as_str()) {
+        // `DiffColorSchemeRow`: the scheme's two dots, and the name without "(default)".
+        ("diffColorScheme", scheme) => {
+            let blue = scheme == Some("blue-orange");
+            let dot = |c: rune::Color| el().size(8.0, 8.0).radius(4.0).fill(c);
+            let dots = row().gap(4.0).child(dot(if blue { t.c.diff_addition } else { t.c.diff_deletion })).child(dot(if blue { t.c.diff_deletion } else { t.c.diff_addition }));
+            select = select.leading(dots, 20.0).display(if blue { "Blue & orange" } else { "Red & green" });
+        }
+        ("defaultRuntimeMode", Some(mode)) => {
+            if let Some((.., glyph)) = crate::chat::composer::RUNTIME_MODES.iter().find(|m| m.0 == mode) {
+                select = select.leading(rune::icon(*glyph, 14.0).color(t.c.muted_foreground), 14.0);
+            }
+        }
+        _ => {}
+    }
+    row().child(select
         .label(title)
         .width(width)
         .size("sm")
