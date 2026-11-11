@@ -196,7 +196,7 @@ pub fn can_organize_projects(s: &App) -> bool {
 }
 /// `toggleProjectGroupPin`: `project.update` with the new pin state.
 pub fn pin_project(s: &mut App, project: &str, pinned: bool) {
-    if let Some(net) = s.src.net() {
+    if let Some(net) = crate::env::net_for(s, project) {
         net.request("projects.mutate", json!({"type": "project.update", "commandId": s5_net::uuid(), "projectId": project, "pinned": pinned}));
     }
 }

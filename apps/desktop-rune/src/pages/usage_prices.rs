@@ -1014,7 +1014,7 @@ mod tests {
 
         let mut u = Ui::default();
         let mut output = TextEdit::default();
-        output.replace_text("2".into());
+        output.replace_text("2");
         u.cells.insert(("model:m".into(), PRICE + 1), Cell { edit: output, ..Cell::default() });
         assert!(drafts(&u, &both).is_empty());
         u.cells.insert(("model:m".into(), PRICE), Cell { touched: true, ..Cell::default() });

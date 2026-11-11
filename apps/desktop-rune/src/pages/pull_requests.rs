@@ -1703,7 +1703,7 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     let projects = super::pr_filters::projects(&s.state().projects, f.project.as_deref(), &server, &environment, errors);
     // PullRequestFilterOptionIcon: the chosen project's favicon, else "All projects" and its glyph.
     let (project, value) = match projects.iter().find(|p| Some(p.id.as_str()) == f.project.as_deref()) {
-        Some(p) => (MenuItem::new("Project").lead(super::pr_filters::menu_favicon(s, t, &p.id, &p.title)), p.title.clone()),
+        Some(p) => (MenuItem::new("Project").leading(super::pr_filters::menu_favicon(s, t, &p.id, &p.title)), p.title.clone()),
         None => (MenuItem::new("Project").icon(&i::LAYERS), "All projects".to_string()),
     };
     let entries = super::pr_filters::project_entries(s, t, &projects);

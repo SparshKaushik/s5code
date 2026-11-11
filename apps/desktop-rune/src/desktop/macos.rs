@@ -143,7 +143,7 @@ unsafe fn set_key(item: Id, key: &str, mask: usize) {
 /// Reshapes the menu bar Rune and winit built into Electron's: the app menu (About, Settings,
 /// Services, Hide, Quit), Edit › Paste as Text, View › Toggle Full Screen, Window › Minimize,
 /// Zoom, Bring All to Front with no Close, and File, Edit, View, Window in that order.
-pub fn fix_menus(settings_title: &str, quit_title: &str) {
+pub fn fix_menus(settings_title: &str, updates_title: &str, quit_title: &str) {
     unsafe {
         let app = msg!(class(c"NSApplication"), c"sharedApplication"; Id);
         if app.is_null() {
@@ -154,7 +154,7 @@ pub fn fix_menus(settings_title: &str, quit_title: &str) {
             return;
         }
         if let Some(app_menu) = items(root).first().map(|&i| submenu(i)).filter(|m| !m.is_null()) {
-            fix_app_menu(app_menu, settings_title, quit_title);
+            fix_app_menu(app_menu, settings_title, updates_title, quit_title);
         }
         if let Some(edit) = top_menu(root, "Edit")
             && let Some(paste) = find_action(edit, c"paste:")
@@ -188,7 +188,7 @@ pub fn fix_menus(settings_title: &str, quit_title: &str) {
     }
 }
 
-unsafe fn fix_app_menu(menu: Id, settings_title: &str, quit_title: &str) {
+unsafe fn fix_app_menu(menu: Id, settings_title: &str, updates_title: &str, quit_title: &str) {
     unsafe {
         // winit's Quit terminates at once; the app's own Quit lets Cmd+Q reach the quit hold.
         if let Some(terminate) = find_action(menu, c"terminate:") {
@@ -207,6 +207,12 @@ unsafe fn fix_app_menu(menu: Id, settings_title: &str, quit_title: &str) {
             insert(menu, separator(), at + 1);
             msg!(settings, c"release"; ());
             set_key(settings, ",", COMMAND);
+        }
+        if let (Some(updates), Some(about)) = (find(menu, |i| title(i) == updates_title), find_action(menu, c"orderFrontStandardAboutPanel:")) {
+            msg!(updates, c"retain"; Id);
+            remove(menu, updates);
+            insert(menu, updates, index(menu, about) + 1);
+            msg!(updates, c"release"; ());
         }
         // winit titles About, Hide and Quit with the executable's name.
         let info = msg!(class(c"NSProcessInfo"), c"processInfo"; Id);
@@ -237,4 +243,21 @@ pub fn autosave_frame(window: &rune::WindowHandle) {
             msg!(ns_window, c"setFrameAutosaveName:", name => Id; i8);
         }
     });
+}
+
+/// Electron's `showMessageBox` info box. Runs on the next run loop pass, outside the event
+/// handler that asked for it, so its modal loop never re-enters one.
+pub fn alert(message: &str, detail: &str) {
+    unsafe {
+        let alloc = msg!(class(c"NSAlert"), c"alloc"; Id);
+        let alert = msg!(alloc, c"init"; Id);
+        if alert.is_null() {
+            return;
+        }
+        msg!(alert, c"setMessageText:", ns_string(message) => Id; ());
+        msg!(alert, c"setInformativeText:", ns_string(detail) => Id; ());
+        // The pending perform retains the alert until it has run.
+        msg!(alert, c"performSelectorOnMainThread:withObject:waitUntilDone:", sel(c"runModal") => Id, std::ptr::null_mut::<c_void>() => Id, 0i8 => i8; ());
+        msg!(alert, c"release"; ());
+    }
 }

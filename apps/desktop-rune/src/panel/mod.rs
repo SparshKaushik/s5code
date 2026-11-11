@@ -7,8 +7,8 @@ mod files;
 pub mod popout;
 pub(crate) mod preview;
 pub mod browser_import;
-mod terminal;
-mod vt;
+pub(crate) mod terminal;
+pub(crate) mod vt;
 
 use crate::{
     App, Route, data, icons, kit,
@@ -161,6 +161,56 @@ pub fn open_preview(app: &mut App, url: &str) {
     let tab = preview::open(app);
     activate(app, Surface::Browser(tab));
     preview::navigate(app, tab, url);
+}
+/// `workspace.focusNext`'s panel (order 4) and terminal (order 5) areas.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Region {
+    Panel,
+    Terminal,
+}
+enum Field {
+    Bar(browser::TabId),
+    Files,
+    Terminal(String, String),
+}
+/// The text field a region focuses, as the web's area picks a preferred control. The diff has
+/// none Rune can focus, so a panel showing it is passed over.
+fn field(app: &App, region: Region) -> Option<Field> {
+    let terminal = |owner| {
+        let (thread, id) = drawer::active_terminal(app, owner)?;
+        app.ui.panel.terminal.get(&thread, &id).map(|_| Field::Terminal(thread, id))
+    };
+    match region {
+        Region::Terminal => terminal(drawer::Owner::Drawer),
+        Region::Panel if !app.ui.shell.panel_open => None,
+        Region::Panel => match app.ui.panel.active? {
+            Surface::Browser(tab) => Some(Field::Bar(tab)),
+            Surface::Files => files::field_focused(app).map(|_| Field::Files),
+            Surface::Terminal => terminal(drawer::Owner::Panel),
+            Surface::Diff => None,
+        },
+    }
+}
+pub fn region_available(app: &App, region: Region) -> bool {
+    field(app, region).is_some()
+}
+pub fn region_focused(app: &App, region: Region) -> bool {
+    match field(app, region) {
+        Some(Field::Bar(tab)) => preview::bar_focused(app, tab),
+        Some(Field::Files) => files::field_focused(app) == Some(true),
+        Some(Field::Terminal(thread, id)) => app.ui.panel.terminal.get(&thread, &id).is_some_and(|s| s.input.focused),
+        None => false,
+    }
+}
+/// Focuses `region`'s field and lets go of the others; `None` lets go of them all.
+pub fn focus_region(app: &mut App, region: Option<Region>) {
+    let target = region.and_then(|r| field(app, r));
+    preview::focus_bar(app, if let Some(Field::Bar(tab)) = target { Some(tab) } else { None });
+    files::focus_field(app, matches!(target, Some(Field::Files)));
+    match target {
+        Some(Field::Terminal(thread, id)) => terminal::focus(app, &thread, &id),
+        _ => terminal::focus(app, "", ""),
+    }
 }
 /// The terminal holds the keyboard, so `!terminalFocus` shortcuts stand down.
 pub fn terminal_active(app: &App) -> bool {

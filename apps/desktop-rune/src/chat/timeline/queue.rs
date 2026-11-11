@@ -175,7 +175,7 @@ pub fn view(app: &App, thread_id: &str, t: &T, max_w: f32) -> Option<El> {
             .border(1.0, border)
             .border_dash(4.0, 3.0)
             .child(
-                text(q.text)
+                text(crate::chat::composer::chips::display(q.text).0)
                     .font(theme::TEXT_SM.lh(22.75))
                     .color(if is_editing { t.c.foreground } else { t.c.muted_foreground })
                     .selectable(true),

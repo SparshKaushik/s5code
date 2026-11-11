@@ -128,9 +128,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     let project = if scratch { "No project".to_string() } else { project.map(|p| data::s(p, "title").to_string()).unwrap_or_default() };
     let mut crumbs = row().gap(12.0).center_y().shrink().min_w(0.0);
     if !project.is_empty() {
-        let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { monogram(t, &project, 14.0) };
+        let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { composer::ctx(s).project.map_or_else(|| monogram(t, &project, 14.0), |p| crate::shell::sidebar::favicon::view(s, t, p, 14.0)) };
         crumbs = crumbs
-            .child(row().gap(6.0).center_y().child(mark).child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate()))
+            .child(
+                row()
+                    .key("topbar-project")
+                    .gap(6.0)
+                    .center_y()
+                    .shrink()
+                    .min_w(0.0)
+                    .max_w(160.0)
+                    .cursor(rune::Cursor::Pointer)
+                    .focusable(true)
+                    .role("button")
+                    .label(format!("New thread in {project}"))
+                    .help(format!("New thread in {project}"))
+                    .on_press(crate::shell::sidebar::new_local)
+                    .child(mark)
+                    .child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate().shrink()),
+            )
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
     let title_el = match &s.ui.chat.topbar.rename {

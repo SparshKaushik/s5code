@@ -25,6 +25,29 @@ pub struct State {
     dismissed: std::collections::HashSet<String>,
     /// The banner whose full error is showing.
     expanded: Option<String>,
+    /// Errors from this client's own commands, by draft key (ChatView's local thread errors);
+    /// they win over the runtime's.
+    local: std::collections::HashMap<String, String>,
+}
+
+/// Transport drops are the connection banner's (isTransportConnectionErrorMessage).
+const TRANSPORT_ERRORS: [&str; 9] = [
+    "socketcloseerror", "socketopenerror", "socket is not connected", "unable to connect to the t3 server websocket",
+    "is not connected.", "could not establish a websocket connection", "clientprotocolerror", "rpcclienterror", "ping timeout",
+];
+
+/// `setThreadError`: shows (or clears) a local error on a thread or new-thread draft.
+pub fn set_local(app: &mut App, key: &str, error: Option<&str>) {
+    let local = &mut app.ui.chat.timeline.errors.local;
+    match error.filter(|e| !is_transport_error(e)) {
+        Some(e) => local.insert(key.to_owned(), e.to_owned()),
+        None => local.remove(key),
+    };
+}
+
+fn is_transport_error(message: &str) -> bool {
+    let m = message.trim().to_lowercase();
+    TRANSPORT_ERRORS.iter().any(|p| m.contains(p)) || m.ends_with(" disconnected.") || m.contains("stopped responding")
 }
 
 /// The runtime error fields `deriveThreadStructureRuntime` reports, and whether its status is failed.
@@ -43,7 +66,7 @@ pub fn runtime_error(p: &Value) -> Option<RuntimeError> {
     let session_error = session.and_then(|v| v["lastError"].as_str());
     let limited = usage_limit_presented(runs, items, session_error);
     let presented = limited.or_else(|| latest_unheld(runs));
-    if presented.is_none() && p["thread"]["activeProviderThreadId"].is_null() {
+    if presented.is_none() && p["thread"]["activeProviderThreadId"].is_null() && !watching_pull_request(p) {
         return None;
     }
     let (message, class, code) = summary(presented.and_then(|r| root_failure(r, items)), session_error);
@@ -54,6 +77,13 @@ pub fn runtime_error(p: &Value) -> Option<RuntimeError> {
         code,
         failed: limited.is_some() || activity.is_some_and(|r| s(r, "status") == "failed"),
     })
+}
+
+/// `pullRequestWatchTasks`: a watched, open pull request holds a thread that never ran.
+fn watching_pull_request(p: &Value) -> bool {
+    array(&p["thread"], "pullRequests")
+        .iter()
+        .any(|link| !link["watch"].is_null() && s(link, "source") != "stack-dismissed" && s(&link["snapshot"], "state") != "merged")
 }
 
 fn ordinal(run: &Value) -> i64 {
@@ -108,9 +138,18 @@ pub fn message(error: &str) -> String {
 /// The banner's error and its key, or `None` when it is dismissed or the timeline's usage-limit
 /// notice already shows it (ChatView's `timelineThreadError`).
 pub fn shown(app: &App) -> Option<(String, RuntimeError)> {
-    let Route::Thread(thread) = app.frame_route() else { return None };
-    let error = runtime_error(&app.state().thread_views.get(thread)?.projection)?;
-    let key = format!("{thread}\0{}", error.message);
+    let route = app.frame_route();
+    if !matches!(route, Route::Thread(_) | Route::Home { .. }) {
+        return None;
+    }
+    let draft = crate::chat::composer::draft_key(app, route);
+    let local = app.ui.chat.timeline.errors.local.get(&draft);
+    let error = match (local, route) {
+        (Some(message), _) => RuntimeError { message: message.clone(), class: None, code: None, failed: false },
+        (None, Route::Thread(thread)) => runtime_error(&app.state().thread_views.get(thread)?.projection)?,
+        _ => return None,
+    };
+    let key = format!("{draft}\0{}", error.message);
     if app.ui.chat.timeline.errors.dismissed.contains(&key) || (error.failed && error.class.as_deref() == Some("usage_limit")) {
         return None;
     }
@@ -215,4 +254,65 @@ fn glass(t: &T, tint: Color) -> Color {
     let a = 0.04 + base;
     let mix = |tc: f32, bc: f32| dec((enc(tc) * 0.04 + enc(bc) * base) / a);
     Color { r: mix(tint.r, bg.r), g: mix(tint.g, bg.g), b: mix(tint.b, bg.b), a }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn projection(runs: Value, session_error: Value) -> Value {
+        let error = |id: &str, node: &str, at: &str, failure: Value| {
+            json!({"id": id, "type": "error", "status": "failed", "runId": "r1", "nodeId": node, "updatedAt": at, "ordinal": 1, "failure": failure})
+        };
+        json!({
+            "thread": {"providerInstanceId": "codex", "activeProviderThreadId": null},
+            "runs": runs,
+            "turnItems": [
+                error("e1", "root", "2026-11-09T10:00:00.000Z", json!({"message": "older", "class": "provider_error"})),
+                error("e2", "root", "2026-11-09T10:01:00.000Z", json!({"message": "Limit hit", "class": "usage_limit", "code": "subscription_sharing_usage_limit_exceeded"})),
+                error("e3", "child", "2026-11-09T10:02:00.000Z", json!({"message": "subagent failed", "class": "provider_error"})),
+            ],
+            "providerSessions": [{"providerInstanceId": "claude", "lastError": "other provider"}, {"providerInstanceId": "codex", "lastError": session_error}],
+        })
+    }
+
+    fn run(id: &str, ordinal: i64, status: &str) -> Value {
+        json!({"id": id, "ordinal": ordinal, "status": status, "rootNodeId": "root", "startedAt": "2026-11-09T09:59:00.000Z", "completedAt": if status == "queued" { Value::Null } else { json!("2026-11-09T10:01:00.000Z") }})
+    }
+
+    #[test]
+    fn the_runtime_error_is_the_latest_root_failure_unless_the_session_reports_another() {
+        let limited = projection(json!([run("r1", 1, "failed"), run("r2", 2, "queued")]), Value::Null);
+        assert_eq!(
+            runtime_error(&limited),
+            Some(RuntimeError { message: "Limit hit".into(), class: Some("usage_limit".into()), code: Some(CHATGPT_USAGE_LIMIT_CODE.into()), failed: true })
+        );
+        let superseded = projection(json!([run("r1", 1, "failed")]), json!("Session died"));
+        assert_eq!(runtime_error(&superseded), Some(RuntimeError { message: "Session died".into(), class: None, code: None, failed: true }));
+        let running = projection(json!([run("r1", 1, "failed"), run("r2", 2, "running")]), Value::Null);
+        assert_eq!(runtime_error(&running), None);
+        let mut idle = projection(json!([]), json!("idle error"));
+        assert_eq!(runtime_error(&idle), None);
+        idle["thread"]["pullRequests"] = json!([{"watch": {"since": "2026-11-09T10:00:00.000Z"}, "source": "manual", "snapshot": {"state": "open"}}]);
+        assert_eq!(runtime_error(&idle), Some(RuntimeError { message: "idle error".into(), class: None, code: None, failed: false }));
+        idle["thread"]["pullRequests"][0]["snapshot"]["state"] = json!("merged");
+        assert_eq!(runtime_error(&idle), None);
+    }
+
+    #[test]
+    fn transport_drops_are_not_thread_errors() {
+        assert!(is_transport_error("SocketCloseError: closed"));
+        assert!(is_transport_error("The T3 server stopped responding for 12s. Check the host."));
+        assert!(is_transport_error("Remote environment is not connected."));
+        assert!(!is_transport_error("Select a base branch before sending in New worktree mode."));
+        assert!(!is_transport_error("Thread not found"));
+    }
+
+    #[test]
+    fn a_json_error_shows_its_nested_message() {
+        assert_eq!(message(r#"{"error":{"message":"Rate limited","type":"x"}}"#), "Rate limited");
+        assert_eq!(message(r#"{"error":{"message":"  "}}"#), r#"{"error":{"message":"  "}}"#);
+        assert_eq!(message("plain"), "plain");
+    }
 }

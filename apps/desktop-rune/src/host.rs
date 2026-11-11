@@ -32,6 +32,8 @@ const EXIT_MANAGED_POLICY: i32 = 77;
 struct Supervisor {
     child: Mutex<Option<Child>>,
     stopping: AtomicBool,
+    /// The next exit is `restart`'s: start again at once.
+    restarting: AtomicBool,
 }
 
 static SUPERVISOR: Mutex<Option<Arc<Supervisor>>> = Mutex::new(None);
@@ -46,7 +48,7 @@ fn remote() -> Option<(String, String)> {
 }
 
 /// `s5code-server` beside the executable (`Contents/MacOS` in the macOS bundle).
-fn bundled_binary() -> Option<PathBuf> {
+pub(crate) fn bundled_binary() -> Option<PathBuf> {
     if let Ok(path) = std::env::var("S5_SERVER_BIN") {
         return Some(PathBuf::from(path));
     }
@@ -82,7 +84,7 @@ fn launch(wake: impl Fn() + Send + Sync + 'static) -> Option<Receiver<Event>> {
         return Some(rx);
     }
     let binary = bundled_binary()?;
-    let sup = Arc::new(Supervisor { child: Mutex::new(None), stopping: AtomicBool::new(false) });
+    let sup = Arc::new(Supervisor { child: Mutex::new(None), stopping: AtomicBool::new(false), restarting: AtomicBool::new(false) });
     *SUPERVISOR.lock().unwrap() = Some(sup.clone());
     std::thread::spawn(move || supervise(binary, sup, tx, wake));
     Some(rx)
@@ -126,7 +128,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "noBrowser": true,
             "port": p,
             "t3Home": home.to_string_lossy(),
-            "host": "127.0.0.1",
+            "host": crate::desktop::exposure::bind_host(),
             "desktopBootstrapToken": credential,
             "tailscaleServeEnabled": false,
             "tailscaleServePort": 443,
@@ -140,8 +142,8 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         let started = Instant::now();
         let mut ready = false;
         let exit = loop {
-            if let Some(status) = sup.child.lock().unwrap().as_mut().and_then(|c| c.try_wait().ok().flatten()) {
-                break Some(status);
+            if let Some(status) = exited(&mut sup.child.lock().unwrap()) {
+                break status;
             }
             if sup.stopping.load(Ordering::SeqCst) {
                 return;
@@ -174,6 +176,11 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         if sup.stopping.load(Ordering::SeqCst) {
             return;
         }
+        if sup.restarting.swap(false, Ordering::SeqCst) {
+            log(&log_path, "restarting for a settings change");
+            attempt = 0;
+            continue;
+        }
         let code = exit.and_then(|s| s.code());
         if code == Some(EXIT_STATE_DIR_OWNED) {
             return send(Event::Failed(format!(
@@ -187,6 +194,15 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         log(&log_path, &format!("server exited ({code:?}); restarting"));
         std::thread::sleep(Duration::from_millis(500).saturating_mul(1 << attempt.min(5)).min(Duration::from_secs(10)));
         attempt += 1;
+    }
+}
+
+/// Whether the server is gone, with its status when known. `terminate` (a restart) takes the
+/// child it waited for, so an empty slot is an exit too.
+fn exited(child: &mut Option<Child>) -> Option<Option<std::process::ExitStatus>> {
+    match child {
+        None => Some(None),
+        Some(c) => c.try_wait().ok().flatten().map(Some),
     }
 }
 
@@ -243,6 +259,19 @@ fn terminate(sup: &Supervisor) {
     guard.take();
 }
 
+/// Whether this window runs the bundled server, so its settings apply.
+pub fn managed() -> bool {
+    SUPERVISOR.lock().unwrap().is_some()
+}
+
+/// Restart the bundled server on its port, as Electron's relaunch after an exposure change.
+/// Clients resume their sessions once it answers again.
+pub fn restart() {
+    let Some(sup) = SUPERVISOR.lock().unwrap().clone() else { return };
+    sup.restarting.store(true, Ordering::SeqCst);
+    std::thread::spawn(move || terminate(&sup));
+}
+
 pub fn shutdown() {
     if let Some(sup) = SUPERVISOR.lock().unwrap().take() {
         sup.stopping.store(true, Ordering::SeqCst);
@@ -283,4 +312,21 @@ pub fn check() -> i32 {
     };
     shutdown();
     code
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_server_restart_took_counts_as_exited() {
+        assert_eq!(exited(&mut None), Some(None));
+        let mut running = Some(Command::new("sleep").arg("5").spawn().unwrap());
+        assert_eq!(exited(&mut running), None);
+        let mut child = running.take().unwrap();
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let mut done = Some(child);
+        assert!(matches!(exited(&mut done), Some(Some(_))));
+    }
 }
