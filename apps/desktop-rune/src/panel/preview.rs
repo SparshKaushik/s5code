@@ -467,10 +467,15 @@ fn panel_tab(app: &App) -> Option<TabId> {
     }
 }
 
+/// The floating tab floats over the chat, so a thread's or the new-thread draft's.
+fn floats_here(app: &App) -> bool {
+    matches!(app.frame_route(), Route::Thread(_) | Route::Home { .. })
+}
+
 /// The floating tab, unless the panel shows that same tab.
 fn pip_tab(app: &App) -> Option<TabId> {
     let tab = app.ui.panel.browser.pip?;
-    (matches!(app.frame_route(), Route::Thread(_)) && panel_tab(app) != Some(tab) && app.ui.panel.browser.tabs.contains_key(&tab)).then_some(tab)
+    (floats_here(app) && panel_tab(app) != Some(tab) && app.ui.panel.browser.tabs.contains_key(&tab)).then_some(tab)
 }
 
 /// The one tab Chrome screencasts: the panel's, else the floating one, else the separate
@@ -1074,7 +1079,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
             if pip { "Close floating preview" } else { "Float preview over chat" },
             &icons::PICTURE_IN_PICTURE_2,
             pip,
-            idle(&status),
+            idle(&status) || !(pip || floats_here(app)),
             move |s: &mut App| float(s, tab),
         ))
         .child(
@@ -2051,6 +2056,19 @@ fn context_menu(t: &T, c: &Context, out: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_floating_tab_shows_over_a_thread_or_the_new_thread_draft() {
+        let mut app = App::new();
+        app.ui.panel.browser.tabs.insert(1, Tab::new(Pixels::new()));
+        app.ui.panel.browser.pip = Some(1);
+        app.navigate(Route::Home { project_id: None });
+        assert_eq!(pip_tab(&app), Some(1));
+        app.navigate(Route::Thread("t".into()));
+        assert_eq!(pip_tab(&app), Some(1));
+        app.navigate(Route::PullRequests);
+        assert_eq!(pip_tab(&app), None);
+    }
 
     #[test]
     fn reveal_escapes_paths_for_dbus() {
