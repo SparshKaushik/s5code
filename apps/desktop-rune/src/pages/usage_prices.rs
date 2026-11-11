@@ -1,6 +1,5 @@
-//! Custom model prices (UsagePriceOverrides): this environment's per-model rates and "Map to"
-//! aliases, edited as one table and saved as a single `server.updateSettings` patch. Rune talks to
-//! one environment, so "Apply to" picks between it and nothing.
+//! Custom model prices (UsagePriceOverrides): the selected environments' per-model rates and
+//! "Map to" aliases, edited as one table and saved as one `server.updateSettings` patch on each.
 
 use std::collections::{HashMap, HashSet};
 
@@ -20,8 +19,10 @@ pub const FIELDS: [(&str, &str, bool); 4] = [
     ("cacheWriteCostPerMillionTokens", "Cache write", true),
 ];
 
-/// The environment the table edits (UsagePriceTarget). `None` maps are unreadable here.
+/// An environment the table edits (UsagePriceTarget). `None` maps are unreadable there.
+#[derive(Clone)]
 pub struct Target {
+    pub key: String,
     pub label: String,
     pub prices: Option<Map<String, Value>>,
     pub aliases: Option<Map<String, Value>>,
@@ -164,22 +165,28 @@ pub fn is_empty(d: &Draft) -> bool {
     d.new && d.model.trim().is_empty() && d.alias.as_deref().unwrap_or("").trim().is_empty() && d.values.iter().all(|v| v.as_deref().unwrap_or("").trim().is_empty())
 }
 
-/// usageAliasCell: the saved mapping and what an empty cell says.
-pub fn alias_cell(t: &Target, model: &str) -> (String, &'static str) {
-    match &t.aliases {
-        None => (String::new(), "Unavailable"),
-        Some(_) => (model_alias(t, model).unwrap_or("").to_string(), "None"),
+/// usageAliasCell: the mapping the targets share and what an empty cell says.
+pub fn alias_cell(targets: &[Target], model: &str) -> (String, &'static str) {
+    if targets.iter().any(|t| t.aliases.is_none()) {
+        return (String::new(), "Unavailable");
+    }
+    let values: Vec<&str> = targets.iter().map(|t| model_alias(t, model).unwrap_or("")).collect();
+    match values.first() {
+        Some(first) if values.iter().any(|v| v != first) => (String::new(), "Mixed"),
+        first => (first.unwrap_or(&"").to_string(), "None"),
     }
 }
 
-/// usagePriceCell: the saved rate and what an empty cell says.
-pub fn price_cell(t: &Target, model: &str, field: usize) -> (String, &'static str) {
-    if t.prices.is_none() {
+/// usagePriceCell: the rate the targets share and what an empty cell says.
+pub fn price_cell(targets: &[Target], model: &str, field: usize) -> (String, &'static str) {
+    if targets.iter().any(|t| t.prices.is_none()) {
         return (String::new(), "Unavailable");
     }
-    match model_price(t, model) {
-        None => (String::new(), "Automatic"),
-        Some(price) => (form(Some(price))[field].clone(), if FIELDS[field].2 { "Input rate" } else { "0.00" }),
+    let values: Vec<Option<String>> = targets.iter().map(|t| model_price(t, model).map(|p| form(Some(p))[field].clone())).collect();
+    match values.first() {
+        Some(first) if values.iter().any(|v| v != first) => (String::new(), "Mixed"),
+        Some(None) => (String::new(), "Automatic"),
+        first => (first.cloned().flatten().unwrap_or_default(), if FIELDS[field].2 { "Input rate" } else { "0.00" }),
     }
 }
 
@@ -293,12 +300,14 @@ pub fn patch(changes: &[Change]) -> Value {
 
 // ---- state ------------------------------------------------------------------------------
 
-/// A cell's editor, the saved text it was last synced to, and its last accepted text.
+/// A cell's editor, the saved text it was last synced to, its last accepted text, and whether it
+/// was typed in (a Mixed or Unavailable cell counts as edited from then on).
 #[derive(Default)]
 struct Cell {
     edit: TextEdit,
     baseline: String,
     last: String,
+    touched: bool,
 }
 
 enum Status {
@@ -307,9 +316,10 @@ enum Status {
     Failed(String),
 }
 
+/// The drafts sent, and each destination's (key, label, result) in "Apply to" order.
 struct Attempt {
     drafts: Vec<Draft>,
-    status: Status,
+    results: Vec<(String, String, Status)>,
 }
 
 /// Cell slots: the new row's model ID, "Map to", then `FIELDS`.
@@ -320,13 +330,14 @@ const PRICE: usize = 2;
 #[derive(Default)]
 pub struct Ui {
     pub open: bool,
-    /// "Apply to" unchecked this environment.
-    deselected: bool,
+    /// "Apply to"'s checked environments; `None` is "All environments".
+    selected: Option<Vec<String>>,
     cells: HashMap<(String, usize), Cell>,
     new_rows: Vec<String>,
     removed: HashSet<String>,
     next: u64,
-    pending: Option<u64>,
+    /// Each destination's `server.updateSettings` in flight.
+    pending: Vec<(String, u64)>,
     attempt: Option<Attempt>,
     menu: bool,
 }
@@ -335,20 +346,38 @@ fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.usage.prices
 }
 
-pub fn target(s: &App) -> Target {
-    let config = s.state().config.as_ref();
-    let label = config.and_then(|c| c["environment"]["label"].as_str()).unwrap_or("This environment").to_string();
-    let settings = config.map(|c| &c["settings"]).filter(|v| v.is_object());
-    let prices = settings.map(|v| v["usagePriceOverrides"].as_object().cloned().unwrap_or_default());
-    let mapped = config.is_some_and(|c| c["environment"]["capabilities"]["usageModelAliases"] == true);
-    let aliases = settings.filter(|_| mapped).map(|v| v["usageModelAliases"].as_object().cloned().unwrap_or_default());
-    let unavailable = settings.is_none().then(|| "Prices not loaded".to_string());
-    Target { label, prices, aliases, unavailable }
+fn env_net<'a>(s: &'a mut App, key: &str) -> Option<&'a mut s5_net::Net> {
+    crate::env::source_mut(s, key).and_then(|src| src.net())
 }
 
-/// Models with a saved price or mapping, sorted.
-fn custom_models(t: &Target) -> Vec<String> {
-    let mut models: Vec<String> = t.prices.iter().chain(&t.aliases).flat_map(|m| m.keys().cloned()).collect();
+/// priceTargetsAtom: every environment, readable or not.
+fn targets(s: &App) -> Vec<Target> {
+    crate::env::keys(s)
+        .into_iter()
+        .map(|key| {
+            let config = crate::env::source(s, &key).and_then(|src| src.state().config.as_ref());
+            let settings = config.map(|c| &c["settings"]).filter(|v| v.is_object());
+            let prices = settings.map(|v| v["usagePriceOverrides"].as_object().cloned().unwrap_or_default());
+            let mapped = config.is_some_and(|c| c["environment"]["capabilities"]["usageModelAliases"] == true);
+            let aliases = settings.filter(|_| mapped).map(|v| v["usageModelAliases"].as_object().cloned().unwrap_or_default());
+            let unavailable = if crate::env::status(s, &key) != "Connected" {
+                Some("Offline".to_string())
+            } else {
+                settings.is_none().then(|| "Prices not loaded".to_string())
+            };
+            Target { label: crate::env::label(s, &key), key, prices, aliases, unavailable }
+        })
+        .collect()
+}
+
+/// The targets "Apply to" leaves in.
+fn chosen(u: &Ui, all: &[Target]) -> Vec<Target> {
+    all.iter().filter(|t| u.selected.as_ref().is_none_or(|keys| keys.contains(&t.key))).cloned().collect()
+}
+
+/// Models with a saved price or mapping on any target, sorted.
+fn custom_models(targets: &[Target]) -> Vec<String> {
+    let mut models: Vec<String> = targets.iter().flat_map(|t| t.prices.iter().chain(&t.aliases)).flat_map(|m| m.keys().cloned()).collect();
     models.sort();
     models.dedup();
     models
@@ -359,13 +388,13 @@ fn text_of(u: &Ui, id: &str, slot: usize) -> String {
 }
 
 /// (row id, saved model or `None` for a new row), saved rows first.
-fn rows(u: &Ui, t: &Target) -> Vec<(String, Option<String>)> {
+fn rows(u: &Ui, t: &[Target]) -> Vec<(String, Option<String>)> {
     let fresh: HashSet<String> = u.new_rows.iter().map(|id| text_of(u, id, MODEL).trim().to_string()).collect();
     let saved = custom_models(t).into_iter().filter(|m| u.attempt.is_none() || !fresh.contains(m)).map(|m| (format!("model:{m}"), Some(m)));
     saved.chain(u.new_rows.iter().map(|id| (id.clone(), None))).collect()
 }
 
-fn drafts(u: &Ui, t: &Target) -> Vec<Draft> {
+fn drafts(u: &Ui, t: &[Target]) -> Vec<Draft> {
     let mut out = Vec::new();
     for (id, saved) in rows(u, t) {
         let cell = |slot: usize| text_of(u, &id, slot);
@@ -378,8 +407,12 @@ fn drafts(u: &Ui, t: &Target) -> Vec<Draft> {
                 ..Draft { id: id.clone(), ..Draft::default() }
             },
             Some(model) => {
-                let values = std::array::from_fn(|f| Some(cell(PRICE + f)).filter(|v| *v != price_cell(t, &model, f).0));
-                let alias = Some(cell(ALIAS)).filter(|v| *v != alias_cell(t, &model).0);
+                let edited = |slot: usize, (value, placeholder): (String, &str)| {
+                    let differs = if matches!(placeholder, "Mixed" | "Unavailable") { u.cells.get(&(id.clone(), slot)).is_some_and(|c| c.touched) } else { cell(slot) != value };
+                    differs.then(|| cell(slot))
+                };
+                let values = std::array::from_fn(|f| edited(PRICE + f, price_cell(t, &model, f)));
+                let alias = edited(ALIAS, alias_cell(t, &model));
                 let removed = u.removed.contains(&id);
                 if !removed && alias.is_none() && values.iter().all(Option::is_none) {
                     continue;
@@ -395,8 +428,9 @@ fn drafts(u: &Ui, t: &Target) -> Vec<Draft> {
 
 /// Every row's editors exist, and untouched ones follow the saved settings as they change.
 fn sync(s: &mut App) {
-    let t = target(s);
+    let all = targets(s);
     let u = ui(s);
+    let t = chosen(u, &all);
     for (id, saved) in rows(u, &t) {
         let mut slots = vec![(ALIAS, saved.as_ref().map(|m| alias_cell(&t, m).0).unwrap_or_default())];
         slots.extend((0..4).map(|f| (PRICE + f, saved.as_ref().map(|m| price_cell(&t, m, f).0).unwrap_or_default())));
@@ -407,7 +441,7 @@ fn sync(s: &mut App) {
             let cell = u.cells.entry((id.clone(), slot)).or_insert_with(|| {
                 let mut edit = TextEdit::default();
                 edit.replace_text(value.clone());
-                Cell { edit, baseline: value.clone(), last: value.clone() }
+                Cell { edit, baseline: value.clone(), last: value.clone(), touched: false }
             });
             if saved.is_some() && cell.edit.text == cell.baseline && cell.baseline != value {
                 cell.edit.replace_text(value.clone());
@@ -424,16 +458,18 @@ fn add_row(u: &mut Ui, model: &str) -> String {
     let mut edit = TextEdit::default();
     edit.replace_text(model.to_string());
     edit.focused = model.is_empty();
-    u.cells.insert((id.clone(), MODEL), Cell { edit, baseline: String::new(), last: model.to_string() });
+    u.cells.insert((id.clone(), MODEL), Cell { edit, baseline: String::new(), last: model.to_string(), touched: false });
     u.new_rows.push(id.clone());
     id
 }
 
 /// Opens the table; `model` (the model dialog's "Set price") starts a row unless it has one.
 pub fn open(s: &mut App, model: Option<&str>) {
-    let has_row = model.is_some_and(|m| custom_models(&target(s)).iter().any(|c| c == m));
+    let selected = s.ui.pages.usage.environments.clone();
+    let all = targets(s);
     let u = ui(s);
-    *u = Ui { open: true, ..Ui::default() };
+    *u = Ui { open: true, selected, ..Ui::default() };
+    let has_row = model.is_some_and(|m| custom_models(&chosen(u, &all)).iter().any(|c| c == m));
     if let Some(model) = model.filter(|_| !has_row) {
         add_row(u, model);
         u.cells.get_mut(&("new:0".to_string(), MODEL)).map(|c| c.edit.focused = false);
@@ -442,7 +478,7 @@ pub fn open(s: &mut App, model: Option<&str>) {
 }
 
 fn close(s: &mut App) {
-    if ui(s).pending.is_none() {
+    if ui(s).pending.is_empty() {
         *ui(s) = Ui::default();
     }
 }
@@ -456,8 +492,9 @@ fn discard(s: &mut App) {
     sync(s);
 }
 
-fn failed(u: &Ui) -> bool {
-    matches!(u.attempt, Some(Attempt { status: Status::Failed(_), .. }))
+/// The destinations whose last save failed (failedDestinations).
+fn failed(u: &Ui) -> Vec<(String, String)> {
+    u.attempt.iter().flat_map(|a| &a.results).filter(|r| matches!(r.2, Status::Failed(_))).map(|r| (r.0.clone(), r.1.clone())).collect()
 }
 
 fn edited(s: &mut App, key: &(String, usize)) {
@@ -469,58 +506,77 @@ fn edited(s: &mut App, key: &(String, usize)) {
             return;
         }
         cell.last = cell.edit.text.clone();
+        cell.touched = true;
     }
-    if u.pending.is_none() {
+    if u.pending.is_empty() {
         u.attempt = None;
     }
 }
 
-/// writeUsagePrices for the one destination; a retry resends the failed drafts.
+/// writeUsagePrices: one patch per selected environment, settling independently; a retry
+/// resends the failed destinations their earlier drafts.
 fn save(s: &mut App) {
-    let t = target(s);
+    let all = targets(s);
     let u = ui(s);
-    if u.pending.is_some() || u.deselected {
+    if !u.pending.is_empty() {
         return;
     }
-    let staged = match &u.attempt {
-        Some(Attempt { drafts, status: Status::Failed(_) }) => drafts.clone(),
-        _ => drafts(u, &t),
-    };
-    if staged.is_empty() {
-        return;
-    }
-    let (changes, errors) = changes(&t, &staged);
-    let unavailable = t.unavailable.clone().or_else(|| errors.values().next().cloned());
-    let status = if let Some(reason) = unavailable {
-        Status::Failed(reason)
-    } else if t.aliases.is_none() && changes.iter().any(|c| matches!(c, Change::Alias(..))) {
-        Status::Failed("Update server to map models".into())
-    } else if changes.is_empty() {
-        Status::Saved
+    let retry = failed(u);
+    let destinations: Vec<Target> = if retry.is_empty() {
+        chosen(u, &all)
     } else {
-        match s.src.net() {
-            Some(net) => {
-                let id = net.request("server.updateSettings", json!({"patch": patch(&changes)}));
-                ui(s).pending = Some(id);
-                Status::Saving
-            }
-            None => Status::Failed("Offline".into()),
-        }
+        let removed = |(key, label): &(String, String)| Target { key: key.clone(), label: label.clone(), prices: None, aliases: None, unavailable: Some("Environment removed".into()) };
+        retry.iter().map(|f| all.iter().find(|t| t.key == f.0).cloned().unwrap_or_else(|| removed(f))).collect()
     };
-    let saved = matches!(status, Status::Saved);
-    ui(s).attempt = Some(Attempt { drafts: staged, status });
-    if saved {
+    let edits = match &u.attempt {
+        Some(attempt) if !retry.is_empty() => attempt.drafts.clone(),
+        _ => drafts(u, &chosen(u, &all)),
+    };
+    if destinations.is_empty() || edits.is_empty() {
+        return;
+    }
+    let mut results = match u.attempt.take() {
+        Some(attempt) if !retry.is_empty() => attempt.results,
+        _ => Vec::new(),
+    };
+    let mut pending = Vec::new();
+    for t in &destinations {
+        let (changes, errors) = changes(t, &edits);
+        let unavailable = t.unavailable.clone().or_else(|| edits.iter().find_map(|d| errors.get(&d.id).cloned()));
+        let status = if let Some(reason) = unavailable {
+            Status::Failed(reason)
+        } else if t.aliases.is_none() && changes.iter().any(|c| matches!(c, Change::Alias(..))) {
+            Status::Failed("Update server to map models".into())
+        } else if changes.is_empty() {
+            Status::Saved
+        } else {
+            match env_net(s, &t.key) {
+                Some(net) => {
+                    pending.push((t.key.clone(), net.request("server.updateSettings", json!({"patch": patch(&changes)}))));
+                    Status::Saving
+                }
+                None => Status::Failed("Offline".into()),
+            }
+        };
+        match results.iter_mut().find(|r| r.0 == t.key) {
+            Some(r) => r.2 = status,
+            None => results.push((t.key.clone(), t.label.clone(), status)),
+        }
+    }
+    let u = ui(s);
+    u.pending = pending;
+    u.attempt = Some(Attempt { drafts: edits, results });
+    if u.pending.is_empty() && failed(u).is_empty() {
         settle(s);
     }
 }
 
-/// A save landed: drafts clear and the summary refetches under the new prices.
+/// Every destination saved: drafts clear, and the table follows the saved settings.
 fn settle(s: &mut App) {
     let u = ui(s);
     u.cells.clear();
     u.new_rows.clear();
     u.removed.clear();
-    s.ui.pages.usage.requested = None;
     sync(s);
 }
 
@@ -528,24 +584,26 @@ pub fn poll(s: &mut App) -> bool {
     if !ui(s).open {
         return false;
     }
-    let mut changed = false;
-    if let Some(id) = ui(s).pending
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
-    {
-        let u = ui(s);
-        u.pending = None;
+    let mut landed = false;
+    for (key, id) in ui(s).pending.clone() {
+        let Some(reply) = env_net(s, &key).and_then(|n| n.take_reply(id)) else { continue };
         let ok = reply.is_ok();
-        if let Some(attempt) = &mut u.attempt {
-            attempt.status = if ok { Status::Saved } else { Status::Failed("Could not save. Try again.".into()) };
+        let u = ui(s);
+        u.pending.retain(|p| p.1 != id);
+        if let Some(r) = u.attempt.as_mut().and_then(|a| a.results.iter_mut().find(|r| r.0 == key)) {
+            r.2 = if ok { Status::Saved } else { Status::Failed("Could not save. Try again.".into()) };
         }
         if ok {
-            settle(s);
+            super::usage::rescan(s, &key);
         }
-        changed = true;
+        landed = true;
+    }
+    if landed && ui(s).pending.is_empty() && failed(ui(s)).is_empty() {
+        settle(s);
     }
     let before = ui(s).cells.len();
     sync(s);
-    changed || ui(s).cells.len() != before
+    landed || ui(s).cells.len() != before
 }
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent) -> bool {
@@ -560,6 +618,19 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent) -> bool {
     true
 }
 
+/// The `usage-prices-environments` scene: this machine and Studio Mac price GLM 4.6 differently,
+/// so its cells read Mixed.
+pub(super) fn environments_scene(s: &mut App) {
+    for (key, input) in [(crate::env::LOCAL, 0.6), ("studio", 0.45)] {
+        if let Some(crate::data::Source::Fixture(state)) = crate::env::source_mut(s, key)
+            && let Some(config) = state.config.as_mut()
+        {
+            config["settings"]["usagePriceOverrides"] = json!({"glm-4.6": {"inputCostPerMillionTokens": input, "outputCostPerMillionTokens": 2.2}});
+        }
+    }
+    open(s, None);
+}
+
 // ---- view -------------------------------------------------------------------------------
 
 pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
@@ -568,11 +639,12 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
         return;
     }
     let k = kit::theme(t);
-    let target = target(s);
+    let all = targets(s);
+    let selected = chosen(u, &all);
     let muted = t.c.muted_foreground;
-    let staged = drafts(u, &target);
-    let customs = custom_models(&target);
-    let mut errors = if target.unavailable.is_none() && target.prices.is_some() { changes(&target, &staged).1 } else { HashMap::new() };
+    let staged = drafts(u, &selected);
+    let customs = custom_models(&selected);
+    let mut errors: HashMap<String, String> = selected.iter().filter(|t| t.unavailable.is_none() && t.prices.is_some()).flat_map(|t| changes(t, &staged).1).collect();
     for d in staged.iter().filter(|d| d.new) {
         let model = d.model.trim();
         if model.is_empty() {
@@ -581,37 +653,45 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
             errors.insert(d.id.clone(), "This model already has a row. Edit its prices there.".into());
         }
     }
-    let failed = failed(u);
-    let pending = u.pending.is_some();
+    let failed = !failed(u).is_empty();
+    let pending = !u.pending.is_empty();
     let locked = pending || failed;
     let has_changes = !staged.is_empty();
-    let selected = !u.deselected;
-    let destination = if selected { target.label.clone() } else { "0 environments".into() };
-    let selection = if selected { "All environments".to_string() } else { destination.clone() };
+    let destination = match selected.as_slice() {
+        [one] => one.label.clone(),
+        many => format!("{} environments", many.len()),
+    };
+    let selection = if u.selected.is_none() { "All environments".to_string() } else { destination.clone() };
 
-    let apply = Menu::new("usage-prices-apply")
+    let mut apply = Menu::new("usage-prices-apply")
         .trigger(apply_trigger(t, &selection, pending || has_changes))
         .placement(Placement::BottomStart)
         .min_width(220.0)
         .open(u.menu)
         .on_close(|s: &mut App| ui(s).menu = false)
-        .item(MenuItem::new("All environments").checked(selected).on_select(|s: &mut App| {
+        .item(MenuItem::new("All environments").checked(u.selected.is_none()).on_select(|s: &mut App| {
             let u = ui(s);
-            u.deselected = !u.deselected;
+            u.selected = if u.selected.is_none() { Some(Vec::new()) } else { None };
             u.attempt = None;
+            u.menu = true;
         }))
-        .separator()
-        .item({
-            let item = MenuItem::new(target.label.clone()).checked(selected).on_select(|s: &mut App| {
-                let u = ui(s);
-                u.deselected = !u.deselected;
-                u.attempt = None;
-            });
-            match &target.unavailable {
-                Some(reason) => item.shortcut(reason.clone()),
-                None => item,
-            }
+        .separator();
+    let keys: Vec<String> = all.iter().map(|t| t.key.clone()).collect();
+    let checked_keys: Vec<String> = selected.iter().map(|t| t.key.clone()).collect();
+    for target in &all {
+        let checked = checked_keys.contains(&target.key);
+        let (keys, checked_keys, key) = (keys.clone(), checked_keys.clone(), target.key.clone());
+        let item = MenuItem::new(target.label.clone()).checked(checked).on_select(move |s: &mut App| {
+            let u = ui(s);
+            u.selected = super::usage::toggle_environment(&keys, &checked_keys, &key, !checked);
+            u.attempt = None;
+            u.menu = true;
         });
+        apply = apply.item(match &target.unavailable {
+            Some(reason) => item.shortcut(reason.clone()),
+            None => item,
+        });
+    }
     let mut body = col()
         .w_full()
         .gap(16.0)
@@ -625,33 +705,36 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
                 .child(spacer())
                 .child(text("USD / million tokens").font(theme::TEXT_XS).color(muted)),
         );
-    if !selected {
+    if selected.is_empty() {
         let line = if s.state().config.is_none() { "Connect an environment to set model prices." } else { "Select an environment to see and change its model prices." };
         body = body.child(text(line).font(theme::TEXT_SM).color(muted));
     } else {
-        body = body.child(table(s, t, u, &target, &staged, &errors, locked)).child(
-            text(
-                "Blank cache rates use the input price. Enter 0 for free tokens. A mapped model\u{2019}s usage counts as the model it maps to.",
-            )
-            .font(theme::TEXT_XS)
-            .color(muted)
-            .wrap(),
+        let mixed = if selected.len() > 1 { " Mixed cells keep each environment\u{2019}s rate until you edit them." } else { "" };
+        body = body.child(table(t, u, &selected, &staged, &errors, locked)).child(
+            text(format!("Blank cache rates use the input price. Enter 0 for free tokens. A mapped model\u{2019}s usage counts as the model it maps to.{mixed}"))
+                .font(theme::TEXT_XS)
+                .color(muted)
+                .wrap(),
         );
     }
     if let Some(attempt) = &u.attempt {
-        let (status, ink) = match &attempt.status {
-            Status::Failed(error) => (format!("Not saved \u{b7} {error}"), t.c.destructive),
-            Status::Saved => ("Saved".into(), muted),
-            Status::Saving => ("Saving\u{2026}".into(), muted),
-        };
-        body = body.child(
-            row()
-                .w_full()
-                .gap(12.0)
-                .child(text(target.label.clone()).font(theme::TEXT_XS).color(muted).truncate().shrink())
-                .child(spacer())
-                .child(text(status).font(theme::TEXT_XS).color(ink)),
-        );
+        let mut lines = col().w_full().gap(4.0);
+        for (_, label, result) in &attempt.results {
+            let (status, ink) = match result {
+                Status::Failed(error) => (format!("Not saved \u{b7} {error}"), t.c.destructive),
+                Status::Saved => ("Saved".into(), muted),
+                Status::Saving => ("Saving\u{2026}".into(), muted),
+            };
+            lines = lines.child(
+                row()
+                    .w_full()
+                    .gap(12.0)
+                    .child(text(label.clone()).font(theme::TEXT_XS).color(muted).truncate().shrink())
+                    .child(spacer())
+                    .child(text(status).font(theme::TEXT_XS).color(ink)),
+            );
+        }
+        body = body.child(lines);
     }
     let mut actions = row().gap(8.0).center_y();
     if has_changes {
@@ -663,7 +746,7 @@ pub fn view(s: &App, t: &T, overlays: &mut Vec<El>) {
                 .build(t),
         );
     }
-    let blocked = pending || (!has_changes && !failed) || (!failed && (!errors.is_empty() || !selected));
+    let blocked = pending || (!has_changes && !failed) || (!failed && (!errors.is_empty() || selected.is_empty()));
     actions = actions.child(
         kit::Button::new(if pending {
             "Saving\u{2026}"
@@ -691,7 +774,7 @@ const MODEL_W: f32 = 180.0;
 const ALIAS_W: f32 = 150.0;
 const ACTION_W: f32 = 28.0;
 
-fn table(s: &App, t: &T, u: &Ui, target: &Target, staged: &[Draft], errors: &HashMap<String, String>, locked: bool) -> El {
+fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<String, String>, locked: bool) -> El {
     let muted = t.c.muted_foreground;
     let head = |label: &str| text(label.to_string()).font(theme::XS_MEDIUM).color(muted);
     let mut header = row()
@@ -722,10 +805,9 @@ fn table(s: &App, t: &T, u: &Ui, target: &Target, staged: &[Draft], errors: &Has
     let mut table = col().w_full().radius(radius()).border(1.0, t.c.border).clip_rounded(radius()).child(header).child(el().w_full().h(1.0).fill(t.c.border));
     let rows = rows(u, target);
     if rows.is_empty() {
-        let line = if target.prices.is_none() { "Some environment prices are unavailable." } else { "No custom prices or mappings. Add a row to set one." };
+        let line = if target.iter().any(|t| t.prices.is_none()) { "Some environment prices are unavailable." } else { "No custom prices or mappings. Add a row to set one." };
         return table.child(row().w_full().py(24.0).center().child(text(line).font(theme::TEXT_SM).color(muted)));
     }
-    let _ = s;
     for (n, (id, saved)) in rows.iter().enumerate() {
         if n > 0 {
             table = table.child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6)));
@@ -843,7 +925,7 @@ mod tests {
     use super::*;
 
     fn target(prices: Value, aliases: Option<Value>) -> Target {
-        Target { label: "Mac".into(), prices: prices.as_object().cloned(), aliases: aliases.and_then(|a| a.as_object().cloned()), unavailable: None }
+        Target { key: "mac".into(), label: "Mac".into(), prices: prices.as_object().cloned(), aliases: aliases.and_then(|a| a.as_object().cloned()), unavailable: None }
     }
 
     fn draft(id: &str, model: &str, new: bool) -> Draft {
@@ -913,12 +995,31 @@ mod tests {
 
     #[test]
     fn saved_cells_name_what_a_blank_means() {
-        let t = target(json!({"m": {"inputCostPerMillionTokens": 0.25, "outputCostPerMillionTokens": 2}}), None);
+        let t = [target(json!({"m": {"inputCostPerMillionTokens": 0.25, "outputCostPerMillionTokens": 2}}), None)];
         assert_eq!(price_cell(&t, "m", 0), ("0.25".into(), "0.00"));
         assert_eq!(price_cell(&t, "m", 2), (String::new(), "Input rate"));
         assert_eq!(price_cell(&t, "other", 1), (String::new(), "Automatic"));
         assert_eq!(alias_cell(&t, "m"), (String::new(), "Unavailable"));
-        let unreadable = Target { prices: None, ..target(json!({}), None) };
+        let unreadable = [t[0].clone(), Target { prices: None, ..target(json!({}), None) }];
         assert_eq!(price_cell(&unreadable, "m", 0).1, "Unavailable");
+    }
+
+    #[test]
+    fn cells_that_differ_across_environments_read_mixed_until_typed_in() {
+        let price = |input: f64| json!({"m": {"inputCostPerMillionTokens": input, "outputCostPerMillionTokens": 2}});
+        let both = [target(price(1.0), Some(json!({}))), Target { key: "studio".into(), ..target(price(3.0), Some(json!({"m": "x"}))) }];
+        assert_eq!(price_cell(&both, "m", 0), (String::new(), "Mixed"));
+        assert_eq!(price_cell(&both, "m", 1), ("2".into(), "0.00"));
+        assert_eq!(alias_cell(&both, "m"), (String::new(), "Mixed"));
+
+        let mut u = Ui::default();
+        let mut output = TextEdit::default();
+        output.replace_text("2".into());
+        u.cells.insert(("model:m".into(), PRICE + 1), Cell { edit: output, ..Cell::default() });
+        assert!(drafts(&u, &both).is_empty());
+        u.cells.insert(("model:m".into(), PRICE), Cell { touched: true, ..Cell::default() });
+        let staged = drafts(&u, &both);
+        assert_eq!((staged[0].values.clone(), staged[0].alias.clone()), ([Some(String::new()), None, None, None], None));
+        assert_eq!(changes(&both[0], &staged).1["model:m"], "Input is required on Mac.");
     }
 }

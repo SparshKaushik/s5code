@@ -22,6 +22,7 @@ impl MenuEntry {
 pub struct MenuItem {
     label: String,
     glyph: Option<&'static Icon>,
+    lead: Option<El>,
     shortcut: Option<String>,
     checked: Option<bool>,
     radio: bool,
@@ -42,6 +43,7 @@ impl MenuItem {
         Self {
             label: label.into(),
             glyph: None,
+            lead: None,
             shortcut: None,
             checked: None,
             radio: false,
@@ -59,6 +61,11 @@ impl MenuItem {
     }
     pub fn icon(mut self, glyph: &'static Icon) -> Self {
         self.glyph = Some(glyph);
+        self
+    }
+    /// An element in the icon slot, such as a project favicon.
+    pub fn lead(mut self, value: El) -> Self {
+        self.lead = Some(value);
         self
     }
     pub fn trailing(mut self, value: El) -> Self {
@@ -272,7 +279,9 @@ impl MenuItem {
         } else if self.inset {
             e = e.child(el().w(16.));
         }
-        if let Some(glyph) = self.glyph {
+        if let Some(lead) = self.lead {
+            e = e.child(lead);
+        } else if let Some(glyph) = self.glyph {
             e = e.child(
                 el().size(12., 16.).child(
                     icon(glyph, 16.)

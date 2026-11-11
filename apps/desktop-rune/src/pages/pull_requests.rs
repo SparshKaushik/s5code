@@ -2,6 +2,8 @@
 //! involvement and ranked by the chosen sort, with the toolbar's search, sort, filters and host.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, Ordering};
 use std::time::{Duration, Instant};
 
 use rune::{Color, Cursor, El, PointerPress, ScrollSpec, Tx, col, el, icon, row, spacer, text, text_input};
@@ -59,7 +61,7 @@ pub struct Ui {
     pub submenu: Option<&'static str>,
     pub selected: Option<String>,
     /// The pull request the panel toggle hid, which it reopens.
-    hidden: Option<String>,
+    pub(super) hidden: Option<String>,
     /// The detail fills the page (RightPanelMaximizeControl); only while it is open.
     pub maximized: bool,
     /// `pullRequests.subscribeRefreshes` is watched, and the revision last seen from it.
@@ -68,6 +70,98 @@ pub struct Ui {
     pub context: Option<(String, f32, f32)>,
     /// The rows' quick actions, stack, checks and change breakdown.
     pub row: super::pr_row::Ui,
+    /// The toolbar has scrolled out of the list's view, so the header carries the scope (condensed).
+    pub condensed: bool,
+    scrolled: Arc<Scrolled>,
+    /// The condensed header's search is open (ExpandableSearch's `open`).
+    pub search_open: bool,
+    /// Scenes only: the list opens scrolled to its end.
+    scene_scrolled: bool,
+    /// A paste landed in the search, which sends it at once (insertFromPaste).
+    pasted: bool,
+    live: Live,
+    /// The filters and search a close sweep runs under; changing either ends it.
+    swept_under: Option<(Filters, String)>,
+}
+
+/// What the list's scroll callback, which runs without the app, leaves for `poll`: whether the
+/// toolbar's marker has left the view, the last offset (f32 bits), and when it last moved.
+#[derive(Default)]
+struct Scrolled {
+    condensed: AtomicBool,
+    offset: AtomicU32,
+    moved_at: AtomicI64,
+}
+
+/// The 1px marker under the toolbar (PullRequestsColumn's markerRef).
+const CONDENSE_MARKER: &str = "pr-condense-marker";
+
+/// useLiveRefresh's floor between live reads, period, and the quiet spell after which nobody is
+/// using the app (LIVE_REFRESH_MIN_INTERVAL_MS, LIVE_REFRESH_INTERVAL_MS, LIVE_REFRESH_IDLE_AFTER_MS).
+const LIVE_FLOOR: i64 = 10_000;
+const LIVE_EVERY: i64 = 5 * 60_000;
+const LIVE_IDLE: i64 = 6 * 60_000;
+
+/// useLiveRefresh's clock for one view, in epoch ms: its last read (kept while the view is away,
+/// as lastRefreshedAtByView outlives a remount), the last input, when the interval next fires
+/// while the view shows, and whether the window was in the background.
+#[derive(Default)]
+pub(super) struct Live {
+    read_at: Option<i64>,
+    input_at: i64,
+    tick_at: Option<i64>,
+    woke: bool,
+    background: bool,
+}
+
+impl Live {
+    /// noteInteraction: input after an idle spell resumes the view (onArrival, and the interval
+    /// starts over).
+    pub(super) fn input(&mut self, now: i64) {
+        self.woke |= now - self.input_at >= LIVE_IDLE;
+        self.input_at = now;
+    }
+
+    /// Whether the view reads again at `now`. Showing it (`on`), coming back to the window and
+    /// input after an idle spell arrive (onArrival); while it shows, the interval fires every
+    /// LIVE_EVERY (onInterval). Either reads only while in use and LIVE_FLOOR after the last read,
+    /// and a view never read only starts its clock, as it reads for itself.
+    pub(super) fn due(&mut self, on: bool, now: i64, background: bool) -> bool {
+        let returned = std::mem::replace(&mut self.background, background) && !background;
+        let woke = std::mem::take(&mut self.woke);
+        if !on {
+            self.tick_at = None;
+            return false;
+        }
+        let shown = self.tick_at.is_none();
+        if shown {
+            self.input_at = now;
+        }
+        let ticked = match self.tick_at {
+            Some(at) if !woke && now >= at => {
+                self.tick_at = Some(at + ((now - at) / LIVE_EVERY + 1) * LIVE_EVERY);
+                true
+            }
+            Some(_) if !woke => false,
+            _ => {
+                self.tick_at = Some(now + LIVE_EVERY);
+                false
+            }
+        };
+        let arrived = shown || returned || woke;
+        let in_use = now - self.input_at < LIVE_IDLE;
+        let Some(read_at) = self.read_at else {
+            if arrived && in_use {
+                self.read_at = Some(now);
+            }
+            return false;
+        };
+        let due = in_use && (arrived || ticked) && now - read_at >= LIVE_FLOOR;
+        if due {
+            self.read_at = Some(now);
+        }
+        due
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -424,10 +518,23 @@ pub(super) fn key(e: &Value) -> String {
 pub fn poll(s: &mut App) -> bool {
     let on = matches!(s.frame_route(), Route::PullRequests);
     let mut changed = watch_refreshes(s, on);
+    changed |= follow_scroll(s);
+    changed |= live_refresh(s, on);
     if !on {
         return changed;
     }
     settle_panel(ui(s));
+    let u = ui(s);
+    if std::mem::take(&mut u.pasted) {
+        submit(u);
+        changed = true;
+    }
+    changed |= settle_search(u);
+    let under = u.swept_under.as_ref().is_some_and(|(f, q)| *f == u.filters && *q == u.sent_query);
+    if !under {
+        u.swept_under = Some((u.filters.clone(), u.sent_query.clone()));
+        changed |= super::pr_row::cancel_sweep(&mut u.row);
+    }
     changed |= debounce(s);
     if let Some(id) = s.ui.pages.pull_requests.invalidating
         && s.src.net().and_then(|n| n.take_reply(id)).is_some()
@@ -557,14 +664,78 @@ fn largest_read(entries: &[Value]) -> u64 {
     counts.into_values().max().unwrap_or(0)
 }
 
-/// A turn rereads the first page, grown to hold what "Load more" had shown (PullRequestsPage's
-/// continuation collapse), and re-measures sizes.
+/// A turn rereads what the page shows, and re-measures sizes.
 fn after_turn(u: &mut Ui) {
+    u.stats_asked.clear();
+    reread_loaded(u);
+}
+
+/// refreshList(true): every read asks again, the first page grown to hold what "Load more" had
+/// shown (PullRequestsPage's continuation collapse).
+fn reread_loaded(u: &mut Ui) {
     let read = u.result.as_ref().and_then(|r| r["entries"].as_array()).map_or(0, |e| largest_read(e));
     let grown = u.limit.unwrap_or(PAGE).max(read.div_ceil(PAGE) * PAGE).min(MAX_PAGE);
     u.limit = (grown != PAGE).then_some(grown);
-    u.stats_asked.clear();
     reread(u);
+}
+
+/// useLiveRefresh(() => refreshList(true)): while the page shows, it reads again every five
+/// minutes of use and on coming back to the window.
+fn live_refresh(s: &mut App, on: bool) -> bool {
+    let (on, now, background) = (on && supported(s), crate::data::now_ms(), s.ui.notify.background);
+    let u = ui(s);
+    let due = u.live.due(on, now, background);
+    if due {
+        reread_loaded(u);
+    }
+    due
+}
+
+/// noteInteraction: input on the page counts as use for the list and the detail.
+fn note_input(s: &mut App, at: i64) {
+    ui(s).live.input(at);
+    s.ui.pages.detail.live.input(at);
+}
+
+/// Takes what the scroll callback saw: scrolling counts as input (the `wheel` noteInteraction
+/// listens to), and the header condenses once the toolbar's marker leaves the view.
+fn follow_scroll(s: &mut App) -> bool {
+    let moved = ui(s).scrolled.moved_at.swap(0, Ordering::Relaxed);
+    if moved > 0 {
+        note_input(s, moved);
+    }
+    let u = ui(s);
+    let condensed = u.scrolled.condensed.load(Ordering::Relaxed);
+    std::mem::replace(&mut u.condensed, condensed) != condensed
+}
+
+/// ExpandableSearch's open state: a full header has none, the field focused while condensed
+/// moves up into the header (one live field at a time), and an empty one closes on blur.
+fn settle_search(u: &mut Ui) -> bool {
+    let open = u.condensed && (u.query.focused || (u.search_open && !u.query.text.is_empty()));
+    std::mem::replace(&mut u.search_open, open) != open
+}
+
+/// Scenes: the list opens scrolled to its end under the condensed header.
+pub(super) fn scene_condensed(u: &mut Ui) {
+    u.scene_scrolled = true;
+    u.condensed = true;
+    u.scrolled.condensed.store(true, Ordering::Relaxed);
+}
+
+/// IntersectionObserver over the toolbar's marker, rooted at the list: condensed once the marker
+/// has scrolled above the view. The marker's offset is read unscrolled from the last layout.
+fn on_scroll(scrolled: &Scrolled, waker: Option<&rune::Waker>, y: f32) {
+    if scrolled.offset.swap(y.to_bits(), Ordering::Relaxed) != y.to_bits() {
+        scrolled.moved_at.store(crate::data::now_ms(), Ordering::Relaxed);
+    }
+    let marker = rune::memo::layout(CONDENSE_MARKER).zip(rune::memo::layout("pr-scroll")).map(|(m, v)| m[1] - v[1]);
+    let condensed = marker.is_some_and(|top| y > top + 1.0);
+    if scrolled.condensed.swap(condensed, Ordering::Relaxed) != condensed
+        && let Some(waker) = waker.cloned()
+    {
+        waker();
+    }
 }
 
 /// What the page reads beside the list: the baseline while a search or longer page replaces it,
@@ -750,6 +921,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if !matches!(s.route, Route::PullRequests) {
         return false;
     }
+    note_input(s, crate::data::now_ms());
     if matches!(e.key, rune::Key::Escape) {
         let u = ui(s);
         if super::pr_row::cancel_sweep(&mut u.row) {
@@ -767,6 +939,7 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     // PullRequestsColumn: mod+F focuses the search with its text selected.
     if e.is_command('f') && !e.mods.shift && !e.mods.alt {
         let u = ui(s);
+        u.search_open |= u.condensed;
         u.picker.query.focused = false;
         u.query.focused = true;
         u.query.anchor = 0;
@@ -1175,22 +1348,14 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     {
         context_menu(t, e, &u.hosts, *x, *y, overlays);
     }
-    let main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background);
+    // Entering or leaving the page counts as input; a handler per pointer move would rebuild it.
+    let main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background).on_hover_change(|s: &mut App, _, _| note_input(s, crate::data::now_ms()));
     if u.selected.is_some() && u.maximized {
         return main.child(super::pr_detail::view(s, t, overlays));
     }
-    let header = row()
-        .key("pr-header")
-        .w_full()
-        .h(layout::TOPBAR_H)
-        .shrink()
-        .px(20.0)
-        .center_y()
-        .window_drag()
-        .child(text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground))
-        .child(spacer())
-        .children(u.selected.is_none().then(|| panel_control(s, t)));
-    let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(toolbar(s, t, overlays));
+    let header = top_bar(s, t, overlays);
+    let marker = el().key(CONDENSE_MARKER).w_full().h(1.0);
+    let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(col().w_full().child(toolbar(s, t, overlays)).child(marker));
     match (&u.result, &u.error) {
         (None, None) => content = content.child(ghost(t, 7, Some("Loading pull requests…".into()))),
         (None, Some(error)) => content = content.child(unavailable(t, error, u.pending.is_some())),
@@ -1215,7 +1380,18 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     }
     let body = kit::scroll_area(
         "pr-scroll",
-        col().key("pr-scroll").grow(1.0).min_h(0.0).w_full().items_center().scroll(ScrollSpec { stick_bottom: false }).child(content),
+        col()
+            .key("pr-scroll")
+            .grow(1.0)
+            .min_h(0.0)
+            .w_full()
+            .items_center()
+            .scroll(ScrollSpec { stick_bottom: u.scene_scrolled })
+            .on_scroll_offset({
+                let (scrolled, waker) = (u.scrolled.clone(), s.ui.panel.waker.clone());
+                move |at: rune::ScrollPos| on_scroll(&scrolled, waker.as_ref(), at.offset[1])
+            })
+            .child(content),
         t,
     );
     let list = col().key("pr-list").grow(1.0).shrink().min_w(0.0).h_full().fill(t.c.background).child(header).child(body);
@@ -1241,15 +1417,60 @@ impl Button {
     }
 }
 
-fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
-    let u = &s.ui.pages.pull_requests;
-    let k = kit::theme(t);
+/// Opens the menu `name`, or closes it if it is open.
+fn toggle_menu(name: &'static str) -> impl Fn(&mut App) + 'static {
+    move |s: &mut App| {
+        let u = ui(s);
+        u.menu = if u.menu == Some(name) { None } else { Some(name) };
+        u.submenu = None;
+    }
+}
+
+fn close_menu(s: &mut App) {
+    let u = ui(s);
+    u.menu = None;
+    u.submenu = None;
+}
+
+/// The search field opened the condensed header's search (ExpandableSearch's `open`), or holds text.
+fn search_expanded(u: &Ui) -> bool {
+    u.search_open || !u.query.text.is_empty()
+}
+
+/// PullRequestSearchInput. Only one field is live at a time (the condensed header's while it
+/// shows one); the other draws the same text still.
+fn search_field(u: &Ui, t: &T, key: &'static str, live: bool) -> El {
     let typed = u.query.text.trim();
     let busy = !typed.is_empty() && (typed != u.sent_query.trim() || u.pending.is_some_and(|p| !p.1));
-    let search = row()
-        .key("pr-search")
-        .grow(1.0)
-        .min_w(240.0)
+    let placeholder = "Search pull requests, or label:bug";
+    let field = if live {
+        text_input(&u.query, theme::TEXT_SM)
+            .key("pr-search-input")
+            .single_line()
+            .placeholder(placeholder, t.c.placeholder)
+            .grow(1.0)
+            .min_w(0.0)
+            .pl(8.0)
+            .color(t.c.foreground)
+            .on_edit(|s: &mut App| &mut s.ui.pages.pull_requests.query)
+            .on_input_key(|s: &mut App, key: &rune::KeyEvent, _: &mut Tx| {
+                if !matches!(key.key, rune::Key::Enter) {
+                    return false;
+                }
+                submit(ui(s));
+                true
+            })
+            // The paste lands first; the next poll sends the field's text at once.
+            .on_input_paste(|s: &mut App, _: &rune::ClipboardContent, _: &mut Tx| {
+                ui(s).pasted = true;
+                false
+            })
+    } else {
+        let (shown, ink) = if u.query.text.is_empty() { (placeholder.to_string(), t.c.placeholder) } else { (u.query.text.clone(), t.c.foreground) };
+        text(shown).font(theme::TEXT_SM).color(ink).truncate().grow(1.0).shrink().min_w(0.0).pl(8.0)
+    };
+    row()
+        .key(key)
         .h(34.0)
         .radius(8.0)
         .border(1.0, t.c.contrast_input)
@@ -1258,80 +1479,153 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .pl(11.0)
         .pr(8.0)
         .child(icon(if busy { &i::LOADER_CIRCLE } else { &i::SEARCH }, 16.0).color(t.c.muted_foreground.alpha_mul(0.8)))
-        .child(
-            text_input(&u.query, theme::TEXT_SM)
-                .key("pr-search-input")
-                .single_line()
-                .placeholder("Search pull requests, or label:bug", t.c.placeholder)
-                .grow(1.0)
-                .min_w(0.0)
-                .pl(8.0)
-                .color(t.c.foreground)
-                .on_edit(|s: &mut App| &mut s.ui.pages.pull_requests.query)
-                .on_input_key(|s: &mut App, key: &rune::KeyEvent, _: &mut Tx| {
-                    if !matches!(key.key, rune::Key::Enter) {
-                        return false;
-                    }
-                    submit(ui(s));
-                    true
-                }),
-        );
-    let open = |name| u.menu == Some(name);
-    let toggle = |name: &'static str| {
-        move |s: &mut App| {
-            let u = ui(s);
-            u.menu = if u.menu == Some(name) { None } else { Some(name) };
-            u.submenu = None;
-        }
-    };
-    let close = |s: &mut App| {
-        let u = ui(s);
-        u.menu = None;
-        u.submenu = None;
-    };
+        .child(field)
+}
 
-    let mut sort = Menu::new("pr-sort").trigger(Button("Sort", Some(&i::ARROW_DOWN_UP)).with("default").on_press(toggle("sort")).build(t)).placement(Placement::BottomStart).min_width(208.0).open(open("sort")).on_close(close);
+/// PullRequestRefreshControl: outlined in the toolbar, a ghost icon in the condensed header.
+fn refresh_button(u: &Ui, t: &T, compact: bool) -> El {
+    let (variant, size) = if compact { ("ghost", "icon-sm") } else { ("outline", "icon") };
+    kit::Button::new("Refresh pull requests")
+        .variant(variant)
+        .size(size)
+        .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
+        .disabled(refreshing(u))
+        .on_press(refresh)
+        .build(t)
+}
+
+/// hostMenuOptions after "All": each host's key, name and glyph, and why it can't be read.
+fn host_options(s: &App) -> Vec<(String, String, &'static rune::Icon, Option<String>)> {
+    let u = &s.ui.pages.pull_requests;
+    let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
+    let entries = if u.hosts.is_empty() { &expected } else { &u.hosts };
+    entries.iter().map(|p| (field(p, "host").to_string(), host_label(entries, p), super::pr_row::host_icon(field(p, "kind")), unavailable_host(p))).collect()
+}
+
+/// The host options under "All". A host that can't be read is greyed out with the reason on
+/// hover, tagged "· Unavailable" where `tagged` (the Filters menu, not the compact menus).
+fn host_entries(s: &App, t: &T, key: &str, tagged: bool) -> Vec<MenuEntry> {
+    let chosen = s.ui.pages.pull_requests.filters.host.as_deref();
+    let mut out = vec![MenuEntry::item(MenuItem::new("All").icon(&i::PLUG_2).radio(chosen.is_none()).on_select(|s: &mut App| ui(s).filters.host = None))];
+    for (host, label, glyph, unavailable) in host_options(s) {
+        let checked = chosen == Some(host.as_str());
+        out.push(match unavailable {
+            Some(why) => super::pr_filters::unavailable_option(t, format!("{key}-{host}"), super::pr_filters::menu_glyph(t, glyph), label, checked, tagged, why),
+            None => MenuEntry::item(MenuItem::new(label).icon(glyph).radio(checked).on_select(move |s: &mut App| ui(s).filters.host = Some(host.clone()))),
+        });
+    }
+    out
+}
+
+/// One radio item per option; picking keeps the menu open, as Base UI's radio items do.
+fn radio_entries(options: &'static [(&'static str, &'static str, &'static rune::Icon)], current: &str, set: fn(&mut Ui, &'static str)) -> Vec<MenuEntry> {
+    options.iter().map(|&(id, title, glyph)| MenuEntry::item(MenuItem::new(title).icon(glyph).radio(current == id).on_select(move |s: &mut App| set(ui(s), id)))).collect()
+}
+
+/// The option `id` names, or the first option's name.
+fn option_label(options: &[(&str, &'static str, &rune::Icon)], id: &str) -> String {
+    options.iter().find(|o| o.0 == id).map_or(options[0].1, |o| o.1).to_string()
+}
+
+/// PullRequestCompactFilterMenu in the condensed header: the choice's name and a chevron.
+fn compact_menu(t: &T, name: &'static str, label: &str, current: String, open: bool, entries: Vec<MenuEntry>, overlays: &mut Vec<El>) -> El {
+    let trigger = kit::Button::new(current)
+        .variant("ghost-muted")
+        .size("sm")
+        .on_press(toggle_menu(name))
+        .build(t)
+        .label(label.to_string())
+        .child(icon(&i::CHEVRON_DOWN, 12.0).color(t.c.muted_foreground.alpha_mul(0.7)));
+    Menu::new(format!("pr-{name}")).trigger(trigger).placement(Placement::BottomStart).min_width(180.0).open(open).on_close(close_menu).entries(entries).build(&kit::theme(t), overlays)
+}
+
+/// PullRequestsColumn's header: the title, and once the toolbar has scrolled away the scope's
+/// menus in its place (State, Involvement, and Host when there is a choice), the search behind
+/// its button and a compact Refresh.
+fn top_bar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
+    let u = &s.ui.pages.pull_requests;
+    let title = || text("Pull requests").font(theme::SM_MEDIUM).color(t.c.foreground).truncate().shrink().min_w(0.0);
+    let bar = row().key("pr-header").w_full().h(layout::TOPBAR_H).shrink().px(20.0).gap(8.0).center_y().window_drag();
+    let panel = u.selected.is_none().then(|| panel_control(s, t));
+    if !u.condensed {
+        return bar.child(title()).child(spacer()).children(panel);
+    }
+    let mut scope = row()
+        .gap(6.0)
+        .center_y()
+        .shrink()
+        .min_w(0.0)
+        .child(compact_menu(t, "scope-state", "Filter by state", option_label(STATES, u.filters.state), u.menu == Some("scope-state"), radio_entries(STATES, u.filters.state, |u, v| u.filters.state = v), overlays))
+        .child(compact_menu(
+            t,
+            "scope-involvement",
+            "Filter by involvement",
+            option_label(INVOLVEMENTS, u.filters.involvement),
+            u.menu == Some("scope-involvement"),
+            radio_entries(INVOLVEMENTS, u.filters.involvement, |u, v| u.filters.involvement = v),
+            overlays,
+        ));
+    let hosts = host_options(s);
+    if hosts.len() > 1 {
+        let current = u.filters.host.as_deref().and_then(|h| hosts.iter().find(|x| x.0 == h)).map_or_else(|| "All".to_string(), |x| x.1.clone());
+        scope = scope.child(compact_menu(t, "scope-host", "Filter by host", current, u.menu == Some("scope-host"), host_entries(s, t, "pr-scope-host", false), overlays));
+    }
+    let expanded = search_expanded(u);
+    let mut crumbs = row().gap(12.0).center_y().shrink().min_w(0.0);
+    if !expanded {
+        crumbs = crumbs.child(title()).child(text("/").font(theme::SM_MEDIUM).color(t.c.icon_muted));
+    }
+    let search = if expanded {
+        search_field(u, t, "pr-header-search", true).w(224.0).min_w(96.0).h(32.0).shrink()
+    } else {
+        kit::Button::new("Search pull requests")
+            .variant("ghost")
+            .size("icon-sm")
+            .icon(&i::SEARCH)
+            .on_press(|s: &mut App| {
+                let u = ui(s);
+                u.search_open = true;
+                u.picker.query.focused = false;
+                u.query.focused = true;
+            })
+            .build(t)
+    };
+    bar.child(crumbs.child(scope))
+        .child(spacer())
+        .child(row().gap(6.0).center_y().shrink().min_w(0.0).child(search).child(refresh_button(u, t, true)))
+        .children(panel)
+}
+
+fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
+    let u = &s.ui.pages.pull_requests;
+    let k = kit::theme(t);
+    let search = search_field(u, t, "pr-search", !(u.condensed && search_expanded(u))).grow(1.0).min_w(240.0);
+    let open = |name| u.menu == Some(name);
+
+    let mut sort = Menu::new("pr-sort").trigger(Button("Sort", Some(&i::ARROW_DOWN_UP)).with("default").on_press(toggle_menu("sort")).build(t)).placement(Placement::BottomStart).min_width(208.0).open(open("sort")).on_close(close_menu);
     for &(id, label, glyph) in SORTS {
         // Radio items keep the menu open (Base UI's `closeOnClick` is off for them).
         sort = sort.item(MenuItem::new(label).icon(glyph).radio(u.filters.sort == id).on_select(move |s: &mut App| ui(s).filters.sort = id));
     }
 
-    let mut filters_trigger = Button("Filters", Some(&i::LIST_FILTER)).with("default").on_press(toggle("filters")).build(t);
+    let mut filters_trigger = Button("Filters", Some(&i::LIST_FILTER)).with("default").on_press(toggle_menu("filters")).build(t);
     let count = u.filters.count(&u.query.text);
     if count > 0 {
         filters_trigger = filters_trigger.child(row().h(16.0).px(6.0).radius(radius::FULL).fill(t.c.muted).center().child(text(count.to_string()).font(theme::TEXT_XS).color(t.c.muted_foreground)));
     }
-    let filters = Menu::new("pr-filters").trigger(filters_trigger).placement(Placement::BottomEnd).min_width(208.0).open(open("filters")).on_close(close).entries(filter_entries(s, t));
+    let filters = Menu::new("pr-filters").trigger(filters_trigger).placement(Placement::BottomEnd).min_width(208.0).open(open("filters")).on_close(close_menu).entries(filter_entries(s, t));
 
-    let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
-    let entries = if u.hosts.is_empty() { &expected } else { &u.hosts };
-    let hosts: Vec<(String, String, Option<String>)> = entries.iter().map(|p| (field(p, "host").to_string(), host_label(entries, p), unavailable_host(p))).collect();
-    let chosen = u.filters.host.as_ref().map(|h| hosts.iter().find(|x| &x.0 == h).map(|x| x.1.clone()).unwrap_or_else(|| h.clone()));
+    let hosts = host_options(s);
+    let chosen = u.filters.host.as_deref().map(|h| hosts.iter().find(|x| x.0 == h).map_or_else(|| (h.to_string(), super::pr_row::host_icon("")), |x| (x.1.clone(), x.2)));
     // PullRequestCompactFilterMenu: icon-only, titled with the choice, once a host is chosen.
-    let host_trigger = match &chosen {
-        Some(name) => {
-            let kind = entries.iter().find(|p| Some(field(p, "host")) == u.filters.host.as_deref()).map_or("", |p| field(p, "kind"));
+    let host_trigger = match chosen {
+        Some((name, glyph)) => {
             let tip = format!("Filter by provider: {name}");
-            kit::Button::new(tip.clone()).variant("outline").size("icon").icon(super::pr_row::host_icon(kind)).on_press(toggle("host")).build(t).help(tip)
+            kit::Button::new(tip.clone()).variant("outline").size("icon").icon(glyph).on_press(toggle_menu("host")).build(t).help(tip)
         }
-        None => kit::Button::new("All").variant("outline").icon(&i::PLUG_2).on_press(toggle("host")).build(t).label("Filter by provider: All"),
+        None => kit::Button::new("All").variant("outline").icon(&i::PLUG_2).on_press(toggle_menu("host")).build(t).label("Filter by provider: All"),
     };
-    let mut host = Menu::new("pr-host")
-        .trigger(host_trigger)
-        .placement(Placement::BottomStart)
-        .min_width(180.0)
-        .open(open("host"))
-        .on_close(close)
-        .item(MenuItem::new("All").icon(&i::PLUG_2).radio(u.filters.host.is_none()).on_select(|s: &mut App| ui(s).filters.host = None));
-    for (h, label, unavailable) in hosts {
-        let checked = u.filters.host.as_deref() == Some(h.as_str());
-        let glyph = super::pr_row::host_icon(entries.iter().find(|p| field(p, "host") == h.as_str()).map_or("", |p| field(p, "kind")));
-        let mut item = MenuItem::new(label).icon(glyph).radio(checked).on_select(move |s: &mut App| ui(s).filters.host = Some(h.clone()));
-        if unavailable.is_some() {
-            item = item.shortcut("Unavailable").disabled(true);
-        }
-        host = host.item(item);
-    }
+    let host = Menu::new("pr-host").trigger(host_trigger).placement(Placement::BottomStart).min_width(180.0).open(open("host")).on_close(close_menu).entries(host_entries(s, t, "pr-host", false));
 
     row()
         .key("pr-toolbar")
@@ -1342,15 +1636,7 @@ fn toolbar(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         .child(sort.build(&k, overlays))
         .child(filters.build(&k, overlays))
         .child(host.build(&k, overlays))
-        .child(
-            kit::Button::new("Refresh pull requests")
-                .variant("outline")
-                .size("icon")
-                .icon(if refreshing(u) { &i::LOADER_CIRCLE } else { &i::REFRESH_CW })
-                .disabled(refreshing(u))
-                .on_press(refresh)
-                .build(t),
-        )
+        .children((!u.condensed).then(|| refresh_button(u, t, false)))
 }
 
 /// PullRequestFiltersMenu: State and Involvement, the row filters, Host when there is a choice, then
@@ -1359,10 +1645,10 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     let u = &s.ui.pages.pull_requests;
     let f = &u.filters;
     let sub = u.submenu;
-    let sub_item = |label: &str, glyph: &'static rune::Icon, value: String, name: &'static str, entries: Vec<MenuEntry>| {
+    let sub_item = |item: MenuItem, value: String, name: &'static str, entries: Vec<MenuEntry>| {
         // The host rows carry an "Unavailable" tag beside the name, which the default width clips.
         let width = if matches!(name, "host" | "project") { 240. } else { 160. };
-        MenuEntry::item(MenuItem::new(label).icon(glyph).shortcut(value).submenu(entries, sub == Some(name)).submenu_min_width(width).on_submenu_change(move |s: &mut App, on| {
+        MenuEntry::item(item.shortcut(value).submenu(entries, sub == Some(name)).submenu_min_width(width).on_submenu_change(move |s: &mut App, on| {
             let u = ui(s);
             if on && u.submenu != Some(name) && matches!(name, "author" | "labels") {
                 super::pr_filters::open(&mut u.picker);
@@ -1377,7 +1663,7 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
         for &(id, title, glyph) in options {
             entries.push(MenuEntry::item(MenuItem::new(title).icon(glyph).radio(current == id).on_select(move |s: &mut App| set(ui(s), id))));
         }
-        sub_item(label, glyph, value.to_string(), name, entries)
+        sub_item(MenuItem::new(label).icon(glyph), value.to_string(), name, entries)
     };
 
     fn rows(v: Option<&Value>) -> impl Iterator<Item = &Value> {
@@ -1395,42 +1681,33 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
         radios("State", "state", STATES, f.state, |u, v| u.filters.state = v),
         radios("Involvement", "involvement", INVOLVEMENTS, f.involvement, |u, v| u.filters.involvement = v),
         MenuEntry::Separator,
-        sub_item("Author", &i::USER_ROUND, f.author.clone().unwrap_or_else(|| "Anyone".into()), "author", super::pr_filters::author_entries(s, t, &authors)),
-        sub_item("Labels", &i::TAG, label_value, "labels", super::pr_filters::label_entries(s, t, &labels)),
+        sub_item(MenuItem::new("Author").icon(&i::USER_ROUND), f.author.clone().unwrap_or_else(|| "Anyone".into()), "author", super::pr_filters::author_entries(s, t, &authors)),
+        sub_item(MenuItem::new("Labels").icon(&i::TAG), label_value, "labels", super::pr_filters::label_entries(s, t, &labels)),
         radios("Draft", "draft", DRAFTS, typed_draft(&u.query.text).unwrap_or(f.draft), pick_draft),
         radios("Review", "review", REVIEWS, f.review, |u, v| u.filters.review = v),
         radios("Checks", "checks", CHECKS, f.checks, |u, v| u.filters.checks = v),
     ];
 
-    let expected = if u.hosts.is_empty() { expected_hosts(&s.state().projects) } else { Vec::new() };
-    let hosts = if u.hosts.is_empty() { &expected } else { &u.hosts };
+    let hosts = host_options(s);
     if hosts.len() > 1 {
-        let current = hosts.iter().find(|p| Some(field(p, "host")) == f.host.as_deref());
-        let (value, glyph) = current.map_or(("All".to_string(), &i::PLUG_2), |p| (host_label(hosts, p), super::pr_row::host_icon(field(p, "kind"))));
-        let mut entries = vec![
-            MenuEntry::Label("Host".into()),
-            MenuEntry::item(MenuItem::new("All").icon(&i::PLUG_2).radio(f.host.is_none()).on_select(|s: &mut App| ui(s).filters.host = None)),
-        ];
-        for p in hosts {
-            let host = field(p, "host").to_string();
-            let mut item = MenuItem::new(host_label(hosts, p)).icon(super::pr_row::host_icon(field(p, "kind"))).radio(f.host.as_deref() == Some(host.as_str()));
-            item = match unavailable_host(p) {
-                Some(_) => item.shortcut("Unavailable").disabled(true),
-                None => item.on_select(move |s: &mut App| ui(s).filters.host = Some(host.clone())),
-            };
-            entries.push(MenuEntry::item(item));
-        }
-        out.extend([MenuEntry::Separator, sub_item("Host", glyph, value, "host", entries)]);
+        let current = hosts.iter().find(|x| Some(x.0.as_str()) == f.host.as_deref());
+        let (value, glyph) = current.map_or(("All".to_string(), &i::PLUG_2), |x| (x.1.clone(), x.2));
+        let entries: Vec<MenuEntry> = std::iter::once(MenuEntry::Label("Host".into())).chain(host_entries(s, t, "pr-filter-host", true)).collect();
+        out.extend([MenuEntry::Separator, sub_item(MenuItem::new("Host").icon(glyph), value, "host", entries)]);
     }
 
     let listed = u.baseline.answer_for(&baseline_input(f)).or(u.result.as_ref());
     let errors = listed.and_then(|r| r["errors"].as_array()).map_or(&[][..], Vec::as_slice);
     let server = crate::env::label(s, &s.ui.env.active);
-    let projects = super::pr_filters::projects(&s.state().projects, f.project.as_deref(), &server, errors);
-    let project_value = projects.iter().find(|p| Some(p.id.as_str()) == f.project.as_deref()).map_or("All projects".to_string(), |p| p.title.clone());
-    let project_glyph = if f.project.is_some() { &i::FOLDER_GIT_2 } else { &i::LAYERS };
+    let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or(s.ui.env.active.as_str()).to_string();
+    let projects = super::pr_filters::projects(&s.state().projects, f.project.as_deref(), &server, &environment, errors);
+    // PullRequestFilterOptionIcon: the chosen project's favicon, else "All projects" and its glyph.
+    let (project, value) = match projects.iter().find(|p| Some(p.id.as_str()) == f.project.as_deref()) {
+        Some(p) => (MenuItem::new("Project").lead(super::pr_filters::menu_favicon(s, t, &p.id, &p.title)), p.title.clone()),
+        None => (MenuItem::new("Project").icon(&i::LAYERS), "All projects".to_string()),
+    };
     let entries = super::pr_filters::project_entries(s, t, &projects);
-    out.extend([MenuEntry::Separator, sub_item("Project", project_glyph, project_value, "project", entries)]);
+    out.extend([MenuEntry::Separator, sub_item(project, value, "project", entries)]);
     out
 }
 
@@ -1710,7 +1987,12 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
         .w_full()
         .radius(radius::MD)
         .fill(if selected { t.c.accent } else { Color::TRANSPARENT })
-        .hover(if selected { t.c.accent } else { t.c.accent.alpha_mul(0.6) })
+        // PullRequestListGroups: a close sweep turns pointer events off over the list.
+        .hover(match (selected, super::pr_row::sweeping(&s.ui.pages.pull_requests.row)) {
+            (true, _) => t.c.accent,
+            (false, true) => Color::TRANSPARENT,
+            (false, false) => t.c.accent.alpha_mul(0.6),
+        })
         .center_y()
         .child(body)
         .children(super::pr_row::speed_actions(s, t, result, e))
@@ -2012,6 +2294,45 @@ mod tests {
         u.selected = Some("https://github.com/acme/app/pull/8".into());
         settle_panel(&mut u);
         assert_eq!(u.hidden, None);
+    }
+
+    #[test]
+    fn live_refresh_reads_on_arrival_and_every_five_minutes_only_while_in_use() {
+        let mut l = Live::default();
+        let t0 = 1_000_000;
+        assert!(!l.due(true, t0, false), "a view never read reads for itself");
+        assert!(!l.due(true, t0 + LIVE_EVERY - 1, false));
+        assert!(l.due(true, t0 + LIVE_EVERY, false), "the interval fires while in use");
+        assert!(!l.due(true, t0 + 2 * LIVE_EVERY, false), "six minutes without input is idle");
+        let back = t0 + 2 * LIVE_EVERY + 1_000;
+        l.input(back);
+        assert!(l.due(true, back, false), "input after an idle spell arrives");
+        assert!(!l.due(true, back + 1, true));
+        assert!(!l.due(true, back + 2, false), "returning to the window within the floor");
+        assert!(!l.due(true, back + 20_000, true));
+        assert!(l.due(true, back + 20_001, false), "returning to the window after the floor");
+        assert!(!l.due(false, back + 40_000, false));
+        assert!(l.due(true, back + 40_001, false), "showing a view read before arrives");
+        assert!(!l.due(true, back + 40_001 + LIVE_EVERY - 1, false), "showing again restarts the interval");
+    }
+
+    #[test]
+    fn the_condensed_header_search_opens_on_focus_and_closes_empty_on_blur() {
+        let mut u = Ui::default();
+        u.query.focused = true;
+        settle_search(&mut u);
+        assert!(!u.search_open, "the full header has no search of its own");
+        u.condensed = true;
+        assert!(settle_search(&mut u) && u.search_open, "the focused field moves into the header");
+        u.query.focused = false;
+        assert!(settle_search(&mut u) && !u.search_open, "an empty field closes on blur");
+        u.query.replace_text("login");
+        u.query.focused = true;
+        settle_search(&mut u);
+        u.query.focused = false;
+        assert!(!settle_search(&mut u) && u.search_open, "a field with text stays");
+        u.condensed = false;
+        assert!(settle_search(&mut u) && !u.search_open);
     }
 
     #[test]
