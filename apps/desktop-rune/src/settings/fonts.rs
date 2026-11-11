@@ -122,8 +122,12 @@ pub fn launch() -> (&'static [&'static [u8]], (&'static str, &'static str)) {
     let values = super::client::ClientSettings::load().values;
     let (sans, mono) = families(&values);
     let mut fonts: Vec<&'static [u8]> = Vec::new();
-    let mut launched = Vec::new();
-    for name in [field(&values, "fontFamilySans"), field(&values, "fontFamilyCode"), field(&values, "fontFamilyTerminal")].into_iter().flat_map(named) {
+    let mut launched: Vec<(String, bool)> = Vec::new();
+    let fields = ["fontFamilySans", "fontFamilyCode", "fontFamilyTerminal"];
+    for name in fields.into_iter().flat_map(|key| named(field(&values, key))) {
+        if launched.iter().any(|(n, _)| *n == name.to_lowercase()) {
+            continue;
+        }
         let before = fonts.len();
         for path in files(&name) {
             if let Ok(bytes) = std::fs::read(&path) {
@@ -220,6 +224,8 @@ mod tests {
         );
         assert_eq!(named("\"Fira Code\", monospace, ,"), ["Fira Code"]);
         assert_eq!(squash("Segoe UI-Bold"), "segoeuibold");
+        let advanced = json!({"typographyAdvanced": true, "fontFamilyTerminal": "Not Loaded Mono"}).as_object().unwrap().clone();
+        assert_eq!(terminal_family(&advanced), rune::Family::SystemMono, "a family that never loaded falls back");
     }
 
     #[test]

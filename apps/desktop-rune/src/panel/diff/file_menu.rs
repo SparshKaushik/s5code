@@ -81,7 +81,7 @@ fn close(app: &mut App) {
 
 fn run(app: &mut App, path: &str, action: Action) {
     close(app);
-    let Some((_, cwd)) = crate::panel::context(app) else { return };
+    let Some((_, cwd)) = crate::panel::diff_context(app) else { return };
     let absolute = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", cwd.trim_end_matches('/')) };
     let (editor, title) = match &action {
         Action::Open => ("file-manager".to_string(), "Could not open file".to_string()),
