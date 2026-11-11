@@ -70,9 +70,9 @@ pub fn full_timestamp(iso: &str, zone: Zone, hour12: bool) -> String {
     format!("{}, {day}{suffix} {} {year}", clock(ms, hour12), MONTHS[(month - 1) as usize])
 }
 
-/// The `timestampFormat` setting: 12-hour unless it says 24-hour.
+/// The `timestampFormat` setting; "locale" follows the system's clock.
 pub fn hour12(app: &App) -> bool {
-    crate::settings::value(app, "timestampFormat").as_str() != Some("24-hour")
+    crate::desktop::locale::hour12(crate::settings::value(app, "timestampFormat").as_str())
 }
 
 /// Days since 1970-01-01 to (year, month, day), Howard Hinnant's civil_from_days.

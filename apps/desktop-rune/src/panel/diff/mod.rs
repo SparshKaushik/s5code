@@ -1011,7 +1011,7 @@ fn short(sha: &str) -> &str {
 
 /// "9:00 AM" in local time, or "09:00" under the 24-hour setting (`formatShortTimestamp`).
 fn clock(app: &App, ms: i64) -> String {
-    let hour12 = app.client_settings.values.get("timestampFormat").and_then(Value::as_str) != Some("24-hour");
+    let hour12 = crate::desktop::locale::hour12(app.client_settings.values.get("timestampFormat").and_then(Value::as_str));
     clock_at(data::Zone::Local.wall(ms), hour12)
 }
 
