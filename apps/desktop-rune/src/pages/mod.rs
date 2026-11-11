@@ -8,6 +8,7 @@ pub mod pr_row;
 pub mod pull_requests;
 pub mod usage;
 pub mod usage_limits;
+pub mod usage_merge;
 pub mod usage_prices;
 pub mod usage_tags;
 
@@ -152,6 +153,7 @@ fn open_usage(s: &mut App, metric: &'static str) {
     u.requested = Some(usage::input(u, s.now_ms, &json!([])));
     u.answered = u.requested.clone();
     u.preferences_read = true;
+    usage::scene_scan(s, crate::env::LOCAL, recording.get("summary").cloned());
 }
 
 fn light(s: &mut App) {
@@ -245,6 +247,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     ("pull-requests-stack-saved", |s| {
         open_prs(s, |_| {});
         pr_row::scene(s, 2479, "stack-saved");
+    }),
+    ("pull-requests-stack-unlisted-layer", |s| {
+        open_prs(s, |r| {
+            if let Some(entries) = r["entries"].as_array_mut() {
+                entries.retain(|e| e["number"] != 2476);
+            }
+        });
+        pr_row::scene(s, 2479, "stack-unlisted");
     }),
     ("pull-requests-matched-elsewhere", |s| {
         open_prs(s, |r| {
@@ -345,6 +355,40 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_detail(s, 0, |_| {});
         pull_requests::toggle_panel(&mut s.ui.pages.pull_requests);
     }),
+    ("pull-requests-condensed", |s| {
+        open_prs(s, |_| {});
+        pull_requests::scene_condensed(&mut s.ui.pages.pull_requests);
+    }),
+    ("pull-requests-condensed-search", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        pull_requests::scene_condensed(u);
+        u.query.replace_text("login");
+        pull_requests::submit(u);
+        u.requested = Some(pull_requests::input(u));
+        u.search_open = true;
+    }),
+    ("pull-requests-condensed-state-menu", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        pull_requests::scene_condensed(u);
+        u.menu = Some("scope-state");
+    }),
+    ("pull-requests-host-menu-unavailable", |s| {
+        open_prs(s, |_| {});
+        let u = &mut s.ui.pages.pull_requests;
+        u.hosts = u.result.as_ref().and_then(|r| r["providers"].as_array()).cloned().unwrap_or_default();
+        u.hosts.push(json!({"host": "gitlab.com", "kind": "gitlab", "searchesOnHost": true, "projectCount": 1, "configured": false, "detail": "glab is not authenticated for gitlab.com."}));
+        u.menu = Some("host");
+    }),
+    ("pull-requests-project-chosen", |s| {
+        open_prs(s, |_| {});
+        let first = s.state().projects.iter().find(|p| p["isScratch"] != true).map(|p| crate::data::s(p, "id").to_string());
+        let u = &mut s.ui.pages.pull_requests;
+        u.filters.project = first;
+        u.requested = Some(pull_requests::input(u));
+        u.menu = Some("filters");
+    }),
     ("usage-limits", |s| open_usage(s, "limits")),
     ("usage-cost", |s| open_usage(s, "cost")),
     ("usage-tokens", |s| open_usage(s, "tokens")),
@@ -357,6 +401,7 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         if let Some(summary) = &mut s.ui.pages.usage.summary {
             summary["buckets"] = json!([]);
             summary["sources"] = json!([]);
+            summary["sessions"] = json!({});
         }
     }),
     ("usage-loading", |s| {
@@ -365,8 +410,40 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
     }),
     ("usage-error", |s| {
         open_usage(s, "cost");
-        s.ui.pages.usage.summary = None;
-        s.ui.pages.usage.error = Some("Usage diagnostics need the admin scope on this environment.".into());
+        usage::error_scene(s);
+    }),
+    ("usage-error-menu", |s| {
+        open_usage(s, "cost");
+        usage::error_scene(s);
+        s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-offline", |s| {
+        open_usage(s, "cost");
+        usage::offline_scene(s);
+    }),
+    ("usage-environments-scanning", |s| {
+        open_usage(s, "cost");
+        usage::studio_scene(s, None);
+        s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-environments-duplicates", |s| {
+        open_usage(s, "cost");
+        usage::studio_scene(s, Some(|_| {}));
+        s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-update-required", |s| {
+        open_usage(s, "cost");
+        usage::studio_scene(s, Some(|summary| summary["contractVersion"] = json!(3)));
+        s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-provider-loading", |s| {
+        open_usage(s, "cost");
+        usage::updating_scene(s);
+    }),
+    ("usage-provider-loading-menu", |s| {
+        open_usage(s, "tokens");
+        usage::updating_scene(s);
+        s.ui.pages.usage.menu = Some("environments");
     }),
     ("usage-limits-light", |s| {
         open_usage(s, "limits");
@@ -409,6 +486,14 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "limits");
         usage::cursor_scene(s);
     }),
+    ("usage-cursor-keychain-environments", |s| {
+        open_usage(s, "cost");
+        usage::cursor_environments_scene(s);
+    }),
+    ("usage-limits-cursor-keychain-environments", |s| {
+        open_usage(s, "limits");
+        usage::cursor_environments_scene(s);
+    }),
     ("usage-unpriced-tooltip", |s| {
         open_usage(s, "cost");
         s.ui.pages.usage.unpriced_tip = true;
@@ -441,5 +526,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
             config["environment"]["capabilities"]["usageModelAliases"] = json!(true);
         }
         usage_prices::open(s, Some("kimi-k2-thinking"));
+    }),
+    ("usage-prices-environments", |s| {
+        open_usage(s, "cost");
+        usage::studio_scene(s, Some(|_| {}));
+        usage_prices::environments_scene(s);
     }),
 ];
