@@ -736,11 +736,9 @@ fn in_preview(settings: &serde_json::Map<String, Value>, url: &str, force_browse
 }
 
 /// The code font size, or the terminal's own under advanced typography
-/// (`resolveTerminalFontSizePreference`).
+/// (`resolveTerminalFontSizePreference`), in units of the root's interface scale.
 fn font_size(settings: &serde_json::Map<String, Value>) -> f32 {
-    let advanced = settings.get("typographyAdvanced").and_then(Value::as_bool).unwrap_or(false);
-    let (key, default) = if advanced { ("fontSizeTerminal", 12.) } else { ("fontSizeCode", 13.) };
-    settings.get(key).and_then(Value::as_f64).unwrap_or(default).clamp(8., 20.) as f32
+    crate::settings::fonts::terminal_size(settings)
 }
 
 fn cell_at(app: &App, thread: &str, id: &str, x: f32, y: f32) -> (usize, usize) {

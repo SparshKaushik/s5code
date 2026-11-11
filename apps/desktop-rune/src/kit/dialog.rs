@@ -98,11 +98,14 @@ impl Dialog {
             .label(self.title)
             .w_full()
             .max_w(self.width)
+            // Web's `max-h-full`: the panel shrinks to the window and a scrolling body takes the cut.
+            .shrink()
+            .min_h(0.)
             .radius(16.)
             .padding(24.)
             .gap(24.)
-            // dialog-glass follows Appearance > Glass opacity: 96% at the default 80%, solid at 100%; no blur.
-            .fill(t.c.background.alpha_mul(1.0 - 0.2 * (1.0 - super::menu::glass_opacity())))
+            // Web's dialog-glass without backdrop blur falls back to an opaque popover; Rune has no blur.
+            .fill(t.c.popover)
             .border(1., t.c.contrast_foreground.alpha_mul(0.1))
             .child(row().w_full().items_start().child(heading))
             .children(self.body)
@@ -112,8 +115,7 @@ impl Dialog {
             super::motion::layer()
                 .key(format!("{}-layer", self.key))
                 .padding(16.)
-                .center()
-                .child(super::motion::popup(close(panel).modal_click_outside(self.outside))),
+                .child(col().w_full().h_full().center().child(super::motion::popup(close(panel).modal_click_outside(self.outside)))),
         );
     }
 }

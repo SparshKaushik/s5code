@@ -1,13 +1,18 @@
 //! Saved environments: other T3 servers this window pairs with (apps/web Settings > Connections >
-//! Environments, "Add environment"). Each keeps its own s5_net client and stays connected. The
-//! active one is `App::src`, so every surface keeps talking to one server and switching swaps it.
-//! The web lists every environment's threads at once; that needs per-thread routing wherever
-//! `src` is used, so here one environment is on screen at a time.
+//! Environments, "Add environment"). Each keeps its own s5_net client and stays connected.
+//!
+//! Like the web, the sidebar, palette and search list every environment at once. `App::src` is the
+//! environment that owns what's on screen (the route's thread or project; this machine otherwise),
+//! so the surfaces that read `s.state()` or send through `s.src.net()` reach the right server. The
+//! other environments' project and thread rows are copied into its lists, tagged with their owner
+//! ([`TAG`]); thread views stay with their own server. Request ids are process-unique, and replies
+//! from every environment are handed to `App::src`, where the UI polls for them.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
 
-use rune::{Cursor, El, TextEdit, col, icon, row, text};
+use rune::{El, TextEdit, col, icon, row, text};
 use serde_json::{Value, json};
 
 use crate::data::Source;
@@ -16,6 +21,8 @@ use crate::{App, Route, icons, kit};
 
 /// The key of this machine's own server in `active` and `parked`.
 pub const LOCAL: &str = "";
+/// Marks a row copied in from another environment, holding that environment's key.
+const TAG: &str = "_environment";
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct Saved {
@@ -36,7 +43,11 @@ pub struct Ui {
     pub code: TextEdit,
     pairing: Option<Receiver<Result<Saved, String>>>,
     pub error: Option<String>,
-    pub menu_open: bool,
+    /// Each parked environment's `shell_revision` when its rows were last copied in.
+    merged: HashMap<String, u64>,
+    /// Rows copied into `App::src`, and which environment owns each copied id.
+    foreign: usize,
+    owners: HashMap<String, String>,
 }
 
 fn path() -> PathBuf {
@@ -155,31 +166,137 @@ pub fn status(s: &App, key: &str) -> String {
     }
 }
 
-/// Puts `key`'s environment on screen. Routes and requests in flight belong to the old server, so
-/// the window returns to a new thread, and Settings stays open over it.
+/// Makes `key`'s environment the one `App::src` talks to; the others' rows are copied back in.
 pub fn switch(s: &mut App, key: &str) {
-    s.ui.env.menu_open = false;
     if s.ui.env.active == key {
         return;
     }
     let Some(i) = s.ui.env.parked.iter().position(|(k, _)| k == key) else { return };
     let (_, next) = s.ui.env.parked.remove(i);
-    let previous = std::mem::replace(&mut s.src, next);
+    let mut previous = std::mem::replace(&mut s.src, next);
+    strip(state_mut(&mut previous));
     let old = std::mem::replace(&mut s.ui.env.active, key.to_owned());
     s.ui.env.parked.push((old, previous));
-    s.ui.shell.panel_open = false;
-    s.ui.search.open = false;
-    let home = Route::Home { project_id: None };
-    if matches!(s.route, Route::Settings(_) | Route::Usage) {
-        s.ui.settings.return_route = Some(home.clone());
-        s.ui.pages.main_route = Some(home);
-    } else {
-        s.navigate(home);
+    s.ui.env.merged.clear();
+    merge(s);
+}
+
+/// The environment that owns `route`: its thread's or project's, else this machine's.
+pub fn follow(s: &mut App, route: &Route) {
+    let key = match route {
+        Route::Thread(id) | Route::Home { project_id: Some(id) } => owner(s, id),
+        Route::Home { project_id: None } => crate::chat::home::default_project(s).map_or_else(|| LOCAL.to_owned(), |p| of(s, p)),
+        _ => LOCAL.to_owned(),
+    };
+    switch(s, &key);
+}
+
+/// Which environment a thread or project id belongs to.
+pub fn owner(s: &App, id: &str) -> String {
+    s.ui.env.owners.get(id).cloned().unwrap_or_else(|| s.ui.env.active.clone())
+}
+
+/// The environment a sidebar row came from: its tag, or the one on screen.
+pub fn of(s: &App, row: &Value) -> String {
+    row[TAG].as_str().map_or_else(|| s.ui.env.active.clone(), str::to_owned)
+}
+
+/// Whether rows from more than one environment are listed (the web's `projectGroupsSpanEnvironments`).
+pub fn spans(s: &App) -> bool {
+    s.ui.env.foreign > 0
+}
+
+/// The web's command palette location: "Local" for this machine, else the environment's label.
+pub fn location(s: &App, row: &Value) -> String {
+    match of(s, row) {
+        key if key == LOCAL => "Local".into(),
+        key => label(s, &key),
     }
+}
+
+/// The environment a row lives on, when that's not this machine.
+pub fn remote_label(s: &App, row: &Value) -> Option<String> {
+    let key = of(s, row);
+    (key != LOCAL).then(|| label(s, &key))
+}
+
+/// The client to send a command about `id` through; an id no environment lists goes to `App::src`.
+pub fn net_for<'a>(s: &'a mut App, id: &str) -> Option<&'a mut s5_net::Net> {
+    let key = owner(s, id);
+    if key == s.ui.env.active {
+        return s.src.net();
+    }
+    s.ui.env.parked.iter_mut().find(|(k, _)| *k == key).and_then(|(_, src)| src.net())
+}
+
+fn state_mut(src: &mut Source) -> &mut s5_net::State {
+    match src {
+        Source::Live(net) => net.state_mut(),
+        Source::Fixture(state) => state,
+    }
+}
+
+fn lists(state: &mut s5_net::State) -> [&mut Vec<Value>; 3] {
+    [&mut state.projects, &mut state.threads, &mut state.archived]
+}
+
+fn strip(state: &mut s5_net::State) {
+    for rows in lists(state) {
+        rows.retain(|r| r.get(TAG).is_none());
+    }
+}
+
+/// Copies the parked environments' rows into `App::src` when any of them moved, or when a shell
+/// snapshot on `App::src` replaced its lists and dropped them.
+fn merge(s: &mut App) -> bool {
+    let env = &mut s.ui.env;
+    if env.parked.is_empty() && env.merged.is_empty() {
+        return false;
+    }
+    let moved = env.merged.len() != env.parked.len() || env.parked.iter().any(|(k, src)| env.merged.get(k) != Some(&src.state().shell_revision));
+    let present = s.src.state().projects.iter().chain(&s.src.state().threads).chain(&s.src.state().archived).filter(|r| r.get(TAG).is_some()).count();
+    if !moved && present == env.foreign {
+        return false;
+    }
+    let state = state_mut(&mut s.src);
+    strip(state);
+    env.owners.clear();
+    env.merged.clear();
+    env.foreign = 0;
+    for (key, src) in &env.parked {
+        let theirs = src.state();
+        env.merged.insert(key.clone(), theirs.shell_revision);
+        let [projects, threads, archived] = lists(state);
+        for (from, into) in [(&theirs.projects, projects), (&theirs.threads, threads), (&theirs.archived, archived)] {
+            for row in from {
+                let mut row = row.clone();
+                row[TAG] = Value::String(key.clone());
+                env.owners.insert(crate::data::s(&row, "id").to_owned(), key.clone());
+                into.push(row);
+                env.foreign += 1;
+            }
+        }
+    }
+    true
+}
+
+/// Drains every environment, hands their replies to `App::src`, and refreshes the merged lists.
+pub fn drain(s: &mut App) -> bool {
+    let mut changed = s.src.net().is_some_and(|net| net.drain());
+    for (_, src) in &mut s.ui.env.parked {
+        if let Some(net) = src.net() {
+            changed |= net.drain();
+            if let Source::Live(to) = &mut s.src {
+                net.hand_off(to);
+            }
+        }
+    }
+    merge(s) | changed
 }
 
 pub fn remove(s: &mut App, id: &str) {
     if s.ui.env.active == id {
+        s.navigate(Route::Home { project_id: None });
         switch(s, LOCAL);
     }
     s.ui.env.parked.retain(|(k, _)| k != id);
@@ -232,6 +349,7 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
         }
     };
     if s.ui.env.active == env.id {
+        s.navigate(Route::Home { project_id: None });
         switch(s, LOCAL);
     }
     s.ui.env.parked.retain(|(k, _)| *k != env.id);
@@ -244,13 +362,8 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
 }
 
-/// Keeps parked environments current and lands a pairing that finished.
+/// Lands a pairing that finished.
 pub fn poll(s: &mut App) -> bool {
-    for (_, src) in &mut s.ui.env.parked {
-        if let Some(net) = src.net() {
-            net.drain();
-        }
-    }
     let Some(result) = s.ui.env.pairing.as_ref().and_then(|rx| rx.try_recv().ok()) else { return false };
     s.ui.env.pairing = None;
     paired(s, result);
@@ -265,7 +378,6 @@ pub fn keys(s: &App) -> Vec<String> {
 pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
     let mut rows = Vec::new();
     for key in keys(s) {
-        let active = s.ui.env.active == key;
         let mut detail = status(s, &key);
         if key == LOCAL {
             detail = format!("This machine · {detail}");
@@ -273,12 +385,6 @@ pub fn settings_rows(s: &App, t: &T) -> Vec<El> {
             detail = format!("{} · {detail}", env.base);
         }
         let mut actions = row().gap(8.0).center_y();
-        if active {
-            actions = actions.child(text("Active").font(theme::XS_MEDIUM).color(t.c.success_foreground));
-        } else {
-            let target = key.clone();
-            actions = actions.child(kit::Button::new("Switch").variant("outline").size("xs").on_press(move |s: &mut App| switch(s, &target)).build(t));
-        }
         if key != LOCAL {
             let target = key.clone();
             actions = actions.child(
@@ -345,63 +451,6 @@ pub fn pairing_form(s: &App, t: &T) -> El {
     form
 }
 
-/// The sidebar's environment switcher, under the brand row once another environment is saved.
-pub fn sidebar_switcher(s: &App, t: &T) -> Option<El> {
-    if s.ui.env.saved.is_empty() {
-        return None;
-    }
-    let active = s.ui.env.active.clone();
-    let connected = status(s, &active) == "Connected";
-    Some(
-        row().px(8.0).pb(4.0).child(
-            row()
-                .key("sb-env")
-                .grow(1.0)
-                .h(28.0)
-                .px(8.0)
-                .gap(8.0)
-                .radius(theme::radius::MD)
-                .center_y()
-                .hover(t.sb.sidebar_row_hover)
-                .cursor(Cursor::Pointer)
-                .role("button")
-                .label("Switch environment")
-                .help("Switch environment")
-                .child(icon(if active == LOCAL { &icons::LAPTOP } else { &icons::SERVER }, 14.0).color(t.sb.sidebar_icon_color))
-                .child(text(label(s, &active)).font(theme::TEXT_XS).color(t.sb.sidebar_foreground).truncate().grow(1.0).shrink().min_w(0.0))
-                .child(rune::el().size(6.0, 6.0).radius(3.0).fill(if connected { t.c.success_foreground } else { t.c.warning_foreground }))
-                .child(icon(&icons::CHEVRONS_UP_DOWN, 12.0).color(t.sb.sidebar_icon_color))
-                .on_press(|s: &mut App| s.ui.env.menu_open = !s.ui.env.menu_open),
-        ),
-    )
-}
-
-pub fn sidebar_menu(s: &App, t: &T, overlays: &mut Vec<El>) {
-    if !s.ui.env.menu_open || s.ui.env.saved.is_empty() {
-        return;
-    }
-    let mut menu = kit::Menu::new("sb-env-menu")
-        .anchor("sb-env")
-        .placement(kit::Placement::BottomStart)
-        .min_width(224.0)
-        .open(true)
-        .on_close(|s: &mut App| s.ui.env.menu_open = false);
-    for key in keys(s) {
-        let target = key.clone();
-        menu = menu.item(
-            kit::MenuItem::new(label(s, &key))
-                .icon(if key == LOCAL { &icons::LAPTOP } else { &icons::SERVER })
-                .checked(s.ui.env.active == key)
-                .on_select(move |s: &mut App| switch(s, &target)),
-        );
-    }
-    menu = menu.separator().item(kit::MenuItem::new("Manage environments").icon(&icons::SETTINGS).on_select(|s: &mut App| {
-        s.ui.env.menu_open = false;
-        crate::shell::sidebar::go(s, Route::Settings("connections".into()));
-    }));
-    menu.overlay(&kit::theme(t), overlays);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -419,24 +468,49 @@ mod tests {
     }
 
     #[test]
-    fn switching_swaps_the_active_source_and_parks_the_previous_one() {
+    fn every_environment_is_listed_and_commands_follow_the_owner() {
         // SAFETY: only this test reads S5_ENVIRONMENTS; keeps `remove` off the real config dir.
         unsafe { std::env::set_var("S5_ENVIRONMENTS", std::env::temp_dir().join(format!("s5-env-{}.json", std::process::id()))) };
         let mut s = App::new();
         let mut local = crate::data::empty_state();
         local.shell_ready = true;
+        local.projects.push(json!({"id": "p-here", "title": "Here"}));
+        local.threads.push(json!({"id": "t-here", "projectId": "p-here"}));
         s.src = Source::Fixture(local);
+        let mut remote = crate::data::empty_state();
+        remote.projects.push(json!({"id": "p-there", "title": "There"}));
+        remote.threads.push(json!({"id": "t-there", "projectId": "p-there"}));
+        remote.shell_revision = 1;
         s.ui.env.saved.push(saved("a"));
-        s.ui.env.parked.push(("a".into(), Source::Fixture(crate::data::empty_state())));
-        s.route = Route::Thread("t1".into());
-        switch(&mut s, "a");
-        assert_eq!(s.ui.env.active, "a");
-        assert!(!s.state().shell_ready, "the remote's state is on screen");
-        assert_eq!(s.route, Route::Home { project_id: None });
-        assert!(matches!(local_mut(&mut s), Source::Fixture(st) if st.shell_ready), "this machine's server is parked, not lost");
-        remove(&mut s, "a");
+        s.ui.env.parked.push(("a".into(), Source::Fixture(remote)));
+        let ids = |s: &App| s.state().threads.iter().map(|t| crate::data::s(t, "id").to_owned()).collect::<Vec<_>>();
+
+        assert!(drain(&mut s));
+        assert_eq!(ids(&s), ["t-here", "t-there"]);
+        assert_eq!((owner(&s, "t-there"), owner(&s, "p-there"), owner(&s, "t-here")), ("a".into(), "a".into(), LOCAL.into()));
+        assert_eq!(remote_label(&s, &s.state().projects[1]), Some("Box a".into()));
+        assert!(!drain(&mut s), "nothing moved, so nothing is copied again");
+
+        s.navigate(Route::Thread("t-there".into()));
+        assert_eq!(s.ui.env.active, "a", "the thread's own server is the one on screen");
+        assert!(!s.state().shell_ready);
+        assert_eq!(ids(&s), ["t-there", "t-here"]);
+        assert_eq!(owner(&s, "t-here"), LOCAL);
+        assert_eq!(location(&s, &s.state().threads[1]), "Local");
+
+        // A shell snapshot replaces the lists and drops the copies; the next drain restores them.
+        if let Source::Fixture(state) = &mut s.src {
+            state.threads.retain(|t| t.get(TAG).is_none());
+        }
+        assert!(drain(&mut s));
+        assert_eq!(ids(&s), ["t-there", "t-here"]);
+
+        s.navigate(Route::Settings("general".into()));
         assert_eq!(s.ui.env.active, LOCAL);
         assert!(s.state().shell_ready);
+        remove(&mut s, "a");
+        drain(&mut s);
+        assert_eq!(ids(&s), ["t-here"]);
         assert!(s.ui.env.parked.is_empty());
     }
 }

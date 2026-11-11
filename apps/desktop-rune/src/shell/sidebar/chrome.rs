@@ -192,6 +192,10 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
             .child(scope_icon(t, glyph, selected))
             .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).grow(1.0).truncate());
         if let Some(g) = item.map(|n| ordered[n]) {
+            let remote = s.state().projects.iter().find(|p| crate::data::s(p, "id") == g.representative).and_then(|p| crate::env::remote_label(s, p));
+            if let Some(remote) = remote {
+                entry = entry.child(icon(&i::SERVER, 14.0).color(t.c.muted_foreground).help(format!("On {remote}")));
+            }
             if can_pin {
                 entry = entry.child(scope_pin(t, g, highlighted, &pin_label));
             }

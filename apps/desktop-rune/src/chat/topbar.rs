@@ -130,7 +130,23 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if !project.is_empty() {
         let mark = if scratch { rune::icon(&icons::MESSAGE_SQUARE_DASHED, 14.0).color(t.c.muted_foreground) } else { composer::ctx(s).project.map_or_else(|| monogram(t, &project, 14.0), |p| crate::shell::sidebar::favicon::view(s, t, p, 14.0)) };
         crumbs = crumbs
-            .child(row().gap(6.0).center_y().child(mark).child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate()))
+            .child(
+                row()
+                    .key("topbar-project")
+                    .gap(6.0)
+                    .center_y()
+                    .shrink()
+                    .min_w(0.0)
+                    .max_w(160.0)
+                    .cursor(rune::Cursor::Pointer)
+                    .focusable(true)
+                    .role("button")
+                    .label(format!("New thread in {project}"))
+                    .help(format!("New thread in {project}"))
+                    .on_press(crate::shell::sidebar::new_local)
+                    .child(mark)
+                    .child(text(project).font(CRUMB).color(t.c.muted_foreground).truncate().shrink()),
+            )
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
     let title_el = match &s.ui.chat.topbar.rename {
