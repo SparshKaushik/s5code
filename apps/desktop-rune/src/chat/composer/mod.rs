@@ -1035,7 +1035,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t));
+    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
     if let Some(docked) = docked {
         stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(docked));
     }
