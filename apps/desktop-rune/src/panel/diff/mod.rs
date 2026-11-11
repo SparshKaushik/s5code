@@ -1406,7 +1406,12 @@ fn tree_pane(app: &App, t: &T) -> El {
                 .label(file.path().to_string())
                 .child(icon(&icons::FILE, 14.0).color(t.c.muted_foreground))
                 .child(text(r.label).font(theme::TEXT_XS).color(color).single_line().truncate().min_w(0.0).shrink())
-                .on_press_tx(move |s: &mut App, tx| s.ui.panel.diff.state.scroll_to_file(f, tx))
+                .on_press_tx(move |s: &mut App, tx| {
+                    let ui = &mut s.ui.panel.diff;
+                    ui.touched = true;
+                    ui.state.set_collapsed(f, false);
+                    ui.state.scroll_to_file(f, tx);
+                })
         };
         list = list.child(line);
     }
