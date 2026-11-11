@@ -295,7 +295,7 @@ pub fn scope_menu(s: &App, _model: &Model, t: &T, overlays: &mut Vec<El>) {
                 .child(icon(&i::SEARCH, 16.0).absolute(0.0, 6.0).color(t.c.muted_foreground.alpha_mul(0.55)))
                 .child(field),
         )
-        .child(el().w_full().h(1.0).fill(t.c.ring));
+        .child(el().w_full().h(1.0).fill(if ui.scope_search.focused { t.c.ring } else { t.c.border.alpha_mul(0.7) }));
     let body = col().key("sb-scope").role("dialog").label("Filter threads by project").w(288.0).min_h(0.0).max_h(360.0).child(search).child(list);
     let close = |s: &mut App| {
         if s.ui.shell.sidebar.scope_open {
