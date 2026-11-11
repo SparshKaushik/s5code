@@ -85,8 +85,12 @@ pub fn launch() -> (&'static [&'static [u8]], (&'static str, &'static str)) {
     let values = super::client::ClientSettings::load().values;
     let (sans, mono) = families(&values);
     let mut fonts: Vec<&'static [u8]> = Vec::new();
-    let mut launched = Vec::new();
-    for name in named(field(&values, "fontFamilySans")).into_iter().chain(named(field(&values, "fontFamilyCode"))) {
+    let mut launched: Vec<(String, bool)> = Vec::new();
+    let fields = ["fontFamilySans", "fontFamilyCode", "fontFamilyTerminal"];
+    for name in fields.into_iter().flat_map(|key| named(field(&values, key))) {
+        if launched.iter().any(|(n, _)| *n == name.to_lowercase()) {
+            continue;
+        }
         let before = fonts.len();
         for path in files(&name) {
             if let Ok(bytes) = std::fs::read(&path) {
@@ -101,6 +105,28 @@ pub fn launch() -> (&'static [&'static [u8]], (&'static str, &'static str)) {
     }
     let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
     (Box::leak(fonts.into_boxed_slice()), (leak(sans), leak(mono)))
+}
+
+/// The terminal's family (`resolveTerminalFontPreference`): the first one its field names that
+/// loaded at launch, else the platform's monospaced font.
+pub fn terminal_family(values: &Map<String, Value>) -> rune::Family {
+    static NAMES: std::sync::Mutex<Vec<&'static str>> = std::sync::Mutex::new(Vec::new());
+    let advanced = values.get("typographyAdvanced").and_then(Value::as_bool).unwrap_or(false);
+    let key = if advanced { "fontFamilyTerminal" } else { "fontFamilyCode" };
+    let loaded = |name: &String| LAUNCHED.get().is_some_and(|l| l.iter().any(|(n, ok)| *ok && *n == name.to_lowercase()));
+    let Some(name) = named(field(values, key)).into_iter().find(loaded) else {
+        return rune::Family::SystemMono;
+    };
+    let mut names = NAMES.lock().unwrap_or_else(|e| e.into_inner());
+    let name = match names.iter().find(|n| **n == name) {
+        Some(n) => *n,
+        None => {
+            let leaked: &'static str = Box::leak(name.into_boxed_str());
+            names.push(leaked);
+            leaked
+        }
+    };
+    rune::Family::Named(name)
 }
 
 /// Points the slots at the current settings' families; free when they already hold them.
@@ -183,6 +209,8 @@ mod tests {
         );
         assert_eq!(named("\"Fira Code\", monospace, ,"), ["Fira Code"]);
         assert_eq!(squash("Segoe UI-Bold"), "segoeuibold");
+        let advanced = json!({"typographyAdvanced": true, "fontFamilyTerminal": "Not Loaded Mono"}).as_object().unwrap().clone();
+        assert_eq!(terminal_family(&advanced), rune::Family::SystemMono, "a family that never loaded falls back");
     }
 
     #[test]
