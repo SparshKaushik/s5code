@@ -94,6 +94,38 @@ enum Section {
     Code(&'static str, String),
     Note(String),
     Error(String),
+    /// An answered question (QuestionAnswerHistory): the question, then its answer indented.
+    Answer(String, String),
+}
+
+/// `getQuestionAnswerText`: strings, lists joined by commas, and `{answers}` records.
+fn answer_text(value: &Value) -> String {
+    match value {
+        Value::String(text) => text.clone(),
+        Value::Array(items) => items.iter().map(answer_text).filter(|t| !t.is_empty()).collect::<Vec<_>>().join(", "),
+        Value::Object(record) => record.get("answers").map(answer_text).unwrap_or_default(),
+        _ => String::new(),
+    }
+}
+
+/// Every question the answer names, in the order web lists them, with its text and answer.
+fn question_answers(answer: &Value) -> Vec<(String, String)> {
+    let mut ids: Vec<&String> = Vec::new();
+    for key in ["questionTextById", "answers", "attachmentsByQuestionId"] {
+        for id in answer[key].as_object().into_iter().flat_map(|m| m.keys()) {
+            if !ids.contains(&id) {
+                ids.push(id);
+            }
+        }
+    }
+    ids.into_iter()
+        .map(|id| {
+            let names: Vec<&str> = rows::array(&answer["attachmentsByQuestionId"], id).iter().map(|a| s(a, "name")).filter(|n| !n.is_empty()).collect();
+            let text = [answer_text(&answer["answers"][id.as_str()]), names.join(", ")].into_iter().filter(|t| !t.is_empty()).collect::<Vec<_>>().join("\n");
+            (s(&answer["questionTextById"], id).to_owned(), text)
+        })
+        .filter(|(q, a)| !q.is_empty() || !a.is_empty())
+        .collect()
 }
 
 /// Output past this many bytes keeps its tail, where failures usually are.
@@ -298,6 +330,9 @@ fn sections(item: &Value, fetched: Option<&Value>, root: Option<&str>) -> Vec<Se
                 out.push(Section::Code("Results", cap(&hits.join("\n\n"))));
             }
         }
+        "user_input_request" => {
+            out.extend(question_answers(&item["questionAnswer"]).into_iter().map(|(q, a)| Section::Answer(q, a)));
+        }
         _ => {}
     }
     out
@@ -351,6 +386,11 @@ pub fn view(app: &App, item: &Value, t: &T) -> Option<El> {
                 Section::Code(label, body) => code(app, format!("inspect-{id}-{index}"), label, body, t),
                 Section::Note(line) => text(line).font(theme::TEXT_XS).color(t.c.muted_foreground).selectable(true).wrap_anywhere(),
                 Section::Error(line) => text(line).font(theme::TEXT_XS).color(t.c.destructive),
+                Section::Answer(question, answer) => col()
+                    .w_full()
+                    .gap(4.0)
+                    .children((!question.is_empty()).then(|| text(question).font(theme::TEXT_SM).color(t.c.muted_foreground).selectable(true).wrap()))
+                    .children((!answer.is_empty()).then(|| text(answer).font(theme::TEXT_SM).color(t.c.muted_foreground).selectable(true).wrap().pl(12.0))),
             });
         }
         if omitted {
@@ -375,6 +415,20 @@ pub fn view(app: &App, item: &Value, t: &T) -> Option<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn answered_questions_pair_each_question_with_its_answer() {
+        let answer = json!({
+            "requestId": "r",
+            "questionTextById": {"q1": "Strict schemas or UI flexibility?"},
+            "answers": {"q1": ["UI flexibility"], "q2": {"answers": ["a", "b"]}},
+            "attachmentsByQuestionId": {"q2": [{"type": "file", "id": "f", "name": "trace.log", "mimeType": "text/plain", "sizeBytes": 3}]}
+        });
+        assert_eq!(
+            question_answers(&answer),
+            vec![("Strict schemas or UI flexibility?".to_owned(), "UI flexibility".to_owned()), (String::new(), "a, b\ntrace.log".to_owned())]
+        );
+    }
 
     #[test]
     fn commands_show_their_output_streams_and_failure() {
