@@ -330,9 +330,10 @@ fn gutter(st: &DiffState, l: &Look, i: usize, f: usize, c: &Cell<'_>, side: Side
             .group_opacity(0.0, 1.0)
             .child(icon(&icons::PLUS, 12.0).color(Color::WHITE))
             .on_hover_change(move |s: &mut App, inside, _| {
-                let hushed = &mut s.ui.panel.diff.state.hushed;
-                if !inside || *hushed != Some((f, at)) {
-                    *hushed = None;
+                // The button leaves the tree while its editor is open; that is not the pointer leaving.
+                let ui = &mut s.ui.panel.diff;
+                if ui.comment.is_none() && (!inside || ui.state.hushed != Some((f, at))) {
+                    ui.state.hushed = None;
                 }
             })
             .on_press(move |s: &mut App| super::comments::begin(s, f, at));
