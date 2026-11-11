@@ -360,6 +360,11 @@ pub(super) fn cancel_sweep(u: &mut Ui) -> bool {
     u.sweep.take().is_some()
 }
 
+#[cfg(test)]
+pub(super) fn start_sweep(u: &mut Ui) {
+    u.sweep = Some(Sweep { origin: String::new(), rows: Vec::new(), started: true, target: None, swept: Vec::new() });
+}
+
 /// A sweep has started moving, so the list takes no hover (`pointer-events-none`).
 pub(super) fn sweeping(u: &Ui) -> bool {
     u.sweep.as_ref().is_some_and(|w| w.started)

@@ -530,11 +530,7 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     changed |= settle_search(u);
-    let under = u.swept_under.as_ref().is_some_and(|(f, q)| *f == u.filters && *q == u.sent_query);
-    if !under {
-        u.swept_under = Some((u.filters.clone(), u.sent_query.clone()));
-        changed |= super::pr_row::cancel_sweep(&mut u.row);
-    }
+    changed |= settle_sweep(u);
     changed |= debounce(s);
     if let Some(id) = s.ui.pages.pull_requests.invalidating
         && s.src.net().and_then(|n| n.take_reply(id)).is_some()
@@ -915,6 +911,16 @@ fn load_more(s: &mut App) {
         let u = ui(s);
         u.limit = Some((u.limit.unwrap_or(PAGE) + PAGE).min(MAX_PAGE));
     }
+}
+
+/// A close sweep ends when the filters or the sent search change under it.
+fn settle_sweep(u: &mut Ui) -> bool {
+    let first = u.swept_under.is_none();
+    if u.swept_under.as_ref().is_some_and(|(f, q)| *f == u.filters && *q == u.sent_query) {
+        return false;
+    }
+    u.swept_under = Some((u.filters.clone(), u.sent_query.clone()));
+    !first && super::pr_row::cancel_sweep(&mut u.row)
 }
 
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
@@ -2314,6 +2320,17 @@ mod tests {
         assert!(!l.due(false, back + 40_000, false));
         assert!(l.due(true, back + 40_001, false), "showing a view read before arrives");
         assert!(!l.due(true, back + 40_001 + LIVE_EVERY - 1, false), "showing again restarts the interval");
+    }
+
+    #[test]
+    fn a_close_sweep_survives_polls_and_ends_when_the_search_changes() {
+        let mut u = Ui::default();
+        let sweeping = |u: &Ui| super::super::pr_row::sweeping(&u.row);
+        super::super::pr_row::start_sweep(&mut u.row);
+        assert!(!settle_sweep(&mut u) && sweeping(&u), "the first poll only records the filters");
+        assert!(!settle_sweep(&mut u) && sweeping(&u));
+        u.sent_query = "crash".into();
+        assert!(settle_sweep(&mut u) && !sweeping(&u), "a new search ends the sweep");
     }
 
     #[test]
