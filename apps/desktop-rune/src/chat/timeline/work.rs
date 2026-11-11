@@ -23,17 +23,7 @@ pub enum Action {
     Update,
 }
 
-/// Item kinds that join a tool group.
-pub fn groupable(item: &Value) -> bool {
-    matches!(
-        s(item, "type"),
-        "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "reasoning" | "thread_created"
-    )
-}
-
-pub fn active(item: &Value) -> bool {
-    matches!(s(item, "status"), "pending" | "running" | "waiting")
-}
+pub use super::rows::{active, groupable};
 
 /// `workEntryDisplayIndicatesToolFailure`, from the fields the wire keeps.
 pub fn failed(item: &Value) -> bool {

@@ -1,7 +1,18 @@
-use super::work;
 use crate::data::{s, ts};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
+
+/// Item kinds that join a tool group.
+pub fn groupable(item: &Value) -> bool {
+    matches!(
+        s(item, "type"),
+        "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "reasoning" | "thread_created"
+    )
+}
+
+pub fn active(item: &Value) -> bool {
+    matches!(s(item, "status"), "pending" | "running" | "waiting")
+}
 
 #[derive(Debug, PartialEq)]
 pub enum Row<'a> {
@@ -249,7 +260,7 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
         for run in array(p, "runs").iter().filter(|r| run_active(r)) {
             let id = s(run, "id");
             let last = latest.get(id).copied();
-            if last.is_some_and(|i| work::active(i) || i["streaming"] == true) {
+            if last.is_some_and(|i| active(i) || i["streaming"] == true) {
                 continue;
             }
             let start = ts(run, "startedAt").or_else(|| ts(run, "requestedAt"));
@@ -266,7 +277,7 @@ fn group_tools(rows: Vec<Row<'_>>) -> Vec<Row<'_>> {
     let mut out: Vec<Row> = Vec::with_capacity(rows.len());
     for row in rows {
         let item = match row {
-            Row::Item(item) if work::groupable(item) => item,
+            Row::Item(item) if groupable(item) => item,
             other => {
                 out.push(other);
                 continue;
@@ -274,7 +285,7 @@ fn group_tools(rows: Vec<Row<'_>>) -> Vec<Row<'_>> {
         };
         match out.last_mut() {
             Some(Row::Tools { items, .. }) if s(items[0], "runId") == s(item, "runId") => items.push(item),
-            Some(Row::Item(prev)) if work::groupable(prev) && s(prev, "runId") == s(item, "runId") => {
+            Some(Row::Item(prev)) if groupable(prev) && s(prev, "runId") == s(item, "runId") => {
                 let prev = *prev;
                 out.pop();
                 out.push(Row::Tools { id: format!("tools:{}", s(prev, "id")), items: vec![prev, item] });
