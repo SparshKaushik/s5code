@@ -112,7 +112,7 @@ pub fn scroll_to_end(app: &App, cx: &mut Cx<App>, t: &T, lane: &crate::chat::det
     Some(
         row()
             .key("timeline-scroll-to-end")
-            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0))
+            .pin(Some(lane.left), None, None, Some(crate::chat::composer::BOTTOM + composer_h + 10.0 + banners::stack_h(cx)))
             .w(lane.width)
             .justify_center()
             .live_opacity(&follow.opacity)
@@ -658,7 +658,7 @@ pub fn view(app: &App, cx: &mut Cx<App>, t: &T, thread_id: &str, lane: &crate::c
         .virtualize(100.0)
         // The composer floats over the list's bottom. Scroll extent counts the stack's own
         // padding but not the viewport's, so the clearance lives here.
-        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0);
+        .pb(composer_h + crate::chat::composer::BOTTOM + 21.0 + banners::stack_h(cx));
     for (index, r) in rows.into_iter().enumerate() {
         let marks = marks.next().flatten();
         let steer = if let Row::User(item) = &r { work::steer(item) } else { None };

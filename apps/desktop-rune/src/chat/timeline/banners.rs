@@ -434,6 +434,11 @@ pub fn stack(app: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> Option<El> {
     )
 }
 
+/// The stack's height plus its gap, so the timeline's end and "Scroll to end" clear it.
+pub fn stack_h(cx: &mut Cx<App>) -> f32 {
+    cx.layout_with("composer-banners", |r| r[3].round() + 8.0).unwrap_or(0.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

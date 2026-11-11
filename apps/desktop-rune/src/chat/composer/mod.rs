@@ -1034,10 +1034,12 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
 
     // The @ menu wins over the stash drawer (isStashMenuOpen && !composerMenuOpen).
     let menu = if question::active(s).is_some() { None } else { menu::view(s, cx, t) };
-    let menu = menu.or_else(|| stash::menu(s, t));
     let mut stack = col().key("composer-lane").w(lane.width).pin(Some(lane.left), None, None, Some(BOTTOM));
     if let Some(menu) = menu {
         stack = stack.child(menu.mx(22.0).mb(-17.0));
+    } else if let Some(stash) = stash::menu(s, t) {
+        // Full width, so the inset is the wrapper's padding (margins would shift it).
+        stack = stack.child(col().w_full().px(22.0).mb(-17.0).child(stash));
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
