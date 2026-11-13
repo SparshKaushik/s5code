@@ -266,10 +266,19 @@ describe("t3 pair", () => {
             const exit = yield* runCli(["pair", "--base-dir", baseDir, "--tailscale"]).pipe(
               Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
               Effect.provideService(HostProcess.Platform, "linux"),
-              Effect.provideService(FetchHttpClient.Fetch, async (input, init) => {
-                if (String(input).startsWith(origin)) return fetch(input, init);
-                throw new TypeError("getaddrinfo ENOTFOUND host-a.tail.ts.net");
-              }),
+              Effect.provideService(
+                FetchHttpClient.Fetch,
+                Object.assign(
+                  async (
+                    input: Parameters<typeof fetch>[0],
+                    init?: Parameters<typeof fetch>[1],
+                  ) => {
+                    if (String(input).startsWith(origin)) return fetch(input, init);
+                    throw new TypeError("getaddrinfo ENOTFOUND host-a.tail.ts.net");
+                  },
+                  { preconnect: () => {} },
+                ),
+              ),
               Effect.exit,
             );
 
@@ -614,13 +623,22 @@ describe("t3 pair", () => {
         runCli(["pair", "--base-dir", baseDir, "--tailscale"]).pipe(
           Effect.provideService(ChildProcessSpawner.ChildProcessSpawner, spawner),
           Effect.provideService(HostProcess.Platform, "darwin"),
-          Effect.provideService(FetchHttpClient.Fetch, async (input) => {
-            if (String(input) === "http://127.0.0.2:3773/.well-known/t3/environment") {
-              return Response.json(testDescriptor);
-            }
-            assert.equal(String(input), "https://pair-test.tail.ts.net/.well-known/t3/environment");
-            return new Response(null, { status: 503 });
-          }),
+          Effect.provideService(
+            FetchHttpClient.Fetch,
+            Object.assign(
+              async (input: Parameters<typeof fetch>[0]) => {
+                if (String(input) === "http://127.0.0.2:3773/.well-known/t3/environment") {
+                  return Response.json(testDescriptor);
+                }
+                assert.equal(
+                  String(input),
+                  "https://pair-test.tail.ts.net/.well-known/t3/environment",
+                );
+                return new Response(null, { status: 503 });
+              },
+              { preconnect: () => {} },
+            ),
+          ),
           Effect.flip,
         ),
       );
