@@ -71,6 +71,8 @@ export function parseModelCatalog(document: unknown): ModelCatalog {
       if (input === null || output === null) continue;
 
       const inputCostPerToken = input / PER_MILLION;
+      const cacheCreationCostPerToken =
+        (finiteNumber(costRecord["cache_write"]) ?? input) / PER_MILLION;
       const entry: CatalogEntry = {
         id: `${providerId}/${modelKey}`,
         providerName,
@@ -82,10 +84,12 @@ export function parseModelCatalog(document: unknown): ModelCatalog {
           // rather than as free, same rule the LiteLLM table follows. An
           // explicit zero is honoured: some providers really do read cache free.
           cacheReadCostPerToken: (finiteNumber(costRecord["cache_read"]) ?? input) / PER_MILLION,
-          cacheCreationCostPerToken:
-            (finiteNumber(costRecord["cache_write"]) ?? input) / PER_MILLION,
+          cacheCreationCostPerToken,
+          // models.dev lists one cache-write rate, so 1-hour writes bill at it too.
+          cacheCreation1hCostPerToken: cacheCreationCostPerToken,
           fast: null,
           ultrafast: null,
+          contextTiers: [],
         },
       };
 

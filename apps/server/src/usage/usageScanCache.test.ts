@@ -12,6 +12,21 @@ import type { UsageRecord } from "@t3tools/provider-core/server/usage";
 import { TEST_FORMAT_MAP } from "./usageTestFormats.ts";
 import { initialCodexScanState, parseCodexLine } from "../provider/Drivers/codexUsage.ts";
 
+const parse = (parts: Iterable<string>) => JSON.parse([...parts].join(""));
+// Upstream T3 Code caches have no gateway table or the two gateway columns.
+const toUpstreamCache = (cache: ReturnType<typeof encodeScanCache>) => {
+  const { apiProviders: _gateways, ...current } = cache;
+  return {
+    ...current,
+    files: Object.fromEntries(
+      Object.entries(current.files).map(([path, file]) => [
+        path,
+        { ...file, r: file.r.map((row) => [...row.slice(0, 11), ...row.slice(13)]) },
+      ]),
+    ),
+  };
+};
+
 function record(overrides: Partial<UsageRecord> = {}): UsageRecord {
   return {
     provider: "claude",
@@ -68,7 +83,12 @@ describe("scan cache round trip", () => {
         100,
         [
           record({ inputTokensEstimated: true, rateModel: "priced-model" }),
-          record({ dedupeKey: "msg_2:", model: "claude-opus-5-5", speed: "fast" }),
+          record({
+            dedupeKey: "msg_2:",
+            model: "claude-opus-5-5",
+            speed: "fast",
+            cacheCreation1hTokens: 8,
+          }),
         ],
       ],
       [
@@ -158,10 +178,7 @@ describe("scan cache round trip", () => {
         record({ model: "<synthetic>", dedupeKey: "msg_tail:" }),
       ],
     });
-    const restored = decodeScanCache(
-      JSON.parse(makeScanCacheWriter()(cached, {})),
-      TEST_FORMAT_MAP,
-    );
+    const restored = decodeScanCache(parse(makeScanCacheWriter()(cached, {})), TEST_FORMAT_MAP);
 
     expect(restored.size).toBe(4);
     expect(restored).toEqual(original);
@@ -267,7 +284,7 @@ describe("scan cache round trip", () => {
     expect(decodeScanCache(encoded, TEST_FORMAT_MAP)).toEqual(original);
   });
 
-  it.each([5, 6, 7, 8, 10])(
+  it.each([5, 6, 7, 8, 10, 11, 12, 13])(
     "retains v%s history and compatible positions but invalidates obsolete state",
     (version) => {
       const original = cacheWith([["/gone.jsonl", 100, [record({ speed: "fast" })]]]);
@@ -302,17 +319,7 @@ describe("scan cache round trip", () => {
         malformedRecords: 0,
       };
       original.set("/clean-codex.jsonl", cleanCodex);
-      // Upstream T3 Code caches have no gateway table or the two gateway columns.
-      const { apiProviders: _gateways, ...current } = encodeScanCache(original);
-      const encoded = {
-        ...current,
-        files: Object.fromEntries(
-          Object.entries(current.files).map(([path, file]) => [
-            path,
-            { ...file, r: file.r.map((row) => [...row.slice(0, 11), ...row.slice(13)]) },
-          ]),
-        ),
-      };
+      const encoded = toUpstreamCache(encodeScanCache(original));
       const entry = encoded.files["/gone.jsonl"]!;
       const legacy = {
         ...encoded,
@@ -335,7 +342,7 @@ describe("scan cache round trip", () => {
 
       const restored = decodeScanCache(JSON.parse(JSON.stringify(legacy)), TEST_FORMAT_MAP);
       expect(restored.get("/gone.jsonl")).toEqual(
-        version >= 10
+        version >= 13
           ? original.get("/gone.jsonl")
           : {
               ...original.get("/gone.jsonl"),
@@ -350,7 +357,7 @@ describe("scan cache round trip", () => {
       });
       expect(restored.get("/clean-codex.jsonl")).toEqual({
         ...cleanCodex,
-        size: version >= 8 ? cleanCodex.size : -1,
+        size: -1,
         position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
       });
       expect(restored.get("/gone-pi.jsonl")).toEqual(
@@ -365,7 +372,7 @@ describe("scan cache round trip", () => {
     },
   );
 
-  it.each([6, 8, 9, 10])(
+  it.each([6, 8, 9, 10, 12])(
     "keeps S5 v%s gateway rows but reparses Codex and Claude state",
     (version) => {
       const original = cacheWith([
@@ -394,7 +401,7 @@ describe("scan cache round trip", () => {
         JSON.parse(JSON.stringify({ ...encodeScanCache(original), version })),
         TEST_FORMAT_MAP,
       );
-      // Claude entries from before S5 v12 predate advisor usage, so live transcripts re-read too.
+      // Claude entries from before S5 v16 predate 1-hour cache writes, so live transcripts re-read too.
       expect(restored.get("/gone.jsonl")).toEqual({
         ...original.get("/gone.jsonl"),
         size: -1,
@@ -408,11 +415,42 @@ describe("scan cache round trip", () => {
     },
   );
 
-  it("re-parses a Claude transcript cached before advisor usage was counted", () => {
-    const original = cacheWith([["/claude.jsonl", 100, [record()]]]);
-    const v9 = { ...JSON.parse(makeScanCacheWriter()(original, {})), version: 9 };
+  it("re-parses a v14 Codex entry that skipped records and restarts a clean one when it grows", () => {
+    const codex = (malformedRecords: number): CachedFile => ({
+      size: 10,
+      mtimeMs: 100,
+      provider: "codex",
+      records: [record({ provider: "codex", model: "gpt-6-astra", dedupeKey: null })],
+      tailRecords: [],
+      malformedRecords,
+      position: position({
+        state: { ...initialCodexScanState(), model: "gpt-6-astra", sessionId: "session-a" },
+      }),
+    });
+    const original: ScanCache = new Map([
+      ["/skipped-codex.jsonl", codex(1)],
+      ["/clean-codex.jsonl", codex(0)],
+    ]);
+    const v14 = { ...toUpstreamCache(encodeScanCache(original)), version: 14 };
 
-    const restored = decodeScanCache(JSON.parse(JSON.stringify(v9)), TEST_FORMAT_MAP);
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(v14)), TEST_FORMAT_MAP);
+    expect(restored.get("/skipped-codex.jsonl")).toEqual({
+      ...codex(1),
+      size: -1,
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+    });
+    // Served while unchanged, but its state predates the latest snapshot time, so it cannot resume.
+    expect(restored.get("/clean-codex.jsonl")).toEqual({
+      ...codex(0),
+      position: { resumeOffset: 0, guardLength: 0, guardHash: 0, state: null },
+    });
+  });
+
+  it("re-parses a Claude transcript cached before 1-hour cache writes were counted", () => {
+    const original = cacheWith([["/claude.jsonl", 100, [record()]]]);
+    const v12 = { ...parse(makeScanCacheWriter()(original, {})), version: 12 };
+
+    const restored = decodeScanCache(JSON.parse(JSON.stringify(v12)), TEST_FORMAT_MAP);
     expect(restored.get("/claude.jsonl")).toEqual({
       ...original.get("/claude.jsonl"),
       size: -1,
@@ -428,7 +466,7 @@ describe("scan cache round trip", () => {
     ]);
     cache.set("/b.jsonl", { ...cache.get("/b.jsonl")!, malformedRecords: 2 });
     const sources = { "claude\u0000/projects": { dir: "/projects", volumeId: "1:2" } };
-    expect(decodeScanCache(JSON.parse(write(cache, { sources })), TEST_FORMAT_MAP)).toEqual(cache);
+    expect(decodeScanCache(parse(write(cache, { sources })), TEST_FORMAT_MAP)).toEqual(cache);
 
     cache.set("/b.jsonl", {
       ...cache.get("/b.jsonl")!,
@@ -443,7 +481,7 @@ describe("scan cache round trip", () => {
       ],
       malformedRecords: 4,
     });
-    const document = JSON.parse(write(cache, { sources }));
+    const document = parse(write(cache, { sources }));
     expect(decodeScanCache(document, TEST_FORMAT_MAP)).toEqual(cache);
     expect(document.sources).toEqual(sources);
   });
@@ -457,9 +495,7 @@ describe("scan cache round trip", () => {
   });
 
   it("skips malformed file entries but keeps good ones", () => {
-    const encoded = JSON.parse(
-      makeScanCacheWriter()(cacheWith([["/good.jsonl", 100, [record()]]]), {}),
-    );
+    const encoded = parse(makeScanCacheWriter()(cacheWith([["/good.jsonl", 100, [record()]]]), {}));
     const withJunk = {
       ...encoded,
       files: { ...encoded.files, "/bad.jsonl": { s: "nope", m: 1, p: "claude", r: [] } },
@@ -470,7 +506,7 @@ describe("scan cache round trip", () => {
   });
 
   it("drops the whole entry when any row is corrupt, forcing a cold re-parse", () => {
-    const encoded = JSON.parse(
+    const encoded = parse(
       makeScanCacheWriter()(
         cacheWith([["/a.jsonl", 100, [record(), record({ dedupeKey: "msg_2:" })]]]),
         {},

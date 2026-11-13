@@ -29,6 +29,10 @@ function text(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+// OpenCode provider IDs whose bare model IDs LiteLLM prices under its own prefix.
+const LITELLM_PREFIXES = new Map([["opencode-go", "opencode_go"]]);
+const OPENCODE_GATEWAYS = new Set(["opencode", "opencode-go"]);
+
 /**
  * Kiro reports full prompt context as `tokens.input` with no cache split. Like
  * the pi parser, treat the previous context per session and model as cached prefix.
@@ -104,16 +108,23 @@ function parseOpenCodeMessage(
   if (totalTokens(totals) === 0) return null;
   const id = fallback.id || text(message.id);
   const cost = message.cost;
+  const prefix = LITELLM_PREFIXES.get(apiProvider);
+  const free = OPENCODE_GATEWAYS.has(apiProvider) && model.endsWith("-free");
   return {
     provider: "opencode",
     timestampMs,
     model,
     apiProvider,
+    ...(prefix !== undefined && !model.includes("/") ? { rateModel: `${prefix}/${model}` } : {}),
     sessionId,
     totals,
     inputTokensEstimated,
-    // OpenCode uses zero for unknown rates, including paid subscriptions; let shared pricing estimate.
-    reportedCostUsd: typeof cost === "number" && Number.isFinite(cost) && cost > 0 ? cost : null,
+    // OpenCode records zero for unknown rates and paid subscriptions alike, so only its own
+    // gateways' free models report zero; shared pricing estimates every other zero.
+    reportedCostUsd:
+      typeof cost === "number" && Number.isFinite(cost) && (cost > 0 || (free && cost === 0))
+        ? cost
+        : null,
     speed: "standard",
     dedupeKey: id ? `opencode:${id}` : null,
   };

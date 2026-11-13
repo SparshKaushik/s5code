@@ -69,8 +69,10 @@ describe("parseModelCatalog", () => {
         outputCostPerToken: 2.5e-5,
         cacheReadCostPerToken: 5e-7,
         cacheCreationCostPerToken: 6.25e-6,
+        cacheCreation1hCostPerToken: 6.25e-6,
         fast: null,
         ultrafast: null,
+        contextTiers: [],
       },
     });
   });
@@ -90,8 +92,10 @@ describe("parseModelCatalog", () => {
       outputCostPerToken: 0,
       cacheReadCostPerToken: 0,
       cacheCreationCostPerToken: 0,
+      cacheCreation1hCostPerToken: 0,
       fast: null,
       ultrafast: null,
+      contextTiers: [],
     });
   });
 

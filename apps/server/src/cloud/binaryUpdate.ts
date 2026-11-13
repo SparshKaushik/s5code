@@ -10,7 +10,7 @@ import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { BOOT_SERVICE_UNIT_ENV } from "./bootService.ts";
+import { SERVICE_UNIT_ENV } from "./serviceProtocol.ts";
 import { serverBinaryAssetName, type ServerBinaryIdentity } from "./binaryRuntime.ts";
 
 /**
@@ -77,9 +77,7 @@ export function resolveRestartMethod(
   env: Readonly<Record<string, string | undefined>>,
 ): ServerBinaryRestartMethod {
   const nonEmpty = (value: string | undefined) => value !== undefined && value.trim().length > 0;
-  return nonEmpty(env[BOOT_SERVICE_UNIT_ENV]) || nonEmpty(env.INVOCATION_ID)
-    ? "systemd"
-    : "self-exec";
+  return nonEmpty(env[SERVICE_UNIT_ENV]) || nonEmpty(env.INVOCATION_ID) ? "systemd" : "self-exec";
 }
 
 export interface ServerBinaryUpdatePlan {

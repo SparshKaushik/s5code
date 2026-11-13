@@ -9,7 +9,7 @@ import * as ChildProcessSpawner from "effect/process/ChildProcessSpawner";
 import * as HostProcess from "@t3tools/shared/HostProcess";
 
 import * as ProcessRunner from "../processRunner.ts";
-import { BOOT_SERVICE_UNIT_ENV } from "./bootService.ts";
+import { SERVICE_UNIT_ENV } from "./serviceProtocol.ts";
 import type { ServerBinaryIdentity } from "./binaryRuntime.ts";
 import {
   prepareServerBinaryUpdate,
@@ -57,8 +57,8 @@ it("builds the release download URL from the identity and target version", () =>
 });
 
 it("uses systemd when the boot-service unit env is present, self-exec otherwise", () => {
-  expect(resolveRestartMethod({ [BOOT_SERVICE_UNIT_ENV]: "t3code.service" })).toBe("systemd");
-  expect(resolveRestartMethod({ [BOOT_SERVICE_UNIT_ENV]: "   " })).toBe("self-exec");
+  expect(resolveRestartMethod({ [SERVICE_UNIT_ENV]: "t3code.service" })).toBe("systemd");
+  expect(resolveRestartMethod({ [SERVICE_UNIT_ENV]: "   " })).toBe("self-exec");
   // systemd sets INVOCATION_ID for every unit invocation, which covers
   // hand-written units that never ran `t3 service install`.
   expect(resolveRestartMethod({ INVOCATION_ID: "3f2a9c8e0d1b4f5e9a6b7c8d9e0f1a2b" })).toBe(
@@ -138,7 +138,7 @@ it.layer(NodeServices.layer)("binary self-update", (it) => {
           Effect.provideService(HttpClient.HttpClient, makeHttpClient(REPLACEMENT_BYTES)),
           Effect.provideService(ProcessRunner.ProcessRunner, makeRunner({})),
           Effect.provideService(HostProcess.Environment, {
-            [BOOT_SERVICE_UNIT_ENV]: "t3code.service",
+            [SERVICE_UNIT_ENV]: "t3code.service",
           }),
         );
         expect(plan.restart).toBe("systemd");
