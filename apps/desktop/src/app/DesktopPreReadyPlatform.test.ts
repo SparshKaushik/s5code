@@ -219,14 +219,17 @@ describe("DesktopPreReadyPlatform", () => {
     ).pipe(Effect.ensuring(Effect.sync(() => vi.unstubAllEnvs())));
   });
 
-  it.effect("still prepares the portal entry when the bundled icon cannot be copied", () => {
+  it.effect("still prepares the portal entry when the bundled icon cannot be read", () => {
     getSwitchValueMock.mockReturnValue("");
-    copyFileSyncMock.mockImplementation(() => {
-      throw new Error("missing bundled icon");
+    readFileSyncMock.mockImplementation((path: string) => {
+      if (path.endsWith("prod-resources/icon.png")) throw new Error("missing bundled icon");
+      return "{}";
     });
     return Effect.gen(function* () {
       yield* DesktopPreReadyPlatform.make;
-      const contents = writeFileSyncMock.mock.calls[0]?.[1];
+      const contents = writeFileSyncMock.mock.calls.find(([path]) =>
+        String(path).endsWith(".desktop"),
+      )?.[1];
       assert.include(contents, "MimeType=x-scheme-handler/s5code;");
       assert.include(contents, "Icon=");
       assert.equal(setDesktopNameMock.mock.calls.length, 1);

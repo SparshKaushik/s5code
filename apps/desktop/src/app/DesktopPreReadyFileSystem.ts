@@ -60,10 +60,6 @@ export const make = FileSystem.makeNoop({
     syncFs("writeFileString", path, () =>
       NodeFS.writeFileSync(path, data, { flag: options?.flag ?? "w" }),
     ),
-  remove: (path, options) =>
-    syncFs("remove", path, () =>
-      NodeFS.rmSync(path, { force: options?.force, recursive: options?.recursive }),
-    ),
 });
 
 export const layer = Layer.succeed(FileSystem.FileSystem, make);

@@ -1356,7 +1356,7 @@ describe("DesktopWindow", () => {
           }
           const webPreferences: Electron.WebPreferences = {};
           willAttachWebview({ preventDefault: () => {} }, webPreferences, {
-            partition: "persist:t3code-preview-test",
+            partition: "persist:s5code-preview-test",
           });
 
           assert.deepEqual(webPreferences.additionalArguments, expected);
