@@ -73,9 +73,10 @@ impl Scan {
         self.error = None;
         self.generation += 1;
         // The model filter is part of the query's input, so another filter's answer is another query.
-        let Some(hit) = self.cached.iter().position(|c| c.window == *window && c.settings[3] == settings[3]).map(|at| self.cached.remove(at)) else {
+        let Some(at) = self.cached.iter().position(|c| c.window == *window && c.settings[3] == settings[3]) else {
             return false;
         };
+        let hit = self.cached.remove(at);
         let fresh = hit.settings == *settings && now - hit.at < STALE_MS;
         self.summary = Some(hit.summary);
         self.answered = Some(hit.window);

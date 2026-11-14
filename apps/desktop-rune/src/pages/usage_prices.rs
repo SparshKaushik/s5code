@@ -1113,4 +1113,24 @@ mod tests {
         assert_eq!((staged[0].values.clone(), staged[0].alias.clone()), ([Some(String::new()), None, None, None], None));
         assert_eq!(changes(&both[0], &staged).1["model:m"], "Input is required on Mac.");
     }
+
+    #[test]
+    fn an_environment_reads_as_checking_until_its_session_grants_settings_write() {
+        let answered = |v: Value| Session { data: Some(v), ..Session::default() };
+        assert_eq!(unavailable_reason(false, true, None, true), Some("Offline"));
+        assert_eq!(unavailable_reason(true, false, None, true), Some("Prices not loaded"));
+        assert_eq!(unavailable_reason(true, true, None, true), Some("Checking permissions…"));
+        assert_eq!(unavailable_reason(true, true, Some(&Session { pending: Some(1), ..Session::default() }), false), Some("Checking permissions…"));
+        assert_eq!(unavailable_reason(true, true, None, false), None, "a recording has no session to read");
+        let read_only = answered(json!({"authenticated": true, "permissions": ["orchestration:read"]}));
+        assert_eq!(unavailable_reason(true, true, Some(&read_only), true), Some("Read-only access"));
+        let writer = answered(json!({"authenticated": true, "permissions": ["settings:write"]}));
+        assert_eq!(unavailable_reason(true, true, Some(&writer), true), None);
+        let legacy = answered(json!({"authenticated": true, "scopes": ["orchestration:read", "orchestration:operate"]}));
+        assert_eq!(unavailable_reason(true, true, Some(&legacy), true), None, "an old server's operate scope grants settings writes");
+        let current = answered(json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "environment:maintain"}}));
+        assert_eq!(unavailable_reason(true, true, Some(&current), true), Some("Read-only access"));
+        let failed = Session { failed: true, ..writer };
+        assert_eq!(unavailable_reason(true, true, Some(&failed), true), Some("Read-only access"));
+    }
 }

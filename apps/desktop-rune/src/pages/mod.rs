@@ -433,6 +433,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "cost");
         usage::offline_scene(s);
     }),
+    ("usage-no-environments", |s| {
+        open_usage(s, "cost");
+        usage::no_environments_scene(s);
+    }),
     ("usage-environments-scanning", |s| {
         open_usage(s, "cost");
         usage::studio_scene(s, None);
@@ -456,6 +460,10 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "tokens");
         usage::updating_scene(s);
         s.ui.pages.usage.menu = Some("environments");
+    }),
+    ("usage-chart-tooltip-partial", |s| {
+        open_usage(s, "cost");
+        usage::tooltip_scene(s);
     }),
     ("usage-limits-light", |s| {
         open_usage(s, "limits");
@@ -543,5 +551,13 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         open_usage(s, "cost");
         usage::studio_scene(s, Some(|_| {}));
         usage_prices::environments_scene(s);
+    }),
+    ("usage-prices-checking", |s| {
+        open_usage(s, "cost");
+        usage_prices::checking_scene(s);
+    }),
+    ("usage-prices-read-only", |s| {
+        open_usage(s, "cost");
+        usage_prices::read_only_scene(s);
     }),
 ];
