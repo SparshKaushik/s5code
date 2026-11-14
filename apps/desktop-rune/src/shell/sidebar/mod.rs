@@ -817,8 +817,12 @@ fn poll_content(s: &mut App) -> bool {
 pub fn commit_rename(s: &mut App) {
     let Some((id, edit)) = s.ui.shell.sidebar.rename.take() else { return };
     let next = edit.text.trim().to_string();
+    if next.is_empty() {
+        crate::shell::palette::toast(s, "Thread title cannot be empty", None);
+        return;
+    }
     let current = Model::build(s).thread(&id).map(|t| t.title.clone()).unwrap_or_default();
-    if next.is_empty() || next == current {
+    if next == current {
         return;
     }
     dispatch(s, "thread.metadata.update", &id, json!({ "title": next }));

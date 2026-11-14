@@ -2,6 +2,18 @@ use crate::data::{s, ts};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 
+/// Item kinds that join a tool group.
+pub fn groupable(item: &Value) -> bool {
+    matches!(
+        s(item, "type"),
+        "command_execution" | "file_change" | "file_search" | "web_search" | "dynamic_tool" | "reasoning" | "thread_created"
+    )
+}
+
+pub fn item_active(item: &Value) -> bool {
+    matches!(s(item, "status"), "pending" | "running" | "waiting")
+}
+
 #[derive(Debug, PartialEq)]
 pub enum Row<'a> {
     User(&'a Value),
@@ -18,6 +30,16 @@ pub enum Row<'a> {
         label: String,
     },
     Item(&'a Value),
+    /// Consecutive tool calls of the turn in flight, behind one summary row.
+    Tools {
+        id: String,
+        items: Vec<&'a Value>,
+    },
+    /// The turn in flight is waiting on the model: "Thinking" and the time since its last step.
+    Thinking {
+        id: String,
+        elapsed: String,
+    },
     Request {
         request: &'a Value,
         item: Option<&'a Value>,
@@ -164,10 +186,14 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
     let mut working = HashSet::new();
     let mut folds: HashMap<&str, usize> = HashMap::new();
     let mut spans: HashMap<&str, (Option<i64>, Option<i64>)> = HashMap::new();
+    let mut latest: HashMap<&str, &Value> = HashMap::new();
     for (item, key) in items.drain(..).zip(&keys) {
         let kind = s(item, "type");
         let run_id = s(item, "runId");
         let live = !run_id.is_empty() && active(run_id);
+        if live && kind != "user_message" {
+            latest.insert(run_id, item);
+        }
         // Notices that open a run (a fork's context) sit above its prompt, not under "Working".
         if live && kind != "user_message" && !escapes_fold(kind) && working.insert(run_id) {
             rows.push(working_row(runs[run_id], now));
@@ -228,7 +254,46 @@ pub fn derive(p: &Value, now: i64) -> Vec<Row<'_>> {
             rows.push(working_row(run, now));
         }
     }
+    let mut rows = group_tools(rows);
+    // Nothing thinks while a request waits on the user (ThinkingTimelineRow).
+    if pending.is_empty() {
+        for run in array(p, "runs").iter().filter(|r| run_active(r)) {
+            let id = s(run, "id");
+            let last = latest.get(id).copied();
+            if last.is_some_and(|i| item_active(i) || i["streaming"] == true) {
+                continue;
+            }
+            let start = ts(run, "startedAt").or_else(|| ts(run, "requestedAt"));
+            let since = last.and_then(|i| ts(i, "completedAt").or_else(|| ts(i, "updatedAt"))).max(start).unwrap_or(now);
+            // Whole seconds, so the label changes once a second at most.
+            rows.push(Row::Thinking { id: format!("thinking:{id}"), elapsed: duration(0, (now - since).max(0) / 1000 * 1000) });
+        }
+    }
     rows
+}
+
+/// Runs of two or more groupable items of one turn, outside any fold, become one tool group.
+fn group_tools(rows: Vec<Row<'_>>) -> Vec<Row<'_>> {
+    let mut out: Vec<Row> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let item = match row {
+            Row::Item(item) if groupable(item) => item,
+            other => {
+                out.push(other);
+                continue;
+            }
+        };
+        match out.last_mut() {
+            Some(Row::Tools { items, .. }) if s(items[0], "runId") == s(item, "runId") => items.push(item),
+            Some(Row::Item(prev)) if groupable(prev) && s(prev, "runId") == s(item, "runId") => {
+                let prev = *prev;
+                out.pop();
+                out.push(Row::Tools { id: format!("tools:{}", s(prev, "id")), items: vec![prev, item] });
+            }
+            _ => out.push(Row::Item(item)),
+        }
+    }
+    out
 }
 
 /// Items the web timeline leaves out (session-logic.ts deriveTimelineEntries): workspace
@@ -397,9 +462,8 @@ mod tests {
         assert!(matches!(derive(&p, 0).as_slice(), [Row::Assistant(_)]));
         let p =
             json!({"runs":[{"id":"r","status":"starting","requestedAt":"1970-01-01T00:00:00Z"}]});
-        assert!(
-            matches!(derive(&p,2000).as_slice(),[Row::Working{label,..}] if label=="Working for 2s")
-        );
+        assert!(matches!(derive(&p, 2000).as_slice(), [Row::Working { label, .. }, Row::Thinking { elapsed, .. }]
+            if label == "Working for 2s" && elapsed == "2s"));
     }
     #[test]
     fn a_live_turn_has_one_working_row_after_its_prompt_and_folds_once_it_ends() {
@@ -417,10 +481,11 @@ mod tests {
             .map(|r| match r {
                 Row::User(v) | Row::Assistant(v) | Row::Item(v) => s(v, "id").to_owned(),
                 Row::Working { label, .. } => label.clone(),
+                Row::Thinking { elapsed, .. } => format!("Thinking {elapsed}"),
                 _ => "?".to_owned(),
             })
             .collect();
-        assert_eq!(ids, ["fc", "u", "Working for 5s", "t1", "a1", "t2", "a2"]);
+        assert_eq!(ids, ["fc", "u", "Working for 5s", "t1", "a1", "t2", "a2", "Thinking 5s"]);
         let done = json!({"runs":[{"id":"r","status":"completed","startedAt":"1970-01-01T00:00:00Z","completedAt":"1970-01-01T00:00:09Z"}],"turnItems":items});
         let rows = derive(&done, 60000);
         assert!(matches!(rows.as_slice(), [Row::Item(_), Row::User(_), Row::Work { id, label, items }, Row::Assistant(a)]
@@ -431,6 +496,27 @@ mod tests {
             {"id":"x","type":"run_interrupt_request","runId":"r","ordinal":3}]});
         assert!(matches!(derive(&stopped, 0).as_slice(), [Row::User(_), Row::Item(_)]));
     }
+    #[test]
+    fn live_tool_runs_group_and_thinking_shows_only_while_idle() {
+        let items = json!([
+            {"id":"u","type":"user_message","runId":"r","ordinal":1},
+            {"id":"t1","type":"command_execution","runId":"r","status":"completed","ordinal":2},
+            {"id":"t2","type":"dynamic_tool","runId":"r","status":"completed","ordinal":3},
+            {"id":"t3","type":"reasoning","runId":"r","status":"completed","ordinal":4},
+            {"id":"n","type":"error","runId":"r","ordinal":5},
+            {"id":"t4","type":"command_execution","runId":"r","status":"running","ordinal":6}]);
+        let p = json!({"runs":[{"id":"r","status":"running","startedAt":"1970-01-01T00:00:00Z"}],"turnItems":items});
+        assert!(matches!(derive(&p, 9500).as_slice(), [Row::User(_), Row::Working { .. }, Row::Tools { id, items }, Row::Item(e), Row::Item(t)]
+            if id == "tools:t1" && items.len() == 3 && s(e, "id") == "n" && s(t, "id") == "t4"));
+        let mut idle = p.clone();
+        idle["turnItems"][5]["status"] = json!("completed");
+        idle["turnItems"][5]["completedAt"] = json!("1970-01-01T00:00:06Z");
+        assert!(matches!(derive(&idle, 9500).last(), Some(Row::Thinking { elapsed, .. }) if elapsed == "3s"));
+        let mut asked = idle.clone();
+        asked["runtimeRequests"] = json!([{"id":"q","status":"pending"}]);
+        assert!(!derive(&asked, 9500).iter().any(|r| matches!(r, Row::Thinking { .. })));
+    }
+
     #[test]
     fn prompts_rewind_to_the_checkpoint_before_their_run() {
         let p = json!({

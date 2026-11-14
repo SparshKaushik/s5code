@@ -411,6 +411,26 @@ pub fn sync_topbar(app: &mut App) {
         current_thread(app).is_some_and(|t| app.ui.panel.drawer.is_open(&t));
 }
 
+/// Opens the drawer on a terminal the server started, such as a setup script's
+/// (`storeEnsureTerminal` with open and active, then focus).
+pub fn show(app: &mut App, id: &str) {
+    let Some(thread) = current_thread(app) else {
+        return;
+    };
+    let drawer = &mut app.ui.panel.drawer;
+    let owner = drawer.owner_of(&thread, id);
+    if owner != Some(Owner::Panel) {
+        let state = drawer.threads.entry(thread.clone()).or_default();
+        state.open = true;
+        if owner.is_none() {
+            state.groups.add(id);
+        }
+    }
+    activate(app, &thread, id);
+    start(app, &thread, id, true);
+    sync_topbar(app);
+}
+
 pub fn new_terminal(app: &mut App, owner: Owner) {
     let Some(thread) = current_or_draft(app) else {
         return;

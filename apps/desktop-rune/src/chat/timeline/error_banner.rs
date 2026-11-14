@@ -247,7 +247,7 @@ fn expandable(app: &App, t: &T, key: &str, error: &str, color: Color) -> El {
 
 /// alert-glass: the page background at the glass opacity under a 4% tint, mixed in sRGB as CSS
 /// `color-mix(in srgb)` does (theme colours are linear).
-fn glass(t: &T, tint: Color) -> Color {
+pub(super) fn glass(t: &T, tint: Color) -> Color {
     let enc = |c: f32| if c <= 0.003_130_8 { c * 12.92 } else { 1.055 * c.powf(1.0 / 2.4) - 0.055 };
     let dec = |c: f32| if c <= 0.040_45 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) };
     let (bg, base) = (t.c.background, 0.8 * 0.96);

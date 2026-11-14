@@ -102,6 +102,8 @@ pub struct Editor {
     pub edit: TextEdit,
     pub key: String,
     pub placeholder: &'static str,
+    /// Only an option answers it: the field takes no typing (the web disables it), so digits pick.
+    pub choice_only: bool,
 }
 
 pub fn editor(app: &App) -> Option<Editor> {
@@ -112,10 +114,23 @@ pub fn editor(app: &App) -> Option<Editor> {
     let placeholder = if choice_only { "Choose an option above" } else { "Type your own answer, or leave this blank to use the selected option" };
     let edit = app.ui.chat.timeline.custom_answers.get(&key).cloned().unwrap_or_else(|| {
         let mut edit = TextEdit::new(s(q, "initialAnswer"));
-        edit.focused = true;
+        // A new question must not take the keyboard, or the next digit types instead of picking.
+        edit.focused = composer_focused(app, &a);
         edit
     });
-    Some(Editor { edit, key, placeholder })
+    Some(Editor { edit, key, placeholder, choice_only })
+}
+
+/// Whether the composer field held the keyboard before this question: the previous question's
+/// answer field, else the draft's.
+fn composer_focused(app: &App, a: &Active) -> bool {
+    let index = progress(app, a).index;
+    let previous = index.checked_sub(1).and_then(|i| a.questions().get(i));
+    if let Some(edit) = previous.and_then(|q| app.ui.chat.timeline.custom_answers.get(&custom_key(a.id(), s(q, "id")))) {
+        return edit.focused;
+    }
+    let key = crate::chat::composer::draft_key(app, app.frame_route());
+    app.ui.chat.composer.drafts.get(&key).is_some_and(|d| d.edit.focused)
 }
 
 /// The stored answer edit behind [`editor`], created on first use.
@@ -424,4 +439,19 @@ pub fn actions(app: &App, t: &T, stop: Option<El>) -> Option<El> {
         pill = pill.opacity(0.64);
     }
     Some(out.child(pill))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_new_question_leaves_the_keyboard_where_it_was() {
+        let mut app = App::new();
+        let id = app.state().thread_views.iter().find(|(_, v)| s(&v.projection["thread"], "title") == "Timeline question fixture").map(|(id, _)| id.clone()).unwrap();
+        app.navigate(Route::Thread(id.clone()));
+        assert!(editor(&app).unwrap().edit.focused, "typing in the composer keeps typing the answer");
+        app.ui.chat.composer.drafts.get_mut(&id).unwrap().edit.focused = false;
+        assert!(!editor(&app).unwrap().edit.focused, "with the composer blurred, digits stay free to pick");
+    }
 }

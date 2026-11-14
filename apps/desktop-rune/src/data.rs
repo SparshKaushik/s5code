@@ -73,7 +73,7 @@ pub fn fixture_state() -> State {
         for entry in entries.flatten() {
             if let Some(projection) = read_json(&entry.path()) {
                 let id = projection["thread"]["id"].as_str().unwrap_or_default().to_string();
-                state.thread_views.insert(id, ThreadView { projection, synchronized: true, sequence: 0 });
+                state.thread_views.insert(id, ThreadView { projection, synchronized: true, sequence: 0, ..Default::default() });
             }
         }
     }
