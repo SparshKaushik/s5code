@@ -128,8 +128,8 @@ pub struct Ui {
     zoom_until: i64,
     /// Whether the panel's browser had focus at the last key event (the `previewFocus` context).
     pub(super) focused: bool,
-    /// A picked element waiting for its comment, as web's annotation editor holds it.
-    pending: Option<Pending>,
+    /// Web's annotation session: what it marks so far, and its comment.
+    annotation: Option<Annotation>,
     comment: TextEdit,
     pub(super) favicons: super::favicon::Favicons,
     /// The floating preview's `[x, y, width]` in the chat area once moved or resized.
@@ -194,12 +194,43 @@ struct Context {
     info: Value,
 }
 
-struct Pending {
+/// Desktop's annotation tools: pick elements, mark a region, draw, or erase a mark.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Tool {
+    Select,
+    Region,
+    Draw,
+    Erase,
+}
+
+/// One thing an annotation marks, in the order the page's marks were added.
+#[derive(Debug, PartialEq)]
+enum Target {
+    Element(Value),
+    Region,
+    Stroke,
+}
+
+struct Annotation {
     tab: TabId,
-    element: Value,
-    image: Option<Vec<u8>>,
-    /// The element's viewport rect in CSS pixels.
-    rect: [f32; 4],
+    tool: Tool,
+    targets: Vec<Target>,
+    /// The latest target's viewport rect in CSS pixels, which the editor sits beside.
+    anchor: Option<[f32; 4]>,
+    /// A region or stroke being dragged: where it started, where the pointer is, its bounds
+    /// and how many points it has, in viewport CSS pixels.
+    drag: Option<Stroke>,
+    /// A submit waiting for the screenshot; whether it sends the message too.
+    capturing: Option<bool>,
+}
+
+#[derive(Clone, Copy)]
+struct Stroke {
+    start: (f32, f32),
+    last: (f32, f32),
+    min: (f32, f32),
+    max: (f32, f32),
+    points: usize,
 }
 
 /// A new tab on a blank page; Chrome starts with the first one. On another machine's thread
@@ -427,8 +458,8 @@ pub fn close(app: &mut App, tab: TabId) {
     if ui.shown == Some(tab) {
         ui.shown = None;
     }
-    if ui.pending.as_ref().is_some_and(|p| p.tab == tab) {
-        ui.pending = None;
+    if ui.annotation.as_ref().is_some_and(|a| a.tab == tab) {
+        ui.annotation = None;
     }
     if ui.pip == Some(tab) {
         ui.pip = None;
@@ -927,7 +958,8 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         ui.shown = want;
         ui.browser.send(Cmd::Show(want));
     }
-    let track = ui.pending.as_ref().map(|p| p.tab);
+    // The editor follows the latest picked element as the page scrolls.
+    let track = ui.annotation.as_ref().filter(|a| matches!(a.targets.last(), Some(Target::Element(_)))).map(|a| a.tab);
     if ui.tracked != track {
         ui.tracked = track;
         ui.browser.send(Cmd::Track(track));
@@ -939,6 +971,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let mut changed = generation != ui.seen || !events.is_empty();
     ui.seen = generation;
     let mut settled = vec![];
+    let mut left = vec![];
     let mut found = vec![];
     let mut loaded = vec![];
     for (id, tab) in ui.tabs.iter_mut() {
@@ -954,6 +987,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         let nav = (status.url.clone(), status.loading);
         if tab.nav != nav {
             if navigated(&tab.nav, &status) {
+                left.push(*id);
                 match &tab.stream {
                     Some(stream) => stream.clear_pointer(),
                     None => {
@@ -1001,8 +1035,22 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             super::history::set_title(app, &url, &title);
         }
     }
+    // A new page has none of the annotation's marks.
+    if app.ui.panel.browser.annotation.as_ref().is_some_and(|a| left.contains(&a.tab) && a.capturing.is_none()) {
+        app.ui.panel.browser.annotation = None;
+    }
     for event in events {
         match event {
+            browser::Event::Erased(tab, Some(index)) => {
+                if let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| a.tab == tab && index < a.targets.len()) {
+                    a.targets.remove(index);
+                    if a.targets.is_empty() {
+                        a.anchor = None;
+                    }
+                }
+            }
+            browser::Event::Erased(_, None) => {}
+            browser::Event::Marked(tab, image) => annotated(app, tab, image),
             browser::Event::Screenshot(Ok(path)) => screenshot_saved(app, path),
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
             browser::Event::Popup { target, opener, url } => adopt(app, target, opener, url),
@@ -1720,25 +1768,142 @@ fn screenshot_saved(app: &mut App, path: std::path::PathBuf) {
     crate::shell::palette::toast_with(app, "Screenshot saved", None, actions);
 }
 
-/// A picked element opens the comment editor beside it, as web's annotation overlay does.
-fn pick(app: &mut App, tab: TabId, element: Value, image: Option<Vec<u8>>) {
+/// Starts web's annotation session on `tab`, element picking first, or ends it.
+fn toggle_annotation(app: &mut App, tab: TabId) {
+    if app.ui.panel.browser.annotation.as_ref().is_some_and(|a| a.tab == tab) {
+        return end_annotation(app);
+    }
+    end_annotation(app);
+    let ui = &mut app.ui.panel.browser;
+    ui.annotation = Some(Annotation { tab, tool: Tool::Select, targets: vec![], anchor: None, drag: None, capturing: None });
+    ui.comment = TextEdit::new("");
+    send(app, Cmd::Pick(tab, true));
+}
+
+fn end_annotation(app: &mut App) {
+    let Some(a) = app.ui.panel.browser.annotation.take() else { return };
+    send(app, Cmd::Pick(a.tab, false));
+    send(app, Cmd::Mark(a.tab, "clear()".into()));
+}
+
+/// Desktop's tool keys and buttons: V, R, D and E.
+fn set_tool(app: &mut App, tool: Tool) {
+    let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| a.capturing.is_none()) else { return };
+    a.tool = tool;
+    a.drag = None;
+    let tab = a.tab;
+    send(app, Cmd::Pick(tab, tool == Tool::Select));
+}
+
+/// A picked element joins the annotation, boxed in the page, and picking carries on.
+fn pick(app: &mut App, tab: TabId, element: Value, _image: Option<Vec<u8>>) {
     let r = &element["rect"];
     let rect = [&r["x"], &r["y"], &r["width"], &r["height"]].map(|v| v.as_f64().unwrap_or(0.) as f32);
     let ui = &mut app.ui.panel.browser;
-    ui.pending = Some(Pending { tab, element, image, rect });
-    ui.comment = TextEdit::new("");
+    if !ui.annotation.as_ref().is_some_and(|a| a.tab == tab) {
+        ui.annotation = Some(Annotation { tab, tool: Tool::Select, targets: vec![], anchor: None, drag: None, capturing: None });
+        ui.comment = TextEdit::new("");
+    }
+    let Some(a) = ui.annotation.as_mut() else { return };
+    a.targets.push(Target::Element(element));
+    a.anchor = Some(rect);
+    let select = a.tool == Tool::Select && a.capturing.is_none();
     ui.comment.focused = true;
+    send(app, Cmd::Mark(tab, format!("element({}, {}, {}, {})", rect[0], rect[1], rect[2], rect[3])));
+    if select {
+        send(app, Cmd::Pick(tab, true));
+    }
 }
 
-/// Enter or Attach: the pending element and its comment go to the composer.
-fn submit_annotation(app: &mut App) {
-    let Some(p) = app.ui.panel.browser.pending.take() else { return };
-    let comment = app.ui.panel.browser.comment.text.trim().to_string();
-    attach(app, &p.element, p.image, &comment);
+/// A region drag or a stroke on the page, in viewport CSS pixels.
+fn mark_drag(s: &mut App, d: &rune::Drag, tab: TabId, scale: f32) {
+    let Some(a) = s.ui.panel.browser.annotation.as_mut().filter(|a| a.tab == tab && a.capturing.is_none()) else { return };
+    let scale = scale.max(0.01);
+    let p = (d.x / scale, d.y / scale);
+    let tool = a.tool;
+    let mut calls = vec![];
+    match (tool, d.phase) {
+        (Tool::Erase, Phase::Down) => {
+            send(s, Cmd::Erase(tab, p.0, p.1));
+            return;
+        }
+        (Tool::Erase, _) | (Tool::Select, _) => return,
+        (_, Phase::Down) => {
+            a.drag = Some(Stroke { start: p, last: p, min: p, max: p, points: 1 });
+            if tool == Tool::Draw {
+                calls.push(format!("begin({}, {})", p.0, p.1));
+            }
+        }
+        (_, Phase::Move) if !d.cancelled() => {
+            let Some(drag) = a.drag.as_mut() else { return };
+            drag.last = p;
+            drag.min = (drag.min.0.min(p.0), drag.min.1.min(p.1));
+            drag.max = (drag.max.0.max(p.0), drag.max.1.max(p.1));
+            drag.points += 1;
+            if tool == Tool::Draw {
+                calls.push(format!("point({}, {})", p.0, p.1));
+            }
+        }
+        _ => {
+            let Some(drag) = a.drag.take() else { return };
+            match tool {
+                Tool::Region if !d.cancelled() => {
+                    if let Some(rect) = region_rect(drag.start, drag.last) {
+                        a.targets.push(Target::Region);
+                        a.anchor = Some(rect);
+                        calls.push(format!("region({}, {}, {}, {})", rect[0], rect[1], rect[2], rect[3]));
+                    }
+                }
+                Tool::Draw => {
+                    calls.push("end()".into());
+                    if drag.points > 1 {
+                        a.targets.push(Target::Stroke);
+                        a.anchor = Some([drag.min.0, drag.min.1, drag.max.0 - drag.min.0, drag.max.1 - drag.min.1]);
+                    }
+                }
+                _ => {}
+            }
+            s.ui.panel.browser.comment.focused = true;
+        }
+    }
+    for call in calls {
+        send(s, Cmd::Mark(tab, call));
+    }
 }
 
-/// A picked element goes to the composer as web's preview annotation, its crop as an image.
-fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>, comment: &str) {
+/// Desktop's `isUsableRect`: a region at least 4 CSS pixels each way, whichever way it was dragged.
+fn region_rect(a: (f32, f32), b: (f32, f32)) -> Option<[f32; 4]> {
+    let (x, y) = (a.0.min(b.0), a.1.min(b.1));
+    let (w, h) = ((a.0 - b.0).abs(), (a.1 - b.1).abs());
+    (w >= 4. && h >= 4.).then_some([x, y, w, h])
+}
+
+/// Enter attaches the annotation and its screenshot; Cmd/Ctrl+Enter sends it too.
+fn submit_annotation(app: &mut App, send_now: bool) {
+    let Some(a) = app.ui.panel.browser.annotation.as_mut().filter(|a| !a.targets.is_empty() && a.capturing.is_none()) else { return };
+    a.capturing = Some(send_now);
+    a.drag = None;
+    let tab = a.tab;
+    send(app, Cmd::Pick(tab, false));
+    send(app, Cmd::CaptureMarks(tab));
+}
+
+/// The screenshot arrived: the annotation goes to the composer, and is sent when asked.
+fn annotated(app: &mut App, tab: TabId, image: Option<Vec<u8>>) {
+    let ui = &mut app.ui.panel.browser;
+    let Some(send_now) = ui.annotation.as_ref().filter(|a| a.tab == tab).and_then(|a| a.capturing) else { return };
+    let Some(a) = ui.annotation.take() else { return };
+    let comment = ui.comment.text.trim().to_string();
+    let status = ui.browser.status(tab);
+    send(app, Cmd::Mark(tab, "clear()".into()));
+    attach(app, (&status.url, &status.title), &a.targets, image, &comment, send_now);
+    if send_now {
+        crate::chat::composer::submit(app);
+    }
+}
+
+/// An annotation goes to the composer as web's preview annotation, its screenshot as an image.
+fn attach(app: &mut App, page: (&str, &str), targets: &[Target], image: Option<Vec<u8>>, comment: &str, quiet: bool) {
     let id = s5_net::uuid();
     let image = image.and_then(|bytes| {
         let dir = crate::host::t3_home().join("userdata").join("browser-artifacts");
@@ -1748,33 +1913,54 @@ fn attach(app: &mut App, element: &Value, image: Option<Vec<u8>>, comment: &str)
         std::fs::write(&path, bytes).ok()?;
         Some(path.display().to_string())
     });
-    let record = annotation(&id, element, comment);
-    let detail = record["elements"][0]["selector"].as_str().or(record["elements"][0]["tagName"].as_str()).unwrap_or_default().to_string();
+    let record = annotation(&id, page, targets, comment);
+    let detail = record["targetSummary"].as_str().unwrap_or_default().to_string();
     crate::chat::composer::add_context(app, record);
     if let Some(image) = image {
         crate::chat::composer::attach_path(app, image);
     }
-    crate::shell::palette::toast(app, "Element added to the composer", Some(&detail));
+    if !quiet {
+        crate::shell::palette::toast(app, "Annotation added to the composer", Some(&detail));
+    }
 }
 
-/// `previewAnnotationContextRecord` for one picked element and its comment.
-fn annotation(id: &str, element: &Value, comment: &str) -> Value {
+/// Web's `previewAnnotationTargetSummary`: "2 selected elements, 1 marked region, 1 drawing".
+fn target_summary(targets: &[Target]) -> String {
+    let count = |f: fn(&Target) -> bool| targets.iter().filter(|t| f(t)).count();
+    let parts = [
+        (count(|t| matches!(t, Target::Element(_))), "selected element"),
+        (count(|t| *t == Target::Region), "marked region"),
+        (count(|t| *t == Target::Stroke), "drawing"),
+    ];
+    parts.iter().filter(|(n, _)| *n > 0).map(|(n, noun)| format!("{n} {noun}{}", if *n == 1 { "" } else { "s" })).collect::<Vec<_>>().join(", ")
+}
+
+/// `previewAnnotationContextRecord` for an annotation's targets and comment.
+fn annotation(id: &str, (url, title): (&str, &str), targets: &[Target], comment: &str) -> Value {
     let bounded = |v: &Value, max: usize| v.as_str().map(|s| s.chars().take(max).collect::<String>());
-    let page_url = bounded(&element["pageUrl"], 2048).unwrap_or_default();
-    let page_title = bounded(&element["pageTitle"], 2048).filter(|t| !t.trim().is_empty());
+    let elements: Vec<&Value> = targets.iter().filter_map(|t| if let Target::Element(e) = t { Some(e) } else { None }).collect();
+    let first = elements.first().copied().cloned().unwrap_or_else(|| json!({ "pageUrl": url, "pageTitle": title }));
+    let page_url = bounded(&first["pageUrl"], 2048).unwrap_or_default();
+    let page_title = bounded(&first["pageTitle"], 2048).filter(|t| !t.trim().is_empty());
     let label = page_title.as_deref().unwrap_or("Preview annotation").replace(['[', ']', '\\', '\r', '\n'], " ");
     let label: String = label.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
-    let details = json!({
-        "pageUrl": page_url,
-        "pageTitle": page_title,
-        "tagName": bounded(&element["tagName"], 255).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "element".into()),
-        "selector": bounded(&element["selector"], 2048),
-        "htmlPreview": bounded(&element["htmlPreview"], 8000).unwrap_or_default(),
-        "componentName": bounded(&element["componentName"], 2048),
-        "source": null,
-        "styles": bounded(&element["styles"], 8000).unwrap_or_default(),
-    });
-    json!({
+    let details: Vec<Value> = elements
+        .iter()
+        .take(50)
+        .map(|element| {
+            json!({
+                "pageUrl": bounded(&element["pageUrl"], 2048).unwrap_or_else(|| page_url.clone()),
+                "pageTitle": bounded(&element["pageTitle"], 2048).filter(|t| !t.trim().is_empty()),
+                "tagName": bounded(&element["tagName"], 255).filter(|t| !t.trim().is_empty()).unwrap_or_else(|| "element".into()),
+                "selector": bounded(&element["selector"], 2048),
+                "htmlPreview": bounded(&element["htmlPreview"], 8000).unwrap_or_default(),
+                "componentName": bounded(&element["componentName"], 2048),
+                "source": null,
+                "styles": bounded(&element["styles"], 8000).unwrap_or_default(),
+            })
+        })
+        .collect();
+    let mut record = json!({
         "version": 1,
         "contextId": format!("preview-annotation_{id}"),
         "kind": "preview-annotation",
@@ -1783,12 +1969,23 @@ fn annotation(id: &str, element: &Value, comment: &str) -> Value {
         "pageUrl": page_url,
         "pageTitle": page_title,
         "comment": comment.chars().take(8000).collect::<String>(),
-        "targetSummary": "1 selected element",
+        "targetSummary": target_summary(targets),
         "styleChanges": [],
-        "elements": [details],
-        "elementIds": ["element-1"],
         "styleChangeDetails": [],
-    })
+    });
+    if !details.is_empty() {
+        record["elementIds"] = json!((1..=details.len()).map(|n| format!("element-{n}")).collect::<Vec<_>>());
+        record["elements"] = json!(details);
+    }
+    let regions = targets.iter().filter(|t| **t == Target::Region).count();
+    let strokes = targets.iter().filter(|t| **t == Target::Stroke).count();
+    if regions > 0 {
+        record["regionCount"] = json!(regions);
+    }
+    if strokes > 0 {
+        record["strokeCount"] = json!(strokes);
+    }
+    record
 }
 
 /// Records `previewFocus` before any shortcut resolves, so `when` clauses see it on this key.
@@ -2130,6 +2327,7 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     let input_off = streamed.as_ref().is_some_and(|s| s.controller.as_deref() != Some("you"));
     let focused = state.bar.focused;
     let live = !idle(&status) && status.failure.is_none();
+    let annotating = ui.annotation.as_ref().is_some_and(|a| a.tab == tab);
     let address = text_input(&state.bar, theme::TEXT_SM)
         .key(format!("browser-url-{tab}"))
         .single_line()
@@ -2224,16 +2422,12 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
         .children(streamed.is_none().then(|| {
             let help = if status.failure.is_some() {
                 "Page didn't load. Pick is unavailable until the page renders"
-            } else if status.picking {
+            } else if annotating {
                 "Cancel annotation (Esc)"
             } else {
                 "Annotate an element"
             };
-            toggle(t, if status.picking { "Cancel annotation" } else { "Annotate preview" }, &icons::MOUSE_POINTER_CLICK, status.picking, !status.painted || !live, move |s: &mut App| {
-                let on = !s.ui.panel.browser.browser.status(tab).picking;
-                send(s, Cmd::Pick(tab, on));
-            })
-            .help(help)
+            toggle(t, if annotating { "Cancel annotation" } else { "Annotate preview" }, &icons::MOUSE_POINTER_CLICK, annotating, !status.painted || !live, move |s: &mut App| toggle_annotation(s, tab)).help(help)
         }))
         .children(streamed.is_none().then(|| capture_button(t, tab, &status, live)))
         .child(toggle(
@@ -2817,18 +3011,47 @@ fn hover_box(t: &T, status: &Status, scale: f32, page: (f32, f32)) -> Option<El>
     Some(el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
 }
 
-/// The picked element's box and web's compact annotation editor beside it: the comment and
-/// Attach (Enter); Escape drops the pick.
+/// Desktop's annotation chrome over the page: the tool bar, a layer taking region and drawing
+/// drags, the region being dragged, and the compact editor beside the latest target with the
+/// comment and Attach (Enter, or Cmd/Ctrl+Enter to send); Escape ends the session.
 fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32)) -> Vec<El> {
     let ui = &app.ui.panel.browser;
-    let Some(pending) = ui.pending.as_ref().filter(|p| p.tab == tab) else { return Vec::new() };
-    // Where the element is now, so the box and editor follow a scroll, as web's overlay does.
-    let rect = ui.browser.status(tab).picked.unwrap_or(pending.rect);
-    let [x, y, w, h] = rect;
-    let mut out: Vec<El> = hover_rect(rect, scale, page)
-        .map(|[x, y, w, h]| el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.1)).border(2., t.c.primary))
-        .into_iter()
-        .collect();
+    let Some(a) = ui.annotation.as_ref().filter(|a| a.tab == tab) else { return Vec::new() };
+    let mut out = vec![];
+    if matches!(a.tool, Tool::Region | Tool::Draw | Tool::Erase) {
+        let cursor = if a.tool == Tool::Erase { rune::Cursor::Pointer } else { rune::Cursor::Crosshair };
+        out.push(el().key("browser-annotation-layer").pin(Some(0.), Some(0.), None, None).size(page.0, page.1).cursor(cursor).on_drag(move |s: &mut App, d, _| mark_drag(s, d, tab, scale)));
+    }
+    if let Some(rect) = a.drag.filter(|_| a.tool == Tool::Region).and_then(|d| region_rect(d.start, d.last)) {
+        out.extend(hover_rect(rect, scale, page).map(|[x, y, w, h]| el().pin(Some(x), Some(y), None, None).size(w, h).radius(3.).fill(t.c.primary.alpha_mul(0.06)).border(2., t.c.primary)));
+    }
+    let busy = a.capturing.is_some();
+    let tool = |label: &'static str, glyph: &'static rune::Icon, which: Tool| toggle(t, label, glyph, a.tool == which, busy, move |s: &mut App| set_tool(s, which)).help(label);
+    let summary = if a.targets.is_empty() { "Pick elements, mark a region or draw".to_string() } else { target_summary(&a.targets) };
+    out.push(
+        row()
+            .key("browser-annotation-tools")
+            .pin(Some(8.), Some(8.), None, None)
+            .h(36.)
+            .px(4.)
+            .gap(2.)
+            .center_y()
+            .radius(10.)
+            .border(1., t.c.border)
+            .fill(t.c.popover.alpha_mul(0.96))
+            .shadow(4., 16., Color::BLACK.alpha(0.2))
+            .child(tool("Select elements (V)", &icons::MOUSE_POINTER_2, Tool::Select))
+            .child(tool("Mark a region (R)", &icons::SCAN, Tool::Region))
+            .child(tool("Draw (D)", &icons::PENCIL, Tool::Draw))
+            .child(tool("Erase a mark (E)", &icons::TRASH_2, Tool::Erase))
+            .child(text(summary).font(theme::TEXT_XS).color(t.c.muted_foreground).px(6.).single_line()),
+    );
+    if a.targets.is_empty() {
+        return out;
+    }
+    // Where the latest element is now, so the editor follows a scroll, as web's overlay does.
+    let picked = ui.browser.status(tab).picked.filter(|_| matches!(a.targets.last(), Some(Target::Element(_))));
+    let [x, y, w, h] = picked.or(a.anchor).unwrap_or([0., 0., page.0 / scale.max(0.01), 0.]);
     let size = (360f32.min(page.0 - 16.).max(160.), 50.);
     let (left, top) = editor_position([x * scale, y * scale, w * scale, h * scale], size, page);
     let comment = text_input(&ui.comment, theme::TEXT_SM)
@@ -2845,17 +3068,23 @@ fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32))
         .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
         .on_edit(|s: &mut App| &mut s.ui.panel.browser.comment)
         .on_submit(|s: &mut App, tx: &mut Tx| {
-            submit_annotation(s);
+            submit_annotation(s, false);
             tx.blur();
         })
-        .on_input_key(|s: &mut App, e, tx| {
-            if !matches!(e.key, Key::Escape) {
-                return false;
+        .on_input_key(|s: &mut App, e, tx| match e.key {
+            Key::Enter if e.mods.cmd || e.mods.ctrl => {
+                submit_annotation(s, true);
+                tx.blur();
+                true
             }
-            s.ui.panel.browser.pending = None;
-            tx.blur();
-            true
+            Key::Escape => {
+                end_annotation(s);
+                tx.blur();
+                true
+            }
+            _ => false,
         });
+    let attach = kit::Button::new(if busy { "Capturing…" } else { "Attach" }).disabled(busy).on_press(|s: &mut App| submit_annotation(s, false)).build(t).help("Attach annotation and screenshot (Enter). Send with Cmd/Ctrl+Enter.");
     out.push(
         row()
             .key("browser-annotation-editor")
@@ -2870,7 +3099,7 @@ fn annotation_editor(app: &App, t: &T, tab: TabId, scale: f32, page: (f32, f32))
             .fill(t.c.popover.alpha_mul(0.96))
             .shadow(8., 24., Color::BLACK.alpha(0.25))
             .child(comment)
-            .child(kit::Button::new("Attach").on_press(submit_annotation).build(t)),
+            .child(attach),
     );
     out
 }
@@ -2957,8 +3186,22 @@ fn page(pixels: &Pixels, key: &str, k: f32) -> El {
             if e.mods.cmd || (e.mods.ctrl && !matches!(e.key, Key::Text(_))) {
                 return false;
             }
-            if matches!(e.key, Key::Escape) && s.ui.panel.browser.pending.take().is_some() {
-                return true;
+            if s.ui.panel.browser.annotation.is_some() {
+                let tool = match &e.key {
+                    Key::Escape => {
+                        end_annotation(s);
+                        return true;
+                    }
+                    Key::Text(v) if v == "v" => Some(Tool::Select),
+                    Key::Text(v) if v == "r" => Some(Tool::Region),
+                    Key::Text(v) if v == "d" => Some(Tool::Draw),
+                    Key::Text(v) if v == "e" => Some(Tool::Erase),
+                    _ => None,
+                };
+                if let Some(tool) = tool {
+                    set_tool(s, tool);
+                    return true;
+                }
             }
             // Escape leaves element picking, as web's annotation mode.
             let picking = s.ui.panel.browser.shown.filter(|&tab| s.ui.panel.browser.browser.status(tab).picking);
@@ -3762,17 +4005,32 @@ mod tests {
             "htmlPreview": "<button id=\"go\">Sign in</button>", "componentName": null, "source": null, "styles": "color: red",
             "rect": { "x": 1 }, "doc": { "x": 1 },
         });
-        let record = annotation("abc", &element, "Make it blue");
+        let page = ("http://localhost:5173/", "Demo");
+        let record = annotation("abc", page, &[Target::Element(element.clone())], "Make it blue");
         assert_eq!(record["contextId"], "preview-annotation_abc");
         assert_eq!(record["comment"], "Make it blue");
         assert_eq!(record["label"], "Demo home");
         assert_eq!(record["targetSummary"], "1 selected element");
+        assert_eq!(record["elementIds"], json!(["element-1"]));
         let details = &record["elements"][0];
         assert_eq!(details["selector"], "#go");
         assert!(details.get("rect").is_none() && details["source"].is_null());
-        let untitled = annotation("x", &json!({ "pageUrl": "http://a/", "pageTitle": "  " }), "");
+        assert!(record.get("regionCount").is_none() && record.get("strokeCount").is_none());
+        let untitled = annotation("x", page, &[Target::Element(json!({ "pageUrl": "http://a/", "pageTitle": "  " }))], "");
         assert_eq!(untitled["label"], "Preview annotation");
         assert!(untitled["pageTitle"].is_null());
+
+        // Several targets: web's summary and counts, the page from the tab without elements.
+        let targets = [Target::Element(element.clone()), Target::Element(element), Target::Region, Target::Stroke, Target::Stroke];
+        let record = annotation("m", page, &targets, "");
+        assert_eq!(record["targetSummary"], "2 selected elements, 1 marked region, 2 drawings");
+        assert_eq!((record["regionCount"].clone(), record["strokeCount"].clone()), (json!(1), json!(2)));
+        assert_eq!(record["elementIds"], json!(["element-1", "element-2"]));
+        let marks = annotation("r", page, &[Target::Region], "Too tight");
+        assert_eq!((marks["pageUrl"].clone(), marks["label"].clone()), (json!("http://localhost:5173/"), json!("Demo")));
+        assert!(marks.get("elements").is_none() && marks.get("elementIds").is_none());
+        assert_eq!(region_rect((50., 40.), (10., 10.)), Some([10., 10., 40., 30.]));
+        assert_eq!(region_rect((10., 10.), (12., 40.)), None);
     }
 
     #[test]
