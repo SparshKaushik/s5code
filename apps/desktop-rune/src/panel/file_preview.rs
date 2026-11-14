@@ -401,7 +401,7 @@ mod tests {
 
     #[test]
     fn reads_version_4_notebooks_with_saved_text_outputs() {
-        let source = r#"{"nbformat": 4, "metadata": {"language_info": {"name": "python 3!"}}, "cells": [
+        let source = r##"{"nbformat": 4, "metadata": {"language_info": {"name": "python 3!"}}, "cells": [
             {"cell_type": "markdown", "source": ["# Title\n", "Body"]},
             {"cell_type": "code", "source": "print(1)", "outputs": [
                 {"output_type": "stream", "text": ["1\n"]},
@@ -410,7 +410,7 @@ mod tests {
                 {"output_type": "display_data", "data": {"image/png": "abc"}}
             ]},
             {"cell_type": "raw", "source": "raw"}
-        ]}"#;
+        ]}"##;
         let nb = notebook(source).unwrap();
         assert_eq!(nb.language, "python3");
         assert_eq!(nb.cells.len(), 3);
