@@ -19,6 +19,8 @@ pub struct Ui {
     /// Whether the details card fits inline in the chat lane, from the last layout, for the
     /// `threadPanel.toggle` chord (a key handler can't read layout).
     pub details_fits: std::cell::Cell<bool>,
+    /// The appearance last drawn, for the theme editor chord.
+    pub dark: std::cell::Cell<bool>,
 }
 
 /// The references open on an empty "New thread" (d01) and on "Replay showcase" (d02).
@@ -50,7 +52,17 @@ fn open_titled(s: &mut App, title: &str) {
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     sidebar::release_undo_key(s, e);
-    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || chat_shortcut(s, e) || sidebar::on_key(s, e, tx)
+    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || theme_editor_key(s, e) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || chat_shortcut(s, e) || sidebar::on_key(s, e, tx)
+}
+
+/// `themeEditor.toggle` on any route; the editor is a dialog, so Escape closes it through Rune.
+fn theme_editor_key(s: &mut App, e: &KeyEvent) -> bool {
+    if !panel::shortcut(s, e, "themeEditor.toggle") {
+        return false;
+    }
+    let dark = s.ui.shell.dark.get();
+    settings::themes::toggle_editor(s, dark);
+    true
 }
 
 /// The chords the web's ChatView answers anywhere on a thread: `threadPanel.toggle` flips the
@@ -75,6 +87,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         return rune_kit::root(crate::onboarding::recovery_view(recovery, t), Vec::new());
     }
     let mut overlays = Vec::new();
+    s.ui.shell.dark.set(t.dark);
     s.ui.shell.details_fits.set(cx.layout_with("chat-body", |r| chat::details::lane(r[2].round(), r[3].round(), false).card).unwrap_or(true));
     let sidebar = sidebar::view(s, cx, t, &mut overlays);
     let main = match s.frame_route() {
@@ -100,6 +113,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         body = body.inert();
         overlays.clear();
         overlays.push(pages::usage::view(s, cx, t));
+    }
+    if !matches!(s.route, Route::Settings(_)) {
+        settings::themes::editor(s, t, &mut overlays);
     }
     overlays.extend(panel::overlays(s, t));
     overlays.extend(palette::overlay(s, cx, t));
@@ -145,5 +161,28 @@ mod tests {
         assert_eq!(shown(&s, narrow.0, narrow.1), Shown::Popover, "a narrow lane opens the popover");
         s.navigate(Route::PullRequests);
         assert!(!super::chat_shortcut(&mut s, &chord), "off a thread the chord falls through");
+    }
+
+    #[test]
+    fn the_theme_editor_chord_opens_on_the_theme_in_use_and_closes() {
+        let mut s = App::new();
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| serde_json::json!({}))["keybindings"] =
+                serde_json::json!([{"command": "themeEditor.toggle", "shortcut": {"key": "t", "modKey": true, "altKey": true, "shiftKey": true}}]);
+        }
+        s.client_settings.values.insert("themeDark".into(), serde_json::json!("grove"));
+        s.navigate(Route::PullRequests);
+        s.ui.shell.dark.set(true);
+        let mut chord = KeyEvent::from(Key::Command('t'));
+        chord.mods.cmd = true;
+        chord.mods.ctrl = !cfg!(target_os = "macos");
+        chord.mods.alt = true;
+        chord.mods.shift = true;
+        assert!(super::theme_editor_key(&mut s, &chord), "FAILED: the chord works off Settings");
+        let editing = s.ui.settings.theme_editor.clone().expect("FAILED: the editor opens");
+        assert!(data::s(&editing, "label").starts_with("Grove"), "FAILED: seeded from the dark theme in use, got {editing}");
+        assert!(s.ui.settings.theme_edit_dark);
+        assert!(super::theme_editor_key(&mut s, &chord));
+        assert!(s.ui.settings.theme_editor.is_none(), "FAILED: the chord closes it again");
     }
 }

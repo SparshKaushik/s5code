@@ -675,6 +675,16 @@ pub fn edit(s: &mut App, mut template: Value, dark: bool) {
         .filter_map(|(k, v)| Some((k.clone(), rune::TextEdit::new(v.as_str()?))))
         .collect();
 }
+/// `toggleThemeEditorForTheme`: closes an open editor, else opens one seeded from the theme
+/// the current appearance uses.
+pub fn toggle_editor(s: &mut App, dark: bool) {
+    if s.ui.settings.theme_editor.take().is_some() {
+        return;
+    }
+    let id = s.client_settings.values.get(if dark { "themeDark" } else { "themeLight" }).and_then(Value::as_str).unwrap_or("t3-code").to_string();
+    let theme = library(s).into_iter().find(|v| v["id"] == id.as_str()).unwrap_or_else(|| builtins()[0].clone());
+    edit(s, theme, dark);
+}
 pub fn editor(s: &App, t: &T, layers: &mut Vec<El>) {
     if s.ui.settings.theme_editor.is_none() {
         return;
