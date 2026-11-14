@@ -213,8 +213,8 @@ pub(crate) fn view(s: &App, t: &T) -> El {
     for (i, (key, _, _, label, signal)) in SIGNALS.iter().enumerate() {
         let over = running_override(running, i);
         let url = over.as_ref().map_or_else(|| ui.inputs[i].text.trim().to_owned(), |(url, ..)| url.clone());
-        let check = checking.then(|| endpoint_status(&url, ui.checks[i].as_ref()));
-        let status = match (&over, check) {
+        let probe = checking.then(|| endpoint_status(&url, ui.checks[i].as_ref()));
+        let status = match (&over, probe) {
             (Some((_, label, _)), Some((check, tone))) => Some((format!("{label} · {check}"), tone)),
             (Some((_, label, _)), None) => Some(((*label).to_owned(), Tone::Idle)),
             (None, check) => check,
