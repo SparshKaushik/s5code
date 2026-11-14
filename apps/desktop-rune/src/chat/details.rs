@@ -17,6 +17,7 @@ use crate::shell::palette;
 
 mod git;
 pub mod pr;
+pub mod run_on;
 pub mod scripts;
 
 #[derive(Default)]
@@ -45,6 +46,7 @@ pub struct Ui {
     pending: Option<(u64, Pending)>,
     /// Where each new-thread draft runs (BranchToolbar's env mode), by draft key.
     drafts: HashMap<String, DraftRun>,
+    run_on: run_on::State,
     pub git: git::State,
     pub scripts: scripts::State,
     pub checkout: Option<pr::Checkout>,
@@ -166,6 +168,9 @@ pub struct DraftRun {
     pub worktree: bool,
     pub base: Option<String>,
     pub from_origin: bool,
+    pub selection: run_on::Selection,
+    /// The machine "Auto balance" moved the draft to (`loadBalancedEnvironmentId`).
+    pub balanced: Option<String>,
 }
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -826,7 +831,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s) | run_on::poll(s);
     poll_branch(s) || changed
 }
 
@@ -960,7 +965,7 @@ pub fn view(s: &App, _cx: &mut Cx<App>, t: &T, shown: Shown, w: f32) -> Option<E
 fn card(s: &App, t: &T) -> Option<El> {
     let muted = t.c.muted_foreground;
     let fg = t.c.foreground.alpha_mul(0.8);
-    let env = env_label(s);
+    let env = run_on::auto_label(s).map_or_else(|| env_label(s), str::to_string);
     let thread = composer::ctx(s).thread;
     let run = draft_run(s);
     let new_worktree = run.as_ref().is_some_and(|r| r.worktree);
@@ -982,7 +987,7 @@ fn card(s: &App, t: &T) -> Option<El> {
         .gap(9.0)
         .center_y()
         .label(format!("Run context: {env}, {mode}"))
-        .child(icon(&icons::SERVER, 18.0).color(muted))
+        .child(icon(run_on::trigger_icon(s), 18.0).color(muted))
         .child(text(env).font(ROW).color(if draft { fg } else { muted }).truncate().grow(1.0).shrink().min_w(0.0))
         .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(workspace_path(s).unwrap_or_else(|| mode.to_string())));
     if workspace_path(s).is_some() {
@@ -1137,12 +1142,18 @@ fn run_context_rows(s: &App, t: &T) -> Vec<El> {
     let worktree = draft_run(s).is_some_and(|r| r.worktree);
     let mut rows = vec![
         group_label(t, "Run on"),
-        radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None),
+    ];
+    let machines = run_on::rows(s, t);
+    if machines.is_empty() {
+        rows.push(radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None));
+    }
+    rows.extend(machines);
+    rows.extend([
         el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
         group_label(t, "Workspace"),
         radio_row(t, &icons::FOLDER, if draft_worktree(s).is_some() { "Current worktree" } else { "Current checkout" }, !worktree, |s: &mut App| set_env_mode(s, false)),
         radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
-    ];
+    ]);
     if let Some((branch, _)) = previous_seed(s) {
         let label = branch.map_or_else(|| "Previous worktree".to_string(), |b| format!("Previous worktree ({b})"));
         rows.push(radio_row(t, &icons::HISTORY, &label, false, |s: &mut App| {
@@ -1489,7 +1500,7 @@ mod tests {
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
         s.navigate(Route::Home { project_id: Some(project) });
         assert_eq!(take_draft_workspace(&mut s), None, "the checkout by default");
-        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true };
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true, ..DraftRun::default() };
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
     }
@@ -1499,7 +1510,7 @@ mod tests {
         let mut s = App::new();
         let project = s.state().projects.iter().map(|p| data::s(p, "id").to_string()).next().unwrap();
         s.navigate(Route::Home { project_id: Some(project) });
-        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true };
+        *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("main".into()), from_origin: true, ..DraftRun::default() };
         git::sync_branch(&mut s, &json!({"branch": {"status": "skipped_not_requested"}}));
         assert_eq!(draft_run(&s).unwrap().base.as_deref(), Some("main"));
         git::sync_branch(&mut s, &json!({"branch": {"status": "created", "name": "feature/fix"}}));

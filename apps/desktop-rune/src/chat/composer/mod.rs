@@ -449,6 +449,9 @@ fn send(s: &mut App, alternate: bool) {
         cancel_queued_edit(s);
         return;
     }
+    if crate::chat::details::run_on::holds_send(s) {
+        return;
+    }
     let mode = mode_for(s, alternate);
     let key = active_key(s);
     let Some(d) = draft(s) else { return };
