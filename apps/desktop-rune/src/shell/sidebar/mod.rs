@@ -5,7 +5,7 @@
 mod brand;
 mod chrome;
 pub mod favicon;
-mod folders;
+pub(crate) mod folders;
 pub mod logic;
 mod menu;
 mod row;
@@ -91,6 +91,8 @@ pub struct Ui {
     pub hover_rect: std::cell::Cell<Option<[f32; 4]>>,
     pub list_y: std::cell::Cell<f32>,
     pub drag_edge: std::cell::Cell<i8>,
+    /// The item nearest the dragged row's centre, from the last layout.
+    pub drag_over: std::cell::RefCell<Option<String>>,
     pub drag_target: std::cell::RefCell<Option<logic::DropTarget>>,
     pub menu: Option<menu::Menu>,
     pub patches: HashMap<String, Patch>,
@@ -110,6 +112,8 @@ pub struct Ui {
     pub custom_snooze: Option<snooze::Custom>,
     /// The row whose hover card (`ThreadHoverCard`) is showing.
     pub card: Option<String>,
+    /// A row key the arrow keys move focus to on the next frame (see `row::list`).
+    pub focus_to: Option<String>,
     /// Project ids the list is filtered to (the web's `projectScopeKeys`); empty shows all.
     pub project_scope: Vec<String>,
     pub scope_open: bool,
@@ -754,6 +758,7 @@ pub fn start_rename(s: &mut App, id: &str) {
 /// thread on screen.
 pub fn poll(s: &mut App) -> bool {
     folders::ensure_loaded(s);
+    folders::sync_scope(s);
     let searched = poll_content(s) | favicon::poll(s) | updates::poll(s) | share::poll(s);
     let shown = match &s.route {
         Route::Thread(id) => Some(id.clone()),
@@ -1243,4 +1248,221 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
         .fill(t.sb.sidebar)
         .child(content)
         .child(el().w(1.0).h_full().fill(t.sb.contrast_sidebar_border))
+}
+
+impl Shelf {
+    pub fn section(self) -> Section {
+        match self {
+            Shelf::Working => Section::Working,
+            Shelf::Snoozed => Section::Snoozed,
+            Shelf::Settled => Section::Settled,
+        }
+    }
+
+    /// The header's element key.
+    pub fn key(self) -> String {
+        let name = match self {
+            Shelf::Working => "working",
+            Shelf::Snoozed => "snoozed",
+            Shelf::Settled => "settled",
+        };
+        format!("sb-shelf-{name}")
+    }
+}
+
+/// `sidebarTree` Right on an open folder: its first row.
+pub fn folder_child(model: &Model, ui: &Ui, group: &str) -> Option<String> {
+    let folder = model.folders.iter().find(|f| f.group.key == group)?;
+    folders::shown(folder, model, &ui.folders).first().map(|i| format!("sb-row-{}", model.threads[*i].id))
+}
+
+/// `sidebarTree` Right on an open shelf: its first row.
+pub fn shelf_child(model: &Model, ui: &Ui, shelf: Shelf) -> Option<String> {
+    model.items(ui).into_iter().find_map(|it| match it {
+        Item::Thread { key, section } if section == shelf.section() => Some(format!("sb-row-{key}")),
+        _ => None,
+    })
+}
+
+/// `sidebarTree` Left on a row: its shelf or folder header.
+pub fn tree_parent(model: &Model, id: &str) -> Option<String> {
+    match model.section_of(id)? {
+        Section::Working => Some(Shelf::Working.key()),
+        Section::Snoozed => Some(Shelf::Snoozed.key()),
+        Section::Settled => Some(Shelf::Settled.key()),
+        Section::Active => model.folders.iter().find(|f| f.rows.iter().any(|i| model.threads[*i].id == id)).map(|f| format!("sb-folder-{}", f.group.key)),
+        Section::Pinned => None,
+    }
+}
+
+/// Moves keyboard focus to a sidebar row by its element key.
+pub fn focus_row(s: &mut App, key: String, tx: &mut Tx) {
+    tx.scroll_into_view(key.clone());
+    s.ui.shell.sidebar.focus_to = Some(key);
+}
+
+/// Opens or folds a shelf; the Settled shelf remembers it.
+pub fn set_shelf(s: &mut App, shelf: Shelf, open: bool) {
+    let ui = &mut s.ui.shell.sidebar;
+    if open {
+        ui.expanded.insert(shelf);
+    } else {
+        ui.expanded.remove(&shelf);
+    }
+    if shelf == Shelf::Settled {
+        ui.folders.set_settled(open);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn thread(id: &str) -> Thread {
+        Thread::from_shell(&json!({"id": id, "projectId": "p", "title": id}))
+    }
+
+    #[test]
+    fn tree_arrows_find_the_first_child_and_the_parent() {
+        let group = folders::Group { key: "g".into(), label: "app".into(), members: vec!["p".into()], representative: "p".into(), root: "/p".into(), pinned: false, archived: false };
+        let model = Model {
+            threads: ["pin", "a1", "a2", "s1", "s2"].map(thread).to_vec(),
+            sections: Sections { pinned: vec![0], active: vec![1, 2], settled: vec![3, 4], ..Default::default() },
+            projects: HashMap::new(),
+            drivers: HashMap::new(),
+            route: None,
+            now: 0,
+            working_shelf: false,
+            updates: 0,
+            folders: vec![folders::Folder { group, rows: vec![1, 2] }],
+        };
+        let mut ui = Ui::default();
+        assert_eq!(folder_child(&model, &ui, "g").as_deref(), Some("sb-row-a1"));
+        assert_eq!(folder_child(&model, &ui, "missing"), None);
+        assert_eq!(shelf_child(&model, &ui, Shelf::Settled), None, "a folded shelf has no rows to enter");
+        ui.expanded.insert(Shelf::Settled);
+        assert_eq!(shelf_child(&model, &ui, Shelf::Settled).as_deref(), Some("sb-row-s1"));
+        assert_eq!(tree_parent(&model, "a2").as_deref(), Some("sb-folder-g"));
+        assert_eq!(tree_parent(&model, "s2").as_deref(), Some("sb-shelf-settled"));
+        assert_eq!(tree_parent(&model, "pin"), None, "pinned rows sit at the top level");
+    }
+
+    #[test]
+    fn a_row_dragged_to_the_lists_bottom_edge_scrolls_the_list() {
+        fn view(s: &App, cx: &mut Cx<App>) -> El {
+            el().size(300., 500.).child(super::view(s, cx, &crate::theme::theme(true), &mut Vec::new()))
+        }
+        let mut app = App::new();
+        app.client_settings.values.insert("boringSidebarEnabled".into(), json!(false));
+        app.client_settings.values.insert("legacySidebarEnabled".into(), json!(false));
+        let active = |app: &App| {
+            let model = Model::build(app);
+            model.items(&app.ui.shell.sidebar).into_iter().filter_map(|it| match it { Item::Thread { key, section: Section::Active } => Some(key), _ => None }).collect::<Vec<_>>()
+        };
+        let seed = active(&app).first().cloned().expect("the fixture has an active row");
+        let crate::data::Source::Fixture(state) = &mut app.src else { unreachable!("App::new runs on fixtures") };
+        let row = state.threads.iter().find(|t| t["id"] == seed.as_str()).cloned().unwrap();
+        for i in 0..40 {
+            let mut t = row.clone();
+            t["id"] = json!(format!("overflow-{i}"));
+            t["title"] = json!(format!("Overflow {i}"));
+            state.threads.push(t);
+        }
+        let keys = active(&app);
+        assert!(keys.len() > 40, "the clones are active rows");
+        let mut rt = rune::Runtime::new(app, view, (300., 500.), rune::Env::new(true, 1.));
+        for _ in 0..3 {
+            rt.frame(1. / 60.);
+        }
+        let viewport = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-scroll")).expect("the list").rect;
+        let list = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-list")).expect("the rows").rect;
+        assert!(list[3] > viewport[3] + 100., "FAILED: the list keeps its content height, taller than the viewport: {list:?} in {viewport:?}");
+        let rows = |rt: &rune::Runtime<App>| rt.elements().into_iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("sb-row-"))).collect::<Vec<_>>();
+        let visible: Vec<_> = rows(&rt)
+            .into_iter()
+            .filter(|e| keys.iter().any(|k| e.key.as_deref() == Some(format!("sb-row-{k}").as_str())) && e.rect[1] >= viewport[1] && e.rect[1] + e.rect[3] <= viewport[1] + viewport[3] * 0.5)
+            .collect();
+        let (anchor, grab) = (visible[0].clone(), visible.get(1).cloned().expect("two active rows in the list's top half"));
+        let anchor_y = |rt: &rune::Runtime<App>| rt.elements().into_iter().find(|e| e.key == anchor.key).map_or(f32::NAN, |e| e.rect[1]);
+        let (x, y) = (grab.rect[0] + grab.rect[2] / 2., grab.rect[1] + grab.rect[3] / 2.);
+        rt.pointer_move(x, y);
+        rt.frame(1. / 60.);
+        assert!(rt.state.ui.shell.sidebar.hover.is_some(), "hovering the row");
+        rt.frame(1. / 60.);
+        rt.pointer_down(x, y);
+        rt.frame(1. / 60.);
+        assert!(rt.state.ui.shell.sidebar.press.is_some(), "the press keeps the row's rect: hover_rect {:?}", rt.state.ui.shell.sidebar.hover_rect.get());
+        let edge = viewport[1] + viewport[3] * 0.95;
+        let state = |rt: &rune::Runtime<App>| {
+            let ui = &rt.state.ui.shell.sidebar;
+            let list = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-list")).map(|e| (e.rect, e.scrolled));
+            let low: Vec<_> = rt
+                .elements()
+                .into_iter()
+                .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("sb-li-")) && e.rect[1] + e.rect[3] > viewport[1] + viewport[3] - 90.)
+                .take(5)
+                .map(|e| (e.key.unwrap_or_default(), e.rect[1], e.rect[3], e.target[1], e.scrolled[1]))
+                .collect();
+            format!(
+                "drag {:?} edge {} over {:?} target {:?} anchor y {} viewport {viewport:?} list {list:?} low {low:?}",
+                ui.drag.as_ref().map(|d| (d.key.clone(), d.at, d.dy, d.context, d.scroll)),
+                ui.drag_edge.get(),
+                ui.drag_over.borrow(),
+                ui.drag_target.borrow().as_ref().map(|t| t.section),
+                anchor_y(rt),
+            )
+        };
+        for step in 1..=60 {
+            let to = (y + step as f32 * 12.).min(edge) - (step % 2) as f32;
+            rt.pointer_move(x, to);
+            rt.frame(1. / 60.);
+            if step == 3 {
+                assert!(rt.state.ui.shell.sidebar.drag.as_ref().is_some_and(|d| !d.context), "a reorder drag: {}", state(&rt));
+            }
+        }
+        let after = state(&rt);
+        let scrolled = rows(&rt).iter().map(|e| e.scrolled[1]).fold(0., f32::max);
+        assert_eq!(rt.state.ui.shell.sidebar.drag_edge.get(), 1, "FAILED: the pointer sits at the bottom edge: {after}");
+        rt.pointer_up(x, edge);
+        rt.frame(1. / 60.);
+        assert!(scrolled > 0., "FAILED: holding a dragged row at the bottom edge scrolls the list: {after}");
+    }
+
+    #[test]
+    fn right_enters_a_folder_and_left_returns_to_it() {
+        fn view(s: &App, cx: &mut Cx<App>) -> El {
+            el().size(300., 900.).child(super::view(s, cx, &crate::theme::theme(true), &mut Vec::new()))
+        }
+        let mut app = App::new();
+        app.client_settings.values.insert("boringSidebarEnabled".into(), json!(true));
+        let mut rt = rune::Runtime::new(app, view, (300., 900.), rune::Env::new(true, 1.));
+        rt.frame(0.);
+        let press = |rt: &mut rune::Runtime<App>, key: Key| {
+            rt.key(KeyEvent { key, mods: Default::default() });
+            for _ in 0..3 {
+                rt.frame(0.);
+            }
+        };
+        let focused = |rt: &rune::Runtime<App>| rt.elements().into_iter().find(|e| e.focused).and_then(|e| e.key).unwrap_or_default();
+        for _ in 0..60 {
+            let at = focused(&rt);
+            if at.starts_with("sb-folder-") {
+                break;
+            }
+            press(&mut rt, if at.starts_with("sb-row-") || at.starts_with("sb-shelf-") { Key::Down } else { Key::Tab });
+        }
+        let header = focused(&rt);
+        let group = header.strip_prefix("sb-folder-").expect("the keyboard reaches a folder").to_string();
+        let first = folder_child(&Model::build(&rt.state), &rt.state.ui.shell.sidebar, &group).expect("the fixture's folder has rows");
+        press(&mut rt, Key::Right);
+        assert_eq!(focused(&rt), first, "Right on an open folder enters it");
+        assert_eq!(rt.state.ui.shell.sidebar.focus_to, None, "the request clears after one layout");
+        press(&mut rt, Key::Left);
+        assert_eq!(focused(&rt), header, "Left on a row returns to its folder");
+        press(&mut rt, Key::Left);
+        assert!(!rt.state.ui.shell.sidebar.folders.expanded(&group), "Left on an open folder folds it");
+        press(&mut rt, Key::Right);
+        assert!(rt.state.ui.shell.sidebar.folders.expanded(&group), "Right on a folded folder opens it");
+        assert_eq!(focused(&rt), header, "opening keeps focus on the folder");
+    }
 }

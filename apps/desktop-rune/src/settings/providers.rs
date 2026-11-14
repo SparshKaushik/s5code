@@ -1673,8 +1673,8 @@ pub fn view(s: &App, cx: &rune::Cx<App>, t: &T) -> El {
         .variant("ghost-muted")
         .size(if refresh_label.is_some() { "xs" } else { "icon-xs" })
         .icon(&icons::REFRESH_CW)
-        .disabled(refreshing);
-    if !refreshing {
+        .disabled(refreshing || !super::permissions::allowed(s, "server.refreshProviders"));
+    if !refreshing && super::permissions::allowed(s, "server.refreshProviders") {
         refresh = refresh.on_press(|s: &mut App| request(s, "server.refreshProviders", json!({"refreshModels": true, "reloadSecrets": true})));
     }
     let add = kit::Button::new("Add provider")

@@ -546,7 +546,17 @@ pub fn view(s: &App, t: &T) -> El {
     let rows = rows(s);
     let busy = saving(s);
     let query = s.ui.settings.keybinding_search.text.trim().to_lowercase();
-    let mut body = col().w_full().gap(32.0).child(c::section("Keybindings", vec![toolbar(s, t)], t));
+    let writable = super::permissions::can_write_settings(s);
+    let mut page = col().w_full().gap(32.0).child(c::section("Keybindings", vec![toolbar(s, t, writable)], t));
+    if !writable {
+        let notice = if s.state().config.is_none() {
+            "Connect an environment to change keybindings."
+        } else {
+            "This connection can view keybindings but cannot change them."
+        };
+        page = page.child(text(notice).font(theme::TEXT_XS).color(t.c.muted_foreground));
+    }
+    let mut body = col().w_full().gap(32.0);
     if s.ui.settings.keybindings.adding {
         body = body.child(c::card(vec![new_row(s, t, &rows, busy)], t));
     }
@@ -574,10 +584,11 @@ pub fn view(s: &App, t: &T) -> El {
             t,
         ));
     }
-    body
+    // Web marks the list `inert` when this connection can't write settings.
+    page.child(if writable { body } else { body.inert() })
 }
 
-fn toolbar(s: &App, t: &T) -> El {
+fn toolbar(s: &App, t: &T, writable: bool) -> El {
     let config = s.state().config.as_ref();
     let path = config.and_then(|c| c["keybindingsConfigPath"].as_str()).map(str::to_owned);
     let editor = config
@@ -622,7 +633,7 @@ fn toolbar(s: &App, t: &T) -> El {
     let add = Button::new("Add keybinding")
         .variant("outline")
         .icon(&icons::PLUS)
-        .disabled(s.ui.settings.keybindings.adding)
+        .disabled(s.ui.settings.keybindings.adding || !writable)
         .on_press(|s: &mut App| {
             let ui = &mut s.ui.settings.keybindings;
             ui.drafts.remove(NEW);

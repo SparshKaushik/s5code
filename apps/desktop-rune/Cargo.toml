@@ -27,6 +27,7 @@ regex-automata = "0.4"
 ring = "0.17"
 # Already in the tree through rune-kit; chat Markdown blocks that hold file and thread chips.
 pulldown-cmark = { version = "0.13", default-features = false }
+qrcodegen = "1.8"
 
 [profile.dev.package."*"]
 debug = false

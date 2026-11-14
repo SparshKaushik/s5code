@@ -150,7 +150,12 @@ impl Net {
                 }
                 Incoming::Item(route, item) => {
                     if let Route::Resource(method, _) = &route {
-                        if matches!(method.as_str(), "terminal.attach" | "subscribeTerminalMetadata" | "orchestration.subscribeCommandOutput" | "subscribeServerLifecycle") {
+                        // Ordered events: terminal output bursts, command output, preview sessions
+                        // that open and close between two polls, and server lifecycle.
+                        if matches!(
+                            method.as_str(),
+                            "terminal.attach" | "subscribeTerminalMetadata" | "subscribePreviewEvents" | "orchestration.subscribeCommandOutput" | "subscribeServerLifecycle"
+                        ) {
                             self.resource_events.entry(route.clone()).or_default().push(item.clone());
                         }
                         if method == "subscribeAuthAccess" {

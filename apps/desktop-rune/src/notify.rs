@@ -197,7 +197,7 @@ fn observe(s: &mut App, now: i64) -> bool {
     }
     let st = s.state();
     let sequence = (st.shell_sequence, s.ui.env.merges);
-    if !matches!(s.src, data::Source::Live(_)) || !st.shell_ready || s.ui.notify.sequence == Some(sequence) {
+    if !st.shell_ready || s.ui.notify.sequence == Some(sequence) {
         return false;
     }
     let rows: Vec<_> = st.threads.iter().chain(st.archived.iter()).map(|row| (observe_row(row), row["latestRunStopRequested"] == true)).collect();
@@ -552,5 +552,71 @@ mod tests {
         assert_eq!(status, Status::Failed);
         assert_eq!(title_for(Kind::Input, status), "Thread failed");
         assert!(!o.settled);
+    }
+
+    /// One replay turn's `thread.updated` rows, as a server streamed them on `orchestration.subscribeShell`.
+    fn turn(id: &str, run: &str, done_at: &str) -> Vec<serde_json::Value> {
+        let row = |status: &str, activity: Option<&str>, done: bool| {
+            json!({
+                "id": id, "projectId": "p", "title": format!("Title {id}"), "lineage": {}, "archivedAt": null,
+                "latestRunId": run, "activeRunId": if done || status == "waiting" { json!(null) } else { json!(run) },
+                "status": status, "activityRunStatus": activity, "latestRunCompletedAt": if done { json!(done_at) } else { json!(null) },
+                "latestRunStopRequested": false, "pendingRuntimeRequest": null, "pendingBackgroundTasks": [],
+                "activeProviderThreadId": "provider-thread:1", "updatedAt": done_at,
+            })
+        };
+        vec![row("starting", Some("starting"), false), row("running", Some("running"), false), row("waiting", Some("waiting"), false), row("completed", None, true)]
+    }
+
+    #[test]
+    fn a_finished_turn_toasts_once_on_every_environment_except_on_the_open_thread() {
+        let mut s = App::new();
+        s.client_settings.values.insert("inAppNotificationsEnabled".into(), json!(true));
+        let mut local = data::empty_state();
+        local.shell_ready = true;
+        s.src = data::Source::Fixture(local);
+        let titles = |s: &App| s.ui.notify.toasts.iter().map(|t| (t.title, t.description.clone())).collect::<Vec<_>>();
+        let here = |s: &mut App, row: &serde_json::Value| {
+            if let data::Source::Fixture(st) = &mut s.src {
+                st.threads.retain(|t| t["id"] != row["id"]);
+                st.threads.push(row.clone());
+                st.shell_sequence += 1;
+            }
+            observe(s, 0);
+        };
+
+        for row in turn("t1", "run:1", "2026-11-11T17:56:04.759Z") {
+            here(&mut s, &row);
+        }
+        assert_eq!(titles(&s), [("Thread completed", "Title t1".to_string())]);
+        here(&mut s, &turn("t1", "run:1", "2026-11-11T17:56:04.759Z")[3]);
+        assert_eq!(s.ui.notify.toasts.len(), 1, "each completion notifies once");
+
+        // A thread on a parked environment finishing while this machine is focused.
+        crate::env::park(&mut s, "box", data::Source::Fixture(data::empty_state()));
+        for row in turn("t2", "run:2", "2026-11-11T17:57:00.000Z") {
+            let Some(data::Source::Fixture(st)) = crate::env::source_mut(&mut s, "box") else { panic!("parked") };
+            st.threads = vec![row];
+            st.shell_revision += 1;
+            crate::env::drain(&mut s);
+            observe(&mut s, 0);
+        }
+        assert_eq!(titles(&s)[1], ("Thread completed", "Title t2".to_string()));
+
+        // The thread on screen never toasts (`present`'s active-thread check).
+        s.route = Route::Thread("t1".into());
+        for row in turn("t1", "run:3", "2026-11-11T17:58:00.000Z") {
+            here(&mut s, &row);
+        }
+        assert_eq!(s.ui.notify.toasts.len(), 2);
+
+        // In the background, toasts give way to desktop notifications, which this mode leaves off.
+        s.route = Route::Home { project_id: None };
+        window_focus(&mut s, false);
+        for row in turn("t1", "run:4", "2026-11-11T17:59:00.000Z") {
+            here(&mut s, &row);
+        }
+        assert_eq!(s.ui.notify.toasts.len(), 2);
+        assert!(s.ui.notify.pending.is_empty());
     }
 }

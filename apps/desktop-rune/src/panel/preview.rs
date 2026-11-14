@@ -7,6 +7,7 @@ use serde_json::{Value, json};
 
 use super::browser::{self, Cmd, Status, TabId};
 use super::popout;
+use super::agent;
 use super::browser_import;
 use crate::{
     App, Route, data, icons, kit,
@@ -61,11 +62,17 @@ struct Tab {
     titled: (String, String),
     /// The icon URL last handed to `favicon`.
     icon: Option<String>,
+    /// The server's preview session this tab renders, so the thread's agent can drive it.
+    session: Option<agent::Key>,
+    /// The server process and Chrome target last told this tab is attached.
+    announced: Option<(u64, String)>,
+    /// The agent's last `revealRequest`, so each one shows the tab once.
+    revealed: Option<String>,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None }
     }
 }
 
@@ -128,6 +135,13 @@ pub struct Ui {
     popout_title: String,
     /// The separate window has shown since it was asked for, so hiding it means it closed.
     popout_seen: bool,
+    /// Whether the local server's preview events are watched.
+    sessions_watched: bool,
+    /// `preview.open` requests for tabs opened here: request id, tab, thread.
+    opening: Vec<(u64, TabId, String)>,
+    /// Session events held until this client's own `preview.open` replies, so its tab binds
+    /// instead of a second one opening.
+    deferred: Vec<Value>,
 }
 
 struct Dialog {
@@ -153,6 +167,12 @@ struct Pending {
 
 /// A new tab on a blank page; Chrome starts with the first one.
 pub fn open(app: &mut App) -> TabId {
+    let tab = open_tab(app);
+    register(app, tab);
+    tab
+}
+
+fn open_tab(app: &mut App) -> TabId {
     let waker = app.ui.panel.waker.clone();
     let ui = &mut app.ui.panel.browser;
     if !ui.browser.started() {
@@ -198,7 +218,9 @@ fn restart(app: &mut App) {
     let tabs: Vec<TabId> = ui.tabs.keys().copied().collect();
     for tab in tabs {
         let pixels = Pixels::new();
-        ui.tabs.insert(tab, Tab::new(pixels.clone()));
+        let mut fresh = Tab::new(pixels.clone());
+        fresh.session = ui.tabs.get(&tab).and_then(|t| t.session.clone());
+        ui.tabs.insert(tab, fresh);
         ui.browser.send(Cmd::Open(tab, pixels));
     }
 }
@@ -217,9 +239,14 @@ fn adopt(app: &mut App, target: String) {
     ui.tabs.insert(tab, Tab::new(pixels.clone()));
     ui.browser.send(Cmd::Adopt(tab, pixels, target));
     super::activate(app, super::Surface::Browser(tab));
+    register(app, tab);
 }
 
 pub fn close(app: &mut App, tab: TabId) {
+    if let Some(key) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.session.clone()) {
+        agent::detach(&key);
+        close_session(app, &key);
+    }
     let ui = &mut app.ui.panel.browser;
     ui.tabs.remove(&tab);
     ui.browser.send(Cmd::Close(tab));
@@ -485,6 +512,7 @@ fn shown(app: &App) -> Option<TabId> {
 }
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
+    let synced = sync_sessions(app);
     let want = shown(app);
     let live = matches!(app.src, data::Source::Live(_));
     let watch = live && !app.ui.panel.browser.tabs.is_empty();
@@ -614,7 +642,207 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
             }
         }
     }
+    changed || synced
+}
+
+const SESSIONS: &str = "subscribePreviewEvents";
+
+/// A tab opened on one of this machine's threads becomes a server preview session, as
+/// Electron's are, so the thread's agent can drive it too.
+fn register(app: &mut App, tab: TabId) {
+    let Route::Thread(thread) = app.frame_route().clone() else { return };
+    if !agent::available() || crate::env::owner(app, &thread) != crate::env::LOCAL {
+        return;
+    }
+    let Some(net) = crate::env::local_mut(app).net() else { return };
+    let id = net.request("preview.open", json!({ "threadId": thread, "viewport": { "_tag": "fill" }, "runtime": "server" }));
+    app.ui.panel.browser.opening.push((id, tab, thread));
+}
+
+fn close_session(app: &mut App, key: &agent::Key) {
+    if let Some(net) = crate::env::local_mut(app).net() {
+        net.request("preview.close", json!({ "threadId": key.0, "tabId": key.1 }));
+    }
+}
+
+/// Follows the local server's preview sessions as web's `followPreviewSessions` does: a session
+/// an agent or another client opens becomes a tab on its thread's panel, a closed one closes,
+/// and each tab with a page is announced to the server, which then drives it.
+fn sync_sessions(app: &mut App) -> bool {
+    let want = agent::available() && matches!(crate::env::local_mut(app), data::Source::Live(_));
+    if want != app.ui.panel.browser.sessions_watched {
+        app.ui.panel.browser.sessions_watched = want;
+        if let Some(net) = crate::env::local_mut(app).net() {
+            if want {
+                net.watch_resource(SESSIONS, json!({}));
+            } else {
+                net.unwatch_resource(SESSIONS, json!({}));
+            }
+        }
+    }
+    if !want {
+        return false;
+    }
+    let ids: Vec<u64> = app.ui.panel.browser.opening.iter().map(|o| o.0).collect();
+    let Some(net) = crate::env::local_mut(app).net() else { return false };
+    let mut events = net.take_resource_events(SESSIONS, json!({}));
+    let replies: Vec<(u64, s5_net::Reply)> = ids.into_iter().filter_map(|id| net.take_reply(id).map(|r| (id, r))).collect();
+    let changed = !events.is_empty() || !replies.is_empty();
+    for (id, reply) in replies {
+        let ui = &mut app.ui.panel.browser;
+        let Some(i) = ui.opening.iter().position(|o| o.0 == id) else { continue };
+        let (_, tab, thread) = ui.opening.remove(i);
+        if let Some(session) = reply.ok().and_then(|snapshot| snapshot["tabId"].as_str().map(str::to_owned)) {
+            bind(app, tab, (thread, session));
+        }
+    }
+    let mut pending = std::mem::take(&mut app.ui.panel.browser.deferred);
+    pending.append(&mut events);
+    for event in pending {
+        session_event(app, event);
+    }
+    announce(app);
     changed
+}
+
+fn bind(app: &mut App, tab: TabId, key: agent::Key) {
+    let ui = &mut app.ui.panel.browser;
+    if ui.tabs.values().any(|t| t.session.as_ref() == Some(&key)) {
+        return;
+    }
+    if let Some(t) = ui.tabs.get_mut(&tab) {
+        if t.session.is_none() {
+            t.session = Some(key);
+        }
+        return;
+    }
+    // Closed before the server answered.
+    close_session(app, &key);
+}
+
+fn session_event(app: &mut App, event: Value) {
+    let thread = event["threadId"].as_str().unwrap_or_default().to_owned();
+    let key = (thread.clone(), event["tabId"].as_str().unwrap_or_default().to_owned());
+    if key.0.is_empty() || key.1.is_empty() {
+        return;
+    }
+    let bound = app.ui.panel.browser.tabs.iter().find(|(_, t)| t.session.as_ref() == Some(&key)).map(|(id, _)| *id);
+    let snapshot = &event["snapshot"];
+    match event["type"].as_str() {
+        Some("opened") => {
+            // A headless session streams from the server, which this panel doesn't view.
+            if bound.is_some() || snapshot["runtime"] != "server" || snapshot["headless"] == true {
+                return;
+            }
+            // Likely this client's own tab, still waiting for its `preview.open` reply.
+            if snapshot["automationOwner"].is_null() && app.ui.panel.browser.opening.iter().any(|o| o.2 == thread) {
+                app.ui.panel.browser.deferred.push(event);
+                return;
+            }
+            let tab = open_tab(app);
+            if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
+                t.session = Some(key);
+            }
+            apply(app, tab, snapshot, &Value::Null);
+            reveal_session(app, tab, &thread, snapshot, true);
+        }
+        Some("closed") => {
+            let Some(tab) = bound else { return };
+            if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
+                t.session = None;
+            }
+            agent::detach(&key);
+            super::drop_browser(app, tab);
+            close(app, tab);
+        }
+        Some("resized") => {
+            let Some(tab) = bound else { return };
+            apply(app, tab, snapshot, &event["request"]);
+            reveal_session(app, tab, &thread, snapshot, false);
+        }
+        Some("navigated") => {
+            if let Some(tab) = bound {
+                reveal_session(app, tab, &thread, snapshot, false);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Web's `revealServerTabs`: every session but a hidden one is a tab on its thread's panel; an
+/// agent's reveal floats a new one over the chat, and a forced one brings its tab forward.
+fn reveal_session(app: &mut App, tab: TabId, thread: &str, snapshot: &Value, opened: bool) {
+    if snapshot["reveal"] == false {
+        return;
+    }
+    let request = snapshot["revealRequest"]["id"].as_str().map(str::to_owned);
+    let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) else { return };
+    let fresh = match &request {
+        Some(id) => t.revealed.as_deref() != Some(id.as_str()),
+        None => opened,
+    };
+    if request.is_some() {
+        t.revealed = request;
+    }
+    let force = snapshot["revealRequest"]["force"] == true;
+    let wanted = fresh && snapshot["reveal"] == true && (force || crate::settings::value(app, "browserAutoShowFloatingPreview").as_bool().unwrap_or(true));
+    let current = super::add_browser(app, thread, tab, wanted && opened);
+    if wanted && !opened && force && current {
+        super::activate(app, super::Surface::Browser(tab));
+    }
+}
+
+/// What an agent's `preview_resize` and `preview_set_appearance` ask of a tab the server leaves
+/// to the desktop: its viewport, zoom, a hard reload or clearing site data. The server emulates
+/// the color scheme itself.
+fn apply(app: &mut App, tab: TabId, snapshot: &Value, request: &Value) {
+    let status = app.ui.panel.browser.browser.status(tab);
+    if let Some(device) = viewport_size(&snapshot["viewport"]).filter(|d| *d != status.device) {
+        send(app, Cmd::Device(tab, device));
+    }
+    if let Some(zoom) = snapshot["zoomFactor"].as_f64().map(|z| z as f32).filter(|z| (status.zoom - z).abs() > 0.001) {
+        send(app, Cmd::Zoom(tab, zoom));
+    }
+    if request["hardReload"] == true {
+        send(app, Cmd::Reload { tab, hard: true });
+    }
+    match request["clear"].as_str() {
+        Some("cookies") => send(app, Cmd::ClearCookies),
+        Some("cache") => send(app, Cmd::ClearCache),
+        _ => {}
+    }
+}
+
+/// A session's `PreviewViewportSetting` as the device toolbar's size: `Some(None)` fills the
+/// panel; `None` when the session names none.
+fn viewport_size(viewport: &Value) -> Option<Option<(u32, u32)>> {
+    match (viewport["_tag"].as_str()?, viewport["width"].as_u64(), viewport["height"].as_u64()) {
+        ("freeform" | "preset", Some(w), Some(h)) => Some(Some((w as u32, h as u32))),
+        _ => Some(None),
+    }
+}
+
+/// Tells the server each session's tab is attached once Chrome has its page, and again for a
+/// new server process or the new page after Chrome restarts.
+fn announce(app: &mut App) {
+    let ui = &mut app.ui.panel.browser;
+    if !ui.tabs.values().any(|t| t.session.is_some()) {
+        return;
+    }
+    let generation = agent::generation();
+    let (host, targets): (Option<String>, HashMap<TabId, String>) = {
+        let shared = ui.browser.shared.lock().unwrap();
+        (shared.devtools.clone(), shared.tabs.iter().filter_map(|(id, s)| s.target.clone().map(|t| (*id, t))).collect())
+    };
+    let Some(host) = host else { return };
+    for (id, tab) in ui.tabs.iter_mut() {
+        let (Some(key), Some(target)) = (&tab.session, targets.get(id)) else { continue };
+        let now = Some((generation, target.clone()));
+        if tab.announced != now {
+            agent::attach(key, host.clone(), target.clone());
+            tab.announced = now;
+        }
+    }
 }
 
 /// Electron's separate window title: `Preview · {title}`, or "Browser preview" for a blank tab.
@@ -2056,6 +2284,74 @@ fn context_menu(t: &T, c: &Context, out: &mut Vec<El>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn session_tab(app: &App, thread: &str, session: &str) -> Option<TabId> {
+        app.ui.panel.browser.tabs.iter().find(|(_, t)| t.session == Some((thread.to_owned(), session.to_owned()))).map(|(id, _)| *id)
+    }
+
+    #[test]
+    fn an_agents_session_opens_a_tab_on_its_thread_and_closes_with_it() {
+        use super::super::Surface;
+        let mut app = App::new();
+        let ids: Vec<String> = app.state().threads.iter().take(2).map(|v| data::s(v, "id").to_string()).collect();
+        let (thread, other) = (ids[0].clone(), ids[1].clone());
+        app.navigate(Route::Thread(thread.clone()));
+        super::super::switch_thread(&mut app);
+
+        // `preview_open` with reveal: a tab on the thread's panel, floating over the chat.
+        session_event(&mut app, json!({ "type": "opened", "threadId": thread, "tabId": "a", "snapshot": { "runtime": "server", "reveal": true, "automationOwner": "agent-1", "viewport": { "_tag": "fill" } } }));
+        let tab = session_tab(&app, &thread, "a").expect("the agent's session has a tab");
+        assert!(app.ui.panel.surfaces.contains(&Surface::Browser(tab)));
+        assert_eq!(app.ui.panel.browser.pip, Some(tab));
+        assert!(!app.ui.shell.panel_open, "a reveal floats the tab; the panel stays shut");
+        // The same session again opens nothing new.
+        session_event(&mut app, json!({ "type": "opened", "threadId": thread, "tabId": "a", "snapshot": { "runtime": "server" } }));
+        assert_eq!(app.ui.panel.browser.tabs.len(), 1);
+
+        // Another thread's session waits on that thread's panel; a hidden one gets no panel tab,
+        // and a headless one streams from the server instead.
+        session_event(&mut app, json!({ "type": "opened", "threadId": other, "tabId": "b", "snapshot": { "runtime": "server", "automationOwner": "agent-2" } }));
+        let b = session_tab(&app, &other, "b").unwrap();
+        assert!(app.ui.panel.stash[&other].surfaces.contains(&Surface::Browser(b)) && !app.ui.panel.surfaces.contains(&Surface::Browser(b)));
+        session_event(&mut app, json!({ "type": "opened", "threadId": thread, "tabId": "c", "snapshot": { "runtime": "server", "reveal": false, "automationOwner": "agent-1" } }));
+        let c = session_tab(&app, &thread, "c").unwrap();
+        assert!(!app.ui.panel.surfaces.contains(&Surface::Browser(c)));
+        session_event(&mut app, json!({ "type": "opened", "threadId": thread, "tabId": "d", "snapshot": { "runtime": "server", "headless": true } }));
+        assert!(session_tab(&app, &thread, "d").is_none());
+
+        // `t3_preview_close`: the tab and its floating preview go.
+        session_event(&mut app, json!({ "type": "closed", "threadId": thread, "tabId": "a" }));
+        assert!(!app.ui.panel.browser.tabs.contains_key(&tab));
+        assert!(!app.ui.panel.surfaces.contains(&Surface::Browser(tab)) && app.ui.panel.browser.pip.is_none());
+        session_event(&mut app, json!({ "type": "closed", "threadId": other, "tabId": "b" }));
+        assert!(!app.ui.panel.stash[&other].surfaces.contains(&Surface::Browser(b)));
+    }
+
+    #[test]
+    fn a_tab_opened_here_binds_to_its_own_session_instead_of_opening_twice() {
+        let mut app = App::new();
+        let thread = data::s(&app.state().threads[0], "id").to_string();
+        let mine = open_tab(&mut app);
+        app.ui.panel.browser.opening.push((7, mine, thread.clone()));
+        let opened = json!({ "type": "opened", "threadId": thread, "tabId": "s", "snapshot": { "runtime": "server" } });
+        session_event(&mut app, opened.clone());
+        assert_eq!(app.ui.panel.browser.tabs.len(), 1, "held until preview.open answers");
+        assert_eq!(app.ui.panel.browser.deferred.len(), 1);
+
+        app.ui.panel.browser.opening.clear();
+        bind(&mut app, mine, (thread.clone(), "s".into()));
+        assert_eq!(session_tab(&app, &thread, "s"), Some(mine));
+        session_event(&mut app, opened);
+        assert_eq!(app.ui.panel.browser.tabs.len(), 1);
+    }
+
+    #[test]
+    fn session_viewports_become_device_sizes() {
+        assert_eq!(viewport_size(&json!({ "_tag": "preset", "width": 390, "height": 844, "presetId": "iphone" })), Some(Some((390, 844))));
+        assert_eq!(viewport_size(&json!({ "_tag": "freeform", "width": 800, "height": 600 })), Some(Some((800, 600))));
+        assert_eq!(viewport_size(&json!({ "_tag": "fill" })), Some(None));
+        assert_eq!(viewport_size(&Value::Null), None);
+    }
 
     #[test]
     fn the_floating_tab_shows_over_a_thread_or_the_new_thread_draft() {

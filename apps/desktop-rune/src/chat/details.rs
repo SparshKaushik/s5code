@@ -712,6 +712,16 @@ fn poll_branch(s: &mut App) -> bool {
     true
 }
 
+/// `editor.openFavorite`: the checkout in the editor the card's "Open in editor" button uses.
+/// False with nothing to open, so the chord falls through.
+pub fn open_favorite(s: &mut App) -> bool {
+    if cwd(s).is_none() || editors(s).is_empty() {
+        return false;
+    }
+    open_in_editor(s, None);
+    true
+}
+
 fn open_in_editor(s: &mut App, editor: Option<String>) {
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
