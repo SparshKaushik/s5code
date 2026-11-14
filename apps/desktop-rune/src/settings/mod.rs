@@ -7,6 +7,7 @@ mod add_provider;
 mod provider_update;
 pub(crate) mod auth;
 mod auth_terminal;
+pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
@@ -21,6 +22,8 @@ mod models;
 mod host_logos;
 mod icon_index;
 mod pages;
+pub(crate) mod permissions;
+mod qr;
 pub(crate) mod project_icon;
 mod projects;
 mod providers;
@@ -99,6 +102,7 @@ pub struct Ui {
     pub connections: connections::Ui,
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
+    pub session: permissions::Session,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -474,6 +478,9 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("source-control") {
             source_control::scan(s);
         }
+        if page.is_some() {
+            permissions::load(s);
+        }
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
         s.ui.settings.advanced.clear();
@@ -519,7 +526,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -553,7 +560,11 @@ pub fn poll(s: &mut App) -> bool {
                         .and_then(|c| c["environment"]["label"].as_str())
                         .unwrap_or("this environment")
                         .to_owned();
-                    s.ui.settings.error = Some(failure_message(&method, &environment, &error));
+                    let message = failure_message(&method, &environment, &error);
+                    match message.strip_prefix("Setting not saved. ") {
+                        Some(detail) => crate::shell::palette::toast_error(s, "Setting not saved", Some(detail)),
+                        None => s.ui.settings.error = Some(message),
+                    }
                 }
             }
             changed = true;
@@ -969,6 +980,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     scope::menu(s, t, &mut overlays);
     devices::overlays(s, t, &mut overlays);
     keybindings::overlays(s, t, &mut overlays);
+    permissions::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()
@@ -1031,6 +1043,30 @@ fn scene_from_thread(s: &mut App) {
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("settings-connections-add-remote", |s| {
+        scene(s, "connections");
+        connections::scene(s, "add-remote");
+    }),
+    ("settings-connections-add-ssh", |s| {
+        scene(s, "connections");
+        connections::scene(s, "add-ssh");
+    }),
+    ("settings-connections-env-menu", |s| {
+        scene(s, "connections");
+        connections::scene(s, "env-menu");
+    }),
+    ("settings-connections-link", |s| {
+        scene(s, "connections");
+        connections::scene(s, "link");
+    }),
+    ("settings-devices-simlock", |s| {
+        scene(s, "devices");
+        devices_editor::open_simlock(s, None);
+    }),
+    ("settings-runtime-mode-open", |s| {
+        scene(s, "threads");
+        s.ui.settings.open_select = Some("defaultRuntimeMode".into());
+    }),
     ("settings-general", |s| scene(s, "general")),
     ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),

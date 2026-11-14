@@ -36,6 +36,7 @@ pub struct MenuItem {
     sub_keys: Option<Box<dyn FnOnce(El) -> El>>,
     leading: Option<El>,
     trailing: Option<El>,
+    description: Option<String>,
     acts: Acts,
 }
 impl MenuItem {
@@ -57,6 +58,7 @@ impl MenuItem {
             sub_keys: None,
             leading: None,
             trailing: None,
+            description: None,
             acts: Acts::default(),
         }
     }
@@ -70,6 +72,12 @@ impl MenuItem {
         self
     }
     /// Custom content after the label, such as a row's own pin button.
+    /// A second, muted line under the label; the item's icon then sits inline with the label,
+    /// like web's `SelectItem` with a `grid gap-0.5` body.
+    pub fn description(mut self, value: impl Into<String>) -> Self {
+        self.description = Some(value.into());
+        self
+    }
     pub fn trailing(mut self, value: El) -> Self {
         self.trailing = Some(value);
         self
@@ -193,7 +201,7 @@ impl MenuItem {
         self
     }
 
-    fn build(self, k: &Kit, native: bool, key: String, layer: &mut Vec<El>) -> El {
+    fn build(mut self, k: &Kit, native: bool, key: String, layer: &mut Vec<El>) -> El {
         let disabled = self.state == State::Disabled;
         let highlighted = matches!(self.state, State::Hover | State::Pressed | State::Focus)
             || self.sub.as_ref().is_some_and(|v| v.1);
@@ -286,6 +294,8 @@ impl MenuItem {
         } else if self.inset {
             e = e.child(el().w(16.));
         }
+        let description = self.description.take();
+        let inline = if description.is_some() { self.glyph.take() } else { None };
         if let Some(leading) = self.leading {
             e = e.child(leading);
         } else if let Some(glyph) = self.glyph {
@@ -299,18 +309,34 @@ impl MenuItem {
                 ),
             );
         }
-        e = e.child(
-            text(self.label)
-                .font(font)
-                .color(fg)
-                .grow(1.)
-                .truncate()
-                .group_color(if native {
-                    rune::Color::WHITE
-                } else {
-                    k.c.text_base
-                }),
-        );
+        let label = text(self.label)
+            .font(if description.is_some() { rune::TextStyle { weight: 500., ..font } } else { font })
+            .color(fg)
+            .grow(1.)
+            .truncate()
+            .group_color(if native {
+                rune::Color::WHITE
+            } else {
+                k.c.text_base
+            });
+        e = match description {
+            Some(description) => e.child(
+                col()
+                    .grow(1.)
+                    .min_w(0.)
+                    .gap(2.)
+                    .child(
+                        row()
+                            .w_full()
+                            .gap(6.)
+                            .center_y()
+                            .children(inline.map(|glyph| icon(glyph, 14.).color(muted)))
+                            .child(label),
+                    )
+                    .child(text(description).font(theme::TEXT_XS.lh(16.)).color(k.c.text_muted).wrap()),
+            ),
+            None => e.child(label),
+        };
         if let Some((glyph, help)) = self.badge {
             e = e.child(icon(glyph, 14.).color(muted).role("img").label(help.clone()).help(help));
         }

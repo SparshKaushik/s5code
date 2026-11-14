@@ -33,10 +33,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
             .as_ref()
             .or(s.client_settings.error.as_ref())
     {
-        let (title, detail) = match error.strip_prefix("Setting not saved. ") {
-            Some(detail) => ("Setting not saved", detail),
-            None => ("Something went wrong", error.as_str()),
-        };
+        let (title, detail) = ("Something went wrong", error.as_str());
         page = page.child(
             row()
                 .w_full()

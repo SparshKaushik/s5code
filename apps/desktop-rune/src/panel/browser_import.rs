@@ -165,7 +165,7 @@ struct Keys {
     empty: Option<[u8; 16]>,
 }
 
-fn derive(passphrase: &[u8], iterations: u32) -> [u8; 16] {
+pub(crate) fn derive(passphrase: &[u8], iterations: u32) -> [u8; 16] {
     let mut key = [0; 16];
     let iterations = std::num::NonZeroU32::new(iterations).expect("iterations > 0");
     ring::pbkdf2::derive(ring::pbkdf2::PBKDF2_HMAC_SHA1, iterations, b"saltysalt", passphrase, &mut key);
@@ -192,7 +192,17 @@ fn keys(source: &Source) -> Result<Keys, &'static str> {
 }
 
 fn keychain(service: &str, account: &str) -> Result<String, &'static str> {
-    let out = Command::new("security").args(["find-generic-password", "-w", "-s", service, "-a", account]).output().map_err(|_| "keychainUnavailable")?;
+    keychain_lookup(&["-s", service, "-a", account])
+}
+
+/// A generic password by its service alone, when the account name isn't known.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn keychain_service(service: &str) -> Result<String, &'static str> {
+    keychain_lookup(&["-s", service])
+}
+
+fn keychain_lookup(query: &[&str]) -> Result<String, &'static str> {
+    let out = Command::new("security").args(["find-generic-password", "-w"]).args(query).output().map_err(|_| "keychainUnavailable")?;
     match out.status.code() {
         Some(0) => Some(String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_owned()).filter(|s| !s.is_empty()).ok_or("keychainItemMissing"),
         // errSecItemNotFound
@@ -201,7 +211,7 @@ fn keychain(service: &str, account: &str) -> Result<String, &'static str> {
     }
 }
 
-fn linux_secret(application: &str) -> Result<String, &'static str> {
+pub(crate) fn linux_secret(application: &str) -> Result<String, &'static str> {
     let out = Command::new("secret-tool").args(["lookup", "application", application]).stdin(Stdio::null()).output().map_err(|_| "keychainUnavailable")?;
     let secret = String::from_utf8_lossy(&out.stdout).trim_end_matches('\n').to_owned();
     if out.status.success() && !secret.is_empty() { Ok(secret) } else { Err("keychainItemMissing") }
@@ -217,7 +227,7 @@ fn decrypt(encrypted: &[u8], keys: &Keys, host: &str, version: i64) -> Option<St
     [Some(primary), keys.empty].into_iter().flatten().find_map(|key| decrypt_cbc(payload, &key, host, version))
 }
 
-fn decrypt_cbc(payload: &[u8], key: &[u8; 16], host: &str, version: i64) -> Option<String> {
+pub(crate) fn decrypt_cbc(payload: &[u8], key: &[u8; 16], host: &str, version: i64) -> Option<String> {
     if payload.is_empty() || payload.len() % 16 != 0 {
         return None;
     }
@@ -248,7 +258,24 @@ fn decrypt_cbc(payload: &[u8], key: &[u8; 16], host: &str, version: i64) -> Opti
     Some(String::from_utf8_lossy(value).into_owned())
 }
 
-/// AES-128 decryption (FIPS-197 inverse cipher), the one primitive `ring` does not expose.
+/// OSCrypt's CBC with a space IV and PKCS #7 padding, as safeStorage writes after its prefix.
+pub(crate) fn encrypt_cbc(plain: &[u8], key: &[u8; 16]) -> Vec<u8> {
+    let aes = Aes::new(key);
+    let pad = 16 - plain.len() % 16;
+    let mut padded = plain.to_vec();
+    padded.extend(std::iter::repeat_n(pad as u8, pad));
+    let mut previous = [0x20u8; 16];
+    let mut out = Vec::with_capacity(padded.len());
+    for chunk in padded.chunks(16) {
+        let mut block = [0u8; 16];
+        block.iter_mut().zip(chunk.iter().zip(previous)).for_each(|(b, (p, v))| *b = p ^ v);
+        previous = aes.encrypt(block);
+        out.extend_from_slice(&previous);
+    }
+    out
+}
+
+/// AES-128 (FIPS-197), the one primitive `ring` does not expose.
 struct Aes {
     keys: [[u8; 16]; 11],
 }
@@ -313,6 +340,32 @@ impl Aes {
             }
         }
         Aes { keys }
+    }
+
+    fn encrypt(&self, mut s: [u8; 16]) -> [u8; 16] {
+        let sbox = &sboxes().0;
+        let add = |s: &mut [u8; 16], k: &[u8; 16]| s.iter_mut().zip(k).for_each(|(a, b)| *a ^= b);
+        add(&mut s, &self.keys[0]);
+        for round in 1..=10 {
+            let old = s;
+            for c in 0..4 {
+                for r in 0..4 {
+                    s[r + 4 * c] = sbox[old[r + 4 * ((c + r) % 4)] as usize];
+                }
+            }
+            if round != 10 {
+                for c in 0..4 {
+                    let a = [s[4 * c], s[4 * c + 1], s[4 * c + 2], s[4 * c + 3]];
+                    let m = |x: [u8; 4]| gmul(a[0], x[0]) ^ gmul(a[1], x[1]) ^ gmul(a[2], x[2]) ^ gmul(a[3], x[3]);
+                    s[4 * c] = m([2, 3, 1, 1]);
+                    s[4 * c + 1] = m([1, 2, 3, 1]);
+                    s[4 * c + 2] = m([1, 1, 2, 3]);
+                    s[4 * c + 3] = m([3, 1, 1, 2]);
+                }
+            }
+            add(&mut s, &self.keys[round]);
+        }
+        s
     }
 
     fn decrypt(&self, mut s: [u8; 16]) -> [u8; 16] {
@@ -736,6 +789,21 @@ pub fn skipped_domains(domains: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn aes_encrypts_the_fips_197_vector_and_cbc_round_trips() {
+        let key: [u8; 16] = std::array::from_fn(|i| i as u8);
+        let plain: [u8; 16] = std::array::from_fn(|i| (i as u8) * 0x11);
+        let cipher = Aes::new(&key).encrypt(plain);
+        assert_eq!(cipher, [0x69, 0xc4, 0xe0, 0xd8, 0x6a, 0x7b, 0x04, 0x30, 0xd8, 0xcd, 0xb7, 0x80, 0x70, 0xb4, 0xc5, 0x5a]);
+        assert_eq!(Aes::new(&key).decrypt(cipher), plain);
+        let k = derive(b"peanuts", 1);
+        for text in ["", "a", "sixteen bytes!!!", "{\"schemaVersion\":1,\"targets\":[]}"] {
+            let sealed = encrypt_cbc(text.as_bytes(), &k);
+            assert_eq!(sealed.len() % 16, 0);
+            assert_eq!(decrypt_cbc(&sealed, &k, "", 0).as_deref(), Some(text));
+        }
+    }
 
     fn hex(s: &str) -> Vec<u8> {
         (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).unwrap()).collect()
