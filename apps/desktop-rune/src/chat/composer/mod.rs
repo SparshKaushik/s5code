@@ -1926,7 +1926,7 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
     };
     let status = if disconnected(s) || no_provider(s) || project_required(s) {
         Some("Environment disconnected".to_owned())
-    } else if let Some(reason) = send_block(s).or_else(|| crate::add_to_machine::send_block(s)) {
+    } else if let Some(reason) = send_block(s).or_else(|| crate::add_to_machine::send_block(s).map(str::to_owned)) {
         Some(reason)
     } else if let Some(reason) = attachment_block(s) {
         Some(reason.to_owned())
