@@ -128,6 +128,8 @@ pub struct Ui {
     pub environments: Option<Vec<String>>,
     /// `server.updateSettings` opting an environment into Cursor's keychain login, in flight.
     pub cursor_enabling: Vec<(String, u64)>,
+    /// The modal's widest (AppRouteModal's 80rem); scenes narrow it to a small window's.
+    pub max_w: f32,
 }
 
 impl Default for Ui {
@@ -160,6 +162,7 @@ impl Default for Ui {
             preferences_read: false,
             environments: None,
             cursor_enabling: Vec::new(),
+            max_w: 1280.0,
         }
     }
 }
@@ -399,8 +402,15 @@ fn scan_input(requested: &Value, settings: &Value) -> Value {
     input
 }
 
-/// What a fetched summary answers; the rolling hour bounds alone don't refetch.
+/// useUsage's `windowKey`: what a fetched summary answers. The rolling 24 hours carry their bounds,
+/// so a window rebuilt in a later minute is another query.
 fn window_key(input: &Value) -> Value {
+    json!([input["sinceDay"], input["untilDay"], input["timeZone"], input["modelAliases"], input["resolution"], input["sinceTime"], input["untilTime"]])
+}
+
+/// The window the page holds until it is chosen again or refreshed (`windowSelection`): the
+/// minute ticking over leaves the rolling bounds where they were.
+fn window_choice(input: &Value) -> Value {
     json!([input["sinceDay"], input["resolution"], input["timeZone"], input["modelAliases"]])
 }
 
@@ -436,7 +446,7 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     let wanted = input(&s.ui.pages.usage, s.now_ms, &model_aliases(s));
-    if s.ui.pages.usage.requested.as_ref().map(window_key) != Some(window_key(&wanted)) {
+    if s.ui.pages.usage.requested.as_ref().map(window_choice) != Some(window_choice(&wanted)) {
         ui(s).requested = Some(wanted);
         changed = true;
     }
@@ -1343,7 +1353,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
         .padding(1.0)
         .modal(true, close)
         .w_full()
-        .max_w(1280.0)
+        .max_w(u.max_w)
         .h_full()
         .max_h(960.0)
         .radius(16.0)
@@ -1406,8 +1416,8 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
             save_preferences(s);
         }))
         .separator();
-    for &(kind, label, _) in PROVIDERS {
-        providers = providers.item(MenuItem::new(label).checked(!u.hidden.contains(&kind)).on_select(move |s: &mut App| {
+    for &(kind, label, driver) in PROVIDERS {
+        providers = providers.item(MenuItem::new(label).leading(provider_icon(t, driver, 14.0)).checked(!u.hidden.contains(&kind)).on_select(move |s: &mut App| {
             let u = ui(s);
             if let Some(at) = u.hidden.iter().position(|h| *h == kind) {
                 u.hidden.remove(at);
@@ -1510,40 +1520,69 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
                 .child(providers.build(&k, overlays)),
         );
     let limits = u.metric == "limits";
-    if !limits && let Some(summary) = &u.summary {
-        let bounds = u.answered.as_ref().filter(|r| r["resolution"] == "hour").and_then(|r| Some((iso_ms(r["sinceTime"].as_str()?)?, iso_ms(r["untilTime"].as_str()?)?)));
-        let label = match bounds {
-            Some((since, until)) => format!("{} to {}", clock(s).date_hour(since), clock(s).date_hour(until)),
-            None if u.window_days == 1 => "Past 24 hours".to_string(),
-            None => format!("{} to {}", day_short(field(summary, "sinceDay")), day_short(field(summary, "untilDay"))),
-        };
-        bar = bar.child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground).ml(8.0));
-    }
+    // The window label shows only from `@7xl/usage-header`, wider than this modal ever gets.
     bar = bar.child(spacer());
-    let mut right = row().gap(8.0).center_y();
-    if !limits {
-        let windows = [1, 7, 30, 90];
-        let selected = windows.iter().position(|w| *w == u.window_days).unwrap_or(2);
+    let window_labels: Vec<&str> = WINDOWS.iter().map(|w| w.1).collect();
+    let window_tips: Vec<String> = WINDOWS.iter().map(|w| shortcut_title(s, w.1, w.2)).collect();
+    let window_at = WINDOWS.iter().position(|w| w.0 == u.window_days).unwrap_or(2);
+    let metric_labels: Vec<&str> = METRICS.iter().map(|m| m.1).collect();
+    let metric_tips: Vec<String> = METRICS.iter().map(|m| shortcut_title(s, m.1, m.2)).collect();
+    let metric_at = METRICS.iter().position(|m| m.0 == u.metric).unwrap_or(2);
+    let wide = rune::memo::layout_with("usage-header", header_wide).unwrap_or(true);
+    let mut right = row().gap(if wide { 8.0 } else { 4.0 }).center_y();
+    if wide {
+        if !limits {
+            right = right.child(
+                ToggleGroup::new(&window_labels, &[window_at])
+                    .tips(&window_tips)
+                    .on_pick(|s: &mut App, n: usize, _: &mut Tx| pick_window(s, WINDOWS[n].0))
+                    .build(&k),
+            );
+        }
+        right = right.child(ToggleGroup::new(&metric_labels, &[metric_at]).tips(&metric_tips).on_pick(|s: &mut App, n: usize, _: &mut Tx| pick_metric(s, METRICS[n].0)).build(&k));
+    } else {
+        if !limits {
+            right = right.child(
+                kit::Select::new("usage-period", &window_labels)
+                    .current(Some(WINDOWS[window_at].1))
+                    .label("Usage period")
+                    .size("compact")
+                    .variant("ghost")
+                    .width(0.0)
+                    .align_end()
+                    .tips(&window_tips)
+                    .open(u.menu == Some("period"))
+                    .on_toggle(toggle("period"))
+                    .on_close(|s: &mut App| ui(s).menu = None)
+                    .on_choose(|s: &mut App, label: &str, _: &mut Tx| {
+                        if let Some(w) = WINDOWS.iter().find(|w| w.1 == label) {
+                            pick_window(s, w.0);
+                        }
+                    })
+                    .build(&k, overlays),
+            );
+        }
         right = right.child(
-            ToggleGroup::new(&["Past 24h", "7 days", "30 days", "90 days"], &[selected])
-                .on_pick(move |s: &mut App, n: usize, _: &mut Tx| {
-                    ui(s).window_days = windows[n];
-                    save_preferences(s);
+            kit::Select::new("usage-metric", &metric_labels)
+                .current(Some(METRICS[metric_at].1))
+                .label("Usage metric")
+                .size("compact")
+                .variant("ghost")
+                .width(0.0)
+                .align_end()
+                .tips(&metric_tips)
+                .open(u.menu == Some("metric"))
+                .on_toggle(toggle("metric"))
+                .on_close(|s: &mut App| ui(s).menu = None)
+                .on_choose(|s: &mut App, label: &str, _: &mut Tx| {
+                    if let Some(m) = METRICS.iter().find(|m| m.1 == label) {
+                        pick_metric(s, m.0);
+                    }
                 })
-                .build(&k),
+                .build(&k, overlays),
         );
     }
-    let metrics = ["cost", "tokens", "limits"];
-    let selected = metrics.iter().position(|m| *m == u.metric).unwrap_or(2);
     right = right
-        .child(
-            ToggleGroup::new(&["Cost", "Tokens", "Limits"], &[selected])
-                .on_pick(move |s: &mut App, n: usize, _: &mut Tx| {
-                    ui(s).metric = metrics[n];
-                    save_preferences(s);
-                })
-                .build(&k),
-        )
         .child(
             kit::Button::new(if limits { "Refresh limits" } else { "Refresh usage" })
                 .variant("ghost")
@@ -1555,6 +1594,41 @@ fn header(s: &App, t: &T, overlays: &mut Vec<El>) -> El {
         )
         .child(kit::Button::new("Close").variant("ghost").size("icon-sm").icon(&i::X).on_press(close).build(t));
     col().w_full().child(bar.child(right)).child(el().w_full().h(1.0).fill(t.c.border))
+}
+
+/// WINDOW_OPTIONS: (days, label, keybinding command).
+const WINDOWS: &[(i64, &str, &str)] = &[(1, "Past 24h", "usage.period.day"), (7, "7 days", "usage.period.week"), (30, "30 days", "usage.period.month"), (90, "90 days", "usage.period.quarter")];
+/// METRIC_OPTIONS: (metric, label, keybinding command).
+const METRICS: &[(&str, &str, &str)] = &[("cost", "Cost", "usage.cost"), ("tokens", "Tokens", "usage.tokens"), ("limits", "Limits", "usage.limits")];
+
+/// The header's content box (`ps-5 pe-2` inside the bar) from which `@4xl/usage-header` (56rem)
+/// shows the toggles; narrower, the period and metric become compact selects.
+fn header_wide(rect: [f32; 4]) -> bool {
+    rect[2] - 28.0 >= 896.0
+}
+
+/// UsagePage's `shortcutTitle`: the option's label and its bound shortcut, if any.
+fn shortcut_title(s: &App, label: &str, command: &str) -> String {
+    match crate::shell::palette::shortcut_label(s, command) {
+        shortcut if shortcut.is_empty() => label.to_string(),
+        shortcut => format!("{label} ({shortcut})"),
+    }
+}
+
+/// selectWindow
+fn pick_window(s: &mut App, days: i64) {
+    let u = ui(s);
+    u.window_days = days;
+    u.menu = None;
+    save_preferences(s);
+}
+
+/// selectMetric
+fn pick_metric(s: &mut App, metric: &'static str) {
+    let u = ui(s);
+    u.metric = metric;
+    u.menu = None;
+    save_preferences(s);
 }
 
 // ---- cost and tokens --------------------------------------------------------------------
@@ -1569,7 +1643,7 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
     let tnum = |style: rune::tok::TextStyle| style.features("'tnum' 1");
     let selected = selected_usage(s);
     let (every, partway) = loading(&selected, refreshing_usage(u), u.showing_kept, &u.hidden);
-    let dim = if every || !partway.is_empty() { 0.4 } else { 1.0 };
+    let dim = faded(every, &partway, None);
     let sessions = m.sessions;
     let mut caption = row().gap(4.0).center_y().child(
         text(format!("{} sessions{}", grouped(sessions), if tokens_view { "" } else { " · API estimate" })).font(theme::TEXT_XS).color(t.c.muted_foreground),
@@ -1704,7 +1778,14 @@ fn overview(s: &App, t: &T, summary: &Value, page: El, overlays: &mut Vec<El>) -
         }
         page = page.child(shares);
     }
-    page.child(breakdown(s, t, &m, dim))
+    page.child(breakdown(s, t, &m, (every, partway.as_slice())))
+}
+
+/// figureClass over usageLoading: a provider's figures fade while that provider loads, and figures
+/// across providers (`None`) while any does.
+fn faded(every: bool, partway: &[String], kind: Option<&str>) -> f32 {
+    let loading = every || kind.map_or(!partway.is_empty(), |kind| partway.iter().any(|x| x == kind));
+    if loading { 0.4 } else { 1.0 }
 }
 
 /// UsageModelDialog: one breakdown row's totals, trend and splits.
@@ -1773,6 +1854,7 @@ fn model_dialog(s: &App, t: &T, summary: &Value, key: &str, overlays: &mut Vec<E
         );
     }
     kit::Dialog::new("usage-model", model)
+        .title_icon(provider_icon(t, presentation(kind).1, 20.0))
         .description(description)
         .child(body)
         .width(768.0)
@@ -2122,21 +2204,21 @@ fn chart(t: &T, m: &Merged, tokens_view: bool, (hover, plot_w): (Option<(usize, 
     col().w_full().gap(4.0).child(row().w_full().gap(8.0).child(axis).child(plot)).child(x_labels)
 }
 
-fn breakdown(s: &App, t: &T, m: &Merged, dim: f32) -> El {
+fn breakdown(s: &App, t: &T, m: &Merged, loading: (bool, &[String])) -> El {
     let u = &s.ui.pages.usage;
     let k = kit::theme(t);
     let period = if m.hourly || u.answered.as_ref().is_some_and(|r| r["resolution"] == "hour") { "Hour" } else { "Day" };
     let toggle = ToggleGroup::new(&["Model", period], &[usize::from(u.by_period)]).on_pick(|s: &mut App, n: usize, _: &mut Tx| ui(s).by_period = n == 1).build(&k);
     let header = row().w_full().center_y().child(h2(t, "Breakdown")).child(spacer()).child(toggle);
-    let table = if u.by_period { period_table(t, m) } else { model_table(t, m, u.metric == "tokens") };
-    col().w_full().gap(12.0).child(header).child(table.opacity(dim))
+    let table = if u.by_period { period_table(t, m, loading) } else { model_table(t, m, u.metric == "tokens", loading) };
+    col().w_full().gap(12.0).child(header).child(table)
 }
 
 fn cell(label: String, w: f32, style: rune::tok::TextStyle, c: Color) -> El {
     row().w(w).shrink().justify_end().child(text(label).font(style).color(c))
 }
 
-fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
+fn model_table(t: &T, m: &Merged, tokens_view: bool, (every, partway): (bool, &[String])) -> El {
     let head = theme::TEXT_XS;
     let muted = t.c.muted_foreground;
     let num = theme::TEXT_SM.features("'tnum' 1");
@@ -2173,6 +2255,7 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
         // modelShare: an unknown cost has no cost share, only a token share.
         let share = if unpriced && !tokens_view { String::new() } else { percent(v / total) };
         let open = line.key.clone();
+        let dim = faded(every, partway, Some(kind));
         table = table
             .child(
                 row()
@@ -2193,18 +2276,18 @@ fn model_table(t: &T, m: &Merged, tokens_view: bool) -> El {
                             .shrink()
                             .min_w(0.0)
                             .child(name)
-                            .child(if v > 0.0 { el().mt(6.0).h(2.0).w(((v / peak) as f32 * 192.0).max(8.0)).radius(radius::FULL).fill(color(t, kind)) } else { el().mt(6.0).h(2.0) }),
+                            .child(if v > 0.0 { el().mt(6.0).h(2.0).w(((v / peak) as f32 * 192.0).max(8.0)).radius(radius::FULL).fill(color(t, kind)).opacity(dim) } else { el().mt(6.0).h(2.0) }),
                     )
-                    .child(cell(cost, 120.0, num, if unpriced { muted } else { t.c.foreground }))
-                    .child(cell(share, 96.0, num, muted))
-                    .child(cell(tokens(totals.tokens), 112.0, num, muted).pr(8.0)),
+                    .child(cell(cost, 120.0, num, if unpriced { muted } else { t.c.foreground }).opacity(dim))
+                    .child(cell(share, 96.0, num, muted).opacity(dim))
+                    .child(cell(tokens(totals.tokens), 112.0, num, muted).pr(8.0).opacity(dim)),
             )
             .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5)));
     }
     table
 }
 
-fn period_table(t: &T, m: &Merged) -> El {
+fn period_table(t: &T, m: &Merged, (every, partway): (bool, &[String])) -> El {
     let head = theme::TEXT_XS;
     let muted = t.c.muted_foreground;
     let num = theme::TEXT_SM.features("'tnum' 1");
@@ -2228,9 +2311,10 @@ fn period_table(t: &T, m: &Merged) -> El {
             let x = get(kind);
             sum.cost += x.cost;
             sum.tokens += x.tokens;
-            line = line.child(cell(usd(x.cost), 120.0, num, muted));
+            line = line.child(cell(usd(x.cost), 120.0, num, muted).opacity(faded(every, partway, Some(*kind))));
         }
-        line = line.child(cell(usd(sum.cost), 112.0, num, t.c.foreground)).child(cell(tokens(sum.tokens), 112.0, num, muted).pr(8.0));
+        let dim = faded(every, partway, None);
+        line = line.child(cell(usd(sum.cost), 112.0, num, t.c.foreground).opacity(dim)).child(cell(tokens(sum.tokens), 112.0, num, muted).pr(8.0).opacity(dim));
         table = table.child(line).child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5)));
     }
     table
@@ -2342,10 +2426,11 @@ mod tests {
             hours,
             json!({"sinceDay": "2026-11-07", "untilDay": "2026-11-08", "timeZone": "Asia/Kolkata", "modelAliases": [], "resolution": "hour", "sinceTime": "2026-11-06T20:00:00.000Z", "untilTime": "2026-11-07T20:00:00.000Z"})
         );
-        // The minute ticking over keeps the fetched window; a new tag refetches.
+        // The minute ticking over keeps the chosen window; a new tag asks again.
         let later = input(&ui_in(IST, 1), now + 5 * MINUTE, &json!([]));
-        assert_eq!(window_key(&later), window_key(&hours));
-        assert_ne!(window_key(&input(&ui_in(IST, 1), now, &tags)), window_key(&hours));
+        assert_eq!(window_choice(&later), window_choice(&hours));
+        assert_ne!(window_key(&later), window_key(&hours), "rebuilt later, the rolling hours are another query");
+        assert_ne!(window_choice(&input(&ui_in(IST, 1), now, &tags)), window_choice(&hours));
     }
 
     #[test]
@@ -2542,6 +2627,20 @@ mod tests {
         assert_eq!(loading(&[answered()], false, false, &["grok"]), (false, Vec::<String>::new()));
         assert_eq!(loading(&[answered(), scanning()], false, false, &[]), (true, vec!["grok".to_string()]));
         assert_eq!(loading(&[answered()], false, true, &[]), (true, Vec::<String>::new()));
+
+        // Only the updating provider's figures fade; figures across providers fade while any updates.
+        let (every, partway) = loading(&[answered()], false, false, &[]);
+        assert_eq!(faded(every, &partway, Some("grok")), 0.4);
+        assert_eq!(faded(every, &partway, Some("codex")), 1.0);
+        assert_eq!(faded(every, &partway, None), 0.4);
+        assert_eq!(faded(false, &[], None), 1.0);
+        assert_eq!(faded(true, &[], Some("codex")), 0.4, "every provider waits while an environment scans");
+    }
+
+    #[test]
+    fn the_header_trades_its_toggles_for_selects_below_56rem_of_content() {
+        assert!(header_wide([0.0, 0.0, 924.0, 48.0]));
+        assert!(!header_wide([40.0, 41.0, 923.0, 48.0]), "the bar's 28px of padding is not content");
     }
 
     #[test]
@@ -2600,6 +2699,20 @@ mod tests {
         assert_eq!(scan.summary, answer(2), "changed prices keep the answer on screen while it is asked again");
         assert!(!scan.show(&a, &settings, 70_000 + IDLE_MS));
         assert_eq!(scan.summary, None, "a window unseen past the idle TTL is dropped");
+
+        // The rolling 24 hours, chosen again within the same minute, are the same query.
+        let at = iso_ms("2026-11-07T20:00:10.000Z").unwrap();
+        let day = |now: i64| window_key(&input(&ui_in(IST, 1), now, &json!([])));
+        let mut scan = Scan { summary: answer(3), answered: Some(day(at)), at, sent: Some((json!({}), settings.clone())), ..Scan::default() };
+        assert!(!scan.show(&b, &settings, at + 1_000));
+        scan.summary = answer(2);
+        scan.answered = Some(b.clone());
+        scan.at = at + 1_000;
+        assert!(scan.show(&day(at + 40_000), &settings, at + 40_000));
+        assert_eq!(scan.summary, answer(3));
+        assert!(scan.show(&b, &settings, at + 45_000));
+        assert!(!scan.show(&day(at + MINUTE), &settings, at + MINUTE));
+        assert_eq!(scan.summary, None, "a later minute's 24 hours are asked anew");
     }
 
     #[test]

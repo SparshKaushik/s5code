@@ -2,7 +2,7 @@
 pub(crate) mod agent;
 pub mod browser;
 mod closed;
-mod diff;
+pub(crate) mod diff;
 pub mod drawer;
 mod favicon;
 mod files;

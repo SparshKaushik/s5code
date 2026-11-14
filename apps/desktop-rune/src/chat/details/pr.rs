@@ -686,7 +686,7 @@ fn stop_watching(s: &mut App, url: &str) {
 }
 
 fn merge_method(s: &App, d: &Value) -> String {
-    crate::pages::pr_detail::merge_method(d, s.ui.pages.detail.merge_method.clone())
+    crate::pages::pr_detail::merge_method(s, d)
 }
 
 pub fn rows(s: &App, t: &T) -> Option<El> {
