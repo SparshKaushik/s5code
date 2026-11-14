@@ -283,7 +283,8 @@ fn open_remote(app: &mut App, tab: TabId, url: Option<String>) {
         Some((w, h)) => json!({ "_tag": "freeform", "width": w, "height": h }),
         None => json!({ "_tag": "fill" }),
     };
-    let mut payload = json!({ "threadId": thread, "viewport": viewport, "runtime": "server" });
+    let profile = crate::settings::browser_profiles::default_profile(app);
+    let mut payload = json!({ "threadId": thread, "viewport": viewport, "runtime": "server", "profileId": profile });
     if let Some(url) = url {
         payload["url"] = json!(url);
     }
@@ -3589,7 +3590,10 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
                 .child(zoom_button("Reset zoom", &icons::ROTATE_CCW, "ghost", blank, 0)),
         );
     let close = |s: &mut App| s.ui.panel.browser.menu = false;
-    kit::Menu::new("browser-more")
+    let profile = ui.tabs.get(&tab).and_then(|t| t.snapshot["profileId"].as_str()).unwrap_or("default");
+    let profile = crate::settings::browser_profiles::profile_name(app, profile);
+    let moving = move_label(app, tab);
+    let mut menu = kit::Menu::new("browser-more")
         .anchor("browser-menu")
         .placement(kit::Placement::BottomEnd)
         .min_width(248.)
@@ -3629,8 +3633,16 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
         )
         .separator()
         .row(zoom_row)
-        .separator()
-        .group_label("Profile: Default")
+        .separator();
+    if let Some(label) = moving {
+        menu = menu
+            .item(kit::MenuItem::new(label).disabled(blank).on_select(move |s: &mut App| {
+                close(s);
+                move_tab(s, tab);
+            }))
+            .separator();
+    }
+    menu.group_label(format!("Profile: {profile}"))
         .item(kit::MenuItem::new("Clear cookies").on_select(move |s: &mut App| {
             close(s);
             send(s, Cmd::ClearCookies);
@@ -3640,6 +3652,42 @@ pub fn overlays(app: &App, t: &T, out: &mut Vec<El>) {
             send(s, Cmd::ClearCache);
         }))
         .overlay(&kit::theme(t), out);
+}
+
+/// Web's `alternatePreviewRuntime`: on another machine's thread, a server tab can move to this
+/// computer's browser, and a tab here to that machine's.
+fn move_label(app: &App, tab: TabId) -> Option<String> {
+    let t = app.ui.panel.browser.tabs.get(&tab)?;
+    if t.remote.is_some() {
+        return t.stream.is_some().then(|| "Open on this computer".to_owned());
+    }
+    let env = server_env(app)?;
+    Some(format!("Open in {}'s browser", crate::env::label(app, &env)))
+}
+
+/// Opens the tab's page in the other runtime and closes it here, as web's `handleMoveTab`.
+fn move_tab(app: &mut App, tab: TabId) {
+    let Some(remote) = app.ui.panel.browser.tabs.get(&tab).map(|t| t.remote.is_some()) else { return };
+    let url = app.ui.panel.browser.browser.status(tab).url;
+    let moved = if remote {
+        let fresh = open_tab(app);
+        register(app, fresh);
+        fresh
+    } else {
+        let Some(env) = server_env(app) else { return };
+        let ui = &mut app.ui.panel.browser;
+        ui.next += 1;
+        let mut fresh = Tab::new(Pixels::new());
+        fresh.remote = Some(env);
+        ui.tabs.insert(ui.next, fresh);
+        ui.next
+    };
+    super::activate(app, super::Surface::Browser(moved));
+    if !url.is_empty() {
+        navigate(app, moved, &url);
+    }
+    super::drop_browser(app, tab);
+    close(app, tab);
 }
 
 /// Electron's page menu: Copy Link on a web link, Copy Image on an image, then the edit roles.

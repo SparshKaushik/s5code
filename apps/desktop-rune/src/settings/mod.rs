@@ -33,7 +33,7 @@ pub mod search;
 mod snooze;
 mod source_control;
 mod storage;
-mod browser_profiles;
+pub(crate) mod browser_profiles;
 mod diagnostics;
 mod resource_telemetry;
 mod licenses;
