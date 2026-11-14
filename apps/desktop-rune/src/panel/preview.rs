@@ -2425,10 +2425,10 @@ fn host_setup(t: &T, need: String, command: Option<String>) -> El {
         notice = notice
             .child(text("Run this on the server's machine, then reopen the tab:").font(theme::TEXT_SM).color(t.c.muted_foreground).wrap())
             .child(row().w_full().gap(8.).center_y().padding(8.).radius(6.).fill(t.c.muted).child(text(command).font(theme::TEXT_XS).color(t.c.foreground).grow(1.).wrap().selectable(true)).child(
-                kit::Button::new("Copy").variant("outline").size("xs").on_press_tx(move |s: &mut App, tx: &mut Tx| {
+                kit::Button::new("Copy").variant("outline").size("xs").build(t).on_press_tx(move |s: &mut App, tx: &mut Tx| {
                     tx.copy(copied.clone());
                     crate::shell::palette::toast_copied(s, tx, "Copy command");
-                }).build(t),
+                }),
             ));
     }
     col().key("browser-host-setup").grow(1.).min_h(0.).w_full().center().child(notice)
