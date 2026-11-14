@@ -34,9 +34,17 @@ pub struct Grouping {
     environment: String,
     /// This machine's environment id: groups that span environments are represented by its member.
     local: String,
+    /// Every known server's `scratchWorkspaceRoot`, normalized (web derives `isScratch` from it).
+    scratch_roots: Vec<String>,
 }
 
 const SCRATCH_KEY: &str = "\0no-project";
+
+fn scratch_roots(s: &App) -> Vec<String> {
+    let root = |config: &Value| normalize(field(config, "scratchWorkspaceRoot"));
+    let others = crate::env::keys(s).into_iter().filter_map(|key| crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()).map(root));
+    s.state().config.as_ref().map(root).into_iter().chain(others).filter(|r| !r.is_empty()).collect()
+}
 
 impl Grouping {
     pub fn read(s: &App) -> Grouping {
@@ -47,7 +55,14 @@ impl Grouping {
             overrides: crate::settings::value(s, "sidebarProjectGroupingOverrides"),
             environment,
             local,
+            scratch_roots: scratch_roots(s),
         }
+    }
+
+    /// `isScratchProject` against the project's server.
+    pub fn is_scratch(&self, project: &Value) -> bool {
+        let root = normalize(field(project, "workspaceRoot"));
+        !root.is_empty() && self.scratch_roots.contains(&root)
     }
 
     /// The environment id a project row belongs to (`project.environmentId` on the web).
@@ -62,7 +77,7 @@ impl Grouping {
     /// `deriveLogicalProjectKey` with the project's override, if any.
     pub fn key(&self, project: &Value) -> String {
         // `groupScratchProjects`: scratch projects share one "No project" group.
-        if project["isScratch"] == true {
+        if self.is_scratch(project) {
             return SCRATCH_KEY.to_string();
         }
         let physical = format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")));
@@ -524,7 +539,7 @@ mod tests {
     use super::*;
 
     fn grouping(mode: &str) -> Grouping {
-        Grouping { mode: mode.into(), overrides: json!({}), environment: "env".into(), local: "env".into() }
+        Grouping { mode: mode.into(), overrides: json!({}), environment: "env".into(), local: "env".into(), scratch_roots: vec!["/scratch".into()] }
     }
 
     fn project(id: &str, title: &str, root: &str, identity: Value) -> Value {
@@ -577,12 +592,13 @@ mod tests {
 
     #[test]
     fn scratch_projects_share_one_no_project_group() {
-        let scratch = |id: &str, root: &str| {
-            let mut p = project(id, id, root, Value::Null);
-            p["isScratch"] = json!(true);
+        // Each server's scratch project sits at its `scratchWorkspaceRoot`.
+        let scratch = |id: &str, env: &str| {
+            let mut p = project(id, id, "/scratch/", Value::Null);
+            p[crate::env::TAG] = json!(env);
             p
         };
-        let projects = vec![scratch("a", "/tmp/a"), project("o", "Other", "/other", Value::Null), scratch("b", "/tmp/b")];
+        let projects = vec![scratch("a", "box"), project("o", "Other", "/other", Value::Null), scratch("b", "studio")];
         let built = groups(&projects, &grouping("separate"));
         assert_eq!(built.len(), 2, "FAILED: scratch projects fold into one group");
         assert_eq!((built[0].label.as_str(), built[0].members.clone()), ("No project", vec!["a".to_string(), "b".to_string()]));
