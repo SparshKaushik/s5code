@@ -452,11 +452,11 @@ mod tests {
         let mut crate_entry = entry("Serde", Some("1.0.0"));
         crate_entry["kind"] = json!("crate");
         crate_entry["bundles"] = json!(["native"]);
-        let native = decode(&json!({"schemaVersion": 1, "entries": [crate_entry, entry("zstd", None)]})).unwrap();
+        let crates = decode(&json!({"schemaVersion": 1, "entries": [crate_entry, entry("zstd", None)]})).unwrap();
         let server = decode(&json!({"schemaVersion": 1, "entries": [entry("effect", None), entry("vite", None)]})).unwrap();
-        let names = with_native(server, &native).into_iter().map(|e| e.name).collect::<Vec<_>>();
+        let names = with_native(server, &crates).into_iter().map(|e| e.name).collect::<Vec<_>>();
         assert_eq!(names, ["effect", "Serde", "vite", "zstd"]);
-        assert_eq!(filter(&with_native(vec![], &native), "native")[0].kind, "crate");
+        assert_eq!(filter(&with_native(vec![], &crates), "native")[0].kind, "crate");
         // The build's own manifest decodes (it is empty when built without the generator).
         let embedded: Value = serde_json::from_str(include_str!(concat!(env!("OUT_DIR"), "/crate-notices.json"))).unwrap();
         assert_eq!(native().len(), decode(&embedded).unwrap().len());
