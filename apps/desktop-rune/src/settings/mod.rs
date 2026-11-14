@@ -1041,6 +1041,30 @@ fn scene_from_thread(s: &mut App) {
 }
 
 pub const SCENES: &[(&str, fn(&mut App))] = &[
+    ("settings-connections-add-remote", |s| {
+        scene(s, "connections");
+        connections::scene(s, "add-remote");
+    }),
+    ("settings-connections-add-ssh", |s| {
+        scene(s, "connections");
+        connections::scene(s, "add-ssh");
+    }),
+    ("settings-connections-env-menu", |s| {
+        scene(s, "connections");
+        connections::scene(s, "env-menu");
+    }),
+    ("settings-connections-link", |s| {
+        scene(s, "connections");
+        connections::scene(s, "link");
+    }),
+    ("settings-devices-simlock", |s| {
+        scene(s, "devices");
+        devices_editor::open_simlock(s, None);
+    }),
+    ("settings-runtime-mode-open", |s| {
+        scene(s, "threads");
+        s.ui.settings.open_select = Some("defaultRuntimeMode".into());
+    }),
     ("settings-general", |s| scene(s, "general")),
     ("settings-from-thread", scene_from_thread),
     ("settings-appearance", |s| scene(s, "appearance")),

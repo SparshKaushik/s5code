@@ -1401,6 +1401,34 @@ fn link_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
     layers.extend(popup);
 }
 
+/// Scenes: a saved environment on a fixture, and the connections overlay that is open.
+pub(super) fn scene(s: &mut App, open: &str) {
+    s.ui.env.saved.push(Saved {
+        id: "env-box".into(),
+        label: "Hetzner box".into(),
+        base: "https://box.tail1234.ts.net".into(),
+        bearer: String::new(),
+    });
+    env::park(s, "env-box", crate::data::Source::Fixture(crate::data::fixture_state()));
+    let ui = &mut s.ui.settings.connections;
+    match open {
+        "add-remote" => ui.adding = Some(Vec::new()),
+        "add-ssh" => {
+            ui.adding = Some(Vec::new());
+            ui.ssh = true;
+        }
+        "env-menu" => {
+            ui.env_menu = Some("env-box".into());
+            ui.routes_open.push("env-box".into());
+        }
+        "link" => {
+            ui.linking = true;
+            ui.link_machine_open = true;
+        }
+        _ => {}
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
