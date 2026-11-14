@@ -50,8 +50,6 @@ pub struct Ui {
     /// Rows copied into `App::src`, and which environment owns each copied id.
     foreign: usize,
     owners: HashMap<String, String>,
-    /// Bumped whenever copied rows change, since the focused shell's sequence does not move then.
-    pub merges: u64,
     pub ssh: ssh::Ui,
 }
 
@@ -372,7 +370,6 @@ fn merge(s: &mut App) -> bool {
             }
         }
     }
-    env.merges += 1;
     true
 }
 
