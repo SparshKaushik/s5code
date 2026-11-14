@@ -7,7 +7,7 @@ use rune::{El, Icon, TextEdit, col, el, icon, row, text};
 use serde_json::{Value, json};
 
 /// Electron's `DesktopAppSettings` key; the default (on) is omitted from the file.
-const LOCAL_KEY: &str = "localEnvironmentEnabled";
+const LOCAL_KEY: &str = crate::host::LOCAL_ENVIRONMENT_KEY;
 
 /// Web `AuthMcpClientAccess` options with `accessConfig` copy, in picker order.
 const ACCESS: [(&str, &str, &str); 5] = [
@@ -281,7 +281,7 @@ fn set_local(s: &mut App, enabled: bool) {
     }
     ui.local_error = None;
     ui.local_disabled = !enabled;
-    crate::host::restart();
+    crate::host::apply_local_setting();
 }
 
 fn saved_row(s: &App, t: &T, saved: &Saved) -> El {

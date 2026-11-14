@@ -27,6 +27,15 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.shell.palette.open = true;
         s.ui.shell.palette.query.focused = true;
     }),
+    ("home-local-off", |s| {
+        crate::scene_clock(s);
+        let mut state = crate::data::empty_state();
+        state.conn = s5_net::Conn::Closed(crate::host::LOCAL_OFF.into());
+        state.shell_ready = true;
+        s.src = crate::data::Source::Fixture(state);
+        s.ui.desktop.local_off = true;
+        s.navigate(crate::Route::Home { project_id: None });
+    }),
 ];
 
 fn open_titled(s: &mut App, title: &str) {

@@ -59,6 +59,8 @@ pub struct Ui {
     pub exposure: exposure::State,
     /// Why the bundled server keeps failing before it ever started, for the recovery screen.
     pub startup_failure: Option<crate::host::StartupFailure>,
+    /// `localEnvironmentEnabled` is off, so this machine runs no server.
+    pub local_off: bool,
     #[cfg(unix)]
     pub cli: cli::State,
     zoom_level: f32,

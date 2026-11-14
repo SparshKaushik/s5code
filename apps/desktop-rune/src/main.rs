@@ -142,6 +142,7 @@ fn poll_host(s: &mut App) -> bool {
             let waker = s.ui.panel.waker.clone().expect("setup stores the waker");
             s.ui.desktop.server = Some((url.clone(), token.clone()));
             s.ui.desktop.startup_failure = None;
+            s.ui.desktop.local_off = false;
             *env::local_mut(s) = Source::Live(s5_net::Net::connect(&url, &token, move || waker()));
             if s.ui.env.active == env::LOCAL {
                 s.navigate(s.route.clone());
@@ -150,6 +151,17 @@ fn poll_host(s: &mut App) -> bool {
         // Electron keeps the first failure's details while later attempts retry.
         host::Event::Failing(failure) => {
             s.ui.desktop.startup_failure.get_or_insert(failure);
+        }
+        // Web's `readPrimaryEnvironmentTarget` is null: an empty, settled local environment, so
+        // remote environments still merge in and the window never waits for a server.
+        host::Event::Off => {
+            s.ui.desktop.server = None;
+            s.ui.desktop.startup_failure = None;
+            s.ui.desktop.local_off = true;
+            let mut state = data::empty_state();
+            state.conn = s5_net::Conn::Closed(host::LOCAL_OFF.into());
+            state.shell_ready = true;
+            *env::local_mut(s) = Source::Fixture(state);
         }
         host::Event::Failed(reason) => {
             eprintln!("s5code-rune: {reason}");

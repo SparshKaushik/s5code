@@ -7,7 +7,7 @@
 use std::fs::File;
 use std::io::Write;
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -20,6 +20,8 @@ pub enum Event {
     Failed(String),
     /// The server keeps exiting before it is ready; the supervisor still retries.
     Failing(StartupFailure),
+    /// The local environment is turned off: no server runs on this machine.
+    Off,
 }
 
 /// Electron's `BackendStartupFailure`, for the startup recovery screen.
@@ -51,6 +53,14 @@ struct Supervisor {
 }
 
 static SUPERVISOR: Mutex<Option<Arc<Supervisor>>> = Mutex::new(None);
+
+type Wake = Arc<dyn Fn() + Send + Sync>;
+/// Where `start` reports, kept so turning the local environment back on can start the server.
+static LINK: Mutex<Option<(Sender<Event>, Wake)>> = Mutex::new(None);
+
+/// Electron's `DesktopSettings.localEnvironmentEnabled`, in the same desktop-settings.json.
+pub(crate) const LOCAL_ENVIRONMENT_KEY: &str = "localEnvironmentEnabled";
+pub const LOCAL_OFF: &str = "The local environment is turned off.";
 
 fn remote() -> Option<(String, String)> {
     let url = std::env::var("S5_SERVER_URL").ok()?;
@@ -87,7 +97,49 @@ pub fn start(wake: impl Fn() + Send + Sync + 'static) -> Option<Receiver<Event>>
     if rune::tooling::is_headless() {
         return None;
     }
-    launch(wake)
+    let (tx, rx) = channel();
+    if let Some((url, token)) = remote() {
+        let _ = tx.send(Event::Ready { url, token });
+        return Some(rx);
+    }
+    bundled_binary()?;
+    *LINK.lock().unwrap() = Some((tx, Arc::new(wake)));
+    apply_local_setting();
+    Some(rx)
+}
+
+/// Electron's `parsed.localEnvironmentEnabled !== false`: on unless the file says off.
+fn local_enabled_at(path: &Path) -> bool {
+    let doc = std::fs::read_to_string(path).ok().and_then(|text| serde_json::from_str::<serde_json::Value>(&text).ok());
+    doc.is_none_or(|doc| doc[LOCAL_ENVIRONMENT_KEY] != serde_json::Value::Bool(false))
+}
+
+pub fn local_enabled() -> bool {
+    local_enabled_at(&t3_home().join("userdata").join("desktop-settings.json"))
+}
+
+/// Start, restart or stop the bundled server for `localEnvironmentEnabled`. Electron relaunches
+/// the app on a change and skips the backend at boot while it is off; this does both in place.
+pub fn apply_local_setting() {
+    let Some((tx, wake)) = LINK.lock().unwrap().clone() else { return };
+    let running = SUPERVISOR.lock().unwrap().clone();
+    match (local_enabled(), running) {
+        (true, Some(_)) => restart(),
+        (true, None) => {
+            if let Some(binary) = bundled_binary() {
+                supervise_in_background(binary, tx, move || wake());
+            }
+        }
+        (false, running) => {
+            SUPERVISOR.lock().unwrap().take();
+            let _ = tx.send(Event::Off);
+            wake();
+            if let Some(sup) = running {
+                sup.stopping.store(true, Ordering::SeqCst);
+                std::thread::spawn(move || terminate(&sup));
+            }
+        }
+    }
 }
 
 /// `start` without Rune's argument parsing, which would reject `--check-server`.
@@ -97,11 +149,14 @@ fn launch(wake: impl Fn() + Send + Sync + 'static) -> Option<Receiver<Event>> {
         let _ = tx.send(Event::Ready { url, token });
         return Some(rx);
     }
-    let binary = bundled_binary()?;
+    supervise_in_background(bundled_binary()?, tx, wake);
+    Some(rx)
+}
+
+fn supervise_in_background(binary: PathBuf, tx: Sender<Event>, wake: impl Fn() + Send + 'static) {
     let sup = Arc::new(Supervisor { child: Mutex::new(None), stopping: AtomicBool::new(false), restarting: AtomicBool::new(false) });
     *SUPERVISOR.lock().unwrap() = Some(sup.clone());
     std::thread::spawn(move || supervise(binary, sup, tx, wake));
-    Some(rx)
 }
 
 /// Free on every address the server might bind, like the Electron app's scan from 3773.
@@ -366,6 +421,10 @@ pub fn check() -> i32 {
             eprintln!("check-server: {}\n{}", f.reason, f.output);
             1
         }
+        Ok(Event::Off) => {
+            eprintln!("check-server: {LOCAL_OFF}");
+            1
+        }
         Err(_) => {
             eprintln!("check-server: timed out waiting for the server");
             1
@@ -404,6 +463,30 @@ mod tests {
         std::fs::write(&path, "first launch\nsecond: boom\n[desktop-rune] server exited (Some(3)); restarting\n").unwrap();
         assert_eq!(output_tail(&path, "first launch\n".len() as u64), "second: boom\n");
         assert_eq!(output_tail(&path, 999), "");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_local_environment_is_off_only_when_desktop_settings_say_so() {
+        let path = std::env::temp_dir().join(format!("s5-host-desktop-settings-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        assert!(local_enabled_at(&path), "no file is Electron's default");
+        for (doc, enabled) in [
+            (r#"{"localEnvironmentEnabled":false,"serverExposureMode":"network-accessible"}"#, false),
+            (r#"{"localEnvironmentEnabled":true}"#, true),
+            (r#"{"serverExposureMode":"local-only"}"#, true),
+            (r#"{"localEnvironmentEnabled":"no"}"#, true),
+            ("not json", true),
+        ] {
+            std::fs::write(&path, doc).unwrap();
+            assert_eq!(local_enabled_at(&path), enabled, "{doc}");
+        }
+        // The Connections row writes through rune's prefs; the host must read what it wrote.
+        let _ = std::fs::remove_file(&path);
+        rune::prefs::Prefs::at(path.clone()).set(LOCAL_ENVIRONMENT_KEY, &false).unwrap();
+        assert!(!local_enabled_at(&path));
+        rune::prefs::Prefs::at(path.clone()).remove(LOCAL_ENVIRONMENT_KEY).unwrap();
+        assert!(local_enabled_at(&path));
         let _ = std::fs::remove_file(&path);
     }
 }
