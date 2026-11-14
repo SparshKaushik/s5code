@@ -923,21 +923,35 @@ fn settle_sweep(u: &mut Ui) -> bool {
     !first && super::pr_row::cancel_sweep(&mut u.row)
 }
 
+/// Escape ends a sweep, closes a menu or the open pull request, and otherwise leaves the page
+/// (registerPullRequestsEscapeCommand) unless a shell overlay is open.
+fn escape(s: &mut App) -> bool {
+    let u = ui(s);
+    if super::pr_row::cancel_sweep(&mut u.row) {
+        return true;
+    }
+    if u.context.take().is_some() || u.menu.take().is_some() {
+        u.submenu = None;
+        return true;
+    }
+    if u.selected.take().is_some() {
+        return true;
+    }
+    let shell = &s.ui.shell;
+    if shell.palette.open || shell.sidebar.menu.is_some() || shell.sidebar.confirm.is_some() {
+        return false;
+    }
+    super::back(s);
+    true
+}
+
 pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
     if !matches!(s.route, Route::PullRequests) {
         return false;
     }
     note_input(s, crate::data::now_ms());
     if matches!(e.key, rune::Key::Escape) {
-        let u = ui(s);
-        if super::pr_row::cancel_sweep(&mut u.row) {
-            return true;
-        }
-        if u.context.take().is_some() || u.menu.take().is_some() {
-            u.submenu = None;
-            return true;
-        }
-        return u.selected.take().is_some();
+        return escape(s);
     }
     if s.ui.shell.palette.open {
         return false;
@@ -2337,6 +2351,17 @@ mod tests {
         assert!(!l.due(false, back + 40_000, false));
         assert!(l.due(true, back + 40_001, false), "showing a view read before arrives");
         assert!(!l.due(true, back + 40_001 + LIVE_EVERY - 1, false), "showing again restarts the interval");
+    }
+
+    #[test]
+    fn escape_closes_the_open_pull_request_then_leaves_the_page() {
+        let mut s = App::new();
+        s.route = Route::PullRequests;
+        s.ui.pages.main_route = Some(Route::Thread("t1".into()));
+        s.ui.pages.pull_requests.selected = Some("https://github.com/acme/app/pull/7".into());
+        assert!(escape(&mut s) && matches!(s.route, Route::PullRequests), "the open pull request closes first");
+        assert!(escape(&mut s));
+        assert!(matches!(&s.route, Route::Thread(id) if id == "t1"), "then Escape leaves for the page it was opened over");
     }
 
     #[test]

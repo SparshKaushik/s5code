@@ -335,13 +335,6 @@ struct Session {
     pending: Option<u64>,
 }
 
-/// sessionGrantsScope(session, "settings:write"), where an old server's `orchestration:operate`
-/// scope still grants it.
-fn writes_settings(session: &Value) -> bool {
-    let legacy = session["permissions"].is_null() && session["auth"]["serverUpdateScope"].is_null();
-    super::pr_row::grants(session, "settings:write") || (legacy && super::pr_row::grants(session, "orchestration:operate"))
-}
-
 /// priceTargetsAtom's `unavailable`: why the table cannot write to an environment. A session not
 /// read yet is still being checked, except in a recording, which has no session to read.
 fn unavailable_reason(connected: bool, loaded: bool, session: Option<&Session>, live: bool) -> Option<&'static str> {
@@ -353,7 +346,7 @@ fn unavailable_reason(connected: bool, loaded: bool, session: Option<&Session>, 
     }
     match session {
         Some(Session { failed: true, .. }) => Some("Read-only access"),
-        Some(Session { data: Some(v), .. }) => (!writes_settings(v)).then_some("Read-only access"),
+        Some(Session { data: Some(v), .. }) => (!super::pr_row::grants(v, "settings:write")).then_some("Read-only access"),
         Some(Session { pending: Some(_), .. }) => Some("Checking permissions…"),
         _ if live => Some("Checking permissions…"),
         _ => None,
@@ -953,10 +946,10 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
                 }
             }
         }
-        let (glyph, label) = match (saved, removed) {
-            (None, _) => (&i::X, "Remove new model".to_string()),
-            (Some(m), true) => (&i::ROTATE_CCW, format!("Undo reset for {m}")),
-            (Some(m), false) => (&i::ROTATE_CCW, format!("Reset price for {m} to automatic")),
+        let (glyph, label, tip) = match (saved, removed) {
+            (None, _) => (&i::X, "Remove new model".to_string(), "Remove row"),
+            (Some(m), true) => (&i::ROTATE_CCW, format!("Undo reset for {m}"), "Undo reset"),
+            (Some(m), false) => (&i::ROTATE_CCW, format!("Reset price for {m} to automatic"), "Reset to automatic"),
         };
         let row_id = id.clone();
         let is_new = saved.is_none();
@@ -977,7 +970,8 @@ fn table(t: &T, u: &Ui, target: &[Target], staged: &[Draft], errors: &HashMap<St
                         }
                         u.attempt = None;
                     })
-                    .build(t),
+                    .build(t)
+                    .help(tip),
             ),
         );
         table = table.child(line);
