@@ -1,12 +1,13 @@
 //! Tool-call groups (work-log presentation.ts): consecutive tool calls in one run fold into a
 //! summary row ("Read 4 files and ran 2 commands") that expands; a running group names its
-//! latest step instead. Also the live "Thinking" row and the steer marker on user messages.
-use super::rows::{self, array};
+//! latest step instead. Also the live "Working" and "Thinking" rows, superseded attempts and the
+//! steer marker on user messages.
+use super::rows::{self, array, tool_token};
 use super::{item_view, toggle};
 use crate::data::s;
 use crate::theme::{self, AlphaMul, T};
 use crate::{App, icons};
-use rune::{El, col, icon, row, text};
+use rune::{El, ScrollSpec, col, el, icon, row, text};
 use serde_json::Value;
 use std::collections::HashSet;
 
@@ -28,15 +29,6 @@ pub use super::rows::{groupable, item_active as active};
 /// `workEntryDisplayIndicatesToolFailure`, from the fields the wire keeps.
 pub fn failed(item: &Value) -> bool {
     matches!(s(item, "status"), "failed" | "declined") || item["exitCode"].as_i64().is_some_and(|c| c != 0) || item["outputIndicatesFailure"] == true
-}
-
-/// toolActivity.ts `toolNameToken`: namespaced names (`mcp__x`, `a.b`, `a/b`) classify as nothing.
-fn tool_token(name: &str) -> Option<String> {
-    let name = name.trim();
-    if name.is_empty() || name.contains("__") || name.contains(['.', '/']) {
-        return None;
-    }
-    Some(name.chars().filter(|c| !matches!(c, '_' | '-') && !c.is_whitespace()).collect::<String>().to_lowercase())
 }
 
 /// `toolGroupAction` + `classifyToolActivity`.
@@ -164,9 +156,32 @@ fn action_icon(action: Action) -> &'static rune::Icon {
         Action::Command => &icons::TERMINAL,
         Action::Search => &icons::GLOBE,
         Action::CodeSearch => &icons::SEARCH,
-        Action::ThreadCreate => &icons::MESSAGES_SQUARE,
+        Action::ThreadCreate => &super::T3_MARK,
         Action::Other => &icons::WRENCH,
         Action::Update => &icons::HAMMER,
+    }
+}
+
+/// `workEntryIconName`: what an entry's own row shows, by kind, surface and tool.
+pub fn entry_icon(item: &Value) -> &'static rune::Icon {
+    match s(item, "type") {
+        "approval_request" | "user_input_request" => return &icons::MESSAGE_CIRCLE,
+        "todo_list" => return &icons::LIST_TODO,
+        "reasoning" => return &icons::BRAIN,
+        "subagent" => return &icons::BOT,
+        _ => {}
+    }
+    match s(item, "toolSurface") {
+        "browser" => return &icons::PANELS_TOP_LEFT,
+        "computer" => return &icons::MONITOR,
+        _ => {}
+    }
+    if matches!(s(item, "toolName"), "js" | "cua_repl.js" | "node_repl.js") {
+        return &icons::CODE;
+    }
+    match action(item) {
+        Action::Other if s(item, "type") != "dynamic_tool" => &icons::ZAP,
+        other => action_icon(other),
     }
 }
 
@@ -241,8 +256,101 @@ fn strip_links(text: &str) -> String {
     out
 }
 
-/// What a running group's header says: its latest step.
-pub fn live_label(item: &Value) -> String {
+/// Shell setup a command line runs before the program it names (`cd x && vp test`).
+const SETUP: [&str; 12] = ["cd", "pushd", "popd", "source", ".", "export", "set", "unset", "alias", "setopt", "shopt", "umask"];
+
+/// commandLabel.ts `commandProgramName`, for the usual shapes: comments, setup steps,
+/// environment assignments and wrappers (`sudo -u root`, `env`, ...) skipped, `bash -lc "..."`
+/// unwrapped, the program's file name.
+pub fn program(command: &str) -> Option<String> {
+    program_in(command, 0)
+}
+
+fn program_in(script: &str, depth: u8) -> Option<String> {
+    let line = script.lines().map(str::trim).find(|l| !l.is_empty() && !l.starts_with('#'))?;
+    for words in segments(line).into_iter().take(8) {
+        match segment_program(&words, depth) {
+            Some(name) if SETUP.contains(&name.as_str()) => continue,
+            found => return found,
+        }
+    }
+    None
+}
+
+/// A line's words, quotes removed, split into commands at unquoted `;`, `&` and `|`.
+fn segments(line: &str) -> Vec<Vec<String>> {
+    let (mut out, mut words, mut word) = (Vec::new(), Vec::new(), String::new());
+    let (mut quote, mut escaped, mut started) = (None, false, false);
+    for c in line.chars() {
+        match (quote, c) {
+            _ if escaped => {
+                word.push(c);
+                escaped = false;
+            }
+            (Some('\''), '\'') | (Some('"'), '"') => quote = None,
+            (Some('"'), '\\') => escaped = true,
+            (Some(_), _) => word.push(c),
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                started = true;
+            }
+            (None, c) if c.is_whitespace() || matches!(c, ';' | '&' | '|') => {
+                if started {
+                    words.push(std::mem::take(&mut word));
+                    started = false;
+                }
+                if !c.is_whitespace() && !words.is_empty() {
+                    out.push(std::mem::take(&mut words));
+                }
+            }
+            (None, c) => {
+                word.push(c);
+                started = true;
+            }
+        }
+    }
+    if started {
+        words.push(word);
+    }
+    if !words.is_empty() {
+        out.push(words);
+    }
+    out
+}
+
+fn segment_program(words: &[String], depth: u8) -> Option<String> {
+    let mut at = 0;
+    let mut wrapped = false;
+    while let Some(word) = words.get(at) {
+        let assignment = word.split_once('=').is_some_and(|(name, _)| {
+            !name.is_empty() && !name.starts_with(|c: char| c.is_ascii_digit()) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        });
+        let wrapper = matches!(word.as_str(), "sudo" | "env" | "time" | "nohup" | "exec" | "command" | "builtin");
+        if !(assignment || wrapper || (wrapped && word.starts_with('-'))) {
+            break;
+        }
+        // A wrapper's option that takes a value: `sudo -u root`, `env -u DEBUG`.
+        let takes_value = wrapped && matches!(word.as_str(), "-u" | "-g" | "-C" | "-D" | "-p" | "-U" | "-h");
+        wrapped |= wrapper;
+        at += if takes_value { 2 } else { 1 };
+    }
+    let path = words.get(at)?;
+    let file = path.rsplit(|c: char| c == '/' || c == '\\').next().unwrap_or(path);
+    let name = file.strip_suffix(".exe").or_else(|| file.strip_suffix(".EXE")).unwrap_or(file);
+    if name.is_empty() {
+        return None;
+    }
+    if depth < 3 && matches!(name, "bash" | "sh" | "zsh" | "dash" | "ksh" | "fish") {
+        let flag = words[at + 1..].iter().position(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('c'));
+        if let Some(flag) = flag {
+            return words.get(at + 2 + flag).and_then(|script| program_in(script, depth + 1));
+        }
+    }
+    Some(name.to_owned())
+}
+
+/// What a running group's header says (`liveWorkEntryLabel`): its latest step.
+pub fn live_label(item: &Value, root: Option<&str>) -> String {
     match s(item, "type") {
         "reasoning" => {
             let line = thought_line(s(item, "text"));
@@ -255,11 +363,16 @@ pub fn live_label(item: &Value) -> String {
             }
         }
         "command_execution" => {
-            let command = s(item, "input").lines().next().unwrap_or("").trim();
-            let verb = if active(item) { "Running" } else { "Ran" };
-            if command.is_empty() { format!("{verb} command") } else { format!("{verb} {command}") }
+            let verb = match s(item, "status") {
+                "failed" => "Failed",
+                "declined" => "Declined",
+                "cancelled" | "interrupted" => "Stopped",
+                _ if active(item) => "Running",
+                _ => "Ran",
+            };
+            format!("{verb} {}", program(s(item, "input")).unwrap_or_else(|| "command".to_owned()))
         }
-        _ => rows::label(item),
+        _ => rows::entry_label(item, root),
     }
 }
 
@@ -295,18 +408,22 @@ pub fn group<'a>(items: &[&'a Value]) -> Vec<Entry<'a>> {
     out
 }
 
-/// A tool group's header; open, the calls it holds, each its own expandable row.
+/// A tool group's header; open, the calls it holds, each its own expandable row, in a box that
+/// scrolls past min(18rem, half the timeline) plus what its open rows add
+/// (ExpandedWorkGroupEntries).
 pub fn group_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
     let expanded = app.ui.chat.timeline.expanded.contains(id);
+    let root = super::workspace_root(app);
     let last = items.last().copied();
     let live = last.is_some_and(active);
     let (title, glyph) = match last {
-        Some(item) if live => (live_label(item), if s(item, "type") == "reasoning" { &icons::BRAIN } else { action_icon(action(item)) }),
+        Some(item) if live => (live_label(item, root.as_deref()), entry_icon(item)),
         _ => (summary(items), group_icon(items)),
     };
-    let broke = !live && items.iter().any(|i| failed(i));
+    // hasFailure: only the latest tool call's outcome marks the group.
+    let broke = items.iter().rev().find(|i| s(i, "type") != "reasoning").is_some_and(|i| failed(i));
     let color = if broke { t.c.destructive.alpha_mul(0.4) } else { t.c.muted_foreground };
-    let spoken = if broke { format!("{title}, a tool call failed") } else { title.clone() };
+    let spoken = if broke { format!("{title}, tool call failed") } else { title.clone() };
     let head_key = format!("group-head-{id}");
     let toggle_id = id.to_owned();
     let head = row()
@@ -320,37 +437,102 @@ pub fn group_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
         .focusable(true)
         .role("button")
         .label(spoken)
+        .expanded(expanded)
         .on_press_tx(move |app: &mut App, tx| {
             tx.keep_on_screen(head_key.clone());
             toggle(app, &toggle_id)
         })
         .child(icon(glyph, 16.0).color(color))
-        .child(text(title).font(theme::TEXT_SM).color(t.c.muted_foreground).truncate().grow(1.0).min_w(0.0))
-        .child(icon(if expanded { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 12.0).color(t.c.muted_foreground));
+        .child(text(title).font(theme::TEXT_SM).color(t.c.muted_foreground).truncate().grow(1.0).min_w(0.0));
     let mut out = col().w_full().gap(4.0).child(head);
     if expanded {
-        let mut list = col().w_full().gap(4.0).pl(12.0);
+        let open = &app.ui.chat.timeline.expanded;
+        let mut list = col().w_full();
+        let mut grown = 0.0;
         for item in items {
-            list = list.child(item_view(app, item, t));
+            let item_id = s(item, "id");
+            let entry_key = format!("group-entry-{item_id}");
+            if open.contains(item_id) {
+                let full = rune::memo::layout_with(&entry_key, |r| r[3]);
+                let compact = rune::memo::layout_with(&format!("item-head-{item_id}"), |r| r[3]);
+                grown += full.zip(compact).map_or(0.0, |(full, compact)| (full - compact).max(0.0));
+            }
+            list = list.child(col().key(entry_key).w_full().child(item_view(app, item, t)));
         }
-        out = out.child(list);
+        let cap = match app.frame_route() {
+            crate::Route::Thread(thread) => rune::memo::layout_with(&format!("timeline-{thread}"), |r| (r[3] * 0.5).min(288.0).round()),
+            _ => None,
+        };
+        let viewport = list.scroll(ScrollSpec { stick_bottom: live });
+        out = out.child(crate::kit::scroll_area(&format!("group-scroll-{id}"), viewport, t).max_h(cap.unwrap_or(288.0) + grown));
     }
     out
 }
 
-/// The running turn's "Thinking" row while nothing else shows activity; `elapsed` is since its
-/// last step, and only changes once a second.
-pub fn thinking_view(elapsed: &str, t: &T) -> El {
+/// AttemptFoldTimelineRow: what an attempt a steer cut off left behind; open, its work below.
+pub fn attempt_view(app: &App, id: &str, items: &[&Value], t: &T) -> El {
+    let expanded = app.ui.chat.timeline.expanded.contains(id);
+    let head_key = format!("attempt-head-{id}");
+    let toggle_id = id.to_owned();
+    let head = row()
+        .key(head_key.clone())
+        .w_full()
+        .gap(8.0)
+        .px(10.0)
+        .py(8.0)
+        .center_y()
+        .radius(theme::radius::MD)
+        .border(1.0, t.c.border.alpha_mul(0.6))
+        .fill(t.c.muted.alpha_mul(0.2))
+        .hover(t.c.muted.alpha_mul(0.35))
+        .focusable(true)
+        .role("button")
+        .label("Superseded attempt, cut off by a steer")
+        .expanded(expanded)
+        .on_press_tx(move |app: &mut App, tx| {
+            tx.keep_on_screen(head_key.clone());
+            toggle(app, &toggle_id)
+        })
+        .child(icon(if expanded { &icons::CHEVRON_DOWN } else { &icons::CHEVRON_RIGHT }, 14.0).color(t.c.muted_foreground))
+        .child(text("Superseded attempt").font(theme::XS_MEDIUM).color(t.c.foreground.alpha_mul(0.8)))
+        .child(text("Cut off by a steer").font(theme::TEXT_2XS).color(t.c.muted_foreground));
+    let mut out = col().w_full().gap(4.0).child(head);
+    if expanded {
+        for entry in group(items) {
+            out = out.child(match entry {
+                Entry::One(item) => item_view(app, item, t),
+                Entry::Group(group_id, members) => group_view(app, &group_id, &members, t),
+            });
+        }
+    }
+    out
+}
+
+/// WorkingTimelineRow: the turn in flight's header; compacting, behind a minimize glyph.
+pub fn working_view(label: String, compacting: bool, t: &T) -> El {
+    let mut line = row().h(24.0).px(4.0).gap(6.0).center_y();
+    if compacting {
+        line = line.child(icon(&icons::MINIMIZE_2, 12.0).color(t.c.muted_foreground));
+    }
+    col()
+        .w_full()
+        .pt(4.0)
+        .pb(8.0)
+        .child(line.child(text(label).font(theme::TEXT_SM.lh(22.75)).color(t.c.muted_foreground)))
+        .child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.6)))
+}
+
+/// The running turn's "Thinking" row while nothing else shows activity.
+pub fn thinking_view(t: &T) -> El {
     row()
         .w_full()
         .gap(8.0)
         .py(4.0)
         .px(4.0)
         .center_y()
-        .label(format!("Thinking, {elapsed}"))
+        .label("Thinking")
         .child(icon(&icons::BRAIN, 16.0).color(t.c.muted_foreground))
         .child(text("Thinking").font(theme::TEXT_SM).color(t.c.muted_foreground))
-        .child(text(elapsed.to_owned()).font(theme::TEXT_XS).color(t.c.muted_foreground.alpha_mul(0.7)))
 }
 
 /// UserMessageIntentMarker's tooltip for a message that steered a running turn.
@@ -443,10 +625,27 @@ mod tests {
 
     #[test]
     fn live_groups_name_their_latest_step() {
-        assert_eq!(live_label(&json!({"type":"command_execution","status":"running","input":"vp test run\n--watch"})), "Running vp test run");
-        assert_eq!(live_label(&json!({"type":"command_execution","status":"completed","input":"ls"})), "Ran ls");
-        assert_eq!(live_label(&json!({"type":"reasoning","status":"running","text":""})), "Thinking");
-        assert_eq!(live_label(&json!({"type":"file_search","title":"Searched src"})), "Searched src");
+        let live = |item: Value| live_label(&item, None);
+        assert_eq!(live(json!({"type":"command_execution","status":"running","input":"vp test run\n--watch"})), "Running vp");
+        assert_eq!(live(json!({"type":"command_execution","status":"completed","input":"ls -la"})), "Ran ls");
+        assert_eq!(live(json!({"type":"command_execution","status":"failed","input":"cargo test"})), "Failed cargo");
+        assert_eq!(live(json!({"type":"command_execution","status":"interrupted","input":""})), "Stopped command");
+        assert_eq!(live(json!({"type":"reasoning","status":"running","text":""})), "Thinking");
+        assert_eq!(live(json!({"type":"file_search","title":"Searched src"})), "Searched src");
+        assert_eq!(live_label(&json!({"type":"dynamic_tool","toolName":"Read","input":{"path":"/w/app/a.rs"}}), Some("/w/app")), "Read app/a.rs");
+    }
+
+    #[test]
+    fn commands_are_named_by_their_program() {
+        assert_eq!(program("FOO=1 sudo -E /usr/bin/git status").as_deref(), Some("git"));
+        assert_eq!(program("bash -lc \"cd src && rg derive\"").as_deref(), Some("rg"));
+        assert_eq!(program("zsh -lc 'CI=1 env -u DEBUG sudo -u root vp test run'").as_deref(), Some("vp"));
+        assert_eq!(program("/bin/bash --rcfile /tmp/config -c 'git status'").as_deref(), Some("git"));
+        assert_eq!(program("# setup\ngit status").as_deref(), Some("git"));
+        assert_eq!(program("zsh -lc 'env'"), None);
+        assert_eq!(program("/bin/zsh -c 'pnpm test'").as_deref(), Some("pnpm"));
+        assert_eq!(program("C:\\tools\\node.exe build.js").as_deref(), Some("node"));
+        assert_eq!(program("  "), None);
     }
 
     #[test]

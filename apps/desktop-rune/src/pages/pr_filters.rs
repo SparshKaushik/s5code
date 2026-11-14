@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 use rune::{Color, Cursor, El, col, el, icon, row, text, text_input};
 use serde_json::{Value, json};
 
+use super::pull_requests::Filters;
 use crate::App;
 use crate::data::s as field;
+use crate::env::TAG;
 use crate::icons as i;
 use crate::kit::{MenuEntry, MenuItem};
 use crate::shell::sidebar::folders::{self, Group};
@@ -46,9 +48,11 @@ pub struct Picker {
     typed: String,
     typed_at: Option<Instant>,
     sent: String,
-    /// `pullRequests.filterOptions` last asked for, the request in flight, and the latest answer.
+    /// `pullRequests.filterOptions` last asked for, each environment's request in flight and
+    /// reply, and those replies merged with the input they answer.
     asked: Option<Value>,
-    pending: Option<u64>,
+    pending: Vec<(String, u64)>,
+    replies: Vec<(String, Result<Value, Value>)>,
     answer: Option<(Value, Result<Value, Value>)>,
 }
 
@@ -216,35 +220,44 @@ pub fn toggled(value: &[String], name: &str, on: bool) -> Vec<String> {
 }
 
 /// pullRequestLabelColor: a six-digit hex, with or without its `#`.
-fn label_hex(color: Option<&str>) -> Option<String> {
+pub(super) fn label_hex(color: Option<&str>) -> Option<String> {
     let color = color?.trim();
     let hex = color.strip_prefix('#').unwrap_or(color);
     (hex.len() == 6 && hex.bytes().all(|b| b.is_ascii_hexdigit())).then(|| format!("#{hex}"))
 }
 
-/// One Project filter choice: the project, the title the menu shows, and why its listing failed.
+/// One Project filter choice: the project and its environment, the title the menu shows, and
+/// why its listing failed.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ProjectChoice {
     pub id: String,
+    pub environment: String,
     pub title: String,
     pub unavailable: Option<String>,
 }
 
+/// Whether `c` is the Project filter's project (on the Server filter's environment, if any).
+pub fn chosen(f: &Filters, c: &ProjectChoice) -> bool {
+    f.project.as_deref() == Some(c.id.as_str()) && f.environment.as_deref().is_none_or(|env| env == c.environment)
+}
+
 /// pullRequestFilterProjects then PullRequestFiltersMenuInSidebarOrder: one project per repository
-/// (the chosen one where two share it), shared titles told apart by server name, then folder, then
-/// environment id, then project id, sorted by title, then in `order` (sortProjectsByGroupOrder:
-/// projects it leaves out after), and the projects whose listing failed last.
-pub fn projects(projects: &[Value], order: &[String], selected: Option<&str>, server: &str, environment: &str, errors: &[Value]) -> Vec<ProjectChoice> {
+/// on each environment (the chosen one where two share it), shared titles told apart by the
+/// server's name, then folder, then environment id, then project id (`server` gives an
+/// environment's name and id), sorted by title, then in `order` (sortProjectsByGroupOrder:
+/// projects it leaves out after), and the projects whose listing failed last. `projects` carry
+/// their environment (`env::TAG`).
+pub fn projects(projects: &[Value], order: &[String], selected: Option<&str>, environment: Option<&str>, server: impl Fn(&str) -> (String, String), errors: &[Value]) -> Vec<ProjectChoice> {
     let mut kept: Vec<&Value> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for p in projects.iter().filter(|p| p["isScratch"] != true) {
-        let id = field(p, "id");
+        let (id, env) = (field(p, "id"), field(p, TAG));
         let k = match p["repositoryIdentity"]["canonicalKey"].as_str().filter(|r| !r.is_empty()) {
-            Some(repository) => format!("repository\0{}", repository.to_lowercase()),
-            None => format!("project\0{id}"),
+            Some(repository) => format!("{env}\0repository\0{}", repository.to_lowercase()),
+            None => format!("{env}\0project\0{id}"),
         };
         match at.get(&k) {
-            Some(&n) if selected == Some(id) => kept[n] = p,
+            Some(&n) if selected == Some(id) && environment.is_none_or(|e| e == env) => kept[n] = p,
             Some(_) => {}
             None => {
                 at.insert(k, kept.len());
@@ -261,10 +274,10 @@ pub fn projects(projects: &[Value], order: &[String], selected: Option<&str>, se
         for (title, p) in titled.iter_mut() {
             if counts.get(title.as_str()).copied().unwrap_or(0) > 1 {
                 let suffix = match stage {
-                    0 => server,
-                    1 => field(p, "workspaceRoot"),
-                    2 => environment,
-                    _ => field(p, "id"),
+                    0 => server(field(p, TAG)).0,
+                    1 => field(p, "workspaceRoot").to_string(),
+                    2 => server(field(p, TAG)).1,
+                    _ => field(p, "id").to_string(),
                 };
                 *title = format!("{title} · {suffix}");
             }
@@ -275,9 +288,9 @@ pub fn projects(projects: &[Value], order: &[String], selected: Option<&str>, se
     let mut out: Vec<ProjectChoice> = titled
         .into_iter()
         .map(|(title, p)| {
-            let id = field(p, "id").to_string();
-            let unavailable = errors.iter().find(|e| field(e, "projectId") == id).map(|e| field(e, "message").to_string());
-            ProjectChoice { id, title, unavailable }
+            let (id, environment) = (field(p, "id").to_string(), field(p, TAG).to_string());
+            let unavailable = errors.iter().find(|e| field(e, "projectId") == id && e[TAG].as_str().is_none_or(|env| env == environment)).map(|e| field(e, "message").to_string());
+            ProjectChoice { id, environment, title, unavailable }
         })
         .collect();
     out.sort_by_key(|c| c.unavailable.is_some());
@@ -302,26 +315,31 @@ fn group_order(groups: &[Group], projects: &[Value], threads: &[Thread], sort: &
 /// The Project submenu: "All projects", then each project under its favicon; one whose listing
 /// failed is greyed out with the reason on hover. Picking keeps the menu open.
 pub fn project_entries(s: &App, t: &T, choices: &[ProjectChoice]) -> Vec<MenuEntry> {
-    let chosen = s.ui.pages.pull_requests.filters.project.as_deref();
+    let f = &s.ui.pages.pull_requests.filters;
     let mut out = vec![
         MenuEntry::Label("Project".into()),
-        MenuEntry::item(MenuItem::new("All projects").icon(&i::LAYERS).radio(chosen.is_none()).on_select(|s: &mut App| s.ui.pages.pull_requests.filters.project = None)),
+        MenuEntry::item(MenuItem::new("All projects").icon(&i::LAYERS).radio(f.project.is_none()).on_select(|s: &mut App| s.ui.pages.pull_requests.filters.project = None)),
     ];
     for c in choices {
-        let checked = chosen == Some(c.id.as_str());
-        let key = format!("pr-project-{}", c.id);
+        let checked = chosen(f, c);
+        let key = format!("pr-project-{}-{}", c.environment, c.id);
         let favicon = crate::shell::sidebar::favicon::mark(s, t, &c.id, &c.title, false, 14.0);
         if let Some(why) = &c.unavailable {
             out.push(unavailable_option(t, key, favicon, c.title.clone(), checked, true, why.clone()));
             continue;
         }
-        let id = c.id.clone();
+        let (id, environment) = (c.id.clone(), c.environment.clone());
         let line = choice(t, key, "menuitemradio", c.title.clone(), checked)
             .fill(if checked { t.c.foreground.alpha_mul(0.08) } else { Color::TRANSPARENT })
             .child(favicon)
             .child(text(c.title.clone()).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0))
             .child(tick(t, checked))
-            .on_press(move |s: &mut App| s.ui.pages.pull_requests.filters.project = Some(id.clone()));
+            // Picking a project scopes the Server filter to its environment, as web's onProject does.
+            .on_press(move |s: &mut App| {
+                let f = &mut s.ui.pages.pull_requests.filters;
+                f.project = Some(id.clone());
+                f.environment = Some(environment.clone());
+            });
         out.push(MenuEntry::Row(line));
     }
     out
@@ -377,10 +395,10 @@ pub fn hosted(p: &Picker, kind: &str, project: Option<&str>, host: Option<&str>)
         return none(true);
     }
     let want = input(kind, project, host, &p.sent);
-    let pending = p.pending.is_some() && p.asked.as_ref() == Some(&want);
+    let pending = !p.pending.is_empty() && p.asked.as_ref() == Some(&want);
     let list = |v: &Value, key: &str| v[key].as_array().cloned().unwrap_or_default();
     match p.answer.as_ref().filter(|a| a.0 == want).map(|a| &a.1) {
-        Some(Ok(v)) => Hosted { labels: list(v, "labels"), authors: list(v, "authors"), failed: false, pending },
+        Some(Ok(v)) => Hosted { labels: list(v, "labels"), authors: list(v, "authors"), failed: v["failed"] == true, pending },
         Some(Err(_)) => Hosted { failed: true, ..none(pending) },
         None => none(pending),
     }
@@ -417,7 +435,8 @@ pub fn poll(s: &mut App) -> bool {
     };
     let (project, host) = (u.filters.project.clone(), u.filters.host.clone());
     let waker = s.ui.panel.waker.clone();
-    let (net, p) = (s.src.net(), &mut s.ui.pages.pull_requests.picker);
+    let targets = if kind.is_some() { super::pull_requests::targets(s) } else { Vec::new() };
+    let p = &mut s.ui.pages.pull_requests.picker;
     let mut changed = false;
     let now = typed(&p.query.text);
     if now != p.typed {
@@ -435,25 +454,48 @@ pub fn poll(s: &mut App) -> bool {
         p.sent = p.typed.clone();
         changed = true;
     }
-    let Some(net) = net else { return changed };
-    if let Some(id) = p.pending
-        && let Some(reply) = net.take_reply(id)
-    {
-        p.pending = None;
+    for (env, id) in std::mem::take(&mut s.ui.pages.pull_requests.picker.pending) {
+        let Some(reply) = super::pull_requests::take(s, &env, id) else {
+            s.ui.pages.pull_requests.picker.pending.push((env, id));
+            continue;
+        };
+        let p = &mut s.ui.pages.pull_requests.picker;
+        p.replies.retain(|r| r.0 != env);
+        p.replies.push((env, reply));
         if let Some(asked) = p.asked.clone() {
-            p.answer = Some((asked, reply));
+            p.answer = Some((asked, merged_options(&p.replies)));
         }
         changed = true;
     }
-    if let Some(kind) = kind {
-        let want = input(kind, project.as_deref(), host.as_deref(), &p.sent);
-        if p.asked.as_ref() != Some(&want) {
-            p.pending = Some(net.request("pullRequests.filterOptions", want.clone()));
-            p.asked = Some(want);
-            changed = true;
+    let Some(kind) = kind else { return changed };
+    let want = input(kind, project.as_deref(), host.as_deref(), &s.ui.pages.pull_requests.picker.sent);
+    if s.ui.pages.pull_requests.picker.asked.as_ref() == Some(&want) || !targets.iter().any(|t| crate::env::source(s, &t.0).is_some_and(|src| matches!(src, crate::data::Source::Live(_)))) {
+        return changed;
+    }
+    let mut pending = Vec::new();
+    for target in &targets {
+        if let Some(net) = crate::env::net_of(s, &target.0) {
+            pending.push((target.0.clone(), net.request("pullRequests.filterOptions", super::pull_requests::for_target(&want, target))));
         }
     }
-    changed
+    let p = &mut s.ui.pages.pull_requests.picker;
+    p.asked = Some(want);
+    p.pending = pending;
+    p.replies.clear();
+    true
+}
+
+/// usePullRequestFilterOptions: every environment's options together, failed while one failed
+/// and none answered.
+fn merged_options(replies: &[(String, Result<Value, Value>)]) -> Result<Value, Value> {
+    let answered: Vec<&Value> = replies.iter().filter_map(|r| r.1.as_ref().ok()).collect();
+    if answered.is_empty()
+        && let Some(Err(e)) = replies.iter().map(|r| &r.1).find(|r| r.is_err())
+    {
+        return Err(e.clone());
+    }
+    let all = |key: &str| answered.iter().flat_map(|v| v[key].as_array().into_iter().flatten()).cloned().collect::<Vec<_>>();
+    Ok(json!({"labels": all("labels"), "authors": all("authors"), "failed": replies.iter().any(|r| r.1.is_err())}))
 }
 
 /// MenuSearchInput: a search icon, or a spinner while the hosts search, over an underline.
@@ -644,17 +686,39 @@ mod tests {
         ];
         let errors = [json!({"projectId": "c", "projectTitle": "api", "message": "gh is not authenticated."})];
         let order: Vec<String> = ["z", "d", "b", "a", "e"].map(String::from).to_vec();
-        let choices = projects(&list, &order, None, "nucbox-1", "env-nucbox", &errors);
+        let server = |_: &str| ("nucbox-1".to_string(), "env-nucbox".to_string());
+        let choices = projects(&list, &order, None, None, server, &errors);
         let shown: Vec<(&str, &str)> = choices.iter().map(|c| (c.id.as_str(), c.title.as_str())).collect();
         assert_eq!(shown, [("z", "Archive"), ("d", "api · nucbox-1 · /x/api"), ("a", "web"), ("e", "Docs"), ("c", "api · nucbox-1 · /w/api")]);
         assert_eq!(choices[4].unavailable.as_deref(), Some("gh is not authenticated."));
-        let chosen: Vec<String> = projects(&list, &order, Some("b"), "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.id).collect();
+        let chosen: Vec<String> = projects(&list, &order, Some("b"), None, server, &[]).into_iter().map(|c| c.id).collect();
         assert_eq!(chosen, ["z", "d", "b", "e", "c"], "a project outside the order comes after it");
-        let by_title: Vec<String> = projects(&list, &[], None, "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.id).collect();
+        let by_title: Vec<String> = projects(&list, &[], None, None, server, &[]).into_iter().map(|c| c.id).collect();
         assert_eq!(by_title, ["c", "d", "z", "e", "a"]);
         let twins = [p("f", "t3code", None, "/work/main"), p("g", "t3code", None, "/work/main")];
-        let titles: Vec<String> = projects(&twins, &[], None, "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.title).collect();
+        let titles: Vec<String> = projects(&twins, &[], None, None, server, &[]).into_iter().map(|c| c.title).collect();
         assert_eq!(titles, ["t3code · nucbox-1 · /work/main · env-nucbox · f", "t3code · nucbox-1 · /work/main · env-nucbox · g"]);
+    }
+
+    #[test]
+    fn each_environment_lists_its_own_copy_of_a_repository_named_by_its_server() {
+        let tagged = |mut v: Value, env: &str| {
+            v[TAG] = json!(env);
+            v
+        };
+        let p = |env: &str, id: &str| tagged(json!({"id": id, "title": "web", "workspaceRoot": "/w/web", "repositoryIdentity": {"canonicalKey": "github.com/acme/web"}}), env);
+        let list = [p("", "a"), p("", "a2"), p("studio", "a")];
+        let server = |env: &str| if env.is_empty() { ("Laptop".to_string(), "env-laptop".to_string()) } else { ("Studio Mac".to_string(), "env-studio".to_string()) };
+        let errors = [tagged(json!({"projectId": "a", "message": "gh is not authenticated."}), "studio")];
+        let choices = projects(&list, &[], None, None, server, &errors);
+        let shown: Vec<(&str, &str, &str, bool)> = choices.iter().map(|c| (c.environment.as_str(), c.id.as_str(), c.title.as_str(), c.unavailable.is_some())).collect();
+        assert_eq!(shown, [("", "a", "web · Laptop", false), ("studio", "a", "web · Studio Mac", true)]);
+        let kept: Vec<String> = projects(&list, &[], Some("a2"), Some(""), server, &[]).into_iter().map(|c| c.id).collect();
+        assert_eq!(kept, ["a2", "a"], "the chosen copy stands for its repository on its own server only");
+        let mut f = Filters { project: Some("a".into()), ..Filters::default() };
+        assert!(chosen(&f, &choices[0]) && chosen(&f, &choices[1]));
+        f.environment = Some("studio".into());
+        assert!(!chosen(&f, &choices[0]) && chosen(&f, &choices[1]));
     }
 
     #[test]

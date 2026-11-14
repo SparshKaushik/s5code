@@ -298,6 +298,22 @@ pub fn changes_totals(local: &Value) -> (u64, u64) {
     }
 }
 
+const READ_ONLY: &str = "This connection cannot change source control.";
+
+/// `canWriteSourceControl`.
+fn writable(s: &App) -> bool {
+    super::grants(s, "source-control:write")
+}
+
+/// Stops an action this connection may not run, saying why.
+fn denied(s: &mut App) -> bool {
+    let denied = !writable(s);
+    if denied {
+        palette::toast_error_brief(s, "Action unavailable", Some(READ_ONLY));
+    }
+    denied
+}
+
 fn quick_action(s: &App, status: Option<&Value>) -> Quick {
     let is_default = status.is_some_and(|v| v["isDefaultRef"] == true);
     let primary = status.is_some_and(|v| v["hasPrimaryRemote"] == true);
@@ -306,6 +322,9 @@ fn quick_action(s: &App, status: Option<&Value>) -> Quick {
 
 /// Runs a stacked action, first asking on the default branch (`runGitActionWithToast`).
 fn run(s: &mut App, action: &'static str, message: Option<String>, files: Option<Vec<String>>, feature_branch: bool, skip_prompt: bool) {
+    if denied(s) {
+        return;
+    }
     let Some(cwd) = cwd(s) else { return };
     let status = status(s);
     let is_default = !feature_branch && status.as_ref().is_some_and(|v| v["isDefaultRef"] == true);
@@ -346,6 +365,9 @@ fn start(s: &mut App, id: u64, cwd: String, pull: bool) {
 }
 
 fn run_quick(s: &mut App) {
+    if denied(s) {
+        return;
+    }
     let status = status(s);
     let q = quick_action(s, status.as_ref());
     match q.kind {
@@ -363,6 +385,9 @@ fn run_quick(s: &mut App) {
 
 fn pick(s: &mut App, id: &str) {
     s.ui.chat.details.menu = None;
+    if denied(s) {
+        return;
+    }
     match id {
         "push" => run(s, "push", None, None, false, false),
         "pr" => run(s, "create_pr", None, None, false, false),
@@ -386,6 +411,9 @@ pub fn status_error(s: &App) -> Option<String> {
 }
 
 fn init(s: &mut App) {
+    if denied(s) {
+        return;
+    }
     let (Some(cwd), Some(net)) = (cwd(s), s.src.net()) else { return };
     s.ui.chat.details.git.init = Some(net.request("vcs.init", json!({"cwd": cwd})));
 }
@@ -590,6 +618,7 @@ pub fn view(s: &App, t: &T, local: &Value, draft: bool) -> Option<El> {
             };
             let main = super::action(t, "details-git-quick", glyph, &q.label, fg);
             match &q.hint {
+                _ if !writable(s) => main.opacity(0.64).help(READ_ONLY),
                 Some(hint) if q.disabled => main.opacity(0.64).help(hint.clone()),
                 _ => main.on_press(|s: &mut App| run_quick(s)),
             }
@@ -614,9 +643,9 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
             "push" => icon(&icons::CLOUD_UPLOAD, 16.0).color(t.c.muted_foreground),
             _ => source_icon(status.as_ref(), 16.0, t.c.muted_foreground),
         };
-        let reason = disabled_reason(&item, status.as_ref(), busy, primary);
+        let reason = if writable(s) { disabled_reason(&item, status.as_ref(), busy, primary) } else { Some(READ_ONLY.into()) };
         let id = item.id;
-        rows.push(super::menu_row(t, Some(glyph), &item.label, (!item.disabled).then_some(move |s: &mut App| pick(s, id)), reason));
+        rows.push(super::menu_row(t, Some(glyph), &item.label, (!item.disabled && writable(s)).then_some(move |s: &mut App| pick(s, id)), reason));
     }
     if status.as_ref().is_some_and(|v| v["isRepo"] == true && v["hasPrimaryRemote"] != true) {
         let glyph = icon(&icons::CLOUD_UPLOAD, 16.0).color(t.c.muted_foreground);
@@ -643,7 +672,7 @@ pub fn menu_rows(s: &App, t: &T) -> Vec<El> {
 /// A commit dialog file row opens in the editor, against the worktree root (`openChangedFileInEditor`).
 fn open_file(s: &mut App, path: &str) {
     let root = status(s).and_then(|v| v["workingTree"]["rootPath"].as_str().map(str::to_string));
-    let (Some(root), Some((editor, _))) = (root, super::editors(s).into_iter().next()) else {
+    let (Some(root), Some((editor, _))) = (root, super::preferred_editor(s)) else {
         return palette::toast_error(s, "Editor opening is unavailable.", None);
     };
     let target = if path.starts_with('/') { path.to_string() } else { format!("{}/{path}", root.trim_end_matches('/')) };

@@ -589,6 +589,10 @@ fn items(s: &App) -> Vec<Item> {
                     0.6,
                 ));
                 row.fields.push(SearchTerm::context(project));
+                // `threadSearchSubject`: the environment counts once threads span several.
+                if crate::env::spans(s) {
+                    row.fields.push(SearchTerm::context(environment.clone()));
+                }
                 row.references.push(data::s(v, "id").into());
                 for pr in v["pullRequests"].as_array().into_iter().flatten() {
                     row.fields
@@ -616,7 +620,17 @@ fn items(s: &App) -> Vec<Item> {
     }
     if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
         let can_pin = actions::can_organize_projects(s);
-        for p in &s.state().projects {
+        // `pickableProjectGroups`: archived projects stay out, pinned ones lead; "New thread in…"
+        // also leaves out the scratch project.
+        let mut projects: Vec<&serde_json::Value> = s
+            .state()
+            .projects
+            .iter()
+            .filter(|p| p["archivedAt"].is_null())
+            .filter(|p| ui.page != "projects" || !actions::is_scratch_project(s, p))
+            .collect();
+        projects.sort_by_key(|p| p["pinnedAt"].is_null());
+        for p in projects {
             out.push(item(
                 data::s(p, "title"),
                 "Projects",
@@ -631,7 +645,10 @@ fn items(s: &App) -> Vec<Item> {
                 },
             ));
             if let Some(row) = out.last_mut() {
-                row.subtitle = Some(format!("{} · {}", crate::env::location(s, p), data::s(p, "workspaceRoot")));
+                let location = crate::env::location(s, p);
+                row.subtitle = Some(format!("{location} · {}", data::s(p, "workspaceRoot")));
+                row.fields.push(SearchTerm::weighted(data::s(p, "workspaceRoot"), 0.6));
+                row.fields.push(SearchTerm::weighted(location, 0.6));
             }
             if can_pin && let Some(row) = out.last_mut() {
                 row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());

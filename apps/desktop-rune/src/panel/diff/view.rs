@@ -87,7 +87,17 @@ pub struct Look {
     find_match: Color,
     find_focus: Color,
     syntax: SyntaxTheme,
-    version: u64,
+    pub(crate) version: u64,
+    pub host: Host,
+    /// The gutter offers a comment on its line.
+    pub comments: bool,
+}
+
+/// Whose diff the rows draw: the thread's Diff panel, or a pull request's Code tab.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Host {
+    Panel,
+    PullRequest,
 }
 
 impl Look {
@@ -132,6 +142,8 @@ impl Look {
             find_focus: c.primary.alpha(0.45),
             syntax: SyntaxTheme::neutral(t.dark),
             version: 0,
+            host: Host::Panel,
+            comments: true,
         };
         let mut h = std::hash::DefaultHasher::new();
         for c in [look.bg, look.fg, look.add.line, look.del.line, look.modified] {
@@ -189,6 +201,13 @@ fn st_mut(s: &mut App) -> &mut DiffState {
     &mut s.ui.panel.diff.state
 }
 
+fn host_st(s: &mut App, host: Host) -> &mut DiffState {
+    match host {
+        Host::Panel => st_mut(s),
+        Host::PullRequest => &mut s.ui.pages.code.diff,
+    }
+}
+
 fn row_key(s: &App, i: usize) -> Cow<'_, str> {
     Cow::Borrowed(st(s).keys[i].as_str())
 }
@@ -221,7 +240,7 @@ pub fn build(s: &App, look: Rc<Look>) -> El {
     root.on_key(|s: &mut App, e, tx| super::find::key(s, e, tx) || st_mut(s).key(e, tx))
 }
 
-fn content_width(l: &Look, st: &DiffState) -> f32 {
+pub(crate) fn content_width(l: &Look, st: &DiffState) -> f32 {
     let digits = (0..st.files().len()).map(|f| st.digits(f)).max().unwrap_or(3);
     BAR + l.number_w(digits) + st.columns() as f32 * l.adv + CODE_PAD.0 + CODE_PAD.1
 }
@@ -272,7 +291,7 @@ fn cells(st: &DiffState, r: Row) -> (Option<Cell<'_>>, Option<Cell<'_>>) {
     }
 }
 
-fn line(st: &DiffState, l: &Look, i: usize) -> El {
+pub(crate) fn line(st: &DiffState, l: &Look, i: usize) -> El {
     let r = st.rows[i];
     let f = r.file();
     let (a, b) = cells(st, r);
@@ -317,8 +336,9 @@ fn gutter(st: &DiffState, l: &Look, i: usize, f: usize, c: &Cell<'_>, side: Side
         .child(b)
         .child(number(st, l, i, f, n, side, c.kind, selected));
     // Pierre's gutter utility: a comment on the selected lines, or on this one.
-    if let Some(line) = n.filter(|_| !st.notes().iter().any(|n| n.draft)) {
+    if let Some(line) = n.filter(|_| l.comments && !st.notes().iter().any(|n| n.draft)) {
         let at = LineRef { side, line };
+        let host = l.host;
         let mut button = row()
             .key("comment")
             .absolute(BAR + 2.0, 2.0)
@@ -333,12 +353,19 @@ fn gutter(st: &DiffState, l: &Look, i: usize, f: usize, c: &Cell<'_>, side: Side
             .child(icon(&icons::PLUS, 12.0).color(Color::WHITE))
             .on_hover_change(move |s: &mut App, inside, _| {
                 // The button leaves the tree while its editor is open; that is not the pointer leaving.
-                let ui = &mut s.ui.panel.diff;
-                if ui.comment.is_none() && (!inside || ui.state.hushed != Some((f, at))) {
-                    ui.state.hushed = None;
+                let drafting = match host {
+                    Host::Panel => s.ui.panel.diff.comment.is_some(),
+                    Host::PullRequest => crate::pages::pr_code::drafting(s),
+                };
+                let st = host_st(s, host);
+                if !drafting && (!inside || st.hushed != Some((f, at))) {
+                    st.hushed = None;
                 }
             })
-            .on_press(move |s: &mut App| super::comments::begin(s, f, at));
+            .on_press(move |s: &mut App| match host {
+                Host::Panel => super::comments::begin(s, f, at),
+                Host::PullRequest => crate::pages::pr_code::begin(s, f, at),
+            });
         if st.hushed != Some((f, at)) {
             button = button.help("Comment".to_owned());
         }
@@ -399,8 +426,9 @@ fn number(st: &DiffState, l: &Look, i: usize, f: usize, n: Option<u32>, side: Si
     let color = if selected { l.fg } else { l.tints(kind).map_or(l.number, |t| t.mark) };
     let at = LineRef { side, line: n };
     let row_at = i as u32;
+    let host = l.host;
     c.child(text(n.to_string()).font(l.code).color(color)).cursor(Cursor::Pointer).on_drag(move |s: &mut App, d: &mut Drag, _tx| {
-        let st = st_mut(s);
+        let st = host_st(s, host);
         match d.phase {
             Phase::Down => st.press_line(f, at),
             Phase::Move => {
@@ -486,7 +514,7 @@ fn gutter_w(st: &DiffState, l: &Look, f: usize) -> f32 {
 }
 
 /// The unchanged lines folded away before a hunk: "N unmodified lines".
-fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
+pub(crate) fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
     let n = st.remaining(f, h);
     let label = if n == 1 { "1 unmodified line".to_owned() } else { format!("{n} unmodified lines") };
     let mut cell = row().key("expand").w(gutter_w(st, l, f)).h(SEP_H).center().gap(2.0);
@@ -523,7 +551,7 @@ fn separator(st: &DiffState, l: &Look, f: usize, h: usize) -> El {
 }
 
 /// A file with no lines to show.
-fn note(st: &DiffState, l: &Look, f: usize) -> El {
+pub(crate) fn note(st: &DiffState, l: &Look, f: usize) -> El {
     let file = &st.files()[f];
     let msg = if file.binary {
         "Binary file not shown"
@@ -543,7 +571,7 @@ fn note(st: &DiffState, l: &Look, f: usize) -> El {
     row().w_full().h(NOTE_H).fill(l.bg).role("note").label(msg).child(inner)
 }
 
-fn change_mark(l: &Look, file: &FileDiff) -> (&'static Icon, Color) {
+pub(crate) fn change_mark(l: &Look, file: &FileDiff) -> (&'static Icon, Color) {
     match file.status {
         FileStatus::Added => (&ADDED, l.add.mark),
         FileStatus::Deleted => (&DELETED, l.del.mark),
@@ -556,7 +584,7 @@ fn change_mark(l: &Look, file: &FileDiff) -> (&'static Icon, Color) {
 /// How long the copy-path button shows its check (ANCHORED_COPY_TOAST_TIMEOUT_MS).
 const COPIED_MS: i64 = 1000;
 
-fn micro(l: &Look, key: &'static str, label: &str, glyph: &'static Icon, size: f32, color: Color) -> El {
+pub(crate) fn micro(l: &Look, key: &'static str, label: &str, glyph: &'static Icon, size: f32, color: Color) -> El {
     row()
         .key(key)
         .size(20.0, 20.0)
@@ -623,7 +651,7 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     name = name.child(title);
     let done = s.ui.panel.diff.copied.as_ref().is_some_and(|(p, at)| *p == path && crate::data::now_ms() - at < COPIED_MS);
     let copy = if done { micro(l, "copy", "Copied", &icons::CHECK, 12.0, l.add.count) } else { micro(l, "copy", "Copy path", &icons::COPY, 12.0, l.muted) };
-    let copy = copy.on_press_tx(move |s: &mut App, tx| {
+    let copy = copy.label("Copy file path").on_press_tx(move |s: &mut App, tx| {
         tx.copy(path.clone());
         s.ui.panel.diff.copied = Some((path.clone(), crate::data::now_ms()));
         tx.wake_after(std::time::Duration::from_millis(COPIED_MS as u64));
@@ -643,7 +671,7 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     let ui = &s.ui.panel.diff;
     if ui.partial.contains(file.path()) {
         let note = "This file is too large to show in full. Counts include all changes.";
-        inner = inner.child(micro(l, "partial", note, &icons::INFO, 12.0, l.muted));
+        inner = inner.child(micro(l, "partial", note, &icons::INFO, 12.0, l.muted).label("Partial diff preview"));
     }
     inner = inner.child(el().key("space").grow(1.0).a11y_hidden());
     let (adds, dels) = super::counts(ui, file);

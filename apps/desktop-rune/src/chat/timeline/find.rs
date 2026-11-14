@@ -66,8 +66,29 @@ fn row_matches(row: &Row, q: &str) -> usize {
             }
         }
         Row::Assistant(item) => find_markdown(s(item, "text"), q, Case::Insensitive).len(),
+        // A finished turn's intermediate replies, which its fold shows once open.
+        Row::Work { items, .. } => items
+            .iter()
+            .filter(|i| s(i, "type") == "assistant_message")
+            .map(|i| find_markdown(s(i, "text"), q, Case::Insensitive).len())
+            .sum(),
         _ => 0,
     }
+}
+
+/// The fold holding match `active`, which opens to show it (MessagesTimeline expandedFindRunId).
+fn fold_at(rows: &[Row], q: &str, active: usize) -> Option<String> {
+    let mut seen = 0;
+    for row in rows {
+        seen += row_matches(row, q);
+        if active < seen {
+            return match row {
+                Row::Work { id, .. } => Some(id.clone()),
+                _ => None,
+            };
+        }
+    }
+    None
 }
 
 /// The row key of every match in the open thread, in order.
@@ -75,9 +96,10 @@ pub fn targets(app: &App) -> Vec<String> {
     let (Some(q), Route::Thread(id)) = (query(app), app.frame_route()) else { return Vec::new() };
     let Some(view) = app.state().thread_views.get(id) else { return Vec::new() };
     let mut out = Vec::new();
-    for (index, row) in rows::derive(&view.projection, app.now_ms).iter().enumerate() {
+    let rows = rows::derive(&view.projection, app.now_ms);
+    for (row, key) in rows.iter().zip(super::row_keys(&rows)) {
         let n = row_matches(row, q);
-        out.extend(std::iter::repeat_n(super::row_key(row, index), n));
+        out.extend(std::iter::repeat_n(key, n));
     }
     out
 }
@@ -155,9 +177,16 @@ pub fn offset(app: &App) -> f32 {
     if open { 36.0 + 12.0 } else { 0.0 }
 }
 
-fn reveal(app: &App, tx: &mut Tx) {
-    let targets = targets(app);
+fn reveal(app: &mut App, tx: &mut Tx) {
     let active = app.ui.chat.timeline.find.active;
+    let fold = match (query(app), app.frame_route()) {
+        (Some(q), Route::Thread(id)) => app.state().thread_views.get(id).and_then(|v| fold_at(&rows::derive(&v.projection, app.now_ms), q, active)),
+        _ => None,
+    };
+    if let Some(fold) = fold {
+        app.ui.chat.timeline.expanded.insert(fold);
+    }
+    let targets = targets(app);
     if let Some(row) = targets.get(active) {
         // Content lands at once (kit::motion); a match jumps into view instead of a 320 ms glide.
         tx.instant();
@@ -296,5 +325,28 @@ mod tests {
         assert_eq!(find_plain("aaa", "aa"), vec![0..2]);
         assert!(find_plain("abc", "").is_empty());
         assert!(find_plain("ab", "abc").is_empty());
+    }
+
+    #[test]
+    fn replies_inside_a_fold_count_and_open_it_when_active() {
+        use serde_json::json;
+        let (prompt, tool, early, late, last) = (
+            json!({"id":"u","type":"user_message","text":"fix the bug"}),
+            json!({"id":"c","type":"command_execution","input":"grep bug"}),
+            json!({"id":"a1","type":"assistant_message","text":"Found the bug."}),
+            json!({"id":"a2","type":"assistant_message","text":"A second bug, and a third bug."}),
+            json!({"id":"a3","type":"assistant_message","text":"Fixed every bug."}),
+        );
+        let rows = vec![
+            Row::User(&prompt),
+            Row::Work { id: "work:r".into(), label: "Worked for 3s".into(), items: vec![&tool, &early, &late] },
+            Row::Assistant(&last),
+        ];
+        assert_eq!(rows.iter().map(|r| row_matches(r, "bug")).collect::<Vec<_>>(), [1, 3, 1]);
+        assert_eq!(fold_at(&rows, "bug", 0), None);
+        assert_eq!(fold_at(&rows, "bug", 1).as_deref(), Some("work:r"));
+        assert_eq!(fold_at(&rows, "bug", 3).as_deref(), Some("work:r"));
+        assert_eq!(fold_at(&rows, "bug", 4), None);
+        assert_eq!(fold_at(&rows, "bug", 5), None);
     }
 }

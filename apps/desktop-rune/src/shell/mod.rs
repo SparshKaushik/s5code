@@ -16,9 +16,6 @@ pub struct Ui {
     pub palette: palette::Ui,
     pub panel_open: bool,
     pub quit: quit::QuitHold,
-    /// Whether the details card fits inline in the chat lane, from the last layout, for the
-    /// `threadPanel.toggle` chord (a key handler can't read layout).
-    pub details_fits: std::cell::Cell<bool>,
     /// The appearance last drawn, for the theme editor chord.
     pub dark: std::cell::Cell<bool>,
 }
@@ -52,7 +49,7 @@ fn open_titled(s: &mut App, title: &str) {
 
 pub fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     sidebar::release_undo_key(s, e);
-    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || theme_editor_key(s, e) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || chat_shortcut(s, e) || sidebar::on_key(s, e, tx)
+    chat::details::on_key(s, e) || palette::on_key(s, e, tx) || theme_editor_key(s, e) || workspace::on_key(s, e, tx) || panel::on_key(s, e, tx) || sidebar::on_key(s, e, tx)
 }
 
 /// `themeEditor.toggle` on any route; the editor is a dialog, so Escape closes it through Rune.
@@ -65,20 +62,6 @@ fn theme_editor_key(s: &mut App, e: &KeyEvent) -> bool {
     true
 }
 
-/// The chords the web's ChatView answers anywhere on a thread: `threadPanel.toggle` flips the
-/// details card, `editor.openFavorite` opens the checkout in the card's editor.
-fn chat_shortcut(s: &mut App, e: &KeyEvent) -> bool {
-    if !matches!(s.route, Route::Thread(_) | Route::Home { .. }) || crate::onboarding::shows_hero(s) {
-        return false;
-    }
-    if chat::composer::ctx(s).project.is_some() && panel::shortcut(s, e, "threadPanel.toggle") {
-        let fits = s.ui.shell.details_fits.get();
-        chat::details::toggle(s, fits);
-        return true;
-    }
-    panel::shortcut(s, e, "editor.openFavorite") && chat::details::open_favorite(s)
-}
-
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     if s.ui.shell.palette.gallery.is_some() {
         return crate::kit::gallery::view(s, cx, t);
@@ -88,7 +71,6 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     }
     let mut overlays = Vec::new();
     s.ui.shell.dark.set(t.dark);
-    s.ui.shell.details_fits.set(cx.layout_with("chat-body", |r| chat::details::lane(r[2].round(), r[3].round(), false).card).unwrap_or(true));
     let sidebar = sidebar::view(s, cx, t, &mut overlays);
     let main = match s.frame_route() {
         Route::PullRequests => pages::pull_requests::view(s, cx, t, &mut overlays),
@@ -122,6 +104,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     overlays.extend(crate::search::overlay(s, t));
     overlays.extend(crate::notify::overlays(s, t));
     crate::links::overlays(s, t, &mut overlays);
+    crate::add_to_machine::overlays(s, t, &mut overlays);
     crate::wizard::overlays(s, t, &mut overlays);
     overlays.extend(quit::overlay(s, t));
     rune_kit::root(body, overlays)
@@ -133,35 +116,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
 mod tests {
     use rune::{Key, KeyEvent};
 
-    use crate::chat::details::{Shown, shown};
     use crate::{App, Route, data};
-
-    #[test]
-    fn the_thread_panel_chord_toggles_the_details_card_as_the_lane_fits() {
-        let mut s = App::new();
-        let id = s.state().threads.iter().find(|t| !data::s(t, "projectId").is_empty()).map(|t| data::s(t, "id").to_owned()).unwrap();
-        if let data::Source::Fixture(state) = &mut s.src {
-            state.config.get_or_insert_with(|| serde_json::json!({}))["keybindings"] =
-                serde_json::json!([{"command": "threadPanel.toggle", "shortcut": {"key": "b", "modKey": true, "shiftKey": true}}]);
-        }
-        s.navigate(Route::Thread(id));
-        let mut chord = KeyEvent::from(Key::Command('b'));
-        chord.mods.cmd = true;
-        chord.mods.ctrl = !cfg!(target_os = "macos");
-        chord.mods.shift = true;
-        let (wide, narrow) = ((1182.0, 848.0), (900.0, 848.0));
-        s.ui.shell.details_fits.set(true);
-        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline);
-        assert!(super::chat_shortcut(&mut s, &chord));
-        assert_eq!(shown(&s, wide.0, wide.1), Shown::None, "the chord closes the inline card");
-        assert!(super::chat_shortcut(&mut s, &chord));
-        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline, "and opens it again");
-        s.ui.shell.details_fits.set(false);
-        assert!(super::chat_shortcut(&mut s, &chord));
-        assert_eq!(shown(&s, narrow.0, narrow.1), Shown::Popover, "a narrow lane opens the popover");
-        s.navigate(Route::PullRequests);
-        assert!(!super::chat_shortcut(&mut s, &chord), "off a thread the chord falls through");
-    }
 
     #[test]
     fn the_theme_editor_chord_opens_on_the_theme_in_use_and_closes() {

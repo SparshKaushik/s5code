@@ -1,10 +1,10 @@
 //! The Diff surface, ported from web's DiffPanel: a scope picker over the same review and
 //! checkpoint RPCs, the header's view toggles, and the diff with an optional file tree.
-mod comments;
+pub(crate) mod comments;
 pub(crate) mod file_menu;
 mod find;
-mod state;
-mod view;
+pub(crate) mod state;
+pub(crate) mod view;
 
 use std::collections::{HashMap, HashSet};
 use std::hash::{Hash, Hasher};
@@ -88,6 +88,8 @@ struct Source {
     truncated: bool,
     /// Tracked changes only: the server is still listing untracked files (`preview.incomplete`).
     incomplete: bool,
+    /// A file patch fetched to fill an incomplete preview failed (web's `selectedPatchError`).
+    failed: bool,
     /// The server listed every file's totals, so they hold even when patches were cut.
     totals: bool,
     /// A tool call that recorded file contents instead of a diff: each label and text.
@@ -133,6 +135,8 @@ pub struct Ui {
     refs_combo: kit::ComboboxState,
     hide_tests: bool,
     tree_open: bool,
+    /// The Changes tree's dragged width; until dragged it takes 40% of the panel.
+    tree_w: Option<f32>,
     folded_dirs: HashSet<String>,
     /// Per-file patches requested when the whole patch passed the server's size limit.
     file_pending: Vec<(u64, Scope)>,
@@ -185,6 +189,7 @@ impl Default for Ui {
             refs_combo: Default::default(),
             hide_tests: false,
             tree_open: false,
+            tree_w: None,
             folded_dirs: HashSet::new(),
             file_pending: vec![],
             counts: HashMap::new(),
@@ -665,7 +670,10 @@ pub fn poll(app: &mut App) -> bool {
                 }
                 ui.files.sort_by(|a, b| a.path().cmp(b.path()));
             }
-            Err(_) => ui.source.truncated = true,
+            Err(_) => {
+                ui.source.truncated = true;
+                ui.source.failed = true;
+            }
         }
         apply(app);
     }
@@ -905,12 +913,12 @@ fn compact(n: usize) -> String {
 
 /// One row of the file tree: a folder (with chains of single folders joined) or a file.
 #[derive(Debug, PartialEq)]
-struct TreeRow {
-    depth: u32,
-    label: String,
+pub(crate) struct TreeRow {
+    pub(crate) depth: u32,
+    pub(crate) label: String,
     /// The folder's full path, for folding it.
-    dir: Option<String>,
-    file: Option<usize>,
+    pub(crate) dir: Option<String>,
+    pub(crate) file: Option<usize>,
 }
 
 #[derive(Default)]
@@ -920,7 +928,7 @@ struct Node {
     file: Option<usize>,
 }
 
-fn tree_rows(paths: &[&str], folded: &HashSet<String>) -> Vec<TreeRow> {
+pub(crate) fn tree_rows(paths: &[&str], folded: &HashSet<String>) -> Vec<TreeRow> {
     let mut root = Node::default();
     for (i, path) in paths.iter().enumerate() {
         let mut node = &mut root;
@@ -962,7 +970,7 @@ fn tree_rows(paths: &[&str], folded: &HashSet<String>) -> Vec<TreeRow> {
     out
 }
 
-fn all_dirs(paths: &[&str]) -> HashSet<String> {
+pub(crate) fn all_dirs(paths: &[&str]) -> HashSet<String> {
     tree_rows(paths, &HashSet::new()).into_iter().filter_map(|r| r.dir).collect()
 }
 
@@ -1067,7 +1075,7 @@ fn clock_at(wall: i64, hour12: bool) -> String {
 }
 
 /// A header toggle: ghost `sm` button that shows pressed with the accent fill.
-fn toggle(t: &T, key: &str, label: &str, glyph: &'static Icon, on: bool, act: impl Fn(&mut App) + 'static) -> El {
+pub(crate) fn toggle(t: &T, key: &str, label: &str, glyph: &'static Icon, on: bool, act: impl Fn(&mut App) + 'static) -> El {
     let fg = t.c.contrast_foreground;
     row()
         .key(key)
@@ -1093,9 +1101,23 @@ fn icon_button(t: &T, key: &str, label: &str, glyph: &'static Icon, act: impl Fn
 
 /// The stacked / split segmented control.
 fn layout_group(app: &App, t: &T) -> El {
-    let mode = app.ui.panel.diff.state.mode();
+    layout_toggle(t, "panel-diff", ("Stacked diff view", "Split diff view"), app.ui.panel.diff.state.mode(), pick_layout)
+}
+
+fn pick_layout(s: &mut App, m: DiffMode) {
+    s.ui.panel.diff.state.set_mode(m);
+    save_layout(s, m);
+}
+
+/// The client's `diffLayout`, shared by this panel and a pull request's Code tab.
+pub(crate) fn save_layout(app: &mut App, m: DiffMode) {
+    save_setting(app, "diffLayout", json!(if m == DiffMode::Split { "split" } else { "stacked" }));
+}
+
+/// A stacked / split segmented control over `mode`, keyed `{key}-layout`, `-stacked` and `-split`.
+pub(crate) fn layout_toggle(t: &T, key: &str, (stacked, split): (&str, &str), mode: DiffMode, pick: fn(&mut App, DiffMode)) -> El {
     let pressed = if t.dark { t.c.input.alpha_mul(0.72) } else { t.c.background };
-    let item = |key: &str, label: &str, glyph: &'static Icon, m: DiffMode| {
+    let item = |key: String, label: &str, glyph: &'static Icon, m: DiffMode| {
         let on = mode == m;
         row()
             .key(key)
@@ -1109,22 +1131,20 @@ fn layout_group(app: &App, t: &T) -> El {
             .focusable(true)
             .role("button")
             .label(label.to_owned())
-            .help(label.to_owned())
             .checked(on)
             .child(icon(glyph, 14.0).color(if on { t.c.foreground } else { t.c.muted_foreground }))
-            .on_press(move |s: &mut App| {
-                s.ui.panel.diff.state.set_mode(m);
-                save_setting(s, "diffLayout", json!(if m == DiffMode::Split { "split" } else { "stacked" }));
-            })
+            .on_press(move |s: &mut App| pick(s, m))
     };
     row()
-        .key("panel-diff-layout")
+        .key(format!("{key}-layout"))
+        .role("group")
+        .label("Diff layout")
         .padding(2.0)
         .gap(2.0)
         .radius(8.0)
         .fill(t.c.input.alpha_mul(0.4))
-        .child(item("panel-diff-stacked", "Stacked diff", &icons::ROWS_3, DiffMode::Unified))
-        .child(item("panel-diff-split", "Split diff", &icons::COLUMNS_2, DiffMode::Split))
+        .child(item(format!("{key}-stacked"), stacked, &icons::ROWS_3, DiffMode::Unified))
+        .child(item(format!("{key}-split"), split, &icons::COLUMNS_2, DiffMode::Split))
 }
 
 /// One base-ref row per branch (`buildBaseRefChoices`): a local branch paired with its remote
@@ -1350,10 +1370,13 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
     }
     right = right.child(layout_group(app, t));
     let wrap = wrap_on(app);
-    right = right.child(toggle(t, "panel-diff-wrap", if wrap { "Disable line wrapping" } else { "Enable line wrapping" }, &icons::TEXT_WRAP, wrap, move |s: &mut App| {
-        s.ui.panel.diff.wrap = Some(!wrap);
-        s.ui.panel.diff.state.set_wrap(!wrap);
-    }));
+    right = right.child(
+        toggle(t, "panel-diff-wrap", if wrap { "Disable line wrapping" } else { "Enable line wrapping" }, &icons::TEXT_WRAP, wrap, move |s: &mut App| {
+            s.ui.panel.diff.wrap = Some(!wrap);
+            s.ui.panel.diff.state.set_wrap(!wrap);
+        })
+        .label(if wrap { "Disable diff line wrapping" } else { "Enable diff line wrapping" }),
+    );
     let ignore = ignore_ws(app);
     right = right.child(toggle(t, "panel-diff-whitespace", if ignore { "Show whitespace changes" } else { "Hide whitespace changes" }, &icons::PILCROW, ignore, move |s: &mut App| {
         s.ui.panel.diff.ignore_ws = Some(!ignore);
@@ -1381,6 +1404,14 @@ fn header(app: &App, t: &T, refs_w: Option<f32>) -> El {
         .w_full()
         .child(left)
         .child(right)
+}
+
+const TREE_FRACTION: f32 = 0.4;
+
+/// `FileExplorerPane`'s bounds: 160 to 560 wide, leaving the diff at least 256.
+fn tree_width(w: f32, row: f32) -> f32 {
+    let max = (row - 256.0).min(560.0).max(160.0);
+    w.clamp(160.0, max)
 }
 
 fn tree_pane(app: &App, t: &T) -> El {
@@ -1461,9 +1492,12 @@ fn tree_pane(app: &App, t: &T) -> El {
         };
         list = list.child(line);
     }
-    col()
-        .key("panel-diff-tree")
-        .w_frac(0.4)
+    let pane = col().key("panel-diff-tree");
+    let pane = match ui.tree_w {
+        Some(w) => pane.w(tree_width(w, app.ui.panel.width)),
+        None => pane.w_frac(TREE_FRACTION),
+    };
+    pane
         .min_w(0.0)
         .min_h(0.0)
         .self_stretch()
@@ -1485,6 +1519,10 @@ fn body(app: &App, t: &T) -> El {
     }
     if matches!(ui.scope, Scope::Turn(_)) && turns(app).is_empty() {
         return super::notice(t, "No completed turns yet.");
+    }
+    let git = matches!(ui.scope, Scope::Unstaged | Scope::Commit(_) | Scope::Branch);
+    if git && !crate::chat::details::grants(app, "filesystem:read") {
+        return super::notice(t, "This connection cannot read local diffs.");
     }
     if let Some(error) = &ui.error {
         return col().grow(1.0).min_h(0.0).center().px(20.0).child(text(error.clone()).font(theme::TEXT_2XS).color(t.c.error.alpha_mul(0.8)).wrap());
@@ -1510,10 +1548,23 @@ fn body(app: &App, t: &T) -> El {
     {
         return banners(app, t).child(raw_patch(app, t, reason, patch));
     }
-    if ui.state.files().is_empty() && !ui.source.truncated && !ui.source.incomplete {
-        return super::notice(t, "No net changes in this selection.");
+    if ui.state.files().is_empty() {
+        return banners(app, t).child(super::notice(t, empty_note(&ui.source)));
     }
     diff_body(app, t)
+}
+
+/// An empty selection is "no net changes" only when the server sent the whole patch.
+fn empty_note(source: &Source) -> &'static str {
+    if source.truncated || source.incomplete { "No patch available for this selection." } else { "No net changes in this selection." }
+}
+
+fn incomplete_note(source: &Source) -> &'static str {
+    if source.failed {
+        "Showing tracked changes. Untracked changes could not be loaded. Refresh to retry."
+    } else {
+        "Showing tracked changes. Checking untracked files..."
+    }
 }
 
 /// The notes above the files: untracked files still loading, and a patch cut at the size limit.
@@ -1527,7 +1578,7 @@ fn banners(app: &App, t: &T) -> El {
             .child(el().h(1.0).w_full().fill(t.c.border.alpha_mul(0.7)))
     };
     if ui.source.incomplete {
-        out = out.child(line("Showing tracked changes. Checking untracked files...".into()).key("diff-incomplete"));
+        out = out.child(line(incomplete_note(&ui.source).into()).key("diff-incomplete"));
     }
     if ui.source.truncated {
         let totals = if ui.source.totals && !ui.source.incomplete { " Totals include all changes." } else { "" };
@@ -1570,7 +1621,24 @@ fn diff_body(app: &App, t: &T) -> El {
     let look = Rc::new(view::Look::new(t));
     let mut main = row().grow(1.0).min_h(0.0).w_full().items_stretch().child(view::build(app, look));
     if ui.tree_open && !ui.state.files().is_empty() {
-        main = main.child(el().w(1.0).self_stretch().fill(t.c.border.alpha_mul(0.6))).child(tree_pane(app, t));
+        let handle = el()
+            .key("panel-diff-tree-resize")
+            .w(1.0)
+            .self_stretch()
+            .fill(t.c.border.alpha_mul(0.6))
+            .cursor(Cursor::ResizeColumn)
+            .role("separator")
+            .label("Resize Changes files")
+            .on_drag(|s: &mut App, d, _| {
+                let row = s.ui.panel.width;
+                if d.phase == rune::Phase::Down {
+                    d.data = s.ui.panel.diff.tree_w.unwrap_or(row * TREE_FRACTION);
+                }
+                if !d.cancelled() {
+                    s.ui.panel.diff.tree_w = Some(tree_width(d.data - d.dx, row));
+                }
+            });
+        main = main.child(handle).child(tree_pane(app, t));
     }
     banners(app, t).child(main)
 }
@@ -1785,6 +1853,16 @@ mod tests {
         assert_eq!(paths, vec!["b.ts", "c.ts"]);
         let src = json!({ "files": [{ "path": "n.ts", "previousPath": "o.ts", "additions": 1, "deletions": 2 }] });
         assert_eq!(file_stats(&src), vec![FileStat { path: "n.ts".into(), previous: Some("o.ts".into()), additions: 1, deletions: 2 }]);
+
+        assert_eq!((tree_width(40.0, 800.0), tree_width(300.0, 800.0), tree_width(900.0, 800.0)), (160.0, 300.0, 544.0));
+        assert_eq!((tree_width(900.0, 2000.0), tree_width(300.0, 300.0)), (560.0, 160.0));
+
+        let mut source = Source { incomplete: true, ..Source::default() };
+        assert_eq!(empty_note(&source), "No patch available for this selection.");
+        assert_eq!(incomplete_note(&source), "Showing tracked changes. Checking untracked files...");
+        source.failed = true;
+        assert!(incomplete_note(&source).contains("Untracked changes could not be loaded. Refresh to retry."));
+        assert_eq!(empty_note(&Source::default()), "No net changes in this selection.");
     }
 
     #[test]

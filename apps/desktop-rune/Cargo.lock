@@ -3037,6 +3037,7 @@ dependencies = [
  "alacritty_terminal",
  "base64",
  "image",
+ "pulldown-cmark",
  "qrcodegen",
  "regex-automata",
  "ring",

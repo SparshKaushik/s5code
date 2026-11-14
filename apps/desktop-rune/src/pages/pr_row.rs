@@ -50,6 +50,8 @@ pub struct Ui {
     pub hovered: Option<String>,
     /// The connection's session (`GET /api/auth/session`), read for its write grant.
     pub session: Read,
+    /// The other environments' sessions, by environment, for their rows' write grant.
+    pub sessions: HashMap<String, Read>,
     sweep: Option<Sweep>,
     batches: Vec<Batch>,
 }
@@ -90,7 +92,7 @@ enum Step {
 }
 
 #[derive(Clone, Copy)]
-enum Kind {
+pub(super) enum Kind {
     Stack,
     Checks,
     Breakdown,
@@ -100,9 +102,9 @@ fn ui(s: &mut App) -> &mut Ui {
     &mut s.ui.pages.pull_requests.row
 }
 
-/// `host:repository#number`, as pullRequestEntryKey.
+/// `environment:host:repository#number`, as pullRequestEntryKey.
 pub fn row_key(e: &Value) -> String {
-    format!("{}:{}#{}", field(e, "host"), field(e, "repository"), e["number"])
+    super::pull_requests::key(e)
 }
 
 fn reads(u: &mut Ui, kind: Kind) -> &mut HashMap<String, Read> {
@@ -114,7 +116,7 @@ fn reads(u: &mut Ui, kind: Kind) -> &mut HashMap<String, Read> {
 }
 
 /// Reads one row's answer unless a fresh one is held or already on its way.
-fn want(s: &mut App, kind: Kind, e: &Value) {
+pub(super) fn want(s: &mut App, kind: Kind, e: &Value) {
     let key = row_key(e);
     let now = s.now_ms;
     let fresh = reads(ui(s), kind).get(&key).is_some_and(|r| r.pending.is_some() || (r.data.is_some() && r.error.is_none() && now - r.at < STALE_MS));
@@ -126,7 +128,7 @@ fn want(s: &mut App, kind: Kind, e: &Value) {
         Kind::Checks => "pullRequests.detail",
         Kind::Breakdown => "pullRequests.changeBreakdown",
     };
-    match s.src.net() {
+    match super::pull_requests::net_for(s, e) {
         Some(net) => {
             let id = net.request(method, reference(e));
             reads(ui(s), kind).entry(key).or_default().pending = Some(id);
@@ -202,6 +204,37 @@ pub fn poll(s: &mut App) -> bool {
         advance(s, a, reply);
         changed = true;
     }
+    let active = s.ui.env.active.clone();
+    for env in super::pull_requests::capable(s).into_iter().filter(|env| *env != active) {
+        changed |= poll_session(s, &env, now);
+    }
+    changed
+}
+
+/// Another environment's session, read like the one on screen's for its rows' write grant.
+fn poll_session(s: &mut App, env: &str, now: i64) -> bool {
+    let mut changed = false;
+    let pending = ui(s).sessions.get(env).and_then(|r| r.pending);
+    if let Some(id) = pending
+        && let Some(reply) = super::pull_requests::take(s, env, id)
+    {
+        let r = ui(s).sessions.entry(env.to_string()).or_default();
+        r.pending = None;
+        r.at = now;
+        match reply {
+            Ok(v) => {
+                r.data = Some(v);
+                r.error = None;
+            }
+            Err(e) => r.error = Some(super::pull_requests::error_text(&e, "")),
+        }
+        changed = true;
+    }
+    let due = ui(s).sessions.get(env).is_none_or(|r| r.pending.is_none() && (r.at == 0 || now - r.at >= STALE_MS));
+    if due && let Some(net) = crate::env::net_of(s, env) {
+        let id = net.http_request("GET", "/api/auth/session", json!({}));
+        ui(s).sessions.entry(env.to_string()).or_default().pending = Some(id);
+    }
     changed
 }
 
@@ -222,7 +255,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 // ---- quick actions ----------------------------------------------------------------------
 
 /// The host's word for a change request (ChangeRequestTerminology.singular).
-fn term(e: &Value) -> &'static str {
+pub(super) fn term(e: &Value) -> &'static str {
     match field(e, "provider") {
         "gitlab" => "merge request",
         "github" | "gitcafe" | "forgejo" | "bitbucket" | "azure-devops" => "pull request",
@@ -231,7 +264,7 @@ fn term(e: &Value) -> &'static str {
 }
 
 /// capitalizeTerm.
-fn capitalized(term: &str) -> String {
+pub(super) fn capitalized(term: &str) -> String {
     let mut chars = term.chars();
     chars.next().map(|c| c.to_uppercase().chain(chars).collect()).unwrap_or_default()
 }
@@ -271,6 +304,16 @@ fn can_write(s: &App) -> bool {
     }
 }
 
+/// `can_write` for the environment that listed `e`: the destination's own grant.
+pub(super) fn can_write_on(s: &App, e: &Value) -> bool {
+    let Some(env) = e[crate::env::TAG].as_str().filter(|env| *env != s.ui.env.active) else { return can_write(s) };
+    match s.ui.pages.pull_requests.row.sessions.get(env).map(|r| (&r.data, &r.error)) {
+        Some((_, Some(_))) => false,
+        Some((Some(v), None)) => grants(v, SOURCE_CONTROL_WRITE),
+        _ => !crate::env::source(s, env).is_some_and(|src| matches!(src, crate::data::Source::Live(_))),
+    }
+}
+
 /// PullRequestSpeedActions: the row's quick actions while Shift is held, one is running, or a close
 /// sweep passes over the row. They stay disabled while the connection can't write.
 pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
@@ -285,7 +328,7 @@ pub fn speed_actions(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
     if actions.is_empty() || !(u.speed || busy || origin) {
         return None;
     }
-    let writable = can_write(s);
+    let writable = can_write_on(s, e);
     let stacked = e["stack"].is_object();
     let (term, number) = (term(e), &e["number"]);
     let mut group = row().key(format!("pr-speed-{key}")).shrink().gap(4.0).pr(12.0).center_y().role("group").label(format!("Quick actions for {term} #{number}"));
@@ -447,8 +490,8 @@ fn close_batch(s: &mut App, entries: Vec<Value>) {
         return;
     }
     let mut sent = Vec::new();
-    if let Some(net) = s.src.net() {
-        for e in batch {
+    for e in batch {
+        if let Some(net) = super::pull_requests::net_for(s, &e) {
             let id = net.request("pullRequests.runAction", action_payload(&e, "close", None));
             sent.push(Acting { key: row_key(&e), entry: e, action: "close", step: Step::Run, id, batch: None });
         }
@@ -513,7 +556,7 @@ fn perform(s: &mut App, e: &Value, action: &'static str) {
 }
 
 fn send(s: &mut App, mut a: Acting, step: Step, method: &str, payload: Value) {
-    match s.src.net() {
+    match super::pull_requests::net_for(s, &a.entry) {
         Some(net) => {
             a.id = net.request(method, payload);
             a.step = step;
@@ -564,7 +607,7 @@ fn run_merge(s: &mut App, a: Acting, detail: &Value) {
 }
 
 /// resolvePullRequestMergeMethod over the methods the repository allows; None when it allows none.
-fn merge_method(detail: &Value, project: Option<&str>, last: Option<&str>) -> Option<String> {
+pub(super) fn merge_method(detail: &Value, project: Option<&str>, last: Option<&str>) -> Option<String> {
     let caps = &detail["mergeCapabilities"];
     let allowed: Vec<&str> = detail["capabilities"]["mergeMethods"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|m| caps[*m] == true).collect();
     [project, last].into_iter().flatten().find(|m| allowed.contains(m)).or(allowed.first().copied()).map(str::to_string)
@@ -607,7 +650,7 @@ fn failure_text(action: &str, term: &str) -> (String, &'static str) {
 
 /// readableFailure: the host's own words without the operation prefix, or the hint when they
 /// are only tool noise.
-fn readable(raw: &str, hint: &str) -> String {
+pub(super) fn readable(raw: &str, hint: &str) -> String {
     let detail = without_operation(raw).trim();
     if detail.is_empty() || noise(detail) {
         return hint.to_string();
@@ -661,7 +704,7 @@ fn success(t: &T) -> Color {
 }
 
 /// pullRequestChecksStatePresentation.
-fn checks_state(t: &T, state: &str) -> Option<(&'static rune::Icon, Color, &'static str)> {
+pub(crate) fn checks_state(t: &T, state: &str) -> Option<(&'static rune::Icon, Color, &'static str)> {
     match state {
         "passing" => Some((&i::CIRCLE_CHECK, success(t), "All checks have passed")),
         "failing" => Some((&i::CIRCLE_X, t.c.destructive, "Some checks were not successful")),
@@ -743,14 +786,15 @@ pub fn checks(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
         let body = match (read.and_then(|r| r.data.as_ref()), read.and_then(|r| r.error.as_deref())) {
             (_, Some(error)) => muted(error),
             (None, _) => muted(if read.is_some_and(|r| r.pending.is_some()) { "Loading checks…" } else { "No checks reported" }),
-            (Some(detail), None) => checks_body(t, detail["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]), u.checks_all),
+            (Some(detail), None) => checks_body(t, detail["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]), u.checks_all, |s| ui(s).checks_all ^= true),
         };
         popover = popover.child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground)).child(body);
     }
     Some(popover.build(&kit::theme(t), overlays))
 }
 
-fn checks_body(t: &T, checks: &[Value], all: bool) -> El {
+/// `toggle` flips the caller's show-all flag.
+pub(crate) fn checks_body(t: &T, checks: &[Value], all: bool, toggle: fn(&mut App)) -> El {
     if checks.is_empty() {
         return text("No checks reported").font(theme::TEXT_XS).color(t.c.muted_foreground);
     }
@@ -786,7 +830,7 @@ fn checks_body(t: &T, checks: &[Value], all: bool) -> El {
     }
     let mut out = col().w_full().gap(4.0).child(list);
     if folds {
-        out = out.child(kit::Button::new(if all { "Show less" } else { "Show all" }).variant("ghost").size("xs").on_press(|s: &mut App| ui(s).checks_all ^= true).build(t));
+        out = out.child(kit::Button::new(if all { "Show less" } else { "Show all" }).variant("ghost").size("xs").on_press(toggle).build(t));
     }
     out
 }
@@ -804,7 +848,7 @@ fn toggle_stack(s: &mut App, e: &Value) {
 }
 
 /// resolvePullRequestState for a stack layer: its glyph, tone and label.
-fn layer_state(t: &T, layer: &Value) -> (&'static rune::Icon, Color, &'static str) {
+pub(super) fn layer_state(t: &T, layer: &Value) -> (&'static rune::Icon, Color, &'static str) {
     match field(layer, "state") {
         "merged" => (&i::GIT_MERGE, if t.dark { tw::VIOLET_300.alpha_mul(0.9) } else { tw::VIOLET_600 }, "Merged"),
         "closed" => (&i::GIT_PULL_REQUEST_CLOSED, if t.dark { tw::RED_300.alpha_mul(0.9) } else { tw::RED_600 }, "Closed"),
@@ -825,7 +869,7 @@ fn select_layer(s: &mut App, e: &Value, layer: &Value) {
     let number = &layer["number"];
     let list = &mut s.ui.pages.pull_requests;
     let listed = list.result.as_ref().and_then(|r| {
-        r["entries"].as_array()?.iter().find(|x| field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && &x["number"] == number).map(|x| field(x, "url").to_string())
+        r["entries"].as_array()?.iter().find(|x| x[crate::env::TAG] == e[crate::env::TAG] && field(x, "host").eq_ignore_ascii_case(field(e, "host")) && field(x, "repository") == field(e, "repository") && &x["number"] == number).map(|x| field(x, "url").to_string())
     });
     if let Some(url) = listed {
         list.selected = Some(url);
@@ -847,7 +891,7 @@ fn layer_entry(e: &Value, layer: &Value, url: String) -> Value {
     let title = layer["title"].as_str().filter(|v| !v.is_empty()).unwrap_or(field(layer, "headBranch"));
     let draft = layer["isDraft"] == true;
     let mut entry = json!({"url": url, "number": layer["number"], "title": title, "state": layer["state"], "isDraft": draft, "headBranch": layer["headBranch"]});
-    for key in ["provider", "host", "projectId", "projectTitle", "repository", "environmentId"] {
+    for key in ["provider", "host", "projectId", "projectTitle", "repository", "environmentId", crate::env::TAG] {
         if !e[key].is_null() {
             entry[key] = e[key].clone();
         }
@@ -966,7 +1010,7 @@ pub fn stack(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
 }
 
 /// PullRequestStackLayers: the layers top first, then the base, scrolling past 320 points.
-fn stack_layers(t: &T, e: &Value, stack: &Value) -> El {
+pub(super) fn stack_layers(t: &T, e: &Value, stack: &Value) -> El {
     let mut list = col().w_full().max_h(320.0).items_stretch().scroll(ScrollSpec { stick_bottom: false });
     for layer in stack["layers"].as_array().into_iter().flatten().rev() {
         list = list.child(layer_row(t, e, layer));
@@ -1115,7 +1159,7 @@ pub fn provider_mark(s: &App, t: &T, result: &Value, e: &Value) -> Option<El> {
 }
 
 /// The source control definition's label for a provider kind.
-fn provider_name(kind: &str) -> &'static str {
+pub(super) fn provider_name(kind: &str) -> &'static str {
     match kind {
         "github" => "GitHub",
         "gitlab" => "GitLab",
@@ -1349,14 +1393,6 @@ mod tests {
     #[test]
     fn quick_actions_need_the_source_control_write_grant() {
         let w = SOURCE_CONTROL_WRITE;
-        assert!(grants(&json!({"authenticated": true, "scopes": [w]}), w));
-        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {}}), w));
-        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"], "auth": {"serverUpdateScope": "server:update"}}), w));
-        assert!(!grants(&json!({"authenticated": true, "scopes": [w], "permissions": ["orchestration:read"]}), w));
-        assert!(!grants(&json!({"authenticated": false, "scopes": [w]}), w));
-        assert!(grants(&json!({"authenticated": true, "scopes": ["orchestration:operate"]}), "settings:write"));
-        assert!(grants(&json!({"authenticated": true, "scopes": ["terminal:operate"]}), "terminal:read"));
-        assert!(!grants(&json!({"authenticated": true, "scopes": ["orchestration:read"]}), "settings:write"));
         let mut s = App::new();
         assert!(can_write(&s), "the recorded scenes may act");
         s.ui.pages.pull_requests.row.session.data = Some(json!({"authenticated": true, "scopes": ["orchestration:read"]}));
@@ -1365,6 +1401,17 @@ mod tests {
         assert!(can_write(&s));
         s.ui.pages.pull_requests.row.session.error = Some("offline".into());
         assert!(!can_write(&s));
+        // A row another environment listed takes that environment's own grant.
+        let local = entry(json!({}));
+        let mut remote = entry(json!({}));
+        remote[crate::env::TAG] = json!("studio");
+        assert!(!can_write_on(&s, &local) && can_write_on(&s, &remote), "an environment not connected yet reads like the scenes");
+        s.ui.pages.pull_requests.row.sessions.insert("studio".into(), Read { data: Some(json!({"authenticated": true, "permissions": ["orchestration:read"]})), ..Read::default() });
+        assert!(!can_write_on(&s, &remote));
+        s.ui.pages.pull_requests.row.session = Read::default();
+        s.ui.pages.pull_requests.row.sessions.insert("studio".into(), Read { data: Some(json!({"authenticated": true, "permissions": [w]})), ..Read::default() });
+        assert!(can_write_on(&s, &local) && can_write_on(&s, &remote));
+        assert_ne!(row_key(&local), row_key(&remote), "the same pull request listed by two environments is two rows");
     }
 
     #[test]
