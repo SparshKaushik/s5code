@@ -226,6 +226,8 @@ impl Select {
                 .map(|o| text_width(o, theme::TEXT_SM) + MENU_CHROME)
                 .fold(width, f32::max)
                 .max(if self.details.is_empty() { 0. } else { 256. })
+                // The popup sizes to unwrapped text, so a description must fit on one line.
+                .max(self.details.iter().map(|(_, _, d)| text_width(d, theme::TEXT_XS) + MENU_CHROME + 4.).fold(0., f32::max))
         } else {
             width
         };

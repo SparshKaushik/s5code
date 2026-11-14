@@ -1411,6 +1411,8 @@ pub(super) fn scene(s: &mut App, open: &str) {
     });
     env::park(s, "env-box", crate::data::Source::Fixture(crate::data::fixture_state()));
     let ui = &mut s.ui.settings.connections;
+    // Without the page, the first poll resets the overlays as a page change.
+    ui.page = Some("connections".into());
     match open {
         "add-remote" => ui.adding = Some(Vec::new()),
         "add-ssh" => {
@@ -1476,6 +1478,37 @@ mod tests {
         assert_eq!(mcp_client_scopes("read-only"), ["orchestration:read"]);
         assert_eq!(mcp_client_scopes("auto"), ["orchestration:read", "orchestration:operate"]);
         assert_eq!(mcp_client_scopes("full-access").len(), 4);
+    }
+
+    #[test]
+    fn the_link_dialog_needs_a_machine_then_a_code_unless_it_can_mint_there() {
+        let mut s = App::new();
+        s.ui.env.saved.push(Saved { id: "env-box".into(), label: "Box".into(), base: "https://box.ts.net".into(), bearer: String::new() });
+        let mut state = crate::data::empty_state();
+        state.conn = s5_net::Conn::Open;
+        state.shell_ready = true;
+        env::park(&mut s, "env-box", crate::data::Source::Fixture(state));
+        let all = machines(&s);
+        assert_eq!(all.len(), 1);
+        assert_eq!((all[0].id.as_str(), all[0].connected, all[0].linked), ("env-box", true, false));
+        assert_eq!(all[0].urls, ["https://box.ts.net"]);
+        assert!(!link_ready(&s), "a machine must be chosen first");
+        s.ui.settings.connections.link_machine = Some("env-box".into());
+        assert!(!link_ready(&s), "no code, and no session there that may mint one");
+        s.ui.settings.connections.link_code = TextEdit::new("PAIR-1234");
+        assert!(link_ready(&s));
+        s.ui.settings.connections.link_code = TextEdit::new("");
+        s.ui.settings.connections.link_may_mint.push("env-box".into());
+        assert!(link_target(&s).2 && link_ready(&s), "this client mints the code there");
+        s.ui.settings.connections.mint_failed.push("env-box".into());
+        assert!(!link_ready(&s), "after a failed mint the dialog asks for a code");
+        s.ui.settings.connections.link_machine = Some(ANOTHER_ADDRESS.into());
+        s.ui.settings.connections.link_code = TextEdit::new("PAIR-1234");
+        assert!(!link_ready(&s), "another address needs the address typed");
+        s.ui.settings.connections.link_url = TextEdit::new("https://other.ts.net");
+        assert!(link_ready(&s));
+        s.ui.settings.results.insert("peerLinks.list".into(), json!({"links": [{"environmentId": "env-box", "status": "reachable"}]}));
+        assert!(machines(&s)[0].linked);
     }
 
     #[test]
