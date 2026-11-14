@@ -932,14 +932,26 @@ fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_p
 /// RunContextSelector: where the draft runs (this environment) and in which workspace.
 fn run_context_rows(s: &App, t: &T) -> Vec<El> {
     let worktree = draft_run(s).is_some_and(|r| r.worktree);
-    vec![
+    let mut rows = vec![
         group_label(t, "Run on"),
         radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None),
+    ];
+    // BranchToolbar's "Add to another machine": clone this project onto a connected environment.
+    if let Some(id) = composer::ctx(s).project.map(|p| data::s(p, "id").to_owned())
+        && !crate::add_to_machine::targets(s, &id).is_empty()
+    {
+        rows.push(menu_row(t, Some(icon(&icons::PLUS, 16.0).color(t.c.muted_foreground)), "Add to another machine", Some(move |s: &mut App| {
+            s.ui.chat.details.menu = None;
+            crate::add_to_machine::open(s, &id, None);
+        }), None));
+    }
+    rows.extend([
         el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
         group_label(t, "Workspace"),
         radio_row(t, &icons::FOLDER, "Current checkout", !worktree, |s: &mut App| set_env_mode(s, false)),
         radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
-    ]
+    ]);
+    rows
 }
 
 /// BranchPicker: a ref search, a capped list with badges, and "Create new ref" for a new name.
