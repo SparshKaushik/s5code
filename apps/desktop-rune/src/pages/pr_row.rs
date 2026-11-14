@@ -661,7 +661,7 @@ fn success(t: &T) -> Color {
 }
 
 /// pullRequestChecksStatePresentation.
-fn checks_state(t: &T, state: &str) -> Option<(&'static rune::Icon, Color, &'static str)> {
+pub(crate) fn checks_state(t: &T, state: &str) -> Option<(&'static rune::Icon, Color, &'static str)> {
     match state {
         "passing" => Some((&i::CIRCLE_CHECK, success(t), "All checks have passed")),
         "failing" => Some((&i::CIRCLE_X, t.c.destructive, "Some checks were not successful")),
@@ -743,14 +743,15 @@ pub fn checks(s: &App, t: &T, e: &Value, overlays: &mut Vec<El>) -> Option<El> {
         let body = match (read.and_then(|r| r.data.as_ref()), read.and_then(|r| r.error.as_deref())) {
             (_, Some(error)) => muted(error),
             (None, _) => muted(if read.is_some_and(|r| r.pending.is_some()) { "Loading checks…" } else { "No checks reported" }),
-            (Some(detail), None) => checks_body(t, detail["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]), u.checks_all),
+            (Some(detail), None) => checks_body(t, detail["checks"].as_array().map(Vec::as_slice).unwrap_or(&[]), u.checks_all, |s| ui(s).checks_all ^= true),
         };
         popover = popover.child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground)).child(body);
     }
     Some(popover.build(&kit::theme(t), overlays))
 }
 
-fn checks_body(t: &T, checks: &[Value], all: bool) -> El {
+/// `toggle` flips the caller's show-all flag.
+pub(crate) fn checks_body(t: &T, checks: &[Value], all: bool, toggle: fn(&mut App)) -> El {
     if checks.is_empty() {
         return text("No checks reported").font(theme::TEXT_XS).color(t.c.muted_foreground);
     }
@@ -786,7 +787,7 @@ fn checks_body(t: &T, checks: &[Value], all: bool) -> El {
     }
     let mut out = col().w_full().gap(4.0).child(list);
     if folds {
-        out = out.child(kit::Button::new(if all { "Show less" } else { "Show all" }).variant("ghost").size("xs").on_press(|s: &mut App| ui(s).checks_all ^= true).build(t));
+        out = out.child(kit::Button::new(if all { "Show less" } else { "Show all" }).variant("ghost").size("xs").on_press(toggle).build(t));
     }
     out
 }

@@ -25,10 +25,15 @@ pub fn start_on_branch(s: &mut App, project: &str, branch: &str, worktree: Optio
 
 /// `workspaceStrategy` for a draft on `branch`, in its worktree when it has one.
 pub fn workspace_strategy(branch: &str, worktree: Option<&str>) -> Value {
-    match worktree.filter(|w| !w.is_empty()) {
-        Some(path) => json!({"type": "existing_worktree", "worktreePath": path, "branch": branch}),
-        None => json!({"type": "root", "branch": branch}),
+    let mut strategy = match worktree.filter(|w| !w.is_empty()) {
+        Some(path) => json!({"type": "existing_worktree", "worktreePath": path}),
+        None => json!({"type": "root"}),
+    };
+    // The launch schema rejects an empty branch.
+    if !branch.trim().is_empty() {
+        strategy["branch"] = json!(branch);
     }
+    strategy
 }
 
 /// Takes the draft's launch strategy for `project`: its branch preset, else the project root.

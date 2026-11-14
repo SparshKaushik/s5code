@@ -138,7 +138,10 @@ pub(crate) fn workspace_path(app: &App, file_path: &str) -> Option<String> {
         Some(t) => app.state().projects.iter().find(|p| p["id"] == t["projectId"]),
         None => crate::chat::home::draft_project(app),
     };
-    let in_worktree = thread.is_some_and(|t| !data::s(t, "worktreePath").is_empty());
+    let in_worktree = match thread {
+        Some(t) => !data::s(t, "worktreePath").is_empty(),
+        None => crate::chat::details::draft_worktree(app).is_some(),
+    };
     let root = project.map(|p| data::s(&p["repositoryIdentity"], "rootPath")).filter(|r| !in_worktree && !r.is_empty());
     diff::file_menu::resolve_diff_path(file_path, cwd.as_deref(), root)
 }
@@ -156,6 +159,9 @@ fn workspace(app: &App) -> Option<String> {
         return Some(cwd);
     }
     let Route::Home { .. } = &app.route else { return None };
+    if let Some((path, _)) = crate::chat::details::draft_worktree(app) {
+        return Some(path);
+    }
     crate::chat::home::draft_project(app).map(|p| data::s(p, "workspaceRoot").to_string()).filter(|cwd| !cwd.is_empty())
 }
 /// The launcher's entries; Browser always opens a new tab, as web's.
@@ -993,6 +999,38 @@ pub const SCENES: &[(&str, fn(&mut App))] = &[
         s.ui.panel.surfaces.push(Surface::Terminal);
         s.ui.panel.active = Some(Surface::Terminal);
         close(s, Surface::Terminal);
+    }),
+    ("branch-mismatch", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        let Route::Thread(id) = s.route.clone() else { return };
+        if let data::Source::Fixture(state) = &mut s.src
+            && let Some(thread) = state.threads.iter_mut().find(|v| v["id"] == id.as_str())
+        {
+            thread["branch"] = json!("feature/login-redirect");
+            thread["worktreePath"] = Value::Null;
+        }
+        let key = crate::chat::composer::draft_key(s, &Route::Thread(id));
+        s.ui.chat.composer.drafts.entry(key).or_default().edit.replace_text("Ship the redirect fix");
+    }),
+    ("sidebar-terminal-card", |s| {
+        (crate::shell::SCENES[1].1)(s);
+        let Route::Thread(id) = s.route.clone() else { return };
+        terminal::known_fixture(s, &id, &["term-1", "term-2"]);
+        s.ui.shell.sidebar.card = Some(id);
+    }),
+    ("details-previous-worktree", |s| {
+        (crate::shell::SCENES[0].1)(s);
+        // The shell's "home" scene is a fixture thread; the previous worktree is a draft's choice.
+        s.navigate(Route::Home { project_id: None });
+        let project = crate::chat::home::draft_project(s).map(|p| data::s(p, "id").to_string()).unwrap_or_default();
+        if let data::Source::Fixture(state) = &mut s.src
+            && let Some(thread) = state.threads.iter_mut().find(|v| v["projectId"] == project.as_str())
+        {
+            thread["worktreePath"] = json!("/home/dev/.t3/worktrees/demo/feat-login");
+            thread["branch"] = json!("feat/login-redirect");
+            thread["archivedAt"] = Value::Null;
+        }
+        s.ui.chat.details.menu = Some(crate::chat::details::Menu::RunContext);
     }),
     ("checkout-pr", |s| {
         (crate::shell::SCENES[1].1)(s);
