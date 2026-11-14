@@ -95,7 +95,8 @@ enum Trailing {
     /// The theme or appearance in use: "Current" in muted text.
     Current,
     /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
-    Pin(String, bool),
+    /// It writes every member of the project's group together.
+    Pin(Vec<String>, bool),
 }
 struct SearchTerm {
     value: String,
@@ -149,6 +150,54 @@ struct Item {
     references: Vec<String>,
     usage: f32,
 }
+/// `pickableProjectGroups` over the sidebar's grouping: one row per project however many machines
+/// have it, archived groups out, pinned first. "New thread in…" (`new_thread`) leaves out the
+/// scratch project and starts in the open project when the group holds it.
+fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
+    let state = s.state();
+    let by_id = |id: &str| state.projects.iter().find(|p| data::s(p, "id") == id);
+    let current = match &s.route {
+        Route::Thread(id) => state.threads.iter().find(|v| data::s(v, "id") == id).map(|v| data::s(v, "projectId")),
+        Route::Home { project_id } => project_id.as_deref(),
+        _ => None,
+    };
+    let can_pin = actions::can_organize_projects(s);
+    let (groups, _) = crate::shell::sidebar::folders::group_of(s);
+    let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.archived).collect();
+    groups.sort_by_key(|g| !g.pinned);
+    let mut out = vec![];
+    for g in groups {
+        let Some(representative) = by_id(&g.representative) else { continue };
+        if new_thread && actions::is_scratch_project(s, representative) {
+            continue;
+        }
+        let target = current.filter(|c| g.members.iter().any(|m| m.as_str() == *c)).unwrap_or(g.representative.as_str()).to_owned();
+        let action = if new_thread { Action::Navigate(Route::Home { project_id: Some(target) }) } else { Action::OpenProject(target) };
+        let mut row = item(g.label.clone(), "Projects", &icons::FOLDER_GIT_2, "", action);
+        // `buildCommandPaletteProjectMetadata`: every member's title, root and location.
+        let mut locations: Vec<String> = vec![];
+        for member in g.members.iter().filter_map(|m| by_id(m)) {
+            let location = crate::env::location(s, member);
+            row.fields.push(SearchTerm::weighted(data::s(member, "title"), 0.6));
+            row.fields.push(SearchTerm::weighted(data::s(member, "workspaceRoot"), 0.6));
+            row.fields.push(SearchTerm::weighted(location.clone(), 0.6));
+            if !locations.contains(&location) {
+                locations.push(location);
+            }
+        }
+        row.subtitle = Some(if g.members.len() > 1 {
+            locations.join(" · ")
+        } else {
+            format!("{} · {}", crate::env::location(s, representative), data::s(representative, "workspaceRoot"))
+        });
+        if can_pin {
+            row.trailing = Trailing::Pin(g.members.clone(), g.pinned);
+        }
+        out.push(row);
+    }
+    out
+}
+
 fn item(
     title: impl Into<String>,
     group: &'static str,
@@ -609,41 +658,7 @@ fn items(s: &App) -> Vec<Item> {
         }
     }
     if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
-        let can_pin = actions::can_organize_projects(s);
-        // `pickableProjectGroups`: archived projects stay out, pinned ones lead; "New thread in…"
-        // also leaves out the scratch project.
-        let mut projects: Vec<&serde_json::Value> = s
-            .state()
-            .projects
-            .iter()
-            .filter(|p| p["archivedAt"].is_null())
-            .filter(|p| ui.page != "projects" || !actions::is_scratch_project(s, p))
-            .collect();
-        projects.sort_by_key(|p| p["pinnedAt"].is_null());
-        for p in projects {
-            out.push(item(
-                data::s(p, "title"),
-                "Projects",
-                &icons::FOLDER_GIT_2,
-                "",
-                if ui.page == "projects" {
-                    Action::Navigate(Route::Home {
-                        project_id: Some(data::s(p, "id").into()),
-                    })
-                } else {
-                    Action::OpenProject(data::s(p, "id").into())
-                },
-            ));
-            if let Some(row) = out.last_mut() {
-                let location = crate::env::location(s, p);
-                row.subtitle = Some(format!("{location} · {}", data::s(p, "workspaceRoot")));
-                row.fields.push(SearchTerm::weighted(data::s(p, "workspaceRoot"), 0.6));
-                row.fields.push(SearchTerm::weighted(location, 0.6));
-            }
-            if can_pin && let Some(row) = out.last_mut() {
-                row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());
-            }
-        }
+        out.extend(project_items(s, ui.page == "projects"));
     }
     // `settingsSearchItems`: every setting, described by its page, for the palette's matcher.
     if !typed.trim().is_empty() && ui.page.is_empty() {
@@ -1980,15 +1995,19 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         }
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
-        Trailing::Pin(project, pinned) if *pinned || selected => {
-            let (project, pinned) = (project.clone(), *pinned);
+        Trailing::Pin(members, pinned) if *pinned || selected => {
+            let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
             entry = entry.child(
                 kit::Button::new(label.clone())
                     .icon(&icons::PIN)
                     .size("icon-xs")
                     .variant("ghost-muted")
-                    .on_press(move |s: &mut App| actions::pin_project(s, &project, !pinned))
+                    .on_press(move |s: &mut App| {
+                        for project in &members {
+                            actions::pin_project(s, project, !pinned);
+                        }
+                    })
                     .build(t)
                     .key(format!("palette-pin-{i}"))
                     .help(label),
@@ -2148,6 +2167,30 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_project_on_several_machines_is_one_palette_row() {
+        let mut s = App::new();
+        let mut state = crate::data::empty_state();
+        state.config = Some(serde_json::json!({"environment": {"capabilities": {"projectOrganization": true}}}));
+        let identity = serde_json::json!({"canonicalKey": "github.com/acme/api", "name": "api"});
+        let project = |id: &str, root: &str| serde_json::json!({"id": id, "title": "api", "workspaceRoot": root, "repositoryIdentity": identity, "pinnedAt": null, "archivedAt": null});
+        let mut remote = project("p2", "/srv/api");
+        remote[crate::env::TAG] = "box".into();
+        let mut archived = project("p3", "/old");
+        archived["repositoryIdentity"] = serde_json::Value::Null;
+        archived["archivedAt"] = "2026-01-01T00:00:00Z".into();
+        state.projects = vec![project("p1", "/home/me/api"), remote, archived];
+        s.src = crate::data::Source::Fixture(state);
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box".into(), bearer: "t".into() });
+        s.route = Route::Home { project_id: Some("p2".into()) };
+
+        let rows = project_items(&s, true);
+        assert_eq!(rows.len(), 1, "one row for both machines; the archived project stays out");
+        assert_eq!(rows[0].subtitle.as_deref(), Some("Local · Box"));
+        assert!(matches!(&rows[0].action, Action::Navigate(Route::Home { project_id: Some(p) }) if p == "p2"), "the open member is where the thread starts");
+        assert!(matches!(&rows[0].trailing, Trailing::Pin(members, false) if members == &["p1", "p2"]));
+        assert!(rows[0].fields.iter().any(|f| f.value == "/srv/api"), "every member's root is searchable");
+    }
     #[test]
     fn emptying_the_folder_path_leaves_the_browse_page_like_the_web() {
         let mut s = App::new();
