@@ -193,6 +193,7 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
         port = Some(p);
         let base = format!("http://127.0.0.1:{p}");
         let (serve, serve_port) = crate::desktop::exposure::tailscale_serve();
+        let (env, prepared) = shell_env();
         let bootstrap = serde_json::json!({
             "mode": "desktop",
             "noBrowser": true,
@@ -202,9 +203,10 @@ fn supervise(binary: PathBuf, sup: Arc<Supervisor>, tx: Sender<Event>, wake: imp
             "desktopBootstrapToken": credential,
             "tailscaleServeEnabled": serve,
             "tailscaleServePort": serve_port,
+            "shellEnvironmentPrepared": prepared,
         });
         let output_from = std::fs::metadata(&log_path).map_or(0, |m| m.len());
-        let child = match spawn(&binary, &log_path, &bootstrap.to_string()) {
+        let child = match spawn(&binary, &log_path, &bootstrap.to_string(), env) {
             Ok(c) => c,
             Err(e) => return send(Event::Failed(format!("Could not start {}: {e}", binary.display()))),
         };
@@ -318,9 +320,39 @@ fn exited(child: &mut Option<Child>) -> Option<Option<std::process::ExitStatus>>
     }
 }
 
-fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str) -> std::io::Result<Child> {
+/// The login shell's environment for the server, as Electron installs it before the backend starts.
+#[cfg(unix)]
+fn shell_env() -> (&'static [(String, String)], bool) {
+    crate::desktop::shell_path::server_env()
+}
+
+#[cfg(not(unix))]
+fn shell_env() -> (&'static [(String, String)], bool) {
+    (&[], false)
+}
+
+/// Electron's `DESKTOP_BACKEND_ENV_NAMES`: the bootstrap envelope, not the app's environment,
+/// configures the server.
+const DESKTOP_BACKEND_ENV_NAMES: &[&str] = &[
+    "T3CODE_PORT",
+    "T3CODE_MODE",
+    "T3CODE_NO_BROWSER",
+    "T3CODE_HOST",
+    "T3CODE_DESKTOP_WS_URL",
+    "T3CODE_DESKTOP_LAN_HOST",
+    "T3CODE_DESKTOP_HTTPS_ENDPOINTS",
+    "T3CODE_TAILSCALE_SERVE",
+    "T3CODE_TAILSCALE_SERVE_PORT",
+];
+
+fn spawn(binary: &PathBuf, log_path: &PathBuf, bootstrap: &str, env: &[(String, String)]) -> std::io::Result<Child> {
     let out = File::options().create(true).append(true).open(log_path)?;
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    for name in DESKTOP_BACKEND_ENV_NAMES {
+        command.env_remove(name);
+    }
+    let mut child = command
+        .envs(env.iter().map(|(k, v)| (k, v)))
         .args(["--bootstrap-fd", "0"])
         .stdin(Stdio::piped())
         .stdout(out.try_clone()?)

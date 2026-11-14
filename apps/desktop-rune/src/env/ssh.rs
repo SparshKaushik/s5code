@@ -1373,6 +1373,8 @@ fn askpass() -> Result<PathBuf, String> {
 /// `baseSshArgs` plus `buildSshChildEnvironment`: batch mode until there is a password to give.
 fn ssh(target: &Target, secret: Option<&str>) -> Result<Command, String> {
     let mut command = Command::new("ssh");
+    // The login shell's agent socket and PATH, which an app opened from Finder lacks.
+    command.envs(crate::desktop::shell_path::server_env().0.iter().map(|(k, v)| (k, v)));
     command.args(["-o", if secret.is_some() { "BatchMode=no" } else { "BatchMode=yes" }, "-o", "ConnectTimeout=10"]);
     if let Some(port) = target.port {
         command.arg("-p").arg(port.to_string());
