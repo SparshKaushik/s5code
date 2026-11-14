@@ -344,6 +344,7 @@
   "id": "keep-threads-with-pull-requests",
   "title": "Keep threads with a PR",
   "to": "threads",
+  "target": "Auto-settle inactive threads",
   "terms": [
    "pull request inactivity auto-settle merge close sidebar"
   ]
@@ -352,6 +353,7 @@
   "id": "days-before-auto-settle",
   "title": "Days of inactivity before auto-settle",
   "to": "threads",
+  "target": "Auto-settle inactive threads",
   "terms": [
    "thread timeout activity sidebar"
   ]
@@ -648,6 +650,7 @@
   "id": "snap-shot-accessibility",
   "title": "Include app text",
   "to": "snap-shot",
+  "target": "SnapShots",
   "terms": [
    "capture accessibility data text UI structure elements privacy omit agent context"
   ]
@@ -656,24 +659,28 @@
   "id": "snap-shot-shortcut",
   "title": "Capture shortcut",
   "to": "snap-shot",
+  "target": "SnapShots",
   "terms": []
  },
  {
   "id": "snap-shot-sound",
   "title": "Capture sound",
   "to": "snap-shot",
+  "target": "SnapShots",
   "terms": []
  },
  {
   "id": "snap-shot-flash",
   "title": "Capture flash",
   "to": "snap-shot",
+  "target": "SnapShots",
   "terms": []
  },
  {
   "id": "snap-shot-animations",
   "title": "Capture animations",
   "to": "snap-shot",
+  "target": "SnapShots",
   "terms": []
  },
  {
@@ -744,6 +751,7 @@
   "id": "device-platform-support",
   "title": "Local simulators",
   "to": "devices",
+  "target": "Device sources",
   "terms": [
    "simulator support xcode android studio sdk avd runtime"
   ]
@@ -758,6 +766,7 @@
   "id": "browser-default-profile",
   "title": "Default browser profile",
   "to": "browser",
+  "target": "Browser profiles",
   "terms": []
  },
  {
@@ -870,6 +879,7 @@
   "id": "git-fetch-interval",
   "title": "Git fetch interval",
   "to": "maintenance",
+  "target": "Background activity",
   "terms": [
    "automatic remote branch refresh background credentials security keys seconds off"
   ]
@@ -918,6 +928,7 @@
   "id": "review-guide-model",
   "title": "Review guide model",
   "to": "source-control",
+  "target": "Review guides (beta)",
   "terms": [
    "pull request pr guided review guide brief maintainer"
   ]
@@ -926,6 +937,7 @@
   "id": "review-guide-instructions",
   "title": "Review guide instructions",
   "to": "source-control",
+  "target": "Review guides (beta)",
   "terms": [
    "pull request pr guided review guide preferences taste prompt custom"
   ]
@@ -942,6 +954,7 @@
   "id": "environment-icon",
   "title": "Environment icon",
   "to": "access",
+  "target": "This machine",
   "terms": [
    "machine glyph sidebar mac mini studio laptop desktop server cloud vm"
   ]
@@ -959,6 +972,7 @@
   "id": "network-access",
   "title": "Network access",
   "to": "access",
+  "target": "This machine",
   "terms": [
    "expose backend remote pairing local machine interfaces host restart"
   ]
@@ -967,6 +981,7 @@
   "id": "tailscale-https",
   "title": "Tailscale HTTPS",
   "to": "access",
+  "target": "This machine",
   "terms": [
    "serve magicdns endpoint remote secure network"
   ],

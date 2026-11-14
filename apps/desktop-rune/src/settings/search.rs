@@ -7,6 +7,8 @@ pub struct Item {
     pub title: String,
     pub to: String,
     pub terms: Vec<String>,
+    /// The setting a result scrolls to when it lives inside another row (web `targetId`).
+    target: Option<String>,
     secondary: bool,
 }
 
@@ -25,10 +27,20 @@ pub fn items() -> &'static [Item] {
                 title: v["title"].as_str().unwrap_or("").to_owned(),
                 to: v["to"].as_str().unwrap_or("").to_owned(),
                 terms: v["terms"].as_array().into_iter().flatten().filter_map(Value::as_str).map(normalize).collect(),
+                target: v["target"].as_str().map(str::to_owned),
                 secondary: v["secondary"] == true,
             })
             .collect()
     })
+}
+
+/// The title a result for `title` on `page` scrolls to.
+pub fn reveal<'a>(page: &str, title: &'a str) -> &'a str {
+    items()
+        .iter()
+        .find(|item| item.to == page && item.title == title)
+        .and_then(|item| item.target.as_deref())
+        .unwrap_or(title)
 }
 
 /// `normalizeSearchText`: lowercase with runs of whitespace collapsed.

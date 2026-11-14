@@ -769,7 +769,7 @@ fn open_result(s: &mut App, page: &str, title: &str) {
 
 /// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
 pub fn open_setting(s: &mut App, page: &str, title: &str) {
-    s.ui.settings.reveal = Some(title.to_owned());
+    s.ui.settings.reveal = Some(search::reveal(page, title).to_owned());
     s.navigate(Route::Settings(page.to_owned()));
 }
 
@@ -1632,5 +1632,38 @@ mod reveal_tests {
         settle(&mut rt);
         assert!(in_view(&rt), "FAILED: opening the result scrolls the setting into view");
         assert!(rt.state.ui.settings.reveal.is_none(), "FAILED: the reveal runs once");
+    }
+
+    /// Web settings this client doesn't draw yet; their results open the page without scrolling.
+    const UNBUILT: &[&str] = &[
+        "Compact idle threads",
+        "Cursor account usage",
+        "Health check interval",
+        "Mobile app",
+        "Project defaults and overrides",
+        "Source control writer model",
+        "Thread details",
+        "Usage providers",
+    ];
+
+    #[test]
+    fn every_search_result_has_a_keyed_setting_to_scroll_to() {
+        let mut app = App::new();
+        app.navigate(Route::Settings("general".into()));
+        let mut rt = rune::Runtime::new(app, view, (1100., 900.), rune::Env::new(true, 1.));
+        let mut missing = Vec::new();
+        for item in crate::settings::search::items() {
+            rt.update(|s, _| {
+                s.ui.settings.project = (item.to == "projects").then(|| crate::data::s(&s.state().projects[0], "id").to_owned());
+                s.navigate(Route::Settings(item.to.clone()));
+            });
+            rt.frame(1. / 60.);
+            let key = super::title_key(super::search::reveal(&item.to, &item.title));
+            if !rt.elements().iter().any(|e| e.key.as_deref() == Some(key.as_str())) {
+                missing.push(item.title.as_str());
+            }
+        }
+        missing.sort_unstable();
+        assert_eq!(missing, UNBUILT, "FAILED: unkeyed search titles {missing:?}");
     }
 }

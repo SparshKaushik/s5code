@@ -138,7 +138,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 }
             }
             if path == "worktrees" && title == "Branches" {
-                page = page.child(super::storage::worktree_cleanup(s, cx, t));
+                page = page.child(super::storage::worktree_cleanup(s, cx, t).key(super::title_key("Worktree cleanup")));
             }
         }
         return page;

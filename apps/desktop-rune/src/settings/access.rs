@@ -269,7 +269,7 @@ pub(super) fn view(s: &App, t: &T) -> El {
     col()
         .w_full()
         .gap(32.0)
-        .child(col().w_full().gap(10.0).child(header).child(c::card(rows, t)))
+        .child(col().key(super::title_key("This machine")).w_full().gap(10.0).child(header).child(c::card(rows, t)))
         .child(clients(s, t))
 }
 
