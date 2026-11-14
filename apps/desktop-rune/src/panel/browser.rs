@@ -118,7 +118,7 @@ impl Default for Status {
 pub enum Event {
     Screenshot(Result<PathBuf, String>),
     /// A page opened a new window; it becomes a tab beside its opener.
-    Popup { target: String },
+    Popup { target: String, opener: String, url: String },
     /// A picked element's details (`PickedElementPayload` fields plus its rect) and its PNG crop.
     Picked { tab: TabId, element: Value, image: Option<Vec<u8>> },
     DevTools(Result<String, String>),
@@ -339,6 +339,8 @@ struct Worker {
     track_busy: bool,
     /// In-flight downloads by guid: the page's file name.
     downloads: HashMap<String, String>,
+    /// Downloads an agent started, by guid: their page's target and Playwright's folder.
+    agent_downloads: HashMap<String, (String, String)>,
     /// When each tab's renderer last crashed, for web's three remounts in 30 s.
     crashes: HashMap<TabId, Vec<std::time::Instant>>,
     shared: Arc<Mutex<Shared>>,
@@ -382,6 +384,7 @@ fn run(rx: Receiver<Cmd>, shared: Arc<Mutex<Shared>>, waker: Waker) -> Result<()
         tracking: None,
         track_busy: false,
         downloads: HashMap::new(),
+        agent_downloads: HashMap::new(),
         crashes: HashMap::new(),
         shared,
         waker,
@@ -831,18 +834,41 @@ impl Worker {
             let ours = |id: &str| self.tabs.values().any(|t| t.target.as_deref() == Some(id));
             if info["type"] == "page" && !opener.is_empty() && ours(opener) {
                 if let Some(target) = info["targetId"].as_str().filter(|id| !ours(id)) {
-                    self.event(Event::Popup { target: target.to_string() });
+                    self.event(Event::Popup { target: target.to_string(), opener: opener.to_string(), url: info["url"].as_str().unwrap_or_default().to_string() });
                 }
             }
             return;
         }
         if method == "Browser.downloadWillBegin" {
+            // Electron's split: one the agent just caused lands in Playwright's folder under its
+            // guid, with its events relayed; a person's goes to Downloads.
+            let (guid, frame) = (p["guid"].as_str().unwrap_or_default(), p["frameId"].as_str().unwrap_or_default());
+            if let Some(dir) = super::agent::agent_download(frame) {
+                self.agent_downloads.insert(guid.to_string(), (frame.to_string(), dir));
+                super::agent::download_event(frame, method, p.clone());
+                return;
+            }
             let name = p["suggestedFilename"].as_str().filter(|n| !n.is_empty()).unwrap_or("download").to_string();
             self.downloads.insert(p["guid"].as_str().unwrap_or_default().to_string(), name);
             return;
         }
         if method == "Browser.downloadProgress" {
             let guid = p["guid"].as_str().unwrap_or_default().to_string();
+            if let Some((frame, dir)) = self.agent_downloads.get(&guid).cloned() {
+                if p["state"] != "inProgress" {
+                    self.agent_downloads.remove(&guid);
+                }
+                if p["state"] == "completed" {
+                    let from = std::path::Path::new(&downloads_staging()).join(&guid);
+                    let to = std::path::Path::new(&dir).join(&guid);
+                    let _ = std::fs::create_dir_all(&dir);
+                    if std::fs::rename(&from, &to).is_err() && std::fs::copy(&from, &to).is_ok() {
+                        let _ = std::fs::remove_file(&from);
+                    }
+                }
+                super::agent::download_event(&frame, method, p.clone());
+                return;
+            }
             match p["state"].as_str() {
                 Some("completed") => {
                     let name = self.downloads.remove(&guid).unwrap_or_else(|| "download".into());

@@ -68,11 +68,14 @@ struct Tab {
     announced: Option<(u64, String)>,
     /// The agent's last `revealRequest`, so each one shows the tab once.
     revealed: Option<String>,
+    /// A popup the agent's page opened: the opener's session and the popup's target, until the
+    /// server's own session for it binds here.
+    adopting: Option<(agent::Key, String)>,
 }
 
 impl Tab {
     fn new(pixels: Pixels) -> Tab {
-        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None }
+        Tab { pixels, bar: TextEdit::new(""), focused: false, device: Device::default(), titled: Default::default(), icon: None, session: None, announced: None, revealed: None, adopting: None }
     }
 }
 
@@ -142,6 +145,13 @@ pub struct Ui {
     /// Session events held until this client's own `preview.open` replies, so its tab binds
     /// instead of a second one opening.
     deferred: Vec<Value>,
+    /// The server process the tabs' sessions belong to.
+    generation: u64,
+    /// The server restarted; tabs take new sessions once the connection is back.
+    rebind: bool,
+    /// The newest agent pointer drawn and whether a cursor was bright, so a move or a dimming
+    /// repaints.
+    cursor_seen: (u64, bool),
 }
 
 struct Dialog {
@@ -231,18 +241,32 @@ pub fn browser_failed(app: &App) -> bool {
 }
 
 /// A window the page opened (`window.open`, `target=_blank`), shown as a tab, as web does.
-fn adopt(app: &mut App, target: String) {
+/// One the agent's page opened goes to the agent: Playwright sees it open, the server adopts it
+/// as the agent's own hidden tab (`adoptPopup`), and that session binds here.
+fn adopt(app: &mut App, target: String, opener: String, url: String) {
     let ui = &mut app.ui.panel.browser;
+    let opener_key = ui.browser.shared.lock().unwrap().tabs.iter().find(|(_, s)| s.target.as_deref() == Some(opener.as_str())).map(|(id, _)| *id);
+    let opener_key = opener_key.and_then(|id| ui.tabs.get(&id)?.session.clone()).filter(agent::driven);
     ui.next += 1;
     let tab = ui.next;
     let pixels = Pixels::new();
-    ui.tabs.insert(tab, Tab::new(pixels.clone()));
-    ui.browser.send(Cmd::Adopt(tab, pixels, target));
-    super::activate(app, super::Surface::Browser(tab));
-    register(app, tab);
+    let mut fresh = Tab::new(pixels.clone());
+    fresh.adopting = opener_key.clone().map(|key| (key, target.clone()));
+    ui.tabs.insert(tab, fresh);
+    ui.browser.send(Cmd::Adopt(tab, pixels, target.clone()));
+    match opener_key {
+        Some(key) => agent::popup(&key, target, url),
+        None => {
+            super::activate(app, super::Surface::Browser(tab));
+            register(app, tab);
+        }
+    }
 }
 
 pub fn close(app: &mut App, tab: TabId) {
+    if let Some((opener, target)) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.adopting.clone()) {
+        agent::popup_gone(&opener, target);
+    }
     if let Some(key) = app.ui.panel.browser.tabs.get(&tab).and_then(|t| t.session.clone()) {
         agent::detach(&key);
         close_session(app, &key);
@@ -513,6 +537,13 @@ fn shown(app: &App) -> Option<TabId> {
 
 pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     let synced = sync_sessions(app);
+    let wait = cursor_wake(app);
+    if let Some(wait) = wait {
+        tx.wake_after(wait + Duration::from_millis(16));
+    }
+    let newest = app.ui.panel.browser.tabs.values().filter_map(|t| agent::pointer(t.session.as_ref()?)).map(|p| p.sequence).max().unwrap_or(0);
+    let cursor = (newest, wait.is_some());
+    let synced = synced || std::mem::replace(&mut app.ui.panel.browser.cursor_seen, cursor) != cursor;
     let want = shown(app);
     let live = matches!(app.src, data::Source::Live(_));
     let watch = live && !app.ui.panel.browser.tabs.is_empty();
@@ -548,12 +579,16 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     ui.seen = generation;
     let mut settled = vec![];
     let mut found = vec![];
+    let mut loaded = vec![];
     for (id, tab) in ui.tabs.iter_mut() {
         let status = statuses.get(id).cloned().unwrap_or_default();
         // Navigation clears the icon, so each load reports it afresh.
         if status.favicon != tab.icon {
             tab.icon = status.favicon.clone();
             found.extend(status.favicon.clone().map(|icon| (status.url.clone(), icon)));
+        }
+        if !idle(&status) && !status.loading && status.failure.is_none() {
+            loaded.push(status.url.clone());
         }
         if tab.bar.focused && !tab.focused {
             tab.bar.set_selection(0, tab.bar.text.len());
@@ -581,6 +616,9 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
     for (page, url) in found {
         super::favicon::note(app, &page, &url);
     }
+    for page in loaded {
+        super::favicon::want_fallback(app, &page);
+    }
     changed |= super::favicon::poll(app);
     for (id, (url, title)) in settled {
         if app.ui.panel.surfaces.contains(&super::Surface::Browser(id)) || app.ui.panel.browser.pip == Some(id) {
@@ -591,7 +629,7 @@ pub fn poll(app: &mut App, tx: &mut Tx) -> bool {
         match event {
             browser::Event::Screenshot(Ok(path)) => screenshot_saved(app, path),
             browser::Event::Screenshot(Err(e)) => crate::shell::palette::toast(app, "Unable to capture screenshot", Some(&e)),
-            browser::Event::Popup { target } => adopt(app, target),
+            browser::Event::Popup { target, opener, url } => adopt(app, target, opener, url),
             browser::Event::Picked { tab, element, image } => pick(app, tab, element, image),
             browser::Event::DevTools(Ok(url)) => {
                 if let Err(e) = tx.open_url(&url) {
@@ -651,6 +689,10 @@ const SESSIONS: &str = "subscribePreviewEvents";
 /// Electron's are, so the thread's agent can drive it too.
 fn register(app: &mut App, tab: TabId) {
     let Route::Thread(thread) = app.frame_route().clone() else { return };
+    register_on(app, tab, thread);
+}
+
+fn register_on(app: &mut App, tab: TabId, thread: String) {
     if !agent::available() || crate::env::owner(app, &thread) != crate::env::LOCAL {
         return;
     }
@@ -683,6 +725,19 @@ fn sync_sessions(app: &mut App) -> bool {
     if !want {
         return false;
     }
+    if let Some(waker) = app.ui.panel.waker.clone() {
+        agent::set_waker(waker);
+    }
+    let generation = agent::generation();
+    if app.ui.panel.browser.generation != generation {
+        app.ui.panel.browser.generation = generation;
+        app.ui.panel.browser.rebind = true;
+    }
+    let open = matches!(crate::env::local_mut(app), data::Source::Live(net) if net.state().conn == s5_net::Conn::Open);
+    if app.ui.panel.browser.rebind && open {
+        app.ui.panel.browser.rebind = false;
+        rebind(app);
+    }
     let ids: Vec<u64> = app.ui.panel.browser.opening.iter().map(|o| o.0).collect();
     let Some(net) = crate::env::local_mut(app).net() else { return false };
     let mut events = net.take_resource_events(SESSIONS, json!({}));
@@ -703,6 +758,26 @@ fn sync_sessions(app: &mut App) -> bool {
     }
     announce(app);
     changed
+}
+
+/// A new server process knows none of the old sessions; each tab that had one takes a new one
+/// on its thread, as a tab the person opened.
+fn rebind(app: &mut App) {
+    let ui = &mut app.ui.panel.browser;
+    let mut stale = vec![];
+    for (id, t) in ui.tabs.iter_mut() {
+        if let Some((thread, _)) = t.session.take() {
+            t.announced = None;
+            t.adopting = None;
+            stale.push((*id, thread));
+        }
+    }
+    ui.opening.clear();
+    ui.deferred.clear();
+    stale.sort();
+    for (tab, thread) in stale {
+        register_on(app, tab, thread);
+    }
 }
 
 fn bind(app: &mut App, tab: TabId, key: agent::Key) {
@@ -738,6 +813,18 @@ fn session_event(app: &mut App, event: Value) {
             if snapshot["automationOwner"].is_null() && app.ui.panel.browser.opening.iter().any(|o| o.2 == thread) {
                 app.ui.panel.browser.deferred.push(event);
                 return;
+            }
+            // The server adopting a popup the agent's page opened, which is already a tab here.
+            if !snapshot["automationOwner"].is_null() {
+                let mut adopting: Vec<TabId> = app.ui.panel.browser.tabs.iter().filter(|(_, t)| t.session.is_none() && t.adopting.as_ref().is_some_and(|(k, _)| k.0 == thread)).map(|(id, _)| *id).collect();
+                adopting.sort();
+                if let Some(&tab) = adopting.first() {
+                    if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
+                        t.session = Some(key);
+                    }
+                    reveal_session(app, tab, &thread, snapshot, true);
+                    return;
+                }
             }
             let tab = open_tab(app);
             if let Some(t) = app.ui.panel.browser.tabs.get_mut(&tab) {
@@ -839,6 +926,10 @@ fn announce(app: &mut App) {
         let (Some(key), Some(target)) = (&tab.session, targets.get(id)) else { continue };
         let now = Some((generation, target.clone()));
         if tab.announced != now {
+            // Chrome restarted under this server: it drops the dead page before taking the new one.
+            if tab.announced.as_ref().is_some_and(|(g, _)| *g == generation) {
+                agent::detach(key);
+            }
             agent::attach(key, host.clone(), target.clone());
             tab.announced = now;
         }
@@ -1334,10 +1425,10 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     } else if let Some(size) = status.device {
         let (w, h, scale) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
         let page = page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7));
-        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))))
+        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))).children(agent_cursor(app, t, tab, scale)))
     } else {
         let hover = hover_box(t, &status, status.zoom.max(0.25), ui.area);
-        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover).children(annotation_editor(app, t, tab, status.zoom.max(0.25), ui.area))
+        page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover).children(annotation_editor(app, t, tab, status.zoom.max(0.25), ui.area)).children(agent_cursor(app, t, tab, status.zoom.max(0.25)))
     };
     let zoom_pill = (ui.zoom_until != 0 && !idle(&status)).then(|| {
         row()
@@ -1708,6 +1799,36 @@ fn pip_gesture(s: &mut App, d: &rune::Drag, dir: (i8, i8), aspect: f32) {
     if matches!(d.phase, Phase::Up) {
         ui.pip_start = None;
     }
+}
+
+/// Web's `AGENT_CURSOR_ACTIVE_MS`: the agent's cursor stays bright this long after each step.
+const CURSOR_ACTIVE: Duration = Duration::from_millis(700);
+
+/// Web's `AgentBrowserCursor`: where the agent last pointed on the page, CSS pixels times the
+/// page's scale, ringed on a click, dimming between steps; a recording draws its own.
+fn agent_cursor(app: &App, t: &T, tab: TabId, scale: f32) -> Option<El> {
+    let ui = &app.ui.panel.browser;
+    let pointer = agent::pointer(ui.tabs.get(&tab)?.session.as_ref()?)?;
+    if ui.browser.status(tab).recording {
+        return None;
+    }
+    let active = pointer.at.elapsed() < CURSOR_ACTIVE;
+    let mut mark = el().key("agent-cursor").pin(Some(pointer.x * scale - 2.), Some(pointer.y * scale - 2.), None, None).size(20., 20.).opacity(cursor_opacity(active)).a11y_hidden();
+    if pointer.click && active {
+        mark = mark.child(el().key(format!("agent-cursor-ring-{}", pointer.sequence)).pin(Some(2.), Some(2.), None, None).size(16., 16.).radius(8.).fill(t.c.primary.alpha_mul(0.25)));
+    }
+    Some(mark.child(icon(&icons::MOUSE_POINTER_2, 20.).color(t.c.primary)))
+}
+
+/// Web's `agentBrowserCursorOpacity` for an agent-driven tab.
+fn cursor_opacity(active: bool) -> f32 {
+    if active { 1. } else { 0.35 }
+}
+
+/// When the brightest agent cursor dims, so the panel repaints then.
+fn cursor_wake(app: &App) -> Option<Duration> {
+    let ui = &app.ui.panel.browser;
+    ui.tabs.values().filter_map(|t| agent::pointer(t.session.as_ref()?)).filter_map(|p| CURSOR_ACTIVE.checked_sub(p.at.elapsed())).min()
 }
 
 /// The picker's box around the element under the pointer, as web's annotation overlay draws it.
@@ -2343,6 +2464,45 @@ mod tests {
         assert_eq!(session_tab(&app, &thread, "s"), Some(mine));
         session_event(&mut app, opened);
         assert_eq!(app.ui.panel.browser.tabs.len(), 1);
+    }
+
+    #[test]
+    fn a_popup_the_agents_page_opened_binds_to_the_session_the_server_adopts_it_as() {
+        use super::super::Surface;
+        let mut app = App::new();
+        let thread = data::s(&app.state().threads[0], "id").to_string();
+        let popup = open_tab(&mut app);
+        app.ui.panel.browser.tabs.get_mut(&popup).unwrap().adopting = Some(((thread.clone(), "opener".into()), "P1".into()));
+
+        // `adoptPopup` opens it as the agent's hidden tab: no new tab, and none on the panel.
+        session_event(&mut app, json!({ "type": "opened", "threadId": thread, "tabId": "adopted", "snapshot": { "runtime": "server", "reveal": false, "automationOwner": "agent-1" } }));
+        assert_eq!(app.ui.panel.browser.tabs.len(), 1);
+        assert_eq!(session_tab(&app, &thread, "adopted"), Some(popup));
+        assert!(!app.ui.panel.surfaces.contains(&Surface::Browser(popup)));
+        // A second agent session is a tab of its own.
+        session_event(&mut app, json!({ "type": "opened", "threadId": thread, "tabId": "other", "snapshot": { "runtime": "server", "reveal": false, "automationOwner": "agent-1" } }));
+        assert_ne!(session_tab(&app, &thread, "other"), Some(popup));
+    }
+
+    #[test]
+    fn a_new_server_process_takes_every_tab_off_its_old_session() {
+        let mut app = App::new();
+        let thread = data::s(&app.state().threads[0], "id").to_string();
+        let (a, b) = (open_tab(&mut app), open_tab(&mut app));
+        for (tab, session) in [(a, "s1"), (b, "s2")] {
+            let t = app.ui.panel.browser.tabs.get_mut(&tab).unwrap();
+            t.session = Some((thread.clone(), session.into()));
+            t.announced = Some((1, "T".into()));
+        }
+        app.ui.panel.browser.tabs.get_mut(&b).unwrap().adopting = Some(((thread.clone(), "s1".into()), "P".into()));
+        app.ui.panel.browser.opening.push((3, a, thread.clone()));
+        app.ui.panel.browser.deferred.push(json!({ "type": "opened" }));
+        rebind(&mut app);
+        let ui = &app.ui.panel.browser;
+        assert!(ui.tabs.values().all(|t| t.session.is_none() && t.announced.is_none() && t.adopting.is_none()));
+        assert!(ui.deferred.is_empty());
+        // No server listens in tests, so nothing is opened again; with one, each tab registers anew.
+        assert!(ui.opening.is_empty());
     }
 
     #[test]
