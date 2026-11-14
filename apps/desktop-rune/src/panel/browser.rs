@@ -809,7 +809,10 @@ impl Worker {
     fn input_scale(&self, tab: TabId) -> f32 {
         let (w, h, _) = self.viewport;
         self.tabs.get(&tab).map_or(1., |t| match t.device {
-            Some(device) => device_box(w, h, device, t.zoom).2,
+            Some(device) => {
+                let (w, h) = device_area(w, h);
+                device_box(w, h, device, t.zoom).2
+            }
             None => t.zoom.max(0.25),
         })
     }
@@ -1262,6 +1265,14 @@ fn metrics(w: f32, h: f32, zoom: f32) -> (u32, u32) {
 /// Where an emulated `dw` x `dh` CSS viewport shows in a `w` x `h` page area, as web's
 /// `resolveBrowserViewportLayout`: zoomed, then shrunk to fit but never enlarged. Returns the
 /// box's width and height in points and its points per CSS pixel.
+/// Web's `BROWSER_VIEWPORT_RESIZE_RAIL_SIZE`: rails beside and below a device-size page.
+pub const RAIL: f32 = 10.;
+
+/// The room a device-size page has in the page area, beside its resize rails.
+pub fn device_area(w: f32, h: f32) -> (f32, f32) {
+    ((w - RAIL * 2.).max(1.), (h - RAIL).max(1.))
+}
+
 pub fn device_box(w: f32, h: f32, (dw, dh): (u32, u32), zoom: f32) -> (f32, f32, f32) {
     let zoom = zoom.max(0.25);
     let (rw, rh) = (dw.max(1) as f32 * zoom, dh.max(1) as f32 * zoom);

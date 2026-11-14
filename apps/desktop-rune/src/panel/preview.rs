@@ -162,6 +162,8 @@ pub struct Ui {
     adjusting: Vec<(u64, String, TabId)>,
     /// Workspace files on their way to a tab: the `assets.createUrl` request and the file.
     assets: Vec<(u64, String)>,
+    /// The device rail being dragged: its tab and edge, and the size the drag started from.
+    rail: Option<(TabId, Edge, (u32, u32))>,
     /// A display-scale change waiting for a recording to end before Chrome relaunches.
     rescale: Option<f32>,
     /// The server process the tabs' sessions belong to.
@@ -689,7 +691,8 @@ fn pdf_asset_url(url: &str, base: &str) -> Option<String> {
 
 /// A streamed page's box in the page area and its scale from CSS pixels, as a device size's.
 fn stream_box(ui: &Ui, tab: TabId) -> (f32, f32, f32) {
-    let (w, h) = (ui.area.0.max(1.), ui.area.1.max(1.));
+    let device = ui.tabs.get(&tab).is_some_and(|t| viewport_size(&t.snapshot["viewport"]).flatten().is_some());
+    let (w, h) = if device { browser::device_area(ui.area.0, ui.area.1) } else { (ui.area.0.max(1.), ui.area.1.max(1.)) };
     let size = ui.tabs.get(&tab).and_then(|t| t.stream.as_ref()?.state().viewport).unwrap_or((w as u32, h as u32));
     browser::device_box(w, h, size, 1.)
 }
@@ -1898,6 +1901,178 @@ fn set_device(app: &mut App, tab: TabId, w: u32, h: u32, preset: Option<usize>) 
     send(app, Cmd::Device(tab, Some((w, h))));
 }
 
+/// A device rail: which sides of the page it moves.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Edge {
+    West,
+    East,
+    South,
+    SouthWest,
+    SouthEast,
+}
+
+impl Edge {
+    fn east(self) -> bool {
+        matches!(self, Edge::East | Edge::SouthEast)
+    }
+    fn west(self) -> bool {
+        matches!(self, Edge::West | Edge::SouthWest)
+    }
+    fn south(self) -> bool {
+        matches!(self, Edge::South | Edge::SouthWest | Edge::SouthEast)
+    }
+}
+
+const VIEWPORT_MIN: f32 = 240.;
+const VIEWPORT_MAX: f32 = 3840.;
+const VIEWPORT_MAX_AREA: f32 = 3840. * 2160.;
+
+/// Web's `resizeFreeformViewport`: a CSS size moved by a delta in window points at `zoom`,
+/// within the server's limits, keeping a locked width / height ratio.
+fn resize_freeform(start: (u32, u32), delta: (f32, f32), zoom: f32, edge: Edge, ratio: Option<f32>) -> (u32, u32) {
+    let zoom = if zoom.is_finite() && zoom > 0. { zoom } else { 1. };
+    let dx = if edge.east() { delta.0 } else if edge.west() { -delta.0 } else { 0. };
+    let dy = if edge.south() { delta.1 } else { 0. };
+    let (sw, sh) = (start.0 as f32, start.1 as f32);
+    let (want_w, want_h) = (sw + dx / zoom, sh + dy / zoom);
+    if let Some(ratio) = ratio.filter(|r| r.is_finite() && *r > 0.) {
+        let by_width = match (dx != 0. || matches!(edge, Edge::East | Edge::West), dy != 0. || edge == Edge::South) {
+            (true, false) => true,
+            (false, true) => false,
+            _ => ((want_w - sw) / sw).abs() >= ((want_h - sh) / sh).abs(),
+        };
+        return at_ratio(if by_width { want_w } else { want_h }, ratio, by_width);
+    }
+    let clamp = |v: f32| v.round().clamp(VIEWPORT_MIN, VIEWPORT_MAX);
+    let (mut w, mut h) = (clamp(want_w), clamp(want_h));
+    if w * h > VIEWPORT_MAX_AREA {
+        if dx.abs() >= dy.abs() {
+            w = (VIEWPORT_MAX_AREA / h).floor().max(VIEWPORT_MIN);
+        } else {
+            h = (VIEWPORT_MAX_AREA / w).floor().max(VIEWPORT_MIN);
+        }
+    }
+    (w as u32, h as u32)
+}
+
+/// Web's `resizeAtAspectRatio`: the driving side clamped, the other following the ratio.
+fn at_ratio(desired: f32, ratio: f32, by_width: bool) -> (u32, u32) {
+    let k = if by_width { ratio } else { 1. / ratio };
+    let min = VIEWPORT_MIN.max(VIEWPORT_MIN * k).ceil();
+    let max = VIEWPORT_MAX.min(VIEWPORT_MAX * k).min((VIEWPORT_MAX_AREA * k).sqrt()).floor();
+    let mut side = desired.round().max(min).min(max);
+    let mut other = (side / k).round();
+    while side * other > VIEWPORT_MAX_AREA && side > min {
+        side -= 1.;
+        other = (side / k).round();
+    }
+    if by_width { (side as u32, other as u32) } else { (other as u32, side as u32) }
+}
+
+/// Web's `resizeFromEndRail`: a centred page grows on both sides, so its edge moves half as far
+/// until it meets the area's edge.
+fn from_end_rail(start: f32, delta: f32, available: f32) -> f32 {
+    let edge = if start < available { (available + start) / 2. } else { start };
+    let target = edge + delta;
+    if target <= available { target * 2. - available } else { target }
+}
+
+fn from_start_rail(start: f32, delta: f32, available: f32) -> f32 {
+    if start > available {
+        let fit = start - available;
+        return if delta <= fit { start - delta } else { available - (delta - fit) * 2. };
+    }
+    let target = (available - start) / 2. + delta;
+    if target >= 0. { available - target * 2. } else { available - target }
+}
+
+/// Web's `resizeBrowserViewportFromRail`: the size a rail drag of `delta` window points makes,
+/// for a page drawn at `scale` window points per CSS pixel in an `available` area.
+fn from_rail(start: (u32, u32), delta: (f32, f32), available: (f32, f32), scale: f32, edge: Edge, ratio: Option<f32>) -> (u32, u32) {
+    let scale = if scale.is_finite() && scale > 0. { scale } else { 1. };
+    let (sw, sh) = (start.0 as f32 * scale, start.1 as f32 * scale);
+    let want_w = if edge.east() { from_end_rail(sw, delta.0, available.0) } else if edge.west() { from_start_rail(sw, delta.0, available.0) } else { sw };
+    let want_h = if edge.south() { from_end_rail(sh, delta.1, available.1) } else { sh };
+    let (dw, dh) = (want_w - sw, want_h - sh);
+    resize_freeform(start, (if edge.west() { -dw } else { dw }, dh), scale, edge, ratio)
+}
+
+fn rail_drag(s: &mut App, d: &rune::Drag, tab: TabId, edge: Edge) {
+    let status = s.ui.panel.browser.browser.status(tab);
+    let Some(size) = status.device else { return };
+    let ui = &mut s.ui.panel.browser;
+    let start = match ui.rail {
+        Some((t, e, start)) if t == tab && e == edge && d.phase != Phase::Down => start,
+        _ => size,
+    };
+    ui.rail = Some((tab, edge, start));
+    let (aw, ah) = browser::device_area(ui.area.0, ui.area.1);
+    let scale = browser::device_box(aw, ah, start, status.zoom).2;
+    let streamed = ui.tabs.get(&tab).is_some_and(|t| t.stream.is_some());
+    let next = if d.cancelled() { start } else { from_rail(start, (d.dx, d.dy), (aw, ah), scale, edge, device(s, tab).lock) };
+    let done = d.phase == Phase::Up || d.cancelled();
+    if done {
+        s.ui.panel.browser.rail = None;
+    }
+    // Chrome here follows the drag; a server's session takes the size once, on release.
+    if next != size && (!streamed || done) {
+        let preset = PRESETS.iter().position(|p| (p.1, p.2) == next);
+        set_device(s, tab, next.0, next.1, preset);
+    } else if streamed && !done {
+        let d = device(s, tab);
+        d.w.replace_text(next.0.to_string());
+        d.h.replace_text(next.1.to_string());
+    }
+}
+
+/// Web's arrow keys on a rail: 10 CSS pixels a press, 50 with Shift.
+fn rail_key(s: &mut App, e: &KeyEvent, tab: TabId, edge: Edge) -> bool {
+    let Some(size) = s.ui.panel.browser.browser.status(tab).device else { return false };
+    let step = if e.mods.shift { 50. } else { 10. };
+    let delta = match e.key {
+        Key::Left if edge != Edge::South => (-step, 0.),
+        Key::Right if edge != Edge::South => (step, 0.),
+        Key::Up if edge.south() => (0., -step),
+        Key::Down if edge.south() => (0., step),
+        _ => return false,
+    };
+    let next = resize_freeform(size, delta, 1., edge, device(s, tab).lock);
+    if next != size {
+        let preset = PRESETS.iter().position(|p| (p.1, p.2) == next);
+        set_device(s, tab, next.0, next.1, preset);
+    }
+    true
+}
+
+/// Web's `BrowserViewportResizeHandles`: rails left, right and below a device-size page, and
+/// its two lower corners, each dragged or moved with the arrow keys.
+fn rails(app: &App, t: &T, tab: TabId, page: El, (w, h): (f32, f32)) -> El {
+    let active = app.ui.panel.browser.rail.filter(|r| r.0 == tab).map(|r| r.1);
+    let rail = |edge: Edge, rw: f32, rh: f32| {
+        let ink = if active == Some(edge) { t.c.foreground } else { t.c.muted_foreground.alpha_mul(0.55) };
+        let line = |lw: f32, lh: f32| el().size(lw, lh).radius(0.5).fill(ink);
+        let (grip, cursor, label) = match edge {
+            Edge::West => (row().gap(1.).child(line(1., 24.)).child(line(1., 24.)), rune::Cursor::ResizeColumn, "Resize browser viewport from left edge. Use arrow keys to resize."),
+            Edge::East => (row().gap(1.).child(line(1., 24.)).child(line(1., 24.)), rune::Cursor::ResizeColumn, "Resize browser viewport from right edge. Use arrow keys to resize."),
+            Edge::South => (col().gap(1.).child(line(24., 1.)).child(line(24., 1.)), rune::Cursor::ResizeRow, "Resize browser viewport from bottom edge. Use arrow keys to resize."),
+            Edge::SouthWest => (el().size(4., 4.).radius(2.).fill(ink), rune::Cursor::Move, "Resize browser viewport from bottom-left corner. Use arrow keys to resize."),
+            Edge::SouthEast => (el().size(4., 4.).radius(2.).fill(ink), rune::Cursor::Move, "Resize browser viewport from bottom-right corner. Use arrow keys to resize."),
+        };
+        el().key(format!("browser-rail-{edge:?}"))
+            .size(rw, rh)
+            .center()
+            .cursor(cursor)
+            .focusable(true)
+            .role("button")
+            .label(label)
+            .child(grip.a11y_hidden())
+            .on_drag(move |s: &mut App, d, _| rail_drag(s, d, tab, edge))
+            .on_key(move |s: &mut App, e: &KeyEvent, _: &mut Tx| rail_key(s, e, tab, edge))
+    };
+    let rail_w = browser::RAIL;
+    col().child(row().child(rail(Edge::West, rail_w, h)).child(page).child(rail(Edge::East, rail_w, h))).child(row().child(rail(Edge::SouthWest, rail_w, rail_w)).child(rail(Edge::South, w, rail_w)).child(rail(Edge::SouthEast, rail_w, rail_w)))
+}
+
 /// Web's locked ratio while typing: the other side's draft follows each keystroke.
 fn follow_lock(app: &mut App, tab: TabId, height_edited: bool) {
     let d = device(app, tab);
@@ -2093,9 +2268,11 @@ pub fn view(app: &App, t: &T, tab: TabId, scale: f32) -> El {
     } else if idle(&status) {
         empty(app, t, tab)
     } else if let Some(size) = status.device {
-        let (w, h, scale) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+        let (aw, ah) = browser::device_area(ui.area.0, ui.area.1);
+        let (w, h, scale) = browser::device_box(aw, ah, size, status.zoom);
         let page = page(&state.pixels, "browser-page", 1.).size(w, h).border(1., t.c.border.alpha_mul(0.7));
-        col().grow(1.).min_h(0.).w_full().center().child(page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))).children(agent_cursor(app, t, tab, scale)))
+        let page = page.children(hover_box(t, &status, scale, (w, h))).children(annotation_editor(app, t, tab, scale, (w, h))).children(agent_cursor(app, t, tab, scale));
+        col().grow(1.).min_h(0.).w_full().center().child(rails(app, t, tab, page, (w, h)))
     } else {
         let hover = hover_box(t, &status, status.zoom.max(0.25), ui.area);
         page(&state.pixels, "browser-page", 1.).grow(1.).min_h(0.).w_full().children(hover).children(annotation_editor(app, t, tab, status.zoom.max(0.25), ui.area)).children(agent_cursor(app, t, tab, status.zoom.max(0.25)))
@@ -2308,7 +2485,8 @@ pub fn pip(app: &App, t: &T, out: &mut Vec<El>) {
     let status = ui.browser.status(tab);
     let (sw, sh) = match status.device {
         Some(size) => {
-            let (w, h, _) = browser::device_box(ui.area.0, ui.area.1, size, status.zoom);
+            let (aw, ah) = browser::device_area(ui.area.0, ui.area.1);
+            let (w, h, _) = browser::device_box(aw, ah, size, status.zoom);
             (w, h)
         }
         None => ui.area,
@@ -2494,7 +2672,9 @@ fn stream_view(app: &App, t: &T, tab: TabId, pixels: &Pixels) -> Option<El> {
         return Some(col().grow(1.).min_h(0.).w_full().center().child(text("Connecting to the server's browser…").font(theme::TEXT_SM).color(t.c.muted_foreground)));
     }
     let (w, h, scale) = stream_box(ui, tab);
-    Some(col().grow(1.).min_h(0.).w_full().center().child(page(pixels, "browser-page", 1.).size(w, h).children(agent_cursor(app, t, tab, scale))))
+    let page = page(pixels, "browser-page", 1.).size(w, h).children(agent_cursor(app, t, tab, scale));
+    let page = if ui.browser.status(tab).device.is_some() { rails(app, t, tab, page, (w, h)) } else { page };
+    Some(col().grow(1.).min_h(0.).w_full().center().child(page))
 }
 
 /// Web embeds a workspace PDF in its own browser; this window has no PDF engine of its own, so
@@ -3440,6 +3620,24 @@ mod tests {
         // While the server still probes the script's URL, its own address opens.
         let probing = json!({ "servers": response["servers"], "configuredUrlProbing": true });
         assert_eq!(previewable(&probing, &["http://localhost:8080/admin".into()])[0].0, "http://127.0.0.1:8080/");
+    }
+
+    #[test]
+    fn device_rails_resize_like_webs() {
+        // A centred page grows on both sides, so the edge travels half the size change.
+        assert_eq!(from_rail((400, 600), (20., 0.), (1000., 800.), 1., Edge::East, None), (440, 600));
+        assert_eq!(from_rail((400, 600), (-20., 0.), (1000., 800.), 1., Edge::West, None), (440, 600));
+        assert_eq!(from_rail((400, 600), (0., 30.), (1000., 800.), 1., Edge::South, None), (400, 660));
+        // Past the area's edge the page grows one-for-one; at half scale each point is two pixels.
+        assert_eq!(from_rail((400, 600), (310., 0.), (1000., 800.), 1., Edge::East, None), (1010, 600));
+        assert_eq!(from_rail((400, 600), (20., 0.), (1000., 800.), 0.5, Edge::East, None), (480, 600));
+        // The server's limits and a locked ratio hold.
+        assert_eq!(from_rail((400, 600), (-400., 0.), (1000., 800.), 1., Edge::East, None), (240, 600));
+        assert_eq!(from_rail((400, 600), (20., 0.), (1000., 800.), 1., Edge::SouthEast, Some(400. / 600.)), (440, 660));
+        assert_eq!(resize_freeform((3840, 2000), (0., 400.), 1., Edge::South, None), (3840, 2160));
+        assert_eq!(resize_freeform((390, 844), (10., 0.), 1., Edge::West, None), (380, 844));
+        assert_eq!(resize_freeform((390, 844), (0., -50.), 1., Edge::SouthEast, None), (390, 794));
+        assert_eq!(browser::device_area(500., 400.), (480., 390.));
     }
 
     #[test]
