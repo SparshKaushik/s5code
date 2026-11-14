@@ -54,6 +54,9 @@ pub struct Ui {
     pub prs: HashMap<String, pr::Live>,
     /// The PR row whose "Merge {singular}?" confirm is open.
     pub merge_confirm: Option<String>,
+    /// The row (by url) whose checks popover is open, and whether it lists every check.
+    pub checks_open: Option<String>,
+    pub checks_all: bool,
     /// A row's Resolve or Fix handoff preparing its checkout: request, kind, the task prompt.
     pub handoff: Option<(u64, &'static str, String)>,
     /// Branch mismatches (by `mismatch_key`) shown once the composer had content, and the ones
@@ -62,6 +65,38 @@ pub struct Ui {
     mismatch_dismissed: HashSet<String>,
     /// "Switch to {branch}?" over uncommitted changes.
     restore_confirm: Option<String>,
+    /// This connection's session (`GET /api/auth/session`): the reply, when it came, and the
+    /// read in flight. Its grants gate git actions, branch changes and the diff panel.
+    session: Option<Result<Value, ()>>,
+    session_at: i64,
+    session_pending: Option<u64>,
+}
+
+const SESSION_STALE_MS: i64 = 5 * 60_000;
+
+/// The connection's `permissionAtom` for a scope. Unknown until the session answers, which
+/// leaves it to the server; a failed read denies, as web's guards do.
+pub fn grants(s: &App, scope: &str) -> bool {
+    match &s.ui.chat.details.session {
+        Some(Ok(session)) => crate::settings::session_grants(session, scope),
+        Some(Err(())) => false,
+        None => true,
+    }
+}
+
+fn poll_session(s: &mut App) -> bool {
+    let Some(net) = s.src.net() else { return false };
+    let ui = &mut s.ui.chat.details;
+    if let Some(reply) = ui.session_pending.and_then(|id| net.take_reply(id)) {
+        ui.session_pending = None;
+        ui.session_at = data::now_ms();
+        ui.session = Some(reply.map_err(|_| ()));
+        return true;
+    }
+    if ui.session_pending.is_none() && (ui.session_at == 0 || data::now_ms() - ui.session_at >= SESSION_STALE_MS) {
+        ui.session_pending = Some(net.http_request("GET", "/api/auth/session", json!({})));
+    }
+    false
 }
 
 enum Pending {
@@ -122,6 +157,8 @@ pub enum Menu {
     Branch,
     Scripts,
     RunContext,
+    /// The workspace row's context menu: "Copy full path".
+    Path,
 }
 
 pub const GAP: f32 = 12.0;
@@ -189,6 +226,14 @@ const ROW: TextStyle = TextStyle::new(13.0, theme::MEDIUM).lh(19.5);
 
 fn cwd(s: &App) -> Option<String> {
     worktree_here(s).or_else(|| composer::ctx(s).project.map(|p| data::s(p, "workspaceRoot").to_string())).filter(|p| !p.is_empty())
+}
+
+/// BranchToolbar's `workspacePath`: none while a new worktree is still to be made.
+fn workspace_path(s: &App) -> Option<String> {
+    if draft_run(s).is_some_and(|r| r.worktree) {
+        return None;
+    }
+    cwd(s)
 }
 
 /// The worktree the thread runs in, or the existing one the draft will launch in.
@@ -540,9 +585,22 @@ fn pick_item(s: &mut App, item: Item) {
 
 /// `selectBranch`: a worktree base for a worktree draft; a ref checked out in a worktree moves
 /// the thread there; anything else is switched to in the thread's checkout.
+/// `runBranchAction`'s guard: changing the branch writes source control, and a thread's metadata.
+fn branch_denied(s: &mut App) -> bool {
+    let thread = composer::ctx(s).thread.is_some();
+    let denied = !grants(s, "source-control:write") || (thread && !grants(s, "orchestration:operate"));
+    if denied {
+        palette::toast_error_brief(s, "Action unavailable", Some("This connection cannot change the thread's branch."));
+    }
+    denied
+}
+
 fn select_ref(s: &mut App, r: &Ref) {
     if selecting_base(s) {
         draft_run_mut(s).base = Some(r.name.clone());
+        return;
+    }
+    if branch_denied(s) {
         return;
     }
     if switching(s) {
@@ -571,7 +629,7 @@ fn switching(s: &App) -> bool {
 }
 
 fn create_ref(s: &mut App, name: &str) {
-    if switching(s) {
+    if switching(s) || branch_denied(s) {
         return;
     }
     let Some(cwd) = cwd(s) else { return };
@@ -750,7 +808,7 @@ fn on_branch_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s);
+    let changed = git::poll(s) | scripts::poll(s) | pr::poll(s) | poll_refs(s) | note_mismatch(s) | poll_session(s);
     poll_branch(s) || changed
 }
 
@@ -898,7 +956,10 @@ fn card(s: &App, t: &T) -> Option<El> {
         .label(format!("Run context: {env}, {mode}"))
         .child(icon(&icons::SERVER, 18.0).color(muted))
         .child(text(env).font(ROW).color(if draft { fg } else { muted }).truncate().grow(1.0).shrink().min_w(0.0))
-        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(mode));
+        .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(workspace_path(s).unwrap_or_else(|| mode.to_string())));
+    if workspace_path(s).is_some() {
+        run_context = run_context.on_secondary_press(|s: &mut App, _: rune::PointerPress, _: &mut Tx| s.ui.chat.details.menu = Some(Menu::Path));
+    }
     if draft {
         run_context = run_context
             .radius(theme::layout::CONTROL_RADIUS)
@@ -992,6 +1053,30 @@ pub fn menu(s: &App, t: &T) -> Option<El> {
         Menu::Scripts => ("details-scripts-menu", surface().children(scripts::menu_rows(s, t))),
         Menu::Branch => ("details-branch", branch_picker(s, t, surface())),
         Menu::RunContext => ("details-env", surface().children(run_context_rows(s, t))),
+        Menu::Path => {
+            let copy = row()
+                .key("details-copy-path")
+                .w_full()
+                .h(32.0)
+                .px(8.0)
+                .gap(8.0)
+                .center_y()
+                .radius(radius::MD)
+                .role("menuitem")
+                .label("Copy full path")
+                .hover(t.c.accent)
+                .cursor(Cursor::Pointer)
+                .child(icon(&icons::COPY, 16.0).color(t.c.muted_foreground))
+                .child(text("Copy full path").font(theme::TEXT_SM).color(t.c.foreground))
+                .on_press_tx(|s: &mut App, tx: &mut Tx| {
+                    s.ui.chat.details.menu = None;
+                    if let Some(path) = workspace_path(s) {
+                        tx.copy(path.clone());
+                        palette::toast(s, "Path copied", Some(&path));
+                    }
+                });
+            ("details-env", surface().child(copy))
+        }
         Menu::Editor => {
             let editors = editors(s);
             let mut list = col().key("details-menu").min_w(200.0).padding(4.0).radius(radius::LG).fill(t.c.popover).border(1.0, t.c.border).shadow(8.0, 24.0, Color::BLACK.alpha(0.3));
@@ -1307,6 +1392,19 @@ mod tests {
         assert!(switching(&s));
         super::create_ref(&mut s, "other");
         assert!(matches!(&s.ui.chat.details.pending, Some((2, Pending::Branch(name, ..))) if name == "feature"));
+    }
+
+    #[test]
+    fn the_connections_session_gates_branch_changes() {
+        let mut s = App::new();
+        assert!(grants(&s, "source-control:write"));
+        s.ui.chat.details.session = Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:read"]})));
+        assert!(!grants(&s, "source-control:write"));
+        assert!(branch_denied(&mut s));
+        s.ui.chat.details.session = Some(Ok(json!({"authenticated": true, "scopes": ["orchestration:operate"]})));
+        assert!(grants(&s, "source-control:write") && !branch_denied(&mut s));
+        s.ui.chat.details.session = Some(Err(()));
+        assert!(!grants(&s, "filesystem:read"));
     }
 
     #[test]

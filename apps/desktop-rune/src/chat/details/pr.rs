@@ -266,8 +266,38 @@ fn state_color(t: &T, state: &str) -> Color {
     }
 }
 
+fn checks_key(url: &str) -> String {
+    format!("details-pr-checks-{url}")
+}
+
+/// PullRequestChecksPopover for the open row: the rollup, then each check with its details link.
+fn checks_popover(s: &App, t: &T, out: &mut Vec<El>) {
+    let Some(url) = s.ui.chat.details.checks_open.as_deref() else { return };
+    let Some(d) = s.ui.chat.details.prs.get(url).and_then(merged_detail) else { return };
+    let checks: &[Value] = d["checks"].as_array().map_or(&[], Vec::as_slice);
+    let state = match classify(checks) {
+        "failing" => "failing",
+        "pending" => "pending",
+        _ => "passing",
+    };
+    let Some((_, _, label)) = crate::pages::pr_row::checks_state(t, state) else { return };
+    let summary = crate::pages::pr_detail::checks_summary(checks);
+    let body = crate::pages::pr_row::checks_body(t, checks, s.ui.chat.details.checks_all, |s| s.ui.chat.details.checks_all ^= true);
+    kit::Popover::new(checks_key(url))
+        .open(true)
+        .placement(kit::Placement::BottomStart)
+        .width("md")
+        .label(label)
+        .on_close(|s: &mut App| s.ui.chat.details.checks_open = None)
+        .child(text(label).font(theme::SM_MEDIUM).color(t.c.foreground))
+        .child(text(summary).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())
+        .child(body)
+        .build(&kit::theme(t), out);
+}
+
 pub fn overlays(s: &App, t: &T, out: &mut Vec<El>) {
     merge_dialog(s, t, out);
+    checks_popover(s, t, out);
     let Some(c) = s.ui.chat.details.checkout.as_ref() else { return };
     let k = kit::theme(t);
     let muted = t.c.muted_foreground;
@@ -793,7 +823,8 @@ fn pr_row(s: &App, t: &T, pr: &RowPr, key: &str) -> El {
         let lines: Vec<String> = checks.iter().map(|c| format!("{} · {}", data::s(c, "name"), data::s(c, "status"))).collect();
         let summary = crate::pages::pr_detail::checks_summary(checks);
         let url = pr.url.clone();
-        let mut chip = row()
+        let open = s.ui.chat.details.checks_open.as_deref() == Some(pr.url.as_str());
+        let chip = row()
             .key("checks")
             .h(20.0)
             .px(4.0)
@@ -804,13 +835,19 @@ fn pr_row(s: &App, t: &T, pr: &RowPr, key: &str) -> El {
             .hover(t.c.accent)
             .role("button")
             .label(format!("Open checks: {summary}"))
-            .help(format!("{summary}\n{}", lines.join("\n")))
             .child(icon(glyph, 14.0).color(tone))
-            .on_press(move |s: &mut App| crate::settings::auth::open_url(s, &format!("{}/checks", url.trim_end_matches('/'))));
+            .on_press(move |s: &mut App| {
+                let ui = &mut s.ui.chat.details;
+                ui.checks_all = false;
+                ui.checks_open = if ui.checks_open.as_deref() == Some(url.as_str()) { None } else { Some(url.clone()) };
+            });
+        let chip = if open { chip } else { chip.help(format!("{summary}\n{}", lines.join("\n"))) };
+        let mut chip = chip;
         if !count.is_empty() {
             chip = chip.child(text(count).font(theme::TEXT_XS.features("'tnum' 1")).color(t.c.muted_foreground));
         }
-        meta = meta.child(chip);
+        // The popup itself is laid in `overlays`, anchored to this trigger's key.
+        meta = meta.child(kit::Popover::new(checks_key(&pr.url)).trigger(chip).build(&kit::theme(t), &mut vec![]));
     }
     if watching {
         meta = meta.child(watch(14.0));
