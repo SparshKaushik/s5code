@@ -623,7 +623,7 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     name = name.child(title);
     let done = s.ui.panel.diff.copied.as_ref().is_some_and(|(p, at)| *p == path && crate::data::now_ms() - at < COPIED_MS);
     let copy = if done { micro(l, "copy", "Copied", &icons::CHECK, 12.0, l.add.count) } else { micro(l, "copy", "Copy path", &icons::COPY, 12.0, l.muted) };
-    let copy = copy.on_press_tx(move |s: &mut App, tx| {
+    let copy = copy.label("Copy file path").on_press_tx(move |s: &mut App, tx| {
         tx.copy(path.clone());
         s.ui.panel.diff.copied = Some((path.clone(), crate::data::now_ms()));
         tx.wake_after(std::time::Duration::from_millis(COPIED_MS as u64));
@@ -643,7 +643,7 @@ fn file_header(s: &App, l: &Look, f: usize, sticky: bool) -> El {
     let ui = &s.ui.panel.diff;
     if ui.partial.contains(file.path()) {
         let note = "This file is too large to show in full. Counts include all changes.";
-        inner = inner.child(micro(l, "partial", note, &icons::INFO, 12.0, l.muted));
+        inner = inner.child(micro(l, "partial", note, &icons::INFO, 12.0, l.muted).label("Partial diff preview"));
     }
     inner = inner.child(el().key("space").grow(1.0).a11y_hidden());
     let (adds, dels) = super::counts(ui, file);

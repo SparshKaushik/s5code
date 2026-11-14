@@ -131,6 +131,8 @@ pub fn poll(s: &mut App) -> bool {
         if !completed(s) {
             if fresh(s.state()) {
                 s.ui.wizard.open = true;
+                // `expandPairingInitially`: with no local backend, pairing is the only way on.
+                s.ui.wizard.pairing_open = s.ui.desktop.local_off;
                 changed = true;
             } else {
                 complete(s);
@@ -608,7 +610,7 @@ fn agents(s: &App, t: &T) -> El {
             "disabled" => text("Disabled").font(theme::TEXT_XS).color(t.c.muted_foreground),
             "attention" => text("Needs attention").font(theme::TEXT_XS).color(t.c.muted_foreground),
             // The web runs the install or login command in an embedded terminal; Rune hands
-            // off to Settings > Providers, which has the same checks.
+            // off to Settings > Providers, which has the same checks (see `overlays`).
             _ => kit::Button::new(if state == "signIn" { "Sign in" } else { "Install" })
                 .icon(&icons::TERMINAL)
                 .variant("ghost")
@@ -710,7 +712,9 @@ fn projects(s: &App, t: &T) -> El {
 
 pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
     let ui = &s.ui.wizard;
-    if !ui.open {
+    // Sign in / Install hand off to Settings > Providers; the wizard steps aside there and
+    // comes back on the Agents step when the person leaves.
+    if !ui.open || matches!(&s.route, Route::Settings(p) if p == "providers") {
         return;
     }
     let current = match ui.step {
@@ -742,7 +746,7 @@ pub fn overlays(s: &App, t: &T, layer: &mut Vec<El>) {
     };
     kit::Dialog::new("welcome-wizard", "Set up T3 Code")
         .width(640.)
-        .alert()
+        .button_only()
         .on_close(close)
         .child(steps)
         .child(rune::el().w_full().h(1.).fill(t.c.border.alpha_mul(0.8)))

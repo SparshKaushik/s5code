@@ -26,6 +26,10 @@ jobs:
     defaults:
       run:
         working-directory: apps/desktop-rune
+    # The Open source licenses page embeds this manifest (build.rs); set for every cargo step so
+    # tests don't rebuild without it.
+    env:
+      S5_CRATE_NOTICES: target/crate-notices.json
     steps:
       - uses: actions/checkout@v6
 
@@ -51,6 +55,12 @@ jobs:
           restore-keys: |
             rune-linux-${{ github.ref_name }}-
             rune-linux-
+
+      - name: Rust crate notices
+        run: |
+          cargo fetch --locked
+          mkdir -p target
+          python3 tools/crate_notices.py target/crate-notices.json
 
       - name: Build
         run: cargo build --release --locked
