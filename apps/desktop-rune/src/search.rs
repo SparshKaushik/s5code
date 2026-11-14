@@ -53,6 +53,11 @@ fn target(s: &App) -> Option<(String, String)> {
     (!cwd.is_empty()).then(|| (data::s(project, "title").to_string(), cwd.to_string()))
 }
 
+/// `useProjectContentSearch`'s file access on the focused environment: `None` while checking.
+fn access(s: &App) -> Option<Result<(), String>> {
+    crate::settings::permissions::access_or(s, &s.ui.env.active, "filesystem:read", "This connection cannot search host files.")
+}
+
 fn params(s: &App) -> Option<Params> {
     let ui = &s.ui.search;
     let (_, cwd) = target(s)?;
@@ -87,9 +92,11 @@ pub fn poll(s: &mut App) -> bool {
         return false;
     }
     let mut changed = false;
-    if s.ui.search.due.is_some_and(|due| data::now_ms() >= due) {
+    // A search typed while access is checked waits for the answer.
+    if s.ui.search.due.is_some_and(|due| data::now_ms() >= due) && access(s).is_some() {
         s.ui.search.due = None;
         if let Some(p) = params(s)
+            && matches!(access(s), Some(Ok(())))
             && !p.query.trim().is_empty()
             && s.ui.search.pending.as_ref().map(|(_, q)| q) != Some(&p)
             && s.ui.search.results.params != p
@@ -241,7 +248,8 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
     }
     let ui = &s.ui.search;
     let target = target(s);
-    let enabled = target.is_some();
+    let access = target.as_ref().map(|_| access(s));
+    let enabled = matches!(access, Some(Some(Ok(()))));
     let placeholder = match &target {
         Some((name, _)) => format!("Search in {name}"),
         None => "Search project contents…".into(),
@@ -286,8 +294,12 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
 
     let (matches, pending) = current(s);
     let body = if matches.is_empty() {
-        let label = if !enabled {
+        let label = if target.is_none() {
             "Open a project to search its files."
+        } else if let Some(None) = &access {
+            "Checking file access…"
+        } else if let Some(Some(Err(denied))) = &access {
+            denied.as_str()
         } else if let Some(error) = &ui.results.error {
             error.as_str()
         } else if !ui.query.text.trim().is_empty() && !pending {
@@ -324,7 +336,7 @@ pub fn overlay(s: &App, t: &T) -> Vec<El> {
         .backdrop_blur(16.)
         .border(1., t.c.contrast_foreground.alpha_mul(0.1))
         .child(head);
-    if let Some(status) = status_line(s, t) {
+    if enabled && let Some(status) = status_line(s, t) {
         panel = panel.child(status);
     }
     let panel = panel.child(body).child(el().w_full().h(1.).fill(t.c.contrast_border)).child(footer).modal(true, close);

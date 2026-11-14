@@ -410,13 +410,23 @@ fn browse_result(s: &App) -> Option<&Value> {
     let query = &s.ui.shell.palette.query.text;
     s.ui.shell.palette.add.browse.as_ref().filter(|b| b.directory == directory(query)).and_then(|b| b.result.as_ref())
 }
+/// `browseAccess`: `None` while the target environment's session is checked.
+fn browse_access(s: &App) -> Option<Result<(), String>> {
+    crate::settings::permissions::access_or(s, &target(s), "filesystem:read", "This connection cannot browse host folders.")
+}
 pub fn browse_pending(s: &App) -> bool {
+    if browse_access(s).is_none() {
+        return true;
+    }
     let query = &s.ui.shell.palette.query.text;
     s.ui.shell.palette.add.browse.as_ref().is_some_and(|b| b.directory == directory(query) && b.pending.is_some() && b.result.is_none())
 }
 pub fn browse_error(s: &App) -> Option<String> {
     if view(s).needs_project {
         return Some("Relative paths require an active project.".into());
+    }
+    if let Some(Err(denied)) = browse_access(s) {
+        return Some(denied);
     }
     let query = &s.ui.shell.palette.query.text;
     s.ui.shell.palette.add.browse.as_ref().filter(|b| b.directory == directory(query)).and_then(|b| b.error.clone())
@@ -623,6 +633,10 @@ pub fn sync_browse(s: &mut App) {
     }
     let dir = directory(&s.ui.shell.palette.query.text);
     if s.ui.shell.palette.add.browse.as_ref().is_some_and(|b| b.directory == dir) || dir.trim().is_empty() {
+        return;
+    }
+    // Asked again each poll, so the listing loads once the access check grants it.
+    if !matches!(browse_access(s), Some(Ok(()))) {
         return;
     }
     let cwd = current_cwd(s);
