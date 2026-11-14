@@ -776,8 +776,8 @@ fn search_key(s: &mut App, e: &rune::KeyEvent) -> bool {
     let last = results.len() - 1;
     let active = s.ui.settings.search_active.min(last);
     match e.key {
-        rune::Key::Down => s.ui.settings.search_active = (active + 1).min(last),
-        rune::Key::Up => s.ui.settings.search_active = active.saturating_sub(1),
+        rune::Key::Down => s.ui.settings.search_active = if active == last { 0 } else { active + 1 },
+        rune::Key::Up => s.ui.settings.search_active = if active == 0 { last } else { active - 1 },
         rune::Key::Enter => {
             let page = results[active].to.clone();
             open_result(s, &page);
@@ -1390,9 +1390,16 @@ fn browser_profiles_scene(s: &mut App, light: bool, menu: Option<&str>) {
     s.ui.settings.profiles.menu = menu.map(str::to_owned);
 }
 
-pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
+pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut rune::Tx) -> bool {
     if !matches!(s.route, Route::Settings(_)) {
         return false;
+    }
+    if focuses_search(e, tx.focused().is_some()) {
+        let search = &mut s.ui.settings.search;
+        search.focused = true;
+        search.anchor = 0;
+        search.focus = search.text.len();
+        return true;
     }
     if crate::chat::details::scripts::settings_editor_open(s) {
         // The action editor captures its shortcut; Escape closes it before Settings.
@@ -1453,6 +1460,14 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, _tx: &mut rune::Tx) -> bool {
 /// Web search fields clear on Escape before Escape leaves Settings.
 /// A search field's own Escape: clears its text first. The field sees the key before its editor
 /// blurs and hands it on to `on_key`, which would close Settings.
+/// Web's find and slash shortcuts: Mod+F, or a bare "/" when nothing has focus.
+fn focuses_search(e: &rune::KeyEvent, focused: bool) -> bool {
+    let rune::Key::Text(key) = &e.key else { return false };
+    let find = key.eq_ignore_ascii_case("f") && e.mods.cmd && !e.mods.alt && !e.mods.shift;
+    let slash = key == "/" && !e.mods.cmd && !e.mods.ctrl && !e.mods.alt && !focused;
+    find || slash
+}
+
 pub fn clear_search_on_escape(search: &mut TextEdit, e: &rune::KeyEvent) -> bool {
     let clear = matches!(e.key, rune::Key::Escape) && !search.text.is_empty();
     if clear {
@@ -1553,5 +1568,14 @@ mod patch_tests {
         assert!(clear_search_on_escape(&mut search, &key(rune::Key::Escape)));
         assert_eq!(search.text, "");
         assert!(!clear_search_on_escape(&mut search, &key(rune::Key::Escape)), "empty search lets Escape through");
+    }
+    #[test]
+    fn find_and_slash_focus_the_settings_search() {
+        let text = |k: &str, mods: rune::Mods| rune::KeyEvent { key: rune::Key::Text(k.into()), mods };
+        let cmd = rune::Mods { cmd: true, ..Default::default() };
+        assert!(focuses_search(&text("f", cmd), true), "Mod+F works from anywhere");
+        assert!(!focuses_search(&text("f", Default::default()), false));
+        assert!(focuses_search(&text("/", Default::default()), false));
+        assert!(!focuses_search(&text("/", Default::default()), true), "a focused field keeps its slash");
     }
 }
