@@ -1354,8 +1354,11 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     {
         context_menu(t, e, &u.hosts, *x, *y, overlays);
     }
-    // Entering or leaving the page counts as input; a handler per pointer move would rebuild it.
-    let main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background).on_hover_change(|s: &mut App, _, _| note_input(s, crate::data::now_ms()));
+    // noteInteraction's pointermove: it only stamps the clock, so the view need not run again.
+    let main = row().key("main").grow(1.0).shrink().min_w(0.0).h_full().items_stretch().fill(t.c.background).on_pointer_move_local(|s: &mut App, _, tx: &mut Tx| {
+        note_input(s, crate::data::now_ms());
+        tx.live_only();
+    });
     if u.selected.is_some() && u.maximized {
         return main.child(super::pr_detail::view(s, t, overlays));
     }
@@ -1443,6 +1446,11 @@ fn search_expanded(u: &Ui) -> bool {
     u.search_open || !u.query.text.is_empty()
 }
 
+/// `Spinner` while `busy`, else the idle glyph.
+pub(super) fn busy_icon(busy: bool, idle: &'static rune::Icon, size: f32) -> El {
+    if busy { icon(&i::LOADER_CIRCLE, size).looping(rune::LoopSpec::rotation(1.)) } else { icon(idle, size) }
+}
+
 /// PullRequestSearchInput. Only one field is live at a time (the condensed header's while it
 /// shows one); the other draws the same text still.
 fn search_field(u: &Ui, t: &T, key: &'static str, live: bool) -> El {
@@ -1450,10 +1458,10 @@ fn search_field(u: &Ui, t: &T, key: &'static str, live: bool) -> El {
     let busy = !typed.is_empty() && (typed != u.sent_query.trim() || u.pending.is_some_and(|p| !p.1));
     let placeholder = "Search pull requests, or label:bug";
     let field = if live {
-        text_input(&u.query, theme::TEXT_SM)
+        let input = text_input(&u.query, theme::TEXT_SM)
             .key("pr-search-input")
             .single_line()
-            .placeholder(placeholder, t.c.placeholder)
+            .label(placeholder)
             .grow(1.0)
             .min_w(0.0)
             .pl(8.0)
@@ -1470,7 +1478,12 @@ fn search_field(u: &Ui, t: &T, key: &'static str, live: bool) -> El {
             .on_input_paste(|s: &mut App, _: &rune::ClipboardContent, _: &mut Tx| {
                 ui(s).pasted = true;
                 false
-            })
+            });
+        // Rune wraps a placeholder wider than its field; a truncated line behind the field stands in.
+        let hint = (u.query.text.is_empty() && u.query.preedit.is_none()).then(|| {
+            row().pin(Some(8.0), Some(0.0), Some(0.0), Some(0.0)).center_y().child(text(placeholder).font(theme::TEXT_SM).color(t.c.placeholder).truncate().shrink().min_w(0.0))
+        });
+        row().grow(1.0).min_w(0.0).h_full().center_y().children(hint).child(input)
     } else {
         let (shown, ink) = if u.query.text.is_empty() { (placeholder.to_string(), t.c.placeholder) } else { (u.query.text.clone(), t.c.foreground) };
         text(shown).font(theme::TEXT_SM).color(ink).truncate().grow(1.0).shrink().min_w(0.0).pl(8.0)
@@ -1484,7 +1497,7 @@ fn search_field(u: &Ui, t: &T, key: &'static str, live: bool) -> El {
         .center_y()
         .pl(11.0)
         .pr(8.0)
-        .child(icon(if busy { &i::LOADER_CIRCLE } else { &i::SEARCH }, 16.0).color(t.c.muted_foreground.alpha_mul(0.8)))
+        .child(busy_icon(busy, &i::SEARCH, 16.0).color(t.c.muted_foreground.alpha_mul(0.8)))
         .child(field)
 }
 
@@ -1706,7 +1719,8 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
     let errors = listed.and_then(|r| r["errors"].as_array()).map_or(&[][..], Vec::as_slice);
     let server = crate::env::label(s, &s.ui.env.active);
     let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or(s.ui.env.active.as_str()).to_string();
-    let projects = super::pr_filters::projects(&s.state().projects, f.project.as_deref(), &server, &environment, errors);
+    let order = if sub == Some("project") { super::pr_filters::sidebar_order(s) } else { Vec::new() };
+    let projects = super::pr_filters::projects(&s.state().projects, &order, f.project.as_deref(), &server, &environment, errors);
     // PullRequestFilterOptionIcon: the chosen project's favicon, else "All projects" and its glyph.
     let (project, value) = match projects.iter().find(|p| Some(p.id.as_str()) == f.project.as_deref()) {
         Some(p) => (MenuItem::new("Project").leading(super::pr_filters::menu_favicon(s, t, &p.id, &p.title)), p.title.clone()),
@@ -1933,12 +1947,15 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
     };
     let meta = theme::TEXT_2XS;
     let matched = matched_elsewhere(e, &parse_query(&s.ui.pages.pull_requests.query.text).0);
+    let meta_key = format!("pr-meta-{url}");
+    let wide = matched && rune::memo::layout_with(&meta_key, super::pr_row::meta_wide).unwrap_or(false);
     let mut line2 = row()
+        .key(meta_key)
         .w_full()
         .h(16.0)
         .gap(6.0)
         .center_y()
-        .children(matched.then(|| super::pr_row::matched_badge(t)))
+        .children(matched.then(|| super::pr_row::matched_badge(t, wide)))
         .children(super::pr_row::provider_mark(s, t, result, e))
         .child(
             row()
@@ -2047,7 +2064,7 @@ fn load_more_footer(u: &Ui, t: &T, result: &Value) -> El {
             row()
                 .gap(8.0)
                 .center_y()
-                .child(icon(&i::LOADER_CIRCLE, 14.0).color(muted))
+                .child(icon(&i::LOADER_CIRCLE, 14.0).color(muted).looping(rune::LoopSpec::rotation(1.)))
                 .child(text(if append { "Loading more" } else { "Updating pull requests" }).font(theme::TEXT_XS).color(muted)),
         ),
         None if can_load_more(u, result) => foot.child(Button("Load more pull requests", None).sm().on_press(load_more).build(t)),

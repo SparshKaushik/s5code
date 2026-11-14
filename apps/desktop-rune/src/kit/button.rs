@@ -194,7 +194,8 @@ impl Button {
             e = e.px(px);
         }
         if let Some(g) = self.glyph {
-            e = e.child(icon(g, glyph_size).mx(-2.).color(fg).a11y_hidden());
+            let glyph = icon(g, glyph_size).mx(-2.).color(fg).a11y_hidden();
+            e = e.child(if std::ptr::eq(g, &crate::icons::LOADER_CIRCLE) { glyph.looping(rune::LoopSpec::rotation(1.)) } else { glyph });
         }
         if !self.size.starts_with("icon") {
             e = e.child(text(self.label).font(font).color(fg).a11y_hidden());
