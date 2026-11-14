@@ -160,9 +160,7 @@ fn bulk_entries(s: &App, model: &Model, sub: Option<Sub>) -> Vec<MenuEntry> {
     if !pinned.is_empty() {
         out.push(leaf(item(format!("Unpin ({})", pinned.len()), move |s, _| {
             close(s);
-            for id in &pinned {
-                super::unpin(s, id);
-            }
+            super::request_unpin_many(s, pinned.clone());
             s.ui.shell.sidebar.selected.clear();
         })));
     }
@@ -258,8 +256,12 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
             let path = th.worktree.clone().or_else(|| {
                 s.state().projects.iter().find(|p| p["id"] == th.project_id.as_str()).and_then(|p| p["workspaceRoot"].as_str().map(str::to_string))
             });
-            if let Some(p) = path {
-                out.push(copy("Path", p.clone(), "Path copied", p));
+            match path {
+                Some(p) => out.push(copy("Path", p.clone(), "Path copied", p)),
+                None => out.push(MenuEntry::item(item("Path", |s, _| {
+                    close(s);
+                    crate::shell::palette::toast_error_brief(s, "Path unavailable", Some("This thread does not have a workspace path to copy."));
+                }))),
             }
             if let Some(b) = th.branch.clone() {
                 out.push(copy("Branch", b.clone(), "Branch copied", b));
@@ -331,16 +333,17 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
     if super::share::can_share_with_guest(s) {
         out.push(leaf(item("Share with guest", with(super::share::open_guest))));
     }
-    let project = th.project_id.clone();
-    let scoped = s.ui.shell.sidebar.project_scope.contains(&project);
-    let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", model.project(th)) };
-    out.push(leaf(
-        item(filter, move |s, _| {
-            let scope = &mut s.ui.shell.sidebar.project_scope;
-            *scope = if scoped { Vec::new() } else { vec![project.clone()] };
+    // An archived group is not a filter choice.
+    let (groups, by_project) = super::folders::group_of(s);
+    if let Some(group) = by_project.get(&th.project_id).map(|n| &groups[*n]).filter(|g| !g.archived) {
+        let members = group.members.clone();
+        let scoped = members.iter().all(|m| s.ui.shell.sidebar.project_scope.contains(m));
+        let filter = if scoped { "Show all projects".to_string() } else { format!("Filter by {}", group.label) };
+        out.push(leaf(item(filter, move |s, _| {
+            s.ui.shell.sidebar.project_scope = if scoped { Vec::new() } else { members.clone() };
             close(s);
-        }),
-    ));
+        })));
+    }
     if super::share::can_turn_into_project(s, th) {
         let (thread, title) = (th.id.clone(), th.title.clone());
         let turn = item("Turn into project", move |s, _| {
@@ -349,7 +352,9 @@ fn entries(s: &App, model: &Model, th: &Thread, sub: Option<Sub>) -> Vec<MenuEnt
         });
         out.push(leaf(if th.running() { todo("Turn into project") } else { turn }));
     }
-    out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
+    if s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["threadAutoSettleOptOut"] == true) {
+        out.push(sub_item("Auto-settle behavior", Sub::AutoSettle));
+    }
     out.push(MenuEntry::Separator);
     out.push(sub_item("Copy", Sub::Copy));
     let settings_project = th.project_id.clone();
@@ -379,4 +384,54 @@ pub fn view(s: &App, _cx: &mut Cx<App>, model: &Model, th: &Thread, m: &Menu, t:
     let mut layers = Vec::new();
     menu.overlay(&kit::theme(t), &mut layers);
     layers
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn labels(entries: &[MenuEntry]) -> Vec<String> {
+        entries
+            .iter()
+            .filter_map(|e| match e {
+                MenuEntry::Item(i) => Some(i.label_text().to_owned()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn state(s: &mut App) -> &mut s5_net::State {
+        match &mut s.src {
+            crate::data::Source::Fixture(state) => state,
+            _ => unreachable!("tests run on the fixture"),
+        }
+    }
+
+    #[test]
+    fn the_thread_menu_gates_its_items_like_the_web() {
+        let mut s = App::new();
+        let model = Model::build(&s);
+        let (groups, by_project) = super::super::folders::group_of(&s);
+        let mut th = model.threads.iter().find(|t| by_project.contains_key(&t.project_id)).expect("a thread in a project").clone();
+        let group = groups[by_project[&th.project_id]].clone();
+        let filter = format!("Filter by {}", group.label);
+
+        state(&mut s).config.get_or_insert_with(|| json!({}))["environment"]["capabilities"]["threadAutoSettleOptOut"] = json!(false);
+        let shown = labels(&entries(&s, &model, &th, None));
+        assert!(!shown.iter().any(|l| l == "Auto-settle behavior"), "FAILED: auto-settle needs the capability");
+        assert!(shown.contains(&filter), "FAILED: the filter names the thread's group: {shown:?}");
+
+        state(&mut s).config.as_mut().unwrap()["environment"]["capabilities"]["threadAutoSettleOptOut"] = json!(true);
+        for p in state(&mut s).projects.iter_mut().filter(|p| group.members.iter().any(|m| p["id"] == m.as_str())) {
+            p["archivedAt"] = json!("2026-01-01T00:00:00Z");
+            p["workspaceRoot"] = serde_json::Value::Null;
+        }
+        let shown = labels(&entries(&s, &model, &th, None));
+        assert!(shown.iter().any(|l| l == "Auto-settle behavior"));
+        assert!(!shown.iter().any(|l| l.starts_with("Filter by")), "FAILED: an archived group is no filter choice");
+
+        th.worktree = None;
+        assert_eq!(labels(&entries(&s, &model, &th, Some(Sub::Copy)))[0], "Path", "FAILED: Copy keeps Path without one, as web toasts");
+    }
 }

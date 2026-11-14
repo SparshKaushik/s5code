@@ -163,7 +163,8 @@ fn looks_like_path(path: &str) -> bool {
     named && !path.contains('@') && path.chars().all(plain)
 }
 
-/// A link press: a thread opens if this environment has it, a file opens in the Files panel.
+/// A link press: a thread opens if this environment has it, a file opens in the Files panel,
+/// and a web link opens where Settings send links.
 pub fn open(app: &mut App, url: &str, tx: &mut Tx) {
     match classify(url) {
         Target::Thread(id) => {
@@ -180,8 +181,10 @@ pub fn open(app: &mut App, url: &str, tx: &mut Tx) {
                 super::citation::go_to_source(app, &citation, tx);
             }
         }
+        // Web's `resolveLinkTarget`: Settings may send links to the preview; Cmd or Ctrl still opens the system browser.
         Target::Web => {
-            let _ = tx.open_url(url);
+            let mods = tx.mods();
+            crate::panel::terminal::open_web(app, tx, url, mods.cmd || mods.ctrl);
         }
     }
 }

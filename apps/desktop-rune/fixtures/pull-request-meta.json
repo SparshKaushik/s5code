@@ -1,0 +1,27 @@
+{
+  "labelCandidates": {
+    "candidates": [
+      { "name": "bug", "color": "d73a4a", "description": "Something isn't working", "isApplied": false },
+      { "name": "desktop", "color": "1d76db", "description": "The Electron and Rune desktop apps", "isApplied": true },
+      { "name": "docs", "color": "0075ca", "description": null, "isApplied": false },
+      { "name": "performance", "color": "fbca04", "description": "Slower than it should be", "isApplied": false },
+      { "name": "server", "color": "5319e7", "description": "The WebSocket server and orchestration", "isApplied": false }
+    ],
+    "truncated": false
+  },
+  "reviewerCandidates": {
+    "candidates": [
+      { "id": "U_juliusmarminge", "kind": "user", "login": "juliusmarminge", "name": "Julius Marminge", "avatarUrl": null, "isRequested": true },
+      { "id": "U_theo", "kind": "user", "login": "theo", "name": "Theo", "avatarUrl": null, "isRequested": false },
+      { "id": "U_mara", "kind": "user", "login": "mara", "name": "Mara Okafor", "avatarUrl": null, "isRequested": false },
+      { "id": "T_desktop", "kind": "team", "login": "s5labs/desktop", "name": "Desktop", "avatarUrl": null, "isRequested": false }
+    ],
+    "truncated": true
+  },
+  "linkedThreads": {
+    "threads": [
+      { "id": "thread-pr-port", "projectId": "7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f", "title": "Port the pull requests page to Rune", "archivedAt": null },
+      { "id": "thread-pr-review", "projectId": "7b60eb1e-933f-470d-b2e1-b9eeadaf3a8f", "title": "Review the usage page port", "archivedAt": null }
+    ]
+  }
+}

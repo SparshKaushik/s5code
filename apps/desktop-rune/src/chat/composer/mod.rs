@@ -99,7 +99,6 @@ pub struct Ui {
     pub usage: usage_limits::Panel,
     /// Threads whose send (composer.sendAndNewThread) opens their project's new-thread draft once
     /// it lands: the thread and its project.
-    new_after: Vec<(String, String)>,
     mention: menu::Mention,
     launches: Vec<(u64, String)>,
     /// Messages waiting on their attachments to be stored.
@@ -816,8 +815,9 @@ fn attachment_block(s: &App) -> Option<&'static str> {
     draft(s).and_then(|d| attachments::block_reason(&d.attachments))
 }
 
-/// Sends the draft; `background` launches a new thread without opening it (composer.sendBackground),
-/// or from a thread, sends and then opens its project's new-thread draft (composer.sendAndNewThread).
+/// Sends the draft. `background` is web's background submission intent: a new thread launches
+/// without opening (composer.sendBackground), and a message to a thread opens a new draft in its
+/// project after sending (composer.sendAndNewThread).
 fn send_with(s: &mut App, alternate: bool, background: bool) {
     // `/usage-limits` alone opens the panel instead of reaching the agent.
     if editing_run(s).is_none() && usage_limits::takes_prompt(s) {
@@ -829,7 +829,15 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     if editing_run(s).is_none() && banners::send_feedback(s) {
         return;
     }
-    if rewinding(s) || send_busy(s) || send_block(s).is_some() || disconnected(s) || no_provider(s) || project_required(s) || attachment_block(s).is_some() {
+    if rewinding(s)
+        || send_busy(s)
+        || send_block(s).is_some()
+        || disconnected(s)
+        || no_provider(s)
+        || project_required(s)
+        || attachment_block(s).is_some()
+        || crate::add_to_machine::send_block(s).is_some()
+    {
         return;
     }
     if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
@@ -918,7 +926,6 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     let (runtime, interaction) = (effective_runtime_mode(s), interaction_mode(s));
     let route = s.frame_route().clone();
     let project_id = ctx(s).project.map(|p| data::s(p, "id").to_string());
-    let new_after = project_id.clone().filter(|_| background && matches!(route, Route::Thread(_)));
     let message_id = s5_net::uuid();
     let (thread_id, payload, launch) = match route {
         Route::Thread(id) => {
@@ -964,9 +971,7 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
     if background && launch.is_some() {
         s.ui.chat.composer.background.push(thread_id.clone());
     }
-    if let Some(project) = new_after {
-        s.ui.chat.composer.new_after.push((thread_id.clone(), project));
-    }
+    let new_draft = background && launch.is_none();
     s.ui.chat.composer.length_error = None;
     crate::chat::timeline::error_banner::set_local(s, &key, None);
     let outgoing = Outgoing { key, draft: snapshot };
@@ -978,6 +983,9 @@ fn send_with(s: &mut App, alternate: bool, background: bool) {
         composer.uploads.push(attachments::start(net, &thread_id, &message_id, uploads, payload, launch, outgoing));
     }
     sent(s);
+    if new_draft {
+        crate::shell::sidebar::new_local(s);
+    }
 }
 
 /// Pasted files join the draft's attachments (ChatComposer onPaste): copied files as they are,
@@ -1133,12 +1141,15 @@ pub fn poll(s: &mut App) -> bool {
         let upload = composer.uploads.remove(i);
         match stored {
             Ok(stored) => deliver(net, composer, upload.payload, upload.launch, stored, upload.outgoing),
-            Err(e) => failed.push((upload.outgoing, e)),
+            Err(e) => {
+                let background = upload.launch.as_ref().map(|id| composer.background.contains(id));
+                composer.background.retain(|b| Some(b) != upload.launch.as_ref());
+                failed.push((upload.outgoing, e, background));
+            }
         }
         changed = true;
     }
     let mut opened = None;
-    let mut landed = Vec::new();
     let composer = &mut s.ui.chat.composer;
     let mut i = 0;
     while i < composer.sends.len() {
@@ -1155,17 +1166,13 @@ pub fn poll(s: &mut App) -> bool {
         }
         match (reply, launch) {
             (Ok(v), Some(thread_id)) if !quiet => opened = Some(v["threadId"].as_str().unwrap_or(&thread_id).to_string()),
-            (Ok(_), _) if !outgoing.draft.is_null() => landed.push(outgoing.key),
             (Ok(_), _) => {}
-            (Err(e), _) => failed.push((outgoing, e)),
+            (Err(e), launch) => failed.push((outgoing, e, launch.map(|_| quiet))),
         }
         changed = true;
     }
-    for (outgoing, error) in failed {
-        send_failed(s, outgoing, &error);
-    }
-    for key in landed {
-        changed |= new_thread_after(s, &key);
+    for (outgoing, error, background) in failed {
+        send_failed(s, outgoing, &error, background);
     }
     let Some(net) = s.src.net() else { return changed };
     changed |= menu::poll(&mut s.ui.chat.composer.mention, net);
@@ -1175,19 +1182,6 @@ pub fn poll(s: &mut App) -> bool {
         changed = true;
     }
     changed
-}
-
-/// composer.sendAndNewThread's second half: once the send landed, and only while its thread is
-/// still open, the thread's project opens a new-thread draft (handleNewThreadInActiveProject).
-fn new_thread_after(s: &mut App, key: &str) -> bool {
-    let Some(at) = s.ui.chat.composer.new_after.iter().position(|(thread, _)| thread == key) else { return false };
-    let (thread, project) = s.ui.chat.composer.new_after.remove(at);
-    if !matches!(s.frame_route(), Route::Thread(id) if *id == thread) {
-        return false;
-    }
-    s.ui.chat.home.workspace = None;
-    s.navigate(Route::Home { project_id: Some(project) });
-    true
 }
 
 /// Drafts on disk, as the web composer draft store persists them: each draft's prompt with its
@@ -1221,10 +1215,15 @@ fn watch(s: &mut App, request: u64, key: &str) {
 }
 
 /// A failed send shows in its route's banner, and its draft comes back unless a new one was started.
-fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value) {
-    s.ui.chat.composer.new_after.retain(|(thread, _)| *thread != outgoing.key);
+/// `launch` is set for a new thread's launch: whether it went to the background.
+fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value, launch: Option<bool>) {
     let message = crate::shell::palette::error_message(error, "Failed to send message.");
     crate::chat::timeline::error_banner::set_local(s, &outgoing.key, Some(&message));
+    if let Some(background) = launch
+        && (background || draft_key(s, s.frame_route()) != outgoing.key)
+    {
+        launch_failed(s, &outgoing.key, background, &message);
+    }
     if outgoing.draft.is_null() {
         return;
     }
@@ -1232,6 +1231,20 @@ fn send_failed(s: &mut App, outgoing: Outgoing, error: &Value) {
     if blank && let Some(draft) = restored(&json!({"draft": outgoing.draft})).remove("draft") {
         s.ui.chat.composer.drafts.insert(outgoing.key, draft);
     }
+}
+
+/// Web's toast for a new thread that failed to start out of sight: in the background, or after
+/// the user left its draft. "Open draft" returns to the restored draft.
+fn launch_failed(s: &mut App, key: &str, background: bool, message: &str) {
+    let title = if background { "Background task failed" } else { "Could not start thread" };
+    let project = key.strip_prefix("home:").map(str::to_owned);
+    let open: crate::shell::palette::ToastAction = (
+        "Open draft".to_owned(),
+        true,
+        std::rc::Rc::new(move |s: &mut App, _: &mut rune::Tx| s.navigate(Route::Home { project_id: project.clone() })),
+    );
+    crate::shell::palette::toast_error_brief(s, title, Some(message));
+    crate::shell::palette::set_toast_actions(s, vec![open]);
 }
 
 fn restored(v: &Value) -> HashMap<String, Draft> {
@@ -1361,36 +1374,37 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     let thread = ctx(s).thread.map(|t| data::s(t, "id").to_owned());
     let plain = !e.mods.shift && !e.mods.cmd && !e.mods.alt && !e.mods.ctrl && !e.mods.logo;
     let answering = question::editor(s).is_some();
-    match e.key {
-        Key::Enter if e.mods.cmd && e.mods.shift => {
+    // composerSubmissionIntentForKey: the bound send variants, each under its own `when`.
+    let bound = SEND_COMMANDS.into_iter().find(|c| crate::panel::shortcut(s, e, c));
+    match bound {
+        Some("thread.steerQueuedMessage") => {
             if let Some(thread) = thread {
                 crate::chat::timeline::queue::steer_next(s, &thread);
             }
-            true
+            return true;
         }
-        Key::Enter if !answering && (e.mods.cmd || plain) => {
+        Some("thread.editQueuedMessage") if !answering => {
+            return thread.is_some_and(|thread| crate::chat::timeline::queue::edit_latest(s, &thread));
+        }
+        Some("composer.sendAlternate" | "composer.sendBackground" | "composer.sendAndNewThread") if !answering && !tx.key_repeat() => {
+            send_with(s, bound == Some("composer.sendAlternate"), bound != Some("composer.sendAlternate"));
+            return true;
+        }
+        _ => {}
+    }
+    match e.key {
+        Key::Enter if !answering && !e.mods.shift && !e.mods.alt && (e.mods.cmd || plain) => {
             let text = draft(s).map(|d| d.edit.text.as_str()).unwrap_or("");
             let shortcut = crate::settings::value(s, "sendShortcut");
             let shortcut = shortcut.as_str().unwrap_or("enter");
             let needs_mod = shortcut == "mod-enter" || (shortcut == "mod-enter-multiline" && text.contains('\n'));
             if plain && needs_mod {
                 draft_mut(s).edit.insert("\n");
-            } else if e.mods.cmd && !matches!(s.frame_route(), Route::Thread(_)) {
-                // composer.sendBackground: a new thread starts without leaving the draft.
-                send_with(s, false, true);
-            } else if e.mods.cmd && e.mods.alt {
-                // composer.sendAndNewThread: sent, then on to a new thread in the same project.
-                send_with(s, false, true);
             } else {
-                // Mod+Enter while a turn runs is the alternate follow-up (steer <-> queue).
-                send(s, e.mods.cmd);
+                send(s, false);
             }
             true
         }
-        Key::Up if e.mods.alt && !e.mods.shift && !answering => match thread {
-            Some(thread) => crate::chat::timeline::queue::edit_latest(s, &thread),
-            None => false,
-        },
         Key::Up | Key::Down if plain && !answering => recall(s, e.key == Key::Up),
         Key::Escape if editing_run(s).is_some() => {
             cancel_queued_edit(s);
@@ -1406,11 +1420,28 @@ fn on_key(s: &mut App, e: &KeyEvent, tx: &mut Tx) -> bool {
     }
 }
 
+const SEND_COMMANDS: [&str; 5] = ["thread.steerQueuedMessage", "thread.editQueuedMessage", "composer.sendAlternate", "composer.sendBackground", "composer.sendAndNewThread"];
+
+/// Whether the open route's prompt has the keys (`composerFocus`).
+pub fn focused(s: &App) -> bool {
+    s.ui.chat.composer.drafts.get(&active_key(s)).is_some_and(|d| d.edit.focused)
+}
+
 /// The composer's window-wide shortcuts (`modelPicker.toggle`, `composer.effort`,
 /// `composer.mode`), which the web binds outside the terminal. Effort lives in the model picker.
 pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
     if !matches!(s.frame_route(), Route::Thread(_) | Route::Home { .. }) || crate::panel::terminal_active(s) || ctx(s).project.is_none() {
         return false;
+    }
+    if picker::step_provider(s, e) {
+        return true;
+    }
+    // ChatView binds steering the next queued message outside the prompt too.
+    if let Some(thread) = ctx(s).thread.map(|t| data::s(t, "id").to_owned())
+        && crate::panel::shortcut(s, e, "thread.steerQueuedMessage")
+    {
+        crate::chat::timeline::queue::steer_next(s, &thread);
+        return true;
     }
     if crate::panel::shortcut(s, e, "modelPicker.toggle") || crate::panel::shortcut(s, e, "composer.effort") {
         picker::toggle(s);
@@ -1541,7 +1572,10 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, lane: &Lane) -> El {
     }
     // A pending question sits directly above the composer, as on the web. The inset is padding
     // on a wrapper: a full-width child with margins would shift rather than shrink.
-    let docked = crate::chat::timeline::composer_requests(s, t).or_else(|| plan::banner(s, t)).or_else(|| crate::chat::details::mismatch_banner(s, t));
+    let docked = crate::chat::timeline::composer_requests(s, t)
+        .or_else(|| plan::banner(s, t))
+        .or_else(|| crate::add_to_machine::banner(s, t))
+        .or_else(|| crate::chat::details::mismatch_banner(s, t));
     // The panel `/usage-limits` opened, which the web lists ahead of the branch notice.
     let docked = usage_limits::banner(s, cx, t).or(docked);
     let docked = banners::dock(s, t, docked);
@@ -1855,7 +1889,7 @@ fn primary_action(s: &App, t: &T) -> El {
             return action;
         }
     }
-    let sendable = !rewinding(s) && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
+    let sendable = !rewinding(s) && crate::add_to_machine::send_block(s).is_none() && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable && editing_run(s).is_none() {
         return stop_button(t, 32.0);
     }
@@ -1892,7 +1926,7 @@ fn send_button(s: &App, t: &T, sendable: bool, resume: bool) -> El {
     };
     let status = if disconnected(s) || no_provider(s) || project_required(s) {
         Some("Environment disconnected".to_owned())
-    } else if let Some(reason) = send_block(s) {
+    } else if let Some(reason) = send_block(s).or_else(|| crate::add_to_machine::send_block(s)) {
         Some(reason)
     } else if let Some(reason) = attachment_block(s) {
         Some(reason.to_owned())
@@ -2697,30 +2731,48 @@ mod tests {
     }
 
     #[test]
-    fn send_and_new_thread_opens_the_project_draft_only_from_the_thread_it_left() {
-        let mut s = App::new();
-        let thread = s.state().threads[0].clone();
-        let (id, project) = (data::s(&thread, "id").to_string(), data::s(&thread, "projectId").to_string());
-        s.navigate(Route::Thread(id.clone()));
-        s.ui.chat.composer.new_after.push((id.clone(), project.clone()));
-        assert!(!new_thread_after(&mut s, "another-thread"));
-        assert!(new_thread_after(&mut s, &id));
-        assert_eq!(s.route, Route::Home { project_id: Some(project.clone()) });
-        assert!(s.ui.chat.composer.new_after.is_empty());
-
-        // Gone elsewhere meanwhile: the user stays put.
-        s.ui.chat.composer.new_after.push((id.clone(), project));
-        assert!(!new_thread_after(&mut s, &id));
-        assert!(matches!(s.route, Route::Home { .. }));
-    }
-
-    #[test]
     fn the_draft_hero_centres_the_card_and_narrow_footers_fold_their_mode_block() {
         assert_eq!(hero_bottom(800.0, 120.0), 350.0);
         assert_eq!(hero_bottom(100.0, 120.0), BOTTOM);
         assert!(!folds_mode_block(720.0, 260.0, 0.0), "nothing to fold");
         assert!(!folds_mode_block(720.0, 260.0, 200.0));
         assert!(folds_mode_block(480.0, 260.0, 200.0));
+    }
+
+    #[test]
+    fn send_chords_resolve_by_route_run_and_focus_like_the_web() {
+        let mut s = App::new();
+        let id = |n: &str| json!({"type": "identifier", "name": n});
+        let and = |l: Value, r: Value| json!({"type": "and", "left": l, "right": r});
+        let enter = |alt: bool| json!({"key": "enter", "modKey": true, "altKey": alt});
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] = json!([
+                {"command": "composer.sendAlternate", "shortcut": enter(false), "whenAst": and(id("composerFocus"), id("turnRunning"))},
+                {"command": "composer.sendBackground", "shortcut": enter(false), "whenAst": and(id("composerFocus"), id("draftThreadRoute"))},
+                {"command": "composer.sendBackground", "shortcut": enter(true), "whenAst": and(id("composerFocus"), id("draftThreadRoute"))},
+                {"command": "composer.sendAndNewThread", "shortcut": enter(true), "whenAst": and(id("composerFocus"), json!({"type": "not", "node": id("draftThreadRoute")}))},
+            ]);
+        }
+        let resolved = |s: &App, alt: bool| {
+            let mut e = KeyEvent::from(Key::Enter);
+            e.mods.cmd = true;
+            e.mods.ctrl = !cfg!(target_os = "macos");
+            e.mods.alt = alt;
+            SEND_COMMANDS.into_iter().find(|c| crate::panel::shortcut(s, &e, c))
+        };
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).next().unwrap();
+        s.navigate(Route::Home { project_id: Some(project) });
+        draft_mut(&mut s).edit.focused = true;
+        assert_eq!(resolved(&s, false), Some("composer.sendBackground"), "FAILED: Mod+Enter on a draft starts it in the background");
+        assert_eq!(resolved(&s, true), Some("composer.sendBackground"));
+        on_replay_showcase(&mut s);
+        draft_mut(&mut s).edit.focused = true;
+        assert_eq!(resolved(&s, false), None, "FAILED: an idle thread sends Mod+Enter in the foreground");
+        assert_eq!(resolved(&s, true), Some("composer.sendAndNewThread"));
+        seed_running(&mut s);
+        assert_eq!(resolved(&s, false), Some("composer.sendAlternate"), "FAILED: a running turn flips steer and queue");
+        draft_mut(&mut s).edit.focused = false;
+        assert_eq!(resolved(&s, false), None, "FAILED: the prompt must have the keys");
     }
 
     #[test]
@@ -2756,5 +2808,29 @@ mod tests {
         assert_eq!(step_history(&entries, Some(("4", "second")), "second", false), Some((None, String::new())));
         // An edited recall is the user's own text again.
         assert_eq!(step_history(&entries, Some(("4", "second")), "second!", true), None);
+    }
+
+    #[test]
+    fn a_launch_that_fails_out_of_sight_toasts_like_the_web() {
+        let mut s = App::new();
+        let project = s.state().projects.iter().map(|p| data::s(p, "id").to_owned()).next().unwrap();
+        let thread = s.state().threads.iter().map(|t| data::s(t, "id").to_owned()).next().unwrap();
+        let draft = Outgoing { key: home_key(&project), draft: json!({"prompt": "ship it"}) };
+        let error = json!({"message": "Provider is not ready"});
+        let toast = |s: &App| crate::shell::palette::toast_title(s).map(str::to_owned);
+        s.navigate(Route::Home { project_id: Some(project.clone()) });
+
+        send_failed(&mut s, Outgoing { key: draft.key.clone(), draft: draft.draft.clone() }, &error, Some(false));
+        assert_eq!(toast(&s), None, "FAILED: a failed launch on its own draft shows only the banner");
+        send_failed(&mut s, Outgoing { key: thread.clone(), draft: Value::Null }, &error, None);
+        assert_eq!(toast(&s), None, "FAILED: a failed message to a thread shows only the banner");
+
+        send_failed(&mut s, Outgoing { key: draft.key.clone(), draft: draft.draft.clone() }, &error, Some(true));
+        assert_eq!(toast(&s).as_deref(), Some("Background task failed"), "FAILED: a background launch failure toasts");
+
+        s.navigate(Route::Thread(thread.clone()));
+        send_failed(&mut s, draft, &error, Some(false));
+        assert_eq!(toast(&s).as_deref(), Some("Could not start thread"), "FAILED: a launch failure after leaving its draft toasts");
+        assert_eq!(s.ui.chat.composer.drafts.get(&home_key(&project)).map(|d| d.edit.text.as_str()), Some("ship it"), "FAILED: the draft comes back to open");
     }
 }

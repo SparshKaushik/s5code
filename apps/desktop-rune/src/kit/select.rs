@@ -36,6 +36,7 @@ pub struct Select {
     toggle: Option<Box<dyn FnOnce(El) -> El>>,
     choose: Option<Choose>,
     close: Option<Box<dyn FnOnce(Menu) -> Menu>>,
+    tips: Vec<String>,
 }
 fn name_of<'a>(names: &'a [(String, String)], value: &'a str) -> &'a str {
     names.iter().find(|(v, _)| v == value).map_or(value, |(_, n)| n.as_str())
@@ -65,7 +66,13 @@ impl Select {
             toggle: None,
             choose: None,
             close: None,
+            tips: vec![],
         }
+    }
+    /// Per-option native titles, in option order (web `SelectItem title`).
+    pub fn tips<S: AsRef<str>>(mut self, tips: &[S]) -> Self {
+        self.tips = tips.iter().map(|v| v.as_ref().into()).collect();
+        self
     }
     pub fn disabled_option(mut self, value: impl Into<String>) -> Self {
         self.disabled_options.push(value.into());
@@ -263,7 +270,7 @@ impl Select {
             })
             .open(self.open && !disabled);
         let mut trailing = std::mem::take(&mut self.trailing);
-        for option in std::mem::take(&mut self.options) {
+        for (index, option) in std::mem::take(&mut self.options).into_iter().enumerate() {
             let mut item = MenuItem::new(name_of(&self.names, &option))
                 .option(self.current.as_ref() == Some(&option))
                 .disabled(self.disabled_options.contains(&option));
@@ -280,6 +287,9 @@ impl Select {
                 let action = choose(&option);
                 // The shared row renderer drops this transformation for disabled rows.
                 item = item.transform(action);
+            }
+            if let Some(tip) = self.tips.get(index).cloned() {
+                item = item.transform(Box::new(move |e| e.help(tip)));
             }
             menu = menu.item(item);
         }

@@ -299,37 +299,6 @@ pub(crate) fn view(s: &App, t: &T) -> El {
     c::section("OpenTelemetry export", vec![form], t)
 }
 
-/// Web Maintenance's Diagnostics section: the way to this page.
-pub fn maintenance_section(s: &App, t: &T) -> El {
-    let description = if s.ui.settings.environment_only {
-        "Inspect processes, resource use, and logs on this environment."
-    } else {
-        "Inspect processes, resource use, and logs on one environment at a time."
-    };
-    let line = row()
-        .w_full()
-        .px(16.0)
-        .py(12.0)
-        .gap(32.0)
-        .center_y()
-        .child(
-            col()
-                .grow(1.0)
-                .min_w(0.0)
-                .gap(4.0)
-                .child(text("Diagnostics").font(theme::SM_MEDIUM).color(t.c.foreground))
-                .child(text(description).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap()),
-        )
-        .child(
-            kit::Button::new("View diagnostics")
-                .variant("outline")
-                .size("sm")
-                .on_press(|s: &mut App| s.navigate(crate::Route::Settings("diagnostics".into())))
-                .build(t),
-        );
-    c::section("Diagnostics", vec![line], t)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

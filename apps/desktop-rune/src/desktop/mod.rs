@@ -106,6 +106,11 @@ impl Ui {
         self.zoom_level = level;
         ZOOM.with(|z| z.set(self.zoom_factor()));
     }
+    /// A scene's zoom, which the saved preference must not replace on the first poll.
+    pub(crate) fn scene_zoom(&mut self, level: f32) {
+        self.prefs_loaded = true;
+        self.set_zoom_level(level);
+    }
 }
 
 thread_local! {
@@ -121,7 +126,7 @@ pub fn from_window(x: f32, y: f32) -> (f32, f32) {
 
 /// Window state that outlives a launch: the app zoom everywhere, the window size where Rune
 /// can't hand it to AppKit's frame autosave. In the T3 home, so a dev worktree keeps its own.
-fn prefs() -> rune::prefs::Prefs {
+pub(crate) fn prefs() -> rune::prefs::Prefs {
     if rune::is_headless() {
         return rune::prefs::Prefs::memory();
     }

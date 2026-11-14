@@ -183,6 +183,10 @@ impl Net {
     pub fn base_url(&self) -> &str {
         &self.base_url
     }
+    /// The session token, for a connection of the client's own such as `api_socket`.
+    pub fn bearer(&self) -> &str {
+        &self.bearer
+    }
     pub fn state(&self) -> &State {
         &self.state
     }
@@ -419,6 +423,45 @@ impl Drop for Net {
     fn drop(&mut self) {
         let _ = self.tx.send(Command::Stop);
     }
+}
+/// A WebSocket to one of the server's `/api` routes as this client, such as the preview frame
+/// stream. Reads time out after `read_timeout`, so the caller's loop can also write.
+pub fn api_socket(
+    base: &str,
+    bearer: &str,
+    path: &str,
+    query: &str,
+    read_timeout: std::time::Duration,
+) -> Result<tungstenite::WebSocket<tungstenite::stream::MaybeTlsStream<std::net::TcpStream>>, String> {
+    use tungstenite::client::IntoClientRequest;
+    use tungstenite::stream::MaybeTlsStream;
+    if !path.starts_with("/api/") {
+        return Err("Unsupported API path".into());
+    }
+    let mut url = url::Url::parse(base).map_err(|e| e.to_string())?;
+    let scheme = match url.scheme() {
+        "https" | "wss" => "wss",
+        "http" | "ws" => "ws",
+        _ => return Err("unsupported server URL scheme".into()),
+    };
+    url.set_scheme(scheme).map_err(|_| "invalid server URL")?;
+    url.set_path(path);
+    url.set_query(Some(query).filter(|q| !q.is_empty()));
+    url.set_fragment(None);
+    let mut req = url.as_str().into_client_request().map_err(|e| e.to_string())?;
+    req.headers_mut().insert(
+        "Authorization",
+        format!("Bearer {bearer}").parse().map_err(|_| "invalid bearer token")?,
+    );
+    let (mut socket, _) = tungstenite::connect(req).map_err(|e| e.to_string())?;
+    let tcp = match socket.get_mut() {
+        MaybeTlsStream::Plain(tcp) => tcp,
+        MaybeTlsStream::Rustls(tls) => &mut tls.sock,
+        _ => return Err("unsupported TLS stream".into()),
+    };
+    tcp.set_read_timeout(Some(read_timeout)).map_err(|e| e.to_string())?;
+    tcp.set_write_timeout(Some(std::time::Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    Ok(socket)
 }
 /// The absolute URL of a signed upload path; nothing outside the server's upload route.
 pub fn upload_url(base: &str, relative_url: &str) -> Result<String, Value> {

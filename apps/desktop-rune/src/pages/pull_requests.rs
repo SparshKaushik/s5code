@@ -10,6 +10,7 @@ use rune::{Color, Cursor, El, PointerPress, ScrollSpec, Tx, col, el, icon, row, 
 use serde_json::{Map, Value, json};
 
 use crate::data::{s as field, ts};
+use crate::env::TAG;
 use crate::icons as i;
 use crate::kit::{self, Menu, MenuEntry, MenuItem, Placement};
 use crate::theme::{self, AlphaMul, T, layout, radius, tw};
@@ -25,14 +26,26 @@ const MAX_STATS_REFS: usize = 500;
 /// Bumped by the server whenever a turn may have changed pull requests.
 const REFRESHES: &str = "pullRequests.subscribeRefreshes";
 
+/// One environment the page reads, and the projects it reads there when another environment
+/// reads the rest of a shared repository (usePullRequestScope's environmentQueries).
+pub(super) type Target = (String, Option<Vec<String>>);
+
 #[derive(Default)]
 pub struct Ui {
-    /// The last `pullRequests.list` result (entries appended across "Load more").
+    /// Every environment's `pullRequests.list` answers merged (entries appended across "Load more").
     pub result: Option<Value>,
     pub error: Option<String>,
-    pub pending: Option<(u64, bool)>,
+    /// Each environment's list request in flight, and whether the question was continued ("Load
+    /// more"), so later answers land after the shown rows.
+    pub pending: Vec<(String, u64)>,
+    appending: bool,
     /// The request the current result answers; a different one refetches.
     pub requested: Option<Value>,
+    /// The environments `requested` went to, and each one's answer to it so far.
+    sent: Vec<Target>,
+    answers: Vec<(String, Value)>,
+    /// The next answer to land replaces the previous question's.
+    fresh: bool,
     pub filters: Filters,
     pub query: rune::TextEdit,
     /// The query sent to the hosts: the typed one once typing pauses, or at once on Enter.
@@ -42,12 +55,12 @@ pub struct Ui {
     typed_at: Option<Instant>,
     /// Rows asked for; grows by a page when the hosts can't continue from cursors.
     limit: Option<u64>,
-    /// `pullRequests.invalidate` in flight from Refresh.
-    invalidating: Option<u64>,
+    /// `pullRequests.invalidate` in flight from Refresh, per environment.
+    invalidating: Vec<(String, u64)>,
     /// Measured sizes for rows the list answered without one (`listStats`), by row key.
     stats: HashMap<String, (i64, i64)>,
     stats_asked: HashSet<String>,
-    stats_pending: Option<u64>,
+    stats_pending: Vec<(String, u64)>,
     /// The hosts offered in the picker, kept from the unfiltered answer while a host narrows it.
     pub(super) hosts: Vec<Value>,
     /// The scope's first page without the search (baselineQuery), held while a search runs.
@@ -59,14 +72,18 @@ pub struct Ui {
     pub picker: super::pr_filters::Picker,
     pub menu: Option<&'static str>,
     pub submenu: Option<&'static str>,
+    /// The shown tab's pull request, by URL.
     pub selected: Option<String>,
+    /// The panel's tabs and width.
+    pub tabs: super::pr_tabs::Tabs,
     /// The pull request the panel toggle hid, which it reopens.
     pub(super) hidden: Option<String>,
     /// The detail fills the page (RightPanelMaximizeControl); only while it is open.
     pub maximized: bool,
-    /// `pullRequests.subscribeRefreshes` is watched, and the revision last seen from it.
-    watching: bool,
-    turn: Option<u64>,
+    /// The environments whose `pullRequests.subscribeRefreshes` is watched, and the revision last
+    /// seen from each.
+    watching: Vec<String>,
+    turns: HashMap<String, Option<u64>>,
     pub context: Option<(String, f32, f32)>,
     /// The rows' quick actions, stack, checks and change breakdown.
     pub row: super::pr_row::Ui,
@@ -177,11 +194,13 @@ pub struct Filters {
     pub labels: Vec<String>,
     pub project: Option<String>,
     pub host: Option<String>,
+    /// The Server filter: the one environment read, by its key in `env`.
+    pub environment: Option<String>,
 }
 
 impl Default for Filters {
     fn default() -> Self {
-        Filters { state: "open", involvement: "all", sort: "ready", draft: "all", review: "all", checks: "all", author: None, labels: Vec::new(), project: None, host: None }
+        Filters { state: "open", involvement: "all", sort: "ready", draft: "all", review: "all", checks: "all", author: None, labels: Vec::new(), project: None, host: None, environment: None }
     }
 }
 
@@ -190,7 +209,17 @@ impl Filters {
     /// in place of the menu's Draft.
     fn count(&self, query: &str) -> usize {
         let draft = typed_draft(query).unwrap_or(self.draft);
-        let set = [self.state != "open", self.involvement != "all", draft != "all", self.review != "all", self.checks != "all", self.author.is_some(), self.project.is_some(), self.host.is_some()];
+        let set = [
+            self.state != "open",
+            self.involvement != "all",
+            draft != "all",
+            self.review != "all",
+            self.checks != "all",
+            self.author.is_some(),
+            self.project.is_some(),
+            self.host.is_some(),
+            self.environment.is_some(),
+        ];
         set.iter().filter(|b| **b).count() + self.labels.len()
     }
 
@@ -212,12 +241,16 @@ impl Filters {
     }
 }
 
-/// One `pullRequests.list` read kept beside the main list: the input last asked for, the request
-/// in flight, and the latest answer with the input it answers.
+/// One `pullRequests.list` read kept beside the main list, asked of every environment read
+/// (createMergedEnvironmentQuery): the input last asked for, the environments it went to with
+/// each one's request in flight and answer so far, and those answers merged with the input
+/// they answer.
 #[derive(Default)]
 struct Read {
     asked: Option<Value>,
-    pending: Option<u64>,
+    sent: Vec<Target>,
+    pending: Vec<(String, u64)>,
+    answers: Vec<(String, Value)>,
     answer: Option<(Value, Value)>,
 }
 
@@ -227,25 +260,42 @@ impl Read {
     }
 }
 
-/// Folds `read`'s reply, then asks for `input` unless it was the last thing asked; `None` stops
-/// asking. A failed read keeps its last answer, as a query keeps its data.
-fn sync(read: &mut Read, net: Option<&mut s5_net::Net>, input: Option<Value>) -> bool {
-    let Some(net) = net else { return false };
+/// Folds `pick`'s replies, then asks `input` of every target not yet asked it; `None` stops
+/// asking. A new input, or a target leaving, starts the read over. A failed read keeps its last
+/// answer, as a query keeps its data.
+fn sync(s: &mut App, pick: fn(&mut Ui) -> &mut Read, input: Option<Value>, targets: &[Target]) -> bool {
     let mut changed = false;
-    if let Some(id) = read.pending
-        && let Some(reply) = net.take_reply(id)
-    {
-        read.pending = None;
-        if let (Ok(result), Some(asked)) = (reply, read.asked.clone()) {
-            read.answer = Some((asked, result));
-        }
+    for (env, id) in std::mem::take(&mut pick(ui(s)).pending) {
+        let Some(reply) = take(s, &env, id) else {
+            pick(ui(s)).pending.push((env, id));
+            continue;
+        };
         changed = true;
+        let read = pick(ui(s));
+        if let (Ok(result), Some(asked)) = (reply, read.asked.clone()) {
+            put(&mut read.answers, &env, result);
+            read.answer = Some((asked, merge(&read.answers)));
+        }
     }
-    if let Some(input) = input
-        && read.asked.as_ref() != Some(&input)
-    {
-        read.pending = Some(net.request("pullRequests.list", input.clone()));
-        read.asked = Some(input);
+    let Some(input) = input else { return changed };
+    if !targets.iter().any(|t| live(s, &t.0)) {
+        return changed;
+    }
+    let read = pick(ui(s));
+    if read.asked.as_ref() != Some(&input) || read.sent.iter().any(|t| !targets.contains(t)) {
+        read.answer = read.answer.take().filter(|a| a.0 != input);
+        read.asked = Some(input.clone());
+        read.sent.clear();
+        read.pending.clear();
+        read.answers.clear();
+    }
+    let joined: Vec<Target> = targets.iter().filter(|t| !read.sent.contains(t)).cloned().collect();
+    for target in joined {
+        let Some(net) = crate::env::net_of(s, &target.0) else { continue };
+        let id = net.request("pullRequests.list", for_target(&input, &target));
+        let read = pick(ui(s));
+        read.pending.push((target.0.clone(), id));
+        read.sent.push(target);
         changed = true;
     }
     changed
@@ -507,12 +557,214 @@ pub(super) fn input(u: &Ui) -> Value {
 }
 
 pub fn supported(s: &App) -> bool {
-    s.state().config.is_some()
+    !capable(s).is_empty()
 }
 
-/// `host:repository#number`, one row across pages and stats (pullRequestEntryKey).
+/// `environment:host:repository#number`, one row across pages and stats (pullRequestEntryKey);
+/// a row no environment tagged has no scope.
 pub(super) fn key(e: &Value) -> String {
-    format!("{}:{}#{}", field(e, "host"), field(e, "repository"), e["number"])
+    let scope = e[TAG].as_str().map_or_else(String::new, |env| format!("{env}:"));
+    format!("{scope}{}:{}#{}", field(e, "host"), field(e, "repository"), e["number"])
+}
+
+// ---- environments -----------------------------------------------------------------------
+
+/// The environment that listed `e`, else the one on screen.
+fn origin<'a>(e: &'a Value, active: &'a str) -> &'a str {
+    e[TAG].as_str().unwrap_or(active)
+}
+
+fn live(s: &App, env: &str) -> bool {
+    crate::env::source(s, env).is_some_and(|src| matches!(src, crate::data::Source::Live(_)))
+}
+
+/// The reply to `id`, which `env` was sent: handed to `App::src` by `env::drain`, else still on
+/// its own client.
+pub(super) fn take(s: &mut App, env: &str, id: u64) -> Option<Result<Value, Value>> {
+    if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
+        return Some(reply);
+    }
+    crate::env::net_of(s, env).and_then(|n| n.take_reply(id))
+}
+
+/// The client of the environment that listed `entry`, where its actions and detail go.
+pub(super) fn net_for<'a>(s: &'a mut App, entry: &Value) -> Option<&'a mut s5_net::Net> {
+    match entry[TAG].as_str() {
+        Some(env) => crate::env::net_of(s, env),
+        None => s.src.net(),
+    }
+}
+
+fn put(answers: &mut Vec<(String, Value)>, env: &str, answer: Value) {
+    match answers.iter_mut().find(|a| a.0 == env) {
+        Some(held) => held.1 = answer,
+        None => answers.push((env.to_string(), answer)),
+    }
+}
+
+/// `input` as `target` is asked it: with the projects it reads, when not all of its own.
+pub(super) fn for_target(input: &Value, target: &Target) -> Value {
+    let mut v = input.clone();
+    if let Some(ids) = &target.1 {
+        v["projectIds"] = json!(ids);
+    }
+    v
+}
+
+/// mergePullRequestLists: every environment's answer as one list. Rows and failures carry their
+/// environment (`env::TAG`), viewers are keyed `"<environment> <host>"`, a host's summaries fold
+/// into one, cursors stay per environment, and rows rank newest first.
+fn merge(answers: &[(String, Value)]) -> Value {
+    let mut viewers = Map::new();
+    let mut providers: Vec<Value> = Vec::new();
+    let (mut entries, mut errors, mut truncated) = (Vec::new(), Vec::new(), Vec::new());
+    let mut cursors = Map::new();
+    let tagged = |v: &Value, env: &str| {
+        let mut v = v.clone();
+        v[TAG] = json!(env);
+        v
+    };
+    for (env, answer) in answers {
+        for (host, login) in answer["viewers"].as_object().into_iter().flatten() {
+            viewers.insert(format!("{env} {host}"), login.clone());
+        }
+        for p in answer["providers"].as_array().into_iter().flatten() {
+            let Some(at) = providers.iter().position(|h| h["host"] == p["host"]) else {
+                providers.push(p.clone());
+                continue;
+            };
+            let held = &mut providers[at];
+            let count = held["projectCount"].as_i64().unwrap_or(0) + p["projectCount"].as_i64().unwrap_or(0);
+            let searches = held["searchesOnHost"] == true && p["searchesOnHost"] == true;
+            let configured = held["configured"] == true || p["configured"] == true;
+            if held["configured"] != true {
+                *held = p.clone();
+            }
+            held["projectCount"] = json!(count);
+            held["searchesOnHost"] = json!(searches);
+            held["configured"] = json!(configured);
+        }
+        entries.extend(answer["entries"].as_array().into_iter().flatten().map(|e| tagged(e, env.as_str())));
+        errors.extend(answer["errors"].as_array().into_iter().flatten().map(|e| tagged(e, env.as_str())));
+        if answer["truncated"] == true {
+            truncated.push(json!(env));
+        }
+        if let Some(next) = answer["nextCursors"].as_object().filter(|c| !c.is_empty()) {
+            cursors.insert(env.clone(), Value::Object(next.clone()));
+        }
+    }
+    entries.sort_by_key(|e| std::cmp::Reverse(ts(e, "updatedAt").unwrap_or(0)));
+    json!({
+        "viewers": viewers,
+        "providers": providers,
+        "entries": entries,
+        "errors": errors,
+        "truncated": !truncated.is_empty(),
+        "nextCursors": cursors,
+        "truncatedEnvironments": truncated,
+    })
+}
+
+/// capableEnvironments: the environments that answered with a config, by environment id.
+pub(super) fn capable(s: &App) -> Vec<String> {
+    let mut found: Vec<(String, String)> = crate::env::keys(s)
+        .into_iter()
+        .filter_map(|env| {
+            let config = crate::env::source(s, &env)?.state().config.as_ref()?;
+            let id = config["environment"]["environmentId"].as_str().map_or_else(|| env.clone(), str::to_owned);
+            Some((id, env))
+        })
+        .collect();
+    found.sort();
+    found.into_iter().map(|(_, env)| env).collect()
+}
+
+/// The environment's id as its server names it (the menus' last tiebreak).
+fn environment_id(s: &App, env: &str) -> String {
+    let config = crate::env::source(s, env).and_then(|src| src.state().config.as_ref());
+    config.and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or(env).to_string()
+}
+
+/// The projects each of `envs` holds (its own rows, not copies of another's), tagged with it.
+fn env_projects(s: &App, envs: &[String]) -> Vec<Value> {
+    let mut out = Vec::new();
+    for env in envs {
+        let Some(src) = crate::env::source(s, env) else { continue };
+        for p in src.state().projects.iter().filter(|p| p.get(TAG).is_none() && p["isScratch"] != true) {
+            let mut p = p.clone();
+            p[TAG] = json!(env);
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// assignProjectsToEnvironments: a repository on several environments is read once, on the
+/// first of `envs` holding it; a project without one stays with its own environment.
+fn assign(projects: &[Value], envs: &[String]) -> HashMap<String, Vec<String>> {
+    let rank = |env: &str| envs.iter().position(|e| e == env);
+    let repository = |p: &Value| p["repositoryIdentity"]["canonicalKey"].as_str().filter(|k| !k.is_empty()).map(str::to_lowercase);
+    let mut owner: HashMap<String, String> = HashMap::new();
+    for p in projects {
+        let env = field(p, TAG);
+        let (Some(repo), Some(at)) = (repository(p), rank(env)) else { continue };
+        if owner.get(&repo).is_none_or(|held| at < rank(held.as_str()).unwrap_or(usize::MAX)) {
+            owner.insert(repo, env.to_string());
+        }
+    }
+    let mut out: HashMap<String, Vec<String>> = HashMap::new();
+    for p in projects {
+        let env = field(p, TAG);
+        if rank(env).is_none() || repository(p).is_some_and(|r| owner.get(&r).map(String::as_str) != Some(env)) {
+            continue;
+        }
+        out.entry(env.to_string()).or_default().push(field(p, "id").to_string());
+    }
+    out
+}
+
+/// resolveQueryEnvironmentIds: within the project filter, only the environments holding it; all
+/// of them while the projects are unknown and the project names no single one.
+fn query_environments(envs: Vec<String>, projects: &[Value], project: Option<&str>, known: bool) -> Vec<String> {
+    let Some(id) = project else { return envs };
+    let holders: Vec<&str> = projects.iter().filter(|p| field(p, "id") == id).map(|p| field(p, TAG)).collect();
+    if !known && holders.len() != 1 {
+        return envs;
+    }
+    envs.into_iter().filter(|env| holders.contains(&env.as_str())).collect()
+}
+
+/// usePullRequestScope's environmentQueries: the environments the Server and Project filters
+/// keep, each reading only the repositories no environment before it reads; one holding no
+/// projects is not read.
+pub(super) fn targets(s: &App) -> Vec<Target> {
+    let f = &s.ui.pages.pull_requests.filters;
+    let envs: Vec<String> = capable(s).into_iter().filter(|env| f.environment.as_ref().is_none_or(|e| e == env)).collect();
+    let projects = env_projects(s, &envs);
+    let known = envs.iter().all(|env| crate::env::source(s, env).is_some_and(|src| src.state().shell_ready));
+    let envs = query_environments(envs, &projects, f.project.as_deref(), known);
+    if !known || f.project.is_some() {
+        return envs.into_iter().map(|env| (env, None)).collect();
+    }
+    let mut assignment = assign(&projects, &envs);
+    envs.into_iter()
+        .filter_map(|env| {
+            let ids = assignment.remove(&env)?;
+            let all = ids.len() == projects.iter().filter(|p| field(p, TAG) == env).count();
+            Some((env, (!all).then_some(ids)))
+        })
+        .collect()
+}
+
+/// The Server filter's pick; another server holds other projects, so the Project filter clears.
+fn pick_server(u: &mut Ui, env: Option<String>) {
+    u.filters.environment = env;
+    u.filters.project = None;
+}
+
+/// PullRequestListGroups' environmentLabel: which server listed the row, once more than one can.
+fn environment_label(s: &App, e: &Value, spans: bool) -> Option<String> {
+    spans.then(|| crate::env::label(s, origin(e, &s.ui.env.active))).filter(|l| !l.is_empty())
 }
 
 pub fn poll(s: &mut App) -> bool {
@@ -524,6 +776,7 @@ pub fn poll(s: &mut App) -> bool {
         return changed;
     }
     settle_panel(ui(s));
+    changed |= super::pr_tabs::sync(s);
     let u = ui(s);
     if std::mem::take(&mut u.pasted) {
         submit(u);
@@ -532,58 +785,30 @@ pub fn poll(s: &mut App) -> bool {
     changed |= settle_search(u);
     changed |= settle_sweep(u);
     changed |= debounce(s);
-    if let Some(id) = s.ui.pages.pull_requests.invalidating
-        && s.src.net().and_then(|n| n.take_reply(id)).is_some()
-    {
+    let invalidating = std::mem::take(&mut ui(s).invalidating);
+    if !invalidating.is_empty() {
+        let asked = invalidating.len();
+        let left: Vec<(String, u64)> = invalidating.into_iter().filter(|(env, id)| take(s, env, *id).is_none()).collect();
+        changed |= left.len() != asked;
+        let u = ui(s);
         // Host caches are dropped (or the call failed, which web also ignores): ask again.
-        let u = ui(s);
-        u.invalidating = None;
-        reread(u);
-        changed = true;
-    }
-    if let Some(id) = s.ui.pages.pull_requests.stats_pending
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
-    {
-        let u = ui(s);
-        u.stats_pending = None;
-        if let Ok(reply) = reply {
-            for stat in reply["stats"].as_array().into_iter().flatten() {
-                let host = u.result.as_ref().and_then(|r| r["entries"].as_array()).and_then(|es| {
-                    es.iter().find(|e| field(e, "repository") == field(stat, "repository") && e["number"] == stat["number"]).map(|e| field(e, "host").to_string())
-                });
-                if let Some(host) = host {
-                    let k = format!("{host}:{}#{}", field(stat, "repository"), stat["number"]);
-                    u.stats.insert(k, (stat["additions"].as_i64().unwrap_or(0), stat["deletions"].as_i64().unwrap_or(0)));
-                }
-            }
+        if left.is_empty() {
+            reread(u);
         }
-        changed = true;
+        u.invalidating = left;
     }
-    if let Some((id, append)) = s.ui.pages.pull_requests.pending
-        && let Some(reply) = s.src.net().and_then(|n| n.take_reply(id))
-    {
-        let u = ui(s);
-        u.pending = None;
-        match reply {
-            Ok(result) => {
-                let result = if append { appended(u.result.take(), result) } else { result };
-                if u.filters.host.is_none() || u.hosts.is_empty() {
-                    u.hosts = result["providers"].as_array().cloned().unwrap_or_default();
-                }
-                // The list asked the baseline's own question, so its answer is the baseline's too.
-                let base = baseline_input(&u.filters);
-                if !append && u.requested.as_ref() == Some(&base) {
-                    u.baseline.answer = Some((base.clone(), result.clone()));
-                    u.baseline.asked = Some(base);
-                }
-                u.result = Some(result);
-                u.error = None;
+    changed |= land_stats(s);
+    for (env, id) in std::mem::take(&mut ui(s).pending) {
+        match take(s, &env, id) {
+            Some(reply) => {
+                land(ui(s), &env, reply);
+                changed = true;
             }
-            Err(e) => u.error = Some(error_text(&e, "The environment request failed.")),
+            None => ui(s).pending.push((env, id)),
         }
-        changed = true;
     }
     let wanted = input(&s.ui.pages.pull_requests);
+    let targets = targets(s);
     let requested = s.ui.pages.pull_requests.requested.clone();
     if requested.as_ref() != Some(&wanted) {
         // A different question starts from the first page again.
@@ -598,17 +823,81 @@ pub fn poll(s: &mut App) -> bool {
         match held {
             Some(held) if requested.is_some() => {
                 u.result = Some(held);
+                // Environments the baseline hasn't heard from yet are asked by the list itself.
+                u.answers = u.baseline.answers.clone();
+                u.sent = u.baseline.sent.iter().filter(|t| u.answers.iter().any(|a| a.0 == t.0)).cloned().collect();
                 u.error = None;
-                u.pending = None;
+                u.pending.clear();
+                u.appending = false;
+                u.fresh = false;
             }
-            _ => fetch(s, wanted, false),
+            _ => fetch(s, &wanted, &targets),
         }
         changed = true;
+    } else if s.ui.pages.pull_requests.sent.iter().any(|t| !targets.contains(t)) {
+        // An environment left the scope, or reads other projects now: the list is asked again.
+        ui(s).requested = None;
+        changed = true;
+    } else if s.ui.pages.pull_requests.pending.is_empty() || !s.ui.pages.pull_requests.appending {
+        // An environment that joined the scope, or connected since, answers into the list too
+        // (not while a continuation is on its way).
+        let u = &s.ui.pages.pull_requests;
+        let joined: Vec<(Target, Value)> = targets.iter().filter(|t| !u.sent.contains(t)).map(|t| (t.clone(), for_target(&wanted, t))).collect();
+        changed |= ask(s, joined, false);
     }
-    changed |= sync_reads(s);
+    changed |= sync_reads(s, &targets);
     changed |= super::pr_filters::poll(s);
     want_stats(s);
     changed
+}
+
+/// One environment's answer to the list's question: the first to land replaces what the last
+/// question showed, and the answers so far show merged, after the shown rows while continuing.
+fn land(u: &mut Ui, env: &str, reply: Result<Value, Value>) {
+    if std::mem::take(&mut u.fresh) {
+        u.answers.clear();
+        u.error = None;
+    }
+    let answer = match reply {
+        Ok(answer) => answer,
+        Err(e) => {
+            u.error = Some(error_text(&e, "The environment request failed."));
+            return;
+        }
+    };
+    put(&mut u.answers, env, answer);
+    let merged = merge(&u.answers);
+    let result = if u.appending { appended(u.result.take(), merged) } else { merged };
+    if u.filters.host.is_none() || u.hosts.is_empty() {
+        u.hosts = result["providers"].as_array().cloned().unwrap_or_default();
+    }
+    // The list asked the baseline's own question, so its answer is the baseline's too.
+    let base = baseline_input(&u.filters);
+    if !u.appending && u.requested.as_ref() == Some(&base) {
+        u.baseline.answer = Some((base.clone(), result.clone()));
+        u.baseline.asked = Some(base);
+        u.baseline.answers = u.answers.clone();
+        u.baseline.sent = u.sent.clone();
+    }
+    u.result = Some(result);
+}
+
+/// Sends the list's question to each environment in `asks`, continuing the shown rows where
+/// `append`; false when none could be reached.
+fn ask(s: &mut App, asks: Vec<(Target, Value)>, append: bool) -> bool {
+    let mut sent = false;
+    for (target, payload) in asks {
+        let Some(net) = crate::env::net_of(s, &target.0) else { continue };
+        let id = net.request("pullRequests.list", payload);
+        let u = ui(s);
+        u.pending.push((target.0.clone(), id));
+        u.appending |= append;
+        if !u.sent.contains(&target) {
+            u.sent.push(target);
+        }
+        sent = true;
+    }
+    sent
 }
 
 /// Every read asks again on its next poll, keeping what it shows until the answer lands.
@@ -619,32 +908,33 @@ fn reread(u: &mut Ui) {
     }
 }
 
-/// Watches `pullRequests.subscribeRefreshes` while the page shows; a new revision means a turn
-/// finished somewhere, so the list and the open detail read again (the queries' refreshTrigger).
+/// Watches each environment's `pullRequests.subscribeRefreshes` while the page shows; a new
+/// revision means a turn finished somewhere, so the list and the open detail read again (the
+/// queries' refreshTrigger).
 fn watch_refreshes(s: &mut App, on: bool) -> bool {
-    if !on {
-        let u = ui(s);
-        let was = std::mem::take(&mut u.watching);
-        u.turn = None;
-        if was && let Some(net) = s.src.net() {
+    let envs: Vec<String> = if on { targets(s).into_iter().map(|t| t.0).collect() } else { Vec::new() };
+    for gone in std::mem::take(&mut ui(s).watching).into_iter().filter(|env| !envs.contains(env)) {
+        if let Some(net) = crate::env::net_of(s, &gone) {
             net.unwatch_resource(REFRESHES, json!({}));
         }
+    }
+    ui(s).turns.retain(|env, _| envs.contains(env));
+    let mut moved = false;
+    for env in &envs {
+        let Some(net) = crate::env::net_of(s, env) else { continue };
+        net.watch_resource(REFRESHES, json!({}));
+        let revision = net.resource(REFRESHES, json!({})).and_then(Value::as_u64);
+        moved |= turned(ui(s).turns.entry(env.clone()).or_default(), revision);
+    }
+    ui(s).watching = envs;
+    if !moved {
         return false;
     }
-    let Some(net) = s.src.net() else { return false };
-    net.watch_resource(REFRESHES, json!({}));
-    let revision = net.resource(REFRESHES, json!({})).and_then(Value::as_u64);
-    let u = ui(s);
-    u.watching = true;
-    if !turned(&mut u.turn, revision) {
-        return false;
-    }
-    after_turn(u);
+    after_turn(ui(s));
     super::pr_detail::refresh(s);
     true
 }
 
-/// Whether `now` is a revision other than the one last seen, which it becomes.
 fn turned(seen: &mut Option<u64>, now: Option<u64>) -> bool {
     let Some(now) = now else { return false };
     seen.replace(now) != Some(now)
@@ -737,7 +1027,7 @@ fn on_scroll(scrolled: &Scrolled, waker: Option<&rune::Waker>, y: f32) {
 /// What the page reads beside the list: the baseline while a search or longer page replaces it,
 /// the authored and review-requested partitions once the baseline has rows, and every state's
 /// rows while the Filters menu is open.
-fn sync_reads(s: &mut App) -> bool {
+fn sync_reads(s: &mut App, targets: &[Target]) -> bool {
     let u = &s.ui.pages.pull_requests;
     let f = &u.filters;
     let base = baseline_input(f);
@@ -746,10 +1036,25 @@ fn sync_reads(s: &mut App) -> bool {
     let partitioned = partitions_wanted(u) && listed;
     let [authored, reviewing] = ["authored", "reviewing"].map(|i| partitioned.then(|| partition_input(f, i)));
     let facets = (u.menu == Some("filters")).then(|| facet_input(f));
-    let mut changed = sync(&mut s.ui.pages.pull_requests.baseline, s.src.net(), baseline);
-    changed |= sync(&mut s.ui.pages.pull_requests.partitions[0], s.src.net(), authored);
-    changed |= sync(&mut s.ui.pages.pull_requests.partitions[1], s.src.net(), reviewing);
-    changed | sync(&mut s.ui.pages.pull_requests.facets, s.src.net(), facets)
+    let mut changed = sync(s, |u| &mut u.baseline, baseline, targets);
+    changed |= sync(s, |u| &mut u.partitions[0], authored, targets);
+    changed |= sync(s, |u| &mut u.partitions[1], reviewing, targets);
+    changed | sync(s, |u| &mut u.facets, facets, targets)
+}
+
+/// The `pull-requests-environments` scenes: the usage scenes' "Studio Mac" lists the recorded
+/// rows outside s5labs/s5code, this machine the rest.
+pub(super) fn environments_scene(s: &mut App) {
+    super::usage_limits::environments_scene(s);
+    let u = ui(s);
+    let Some(result) = u.result.take() else { return };
+    let (theirs, ours): (Vec<Value>, Vec<Value>) = result["entries"].as_array().into_iter().flatten().cloned().partition(|e| field(e, "repository") != "s5labs/s5code");
+    let part = |entries: Vec<Value>| {
+        let mut answer = result.clone();
+        answer["entries"] = json!(entries);
+        answer
+    };
+    u.result = Some(merge(&[(crate::env::LOCAL.to_string(), part(ours)), ("studio".to_string(), part(theirs))]));
 }
 
 /// Records the shown list as the scope's baseline, with `authored` and `reviewing` as its
@@ -822,71 +1127,103 @@ fn appended(prev: Option<Value>, mut next: Value) -> Value {
     next
 }
 
-/// Asks the hosts for the sizes of rows listed without one, a batch at a time.
+/// Asks each environment for the sizes of its rows listed without one, a batch at a time.
 fn want_stats(s: &mut App) {
     let u = &s.ui.pages.pull_requests;
-    if u.stats_pending.is_some() || !matches!(s.src, crate::data::Source::Live(_)) {
+    if !u.stats_pending.is_empty() || !matches!(s.src, crate::data::Source::Live(_)) {
         return;
     }
-    let refs: Vec<(String, Value)> = u
-        .result
-        .as_ref()
-        .and_then(|r| r["entries"].as_array())
-        .into_iter()
-        .flatten()
-        .filter(|e| size(e) == 0 && !u.stats_asked.contains(&key(e)) && e["projectId"].is_string())
-        .take(MAX_STATS_REFS)
-        .map(|e| (key(e), json!({"projectId": e["projectId"], "repository": e["repository"], "number": e["number"]})))
-        .collect();
-    if refs.is_empty() {
-        return;
+    let mut batches: Vec<(String, Vec<String>, Vec<Value>)> = Vec::new();
+    let rows = u.result.as_ref().and_then(|r| r["entries"].as_array()).into_iter().flatten();
+    for e in rows.filter(|e| size(e) == 0 && !u.stats_asked.contains(&key(e)) && e["projectId"].is_string()).take(MAX_STATS_REFS) {
+        let env = origin(e, &s.ui.env.active);
+        let at = match batches.iter().position(|b| b.0 == env) {
+            Some(at) => at,
+            None => {
+                batches.push((env.to_string(), Vec::new(), Vec::new()));
+                batches.len() - 1
+            }
+        };
+        batches[at].1.push(key(e));
+        batches[at].2.push(json!({"projectId": e["projectId"], "repository": e["repository"], "number": e["number"]}));
     }
-    let payload = json!({"refs": refs.iter().map(|r| r.1.clone()).collect::<Vec<_>>()});
-    if let Some(net) = s.src.net() {
-        let id = net.request("pullRequests.listStats", payload);
+    for (env, keys, refs) in batches {
+        let Some(net) = crate::env::net_of(s, &env) else { continue };
+        let id = net.request("pullRequests.listStats", json!({"refs": refs}));
         let u = ui(s);
-        u.stats_pending = Some(id);
-        u.stats_asked.extend(refs.into_iter().map(|r| r.0));
+        u.stats_pending.push((env, id));
+        u.stats_asked.extend(keys);
     }
 }
 
-fn fetch(s: &mut App, payload: Value, append: bool) {
-    match s.src.net() {
-        Some(net) => {
-            let id = net.request("pullRequests.list", payload);
-            ui(s).pending = Some((id, append));
-        }
-        None if !crate::host::live() => {
-            if ui(s).result.is_none() {
-                let result = super::fixture("pull-requests.json");
-                let u = ui(s);
-                u.hosts = result.as_ref().and_then(|r| r["providers"].as_array()).cloned().unwrap_or_default();
-                u.result = result;
+/// Folds the sizes each environment measured onto its own rows.
+fn land_stats(s: &mut App) -> bool {
+    let mut changed = false;
+    for (env, id) in std::mem::take(&mut ui(s).stats_pending) {
+        let Some(reply) = take(s, &env, id) else {
+            ui(s).stats_pending.push((env, id));
+            continue;
+        };
+        changed = true;
+        let Ok(reply) = reply else { continue };
+        let active = s.ui.env.active.clone();
+        let u = ui(s);
+        for stat in reply["stats"].as_array().into_iter().flatten() {
+            let row = u.result.as_ref().and_then(|r| r["entries"].as_array()).and_then(|es| {
+                es.iter().find(|e| origin(e, &active) == env && field(e, "repository") == field(stat, "repository") && e["number"] == stat["number"]).map(key)
+            });
+            if let Some(row) = row {
+                u.stats.insert(row, (stat["additions"].as_i64().unwrap_or(0), stat["deletions"].as_i64().unwrap_or(0)));
             }
         }
-        None => {}
     }
+    changed
 }
 
-/// Refresh drops the hosts' cached answers, then lists again (`pullRequests.invalidate`).
+/// Asks every target `question` afresh; the first answer to land replaces the shown rows.
+fn fetch(s: &mut App, question: &Value, targets: &[Target]) {
+    let u = ui(s);
+    u.pending.clear();
+    u.sent.clear();
+    u.appending = false;
+    u.fresh = true;
+    if ask(s, targets.iter().map(|t| (t.clone(), for_target(question, t))).collect(), false) || crate::host::live() || ui(s).result.is_some() {
+        return;
+    }
+    let result = super::fixture("pull-requests.json");
+    let u = ui(s);
+    u.hosts = result.as_ref().and_then(|r| r["providers"].as_array()).cloned().unwrap_or_default();
+    u.result = result;
+}
+
+/// Refresh drops each environment's cached host answers, then lists again (`pullRequests.invalidate`).
 fn refresh(s: &mut App) {
     if refreshing(&s.ui.pages.pull_requests) {
         return;
     }
-    match s.src.net() {
-        Some(net) => {
-            let id = net.request("pullRequests.invalidate", json!({}));
-            let u = ui(s);
-            u.invalidating = Some(id);
-            u.stats.clear();
-            u.stats_asked.clear();
+    let mut asked = Vec::new();
+    for (env, _) in targets(s) {
+        if let Some(net) = crate::env::net_of(s, &env) {
+            asked.push((env, net.request("pullRequests.invalidate", json!({}))));
         }
-        None => ui(s).requested = None,
     }
+    let u = ui(s);
+    if asked.is_empty() {
+        u.requested = None;
+        return;
+    }
+    u.invalidating = asked;
+    u.stats.clear();
+    u.stats_asked.clear();
+}
+
+/// The list's first page is on its way (not a continuation).
+fn listing(u: &Ui) -> bool {
+    !u.pending.is_empty() && !u.appending
 }
 
 fn refreshing(u: &Ui) -> bool {
-    u.invalidating.is_some() || u.pending.is_some_and(|p| !p.1)
+    !u.invalidating.is_empty() || listing(u)
 }
 
 /// Whether "Load more" has anything to ask: cursors to continue from, or room to grow the page.
@@ -895,22 +1232,39 @@ fn can_load_more(u: &Ui, result: &Value) -> bool {
     result["truncated"].as_bool().unwrap_or(false) && (cursors || u.limit.unwrap_or(PAGE) < MAX_PAGE)
 }
 
+/// loadMore: the environments with cursors continue from them, and those that hold more without
+/// a cursor answer a longer first page; without any cursor every one answers a longer page.
 fn load_more(s: &mut App) {
     let u = &s.ui.pages.pull_requests;
-    if u.pending.is_some() {
+    if !u.pending.is_empty() {
         return;
     }
     let Some(result) = u.result.as_ref() else { return };
-    let cursors = result["nextCursors"].clone();
-    if cursors.as_object().is_some_and(|c| !c.is_empty()) {
-        let mut payload = input(u);
-        payload["cursors"] = cursors;
-        fetch(s, payload, true);
-    } else {
-        // Without cursors the hosts answer a longer first page instead.
-        let u = ui(s);
+    let cursors = result["nextCursors"].as_object().cloned().unwrap_or_default();
+    let regrown: Vec<String> = result["truncatedEnvironments"].as_array().into_iter().flatten().filter_map(Value::as_str).filter(|env| !cursors.contains_key(*env)).map(str::to_string).collect();
+    let u = ui(s);
+    if cursors.is_empty() || !regrown.is_empty() {
         u.limit = Some((u.limit.unwrap_or(PAGE) + PAGE).min(MAX_PAGE));
     }
+    if cursors.is_empty() {
+        return;
+    }
+    let question = input(u);
+    u.requested = Some(question.clone());
+    let asks: Vec<(Target, Value)> = u
+        .sent
+        .iter()
+        .filter_map(|t| {
+            let mut payload = for_target(&question, t);
+            match cursors.get(&t.0) {
+                Some(next) => payload["cursors"] = next.clone(),
+                None if regrown.contains(&t.0) => {}
+                None => return None,
+            }
+            Some((t.clone(), payload))
+        })
+        .collect();
+    ask(s, asks, true);
 }
 
 /// A close sweep ends when the filters or the sent search change under it.
@@ -923,18 +1277,15 @@ fn settle_sweep(u: &mut Ui) -> bool {
     !first && super::pr_row::cancel_sweep(&mut u.row)
 }
 
-/// Escape ends a sweep, closes a menu or the open pull request, and otherwise leaves the page
+/// Escape ends a sweep or closes a menu, and otherwise leaves the page with its tabs kept
 /// (registerPullRequestsEscapeCommand) unless a shell overlay is open.
 fn escape(s: &mut App) -> bool {
     let u = ui(s);
     if super::pr_row::cancel_sweep(&mut u.row) {
         return true;
     }
-    if u.context.take().is_some() || u.menu.take().is_some() {
+    if u.context.take().is_some() || u.menu.take().is_some() || u.tabs.menu.take().is_some() {
         u.submenu = None;
-        return true;
-    }
-    if u.selected.take().is_some() {
         return true;
     }
     let shell = &s.ui.shell;
@@ -966,10 +1317,15 @@ pub fn on_key(s: &mut App, e: &rune::KeyEvent, tx: &mut Tx) -> bool {
         u.query.focus = u.query.text.len();
         return true;
     }
+    // closeActiveSurfaceFromShortcut: the shown tab closes.
     if crate::panel::shortcut(s, e, "rightPanel.close") {
         let repeat = tx.key_repeat();
         let u = ui(s);
-        return if repeat { u.selected.is_some() } else { u.selected.take().is_some() };
+        let Some(url) = u.selected.clone() else { return false };
+        if !repeat {
+            super::pr_tabs::close(u, &url);
+        }
+        return true;
     }
     if crate::panel::shortcut(s, e, "rightPanel.toggle") {
         let repeat = tx.key_repeat();
@@ -1010,8 +1366,11 @@ fn short_label(url: &str) -> &'static str {
 
 // ---- ranking ----------------------------------------------------------------------------
 
+/// pullRequestEntryViewer: the account the row's environment reads its host as.
 fn viewer<'a>(result: &'a Value, e: &Value) -> &'a str {
-    result["viewers"][field(e, "host")].as_str().map(str::trim).unwrap_or("")
+    let scoped = format!("{} {}", e[TAG].as_str().unwrap_or(""), field(e, "host"));
+    let viewers = &result["viewers"];
+    viewers.get(scoped.as_str()).or_else(|| viewers.get(field(e, "host"))).and_then(Value::as_str).map(str::trim).unwrap_or("")
 }
 
 fn authored(result: &Value, e: &Value) -> bool {
@@ -1043,7 +1402,8 @@ fn author_filter<'a>(author: &'a str, viewer: &'a str) -> &'a str {
 fn matches_filters(f: &Filters, filters: &Map<String, Value>, result: &Value, e: &Value) -> bool {
     let narrowed = (f.state == "all" || field(e, "state") == f.state)
         && f.project.as_deref().is_none_or(|p| field(e, "projectId") == p)
-        && f.host.as_deref().is_none_or(|h| field(e, "host") == h);
+        && f.host.as_deref().is_none_or(|h| field(e, "host") == h)
+        && f.environment.as_deref().is_none_or(|env| e[TAG].as_str().is_none_or(|t| t == env));
     let involvement_ok = match f.involvement {
         "reviewing" => e["viewerReviewRequested"].as_bool().unwrap_or(false),
         "authored" => authored(result, e),
@@ -1244,7 +1604,7 @@ pub(super) fn groups(u: &Ui, result: &Value) -> Vec<(Group, Vec<Value>)> {
     let (typed_text, typed) = parse_query(&u.query.text);
     let (sent_text, _) = parse_query(&u.sent_query);
     let filters = merged_filters(&u.filters, &typed);
-    let settled = u.query.text == u.sent_query && u.pending.is_none();
+    let settled = u.query.text == u.sent_query && u.pending.is_empty();
     // Hosts that search text themselves match fields rows don't carry; trust their answer.
     let searching_hosts: HashSet<&str> = result["providers"].as_array().into_iter().flatten().filter(|p| p["searchesOnHost"] == true).map(|p| field(p, "host")).collect();
     let mut rows: Vec<Value> = result["entries"]
@@ -1361,7 +1721,6 @@ pub(super) fn panel_control(s: &App, t: &T) -> El {
 // ---- view -------------------------------------------------------------------------------
 
 pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> El {
-    let _ = cx;
     let u = &s.ui.pages.pull_requests;
     if let Some((url, x, y)) = &u.context
         && let Some(e) = u.result.as_ref().and_then(|r| r["entries"].as_array()?.iter().find(|e| field(e, "url") == url))
@@ -1374,18 +1733,18 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
         tx.live_only();
     });
     if u.selected.is_some() && u.maximized {
-        return main.child(super::pr_detail::view(s, t, overlays));
+        return main.child(super::pr_tabs::panel(s, cx, t, overlays));
     }
     let header = top_bar(s, t, overlays);
     let marker = el().key(CONDENSE_MARKER).w_full().h(1.0);
     let mut content = col().w_full().max_w(1152.0).px(24.0).pt(24.0).pb(48.0).gap(16.0).child(col().w_full().child(toolbar(s, t, overlays)).child(marker));
     match (&u.result, &u.error) {
         (None, None) => content = content.child(ghost(t, 7, Some("Loading pull requests…".into()))),
-        (None, Some(error)) => content = content.child(unavailable(t, error, u.pending.is_some())),
+        (None, Some(error)) => content = content.child(unavailable(t, error, !u.pending.is_empty())),
         (Some(result), error) => {
             let groups = groups(u, result);
             match error {
-                Some(error) if groups.is_empty() => content = content.child(unavailable(t, error, u.pending.is_some())),
+                Some(error) if groups.is_empty() => content = content.child(unavailable(t, error, !u.pending.is_empty())),
                 _ if groups.is_empty() => content = content.child(empty(s, t, result)),
                 _ => {
                     for (group, entries) in &groups {
@@ -1422,7 +1781,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     if u.selected.is_none() {
         return main;
     }
-    main.child(el().w(1.0).h_full().shrink().fill(t.c.border)).child(super::pr_detail::view(s, t, overlays))
+    main.child(super::pr_tabs::panel(s, cx, t, overlays))
 }
 
 /// `Button` with the outline look the toolbar and states use throughout.
@@ -1469,7 +1828,7 @@ pub(super) fn busy_icon(busy: bool, idle: &'static rune::Icon, size: f32) -> El 
 /// shows one); the other draws the same text still.
 fn search_field(u: &Ui, t: &T, key: &'static str, live: bool) -> El {
     let typed = u.query.text.trim();
-    let busy = !typed.is_empty() && (typed != u.sent_query.trim() || u.pending.is_some_and(|p| !p.1));
+    let busy = !typed.is_empty() && (typed != u.sent_query.trim() || listing(u));
     let placeholder = "Search pull requests, or label:bug";
     let field = if live {
         let input = text_input(&u.query, theme::TEXT_SM)
@@ -1729,19 +2088,41 @@ fn filter_entries(s: &App, t: &T) -> Vec<MenuEntry> {
         out.extend([MenuEntry::Separator, sub_item(MenuItem::new("Host").icon(glyph), value, "host", entries)]);
     }
 
+    // serverMenuOptions: "All servers", then each environment that can list pull requests.
+    let environments = capable(s);
+    if environments.len() > 1 {
+        let value = f.environment.as_deref().map_or_else(|| "All servers".to_string(), |env| crate::env::label(s, env));
+        let glyph = if f.environment.is_some() { &i::SERVER } else { &i::LAYERS };
+        out.extend([MenuEntry::Separator, sub_item(MenuItem::new("Server").icon(glyph), value, "server", server_entries(s, &environments))]);
+    }
+
     let listed = u.baseline.answer_for(&baseline_input(f)).or(u.result.as_ref());
     let errors = listed.and_then(|r| r["errors"].as_array()).map_or(&[][..], Vec::as_slice);
-    let server = crate::env::label(s, &s.ui.env.active);
-    let environment = s.state().config.as_ref().and_then(|c| c["environment"]["environmentId"].as_str()).unwrap_or(s.ui.env.active.as_str()).to_string();
     let order = if sub == Some("project") { super::pr_filters::sidebar_order(s) } else { Vec::new() };
-    let projects = super::pr_filters::projects(&s.state().projects, &order, f.project.as_deref(), &server, &environment, errors);
+    let scoped: Vec<String> = environments.into_iter().filter(|env| f.environment.as_ref().is_none_or(|e| e == env)).collect();
+    let server = |env: &str| (crate::env::label(s, env), environment_id(s, env));
+    let projects = super::pr_filters::projects(&env_projects(s, &scoped), &order, f.project.as_deref(), f.environment.as_deref(), server, errors);
     // PullRequestFilterOptionIcon: the chosen project's favicon, else "All projects" and its glyph.
-    let (project, value) = match projects.iter().find(|p| Some(p.id.as_str()) == f.project.as_deref()) {
+    let (project, value) = match projects.iter().find(|p| super::pr_filters::chosen(f, p)) {
         Some(p) => (MenuItem::new("Project").leading(super::pr_filters::menu_favicon(s, t, &p.id, &p.title)), p.title.clone()),
         None => (MenuItem::new("Project").icon(&i::LAYERS), "All projects".to_string()),
     };
     let entries = super::pr_filters::project_entries(s, t, &projects);
     out.extend([MenuEntry::Separator, sub_item(project, value, "project", entries)]);
+    out
+}
+
+/// The Server submenu: "All servers", then each environment by its label.
+fn server_entries(s: &App, environments: &[String]) -> Vec<MenuEntry> {
+    let chosen = s.ui.pages.pull_requests.filters.environment.as_deref();
+    let mut out = vec![
+        MenuEntry::Label("Server".into()),
+        MenuEntry::item(MenuItem::new("All servers").icon(&i::LAYERS).radio(chosen.is_none()).on_select(|s: &mut App| pick_server(ui(s), None))),
+    ];
+    for env in environments {
+        let pick = env.clone();
+        out.push(MenuEntry::item(MenuItem::new(crate::env::label(s, env)).icon(&i::SERVER).radio(chosen == Some(env.as_str())).on_select(move |s: &mut App| pick_server(ui(s), Some(pick.clone())))));
+    }
     out
 }
 
@@ -1829,9 +2210,10 @@ fn group_view(s: &App, t: &T, result: &Value, group: Group, entries: &[Value], o
                 .child(el().grow(1.0).h(1.0).fill(t.c.border)),
         );
     }
+    let spans = capable(s).len() > 1;
     let mut rows = col().w_full().gap(2.0);
     for e in entries {
-        rows = rows.child(pr_row(s, t, result, e, overlays));
+        rows = rows.child(pr_row(s, t, result, e, spans, overlays));
     }
     out.child(rows)
 }
@@ -1840,7 +2222,7 @@ fn mix(a: Color, b: Color, k: f32) -> Color {
     Color { r: a.r * k + b.r * (1.0 - k), g: a.g * k + b.g * (1.0 - k), b: a.b * k + b.b * (1.0 - k), a: a.a * k + b.a * (1.0 - k) }
 }
 
-fn state_glyph(t: &T, e: &Value) -> (&'static rune::Icon, Color) {
+pub(super) fn state_glyph(t: &T, e: &Value) -> (&'static rune::Icon, Color) {
     let dark = t.dark;
     if open(e) && e["isDraft"].as_bool().unwrap_or(false) {
         return (&i::GIT_PULL_REQUEST_DRAFT, if dark { tw::ZINC_400.alpha_mul(0.8) } else { tw::ZINC_500 });
@@ -1896,7 +2278,7 @@ fn matched_elsewhere(e: &Value, query: &str) -> bool {
     !query.is_empty() && score(e, query) <= 10
 }
 
-fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> El {
+fn pr_row(s: &App, t: &T, result: &Value, e: &Value, spans: bool, overlays: &mut Vec<El>) -> El {
     let url = field(e, "url").to_string();
     let selected = s.ui.pages.pull_requests.selected.as_deref() == Some(url.as_str());
     let (glyph, ink) = state_glyph(t, e);
@@ -1981,7 +2363,8 @@ fn pr_row(s: &App, t: &T, result: &Value, e: &Value, overlays: &mut Vec<El>) -> 
                 .child(super::avatars::avatar(&s.ui.pages.avatars, &e["author"], 14.0, t))
                 .child(text(login).font(meta).color(t.c.muted_foreground).truncate().shrink()),
         )
-        .child(text(field(e, "repository").to_string()).font(meta).color(t.c.muted_foreground).truncate().shrink());
+        .child(text(field(e, "repository").to_string()).font(meta).color(t.c.muted_foreground).truncate().shrink())
+        .children(environment_label(s, e, spans).map(|place| text(place).font(meta).color(t.c.muted_foreground).truncate().shrink().min_w(0.0).max_w(128.0)));
     let labels = e["labels"].as_array().map(Vec::as_slice).unwrap_or(&[]);
     for (n, label) in labels.iter().take(3).enumerate() {
         let hue = rune::color::hex(&format!("#{}", field(label, "color"))).unwrap_or(t.c.muted_foreground);
@@ -2073,16 +2456,19 @@ fn context_menu(t: &T, e: &Value, hosts: &[Value], x: f32, y: f32, overlays: &mu
 fn load_more_footer(u: &Ui, t: &T, result: &Value) -> El {
     let foot = row().w_full().py(12.0).center();
     let muted = t.c.muted_foreground;
-    match u.pending {
-        Some((_, append)) => foot.child(
+    if !u.pending.is_empty() {
+        return foot.child(
             row()
                 .gap(8.0)
                 .center_y()
                 .child(icon(&i::LOADER_CIRCLE, 14.0).color(muted).looping(rune::LoopSpec::rotation(1.)))
-                .child(text(if append { "Loading more" } else { "Updating pull requests" }).font(theme::TEXT_XS).color(muted)),
-        ),
-        None if can_load_more(u, result) => foot.child(Button("Load more pull requests", None).sm().on_press(load_more).build(t)),
-        None => foot.child(text("Narrow your search to find more pull requests.").font(theme::TEXT_XS).color(muted)),
+                .child(text(if u.appending { "Loading more" } else { "Updating pull requests" }).font(theme::TEXT_XS).color(muted)),
+        );
+    }
+    if can_load_more(u, result) {
+        foot.child(Button("Load more pull requests", None).sm().on_press(load_more).build(t))
+    } else {
+        foot.child(text("Narrow your search to find more pull requests.").font(theme::TEXT_XS).color(muted))
     }
 }
 
@@ -2205,7 +2591,7 @@ fn empty(s: &App, t: &T, result: &Value) -> El {
         return state_block(t, mark, "No projects in this workspace", "Add a project, and the pull requests from its repository appear here.", row().child(add));
     }
     // The typed search hasn't reached the hosts yet, or its answer is still on the way.
-    if !query.is_empty() && (query != u.sent_query || u.pending.is_some()) {
+    if !query.is_empty() && (query != u.sent_query || !u.pending.is_empty()) {
         return ghost(t, 5, Some(format!("Searching every host for “{shown}”")));
     }
     // carriedToNothing: a cleared search waits for the scope's own answer, not an empty state.
@@ -2224,7 +2610,7 @@ fn empty(s: &App, t: &T, result: &Value) -> El {
         (format!("Nothing matches “{shown}”"), "The hosts were searched for it. Try fewer words, or search by number, author or branch.")
     } else {
         if can_load_more(u, result) {
-            let loading = u.pending.is_some();
+            let loading = !u.pending.is_empty();
             actions = actions.child(kit::Button::new(if loading { "Loading..." } else { "Load more pull requests" }).variant("outline").size("sm").disabled(loading).on_press(load_more).build(t));
         }
         let f = &u.filters;
@@ -2354,14 +2740,16 @@ mod tests {
     }
 
     #[test]
-    fn escape_closes_the_open_pull_request_then_leaves_the_page() {
+    fn escape_leaves_the_page_with_its_pull_requests_still_open() {
         let mut s = App::new();
         s.route = Route::PullRequests;
         s.ui.pages.main_route = Some(Route::Thread("t1".into()));
         s.ui.pages.pull_requests.selected = Some("https://github.com/acme/app/pull/7".into());
-        assert!(escape(&mut s) && matches!(s.route, Route::PullRequests), "the open pull request closes first");
+        s.ui.pages.pull_requests.tabs.menu = Some(("https://github.com/acme/app/pull/7".into(), 0.0, 0.0));
+        assert!(escape(&mut s) && matches!(s.route, Route::PullRequests), "an open tab menu closes first");
         assert!(escape(&mut s));
         assert!(matches!(&s.route, Route::Thread(id) if id == "t1"), "then Escape leaves for the page it was opened over");
+        assert_eq!(s.ui.pages.pull_requests.selected.as_deref(), Some("https://github.com/acme/app/pull/7"));
     }
 
     #[test]
@@ -2560,5 +2948,106 @@ mod tests {
         assert_eq!(error_text(&operation, "x"), "Pull request operation list failed: rate limited");
         assert_eq!(error_text(&json!({"message": "offline"}), "x"), "offline");
         assert_eq!(error_text(&json!([{"_tag": "Die"}]), "The environment request failed."), "The environment request failed.");
+    }
+
+    fn numbers(result: &Value) -> Vec<(u64, String)> {
+        result["entries"].as_array().into_iter().flatten().map(|e| (e["number"].as_u64().unwrap_or(0), e[TAG].as_str().unwrap_or("-").to_string())).collect()
+    }
+
+    /// This machine ("env-b", "Laptop") holds acme/web and acme/api; "Studio Mac" ("env-a")
+    /// holds acme/web too, and a project without a repository.
+    fn two_environments() -> App {
+        let mut s = App::new();
+        let config = |id: &str, label: &str| json!({"environment": {"environmentId": id, "label": label}});
+        let project = |id: &str, repository: Option<&str>| json!({"id": id, "title": id, "repositoryIdentity": repository.map(|r| json!({"canonicalKey": r}))});
+        let mut local = crate::data::empty_state();
+        local.config = Some(config("env-b", "Laptop"));
+        local.shell_ready = true;
+        local.projects = vec![project("web", Some("github.com/acme/web")), project("api", Some("github.com/acme/api"))];
+        s.src = crate::data::Source::Fixture(local);
+        let mut studio = crate::data::empty_state();
+        studio.config = Some(config("env-a", "Studio Mac"));
+        studio.shell_ready = true;
+        studio.projects = vec![project("web-copy", Some("GitHub.com/acme/web")), project("docs", None)];
+        s.ui.env.saved.push(crate::env::Saved { id: "studio".into(), label: "Studio Mac".into(), base: "https://studio.example".into(), bearer: "scene".into() });
+        crate::env::park(&mut s, "studio", crate::data::Source::Fixture(studio));
+        s
+    }
+
+    #[test]
+    fn merging_environments_ranks_rows_newest_first_and_keeps_each_ones_viewer_and_cursors() {
+        let mine = json!({
+            "viewers": {"github.com": "octo"},
+            "providers": [{"host": "github.com", "configured": false, "projectCount": 1, "searchesOnHost": true, "actions": ["close"]}],
+            "entries": [entry(json!({"number": 1, "updatedAt": "2026-01-01T00:00:00Z"})), entry(json!({"number": 3, "updatedAt": "2026-01-03T00:00:00Z"}))],
+            "errors": [], "truncated": true, "nextCursors": {},
+        });
+        let theirs = json!({
+            "viewers": {"github.com": "mara"},
+            "providers": [{"host": "github.com", "configured": true, "projectCount": 2, "searchesOnHost": false, "actions": ["merge"]}],
+            "entries": [entry(json!({"number": 1, "updatedAt": "2026-01-02T00:00:00Z"}))],
+            "errors": [{"projectId": "p", "message": "gh is not authenticated."}], "truncated": true, "nextCursors": {"github.com": "c2"},
+        });
+        let m = merge(&[(String::new(), mine), ("studio".into(), theirs)]);
+        assert_eq!(numbers(&m), [(3, String::new()), (1, "studio".into()), (1, String::new())]);
+        let rows = m["entries"].as_array().cloned().unwrap_or_default();
+        assert_eq!((key(&rows[1]), key(&rows[2])), ("studio:github.com:acme/app#1".to_string(), ":github.com:acme/app#1".to_string()));
+        assert_eq!(m["providers"], json!([{"host": "github.com", "configured": true, "projectCount": 3, "searchesOnHost": false, "actions": ["merge"]}]));
+        assert_eq!((&m["nextCursors"], &m["truncatedEnvironments"], &m["truncated"]), (&json!({"studio": {"github.com": "c2"}}), &json!(["", "studio"]), &json!(true)));
+        assert_eq!(m["errors"][0][TAG], "studio");
+        assert_eq!((viewer(&m, &rows[0]), viewer(&m, &rows[1])), ("octo", "mara"));
+        assert!(authored(&m, &rows[2]) && !authored(&m, &rows[1]), "each row is the viewer's on its own environment only");
+    }
+
+    #[test]
+    fn the_first_answer_to_a_question_replaces_the_rows_and_the_rest_merge_in() {
+        let mut u = Ui::default();
+        u.result = Some(json!({"entries": [entry(json!({"number": 9}))]}));
+        u.fresh = true;
+        u.error = Some("Earlier failure".into());
+        land(&mut u, "studio", Err(json!({"message": "offline"})));
+        assert_eq!((numbers(u.result.as_ref().unwrap()), u.error.as_deref()), (vec![(9, "-".to_string())], Some("offline")), "a failure keeps the rows shown");
+        land(&mut u, "", Ok(json!({"entries": [entry(json!({"number": 1}))]})));
+        assert_eq!((numbers(u.result.as_ref().unwrap()), u.error.as_deref()), (vec![(1, String::new())], Some("offline")));
+        let two = entry(json!({"number": 2, "updatedAt": "2026-01-02T00:00:00Z"}));
+        land(&mut u, "studio", Ok(json!({"entries": [two.clone()]})));
+        assert_eq!(numbers(u.result.as_ref().unwrap()), [(2, "studio".to_string()), (1, String::new())]);
+        // A continuation's new rows follow the ones shown.
+        u.appending = true;
+        land(&mut u, "studio", Ok(json!({"entries": [two, entry(json!({"number": 5, "updatedAt": "2026-01-05T00:00:00Z"}))]})));
+        assert_eq!(numbers(u.result.as_ref().unwrap()), [(2, "studio".to_string()), (1, String::new()), (5, "studio".to_string())]);
+    }
+
+    #[test]
+    fn a_shared_repository_is_read_once_and_the_server_and_project_filters_narrow_the_reads() {
+        let mut s = two_environments();
+        assert_eq!(capable(&s), ["studio".to_string(), String::new()], "ordered by environment id");
+        let studio = ("studio".to_string(), None);
+        assert_eq!(targets(&s), [studio.clone(), (String::new(), Some(vec!["api".to_string()]))]);
+        assert_eq!(for_target(&json!({"state": "open"}), &targets(&s)[1]), json!({"state": "open", "projectIds": ["api"]}));
+
+        ui(&mut s).filters.project = Some("web".into());
+        pick_server(ui(&mut s), Some(String::new()));
+        assert_eq!(ui(&mut s).filters.project, None, "another server holds other projects");
+        assert_eq!(targets(&s), [(String::new(), None)]);
+        assert_eq!(ui(&mut s).filters.count(""), 1);
+
+        pick_server(ui(&mut s), None);
+        ui(&mut s).filters.project = Some("docs".into());
+        assert_eq!(targets(&s), [studio], "only the environment holding the project");
+        assert_eq!(assign(&env_projects(&s, &capable(&s)), &capable(&s))["studio"], ["web-copy", "docs"]);
+    }
+
+    #[test]
+    fn rows_name_their_environment_only_once_more_than_one_can_list() {
+        let s = two_environments();
+        let spans = capable(&s).len() > 1;
+        let mut theirs = entry(json!({}));
+        theirs[TAG] = json!("studio");
+        assert_eq!((environment_label(&s, &theirs, spans), environment_label(&s, &entry(json!({})), spans)), (Some("Studio Mac".to_string()), Some("Laptop".to_string())));
+        let mut alone = App::new();
+        alone.src = crate::env::source(&s, crate::env::LOCAL).map(|src| crate::data::Source::Fixture(src.state().clone())).unwrap();
+        assert_eq!(capable(&alone).len(), 1);
+        assert_eq!(environment_label(&alone, &entry(json!({})), capable(&alone).len() > 1), None);
     }
 }

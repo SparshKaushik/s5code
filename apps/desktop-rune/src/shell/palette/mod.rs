@@ -76,6 +76,9 @@ enum Action {
     CopyThread,
     CopyPromptLink(String),
     ShareWithGuest(String),
+    ToggleThemeEditor,
+    /// A settings search result: its page and title.
+    Setting(String, String),
     LinkPr(String),
     ShowPrs,
     Files,
@@ -95,7 +98,8 @@ enum Trailing {
     /// The theme or appearance in use: "Current" in muted text.
     Current,
     /// `ProjectPinButton`: a project row's pin, always shown once pinned, else on the highlight.
-    Pin(String, bool),
+    /// It writes every member of the project's group together.
+    Pin(Vec<String>, bool),
 }
 struct SearchTerm {
     value: String,
@@ -149,6 +153,54 @@ struct Item {
     references: Vec<String>,
     usage: f32,
 }
+/// `pickableProjectGroups` over the sidebar's grouping: one row per project however many machines
+/// have it, archived groups out, pinned first. "New thread in…" (`new_thread`) leaves out the
+/// scratch project and starts in the open project when the group holds it.
+fn project_items(s: &App, new_thread: bool) -> Vec<Item> {
+    let state = s.state();
+    let by_id = |id: &str| state.projects.iter().find(|p| data::s(p, "id") == id);
+    let current = match &s.route {
+        Route::Thread(id) => state.threads.iter().find(|v| data::s(v, "id") == id).map(|v| data::s(v, "projectId")),
+        Route::Home { project_id } => project_id.as_deref(),
+        _ => None,
+    };
+    let can_pin = actions::can_organize_projects(s);
+    let (groups, _) = crate::shell::sidebar::folders::group_of(s);
+    let mut groups: Vec<_> = groups.into_iter().filter(|g| !g.archived).collect();
+    groups.sort_by_key(|g| !g.pinned);
+    let mut out = vec![];
+    for g in groups {
+        let Some(representative) = by_id(&g.representative) else { continue };
+        if new_thread && actions::is_scratch_project(s, representative) {
+            continue;
+        }
+        let target = current.filter(|c| g.members.iter().any(|m| m.as_str() == *c)).unwrap_or(g.representative.as_str()).to_owned();
+        let action = if new_thread { Action::Navigate(Route::Home { project_id: Some(target) }) } else { Action::OpenProject(target) };
+        let mut row = item(g.label.clone(), "Projects", &icons::FOLDER_GIT_2, "", action);
+        // `buildCommandPaletteProjectMetadata`: every member's title, root and location.
+        let mut locations: Vec<String> = vec![];
+        for member in g.members.iter().filter_map(|m| by_id(m)) {
+            let location = crate::env::location(s, member);
+            row.fields.push(SearchTerm::weighted(data::s(member, "title"), 0.6));
+            row.fields.push(SearchTerm::weighted(data::s(member, "workspaceRoot"), 0.6));
+            row.fields.push(SearchTerm::weighted(location.clone(), 0.6));
+            if !locations.contains(&location) {
+                locations.push(location);
+            }
+        }
+        row.subtitle = Some(if g.members.len() > 1 {
+            locations.join(" · ")
+        } else {
+            format!("{} · {}", crate::env::location(s, representative), data::s(representative, "workspaceRoot"))
+        });
+        if can_pin {
+            row.trailing = Trailing::Pin(g.members.clone(), g.pinned);
+        }
+        out.push(row);
+    }
+    out
+}
+
 fn item(
     title: impl Into<String>,
     group: &'static str,
@@ -302,6 +354,10 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         copied: Vec::new(),
     });
 }
+#[cfg(test)]
+pub(crate) fn toast_title(s: &App) -> Option<&str> {
+    s.ui.shell.palette.notice.as_ref().map(|n| n.title.as_str())
+}
 /// The open toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
     let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
@@ -328,6 +384,11 @@ pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&s
     toast_error(s, title, description);
     if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
         notice.until = data::now_ms() + 4000;
+    }
+}
+pub(crate) fn set_toast_actions(s: &mut App, actions: Vec<ToastAction>) {
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.actions = actions;
     }
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -476,6 +537,9 @@ fn items(s: &App) -> Vec<Item> {
         let mut appearance = item("Change appearance", "Actions", &icons::MONITOR, &shortcut_label(s, "appearance.cycle"), Action::Page("appearance"));
         appearance.fields = keywords(&["change appearance", "light", "dark", "system", "mode", "toggle"]);
         out.push(appearance);
+        let mut editor = item("Toggle theme editor", "Actions", &icons::PALETTE, &shortcut_label(s, "themeEditor.toggle"), Action::ToggleThemeEditor);
+        editor.fields = keywords(&["theme", "appearance", "colors", "palette", "customize"]);
+        out.push(editor);
         if crate::pages::pull_requests::supported(s) {
             let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
             prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
@@ -609,47 +673,13 @@ fn items(s: &App) -> Vec<Item> {
         }
     }
     if ui.page == "projects" || (!typed.trim().is_empty() && ui.page.is_empty()) {
-        let can_pin = actions::can_organize_projects(s);
-        // `pickableProjectGroups`: archived projects stay out, pinned ones lead; "New thread in…"
-        // also leaves out the scratch project.
-        let mut projects: Vec<&serde_json::Value> = s
-            .state()
-            .projects
-            .iter()
-            .filter(|p| p["archivedAt"].is_null())
-            .filter(|p| ui.page != "projects" || !actions::is_scratch_project(s, p))
-            .collect();
-        projects.sort_by_key(|p| p["pinnedAt"].is_null());
-        for p in projects {
-            out.push(item(
-                data::s(p, "title"),
-                "Projects",
-                &icons::FOLDER_GIT_2,
-                "",
-                if ui.page == "projects" {
-                    Action::Navigate(Route::Home {
-                        project_id: Some(data::s(p, "id").into()),
-                    })
-                } else {
-                    Action::OpenProject(data::s(p, "id").into())
-                },
-            ));
-            if let Some(row) = out.last_mut() {
-                let location = crate::env::location(s, p);
-                row.subtitle = Some(format!("{location} · {}", data::s(p, "workspaceRoot")));
-                row.fields.push(SearchTerm::weighted(data::s(p, "workspaceRoot"), 0.6));
-                row.fields.push(SearchTerm::weighted(location, 0.6));
-            }
-            if can_pin && let Some(row) = out.last_mut() {
-                row.trailing = Trailing::Pin(data::s(p, "id").into(), !p["pinnedAt"].is_null());
-            }
-        }
+        out.extend(project_items(s, ui.page == "projects"));
     }
     // `settingsSearchItems`: every setting, described by its page, for the palette's matcher.
     if !typed.trim().is_empty() && ui.page.is_empty() {
-        for setting in crate::settings::search::items() {
+        for setting in crate::settings::search::items().iter().filter(|i| crate::settings::search::shown(s, i)) {
             let page = crate::settings::label(&setting.to);
-            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Navigate(Route::Settings(setting.to.clone())));
+            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Setting(setting.to.clone(), setting.title.clone()));
             row.description = Some(format!("Settings · {page}"));
             row.fields = std::iter::once(page).chain(setting.terms.iter().map(String::as_str)).map(|v| SearchTerm::weighted(v, 0.6)).collect();
             out.push(row);
@@ -1121,6 +1151,9 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     tx.wake_after(std::time::Duration::from_millis(120));
 }
 pub fn poll(s: &mut App) -> bool {
+    if s.ui.shell.palette.open {
+        add_project::sync_browse(s);
+    }
     let mut changed = add_project::poll(s);
     changed |= actions::poll(s);
     let acknowledgements = std::mem::take(&mut s.ui.shell.palette.acknowledgements);
@@ -1436,6 +1469,11 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             toast(s, "Prompt link copied", None);
         }
         Action::ShareWithGuest(thread) => crate::shell::sidebar::share::open_guest(s, &thread),
+        Action::Setting(page, title) => crate::settings::open_setting(s, &page, &title),
+        Action::ToggleThemeEditor => {
+            let dark = s.ui.shell.dark.get();
+            crate::settings::themes::toggle_editor(s, dark);
+        }
         Action::LinkPr(thread) => actions::open_link(s, thread),
         Action::ShowPrs => actions::show_pull_requests(s),
         Action::OpenFile(path) => crate::panel::open_file(s, path),
@@ -1977,15 +2015,19 @@ fn row_view(s: &App, i: usize, v: &Item, raw: bool, t: &T) -> El {
         }
         Trailing::Check(on) => entry = entry.child(kit::Checkbox::new(*on).hide_label().build(&kit::theme(t))),
         Trailing::Current => entry = entry.child(text("Current").font(theme::TEXT_XS).color(t.c.contrast_muted_foreground.alpha_mul(0.7))),
-        Trailing::Pin(project, pinned) if *pinned || selected => {
-            let (project, pinned) = (project.clone(), *pinned);
+        Trailing::Pin(members, pinned) if *pinned || selected => {
+            let (members, pinned) = (members.clone(), *pinned);
             let label = format!("{} {}", if pinned { "Unpin" } else { "Pin" }, v.title);
             entry = entry.child(
                 kit::Button::new(label.clone())
                     .icon(&icons::PIN)
                     .size("icon-xs")
                     .variant("ghost-muted")
-                    .on_press(move |s: &mut App| actions::pin_project(s, &project, !pinned))
+                    .on_press(move |s: &mut App| {
+                        for project in &members {
+                            actions::pin_project(s, project, !pinned);
+                        }
+                    })
                     .build(t)
                     .key(format!("palette-pin-{i}"))
                     .help(label),
@@ -2146,6 +2188,30 @@ fn palette(s: &App, t: &T) -> Vec<El> {
 mod tests {
     use super::*;
     #[test]
+    fn a_project_on_several_machines_is_one_palette_row() {
+        let mut s = App::new();
+        let mut state = crate::data::empty_state();
+        state.config = Some(serde_json::json!({"environment": {"capabilities": {"projectOrganization": true}}}));
+        let identity = serde_json::json!({"canonicalKey": "github.com/acme/api", "name": "api"});
+        let project = |id: &str, root: &str| serde_json::json!({"id": id, "title": "api", "workspaceRoot": root, "repositoryIdentity": identity, "pinnedAt": null, "archivedAt": null});
+        let mut remote = project("p2", "/srv/api");
+        remote[crate::env::TAG] = "box".into();
+        let mut archived = project("p3", "/old");
+        archived["repositoryIdentity"] = serde_json::Value::Null;
+        archived["archivedAt"] = "2026-01-01T00:00:00Z".into();
+        state.projects = vec![project("p1", "/home/me/api"), remote, archived];
+        s.src = crate::data::Source::Fixture(state);
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box".into(), bearer: "t".into() });
+        s.route = Route::Home { project_id: Some("p2".into()) };
+
+        let rows = project_items(&s, true);
+        assert_eq!(rows.len(), 1, "one row for both machines; the archived project stays out");
+        assert_eq!(rows[0].subtitle.as_deref(), Some("Local · Box"));
+        assert!(matches!(&rows[0].action, Action::Navigate(Route::Home { project_id: Some(p) }) if p == "p2"), "the open member is where the thread starts");
+        assert!(matches!(&rows[0].trailing, Trailing::Pin(members, false) if members == &["p1", "p2"]));
+        assert!(rows[0].fields.iter().any(|f| f.value == "/srv/api"), "every member's root is searchable");
+    }
+    #[test]
     fn emptying_the_folder_path_leaves_the_browse_page_like_the_web() {
         let mut s = App::new();
         push_page(&mut s, "add-project", "");
@@ -2241,7 +2307,7 @@ mod tests {
         let rows = items(&s);
         let hit = rows.iter().find(|v| v.group == "Settings" && v.title == "Keep worktrees with local changes").expect("the setting matches");
         assert_eq!(hit.description.as_deref(), Some("Settings · Worktrees"));
-        assert!(matches!(&hit.action, Action::Navigate(Route::Settings(page)) if page == "worktrees"));
+        assert!(matches!(&hit.action, Action::Setting(page, title) if page == "worktrees" && title == "Keep worktrees with local changes"));
 
         let (thread, project) = s
             .state()
