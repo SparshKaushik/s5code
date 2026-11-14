@@ -1596,7 +1596,7 @@ fn net_error(text: &str) -> String {
     text.trim_start_matches("net::").to_string()
 }
 
-fn key_code(key: &str) -> u32 {
+pub(super) fn key_code(key: &str) -> u32 {
     match key {
         "Enter" => 13,
         "Backspace" => 8,

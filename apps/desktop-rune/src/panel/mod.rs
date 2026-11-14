@@ -1,5 +1,6 @@
 //! Workspace surfaces; wire payloads stay identical to the web client's RPCs.
 pub(crate) mod agent;
+pub(crate) mod stream;
 pub mod browser;
 mod closed;
 mod diff;
