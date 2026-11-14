@@ -270,18 +270,12 @@ fn answer(mut stream: TcpStream, request: &Request, purpose: &Purpose) -> Option
     callback
 }
 
-/// "Open browser" on a client-mode ChatGPT flow: the code comes back here. False when `url`
-/// isn't one, so the caller opens it as a plain page.
-pub fn sign_in(s: &mut App, instance: &str, flow: &Value, url: &str) -> bool {
+/// "Open browser" on a ChatGPT flow: the code comes back here. False when Rune can't listen
+/// for it (not ChatGPT, already listening, or a server-mode flow whose server holds the
+/// port), so the caller opens the page as before.
+pub fn sign_in(s: &App, instance: &str, flow: &Value, url: &str) -> bool {
     let Ok(request) = authorization_request(url) else { return false };
-    if flow.is_null() {
-        return false;
-    }
-    let purpose = Purpose::Complete { environment: s.ui.env.active.clone(), instance: instance.to_owned(), flow: flow.clone() };
-    if let Err(e) = receive(request, purpose) {
-        s.ui.settings.error = Some(e);
-    }
-    true
+    !flow.is_null() && receive(request, Purpose::Complete { environment: s.ui.env.active.clone(), instance: instance.to_owned(), flow: flow.clone() }).is_ok()
 }
 
 /// A handoff link from a web client on this computer.
