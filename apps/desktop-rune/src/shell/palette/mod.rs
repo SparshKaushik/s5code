@@ -64,6 +64,8 @@ enum Action {
     Restart(String),
     OpenProject(String),
     AddProject,
+    /// "Add project" on one environment, from the environment list.
+    AddProjectIn(String),
     NewProject,
     Source(add_project::Source),
     Browse(String),
@@ -76,6 +78,7 @@ enum Action {
     ShowPrs,
     Files,
     ContentSearch,
+    CheckForUpdates,
     OpenFile(String),
     ProjectSettings(String),
     /// A message match: open its thread with find on the matched words.
@@ -160,7 +163,7 @@ fn item(
         subtitle: None,
         description: None,
         disabled: false,
-        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::NewProject | Action::Files | Action::ContentSearch) {
+        trailing: if matches!(action, Action::Page(_) | Action::AddProject | Action::AddProjectIn(_) | Action::NewProject | Action::Files | Action::ContentSearch) {
             Trailing::Chevron
         } else {
             Trailing::None
@@ -377,6 +380,7 @@ fn reset(s: &mut App, open: bool) {
     ui.page.clear();
     ui.back.clear();
     ui.add.clone = None;
+    ui.add.env = None;
     set_query(s, "");
 }
 
@@ -391,6 +395,9 @@ fn items(s: &App) -> Vec<Item> {
     let mut out = vec![];
     if ui.page == "add-project" {
         out = add_project::source_items(s);
+    }
+    if ui.page == "add-environment" {
+        out = add_project::environment_items(s);
     }
     if ui.page == "themes" {
         out.extend(theme_items(s));
@@ -1116,7 +1123,7 @@ pub fn poll(s: &mut App) -> bool {
                 if restart.refreshed {
                     toast(s, "Agent session will restart on your next message", None);
                     changed = true;
-                } else if let Some(net) = s.src.net() {
+                } else if let Some(net) = crate::env::net_for(s, &restart.thread) {
                     restart.pending = if let Some(session) = restart.remaining.pop() {
                         net.dispatch(serde_json::json!({"type":"provider-session.detach","threadId":restart.thread,"providerSessionId":session,"reason":"client-requested"}))
                     } else {
@@ -1145,12 +1152,9 @@ pub fn poll(s: &mut App) -> bool {
                     c.is_whitespace() || ['"', '\'', '`', '“', '”', '‘', '’'].contains(&c)
                 })
                 .to_owned();
-        if let Some(net) = s.src.net() {
-            let id = net.request(
-                "orchestration.searchThreads",
-                serde_json::json!({"query":limit_utf16(&raw,200),"limit":10}),
-            );
-            s.ui.shell.palette.searches.push((id, query));
+        let params = serde_json::json!({"query":limit_utf16(&raw,200),"limit":10});
+        for id in crate::env::request_all(s, "orchestration.searchThreads", &params) {
+            s.ui.shell.palette.searches.push((id, query.clone()));
         }
     }
     let pending = std::mem::take(&mut s.ui.shell.palette.searches);
@@ -1159,10 +1163,10 @@ pub fn poll(s: &mut App) -> bool {
         match reply {
             Some(reply) => {
                 if query == s.ui.shell.palette.message_query {
-                    s.ui.shell.palette.message_matches = reply
-                        .ok()
-                        .and_then(|v| v["matches"].as_array().cloned())
-                        .unwrap_or_default();
+                    // Every environment answers the same query; their matches add up.
+                    s.ui.shell.palette.message_matches.extend(
+                        reply.ok().and_then(|v| v["matches"].as_array().cloned()).unwrap_or_default(),
+                    );
                     changed = true;
                 }
             }
@@ -1374,6 +1378,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
     match action {
         Action::Page(page) => return push_page(s, page, ""),
         Action::AddProject => return add_project::open(s),
+        Action::AddProjectIn(key) => return add_project::open_in(s, &key),
         Action::NewProject => return add_project::choose(s, add_project::Source::New),
         Action::Source(source) => return add_project::choose(s, source),
         Action::Browse(to) => {
@@ -1390,6 +1395,7 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         Action::NewWithoutProject => actions::new_without_project(s),
         Action::Find => actions::find(s),
         Action::ContentSearch => crate::search::open(s),
+        Action::CheckForUpdates => crate::desktop::check_for_updates(s),
         Action::CopyThread => {
             actions::copy_thread(s, tx);
         }

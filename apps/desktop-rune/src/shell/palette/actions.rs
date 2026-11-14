@@ -38,9 +38,10 @@ pub struct Files {
     pub loaded: Option<String>,
     pub error: Option<String>,
 }
+/// Each step carries the environment the triage started on, which answers every follow-up.
 enum Triage {
-    Prepare(u64),
-    Scratch(u64, String),
+    Prepare(u64, String),
+    Scratch(u64, String, String),
 }
 
 fn config(s: &App) -> &Value {
@@ -147,6 +148,10 @@ pub fn tail_items(s: &App) -> Vec<Item> {
         "gitcafe", "forgejo", "gitea", "bitbucket", "azure", "devops", "url", "environment",
     ]);
     out.push(add);
+    // Electron's App and Help menu item, which Rune has as a native menu only on macOS.
+    let mut updates = item("Check for Updates", "Actions", &icons::DOWNLOAD, "", Action::CheckForUpdates);
+    updates.fields = keywords(&["check for updates", "update", "upgrade", "new version", "release"]);
+    out.push(updates);
     out
 }
 
@@ -180,7 +185,8 @@ pub fn triage(s: &mut App) {
     }
     let client = json!({"deviceType": "desktop", "surface": "desktop", "os": std::env::consts::OS});
     if let Some(net) = s.src.net() {
-        s.ui.shell.palette.act.triage = Some(Triage::Prepare(net.request("server.prepareTriage", json!({"client": client}))));
+        let id = net.request("server.prepareTriage", json!({"client": client}));
+        s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, s.ui.env.active.clone()));
     }
 }
 fn triage_failed(s: &mut App, message: &str) {
@@ -335,7 +341,7 @@ fn submit_link(s: &mut App) {
         "url": link.url,
         "source": "manual",
     });
-    let pending = s.src.net().map(|net| net.dispatch(command));
+    let pending = crate::env::net_for(s, &thread).map(|net| net.dispatch(command));
     if let Some(dialog) = &mut s.ui.shell.palette.act.link {
         dialog.pending = pending;
     }
@@ -554,27 +560,29 @@ pub fn poll(s: &mut App) -> bool {
         pending => s.ui.shell.palette.act.scratch = pending,
     }
     match s.ui.shell.palette.act.triage.take() {
-        Some(Triage::Prepare(id)) => match s.src.net().and_then(|net| net.take_reply(id)) {
-            None => s.ui.shell.palette.act.triage = Some(Triage::Prepare(id)),
+        Some(Triage::Prepare(id, env)) => match s.src.net().and_then(|net| net.take_reply(id)) {
+            None => s.ui.shell.palette.act.triage = Some(Triage::Prepare(id, env)),
             Some(Err(e)) => {
                 triage_failed(s, &super::error_message(&e, "An error occurred."));
                 changed = true;
             }
             Some(Ok(v)) => {
                 let prompt = data::s(&v, "prompt").to_owned();
-                if let Some(net) = s.src.net() {
-                    s.ui.shell.palette.act.triage = Some(Triage::Scratch(net.request("projects.ensureScratch", json!({})), prompt));
+                if let Some(net) = crate::env::net_of(s, &env) {
+                    s.ui.shell.palette.act.triage = Some(Triage::Scratch(net.request("projects.ensureScratch", json!({})), prompt, env));
                 }
             }
         },
-        Some(Triage::Scratch(id, prompt)) => match s.src.net().and_then(|net| net.take_reply(id)) {
-            None => s.ui.shell.palette.act.triage = Some(Triage::Scratch(id, prompt)),
+        Some(Triage::Scratch(id, prompt, env)) => match s.src.net().and_then(|net| net.take_reply(id)) {
+            None => s.ui.shell.palette.act.triage = Some(Triage::Scratch(id, prompt, env)),
             Some(Err(e)) => {
                 triage_failed(s, &super::error_message(&e, "An error occurred."));
                 changed = true;
             }
             Some(Ok(v)) => {
-                let route = Route::Home { project_id: Some(data::s(&v, "projectId").to_owned()) };
+                let project = data::s(&v, "projectId").to_owned();
+                crate::env::adopt(s, &project, &env);
+                let route = Route::Home { project_id: Some(project) };
                 let key = crate::chat::composer::draft_key(s, &route);
                 s.ui.chat.composer.drafts.entry(key).or_default().edit = TextEdit::new(prompt);
                 crate::shell::sidebar::go(s, route);
