@@ -20,6 +20,7 @@ mod models;
 mod host_logos;
 mod icon_index;
 mod pages;
+pub(crate) mod permissions;
 pub(crate) mod project_icon;
 mod projects;
 mod providers;
@@ -98,6 +99,7 @@ pub struct Ui {
     pub connections: connections::Ui,
     pub maintenance: storage::Maintenance,
     pub devices: devices::Ui,
+    pub session: permissions::Session,
 }
 
 pub fn appearance(client: &client::ClientSettings) -> Appearance {
@@ -473,6 +475,9 @@ pub fn poll(s: &mut App) -> bool {
         if page.as_deref() == Some("source-control") {
             source_control::scan(s);
         }
+        if page.is_some() {
+            permissions::load(s);
+        }
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
         s.ui.settings.advanced.clear();
@@ -518,7 +523,7 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.active_resources = wanted;
     }
     let ids: Vec<_> = s.ui.settings.pending.keys().copied().collect();
-    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s);
+    let mut changed = commit_edits(s, false) | add_provider::poll(s) | acp_icons::poll(s) | auth_terminal::poll(s) | source_control::poll(s) | storage::poll(s) | connections::poll(s) | devices::poll(s) | permissions::poll(s);
     for id in ids {
         if let Some(reply) = s.src.net().and_then(|n| n.take_reply(id)) {
             let method = s.ui.settings.pending.remove(&id).unwrap();
@@ -967,6 +972,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
     scope::menu(s, t, &mut overlays);
     devices::overlays(s, t, &mut overlays);
     keybindings::overlays(s, t, &mut overlays);
+    permissions::overlays(s, t, &mut overlays);
     if let Some(key) = &s.ui.settings.open_select {
         let fallback: Vec<_> = pages::specs()
             .as_object()

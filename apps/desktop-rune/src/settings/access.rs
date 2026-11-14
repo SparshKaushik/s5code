@@ -196,30 +196,7 @@ fn toggle_scope(current: &[&'static str], scope: &'static str, checked: bool) ->
     next
 }
 
-/// Contracts `sessionGrantsScope`, with its legacy parents.
-fn grants(session: &Value, scope: &str) -> bool {
-    if session["authenticated"] != true {
-        return false;
-    }
-    let has = |list: &Value, scope: &str| list.as_array().is_some_and(|l| l.iter().any(|s| s == scope));
-    if session["permissions"].is_array() {
-        return has(&session["permissions"], scope);
-    }
-    if has(&session["scopes"], scope) {
-        return true;
-    }
-    if !session["auth"]["serverUpdateScope"].is_null() {
-        return false;
-    }
-    let parent = match scope {
-        "filesystem:read" | "diagnostics:read" => "orchestration:read",
-        "settings:write" | "providers:manage" | "environment:maintain" | "preview:operate" | "source-control:write"
-        | "filesystem:write" => "orchestration:operate",
-        "terminal:read" => "terminal:operate",
-        _ => return false,
-    };
-    has(&session["scopes"], parent)
-}
+use super::permissions::grants;
 
 fn delegatable(session: Option<&Result<Value, Value>>) -> Vec<&'static str> {
     match session {
