@@ -201,10 +201,10 @@ fn card(t: &T, c: &Citation) -> El {
     let quote = row()
         .w_full()
         .child(el().w(2.0).self_stretch().fill(t.c.border))
-        .child(text(c.text.clone()).font(theme::TEXT_SM).color(t.c.muted_foreground).selectable(true).grow(1.0).min_w(0.0).pl(12.0));
+        .child(col().grow(1.0).min_w(0.0).pl(12.0).child(text(c.text.clone()).font(theme::TEXT_SM).color(t.c.muted_foreground).selectable(true).w_full()));
     let mut body = col().w_full().gap(12.0).child(quote);
     if let Some(comment) = c.comment.as_deref().filter(|v| !v.is_empty()) {
-        body = body.child(text(comment.to_owned()).font(theme::TEXT_SM).color(t.c.foreground).selectable(true));
+        body = body.child(text(comment.to_owned()).font(theme::TEXT_SM).color(t.c.foreground).selectable(true).w_full());
     }
     let target = c.clone();
     let go = crate::kit::Button::new("Go to source")
