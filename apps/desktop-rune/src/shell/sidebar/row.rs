@@ -215,6 +215,7 @@ fn interactive(e: El, t: &T, th: &Thread, section: Section, over: Option<String>
                         ui.drag = Some(Dragging { key: id.clone(), section, dy: d.dy, context, at, scroll });
                         ui.hover = None;
                         // Auto-scroll: near an edge, each move reveals the next item past the target.
+                        let over = ui.drag_over.borrow().clone().or_else(|| over.clone());
                         if edge != 0 && !context
                             && let Some(over) = &over
                         {
@@ -804,6 +805,8 @@ pub fn list(s: &App, cx: &mut Cx<App>, model: &Model, t: &T) -> El {
         _ => 0,
     });
     let over = drag.and_then(|d| drag_over(cx, &items, d));
+    // The drag handler reads it from here, so a row built before the drag moved still follows.
+    *ui.drag_over.borrow_mut() = over.clone();
     let target = drag.zip(over.as_deref()).and_then(|(d, o)| logic::drop_target(&items, &d.key, o));
     let center = drag.and_then(|d| cx.layout(&format!("sb-li-{}", d.key)).map(|r| r[1] + r[3] / 2.0 + d.dy));
     let target = sticky(target, ui.drag_target.borrow().clone(), center, cx.layout(&marker_key(Marker::PinnedDivider)).map(|r| (r[1], r[1] + r[3])));

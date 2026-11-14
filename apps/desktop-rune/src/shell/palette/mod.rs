@@ -74,6 +74,8 @@ enum Action {
     NewWithoutProject,
     Find,
     CopyThread,
+    CopyPromptLink(String),
+    ShareWithGuest(String),
     LinkPr(String),
     ShowPrs,
     Files,
@@ -619,21 +621,14 @@ fn items(s: &App) -> Vec<Item> {
             }
         }
     }
+    // `settingsSearchItems`: every setting, described by its page, for the palette's matcher.
     if !typed.trim().is_empty() && ui.page.is_empty() {
-        for (label, page) in [
-            ("General", "general"),
-            ("Appearance", "appearance"),
-            ("Keybindings", "keybindings"),
-            ("Providers", "providers"),
-            ("Connections", "connections"),
-        ] {
-            out.push(item(
-                label,
-                "Settings",
-                &icons::SETTINGS,
-                "",
-                Action::Navigate(Route::Settings(page.into())),
-            ));
+        for setting in crate::settings::search::items() {
+            let page = crate::settings::label(&setting.to);
+            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Navigate(Route::Settings(setting.to.clone())));
+            row.description = Some(format!("Settings · {page}"));
+            row.fields = std::iter::once(page).chain(setting.terms.iter().map(String::as_str)).map(|v| SearchTerm::weighted(v, 0.6)).collect();
+            out.push(row);
         }
     }
     if actions_only {
@@ -1399,6 +1394,11 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
         Action::CopyThread => {
             actions::copy_thread(s, tx);
         }
+        Action::CopyPromptLink(link) => {
+            tx.copy(&link);
+            toast(s, "Prompt link copied", None);
+        }
+        Action::ShareWithGuest(thread) => crate::shell::sidebar::share::open_guest(s, &thread),
         Action::LinkPr(thread) => actions::open_link(s, thread),
         Action::ShowPrs => actions::show_pull_requests(s),
         Action::OpenFile(path) => crate::panel::open_file(s, path),
@@ -2184,6 +2184,39 @@ mod tests {
         let rows = items(&app);
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0].title, "Dark");
+    }
+    #[test]
+    fn every_setting_and_the_drafts_prompt_links_join_the_palette() {
+        let mut s = App::new();
+        s.ui.shell.palette.query = TextEdit::new("keep worktrees");
+        let rows = items(&s);
+        let hit = rows.iter().find(|v| v.group == "Settings" && v.title == "Keep worktrees with local changes").expect("the setting matches");
+        assert_eq!(hit.description.as_deref(), Some("Settings · Worktrees"));
+        assert!(matches!(&hit.action, Action::Navigate(Route::Settings(page)) if page == "worktrees"));
+
+        let (thread, project) = s
+            .state()
+            .threads
+            .iter()
+            .find(|t| !data::s(t, "projectId").is_empty())
+            .map(|t| (data::s(t, "id").to_owned(), data::s(t, "projectId").to_owned()))
+            .unwrap();
+        s.navigate(Route::Thread(thread.clone()));
+        s.ui.shell.palette.query = TextEdit::new("");
+        let links = |s: &App| items(s).into_iter().filter_map(|v| match v.action { Action::CopyPromptLink(link) => Some((v.title, link)), _ => None }).collect::<Vec<_>>();
+        let identity = |s: &mut App, identity: serde_json::Value| {
+            if let data::Source::Fixture(state) = &mut s.src {
+                state.projects.iter_mut().filter(|p| p["id"] == project.as_str()).for_each(|p| p["repositoryIdentity"] = identity.clone());
+            }
+        };
+        identity(&mut s, serde_json::json!({"canonicalKey": "gitlab.com/acme/app"}));
+        assert!(links(&s).is_empty(), "an empty draft has no link");
+        s.ui.chat.composer.drafts.entry(thread.clone()).or_default().edit = TextEdit::new("Fix the tests");
+        assert_eq!(links(&s), [("Copy prompt link".to_string(), "https://app.s5code.touchtech.club/new?prompt=Fix+the+tests".to_string())]);
+        identity(&mut s, serde_json::json!({"canonicalKey": "github.com/acme/app"}));
+        let titles: Vec<String> = links(&s).into_iter().map(|(title, _)| title).collect();
+        assert_eq!(titles, ["Copy prompt link", "Copy prompt link with repo and model"]);
+        assert!(links(&s)[1].1.contains("&repo=acme%2Fapp"));
     }
     #[test]
     fn stale_search_results_are_hidden_after_query_changes() {

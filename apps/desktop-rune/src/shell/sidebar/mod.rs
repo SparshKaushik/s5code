@@ -91,6 +91,8 @@ pub struct Ui {
     pub hover_rect: std::cell::Cell<Option<[f32; 4]>>,
     pub list_y: std::cell::Cell<f32>,
     pub drag_edge: std::cell::Cell<i8>,
+    /// The item nearest the dragged row's centre, from the last layout.
+    pub drag_over: std::cell::RefCell<Option<String>>,
     pub drag_target: std::cell::RefCell<Option<logic::DropTarget>>,
     pub menu: Option<menu::Menu>,
     pub patches: HashMap<String, Patch>,
@@ -1339,6 +1341,85 @@ mod tests {
         assert_eq!(tree_parent(&model, "a2").as_deref(), Some("sb-folder-g"));
         assert_eq!(tree_parent(&model, "s2").as_deref(), Some("sb-shelf-settled"));
         assert_eq!(tree_parent(&model, "pin"), None, "pinned rows sit at the top level");
+    }
+
+    #[test]
+    fn a_row_dragged_to_the_lists_bottom_edge_scrolls_the_list() {
+        fn view(s: &App, cx: &mut Cx<App>) -> El {
+            el().size(300., 500.).child(super::view(s, cx, &crate::theme::theme(true), &mut Vec::new()))
+        }
+        let mut app = App::new();
+        app.client_settings.values.insert("boringSidebarEnabled".into(), json!(false));
+        app.client_settings.values.insert("legacySidebarEnabled".into(), json!(false));
+        let active = |app: &App| {
+            let model = Model::build(app);
+            model.items(&app.ui.shell.sidebar).into_iter().filter_map(|it| match it { Item::Thread { key, section: Section::Active } => Some(key), _ => None }).collect::<Vec<_>>()
+        };
+        let seed = active(&app).first().cloned().expect("the fixture has an active row");
+        let crate::data::Source::Fixture(state) = &mut app.src else { unreachable!("App::new runs on fixtures") };
+        let row = state.threads.iter().find(|t| t["id"] == seed.as_str()).cloned().unwrap();
+        for i in 0..40 {
+            let mut t = row.clone();
+            t["id"] = json!(format!("overflow-{i}"));
+            t["title"] = json!(format!("Overflow {i}"));
+            state.threads.push(t);
+        }
+        let keys = active(&app);
+        assert!(keys.len() > 40, "the clones are active rows");
+        let mut rt = rune::Runtime::new(app, view, (300., 500.), rune::Env::new(true, 1.));
+        for _ in 0..3 {
+            rt.frame(1. / 60.);
+        }
+        let viewport = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-scroll")).expect("the list").rect;
+        let rows = |rt: &rune::Runtime<App>| rt.elements().into_iter().filter(|e| !e.exiting && e.key.as_deref().is_some_and(|k| k.starts_with("sb-row-"))).collect::<Vec<_>>();
+        let visible: Vec<_> = rows(&rt)
+            .into_iter()
+            .filter(|e| keys.iter().any(|k| e.key.as_deref() == Some(format!("sb-row-{k}").as_str())) && e.rect[1] >= viewport[1] && e.rect[1] + e.rect[3] <= viewport[1] + viewport[3] * 0.5)
+            .collect();
+        let (anchor, grab) = (visible[0].clone(), visible.get(1).cloned().expect("two active rows in the list's top half"));
+        let anchor_y = |rt: &rune::Runtime<App>| rt.elements().into_iter().find(|e| e.key == anchor.key).map_or(f32::NAN, |e| e.rect[1]);
+        let (x, y) = (grab.rect[0] + grab.rect[2] / 2., grab.rect[1] + grab.rect[3] / 2.);
+        rt.pointer_move(x, y);
+        rt.frame(1. / 60.);
+        assert!(rt.state.ui.shell.sidebar.hover.is_some(), "hovering the row");
+        rt.frame(1. / 60.);
+        rt.pointer_down(x, y);
+        rt.frame(1. / 60.);
+        assert!(rt.state.ui.shell.sidebar.press.is_some(), "the press keeps the row's rect: hover_rect {:?}", rt.state.ui.shell.sidebar.hover_rect.get());
+        let edge = viewport[1] + viewport[3] * 0.95;
+        let state = |rt: &rune::Runtime<App>| {
+            let ui = &rt.state.ui.shell.sidebar;
+            let list = rt.elements().into_iter().find(|e| e.key.as_deref() == Some("sb-list")).map(|e| (e.rect, e.scrolled));
+            let low: Vec<_> = rt
+                .elements()
+                .into_iter()
+                .filter(|e| e.key.as_deref().is_some_and(|k| k.starts_with("sb-li-")) && e.rect[1] + e.rect[3] > viewport[1] + viewport[3] - 90.)
+                .take(5)
+                .map(|e| (e.key.unwrap_or_default(), e.rect[1], e.rect[3], e.target[1], e.scrolled[1]))
+                .collect();
+            format!(
+                "drag {:?} edge {} over {:?} target {:?} anchor y {} viewport {viewport:?} list {list:?} low {low:?}",
+                ui.drag.as_ref().map(|d| (d.key.clone(), d.at, d.dy, d.context, d.scroll)),
+                ui.drag_edge.get(),
+                ui.drag_over.borrow(),
+                ui.drag_target.borrow().as_ref().map(|t| t.section),
+                anchor_y(rt),
+            )
+        };
+        for step in 1..=60 {
+            let to = (y + step as f32 * 12.).min(edge) - (step % 2) as f32;
+            rt.pointer_move(x, to);
+            rt.frame(1. / 60.);
+            if step == 3 {
+                assert!(rt.state.ui.shell.sidebar.drag.as_ref().is_some_and(|d| !d.context), "a reorder drag: {}", state(&rt));
+            }
+        }
+        let after = state(&rt);
+        let (from, to) = (anchor.rect[1], anchor_y(&rt));
+        assert_eq!(rt.state.ui.shell.sidebar.drag_edge.get(), 1, "FAILED: the pointer sits at the bottom edge: {after}");
+        rt.pointer_up(x, edge);
+        rt.frame(1. / 60.);
+        assert!(to < from - 0.5, "FAILED: holding a dragged row at the bottom edge scrolls the list ({from} -> {to}): {after}");
     }
 
     #[test]
