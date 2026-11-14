@@ -65,6 +65,7 @@ pub fn edit(s: &mut App, task: Option<Value>) {
 }
 pub fn view(s: &App, t: &T) -> El {
     let mut children = Vec::new();
+    let operate = super::permissions::allowed(s, "scheduledTasks.upsert");
     for task in tasks(s).into_iter().filter(|task| {
         s.ui.settings
             .project
@@ -97,31 +98,18 @@ pub fn view(s: &App, t: &T) -> El {
                                 .wrap(),
                         ),
                 )
-                .child(
-                    c::button(
-                        if task["enabled"] == true {
-                            "Pause"
-                        } else {
-                            "Enable"
-                        },
-                        t,
-                    )
-                    .on_press(move |s: &mut App| {
-                        request(
-                            s,
-                            "scheduledTasks.setEnabled",
-                            json!({"id":toggle,"enabled":task["enabled"]!=true}),
-                        )
-                    }),
-                )
-                .child(c::button("Run now", t).on_press(move |s: &mut App| {
+                .child(c::press_if(
+                    c::button(if task["enabled"] == true { "Pause" } else { "Enable" }, t),
+                    operate,
+                    move |s: &mut App| {
+                        request(s, "scheduledTasks.setEnabled", json!({"id":toggle,"enabled":task["enabled"]!=true}))
+                    },
+                ))
+                .child(c::press_if(c::button("Run now", t), operate, move |s: &mut App| {
                     request(s, "scheduledTasks.runNow", json!({"id":run}))
                 }))
-                .child(
-                    c::button("Edit", t)
-                        .on_press(move |s: &mut App| edit(s, Some(original.clone()))),
-                )
-                .child(c::button("Delete", t).on_press(move |s: &mut App| {
+                .child(c::press_if(c::button("Edit", t), operate, move |s: &mut App| edit(s, Some(original.clone()))))
+                .child(c::press_if(c::button("Delete", t), operate, move |s: &mut App| {
                     s.ui.settings.delete_task = Some((delete.clone(), delete_title.clone()))
                 })),
         );
@@ -148,6 +136,7 @@ pub fn view(s: &App, t: &T) -> El {
         .variant("ghost-muted")
         .size("xs")
         .icon(&crate::icons::PLUS)
+        .disabled(!operate)
         .on_press(|s: &mut App| edit(s, None))
         .build(t);
     c::section_with_actions("Scheduled tasks", vec![new_task], children, t)

@@ -19,6 +19,7 @@ pub struct Select {
     current: Option<String>,
     display: Option<String>,
     leading: Option<(El, f32)>,
+    details: Vec<(String, &'static rune::Icon, String)>,
     disabled_options: Vec<String>,
     placeholder: String,
     label: Option<String>,
@@ -41,6 +42,7 @@ impl Select {
             current: None,
             display: None,
             leading: None,
+            details: vec![],
             disabled_options: vec![],
             placeholder: "Select".into(),
             label: None,
@@ -73,6 +75,12 @@ impl Select {
     /// Content before the value, `width` wide, which auto-sized triggers make room for.
     pub fn leading(mut self, value: El, width: f32) -> Self {
         self.leading = Some((value, width));
+        self
+    }
+    /// An option's icon and description line in the popup, which then is at least 256 wide
+    /// (web `SelectItem className="min-w-64"` with a `grid gap-0.5` body).
+    pub fn option_detail(mut self, value: impl Into<String>, glyph: &'static rune::Icon, description: impl Into<String>) -> Self {
+        self.details.push((value.into(), glyph, description.into()));
         self
     }
     pub fn placeholder(mut self, value: impl Into<String>) -> Self {
@@ -217,6 +225,9 @@ impl Select {
                 .iter()
                 .map(|o| text_width(o, theme::TEXT_SM) + MENU_CHROME)
                 .fold(width, f32::max)
+                .max(if self.details.is_empty() { 0. } else { 256. })
+                // The popup sizes to unwrapped text, so a description must fit on one line.
+                .max(self.details.iter().map(|(_, _, d)| text_width(d, theme::TEXT_XS) + MENU_CHROME + 4.).fold(0., f32::max))
         } else {
             width
         };
@@ -234,6 +245,9 @@ impl Select {
             let mut item = MenuItem::new(&option)
                 .option(self.current.as_ref() == Some(&option))
                 .disabled(self.disabled_options.contains(&option));
+            if let Some((_, glyph, description)) = self.details.iter().find(|(value, ..)| *value == option) {
+                item = item.icon(*glyph).description(description.clone());
+            }
             if let Some(choose) = &self.choose {
                 let action = choose(&option);
                 // The shared row renderer drops this transformation for disabled rows.

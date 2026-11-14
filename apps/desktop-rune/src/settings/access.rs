@@ -1,7 +1,7 @@
 //! Web Settings › Sharing & access (`ConnectionsSettings` view "access").
 
 use super::about::about_row;
-use super::connections::{desktop_settings, dot, info_row, machine_icon, machine_kind, reason, take, KINDS};
+use super::connections::{dot, machine_icon, machine_kind, reason, take, KINDS};
 use super::{controls as c, http, update};
 use crate::kit::{self, Menu, MenuEntry, MenuItem, Placement};
 use crate::theme::{self, AlphaMul, T};
@@ -52,13 +52,6 @@ const STANDARD: [&str; 16] = [
 
 #[derive(Default)]
 pub struct State {
-    network: bool,
-    tailscale_serve: bool,
-    /// The second `s.now_ms` last read the exposure prefs at.
-    prefs_read: i64,
-    /// `GET /api/auth/session`.
-    session: Option<Result<Value, Value>>,
-    session_pending: Option<u64>,
     menu: bool,
     icon_menu: bool,
     permissions: bool,
@@ -72,20 +65,9 @@ pub struct State {
     /// Credentials for links this window created; the server never returns them again.
     credentials: HashMap<String, String>,
     newest: Option<String>,
-}
-
-pub(super) fn load(s: &mut App) {
-    let id = s.src.net().map(|net| net.http_request("GET", "/api/auth/session", json!({})));
-    s.ui.settings.connections.access.session_pending = id;
-    read_prefs(s);
-}
-
-fn read_prefs(s: &mut App) {
-    let prefs = desktop_settings();
-    let state = &mut s.ui.settings.connections.access;
-    state.prefs_read = s.now_ms / 1000;
-    state.network = prefs.get::<String>("serverExposureMode").as_deref() == Some("network-accessible");
-    state.tailscale_serve = prefs.get::<bool>("tailscaleServeEnabled") == Some(true);
+    /// The pairing link whose share panel is open, and the endpoint its QR code uses.
+    share: Option<String>,
+    share_endpoint: Option<String>,
 }
 
 pub(super) fn poll(s: &mut App) -> bool {
@@ -94,14 +76,7 @@ pub(super) fn poll(s: &mut App) -> bool {
     }
     let mut changed = false;
     let state = &s.ui.settings.connections.access;
-    let (session, creating, revoking) = (state.session_pending, state.creating, state.revoking);
-    let stale = state.prefs_read != s.now_ms / 1000;
-    if let Some(reply) = take(s, session) {
-        let state = &mut s.ui.settings.connections.access;
-        state.session_pending = None;
-        state.session = Some(reply);
-        changed = true;
-    }
+    let (creating, revoking) = (state.creating, state.revoking);
     if let Some(reply) = take(s, creating) {
         let state = &mut s.ui.settings.connections.access;
         state.creating = None;
@@ -125,12 +100,6 @@ pub(super) fn poll(s: &mut App) -> bool {
             s.ui.settings.error = Some(reason(&error));
         }
         changed = true;
-    }
-    if stale {
-        let before = (s.ui.settings.connections.access.network, s.ui.settings.connections.access.tailscale_serve);
-        read_prefs(s);
-        let state = &s.ui.settings.connections.access;
-        changed |= before != (state.network, state.tailscale_serve);
     }
     changed
 }
@@ -196,30 +165,7 @@ fn toggle_scope(current: &[&'static str], scope: &'static str, checked: bool) ->
     next
 }
 
-/// Contracts `sessionGrantsScope`, with its legacy parents.
-pub(crate) fn grants(session: &Value, scope: &str) -> bool {
-    if session["authenticated"] != true {
-        return false;
-    }
-    let has = |list: &Value, scope: &str| list.as_array().is_some_and(|l| l.iter().any(|s| s == scope));
-    if session["permissions"].is_array() {
-        return has(&session["permissions"], scope);
-    }
-    if has(&session["scopes"], scope) {
-        return true;
-    }
-    if !session["auth"]["serverUpdateScope"].is_null() {
-        return false;
-    }
-    let parent = match scope {
-        "filesystem:read" | "diagnostics:read" => "orchestration:read",
-        "settings:write" | "providers:manage" | "environment:maintain" | "preview:operate" | "source-control:write"
-        | "filesystem:write" => "orchestration:operate",
-        "terminal:read" => "terminal:operate",
-        _ => return false,
-    };
-    has(&session["scopes"], parent)
-}
+pub(crate) use super::permissions::grants;
 
 fn delegatable(session: Option<&Result<Value, Value>>) -> Vec<&'static str> {
     match session {
@@ -246,15 +192,6 @@ fn unavailable(connected: bool, failed: bool, rejected: bool) -> &'static str {
         "Could not verify your permissions. Retrying automatically."
     } else {
         "Checking permissions…"
-    }
-}
-
-/// Web `missingTailscaleEndpointDescription`; Rune never probes Tailscale, so no endpoint is known.
-fn tailscale_description(network: bool, serve: bool) -> &'static str {
-    if !network && !serve {
-        "Turn on Network access to detect Tailscale."
-    } else {
-        "Start Tailscale to set up HTTPS access through MagicDNS."
     }
 }
 
@@ -360,7 +297,7 @@ fn permissions(s: &App, t: &T) -> El {
         return details;
     }
     let connected = matches!(s.state().conn, s5_net::Conn::Open);
-    let session = state.session.as_ref();
+    let session = super::permissions::reply(s);
     details = details.child(match session {
         Some(Ok(session)) if connected && session["authenticated"] == true => {
             let mut list = col().w_full().gap(8.0);
@@ -502,12 +439,58 @@ fn clients(s: &App, t: &T) -> El {
     c::card(card, t)
 }
 
-/// Web `PairingLinkListRow`, without the share panel.
+/// `URLSearchParams` form encoding.
+fn form_encode(value: &str) -> String {
+    value
+        .bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'*' | b'-' | b'.' | b'_' => (b as char).to_string(),
+            b' ' => "+".to_owned(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
+/// Web `resolveAdvertisedEndpointPairingUrl`: the hosted app's `/pair` for an HTTPS endpoint it can
+/// reach, else the endpoint's own `/pair`; the token rides in the fragment.
+fn pairing_url(endpoint: &str, hosted: bool, credential: &str) -> String {
+    let token = form_encode(credential);
+    if hosted && endpoint.starts_with("https://") {
+        return format!("https://app.t3.codes/pair?host={}#token={token}", form_encode(endpoint));
+    }
+    let origin = match endpoint.split_once("://") {
+        Some((scheme, rest)) => format!("{scheme}://{}", rest.split(['/', '?', '#']).next().unwrap_or_default()),
+        None => endpoint.to_owned(),
+    };
+    format!("{origin}/pair#token={token}")
+}
+
+fn copy_kind(url: &str) -> (&'static str, &'static str) {
+    if url.starts_with("https://app.t3.codes/pair") {
+        ("Hosted app link copied", "Open it in the browser on the device you want to connect.")
+    } else {
+        ("Pairing URL copied", "Open it in the client you want to pair to this environment.")
+    }
+}
+
+fn copy_code(s: &mut App, tx: &mut rune::Tx, code: &str) {
+    tx.copy(code.to_owned());
+    crate::shell::palette::toast(s, "Pairing code copied", Some("Paste it into another client to finish pairing."));
+}
+
+/// Web `PairingLinkListRow`.
 fn link_row(s: &App, t: &T, link: &Value) -> El {
+    let state = &s.ui.settings.connections.access;
     let id = link["id"].as_str().unwrap_or_default().to_owned();
-    let credential = s.ui.settings.connections.access.credentials.get(&id).cloned();
+    let credential = state.credentials.get(&id).cloned();
     let scopes = link["permissions"].as_array().or(link["scopes"].as_array()).map_or(0, Vec::len);
     let expires = crate::data::ts(link, "expiresAt").map(|e| expires_in(e, s.now_ms)).unwrap_or_default();
+    let options = crate::desktop::exposure::share_endpoints(s);
+    let default = crate::desktop::exposure::pairing_endpoint(s);
+    let shareable = credential.as_ref().and_then(|code| {
+        let endpoint = default.as_ref().or(options.first())?;
+        Some(pairing_url(&endpoint.url, endpoint.hosted_https, code))
+    });
     let mut copy = col()
         .grow(1.0)
         .min_w(0.0)
@@ -529,31 +512,127 @@ fn link_row(s: &App, t: &T, link: &Value) -> El {
                 .font(theme::TEXT_XS)
                 .color(t.c.muted_foreground),
         );
-    if credential.is_none() {
-        copy = copy.child(
-            text("Create a new link to share from this client.")
-                .font(theme::TEXT_2XS)
-                .color(t.c.muted_foreground.alpha_mul(0.7)),
-        );
+    let hint = match (&credential, &shareable) {
+        (None, _) => Some("Create a new link to share from this client."),
+        (Some(_), None) => Some("Copy the token and pair from another client using this backend's reachable host."),
+        _ => None,
+    };
+    if let Some(hint) = hint {
+        copy = copy.child(text(hint).font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)).wrap());
     }
+    let open = state.share.as_deref() == Some(id.as_str()) && shareable.is_some();
     let mut actions = row().gap(8.0).center_y();
-    if let Some(code) = credential {
-        actions = actions.child(
-            kit::Button::new("Copy code")
-                .variant("outline")
-                .size("xs")
-                .build(t)
-                .on_press_tx(move |_: &mut App, tx| tx.copy(code.clone())),
-        );
+    match (&credential, &shareable) {
+        (Some(_), Some(_)) => {
+            let toggle = id.clone();
+            actions = actions.child(
+                kit::Button::new("Share")
+                    .variant("outline")
+                    .size("xs")
+                    .icon(&icons::QR_CODE)
+                    .on_press(move |s: &mut App| {
+                        let state = &mut s.ui.settings.connections.access;
+                        state.share = if state.share.as_deref() == Some(toggle.as_str()) { None } else { Some(toggle.clone()) };
+                    })
+                    .build(t),
+            );
+        }
+        (Some(code), None) => {
+            let code = code.clone();
+            actions = actions.child(
+                kit::Button::new("Copy code")
+                    .variant("outline")
+                    .size("xs")
+                    .build(t)
+                    .on_press_tx(move |s: &mut App, tx| copy_code(s, tx, &code)),
+            );
+        }
+        _ => {}
     }
+    let revoke = id.clone();
     actions = actions.child(
         kit::Button::new("Revoke")
             .variant("destructive-outline")
             .size("xs")
-            .on_press(move |s: &mut App| http(s, "POST", "/api/auth/pairing-links/revoke", json!({"id": id})))
+            .disabled(!super::permissions::can(s, "access:write"))
+            .on_press(move |s: &mut App| http(s, "POST", "/api/auth/pairing-links/revoke", json!({"id": revoke})))
             .build(t),
     );
-    row().w_full().px(16.0).py(12.0).gap(12.0).center_y().child(copy).child(actions)
+    let line = row().w_full().gap(12.0).center_y().child(copy).child(actions);
+    let (Some(code), true) = (credential, open) else {
+        return line.px(16.0).py(12.0);
+    };
+    let selected = state
+        .share_endpoint
+        .as_ref()
+        .and_then(|key| options.iter().find(|e| &e.key == key))
+        .or_else(|| default.as_ref().and_then(|d| options.iter().find(|e| e.key == d.key)))
+        .or(options.first());
+    let url = selected.map_or_else(|| shareable.clone().unwrap_or_default(), |e| pairing_url(&e.url, e.hosted_https, &code));
+    col().w_full().px(16.0).py(12.0).child(line).child(share_panel(t, &options, selected, &url, &code))
+}
+
+/// Web's pairing link QR panel: which endpoint to reach this machine through, the link, and its QR code.
+fn share_panel(t: &T, options: &[crate::desktop::exposure::Endpoint], selected: Option<&crate::desktop::exposure::Endpoint>, url: &str, code: &str) -> El {
+    let mut left = col().grow(1.0).min_w(0.0).gap(12.0);
+    if options.len() > 1 {
+        let mut group = col().w_full().gap(6.0).role("radiogroup").label("Endpoint the pairing QR code and URL use").child(
+            text("Reach this machine via").font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)),
+        );
+        for option in options {
+            let on = selected.is_some_and(|e| e.key == option.key);
+            let key = option.key.clone();
+            let detail = if pairing_url(&option.url, option.hosted_https, code).starts_with("https://app.t3.codes/pair") {
+                "Opens the hosted app, no install needed"
+            } else {
+                option.reach()
+            };
+            let mut item = row()
+                .w_full()
+                .px(10.0)
+                .py(6.0)
+                .gap(8.0)
+                .center_y()
+                .radius(8.0)
+                .border(1.0, if on { t.c.foreground.alpha_mul(0.6) } else { t.c.border.alpha_mul(0.5) })
+                .role("radio")
+                .label(option.label.clone())
+                .checked(on)
+                .focusable(true)
+                .child(text(option.label.clone()).font(theme::XS_MEDIUM).color(if on { t.c.foreground } else { t.c.muted_foreground }))
+                .child(text(detail).font(theme::TEXT_2XS).color(t.c.muted_foreground.alpha_mul(0.7)).truncate().shrink().min_w(0.0));
+            item = if on { item.fill(t.c.muted.alpha_mul(0.3)) } else { item.hover(t.c.muted.alpha_mul(0.2)) };
+            group = group.child(item.on_press(move |s: &mut App| s.ui.settings.connections.access.share_endpoint = Some(key.clone())));
+        }
+        left = left.child(group);
+    }
+    let link = url.to_owned();
+    left = left.child(
+        row()
+            .w_full()
+            .px(10.0)
+            .py(6.0)
+            .gap(8.0)
+            .center_y()
+            .radius(8.0)
+            .border(1.0, t.c.border.alpha_mul(0.6))
+            .fill(t.c.muted.alpha_mul(0.3))
+            .child(text(url.to_owned()).font(theme::mono(theme::TEXT_2XS)).color(t.c.muted_foreground).truncate().grow(1.0).min_w(0.0))
+            .child(kit::Button::new("Copy link").variant("ghost").size("xs").build(t).on_press_tx(move |s: &mut App, tx| {
+                tx.copy(link.clone());
+                let (title, description) = copy_kind(&link);
+                crate::shell::palette::toast(s, title, Some(description));
+            })),
+    );
+    let code = code.to_owned();
+    left = left.child(
+        row().child(kit::Button::new("Copy code only").variant("ghost").size("xs").build(t).on_press_tx(move |s: &mut App, tx| copy_code(s, tx, &code))),
+    );
+    let mut body = row().w_full().pt(12.0).gap(16.0).items_start().child(left);
+    if selected.is_none_or(|e| e.qr_shareable()) {
+        body = body.child(el().padding(12.0).radius(12.0).fill(rune::Color::WHITE).child(super::qr::view(url, 168.0)));
+    }
+    col().w_full().mt(12.0).child(el().w_full().h(1.0).fill(t.c.border.alpha_mul(0.5))).child(body)
 }
 
 /// Web `ConnectedClientListRow`.
@@ -653,7 +732,7 @@ fn set_scopes(s: &mut App, scopes: &[&'static str]) {
 
 fn create(s: &mut App) {
     let state = &s.ui.settings.connections.access;
-    let scopes = selected(&state.scopes, &delegatable(state.session.as_ref()));
+    let scopes = selected(&state.scopes, &delegatable(super::permissions::reply(s)));
     if state.creating.is_some() || scopes.is_empty() {
         return;
     }
@@ -675,7 +754,7 @@ fn create_dialog(s: &App, t: &T, layers: &mut Vec<El>) {
         return;
     }
     let creating = state.creating.is_some();
-    let delegatable = delegatable(state.session.as_ref());
+    let delegatable = delegatable(super::permissions::reply(s));
     let chosen = selected(&state.scopes, &delegatable);
     let k = kit::theme(t);
     let mut options = col().w_full();
@@ -915,11 +994,21 @@ mod tests {
     }
 
     #[test]
-    fn icon_and_tailscale_copy() {
+    fn pairing_urls_follow_web_resolve_advertised_endpoint_pairing_url() {
+        assert_eq!(pairing_url("http://192.168.1.4:3773", false, "AB c/d"), "http://192.168.1.4:3773/pair#token=AB+c%2Fd");
+        assert_eq!(pairing_url("http://192.168.1.4:3773/x?y", false, "t"), "http://192.168.1.4:3773/pair#token=t");
+        assert_eq!(
+            pairing_url("https://box.tail.ts.net", true, "t"),
+            "https://app.t3.codes/pair?host=https%3A%2F%2Fbox.tail.ts.net#token=t"
+        );
+        assert_eq!(pairing_url("http://box:1", true, "t"), "http://box:1/pair#token=t", "the hosted app needs HTTPS");
+        assert_eq!(copy_kind("https://app.t3.codes/pair?host=x#token=t").0, "Hosted app link copied");
+    }
+
+    #[test]
+    fn icon_setting_and_permissions_copy() {
         assert_eq!(icon_setting("laptop", "laptop"), Value::Null);
         assert_eq!(icon_setting("cloud", "server"), json!("cloud"));
-        assert_eq!(tailscale_description(false, false), "Turn on Network access to detect Tailscale.");
-        assert_eq!(tailscale_description(true, false), "Start Tailscale to set up HTTPS access through MagicDNS.");
         assert_eq!(unavailable(true, true, false), "Could not verify your permissions. Retrying automatically.");
     }
 }

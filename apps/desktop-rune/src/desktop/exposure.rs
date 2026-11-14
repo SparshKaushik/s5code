@@ -291,6 +291,39 @@ fn endpoints(port: u16, network: bool, lan: Option<Ipv4Addr>, custom: &[String],
     out
 }
 
+impl Endpoint {
+    /// Web `isQrShareableEndpoint`.
+    pub fn qr_shareable(&self) -> bool {
+        self.available && !self.loopback
+    }
+
+    /// Web `endpointShareHint` for this endpoint's reachability.
+    pub fn reach(&self) -> &'static str {
+        if self.loopback {
+            "Clients on this machine"
+        } else if self.key.starts_with("tailscale:") {
+            "Devices on your private network"
+        } else if self.key.starts_with("manual:") {
+            "Reachable from anywhere"
+        } else {
+            "Devices on the same network"
+        }
+    }
+}
+
+/// The endpoints a pairing link can be shared through: web's `endpointCopyOptions` source.
+pub fn share_endpoints(s: &App) -> Vec<Endpoint> {
+    if !crate::host::managed() {
+        return Vec::new();
+    }
+    let network = s.ui.desktop.exposure.network;
+    let v = view(s);
+    let mut out = if network { v.network } else { endpoints(port(s).unwrap_or(0), false, None, &[], None, false, 0) };
+    out.extend(v.tailscale_https);
+    out.retain(|e| e.available);
+    out
+}
+
 /// Web's `selectPairingEndpoint`.
 fn select<'a>(endpoints: &'a [Endpoint], key: Option<&str>) -> Option<&'a Endpoint> {
     let available = || endpoints.iter().filter(|e| e.available);

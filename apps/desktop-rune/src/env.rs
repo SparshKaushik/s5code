@@ -53,6 +53,8 @@ pub struct Ui {
     /// Bumped whenever copied rows change, since the focused shell's sequence does not move then.
     pub merges: u64,
     pub ssh: ssh::Ui,
+    /// Saved environments switched off in Settings: kept, but not connected.
+    pub off: Vec<String>,
 }
 
 fn path() -> PathBuf {
@@ -73,13 +75,33 @@ fn decode(value: &Value) -> Vec<Saved> {
         .collect()
 }
 
-fn encode(saved: &[Saved]) -> Value {
-    let rows: Vec<Value> = saved.iter().map(|e| json!({"environmentId": e.id, "label": e.label, "httpBaseUrl": e.base, "bearerToken": e.bearer})).collect();
+/// Web's catalog `enabled: false` rows.
+fn decode_off(value: &Value) -> Vec<String> {
+    value["environments"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|v| v["enabled"] == false)
+        .filter_map(|v| v["environmentId"].as_str().map(str::to_owned))
+        .collect()
+}
+
+fn encode(saved: &[Saved], off: &[String]) -> Value {
+    let rows: Vec<Value> = saved
+        .iter()
+        .map(|e| {
+            let mut row = json!({"environmentId": e.id, "label": e.label, "httpBaseUrl": e.base, "bearerToken": e.bearer});
+            if off.contains(&e.id) {
+                row["enabled"] = json!(false);
+            }
+            row
+        })
+        .collect();
     json!({ "version": 1, "environments": rows })
 }
 
 /// Bearer tokens are credentials: the file is the user's alone.
-fn save(saved: &[Saved]) -> Result<(), String> {
+fn save(saved: &[Saved], off: &[String]) -> Result<(), String> {
     let path = path();
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
@@ -90,7 +112,7 @@ fn save(saved: &[Saved]) -> Result<(), String> {
     #[cfg(unix)]
     std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
     let mut file = options.open(&temporary).map_err(|e| e.to_string())?;
-    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
+    std::io::Write::write_all(&mut file, serde_json::to_string_pretty(&encode(saved, off)).unwrap_or_default().as_bytes()).map_err(|e| e.to_string())?;
     std::fs::rename(&temporary, &path).map_err(|e| e.to_string())
 }
 
@@ -105,12 +127,15 @@ fn connect(s: &App, env: &Saved) -> Source {
 
 /// Loads the saved environments and connects each in the background; this machine stays active.
 pub fn start(s: &mut App) {
-    let saved = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok()).map(|v| decode(&v)).unwrap_or_default();
-    for env in &saved {
+    let file = std::fs::read_to_string(path()).ok().and_then(|text| serde_json::from_str::<Value>(&text).ok());
+    let saved = file.as_ref().map(decode).unwrap_or_default();
+    let off = file.as_ref().map(decode_off).unwrap_or_default();
+    for env in saved.iter().filter(|e| !off.contains(&e.id)) {
         let src = connect(s, env);
         s.ui.env.parked.push((env.id.clone(), src));
     }
     s.ui.env.saved.extend(saved);
+    s.ui.env.off = off;
     ssh::start(s);
 }
 
@@ -397,8 +422,36 @@ pub fn remove(s: &mut App, id: &str) {
     }
     s.ui.env.parked.retain(|(k, _)| k != id);
     s.ui.env.saved.retain(|e| e.id != id);
-    s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    s.ui.env.off.retain(|k| k != id);
+    s.ui.env.error = persist(s);
     ssh::forget(s, id);
+}
+
+/// Writes the saved environments, returning the error the settings page shows.
+pub(crate) fn persist(s: &App) -> Option<String> {
+    save(&s.ui.env.saved, &s.ui.env.off).err().map(|e| format!("Could not save environments: {e}"))
+}
+
+/// Web `setEnabled` on a saved environment: off disconnects it and keeps it saved; on reconnects.
+pub fn set_enabled(s: &mut App, id: &str, enabled: bool) {
+    let Some(env) = s.ui.env.saved.iter().find(|e| e.id == id).cloned() else { return };
+    if enabled == !s.ui.env.off.iter().any(|k| k == id) {
+        return;
+    }
+    if enabled {
+        s.ui.env.off.retain(|k| k != id);
+        let src = connect(s, &env);
+        s.ui.env.parked.push((env.id.clone(), src));
+        ssh::resume(s, id);
+    } else {
+        if s.ui.env.active == id {
+            s.navigate(Route::Home { project_id: None });
+            switch(s, LOCAL);
+        }
+        s.ui.env.parked.retain(|(k, _)| k != id);
+        s.ui.env.off.push(id.to_owned());
+    }
+    s.ui.env.error = persist(s);
 }
 
 /// `preparePairingRegistration`: the descriptor first, so a wrong address never spends the code.
@@ -457,10 +510,11 @@ fn paired(s: &mut App, result: Result<Saved, String>) {
     let src = connect(s, &env);
     s.ui.env.parked.push((env.id.clone(), src));
     s.ui.env.saved.retain(|e| e.id != env.id);
+    s.ui.env.off.retain(|k| *k != env.id);
     s.ui.env.saved.push(env);
     s.ui.env.host.clear();
     s.ui.env.code.clear();
-    s.ui.env.error = save(&s.ui.env.saved).err().map(|e| format!("Could not save environments: {e}"));
+    s.ui.env.error = persist(s);
 }
 
 /// Lands a pairing that finished, and SSH environments' tunnel work.
@@ -541,7 +595,10 @@ mod tests {
     #[test]
     fn saved_environments_round_trip_and_drop_incomplete_rows() {
         let list = vec![saved("a"), saved("b")];
-        assert_eq!(decode(&encode(&list)), list);
+        let off = vec!["b".to_owned()];
+        assert_eq!(decode(&encode(&list, &off)), list);
+        assert_eq!(decode_off(&encode(&list, &off)), off, "a switched-off environment stays off");
+        assert!(encode(&list, &[]).to_string().find("enabled").is_none(), "on is the default and omitted");
         let partial = json!({"environments": [{"environmentId": "c", "label": "C", "httpBaseUrl": "https://c"}]});
         assert!(decode(&partial).is_empty(), "a row without a bearer cannot connect");
     }
