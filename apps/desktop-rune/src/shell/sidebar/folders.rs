@@ -36,6 +36,8 @@ pub struct Grouping {
     local: String,
 }
 
+const SCRATCH_KEY: &str = "\0no-project";
+
 impl Grouping {
     pub fn read(s: &App) -> Grouping {
         let environment = s.state().config.as_ref().map(|c| field(&c["environment"], "environmentId").to_string()).unwrap_or_default();
@@ -59,6 +61,10 @@ impl Grouping {
 
     /// `deriveLogicalProjectKey` with the project's override, if any.
     pub fn key(&self, project: &Value) -> String {
+        // `groupScratchProjects`: scratch projects share one "No project" group.
+        if project["isScratch"] == true {
+            return SCRATCH_KEY.to_string();
+        }
         let physical = format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")));
         let mode = self.overrides[&physical].as_str().unwrap_or(&self.mode);
         if mode == "separate" {
@@ -137,7 +143,13 @@ pub fn groups(projects: &[Value], grouping: &Grouping) -> Vec<Group> {
             let list = &members[&key];
             let first = list.iter().find(|p| grouping.environment_of(p) == grouping.local).unwrap_or(&list[0]);
             Group {
-                label: if list.len() == 1 { field(list[0], "title").to_string() } else { label(list) },
+                label: if key == SCRATCH_KEY {
+                    "No project".to_string()
+                } else if list.len() == 1 {
+                    field(list[0], "title").to_string()
+                } else {
+                    label(list)
+                },
                 members: list.iter().map(|p| field(p, "id").to_string()).collect(),
                 representative: field(first, "id").to_string(),
                 root: field(first, "workspaceRoot").to_string(),
@@ -334,9 +346,16 @@ pub fn shown(folder: &Folder, model: &Model, state: &State) -> Vec<usize> {
     folder.rows.iter().copied().filter(|i| model.route.as_deref() == Some(model.threads[*i].id.as_str())).collect()
 }
 
-/// The collapsed folder's dot: needs you, failed, unread done, then working.
+/// The collapsed folder's dot: needs you, failed, unread done, then working, over the threads
+/// it hides (the open thread stays listed).
 fn dot(t: &T, model: &Model, folder: &Folder) -> Option<rune::Color> {
-    let statuses: Vec<(Status, bool)> = folder.rows.iter().map(|i| (super::logic::status(&model.threads[*i]), model.threads[*i].unread())).collect();
+    let statuses: Vec<(Status, bool)> = folder
+        .rows
+        .iter()
+        .map(|i| &model.threads[*i])
+        .filter(|th| model.route.as_deref() != Some(th.id.as_str()))
+        .map(|th| (super::logic::status(th), th.unread()))
+        .collect();
     if statuses.iter().any(|(s, _)| matches!(s, Status::Approval | Status::Input | Status::Request)) {
         Some(t.sb.warning_foreground)
     } else if statuses.iter().any(|(s, _)| *s == Status::Failed) {
@@ -542,6 +561,32 @@ mod tests {
         let saved = vec!["env:/gone".to_string(), "env:/x".to_string(), "env:/o".to_string()];
         assert_eq!(scope_members(&groups, &saved), vec!["o".to_string()]);
         assert!(scope_members(&groups, &[]).is_empty(), "no keys is all projects");
+    }
+
+    #[test]
+    fn a_folded_folders_dot_reads_only_the_threads_it_hides() {
+        let t = crate::theme::theme(true);
+        let mut model = super::super::Model::build(&crate::App::new());
+        model.threads.truncate(1);
+        model.threads[0].pending_approval = true;
+        let folder = Folder { group: groups(&[project("p", "P", "/p", Value::Null)], &grouping("separate")).remove(0), rows: vec![0] };
+        assert_eq!(dot(&t, &model, &folder), Some(t.sb.warning_foreground), "FAILED: a hidden thread that needs you shows");
+        model.route = Some(model.threads[0].id.clone());
+        assert_eq!(dot(&t, &model, &folder), None, "FAILED: the open thread stays listed, so it adds no dot");
+    }
+
+    #[test]
+    fn scratch_projects_share_one_no_project_group() {
+        let scratch = |id: &str, root: &str| {
+            let mut p = project(id, id, root, Value::Null);
+            p["isScratch"] = json!(true);
+            p
+        };
+        let projects = vec![scratch("a", "/tmp/a"), project("o", "Other", "/other", Value::Null), scratch("b", "/tmp/b")];
+        let built = groups(&projects, &grouping("separate"));
+        assert_eq!(built.len(), 2, "FAILED: scratch projects fold into one group");
+        assert_eq!((built[0].label.as_str(), built[0].members.clone()), ("No project", vec!["a".to_string(), "b".to_string()]));
+        assert_eq!(built[1].label, "Other");
     }
 
     #[test]

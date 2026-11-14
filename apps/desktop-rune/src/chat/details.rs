@@ -11,7 +11,7 @@ use crate::chat::composer;
 use crate::data;
 use crate::icons;
 use crate::theme::{self, AlphaMul, T, radius};
-use crate::App;
+use crate::{App, Route};
 use std::collections::{HashMap, HashSet};
 use crate::shell::palette;
 
@@ -569,6 +569,42 @@ fn set_env_mode(s: &mut App, worktree: bool) {
     }
 }
 
+/// The draft's project and one copy per other environment in its repository group; empty when
+/// it lives on one environment only.
+fn hosts(s: &App) -> Vec<String> {
+    let Some(project) = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()) else { return Vec::new() };
+    let (groups, by_project) = crate::shell::sidebar::folders::group_of(s);
+    let Some(&g) = by_project.get(&project) else { return Vec::new() };
+    let rows = &s.state().projects;
+    let env_of = |id: &str| rows.iter().find(|p| data::s(p, "id") == id).filter(|p| p["archivedAt"].is_null()).map(|p| crate::env::of(s, p));
+    let mut seen = vec![env_of(&project).unwrap_or_default()];
+    let mut hosts = vec![project.clone()];
+    for member in &groups[g].members {
+        if let Some(env) = env_of(member).filter(|e| !seen.contains(e)) {
+            seen.push(env);
+            hosts.push(member.clone());
+        }
+    }
+    if hosts.len() > 1 { hosts } else { Vec::new() }
+}
+
+/// Moves the new-thread draft (prompt and run context) to `project`'s copy on another
+/// environment, as RunContextSelector's "Run on" does.
+fn move_draft(s: &mut App, project: &str) {
+    s.ui.chat.details.menu = None;
+    let (from, to) = (composer::draft_key(s, s.frame_route()), composer::home_key(project));
+    if from == to {
+        return;
+    }
+    if let Some(d) = s.ui.chat.composer.drafts.remove(&from) {
+        s.ui.chat.composer.drafts.insert(to.clone(), d);
+    }
+    if let Some(run) = s.ui.chat.details.drafts.remove(&from) {
+        s.ui.chat.details.drafts.insert(to, run);
+    }
+    s.navigate(Route::Home { project_id: Some(project.to_string()) });
+}
+
 fn pick_item(s: &mut App, item: Item) {
     s.ui.chat.details.menu = None;
     match item {
@@ -864,16 +900,6 @@ fn poll_branch(s: &mut App) -> bool {
     true
 }
 
-/// `editor.openFavorite`: the checkout in the editor the card's "Open in editor" button uses.
-/// False with nothing to open, so the chord falls through.
-pub fn open_favorite(s: &mut App) -> bool {
-    if cwd(s).is_none() || editors(s).is_empty() {
-        return false;
-    }
-    open_in_editor(s, None);
-    true
-}
-
 fn open_in_editor(s: &mut App, editor: Option<String>) {
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| preferred_editor(s).map(|e| e.0))) else { return };
     let Some(editor) = editor else { return };
@@ -1155,10 +1181,18 @@ fn radio_row(t: &T, glyph: &'static rune::Icon, label: &str, checked: bool, on_p
 /// RunContextSelector: where the draft runs (this environment) and in which workspace.
 fn run_context_rows(s: &App, t: &T) -> Vec<El> {
     let worktree = draft_run(s).is_some_and(|r| r.worktree);
-    let mut rows = vec![
-        group_label(t, "Run on"),
-        radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None),
-    ];
+    let mut rows = vec![group_label(t, "Run on")];
+    // One row per environment holding the project's repository; picking one moves the draft.
+    let hosts = hosts(s);
+    if hosts.is_empty() {
+        rows.push(radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None));
+    }
+    let current = composer::ctx(s).project.map(|p| data::s(p, "id").to_string()).unwrap_or_default();
+    for project in hosts {
+        let label = s.state().projects.iter().find(|p| data::s(p, "id") == project).map(|p| crate::env::location(s, p)).unwrap_or_default();
+        let checked = project == current;
+        rows.push(radio_row(t, &icons::SERVER, &label, checked, move |s: &mut App| move_draft(s, &project)));
+    }
     // BranchToolbar's "Add to another machine": clone this project onto a connected environment.
     if let Some(id) = composer::ctx(s).project.map(|p| data::s(p, "id").to_owned())
         && !crate::add_to_machine::targets(s, &id).is_empty()
@@ -1357,6 +1391,8 @@ pub fn shortcut(s: &mut App, e: &KeyEvent) -> bool {
         Menu::Branch
     } else if crate::panel::shortcut(s, e, "composer.workspace") && draft_run(s).is_some() {
         Menu::RunContext
+    } else if crate::panel::shortcut(s, e, "composer.host") && draft_run(s).is_some() && !hosts(s).is_empty() {
+        Menu::RunContext
     } else {
         return false;
     };
@@ -1529,6 +1565,62 @@ mod tests {
         *super::draft_run_mut(&mut s) = DraftRun { worktree: true, base: Some("feature/x".into()), from_origin: true };
         assert_eq!(take_draft_workspace(&mut s), Some(json!({"type": "worktree", "baseRef": "feature/x", "startFromOrigin": true})));
         assert_eq!(take_draft_workspace(&mut s), None, "taken once: the next draft starts over");
+    }
+
+    fn chord(c: char) -> rune::KeyEvent {
+        let mut e = rune::KeyEvent::from(rune::Key::Command(c));
+        e.mods.cmd = true;
+        e.mods.ctrl = !cfg!(target_os = "macos");
+        e.mods.shift = true;
+        e
+    }
+
+    #[test]
+    fn the_thread_panel_chord_toggles_the_details_card_as_the_lane_fits() {
+        let mut s = App::new();
+        let id = s.state().threads.iter().find(|t| !data::s(t, "projectId").is_empty()).map(|t| data::s(t, "id").to_owned()).unwrap();
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| serde_json::json!({}))["keybindings"] =
+                serde_json::json!([{"command": "threadPanel.toggle", "shortcut": {"key": "b", "modKey": true, "shiftKey": true}}]);
+        }
+        s.navigate(Route::Thread(id));
+        let mut chord = rune::KeyEvent::from(rune::Key::Command('b'));
+        chord.mods.cmd = true;
+        chord.mods.ctrl = !cfg!(target_os = "macos");
+        chord.mods.shift = true;
+        let (wide, narrow) = ((1182.0, 848.0), (900.0, 848.0));
+        s.ui.chat.details.fits.set(true);
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline);
+        assert!(super::shortcut(&mut s, &chord));
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::None, "the chord closes the inline card");
+        assert!(super::shortcut(&mut s, &chord));
+        assert_eq!(shown(&s, wide.0, wide.1), Shown::Inline, "and opens it again");
+        s.ui.chat.details.fits.set(false);
+        assert!(super::shortcut(&mut s, &chord));
+        assert_eq!(shown(&s, narrow.0, narrow.1), Shown::Popover, "a narrow lane opens the popover");
+    }
+
+    #[test]
+    fn the_host_chord_lists_one_copy_per_environment_and_moves_the_draft() {
+        let mut s = App::new();
+        let identity = json!({"canonicalKey": "github.com/acme/app", "name": "app", "rootPath": "/src/app"});
+        let project = |id: &str| json!({"id": id, "title": "app", "workspaceRoot": "/src/app", "repositoryIdentity": identity, "pinnedAt": null, "archivedAt": null});
+        if let data::Source::Fixture(state) = &mut s.src {
+            state.config.get_or_insert_with(|| json!({}))["keybindings"] =
+                json!([{"command": "composer.host", "shortcut": {"key": "h", "modKey": true, "shiftKey": true}}]);
+            let mut remote = project("remote-app");
+            remote[crate::env::TAG] = json!("box");
+            state.projects.extend([project("local-app"), project("local-app-2"), remote]);
+        }
+        s.navigate(Route::Home { project_id: Some("local-app".into()) });
+        assert_eq!(super::hosts(&s), vec!["local-app".to_string(), "remote-app".to_string()], "FAILED: one row per environment");
+        s.ui.chat.composer.drafts.entry(crate::chat::composer::home_key("local-app")).or_default().edit.replace_text("carry me");
+        assert!(super::shortcut(&mut s, &chord('h')), "FAILED: the chord opens Run on");
+        assert_eq!(s.ui.chat.details.menu, Some(super::Menu::RunContext));
+        super::move_draft(&mut s, "remote-app");
+        assert_eq!(s.route, Route::Home { project_id: Some("remote-app".into()) });
+        assert_eq!(s.ui.chat.composer.drafts[&crate::chat::composer::home_key("remote-app")].edit.text, "carry me", "FAILED: the prompt moves along");
+        assert!(!s.ui.chat.composer.drafts.contains_key(&crate::chat::composer::home_key("local-app")));
     }
 
     #[test]

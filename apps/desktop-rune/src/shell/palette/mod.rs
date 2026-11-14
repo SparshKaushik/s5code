@@ -76,6 +76,9 @@ enum Action {
     CopyThread,
     CopyPromptLink(String),
     ShareWithGuest(String),
+    ToggleThemeEditor,
+    /// A settings search result: its page and title.
+    Setting(String, String),
     LinkPr(String),
     ShowPrs,
     Files,
@@ -302,6 +305,10 @@ pub(crate) fn toast_with(s: &mut App, title: &str, description: Option<&str>, ac
         copied: Vec::new(),
     });
 }
+#[cfg(test)]
+pub(crate) fn toast_title(s: &App) -> Option<&str> {
+    s.ui.shell.palette.notice.as_ref().map(|n| n.title.as_str())
+}
 /// The open toast's `label` action reads "Copied!", disabled, for 2 s.
 pub(crate) fn toast_copied(s: &mut App, tx: &mut Tx, label: &str) {
     let Some(notice) = s.ui.shell.palette.notice.as_mut() else { return };
@@ -328,6 +335,11 @@ pub(crate) fn toast_error_brief(s: &mut App, title: &str, description: Option<&s
     toast_error(s, title, description);
     if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
         notice.until = data::now_ms() + 4000;
+    }
+}
+pub(crate) fn set_toast_actions(s: &mut App, actions: Vec<ToastAction>) {
+    if let Some(notice) = s.ui.shell.palette.notice.as_mut() {
+        notice.actions = actions;
     }
 }
 /// The first `message` in an Effect cause, else the reply's own text.
@@ -476,6 +488,9 @@ fn items(s: &App) -> Vec<Item> {
         let mut appearance = item("Change appearance", "Actions", &icons::MONITOR, &shortcut_label(s, "appearance.cycle"), Action::Page("appearance"));
         appearance.fields = keywords(&["change appearance", "light", "dark", "system", "mode", "toggle"]);
         out.push(appearance);
+        let mut editor = item("Toggle theme editor", "Actions", &icons::PALETTE, &shortcut_label(s, "themeEditor.toggle"), Action::ToggleThemeEditor);
+        editor.fields = keywords(&["theme", "appearance", "colors", "palette", "customize"]);
+        out.push(editor);
         if crate::pages::pull_requests::supported(s) {
             let mut prs = item("Open pull requests", "Actions", &icons::GIT_PULL_REQUEST_ARROW, "", Action::Navigate(Route::PullRequests));
             prs.fields = keywords(&["pull requests", "prs", "review", "merge", "branch"]);
@@ -649,7 +664,7 @@ fn items(s: &App) -> Vec<Item> {
     if !typed.trim().is_empty() && ui.page.is_empty() {
         for setting in crate::settings::search::items() {
             let page = crate::settings::label(&setting.to);
-            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Navigate(Route::Settings(setting.to.clone())));
+            let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Setting(setting.to.clone(), setting.title.clone()));
             row.description = Some(format!("Settings · {page}"));
             row.fields = std::iter::once(page).chain(setting.terms.iter().map(String::as_str)).map(|v| SearchTerm::weighted(v, 0.6)).collect();
             out.push(row);
@@ -1436,6 +1451,11 @@ fn execute(s: &mut App, action: Action, tx: &mut Tx) {
             toast(s, "Prompt link copied", None);
         }
         Action::ShareWithGuest(thread) => crate::shell::sidebar::share::open_guest(s, &thread),
+        Action::Setting(page, title) => crate::settings::open_setting(s, &page, &title),
+        Action::ToggleThemeEditor => {
+            let dark = s.ui.shell.dark.get();
+            crate::settings::themes::toggle_editor(s, dark);
+        }
         Action::LinkPr(thread) => actions::open_link(s, thread),
         Action::ShowPrs => actions::show_pull_requests(s),
         Action::OpenFile(path) => crate::panel::open_file(s, path),
@@ -2241,7 +2261,7 @@ mod tests {
         let rows = items(&s);
         let hit = rows.iter().find(|v| v.group == "Settings" && v.title == "Keep worktrees with local changes").expect("the setting matches");
         assert_eq!(hit.description.as_deref(), Some("Settings · Worktrees"));
-        assert!(matches!(&hit.action, Action::Navigate(Route::Settings(page)) if page == "worktrees"));
+        assert!(matches!(&hit.action, Action::Setting(page, title) if page == "worktrees" && title == "Keep worktrees with local changes"));
 
         let (thread, project) = s
             .state()

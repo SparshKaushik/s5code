@@ -138,7 +138,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                 }
             }
             if path == "worktrees" && title == "Branches" {
-                page = page.child(super::storage::worktree_cleanup(s, cx, t));
+                page = page.child(super::storage::worktree_cleanup(s, cx, t).key(super::title_key("Worktree cleanup")));
             }
         }
         return page;
@@ -151,7 +151,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
         "scheduled-tasks" => super::tasks::view(s, t),
         "keybindings" => super::keybindings::view(s, t),
         "projects" => super::projects::view(s, cx, t),
-        "archived" => super::projects::archived(s, t),
+        "archived" => super::projects::archived(s, t).key(super::title_key("Archived threads")),
         "about" => super::about::view(s, t),
         "secrets" => super::secrets::view(s, t),
         "diagnostics" => super::diagnostics::view(s, cx, t),
@@ -181,6 +181,20 @@ fn diagnostics_link(s: &App, t: &T) -> El {
         )],
         t,
     )
+}
+
+/// The `AdvancedSettings` fold on `path` that holds the setting titled `title`.
+pub(super) fn fold_of(path: &str, title: &str) -> Option<String> {
+    let mut section = "";
+    for spec in specs()[path].as_array()? {
+        let name = spec["title"].as_str().unwrap_or("");
+        if name != "Advanced" {
+            section = name;
+        } else if spec["rows"].as_array().into_iter().flatten().any(|row| row["title"] == title) {
+            return Some(format!("{path}/{section}"));
+        }
+    }
+    None
 }
 
 pub(super) fn advanced_trigger(path: String, open: bool, t: &T) -> El {

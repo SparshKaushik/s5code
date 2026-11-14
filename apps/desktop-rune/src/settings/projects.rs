@@ -82,7 +82,7 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T) -> El {
                         .min_w(0.0),
                 ),
         )
-        .child(c::card(overview, t))
+        .child(c::card(overview, t).key(super::title_key("Project overview")))
         .child(actions(s, t, project));
 
     let checkout = super::about::about_row(t, &environment, &root, el());

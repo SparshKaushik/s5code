@@ -90,6 +90,8 @@ pub struct Ui {
     pub search: TextEdit,
     /// The highlighted search result (web's `activeResultIndex`).
     pub search_active: usize,
+    /// A search result's title to scroll to once its page lays out (web's search target).
+    pub reveal: Option<String>,
     pub edits: HashMap<String, TextEdit>,
     pub optimistic_settings: Option<Value>,
     pub pending: HashMap<u64, String>,
@@ -498,6 +500,9 @@ pub fn poll(s: &mut App) -> bool {
         s.ui.settings.loaded_page = page;
         s.ui.settings.error = None;
         s.ui.settings.advanced.clear();
+        if let (Some(page), Some(title)) = (&s.ui.settings.loaded_page, &s.ui.settings.reveal) {
+            s.ui.settings.advanced.extend(pages::fold_of(page, title));
+        }
         accent::close(s);
         s.ui.settings.icon_picker = None;
     }
@@ -722,6 +727,7 @@ fn search_results(s: &App, t: &T, query: &str) -> El {
     let mut list = col().gap(4.0).w_full().role("listbox").label("Settings search results");
     for (index, item) in results.into_iter().enumerate() {
         let target = item.to.clone();
+        let title = item.title.clone();
         list = list.child(
             row()
                 .key(format!("settings-result-{index}"))
@@ -737,7 +743,7 @@ fn search_results(s: &App, t: &T, query: &str) -> El {
                 .role("option")
                 .label(item.title.clone())
                 .on_hover(move |s: &mut App| s.ui.settings.search_active = index)
-                .on_press(move |s: &mut App| open_result(s, &target))
+                .on_press(move |s: &mut App| open_result(s, &target, &title))
                 .child(rune::icon(nav_icon(&item.to), 16.0).color(t.sb.sidebar_icon_color).mt(2.0))
                 .child(
                     col()
@@ -756,12 +762,30 @@ fn search_results(s: &App, t: &T, query: &str) -> El {
     list
 }
 
-fn open_result(s: &mut App, page: &str) {
+fn open_result(s: &mut App, page: &str, title: &str) {
     commit_edits(s, true);
     s.ui.settings.search.clear();
     s.ui.settings.search_active = 0;
     s.ui.settings.open_select = None;
+    open_setting(s, page, title);
+}
+
+/// Opens `page` scrolled to the setting titled `title`, as a settings search target does.
+pub fn open_setting(s: &mut App, page: &str, title: &str) {
+    let reveal = search::reveal(page, title);
+    // Web's `AdvancedSettings` opens on a target inside it and stays open.
+    s.ui.settings.advanced.extend(pages::fold_of(page, reveal));
+    s.ui.settings.reveal = Some(reveal.to_owned());
+    // Web's `revealSettingsSearchTarget`: the separate font rows show only with this on.
+    if matches!(title, "Prompt font" | "Code font" | "Terminal font") {
+        update(s, "typographyAdvanced", json!(true));
+    }
     s.navigate(Route::Settings(page.to_owned()));
+}
+
+/// The key on a setting's title text, so a search result can scroll to it.
+pub fn title_key(title: &str) -> String {
+    format!("setting-title-{}", search::normalize(title))
 }
 
 /// Arrow keys move through the results and Enter opens the active one, as web's combobox does.
@@ -779,8 +803,8 @@ fn search_key(s: &mut App, e: &rune::KeyEvent) -> bool {
         rune::Key::Down => s.ui.settings.search_active = if active == last { 0 } else { active + 1 },
         rune::Key::Up => s.ui.settings.search_active = if active == 0 { last } else { active - 1 },
         rune::Key::Enter => {
-            let page = results[active].to.clone();
-            open_result(s, &page);
+            let (page, title) = (results[active].to.clone(), results[active].title.clone());
+            open_result(s, &page, &title);
         }
         _ => return false,
     }
@@ -967,18 +991,29 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .child(header)
         .child(el().h(1.0).w_full().fill(t.c.border));
     let page = pages::view(s, cx, t, path);
-    content = content.child(
-        col()
-            .key(format!("settings-scroll-{path}"))
-            .grow(1.0)
-            .min_h(0.0)
-            .w_full()
-            .items_center()
-            .scroll(rune::ScrollSpec {
-                stick_bottom: false,
-            })
-            .child(page),
-    );
+    let scroll = format!("settings-scroll-{path}");
+    let mut scroller = col()
+        .key(scroll.clone())
+        .grow(1.0)
+        .min_h(0.0)
+        .w_full()
+        .items_center()
+        .scroll(rune::ScrollSpec {
+            stick_bottom: false,
+        })
+        .child(page);
+    // A marker keyed by the target, since `on_layout` reports only a new or moved element: a
+    // second result on the same page scrolls too.
+    if let Some(title) = s.ui.settings.reveal.clone() {
+        let key = title_key(&title);
+        scroller = scroller.child(el().key(format!("settings-reveal-{key}")).size(0.0, 0.0).on_layout_tx(
+            move |s: &mut App, _, tx: &mut rune::Tx| {
+                s.ui.settings.reveal = None;
+                tx.scroll_center_in(scroll.clone(), key.clone());
+            },
+        ));
+    }
+    content = content.child(scroller);
     let modal = row()
         .key("settings-modal")
         .padding(1.0)
@@ -1577,5 +1612,81 @@ mod patch_tests {
         assert!(!focuses_search(&text("f", Default::default()), false));
         assert!(focuses_search(&text("/", Default::default()), false));
         assert!(!focuses_search(&text("/", Default::default()), true), "a focused field keeps its slash");
+    }
+}
+
+#[cfg(test)]
+mod reveal_tests {
+    use crate::{App, Route};
+    use rune::{Cx, El};
+
+    fn view(s: &App, cx: &mut Cx<App>) -> El {
+        crate::shell::view(s, cx, &crate::theme::theme(true))
+    }
+
+    #[test]
+    fn a_search_result_opens_its_page_scrolled_to_the_setting() {
+        let mut app = App::new();
+        app.navigate(Route::Settings("general".into()));
+        let mut rt = rune::Runtime::new(app, view, (1100., 460.), rune::Env::new(true, 1.));
+        let settle = |rt: &mut rune::Runtime<App>| {
+            for _ in 0..90 {
+                rt.frame(1. / 60.);
+            }
+        };
+        let rect = |rt: &rune::Runtime<App>, key: &str| rt.elements().into_iter().find(|e| e.key.as_deref() == Some(key)).map(|e| e.rect);
+        let in_view = |rt: &rune::Runtime<App>, title: &str| {
+            let viewport = rect(rt, "settings-scroll-general").expect("FAILED: the page scrolls");
+            let target = rect(rt, &super::title_key(title)).expect("FAILED: the setting's title is keyed");
+            let mid = target[1] + target[3] / 2.;
+            mid > viewport[1] && mid < viewport[1] + viewport[3]
+        };
+        settle(&mut rt);
+        assert!(!in_view(&rt, "Quit shortcut"), "FAILED: the setting starts below the fold");
+        rt.update(|s, _| crate::settings::open_setting(s, "general", "Quit shortcut"));
+        settle(&mut rt);
+        assert!(in_view(&rt, "Quit shortcut"), "FAILED: opening the result scrolls the setting into view");
+        assert!(rt.state.ui.settings.reveal.is_none(), "FAILED: the reveal runs once");
+        assert!(!in_view(&rt, "Thread notifications"), "FAILED: the first setting is scrolled away");
+        rt.update(|s, _| crate::settings::open_setting(s, "general", "Thread notifications"));
+        settle(&mut rt);
+        assert!(in_view(&rt, "Thread notifications"), "FAILED: a second result on the same page scrolls too");
+    }
+
+    /// Web settings this client doesn't draw yet; their results open the page without scrolling.
+    const UNBUILT: &[&str] = &[
+        "Compact idle threads",
+        "Cursor account usage",
+        "Health check interval",
+        "Mobile app",
+        "Project defaults and overrides",
+        "Source control writer model",
+        "Thread details",
+        "Usage providers",
+    ];
+    /// Drawn only in other states: the desktop CLI row, the managed host's local environment, and
+    /// Linked environments behind its Labs flag.
+    const HIDDEN_HERE: &[&str] = &["Linked environments", "Local environment", "t3 command"];
+
+    #[test]
+    fn every_search_result_has_a_keyed_setting_to_scroll_to() {
+        let mut app = App::new();
+        app.navigate(Route::Settings("general".into()));
+        let mut rt = rune::Runtime::new(app, view, (1100., 900.), rune::Env::new(true, 1.));
+        let mut missing = Vec::new();
+        for item in crate::settings::search::items() {
+            rt.update(|s, _| {
+                s.ui.settings.project = (item.to == "projects").then(|| crate::data::s(&s.state().projects[0], "id").to_owned());
+                crate::settings::open_setting(s, &item.to, &item.title);
+            });
+            rt.frame(1. / 60.);
+            let key = super::title_key(super::search::reveal(&item.to, &item.title));
+            if !rt.elements().iter().any(|e| e.key.as_deref() == Some(key.as_str())) {
+                missing.push(item.title.as_str());
+            }
+        }
+        missing.retain(|title| !HIDDEN_HERE.contains(title));
+        missing.sort_unstable();
+        assert_eq!(missing, UNBUILT, "FAILED: unkeyed search titles {missing:?}");
     }
 }
