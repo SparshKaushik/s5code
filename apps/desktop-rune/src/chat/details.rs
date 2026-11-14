@@ -987,7 +987,7 @@ fn card(s: &App, t: &T) -> Option<El> {
         .gap(9.0)
         .center_y()
         .label(format!("Run context: {env}, {mode}"))
-        .child(icon(run_on::trigger_icon(s), 18.0).color(muted))
+        .child(icon(if run_on::auto_label(s).is_some() { &icons::SCALE } else { &icons::SERVER }, 18.0).color(muted))
         .child(text(env).font(ROW).color(if draft { fg } else { muted }).truncate().grow(1.0).shrink().min_w(0.0))
         .child(icon(if new_worktree { &icons::FOLDER_GIT_2 } else if worktree { &icons::GIT_FORK } else { &icons::FOLDER }, 16.0).color(muted).ml(1.0).help(workspace_path(s).unwrap_or_else(|| mode.to_string())));
     if workspace_path(s).is_some() {
@@ -1142,18 +1142,15 @@ fn run_context_rows(s: &App, t: &T) -> Vec<El> {
     let worktree = draft_run(s).is_some_and(|r| r.worktree);
     let mut rows = vec![
         group_label(t, "Run on"),
-    ];
-    let machines = run_on::rows(s, t);
-    if machines.is_empty() {
-        rows.push(radio_row(t, &icons::SERVER, &env_label(s), true, |s: &mut App| s.ui.chat.details.menu = None));
-    }
-    rows.extend(machines);
-    rows.extend([
+        radio_row(t, &icons::SERVER, &env_label(s), run_on::auto_label(s).is_none(), run_on::keep_here),
         el().h(1.0).mx(8.0).my(4.0).fill(t.c.border),
         group_label(t, "Workspace"),
         radio_row(t, &icons::FOLDER, if draft_worktree(s).is_some() { "Current worktree" } else { "Current checkout" }, !worktree, |s: &mut App| set_env_mode(s, false)),
         radio_row(t, &icons::FOLDER_GIT_2, "New worktree", worktree, |s: &mut App| set_env_mode(s, true)),
-    ]);
+    ];
+    if let Some(auto) = run_on::auto_row(s, t) {
+        rows.insert(1, auto);
+    }
     if let Some((branch, _)) = previous_seed(s) {
         let label = branch.map_or_else(|| "Previous worktree".to_string(), |b| format!("Previous worktree ({b})"));
         rows.push(radio_row(t, &icons::HISTORY, &label, false, |s: &mut App| {

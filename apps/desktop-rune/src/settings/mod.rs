@@ -11,7 +11,7 @@ pub mod codex_callback;
 mod background;
 mod balance;
 pub mod client;
-pub(crate) mod connections;
+mod connections;
 mod controls;
 mod devices;
 mod devices_editor;
