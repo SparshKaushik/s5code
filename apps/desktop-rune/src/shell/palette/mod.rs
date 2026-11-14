@@ -647,7 +647,7 @@ fn items(s: &App) -> Vec<Item> {
     }
     // `settingsSearchItems`: every setting, described by its page, for the palette's matcher.
     if !typed.trim().is_empty() && ui.page.is_empty() {
-        for setting in crate::settings::search::items() {
+        for setting in crate::settings::search::items().iter().filter(|i| crate::settings::search::shown(s, i)) {
             let page = crate::settings::label(&setting.to);
             let mut row = item(setting.title.clone(), "Settings", &icons::SETTINGS, "", Action::Navigate(Route::Settings(setting.to.clone())));
             row.description = Some(format!("Settings · {page}"));
@@ -1121,6 +1121,9 @@ pub fn search_changed(s: &mut App, tx: &mut Tx) {
     tx.wake_after(std::time::Duration::from_millis(120));
 }
 pub fn poll(s: &mut App) -> bool {
+    if s.ui.shell.palette.open {
+        add_project::sync_browse(s);
+    }
     let mut changed = add_project::poll(s);
     changed |= actions::poll(s);
     let acknowledgements = std::mem::take(&mut s.ui.shell.palette.acknowledgements);

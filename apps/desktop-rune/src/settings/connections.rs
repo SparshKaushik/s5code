@@ -1054,7 +1054,7 @@ fn ssh_fields(s: &App, t: &T) -> El {
 }
 
 /// Web `offersLinkedEnvironments`.
-fn offers_links(s: &App) -> bool {
+pub(super) fn offers_links(s: &App) -> bool {
     s.state().config.as_ref().is_some_and(|c| c["environment"]["capabilities"]["peerLinks"] == true)
         && super::server_settings(s)["linkedEnvironmentsEnabled"] == true
 }

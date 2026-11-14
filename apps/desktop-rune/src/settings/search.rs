@@ -4,6 +4,7 @@ use serde_json::Value;
 use std::sync::OnceLock;
 
 pub struct Item {
+    id: String,
     pub title: String,
     pub to: String,
     pub terms: Vec<String>,
@@ -22,6 +23,7 @@ pub fn items() -> &'static [Item] {
             // Connections sections this client doesn't draw.
             .filter(|v| !matches!(v["id"].as_str(), Some("load-balancing" | "pull-request-routing")))
             .map(|v| Item {
+                id: v["id"].as_str().unwrap_or("").to_owned(),
                 title: v["title"].as_str().unwrap_or("").to_owned(),
                 to: v["to"].as_str().unwrap_or("").to_owned(),
                 terms: v["terms"].as_array().into_iter().flatten().filter_map(Value::as_str).map(normalize).collect(),
@@ -36,8 +38,13 @@ pub fn normalize(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ").to_lowercase()
 }
 
-pub fn search(query: &str) -> Vec<&'static Item> {
-    rank(items(), query)
+/// Whether the setting's section is on screen now, as web's availability flags decide.
+pub fn shown(s: &crate::App, item: &Item) -> bool {
+    item.id != "linked-environments" || super::connections::offers_links(s)
+}
+
+pub fn search(s: &crate::App, query: &str) -> Vec<&'static Item> {
+    rank(items(), query).into_iter().filter(|item| shown(s, item)).collect()
 }
 
 fn rank<'a>(items: &'a [Item], query: &str) -> Vec<&'a Item> {
@@ -83,6 +90,7 @@ mod tests {
     #[test]
     fn titles_outrank_search_terms_and_every_token_must_match() {
         let item = |title: &str, to: &str, terms: &[&str], secondary: bool| Item {
+            id: String::new(),
             title: title.into(),
             to: to.into(),
             terms: terms.iter().map(|t| normalize(t)).collect(),
@@ -101,9 +109,16 @@ mod tests {
         assert!(titles("missing").is_empty());
         assert!(titles("   ").is_empty());
         // The real index loads and only lists pages this client has.
-        assert!(search("contrast").iter().any(|i| i.to == "appearance"));
+        let mut s = crate::App::new();
+        assert!(search(&s, "contrast").iter().any(|i| i.to == "appearance"));
         assert!(super::items().iter().all(|i| super::super::has_page(&i.to)));
-        assert!(search("open source licenses").iter().any(|i| i.to == "about"));
-        assert!(search("load balancing").is_empty(), "no result for a section this client doesn't draw");
+        assert!(search(&s, "open source licenses").iter().any(|i| i.to == "about"));
+        assert!(search(&s, "load balancing").is_empty(), "no result for a section this client doesn't draw");
+        let linked = |s: &crate::App| search(s, "linked environments").iter().any(|i| i.to == "connections");
+        assert!(!linked(&s), "Linked environments hides with its section");
+        let mut state = crate::data::empty_state();
+        state.config = Some(serde_json::json!({"environment": {"capabilities": {"peerLinks": true}}, "settings": {"linkedEnvironmentsEnabled": true}}));
+        s.src = crate::data::Source::Fixture(state);
+        assert!(linked(&s));
     }
 }
