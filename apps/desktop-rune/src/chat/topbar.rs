@@ -14,9 +14,13 @@ use crate::{App, Route};
 
 #[derive(Default)]
 pub struct Ui {
-    /// The title being edited, while renaming.
-    pub rename: Option<TextEdit>,
+    /// The thread being renamed and its title field.
+    pub rename: Option<(String, TextEdit)>,
+    /// The rename in flight, for its failure toast.
+    rename_request: Option<u64>,
     pub terminal_open: bool,
+    /// The thread footer's requests in flight (ThreadNow).
+    pub now: crate::chat::timeline::now::State,
 }
 
 /// A project's monogram and colour (projectIdentity.ts).
@@ -91,20 +95,32 @@ fn open_menu(s: &mut App, at: Option<(f32, f32)>) {
 }
 
 pub fn start_rename(s: &mut App) {
-    if !matches!(s.frame_route(), Route::Thread(_)) {
+    let Route::Thread(id) = s.frame_route().clone() else { return };
+    if composer::ctx(s).thread.is_none() {
         return;
     }
     let current = title(s);
     let mut edit = TextEdit::new(current.clone());
     edit.set_selection(0, current.len());
     edit.focused = true;
-    s.ui.chat.topbar.rename = Some(edit);
+    s.ui.chat.topbar.rename = Some((id, edit));
+}
+
+/// The title field, while it renames the thread on screen; a rename started on another thread
+/// is not this one's.
+fn renaming<'a>(rename: &'a Option<(String, TextEdit)>, route: &Route) -> Option<&'a TextEdit> {
+    match (rename, route) {
+        (Some((id, edit)), Route::Thread(shown)) if id == shown => Some(edit),
+        _ => None,
+    }
 }
 
 fn commit_rename(s: &mut App) {
-    let Some(edit) = s.ui.chat.topbar.rename.take() else { return };
+    let Some((id, edit)) = s.ui.chat.topbar.rename.take() else { return };
+    if s.frame_route() != &Route::Thread(id.clone()) {
+        return;
+    }
     let next = edit.text.trim().to_string();
-    let Route::Thread(id) = s.frame_route().clone() else { return };
     if next.is_empty() {
         crate::shell::palette::toast(s, "Thread title cannot be empty", None);
         return;
@@ -114,13 +130,62 @@ fn commit_rename(s: &mut App) {
     }
     match &mut s.src {
         crate::data::Source::Live(net) => {
-            net.dispatch(json!({"type": "thread.metadata.update", "commandId": s5_net::uuid(), "threadId": id, "title": next}));
+            let request = net.dispatch(json!({"type": "thread.metadata.update", "commandId": s5_net::uuid(), "threadId": id, "title": next}));
+            s.ui.chat.topbar.rename_request = Some(request);
         }
         crate::data::Source::Fixture(state) => {
             if let Some(t) = state.threads.iter_mut().find(|t| data::s(t, "id") == id) {
                 t["title"] = json!(next);
             }
         }
+    }
+}
+
+/// Drops a rename once its thread leaves the screen, commits one whose field lost focus (the
+/// title input's blur), and takes the rename's reply. Also polls the thread footer.
+pub fn poll(s: &mut App) -> bool {
+    let mut changed = crate::chat::timeline::now::poll(s);
+    let route = s.frame_route().clone();
+    let rename = &s.ui.chat.topbar.rename;
+    let stale = rename.is_some() && renaming(rename, &route).is_none();
+    let blurred = rename.as_ref().is_some_and(|(_, edit)| !edit.focused);
+    if stale {
+        s.ui.chat.topbar.rename = None;
+        changed = true;
+    } else if blurred {
+        commit_rename(s);
+        changed = true;
+    }
+    if let Some(id) = s.ui.chat.topbar.rename_request
+        && let Some(reply) = s.src.net().and_then(|net| net.take_reply(id))
+    {
+        s.ui.chat.topbar.rename_request = None;
+        if let Err(e) = reply {
+            let message = crate::shell::palette::error_message(&e, "An error occurred.");
+            crate::shell::palette::toast_error_brief(s, "Failed to rename thread", Some(&message));
+        }
+        changed = true;
+    }
+    changed
+}
+
+/// The open subagent's parent (ChatHeader's parent breadcrumb): its id and title.
+fn parent(s: &App) -> Option<(String, String)> {
+    let thread = composer::ctx(s).thread?;
+    let lineage = &thread["lineage"];
+    let id = data::s(lineage, "parentThreadId");
+    if id.is_empty() || data::s(lineage, "relationshipToParent") != "subagent" {
+        return None;
+    }
+    let title = s.state().threads.iter().find(|t| data::s(t, "id") == id).map(|t| data::s(t, "title")).filter(|t| !t.is_empty()).unwrap_or("Parent thread");
+    Some((id.to_string(), title.to_string()))
+}
+
+/// A header toggle's tooltip: `{label} ({shortcut})`.
+fn with_shortcut(s: &App, label: &str, command: &str) -> String {
+    match crate::shell::palette::shortcut_label(s, command) {
+        k if k.is_empty() => label.to_string(),
+        k => format!("{label} ({k})"),
     }
 }
 
@@ -153,17 +218,42 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             )
             .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
     }
-    let title_el = match &s.ui.chat.topbar.rename {
+    if let Some((id, parent)) = parent(s) {
+        crumbs = crumbs
+            .child(
+                row()
+                    .key("topbar-parent")
+                    .center_y()
+                    .shrink()
+                    .min_w(0.0)
+                    .max_w(160.0)
+                    .hover_group()
+                    .cursor(rune::Cursor::Pointer)
+                    .focusable(true)
+                    .role("button")
+                    .label(format!("Open parent thread: {parent}"))
+                    .help(parent.clone())
+                    .on_press(move |s: &mut App| crate::shell::sidebar::open_thread(s, &id))
+                    .child(text(parent).font(CRUMB).color(t.c.muted_foreground).group_color(t.c.foreground).truncate().shrink()),
+            )
+            .child(text("/").font(theme::TEXT_SM).color(t.c.muted_foreground));
+    }
+    let thread = composer::ctx(s).thread;
+    let field = renaming(&s.ui.chat.topbar.rename, s.frame_route()).filter(|_| thread.is_some());
+    let title_el = match field {
         Some(edit) => text_input(edit, CRUMB)
             .key("topbar-rename")
             .single_line()
-            .w(320.0)
+            .grow(1.0)
+            .shrink()
+            .min_w(40.0)
             .px(6.0)
             .radius(6.0)
             .border(1.0, t.c.ring)
             .color(t.c.foreground)
             .caret(t.c.foreground, t.c.primary.alpha_mul(0.3))
-            .on_edit(|s: &mut App| s.ui.chat.topbar.rename.get_or_insert_with(|| TextEdit::new("")))
+            .label("Thread title")
+            .on_edit(|s: &mut App| &mut s.ui.chat.topbar.rename.get_or_insert_with(|| (String::new(), TextEdit::new(""))).1)
             .on_submit(|s: &mut App, _| commit_rename(s))
             .on_input_key(|s: &mut App, e, _| {
                 if e.key == Key::Escape {
@@ -172,6 +262,8 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
                 }
                 false
             }),
+        // A draft's "New thread" is plain text: there is no thread to act on yet.
+        None if thread.is_none() => text(title(s)).key("topbar-title").font(CRUMB).color(t.c.foreground).truncate().shrink().min_w(0.0).help(title(s)),
         // ChatHeader: the title opens the thread's action menu, a double-click renames, and a
         // right-click opens the menu where it lands.
         None => row()
@@ -183,8 +275,9 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             .hover_group()
             .cursor(rune::Cursor::Pointer)
             .role("button")
-            .label("Thread actions")
-            .child(text(title(s)).font(CRUMB).color(t.c.foreground).truncate().shrink().help_when_truncated(title(s)))
+            .label(format!("Thread actions for {}", title(s)))
+            .help(title(s))
+            .child(text(title(s)).font(CRUMB).color(t.c.foreground).truncate().shrink())
             .child(rune::icon(&icons::CHEVRON_DOWN, 14.0).color(t.c.muted_foreground).group_opacity(0.0, 1.0))
             .on_press(|s: &mut App| open_menu(s, None))
             .on_double_press(|s: &mut App| {
@@ -193,7 +286,16 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
             })
             .on_secondary_press(|s: &mut App, at: rune::PointerPress, _: &mut rune::Tx| open_menu(s, Some((at.x, at.y)))),
     };
+    let editing = field.is_some();
     crumbs = crumbs.child(title_el);
+    // A thread a linked environment's agent started here.
+    let origin = thread.map(|t| data::s(&t["linkOrigin"], "label")).filter(|l| !l.is_empty());
+    if let Some(origin) = origin.filter(|_| !editing) {
+        crumbs = crumbs.child(crate::kit::badge(&format!("From {origin}"), "info", "sm", t).help(format!("Started by an agent on {origin} through a linked environment.")));
+    }
+    if editing {
+        crumbs = crumbs.grow(1.0);
+    }
 
     let (w, h) = cx.layout_with("chat-body", |r| (r[2].round(), r[3].round())).unwrap_or((1182.0, 848.0));
     let fits = crate::chat::details::lane(w, h, false).card;
@@ -204,16 +306,25 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         toggles = toggles.child(
             toggle(t, &icons::SQUARE_MENU, "Toggle thread details panel", details_on)
                 .key("topbar-details")
+                .help(with_shortcut(s, "Toggle thread details", "threadPanel.toggle"))
                 .on_press(move |s: &mut App| crate::chat::details::toggle(s, fits)),
         );
     }
     let toggles = toggles
-        .child(toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open).on_press(|s: &mut App| {
-            crate::panel::toggle_terminal(s);
-        }))
-        .child(toggle(t, &icons::PANEL_RIGHT, "Toggle right panel", s.ui.shell.panel_open).on_press(|s: &mut App| {
-            s.ui.shell.panel_open = !s.ui.shell.panel_open;
-        }));
+        .child(
+            toggle(t, &icons::PANEL_BOTTOM, "Toggle terminal drawer", s.ui.chat.topbar.terminal_open)
+                .help(with_shortcut(s, "Toggle terminal drawer", "terminal.toggle"))
+                .on_press(|s: &mut App| {
+                    crate::panel::toggle_terminal(s);
+                }),
+        )
+        .child(
+            toggle(t, &icons::PANEL_RIGHT, "Toggle right panel", s.ui.shell.panel_open)
+                .help(with_shortcut(s, "Toggle right panel", "rightPanel.toggle"))
+                .on_press(|s: &mut App| {
+                    s.ui.shell.panel_open = !s.ui.shell.panel_open;
+                }),
+        );
 
     row()
         .key("topbar")
@@ -225,11 +336,57 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T) -> El {
         .center_y()
         .window_drag()
         .child(crumbs)
-        .child(spacer())
+        .children((!editing).then(spacer))
         .child(toggles)
 }
 
 /// A header toggle: the icon at 80% foreground, the accent wash while on.
 fn toggle(t: &T, i: &'static rune::Icon, label: &str, on: bool) -> El {
     icon_button(t, i, label, on, t.c.foreground.alpha_mul(0.8))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{commit_rename, poll, start_rename};
+    use crate::{App, Route, data};
+
+    fn title_of(s: &App, id: &str) -> String {
+        s.state().threads.iter().find(|t| data::s(t, "id") == id).map(|t| data::s(t, "title").to_string()).unwrap_or_default()
+    }
+
+    fn rename_to(s: &mut App, text: &str) {
+        let edit = &mut s.ui.chat.topbar.rename.as_mut().expect("renaming").1;
+        *edit = rune::TextEdit::new(text);
+        edit.focused = true;
+    }
+
+    #[test]
+    fn a_rename_only_ever_renames_the_thread_it_started_on() {
+        let mut s = App::new();
+        let ids: Vec<String> = s.state().threads.iter().map(|t| data::s(t, "id").to_string()).take(2).collect();
+        let (a, b) = (ids[0].clone(), ids[1].clone());
+        let (title_a, title_b) = (title_of(&s, &a), title_of(&s, &b));
+
+        s.navigate(Route::Thread(a.clone()));
+        start_rename(&mut s);
+        rename_to(&mut s, "Renamed");
+        s.navigate(Route::Thread(b.clone()));
+        commit_rename(&mut s);
+        assert_eq!((title_of(&s, &a), title_of(&s, &b)), (title_a.clone(), title_b.clone()), "Enter after switching threads renames neither");
+        assert!(s.ui.chat.topbar.rename.is_none());
+
+        s.navigate(Route::Thread(a.clone()));
+        start_rename(&mut s);
+        s.navigate(Route::Thread(b.clone()));
+        poll(&mut s);
+        assert!(s.ui.chat.topbar.rename.is_none(), "leaving the thread drops its rename");
+
+        s.navigate(Route::Thread(a.clone()));
+        start_rename(&mut s);
+        rename_to(&mut s, "Renamed");
+        s.ui.chat.topbar.rename.as_mut().expect("renaming").1.focused = false;
+        poll(&mut s);
+        assert_eq!(title_of(&s, &a), "Renamed", "losing focus commits");
+        assert_eq!(title_of(&s, &b), title_b);
+    }
 }

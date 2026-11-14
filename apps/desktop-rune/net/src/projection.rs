@@ -268,40 +268,46 @@ fn projected_key(row: &Value) -> String {
     format!("{}:{}", row["sourceThreadId"].as_str().unwrap_or(""), row["sourceItemId"].as_str().unwrap_or(""))
 }
 
-/// `mergeOlderHistoryIntoProjection` without deferred work: an older page's rows lead the window,
-/// rows already held win, and local items join `turnItems` so later events can update them.
-pub(crate) fn merge_older(p: &mut Value, older: &[Value]) {
-    if p.is_null() || older.is_empty() {
-        return;
-    }
-    let thread = p["thread"]["id"].clone();
-    let current: std::collections::HashMap<String, Value> =
-        rows(p, "visibleTurnItems").iter().map(|r| (projected_key(r), r.clone())).collect();
+/// An older page's rows to show: rows already held win over the page's copy, and a local item
+/// the projection holds but hides stays out. Also returns the page's keys and the local items
+/// `turnItems` gains so later events can update them.
+fn page_rows(p: &Value, older: &[Value], keep: impl Fn(&Value) -> bool) -> (Vec<Value>, std::collections::HashSet<String>, Vec<Value>) {
+    let thread = &p["thread"]["id"];
+    let current: std::collections::HashMap<String, &Value> =
+        rows(p, "visibleTurnItems").iter().map(|r| (projected_key(r), r)).collect();
     let mut page_keys = std::collections::HashSet::new();
     let mut page = Vec::new();
-    let mut added = Vec::new();
-    for page_row in older {
+    let mut added: Vec<Value> = Vec::new();
+    for page_row in older.iter().filter(|r| keep(*r)) {
         let key = projected_key(page_row);
         if page_keys.contains(&key) {
             continue;
         }
-        let local = page_row["visibility"] == "local" || page_row["sourceThreadId"] == thread;
-        let mut row = current.get(&key).cloned().unwrap_or_else(|| page_row.clone());
+        let local = page_row["visibility"] == "local" || page_row["sourceThreadId"] == *thread;
+        let mut row = current.get(&key).map_or_else(|| page_row.clone(), |r| (*r).clone());
         if !current.contains_key(&key) && local {
-            let held = rows(p, "turnItems").iter().find(|i| i["id"] == row["sourceItemId"]).cloned();
-            if let Some(held) = held {
+            if let Some(held) = rows(p, "turnItems").iter().find(|i| i["id"] == row["sourceItemId"]) {
                 // A held item that is not in the window was hidden on purpose.
-                if held["type"] != "run_interrupt_request" || !visible(p, &held) {
+                if held["type"] != "run_interrupt_request" || !visible(p, held) {
                     continue;
                 }
-                row["item"] = held;
-            } else if !added.iter().any(|i: &Value| i["id"] == row["sourceItemId"]) {
+                row["item"] = held.clone();
+            } else if !added.iter().any(|i| i["id"] == row["sourceItemId"]) {
                 added.push(row["item"].clone());
             }
         }
         page_keys.insert(key);
         page.push(row);
     }
+    (page, page_keys, added)
+}
+
+/// `mergeOlderHistoryIntoProjection` for a history page: its rows lead the window.
+pub(crate) fn merge_older(p: &mut Value, older: &[Value]) {
+    if p.is_null() || older.is_empty() {
+        return;
+    }
+    let (page, page_keys, added) = page_rows(p, older, |_| true);
     if page.is_empty() {
         return;
     }
@@ -310,4 +316,73 @@ pub(crate) fn merge_older(p: &mut Value, older: &[Value]) {
     renumber(&mut visible_rows);
     p["visibleTurnItems"] = json!(visible_rows);
     list(p, "turnItems").extend(added);
+}
+
+/// `mergeOlderHistoryIntoProjection`'s `work` branch: a page of the work deferred behind
+/// `anchor_id` joins the anchor's run of rows in ordinal order, and the anchor keeps
+/// `next_cursor` or, with none, drops its `deferredWork` placeholder.
+pub(crate) fn merge_work(p: &mut Value, anchor_id: &str, older: &[Value], next_cursor: Option<&str>) {
+    let shown = rows(p, "visibleTurnItems");
+    let Some(start) = shown.iter().position(|r| r["sourceItemId"] == anchor_id) else { return };
+    let anchor = shown[start].clone();
+    let deferred = &anchor["item"]["deferredWork"];
+    if !deferred.is_object() {
+        return;
+    }
+    let first = anchor["item"]["ordinal"].as_i64().unwrap_or(0);
+    let last = deferred["lastOrdinal"].as_i64().unwrap_or(i64::MAX);
+    let source = &anchor["sourceThreadId"];
+    let ordinal = |r: &Value| r["item"]["ordinal"].as_i64().unwrap_or(0);
+    let in_range = |r: &Value| r["sourceThreadId"] == *source && (first..=last).contains(&ordinal(r));
+    let (page, page_keys, added) = page_rows(p, older, in_range);
+    let mut end = start + 1;
+    while let Some(r) = shown.get(end) {
+        if r["sourceThreadId"] != *source || r["visibility"] == "synthetic" || ordinal(r) > last {
+            break;
+        }
+        end += 1;
+    }
+    let mut updated = anchor.clone();
+    match next_cursor {
+        Some(cursor) => updated["item"]["deferredWork"]["cursor"] = json!(cursor),
+        None => {
+            if let Some(item) = updated["item"].as_object_mut() {
+                item.remove("deferredWork");
+            }
+        }
+    }
+    let held = shown[start..end].iter().filter(|r| !page_keys.contains(&projected_key(r))).cloned();
+    let mut section: Vec<Value> = page
+        .into_iter()
+        .chain(held)
+        .map(|r| if r["sourceItemId"] == anchor["sourceItemId"] { updated.clone() } else { r })
+        .collect();
+    section.sort_by_key(|r| ordinal(r));
+    let mut next: Vec<Value> = shown[..start].to_vec();
+    next.extend(section);
+    next.extend_from_slice(&shown[end..]);
+    renumber(&mut next);
+    p["visibleTurnItems"] = json!(next);
+    let items = list(p, "turnItems");
+    if anchor["visibility"] == "local" {
+        upsert(items, updated["item"].clone());
+    }
+    items.extend(added);
+}
+
+/// The rows `old` shows ahead of `new`'s window, for a fresh snapshot to keep: those before the
+/// first row both hold, still visible under `new`'s runs. No shared row means a gap the client
+/// cannot bridge, so nothing is kept.
+pub(crate) fn kept_before(old: &Value, new: &Value) -> Vec<Value> {
+    let window: std::collections::HashSet<String> = rows(new, "visibleTurnItems").iter().map(projected_key).collect();
+    let old_rows = rows(old, "visibleTurnItems");
+    let Some(overlap) = old_rows.iter().position(|r| window.contains(&projected_key(r))) else {
+        return Vec::new();
+    };
+    let thread = &new["thread"]["id"];
+    old_rows[..overlap]
+        .iter()
+        .filter(|r| !(r["visibility"] == "local" || r["sourceThreadId"] == *thread) || visible(new, &r["item"]))
+        .cloned()
+        .collect()
 }

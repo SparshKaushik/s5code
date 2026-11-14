@@ -416,7 +416,68 @@ fn bounded_snapshot_pages_in_earlier_history() {
     event(&mut p, "turn-item.updated", update);
     assert_eq!(p["visibleTurnItems"][0]["item"]["output"], "edited");
 
-    s.merge_history("t", "k2", &json!({"snapshotSequence":5,"items":[],"nextCursor":null,"hasMoreHistory":false}));
+    // A reconnect's fresh window keeps the rows already shown ahead of it, and their cursor.
+    let mut fresh = projection();
+    fresh["turnItems"] = json!([item("c", 3), item("d", 4)]);
+    fresh["visibleTurnItems"] = json!([row("c", 3), row("d", 4)]);
+    s.fold(Route::Thread("t".into()), json!({"kind":"snapshot","snapshotSequence":9,"projection":fresh,"historyCursor":"k9","hasMoreHistory":true}));
+    let view = &s.thread_views["t"];
+    let ids: Vec<_> = view.projection["visibleTurnItems"].as_array().unwrap().iter().map(|r| r["sourceItemId"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["a", "b", "c", "d"]);
+    assert_eq!(view.history_cursor.as_deref(), Some("k2"));
+    assert_eq!(view.sequence, 9);
+
+    // A window with nothing in common leaves a gap, so it replaces what was shown.
+    let mut later = projection();
+    later["visibleTurnItems"] = json!([row("z", 40)]);
+    s.fold(Route::Thread("t".into()), json!({"kind":"snapshot","snapshotSequence":50,"projection":later,"historyCursor":"k50","hasMoreHistory":true}));
+    assert_eq!(s.thread_views["t"].projection["visibleTurnItems"].as_array().unwrap().len(), 1);
+    assert_eq!(s.thread_views["t"].history_cursor.as_deref(), Some("k50"));
+
+    s.merge_history("t", "k50", &json!({"snapshotSequence":50,"items":[],"nextCursor":null,"hasMoreHistory":false}));
     assert!(!s.thread_views["t"].has_more_history);
     assert_eq!(s.thread_views["t"].history_cursor, None);
+}
+
+#[test]
+fn deferred_work_pages_fill_in_behind_their_anchor() {
+    let row = |id: &str, ordinal: i32| json!({"visibility":"local","sourceThreadId":"t","sourceItemId":id,"position":0,"item":item(id, ordinal)});
+    let mut s = State::default();
+    s.thread_views.insert("t".into(), ThreadView::default());
+    let mut anchor = row("w1", 2);
+    anchor["item"]["deferredWork"] = json!({"cursor":"c1","itemCount":4,"lastOrdinal":5});
+    let mut p = projection();
+    p["turnItems"] = json!([item("u", 1), anchor["item"].clone(), item("reply", 6)]);
+    p["visibleTurnItems"] = json!([row("u", 1), anchor, row("reply", 6)]);
+    s.fold(Route::Thread("t".into()), json!({"kind":"snapshot","snapshotSequence":5,"projection":p}));
+    assert_eq!(s.work_cursor("t", "w1"), Some("c1"));
+    assert_eq!(s.work_cursor("t", "u"), None);
+
+    let page = |rows: &[(&str, i32)], next: Value| json!({"items": rows.iter().map(|&(id, o)| row(id, o)).collect::<Vec<_>>(), "nextCursor": next});
+    let ids = |s: &State| -> Vec<String> {
+        s.thread_views["t"].projection["visibleTurnItems"].as_array().unwrap().iter().map(|r| r["sourceItemId"].as_str().unwrap().to_owned()).collect()
+    };
+    assert_eq!(s.merge_work("t", "w1", "c0", &page(&[("w2", 3)], json!("c2"))), Err("Work history changed. Retry loading it.".to_owned()));
+    assert_eq!(ids(&s), ["u", "w1", "reply"]);
+
+    // Rows outside the anchor's turn stay out; the anchor's own row keeps its place.
+    let first = page(&[("w1", 2), ("w2", 3), ("w3", 4), ("u", 1), ("late", 9)], json!("c2"));
+    assert_eq!(s.merge_work("t", "w1", "c1", &first), Ok(true));
+    assert_eq!(ids(&s), ["u", "w1", "w2", "w3", "reply"]);
+    assert_eq!(s.work_cursor("t", "w1"), Some("c2"));
+    assert_eq!(s.merge_work("t", "w1", "c2", &page(&[("w2", 3)], json!("c2"))), Err("Work history did not advance.".to_owned()));
+
+    assert_eq!(s.merge_work("t", "w1", "c2", &page(&[("w4", 5)], Value::Null)), Ok(false));
+    assert_eq!(ids(&s), ["u", "w1", "w2", "w3", "w4", "reply"]);
+    {
+        let p = &s.thread_views["t"].projection;
+        assert_eq!(p["visibleTurnItems"][5]["position"], 5);
+        assert!(p["visibleTurnItems"][1]["item"].get("deferredWork").is_none());
+        let held = p["turnItems"].as_array().unwrap();
+        assert!(held.iter().find(|i| i["id"] == "w1").is_some_and(|i| i.get("deferredWork").is_none()));
+        assert!(held.iter().any(|i| i["id"] == "w4"));
+    }
+    // Once nothing is deferred, a late reply changes nothing.
+    assert_eq!(s.merge_work("t", "w1", "c2", &page(&[("x", 3)], Value::Null)), Ok(false));
+    assert_eq!(ids(&s).len(), 6);
 }
