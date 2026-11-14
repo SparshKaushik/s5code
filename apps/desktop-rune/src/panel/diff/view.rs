@@ -104,11 +104,12 @@ impl Look {
         let modified = c.diff_modified_icon.alpha(1.0);
         let mut look = Look {
             t: *t,
-            code: theme::mono(TextStyle::new(13.0, 400.0).lh(LINE_H)),
+            // Web's `--diffs-font-size` follows the code size; Pierre's line height stays.
+            code: theme::mono(TextStyle::new(t.code, 400.0).lh(LINE_H)),
             title: theme::TEXT_XS,
             small: theme::TEXT_2XS,
             count: theme::mono(theme::TEXT_2XS),
-            adv: 0.6 * 13.0,
+            adv: 0.6 * t.code,
             bg,
             fg,
             muted: c.muted_foreground,
@@ -137,6 +138,7 @@ impl Look {
             [c.r, c.g, c.b, c.a].map(f32::to_bits).hash(&mut h);
         }
         t.dark.hash(&mut h);
+        t.code.to_bits().hash(&mut h);
         look.version = h.finish();
         look
     }
@@ -248,7 +250,7 @@ fn row_el(s: &App, l: &Look, i: usize) -> El {
             row().w_full().child(inner)
         }
         _ => {
-            let version = (l.version, st.rev, st.row_selected(i, None), st.selection().map(|s| (s.start.side, s.end.side)));
+            let version = (l.version, st.rev, st.row_selected(i, None), st.selection().map(|s| (s.start.side, s.end.side)), st.hushed);
             memo(key, version, || line(st, l, i))
         }
     }
@@ -317,22 +319,30 @@ fn gutter(st: &DiffState, l: &Look, i: usize, f: usize, c: &Cell<'_>, side: Side
     // Pierre's gutter utility: a comment on the selected lines, or on this one.
     if let Some(line) = n.filter(|_| !st.notes().iter().any(|n| n.draft)) {
         let at = LineRef { side, line };
-        g = g.child(
-            row()
-                .key("comment")
-                .absolute(BAR + 2.0, 2.0)
-                .size(16.0, 16.0)
-                .center()
-                .radius(4.0)
-                .fill(l.modified.alpha(1.0))
-                .cursor(Cursor::Pointer)
-                .role("button")
-                .label("Comment on this line".to_owned())
-                .help("Comment".to_owned())
-                .group_opacity(0.0, 1.0)
-                .child(icon(&icons::PLUS, 12.0).color(Color::WHITE))
-                .on_press(move |s: &mut App| super::comments::begin(s, f, at)),
-        );
+        let mut button = row()
+            .key("comment")
+            .absolute(BAR + 2.0, 2.0)
+            .size(16.0, 16.0)
+            .center()
+            .radius(4.0)
+            .fill(l.modified.alpha(1.0))
+            .cursor(Cursor::Pointer)
+            .role("button")
+            .label("Comment on this line".to_owned())
+            .group_opacity(0.0, 1.0)
+            .child(icon(&icons::PLUS, 12.0).color(Color::WHITE))
+            .on_hover_change(move |s: &mut App, inside, _| {
+                // The button leaves the tree while its editor is open; that is not the pointer leaving.
+                let ui = &mut s.ui.panel.diff;
+                if ui.comment.is_none() && (!inside || ui.state.hushed != Some((f, at))) {
+                    ui.state.hushed = None;
+                }
+            })
+            .on_press(move |s: &mut App| super::comments::begin(s, f, at));
+        if st.hushed != Some((f, at)) {
+            button = button.help("Comment".to_owned());
+        }
+        g = g.child(button);
     }
     g
 }

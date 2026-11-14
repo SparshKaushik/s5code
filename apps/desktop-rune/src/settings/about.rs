@@ -42,6 +42,13 @@ pub fn view(s: &App, t: &T) -> El {
         },
         controls,
     )];
+    // Electron's Check for Updates, which Rune has in a menu only on macOS.
+    app.push(about_row(
+        t,
+        "App updates",
+        crate::desktop::NO_UPDATE_FEED,
+        c::button("Check for Updates", t).on_press(crate::desktop::check_for_updates),
+    ));
     // Web's `CliCommandSettingsRow`, desktop only.
     #[cfg(unix)]
     if let Some(cli) = crate::desktop::cli::row(s) {

@@ -46,6 +46,7 @@ pub struct Ui {
     pub confirm: Option<&'static str>,
     pub merge_method: Option<String>,
     pub action_error: Option<String>,
+    pub(super) live: super::pull_requests::Live,
 }
 
 fn ui(s: &mut App) -> &mut Ui {
@@ -76,14 +77,22 @@ fn selected_entry(s: &App) -> Option<Value> {
 }
 
 pub fn poll(s: &mut App) -> bool {
-    if !matches!(s.frame_route(), Route::PullRequests) {
-        return false;
+    let on = matches!(s.frame_route(), Route::PullRequests);
+    let mut changed = live_refresh(s, on);
+    if !on {
+        return changed;
     }
-    let mut changed = false;
     let selected = s.ui.pages.pull_requests.selected.clone();
     let current = ui(s).entry.as_ref().map(|e| field(e, "url").to_string());
-    // A row that leaves the list after an action (closed under the Open filter) stays open here.
-    let wanted = if selected.is_none() { Some(None) } else { selected_entry(s).map(Some) };
+    // A row that leaves the list after an action (closed under the Open filter) stays open here,
+    // and the panel toggle hides the open one without dropping it, so a stack layer the list
+    // doesn't hold reopens too.
+    let hidden = s.ui.pages.pull_requests.hidden.is_some() && s.ui.pages.pull_requests.hidden == current;
+    let wanted = match &selected {
+        None if hidden => None,
+        None => Some(None),
+        Some(_) => selected_entry(s).map(Some),
+    };
     if selected != current
         && let Some(entry) = wanted
     {
@@ -192,6 +201,19 @@ fn recorded_detail(recorded: &Value, entry: &Value) -> Value {
 /// A finished turn rereads the open pull request, keeping it shown meanwhile.
 pub(super) fn refresh(s: &mut App) {
     load(s);
+}
+
+/// useLiveRefresh(detailQuery.refresh), keyed by the pull request: the open one reads again on
+/// the same clock as the list while its panel shows.
+fn live_refresh(s: &mut App, on: bool) -> bool {
+    let shown = on && s.ui.pages.pull_requests.selected.is_some();
+    let (now, background) = (crate::data::now_ms(), s.ui.notify.background);
+    let u = ui(s);
+    let due = u.live.due(shown && u.entry.is_some(), now, background);
+    if due {
+        load(s);
+    }
+    due
 }
 
 fn reload(s: &mut App) {
@@ -1368,5 +1390,22 @@ mod tests {
         let d = recorded_detail(&rec["detail"], &other);
         assert_eq!((d["number"].clone(), d["title"].clone(), d["state"].clone(), d["body"].clone()), (json!(12), json!("Other"), json!("merged"), json!("")));
         assert_eq!(recorded_detail(&rec["detail"], &rec["detail"]), rec["detail"]);
+    }
+
+    #[test]
+    fn the_panel_toggle_reopens_a_pull_request_the_list_does_not_hold() {
+        let mut s = App::new();
+        s.route = Route::PullRequests;
+        let url = "https://github.com/acme/app/pull/9";
+        s.ui.pages.pull_requests.result = Some(json!({"entries": []}));
+        s.ui.pages.pull_requests.selected = Some(url.into());
+        s.ui.pages.detail.entry = Some(json!({"url": url, "projectId": "p", "repository": "acme/app", "number": 9}));
+        let shown = |s: &App| s.ui.pages.detail.entry.as_ref().map(|e| field(e, "url").to_string());
+        super::super::pull_requests::toggle_panel(&mut s.ui.pages.pull_requests);
+        poll(&mut s);
+        assert_eq!(shown(&s).as_deref(), Some(url), "hidden, not dropped");
+        super::super::pull_requests::toggle_panel(&mut s.ui.pages.pull_requests);
+        poll(&mut s);
+        assert_eq!((s.ui.pages.pull_requests.selected.as_deref(), shown(&s).as_deref()), (Some(url), Some(url)));
     }
 }

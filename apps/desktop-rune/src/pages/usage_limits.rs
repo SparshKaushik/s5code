@@ -916,7 +916,8 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     let pools = collect_pools(collect_accounts(&envs), now);
     let notices = collect_notices(&envs);
     let links = collect_links(&envs);
-    let mut cursor = super::usage::cursor_access(s).map(|label| cursor_prompt(s, t, &label));
+    let access = super::usage::cursor_access(s);
+    let mut cursor = (!access.is_empty()).then(|| cursor_prompt(s, t, &access));
     let mut out = col().w_full().gap(32.0);
     if pools.is_empty() && notices.is_empty() && cursor.is_none() && links.is_empty() {
         out = out.child(super::usage::muted_line(t, "No provider on the selected environments reports subscription limits."));
@@ -958,8 +959,23 @@ pub fn view(s: &App, cx: &mut rune::Cx<App>, t: &T, overlays: &mut Vec<El>) -> E
     out
 }
 
-/// CursorEnableLimits for the one environment whose scan asks for the keychain.
-fn cursor_prompt(s: &App, t: &T, label: &str) -> El {
+/// CursorEnableLimits: an Enable per environment whose scan asks for the keychain, named once
+/// there are several.
+fn cursor_prompt(s: &App, t: &T, environments: &[(String, String)]) -> El {
+    let mut buttons = row().w_full().flex_wrap().gaps(8.0, 8.0);
+    for (key, label) in environments {
+        let caption = if environments.len() > 1 { format!("Enable on {label}") } else { "Enable".to_string() };
+        let key = key.clone();
+        buttons = buttons.child(
+            kit::Button::new(caption)
+                .variant("outline")
+                .size("sm")
+                .disabled(super::usage::cursor_enabling(s, &key))
+                .on_press(move |s: &mut App| super::usage::enable_cursor(s, &key))
+                .build(t)
+                .label(format!("Enable Cursor usage from {label}")),
+        );
+    }
     col()
         .w_full()
         .gap(12.0)
@@ -972,15 +988,7 @@ fn cursor_prompt(s: &App, t: &T, label: &str) -> El {
                 .border(1.0, t.c.border.alpha_mul(0.6))
                 .padding(16.0)
                 .child(text(super::usage::CURSOR_KEYCHAIN_COPY).font(theme::TEXT_XS).color(t.c.muted_foreground).wrap())
-                .child(row().child(
-                    kit::Button::new("Enable")
-                        .variant("outline")
-                        .size("sm")
-                        .disabled(s.ui.pages.usage.cursor_enabling.is_some())
-                        .on_press(super::usage::enable_cursor)
-                        .build(t)
-                        .label(format!("Enable Cursor usage from {label}")),
-                )),
+                .child(buttons),
         )
 }
 
@@ -1308,7 +1316,7 @@ fn popover_body(s: &App, t: &T, seg: &Seg, now: i64) -> El {
     let a = seg.account;
     let w = &seg.member.window;
     let u = &s.ui.pages.usage;
-    let hour12 = s.client_settings.values.get("timestampFormat").and_then(Value::as_str).unwrap_or("locale") != "24-hour";
+    let hour12 = crate::desktop::locale::hour12(s.client_settings.values.get("timestampFormat").and_then(Value::as_str));
     let name = a.display_name.clone().unwrap_or_else(|| driver_label(&a.driver).unwrap_or(a.driver.as_str()).to_string());
     let avatar = if a.redeem.is_some() { Some(el().size(20.0, 20.0).center().child(provider_icon(t, &a.driver, 16.0))) } else { a.email.as_deref().map(chip) };
     let mut head = col()

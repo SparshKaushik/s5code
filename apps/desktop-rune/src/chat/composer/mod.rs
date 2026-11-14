@@ -428,7 +428,15 @@ pub fn has_attachments(s: &App) -> bool {
     draft(s).is_some_and(|d| !d.attachments.is_empty())
 }
 
+/// The open thread is rewinding, so Send waits ("Rewinding conversation").
+fn rewinding(s: &App) -> bool {
+    matches!(s.frame_route(), Route::Thread(id) if crate::chat::timeline::actions::rewinding(s, id))
+}
+
 fn send(s: &mut App, alternate: bool) {
+    if rewinding(s) {
+        return;
+    }
     if let (Some(run), Route::Thread(thread)) = (editing_run(s).map(str::to_owned), s.frame_route().clone()) {
         let text = draft(s).map(|d| d.edit.text.trim().to_owned()).unwrap_or_default();
         if text.is_empty() {
@@ -630,9 +638,9 @@ pub fn add_terminal_context(s: &mut App, thread: &str, terminal_id: &str, termin
     add_thread_context(s, thread, chips::terminal(terminal_id, terminal_label, line_start, line_end, text));
 }
 
-/// Adds `record` to `thread`'s draft, opening the thread first.
+/// Adds `record` to `thread`'s draft (a thread id or a new-thread draft's key), opening it first.
 pub fn add_thread_context(s: &mut App, thread: &str, record: Value) {
-    if s.frame_route() != &Route::Thread(thread.to_owned()) {
+    if draft_key(s, s.frame_route()) != thread {
         s.navigate(Route::Thread(thread.to_owned()));
     }
     add_context(s, record);
@@ -1198,7 +1206,7 @@ fn primary_action(s: &App, t: &T) -> El {
     if let Some(action) = plan::action(s, t, typed) {
         return action;
     }
-    let sendable = draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
+    let sendable = !rewinding(s) && draft(s).is_some_and(|d| !d.edit.text.trim().is_empty() || !d.attachments.is_empty());
     if running(s) && !sendable {
         return stop_button(t);
     }
@@ -1240,6 +1248,8 @@ fn send_button(s: &App, t: &T, sendable: bool) -> El {
     let mut b = el().key("composer-send").size(32.0, 32.0).center().radius(radius::FULL).fill(bg).label(label).child(icon(&icons::ARROW_UP, 14.0).color(fg));
     if sendable {
         b = b.hover(t.c.message_action_hover).cursor(Cursor::Pointer).help(help).on_press_tx(|s: &mut App, tx| send(s, tx.mods().cmd));
+    } else if rewinding(s) {
+        b = b.help("Rewinding conversation");
     }
     b
 }
@@ -1378,8 +1388,26 @@ pub fn attach_path(s: &mut App, path: String) {
 /// Sent-form text appended to the draft after `gap` (a rewound prompt, a file's "Add to chat"):
 /// file links become mentions and context links chips, with the `records` they were sent with.
 pub fn append_with_chips(s: &mut App, text: &str, records: &[Value], gap: &str) {
+    append_chips_to(draft_mut(s), text, records, gap);
+}
+
+/// Attachments queued in draft `key`.
+pub fn draft_attachment_count(s: &App, key: &str) -> usize {
+    s.ui.chat.composer.drafts.get(key).map_or(0, |d| d.attachments.len())
+}
+
+/// A rewound prompt, its chips and images back into draft `key`; the caret follows only on `focus`.
+pub fn restore_rewound(s: &mut App, key: &str, text: &str, records: &[Value], files: Vec<String>, focus: bool) {
+    let d = s.ui.chat.composer.drafts.entry(key.to_owned()).or_default();
+    if !text.trim().is_empty() {
+        append_chips_to(d, text.trim(), records, "\n\n");
+    }
+    d.attachments.extend(files);
+    d.edit.focused = focus;
+}
+
+fn append_chips_to(d: &mut Draft, text: &str, records: &[Value], gap: &str) {
     let (shown_text, shown) = chips::display(text);
-    let d = draft_mut(s);
     d.edit.set_caret(d.edit.text.len());
     if !d.edit.text.trim().is_empty() && !d.edit.text.ends_with(gap) {
         d.edit.insert(gap);

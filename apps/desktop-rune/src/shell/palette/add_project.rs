@@ -44,6 +44,9 @@ pub struct State {
     pending: Option<(u64, Pending)>,
     pub publish: bool,
     pub(super) published: Option<(u64, &'static str)>,
+    /// The environment the flow adds the project to, picked when it started; every request and
+    /// server setting it reads belongs to it, wherever focus moves meanwhile.
+    pub env: Option<String>,
 }
 #[derive(Default)]
 pub struct Browse {
@@ -256,9 +259,17 @@ fn github_owner_only(source: Option<usize>, input: &str) -> bool {
 
 // Server state the flow reads.
 
+fn target(s: &App) -> String {
+    s.ui.shell.palette.add.env.clone().unwrap_or_else(|| s.ui.env.active.clone())
+}
+fn net(s: &mut App) -> Option<&mut s5_net::Net> {
+    let key = target(s);
+    crate::env::net_of(s, &key)
+}
 fn config(s: &App) -> &Value {
     static NULL: Value = Value::Null;
-    s.state().config.as_ref().unwrap_or(&NULL)
+    let key = target(s);
+    crate::env::source(s, &key).and_then(|src| src.state().config.as_ref()).unwrap_or(&NULL)
 }
 fn os(s: &App) -> String {
     config(s)["environment"]["platform"]["os"].as_str().unwrap_or("").into()
@@ -280,6 +291,9 @@ fn current_cwd(s: &App) -> Option<String> {
         Route::Home { project_id: Some(id) } => (None, id.clone()),
         _ => return None,
     };
+    if crate::env::owner(s, &project_id) != target(s) {
+        return None;
+    }
     if let Some(path) = thread.and_then(|v| v["worktreePath"].as_str()).filter(|v| !v.is_empty()) {
         return Some(path.into());
     }
@@ -527,13 +541,51 @@ pub fn request_discovery(s: &mut App) {
     if add.discovery.is_some() || add.discovery_pending.is_some() {
         return;
     }
-    add.discovery_pending = s.src.net().map(|net| net.request("server.discoverSourceControl", json!({})));
+    s.ui.shell.palette.add.discovery_pending = net(s).map(|net| net.request("server.discoverSourceControl", json!({})));
 }
-/// Opens the source list, the view an "Add project" intent lands on with one environment.
+/// Where "Add project" starts (`resolveAddProjectEntry`): the environment list when several are
+/// connected, else the sources of the one that is.
 pub fn open(s: &mut App) {
     s.ui.shell.palette.add.clone = None;
+    let ready: Vec<String> = crate::env::keys(s).into_iter().filter(|k| crate::env::connected(s, k)).collect();
+    match ready.as_slice() {
+        [_, _, ..] => push_page(s, "add-environment", ""),
+        [only] => open_in(s, only),
+        [] => {
+            let key = s.ui.env.active.clone();
+            open_in(s, &key);
+        }
+    }
+}
+/// The source list for adding a project to the environment `key`.
+pub fn open_in(s: &mut App, key: &str) {
+    let add = &mut s.ui.shell.palette.add;
+    if add.env.as_deref() != Some(key) {
+        add.discovery = None;
+        add.discovery_pending = None;
+        add.browse = None;
+    }
+    add.env = Some(key.to_owned());
+    add.clone = None;
     push_page(s, "add-project", "");
     request_discovery(s);
+}
+/// The environments "Add project" can target, as the web's `buildEnvironmentItem`.
+pub fn environment_items(s: &App) -> Vec<Item> {
+    crate::env::keys(s)
+        .into_iter()
+        .map(|key| {
+            let local = key == crate::env::LOCAL;
+            let label = crate::env::label(s, &key);
+            let connected = crate::env::connected(s, &key);
+            let glyph = if local { &crate::icons::LAPTOP } else { &crate::icons::SERVER };
+            let mut v = item(label.clone(), "Environments", glyph, "", Action::AddProjectIn(key.clone()));
+            v.description = Some(if !connected { crate::env::status(s, &key) } else if local { "This device".into() } else { key.clone() });
+            v.disabled = !connected;
+            v.fields = keywords(&[label.as_str(), key.as_str(), if local { "this device" } else { "" }]);
+            v
+        })
+        .collect()
 }
 pub fn choose(s: &mut App, source: Source) {
     s.ui.shell.palette.add.clone = None;
@@ -541,7 +593,8 @@ pub fn choose(s: &mut App, source: Source) {
         Source::Existing => {
             super::pop_page(s);
             if s.ui.shell.palette.page != "add-project" {
-                open(s);
+                let key = target(s);
+                open_in(s, &key);
             }
         }
         Source::New => {
@@ -574,7 +627,7 @@ pub fn sync_browse(s: &mut App) {
     if let Some(cwd) = cwd {
         payload["cwd"] = cwd.into();
     }
-    let pending = s.src.net().map(|net| net.request("filesystem.browse", payload));
+    let pending = net(s).map(|net| net.request("filesystem.browse", payload));
     s.ui.shell.palette.add.browse = Some(Browse { directory: dir, pending, ..Default::default() });
 }
 /// Tab: into the highlighted folder, the only match, or the matches' common prefix.
@@ -647,12 +700,13 @@ fn add(s: &mut App, raw: &str) {
         return toast(s, "Failed to add project", Some("Relative paths require an active project."));
     }
     let path = resolve(raw, cwd.as_deref());
-    let existing = s.state().projects.iter().filter(|p| crate::env::of(s, p) == s.ui.env.active).find(|p| compare(data::s(p, "workspaceRoot")) == compare(&path)).cloned();
+    let key = target(s);
+    let existing = s.state().projects.iter().filter(|p| crate::env::of(s, p) == key).find(|p| compare(data::s(p, "workspaceRoot")) == compare(&path)).cloned();
     if let Some(project) = existing {
         let id = data::s(&project, "id").to_owned();
         let route = latest_thread(s, &id).map(Route::Thread).unwrap_or(Route::Home { project_id: Some(id.clone()) });
         let archived = !project["archivedAt"].is_null() || project["archived"] == true;
-        if archived && let Some(net) = s.src.net() {
+        if archived && let Some(net) = net(s) {
             let pending = net.request("projects.mutate", json!({"type":"project.update","commandId":s5_net::uuid(),"projectId":id,"archived":false}));
             s.ui.shell.palette.add.pending = Some((pending, Pending::Unarchive(route)));
             return;
@@ -671,7 +725,7 @@ fn add(s: &mut App, raw: &str) {
         "createWorkspaceRootIfMissing": true,
         "defaultModelSelection": null,
     });
-    if let Some(net) = s.src.net() {
+    if let Some(net) = net(s) {
         let pending = net.request("projects.mutate", command);
         s.ui.shell.palette.add.pending = Some((pending, Pending::Add(project_id)));
     }
@@ -697,7 +751,7 @@ fn lookup(s: &mut App) {
         confirm(s, Confirm { input, name_with_owner: None, url: remote_url.clone(), remote_url });
         return;
     };
-    if let Some(net) = s.src.net() {
+    if let Some(net) = net(s) {
         let pending = net.request("sourceControl.lookupRepository", json!({"provider": PROVIDERS[i].kind, "repository": input}));
         s.ui.shell.palette.add.pending = Some((pending, Pending::Lookup(input)));
     }
@@ -729,7 +783,7 @@ fn start_clone(s: &mut App, destination: &str) {
         "remoteUrl": confirm.remote_url,
         "destinationPath": resolve(destination, current_cwd(s).as_deref()),
     });
-    if let Some(net) = s.src.net() {
+    if let Some(net) = net(s) {
         let pending = net.request("projectClone.start", payload);
         s.ui.shell.palette.add.pending = Some((pending, Pending::Clone(project_id)));
     }
@@ -755,7 +809,7 @@ fn create(s: &mut App) {
         return;
     }
     let publish = s.ui.shell.palette.add.publish.then(|| publish_target(s).map(|t| t.0)).flatten();
-    if let Some(net) = s.src.net() {
+    if let Some(net) = net(s) {
         let pending = net.request("projects.createNew", json!({"name": name}));
         s.ui.shell.palette.add.pending = Some((pending, Pending::Create(name, publish)));
     }
@@ -843,7 +897,7 @@ pub fn poll(s: &mut App) -> bool {
             }
             if let Some(i) = publish
                 && let Some((_, owner, _)) = publish_target(s)
-                && let Some(net) = s.src.net()
+                && let Some(net) = self::net(s)
             {
                 let pending = net.request("sourceControl.publishRepository", json!({
                     "cwd": root, "provider": PROVIDERS[i].kind, "repository": new_repository(&owner, &root), "visibility": "private",
@@ -856,6 +910,10 @@ pub fn poll(s: &mut App) -> bool {
     true
 }
 fn finish(s: &mut App, route: Route) {
+    if let Route::Home { project_id: Some(id) } = &route {
+        let key = target(s);
+        crate::env::adopt(s, id, &key);
+    }
     s.ui.shell.palette.open = false;
     s.ui.shell.palette.add.clone = None;
     crate::shell::sidebar::go(s, route);
@@ -894,6 +952,36 @@ pub fn brand(provider: usize, size: f32, muted: rune::Color) -> Option<rune::El>
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn add_project_asks_which_environment_and_the_flow_stays_on_it() {
+        let ready = |root: &str| {
+            let mut state = crate::data::empty_state();
+            state.conn = s5_net::Conn::Open;
+            state.shell_ready = true;
+            state.config = Some(json!({"newProjectsRoot": root}));
+            state
+        };
+        let mut s = App::new();
+        s.src = crate::data::Source::Fixture(ready("/home/me/new"));
+        s.ui.env.saved.push(crate::env::Saved { id: "box".into(), label: "Box".into(), base: "https://box".into(), bearer: "t".into() });
+        crate::env::park(&mut s, "box", crate::data::Source::Fixture(ready("/srv/new")));
+
+        crate::shell::palette::open_add_project(&mut s);
+        assert_eq!(s.ui.shell.palette.page, "add-environment");
+        let rows = environment_items(&s);
+        assert_eq!(rows.iter().map(|r| r.description.clone().unwrap_or_default()).collect::<Vec<_>>(), ["This device", "box"]);
+        open_in(&mut s, "box");
+        assert_eq!(s.ui.env.active, crate::env::LOCAL, "picking an environment does not move focus");
+        assert_eq!(new_projects_root(&s).as_deref(), Some("/srv/new"), "the flow reads the picked environment's settings");
+
+        if let Some(crate::data::Source::Fixture(state)) = crate::env::source_mut(&mut s, "box") {
+            state.conn = s5_net::Conn::Closed("gone".into());
+        }
+        crate::shell::palette::open_add_project(&mut s);
+        assert_eq!(s.ui.shell.palette.page, "add-project", "one connected environment skips the list");
+        assert_eq!(new_projects_root(&s).as_deref(), Some("/home/me/new"));
+        assert!(environment_items(&s)[1].disabled, "a disconnected environment is listed but cannot be picked");
+    }
     #[test]
     fn browse_paths_follow_client_runtime() {
         assert_eq!(directory("~/projects/s5"), "~/projects/");

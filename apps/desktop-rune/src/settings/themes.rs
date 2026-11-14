@@ -2,7 +2,7 @@ use crate::{
     App, Appearance,
     theme::{self, AlphaMul, T},
 };
-use rune::{Color, El, col, el, row, text};
+use rune::{Color, El, col, el, icon, row, text};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
 
@@ -62,6 +62,8 @@ pub fn apply(s: &App, t: T) -> T {
     crate::kit::menu::set_glass_opacity(percent("glassOpacity", 80.0));
     let mut t = apply_theme(s, t);
     t.code = super::fonts::code_size(&s.client_settings.values);
+    t.px = 1.0 / super::fonts::interface_scale(&s.client_settings.values);
+    super::diff_scheme::apply(super::value(s, "diffColorScheme").as_str().unwrap_or(""), &mut t);
     let contrast = percent("appearanceContrast", 100.0);
     if contrast != 100.0 {
         let target = if t.dark { rune::Color::WHITE } else { rune::Color::BLACK };
@@ -142,6 +144,17 @@ fn apply_theme(s: &App, mut t: T) -> T {
     let p = palette(selected, t.dark);
     macro_rules! set {($($field:ident => $role:literal),* $(,)?)=>{$(t.c.$field=paint(p,$role);)*};}
     set!(background=>"canvas",foreground=>"text",contrast_foreground=>"text",muted_foreground=>"textMuted",contrast_muted_foreground=>"textMuted",card=>"surface",contrast_card_foreground=>"text",popover=>"surfaceOverlay",popover_foreground=>"text",contrast_popover_foreground=>"text",border=>"border",contrast_border=>"border",input=>"input",contrast_input=>"input",primary=>"accent",primary_foreground=>"accentForeground",accent=>"accentSurface",accent_foreground=>"accentSurfaceForeground",contrast_accent_foreground=>"accentSurfaceForeground",secondary=>"secondary",secondary_foreground=>"secondaryForeground",contrast_secondary_foreground=>"secondaryForeground",muted=>"muted",ring=>"focus",sidebar=>"sidebar",sidebar_foreground=>"sidebarForeground",surface_raised=>"surfaceRaised");
+    // A custom theme saved before the terminal roles keeps the base terminal colours.
+    for (slot, role) in [
+        (&mut t.c.terminal_background, "terminalBackground"),
+        (&mut t.c.terminal_foreground, "terminalForeground"),
+        (&mut t.c.terminal_cursor, "terminalCursor"),
+        (&mut t.c.terminal_selection_background, "terminalSelection"),
+    ] {
+        if p[role].is_string() {
+            *slot = paint(p, role);
+        }
+    }
     t.sb = t.c;
     t.sb.sidebar = paint(p, "sidebar");
     t.sb.foreground = paint(p, "sidebarForeground");
@@ -149,17 +162,31 @@ fn apply_theme(s: &App, mut t: T) -> T {
     t.sb.accent = paint(p, "sidebarRowHover");
     t
 }
-fn orb(theme: &Value, dark: bool) -> El {
+fn preview() -> &'static Value {
     static PREVIEW: OnceLock<Value> = OnceLock::new();
-    let preview =
-        PREVIEW.get_or_init(|| serde_json::from_str(include_str!("theme-preview.json")).unwrap());
-    let mode = if dark { "dark" } else { "light" };
-    let p = if theme["id"] == "t3-code" {
-        &preview["standard"][mode]
+    PREVIEW.get_or_init(|| serde_json::from_str(include_str!("theme-preview.json")).unwrap())
+}
+fn preview_palette(theme: &Value, dark: bool) -> &Value {
+    if theme["id"] == "t3-code" {
+        &preview()["standard"][if dark { "dark" } else { "light" }]
     } else {
         palette(theme, dark)
-    };
-    let spec = &preview["specs"][mode];
+    }
+}
+fn scheme_colors(s: &App, dark: bool) -> Value {
+    let id = s
+        .client_settings
+        .values
+        .get(if dark { "themeDark" } else { "themeLight" })
+        .and_then(Value::as_str)
+        .unwrap_or("t3-code");
+    let themes = library(s);
+    let theme = themes.iter().find(|v| v["id"] == id).unwrap_or(&builtins()[0]);
+    preview_palette(theme, dark).clone()
+}
+fn orb(theme: &Value, dark: bool, background: Color) -> El {
+    let p = preview_palette(theme, dark);
+    let spec = &preview()["specs"][if dark { "dark" } else { "light" }];
     let point = |key: &str| {
         [
             spec[key]["center"][0].as_f64().unwrap() as f32,
@@ -167,104 +194,249 @@ fn orb(theme: &Value, dark: bool) -> El {
         ]
     };
     let n = |key: &str, field: &str| spec[key][field].as_f64().unwrap() as f32;
+    let top = |key: &str, default: f64| spec[key].as_f64().unwrap_or(default) as f32;
+    let size = 52.0 * top("scale", 1.1);
+    let inset = (size - 52.0) / 2.0;
+    let reach = |c: [f32; 2]| size * c[0].max(1.0 - c[0]).hypot(c[1].max(1.0 - c[1]));
+    let base = mix_oklab(
+        paint(p, "canvas"),
+        spec["baseTarget"].as_str().and_then(color).unwrap_or_default(),
+        top("baseWeight", 0.8),
+    );
+    let (accent, action) = (point("accent"), point("action"));
+    let edge = if dark {
+        Color::WHITE.alpha_mul(0.14)
+    } else {
+        Color::BLACK.alpha_mul(0.1)
+    };
     el().size(56.0, 56.0)
+        .padding(2.0)
         .radius(28.0)
-        .clip_rounded(28.0)
-        .border(2.0, Color::BLACK)
+        .fill(background)
+        .shadow(1.0, 2.0, Color::BLACK.alpha_mul(if dark { 0.18 } else { 0.08 }))
         .child(
-            el().absolute(-2.8, -2.8)
-                .size(61.6, 61.6)
-                .fill(paint(p, "canvas"))
-                .blur(3.0)
-                .radial_gradient(
-                    point("action"),
-                    67.0,
-                    [
-                        (
-                            0.0,
-                            paint(p, "messageAction").alpha_mul(n("action", "startOpacity")),
-                        ),
-                        (n("action", "endOffset"), Color::TRANSPARENT),
-                    ],
-                )
-                .child(el().w_full().h_full().radial_gradient(
-                    point("accent"),
-                    67.0,
-                    [
-                        (0.0, paint(p, "accent")),
-                        (
-                            n("accent", "middleOffset"),
-                            paint(p, "accent").alpha_mul(n("accent", "middleOpacity")),
-                        ),
-                        (n("accent", "endOffset"), Color::TRANSPARENT),
-                    ],
-                )),
+            el().size(52.0, 52.0)
+                .radius(26.0)
+                .clip_rounded(26.0)
+                .box_shadow(rune::Shadow {
+                    spread: 1.0,
+                    color: edge,
+                    inset: true,
+                    ..Default::default()
+                })
+                .child(
+                    el().absolute(-inset, -inset)
+                        .size(size, size)
+                        .fill(base)
+                        .blur(top("blurAt56Px", 3.0))
+                        .radial_gradient(
+                            action,
+                            reach(action),
+                            [
+                                (
+                                    0.0,
+                                    paint(p, "messageAction").alpha_mul(n("action", "startOpacity")),
+                                ),
+                                (n("action", "endOffset"), Color::TRANSPARENT),
+                            ],
+                        )
+                        .child(el().w_full().h_full().radial_gradient(
+                            accent,
+                            reach(accent),
+                            [
+                                (0.0, paint(p, "accent")),
+                                (
+                                    n("accent", "middleOffset"),
+                                    paint(p, "accent").alpha_mul(n("accent", "middleOpacity")),
+                                ),
+                                (n("accent", "endOffset"), Color::TRANSPARENT),
+                            ],
+                        )),
+                ),
         )
 }
 
-fn wireframe(p: &Value) -> El {
-    row()
-        .w_full()
-        .h(140.0)
-        .radius(8.0)
-        .clip_rounded(8.0)
-        .border(1.0, paint(p, "border"))
-        .child(
-            col()
-                .w(56.0)
+const WIREFRAME_H: f32 = 138.0;
+
+fn wireframe_pane(p: &Value) -> El {
+    let line = color("#7f7f7f40").unwrap_or_default();
+    let band = |top: f32, height: f32| {
+        row()
+            .pin(Some(0.0), Some(top * WIREFRAME_H), Some(0.0), None)
+            .h(height * WIREFRAME_H)
+    };
+    let edge = || rune::Shadow {
+        spread: 1.0,
+        color: line,
+        inset: true,
+        ..Default::default()
+    };
+    let pill = |top: f32, height: f32, fill: Color, opacity: f32| {
+        band(top, height).child(el().w_frac(0.03)).child(
+            el().w_frac(0.16)
                 .h_full()
-                .padding(8.0)
-                .gap(5.0)
+                .radius(6.0)
+                .fill(fill)
+                .opacity(opacity),
+        )
+    };
+    let bar = |top: f32, width: f32| {
+        band(top, 0.05)
+            .child(el().w_frac(0.27))
+            .child(el().w_frac(width).h_full().radius(4.0).fill(line))
+    };
+    let composer_h = 0.15 * WIREFRAME_H;
+    let send = 0.58 * composer_h;
+    let panel_h = 0.46 * WIREFRAME_H;
+    let dots = [
+        color("#34d399").unwrap_or_default(),
+        paint(p, "messageAction"),
+        color("#fbbf24").unwrap_or_default(),
+    ];
+    el().fill(paint(p, "canvas"))
+        .child(
+            el().pin(Some(0.0), Some(0.0), None, Some(0.0))
+                .w_frac(0.22)
                 .fill(paint(p, "sidebar"))
-                .child(
-                    el().w_full()
-                        .h(10.0)
-                        .radius(4.0)
-                        .border(1.0, paint(p, "border")),
-                )
-                .children((0..3).map(|_| {
-                    el().w_full()
-                        .h(10.0)
-                        .radius(4.0)
-                        .fill(paint(p, "textMuted").alpha_mul(0.16))
-                })),
+                .child(el().pin(None, Some(0.0), Some(0.0), Some(0.0)).w(1.0).fill(line)),
         )
         .child(
-            col()
-                .grow(1.0)
-                .h_full()
-                .padding(12.0)
-                .gap(8.0)
-                .fill(paint(p, "canvas"))
+            band(0.08, 0.08).child(el().w_frac(0.03)).child(
+                el().w_frac(0.16)
+                    .h_full()
+                    .radius(6.0)
+                    .fill(paint(p, "surface"))
+                    .box_shadow(edge()),
+            ),
+        )
+        .child(pill(0.22, 0.07, paint(p, "accentSurface"), 1.0))
+        .child(pill(0.32, 0.07, paint(p, "messageSurface"), 0.7))
+        .child(pill(0.42, 0.07, paint(p, "messageSurface"), 0.5))
+        .child(
+            band(0.11, 0.09)
+                .justify_end()
                 .child(
-                    el().w(60.0)
-                        .h(13.0)
+                    el().w_frac(0.24)
+                        .h_full()
                         .radius(8.0)
-                        .fill(paint(p, "textMuted").alpha_mul(0.2)),
+                        .fill(paint(p, "messageSurface")),
                 )
+                .child(el().w_frac(0.28)),
+        )
+        .child(bar(0.28, 0.34))
+        .child(bar(0.38, 0.26))
+        .child(
+            band(0.77, 0.15).child(el().w_frac(0.26)).child(
+                row()
+                    .w_frac(0.68)
+                    .h_full()
+                    .px(4.0)
+                    .center_y()
+                    .justify_between()
+                    .radius(6.0)
+                    .fill(paint(p, "surface"))
+                    .box_shadow(edge())
+                    .child(
+                        el().w_frac(0.34)
+                            .h(0.26 * composer_h)
+                            .radius(999.0)
+                            .fill(line)
+                            .opacity(0.7),
+                    )
+                    .child(
+                        el().size(send, send)
+                            .radius(send / 2.0)
+                            .fill(paint(p, "messageAction")),
+                    ),
+            ),
+        )
+        .child(
+            band(0.08, 0.46)
+                .justify_end()
                 .child(
-                    el().w(86.0)
-                        .h(6.0)
-                        .radius(3.0)
-                        .fill(paint(p, "textMuted").alpha_mul(0.24)),
+                    el().w_frac(0.2)
+                        .h_full()
+                        .radius(8.0)
+                        .fill(paint(p, "surface"))
+                        .box_shadow(edge())
+                        .shadow(2.0, 5.0, Color::BLACK.alpha_mul(0.14))
+                        .children(dots.into_iter().enumerate().map(|(i, dot)| {
+                            let dot_size = 0.26 * 0.2 * panel_h;
+                            row()
+                                .pin(
+                                    Some(0.0),
+                                    Some((0.1 + 0.3 * i as f32) * panel_h),
+                                    Some(0.0),
+                                    None,
+                                )
+                                .h(0.2 * panel_h)
+                                .child(el().w_frac(0.11))
+                                .child(
+                                    row()
+                                        .w_frac(0.78)
+                                        .h_full()
+                                        .gap(4.0)
+                                        .center_y()
+                                        .child(
+                                            el().size(dot_size, dot_size)
+                                                .radius(dot_size / 2.0)
+                                                .fill(dot)
+                                                .opacity(0.55),
+                                        )
+                                        .child(
+                                            el().w_frac(0.52)
+                                                .h(0.3 * 0.2 * panel_h)
+                                                .radius(4.0)
+                                                .fill(line),
+                                        ),
+                                )
+                        })),
                 )
-                .child(
-                    el().w(65.0)
-                        .h(6.0)
-                        .radius(3.0)
-                        .fill(paint(p, "textMuted").alpha_mul(0.24)),
-                )
-                .child(el().grow(1.0))
-                .child(
-                    el().w_full()
-                        .h(20.0)
-                        .radius(6.0)
-                        .border(1.0, paint(p, "border")),
+                .child(el().w_frac(0.05)),
+        )
+}
+
+fn wireframe(t: &T, light: &Value, dark: Option<&Value>) -> El {
+    let panes = match dark {
+        None => el()
+            .w_full()
+            .h_full()
+            .child(wireframe_pane(light).pin(Some(0.0), Some(0.0), Some(0.0), Some(0.0))),
+        Some(dark) => row()
+            .w_full()
+            .h_full()
+            .gap(2.0)
+            .child(
+                el().grow(1.0).min_w(0.0).h_full().clip_rounded(0.0).child(
+                    wireframe_pane(light)
+                        .pin(Some(0.0), Some(0.0), None, Some(0.0))
+                        .w_frac(2.0),
                 ),
+            )
+            .child(
+                el().grow(1.0).min_w(0.0).h_full().clip_rounded(0.0).child(
+                    wireframe_pane(dark)
+                        .pin(None, Some(0.0), Some(0.0), Some(0.0))
+                        .w_frac(2.0),
+                ),
+            ),
+    };
+    el().w_full()
+        .h(WIREFRAME_H + 2.0)
+        .padding(1.0)
+        .radius(8.0)
+        .border(1.0, t.c.border.alpha_mul(0.6))
+        .child(
+            el().w_full()
+                .h_full()
+                .radius(7.0)
+                .clip_rounded(7.0)
+                .child(panes),
         )
 }
 pub fn view(s: &App, t: &T) -> El {
     let mut modes = row().w_full().gap(12.0);
+    let (light_colors, dark_colors) = (scheme_colors(s, false), scheme_colors(s, true));
     for (mode, label) in [("system", "System"), ("light", "Light"), ("dark", "Dark")] {
         let selected = matches!(
             (s.appearance, mode),
@@ -276,46 +448,41 @@ pub fn view(s: &App, t: &T) -> El {
             col()
                 .grow(1.0)
                 .min_w(0.0)
-                .padding(8.0)
+                .padding(9.0)
                 .gap(6.0)
                 .radius(12.0)
                 .border(
                     if selected { 2.0 } else { 1.0 },
-                    if selected { t.c.ring } else { t.c.border },
+                    if selected {
+                        t.c.ring
+                    } else {
+                        t.c.border.alpha_mul(0.7)
+                    },
                 )
-                .fill(t.c.card.alpha_mul(0.4))
+                .fill(if selected {
+                    t.c.accent.alpha_mul(0.3)
+                } else {
+                    t.c.card.alpha_mul(0.6)
+                })
                 .focusable(true)
                 .role("button")
                 .label(label)
                 .on_press(move |s: &mut App| super::update(s, "appearance", json!(mode)))
-                .child(if mode == "system" {
-                    row()
-                        .w_full()
-                        .h(140.0)
-                        .radius(8.0)
-                        .clip_rounded(8.0)
-                        .child(
-                            el().grow(1.0).min_w(0.0).h_full().clip_rounded(0.0).child(
-                                wireframe(palette(&builtins()[0], false))
-                                    .w(256.0)
-                                    .min_w(256.0),
-                            ),
-                        )
-                        .child(
-                            el().grow(1.0).min_w(0.0).h_full().clip_rounded(0.0).child(
-                                wireframe(palette(&builtins()[0], true))
-                                    .w(256.0)
-                                    .min_w(256.0)
-                                    .offset(-128.0, 0.0),
-                            ),
-                        )
-                } else {
-                    wireframe(palette(&builtins()[0], mode == "dark"))
+                .child(match mode {
+                    "system" => wireframe(t, &light_colors, Some(&dark_colors)),
+                    "dark" => wireframe(t, &dark_colors, None),
+                    _ => wireframe(t, &light_colors, None),
                 })
                 .child(
-                    el().w_full()
-                        .center()
-                        .child(text(label).font(theme::TEXT_XS).color(t.c.muted_foreground)),
+                    el().w_full().center().child(
+                        text(label)
+                            .font(theme::XS_MEDIUM)
+                            .color(if selected {
+                                t.c.foreground
+                            } else {
+                                t.c.muted_foreground
+                            }),
+                    ),
                 ),
         );
     }
@@ -325,7 +492,7 @@ pub fn view(s: &App, t: &T) -> El {
         for item in group {
             let id = item["id"].as_str().unwrap_or("").to_owned();
             let label = item["label"].as_str().unwrap_or("").to_owned();
-            let mut previews = row().w_full().h(70.0).gap(20.0).center();
+            let mut previews = row().w_full().h(68.0).gap(10.0).center();
             for dark in [false, true] {
                 let selected = s
                     .client_settings
@@ -335,29 +502,49 @@ pub fn view(s: &App, t: &T) -> El {
                     .unwrap_or("t3-code")
                     == id;
                 let choice = id.clone();
-                previews = previews.child(
-                    el().padding(4.0)
-                        .radius(999.0)
-                        .border(
-                            2.0,
-                            if selected {
-                                t.c.ring
-                            } else {
-                                Color::TRANSPARENT
-                            },
+                let mut swatch = el()
+                    .size(68.0, 68.0)
+                    .padding(6.0)
+                    .radius(34.0)
+                    .focusable(true)
+                    .role("button")
+                    .label(format!("{label} {}", if dark { "dark" } else { "light" }))
+                    .on_press(move |s: &mut App| {
+                        super::update(
+                            s,
+                            if dark { "themeDark" } else { "themeLight" },
+                            json!(choice),
                         )
-                        .focusable(true)
-                        .role("button")
-                        .label(format!("{label} {}", if dark { "dark" } else { "light" }))
-                        .on_press(move |s: &mut App| {
-                            super::update(
-                                s,
-                                if dark { "themeDark" } else { "themeLight" },
-                                json!(choice),
+                    })
+                    .child(orb(item, dark, t.c.background));
+                if selected {
+                    swatch = swatch.border(2.0, t.c.ring).child(
+                        el().absolute(46.0, 46.0)
+                            .size(20.0, 20.0)
+                            .radius(10.0)
+                            .fill(t.c.background)
+                            .shadow(1.0, 3.0, Color::BLACK.alpha_mul(0.1))
+                            .center()
+                            .child(
+                                el().absolute(0.0, 0.0)
+                                    .size(20.0, 20.0)
+                                    .radius(10.0)
+                                    .border(1.0, t.c.border.alpha_mul(0.7)),
                             )
-                        })
-                        .child(orb(item, dark)),
-                );
+                            .child(
+                                icon(
+                                    if dark {
+                                        &crate::icons::MOON
+                                    } else {
+                                        &crate::icons::SUN
+                                    },
+                                    12.0,
+                                )
+                                .color(t.c.foreground),
+                            ),
+                    );
+                }
+                previews = previews.child(swatch);
             }
             let template = item.clone();
             let editor_dark = t.dark;
@@ -374,15 +561,18 @@ pub fn view(s: &App, t: &T) -> El {
                     .grow(1.0)
                     .min_w(0.0)
                     .h(126.0)
-                    .padding(12.0)
+                    .pt(13.0)
+                    .px(13.0)
+                    .pb(13.0)
                     .gap(8.0)
                     .radius(12.0)
-                    .border(1.0, t.c.border)
-                    .fill(t.c.card.alpha_mul(0.4))
+                    .border(1.0, t.c.border.alpha_mul(0.7))
+                    .fill(t.c.card.alpha_mul(0.6))
                     .child(previews)
                     .child(
                         row()
                             .w_full()
+                            .gap(8.0)
                             .center_y()
                             .child(
                                 text(label)
@@ -392,8 +582,8 @@ pub fn view(s: &App, t: &T) -> El {
                             )
                             .children(action.map(|(name, glyph)| {
                                 crate::kit::Button::new(name)
-                                    .variant("ghost-muted")
-                                    .size("icon-micro")
+                                    .variant("ghost")
+                                    .size("icon-xs")
                                     .icon(glyph)
                                     .on_press(move |s: &mut App| {
                                         edit(s, template.clone(), editor_dark)
@@ -757,5 +947,18 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn a_theme_recolours_the_terminal() {
+        let mut app = App::new();
+        app.client_settings.values.insert("themeDark".into(), json!("grove"));
+        let grove = builtins().iter().find(|v| v["id"] == "grove").unwrap();
+        let t = apply_theme(&app, crate::theme::theme(true));
+        let p = palette(grove, true);
+        assert_eq!(t.c.terminal_background, paint(p, "terminalBackground"));
+        assert_eq!(t.c.terminal_foreground, paint(p, "terminalForeground"));
+        assert_eq!(t.c.terminal_cursor, paint(p, "terminalCursor"));
+        assert_eq!(t.c.terminal_selection_background, paint(p, "terminalSelection"));
     }
 }

@@ -43,8 +43,9 @@ pub struct Ui {
 
 enum Pending {
     List,
-    /// A switch or create; its reply moves the thread onto the branch, in that worktree.
-    Branch(String, Option<String>),
+    /// A switch or create; its reply moves the thread onto the branch, in that worktree. The
+    /// title is the toast for a failure.
+    Branch(String, Option<String>, &'static str),
 }
 
 /// A row of `vcs.listRefs` (VcsRef).
@@ -386,6 +387,9 @@ fn select_ref(s: &mut App, r: &Ref) {
         draft_run_mut(s).base = Some(r.name.clone());
         return;
     }
+    if switching(s) {
+        return;
+    }
     let c = composer::ctx(s);
     let project_cwd = c.project.map(|p| data::s(p, "workspaceRoot").to_string()).unwrap_or_default();
     let active = c.thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty()).map(str::to_string);
@@ -399,16 +403,24 @@ fn select_ref(s: &mut App, r: &Ref) {
     let name = if r.remote { local_name(&r.name) } else { r.name.clone() };
     if let Some(net) = s.src.net() {
         let id = net.request("vcs.switchRef", json!({"cwd": checkout, "refName": r.name}));
-        s.ui.chat.details.pending = Some((id, Pending::Branch(name, next)));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(name, next, "Failed to switch ref.")));
     }
 }
 
+/// `isBranchActionPending`: a pick waits for the switch already under way.
+fn switching(s: &App) -> bool {
+    matches!(s.ui.chat.details.pending, Some((_, Pending::Branch(..))))
+}
+
 fn create_ref(s: &mut App, name: &str) {
+    if switching(s) {
+        return;
+    }
     let Some(cwd) = cwd(s) else { return };
     let worktree = composer::ctx(s).thread.map(|t| data::s(t, "worktreePath")).filter(|p| !p.is_empty()).map(str::to_string);
     if let Some(net) = s.src.net() {
         let id = net.request("vcs.createRef", json!({"cwd": cwd, "refName": name, "switchRef": true}));
-        s.ui.chat.details.pending = Some((id, Pending::Branch(name.to_string(), worktree)));
+        s.ui.chat.details.pending = Some((id, Pending::Branch(name.to_string(), worktree, "Failed to create and switch ref.")));
     }
 }
 
@@ -461,7 +473,7 @@ fn poll_branch(s: &mut App) -> bool {
             ui.refs_more = (!v["nextCursor"].is_null()).then(|| (refs.len(), v["totalCount"].as_u64().unwrap_or(0)));
             ui.refs = Some(refs);
         }
-        (Pending::Branch(name, worktree), Ok(v)) => {
+        (Pending::Branch(name, worktree, _), Ok(v)) => {
             let branch = v["refName"].as_str().unwrap_or(&name).to_string();
             set_thread_branch(s, &branch, worktree);
             git::refresh(s);
@@ -470,7 +482,7 @@ fn poll_branch(s: &mut App) -> bool {
             s.ui.chat.details.refs = Some(vec![]);
             palette::toast(s, "Failed to load branches.", Some(&palette::error_message(&e, "An error occurred.")));
         }
-        (Pending::Branch(..), Err(e)) => palette::toast(s, "Failed to switch ref.", Some(&palette::error_message(&e, "An error occurred."))),
+        (Pending::Branch(_, _, title), Err(e)) => palette::toast(s, title, Some(&palette::error_message(&e, "An error occurred."))),
     }
     true
 }
@@ -478,6 +490,9 @@ fn poll_branch(s: &mut App) -> bool {
 fn open_in_editor(s: &mut App, editor: Option<String>) {
     let (Some(cwd), editor) = (cwd(s), editor.or_else(|| editors(s).first().map(|e| e.0.clone()))) else { return };
     let Some(editor) = editor else { return };
+    if crate::env::ssh::open_in_editor(s, &editor, &cwd) {
+        return;
+    }
     if let Some(net) = s.src.net() {
         net.request("shell.openInEditor", json!({"cwd": cwd, "editor": editor}));
     }
@@ -485,6 +500,9 @@ fn open_in_editor(s: &mut App, editor: Option<String>) {
 
 /// `(id, label)` for each editor the server found.
 fn editors(s: &App) -> Vec<(String, String)> {
+    if let Some(remote) = crate::env::ssh::editors(s) {
+        return remote;
+    }
     s.state()
         .config
         .as_ref()
@@ -617,7 +635,7 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .expanded(s.ui.chat.details.menu == Some(Menu::Branch))
                     .on_press(|s: &mut App| toggle_menu(s, Menu::Branch)),
             );
-        // The Changes row hides with the quiet git row; a draft shows it disabled.
+        // The Changes row hides with the quiet git row; on a draft it opens the project's changes.
         let Some(git) = git::view(s, t, v, draft) else { return Some(card.child(section)) };
         section = section.child(git);
         let (add, del) = git::changes_totals(v);
@@ -630,7 +648,7 @@ fn card(s: &App, t: &T) -> Option<El> {
                     .child(text(format!("+{add}")).font(stat).color(if add > 0 { t.c.diff_addition_foreground } else { muted }))
                     .child(text(format!("-{del}")).font(stat).color(if del > 0 { t.c.diff_deletion_foreground } else { muted })),
             );
-        section = section.child(if draft { changes.opacity(0.64) } else { changes.on_press(|s: &mut App| crate::panel::open_changes(s)) });
+        section = section.child(changes.on_press(|s: &mut App| crate::panel::open_changes(s)));
         card = card.child(section);
     }
     Some(card)
@@ -815,7 +833,7 @@ pub fn on_key(s: &mut App, e: &KeyEvent) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{DraftRun, Item, Ref, Shown, branch_items, draft_run, git, lane, local_name, shown, take_draft_workspace, toggle};
+    use super::{DraftRun, Item, Pending, Ref, Shown, branch_items, draft_run, git, lane, local_name, shown, switching, take_draft_workspace, toggle};
     use serde_json::json;
     use crate::{App, Route, data};
 
@@ -850,6 +868,17 @@ mod tests {
         assert_eq!(branch_items(&refs, "new", false), vec![], "no create while picking a worktree base");
         assert_eq!(local_name("origin/feature/x"), "feature/x");
         assert_eq!(local_name("main"), "main");
+    }
+
+    #[test]
+    fn a_pick_waits_for_the_switch_under_way_but_not_for_a_ref_listing() {
+        let mut s = App::new();
+        s.ui.chat.details.pending = Some((1, Pending::List));
+        assert!(!switching(&s));
+        s.ui.chat.details.pending = Some((2, Pending::Branch("feature".into(), None, "Failed to switch ref.")));
+        assert!(switching(&s));
+        super::create_ref(&mut s, "other");
+        assert!(matches!(&s.ui.chat.details.pending, Some((2, Pending::Branch(name, ..))) if name == "feature"));
     }
 
     #[test]

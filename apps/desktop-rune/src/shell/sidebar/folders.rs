@@ -30,22 +30,36 @@ pub struct Group {
 pub struct Grouping {
     mode: String,
     overrides: Value,
+    /// The environment id of rows native to `App::src`; copied rows carry their owner's.
     environment: String,
+    /// This machine's environment id: groups that span environments are represented by its member.
+    local: String,
 }
 
 impl Grouping {
     pub fn read(s: &App) -> Grouping {
         let environment = s.state().config.as_ref().map(|c| field(&c["environment"], "environmentId").to_string()).unwrap_or_default();
+        let local = crate::env::local_id(s).unwrap_or_else(|| environment.clone());
         Grouping {
             mode: crate::settings::value(s, "sidebarProjectGroupingMode").as_str().unwrap_or("repository").to_string(),
             overrides: crate::settings::value(s, "sidebarProjectGroupingOverrides"),
             environment,
+            local,
+        }
+    }
+
+    /// The environment id a project row belongs to (`project.environmentId` on the web).
+    fn environment_of<'a>(&'a self, project: &'a Value) -> &'a str {
+        match project[crate::env::TAG].as_str() {
+            None => &self.environment,
+            Some(crate::env::LOCAL) => &self.local,
+            Some(id) => id,
         }
     }
 
     /// `deriveLogicalProjectKey` with the project's override, if any.
     pub fn key(&self, project: &Value) -> String {
-        let physical = format!("{}:{}", self.environment, normalize(field(project, "workspaceRoot")));
+        let physical = format!("{}:{}", self.environment_of(project), normalize(field(project, "workspaceRoot")));
         let mode = self.overrides[&physical].as_str().unwrap_or(&self.mode);
         if mode == "separate" {
             return physical;
@@ -105,7 +119,8 @@ fn label(members: &[&Value]) -> String {
     }
 }
 
-/// `buildProjectGroups` for one environment: groups in first-member order.
+/// `buildProjectGroups` over every environment's projects: groups in first-member order, each
+/// represented by its member on this machine when it has one.
 pub fn groups(projects: &[Value], grouping: &Grouping) -> Vec<Group> {
     let mut order: Vec<String> = vec![];
     let mut members: HashMap<String, Vec<&Value>> = HashMap::new();
@@ -120,11 +135,12 @@ pub fn groups(projects: &[Value], grouping: &Grouping) -> Vec<Group> {
         .into_iter()
         .map(|key| {
             let list = &members[&key];
+            let first = list.iter().find(|p| grouping.environment_of(p) == grouping.local).unwrap_or(&list[0]);
             Group {
                 label: if list.len() == 1 { field(list[0], "title").to_string() } else { label(list) },
                 members: list.iter().map(|p| field(p, "id").to_string()).collect(),
-                representative: field(list[0], "id").to_string(),
-                root: field(list[0], "workspaceRoot").to_string(),
+                representative: field(first, "id").to_string(),
+                root: field(first, "workspaceRoot").to_string(),
                 pinned: list.iter().any(|p| !p["pinnedAt"].is_null()),
                 archived: list.iter().all(|p| !p["archivedAt"].is_null()),
                 key,
@@ -208,10 +224,12 @@ pub fn plan(p: &Plan) -> Vec<Folder> {
 }
 
 /// Collapsed folders (the web's `projectExpandedById`); folders start open. Kept beside the
-/// client settings so they outlive a restart.
+/// client settings so they outlive a restart, with the Settled shelf's open state
+/// (`t3code:sidebar:settled-expanded`).
 #[derive(Default)]
 pub struct State {
     collapsed: HashSet<String>,
+    settled: bool,
     loaded: bool,
     pub hover: Option<String>,
     /// The folder context menu: group key and the point it opened at.
@@ -225,12 +243,15 @@ impl State {
         (!cfg!(test)).then(|| crate::settings::client::sibling_path(FILE))
     }
 
-    fn load(&mut self) {
+    /// True on the call that read the file.
+    fn load(&mut self) -> bool {
         if std::mem::replace(&mut self.loaded, true) {
-            return;
+            return false;
         }
         let saved = Self::path().and_then(|p| std::fs::read(p).ok()).and_then(|b| serde_json::from_slice::<Value>(&b).ok());
         self.collapsed = saved.iter().flat_map(|v| v["collapsed"].as_array().into_iter().flatten()).filter_map(|k| k.as_str().map(str::to_string)).collect();
+        self.settled = saved.is_some_and(|v| v["settledExpanded"] == true);
+        true
     }
 
     pub fn expanded(&self, key: &str) -> bool {
@@ -240,11 +261,21 @@ impl State {
     pub fn toggle(&mut self, key: &str, open: bool) {
         self.load();
         if open { self.collapsed.remove(key) } else { self.collapsed.insert(key.to_string()) };
+        self.save();
+    }
+
+    pub fn set_settled(&mut self, open: bool) {
+        self.load();
+        self.settled = open;
+        self.save();
+    }
+
+    fn save(&self) {
         let Some(path) = Self::path() else { return };
         let mut keys: Vec<&String> = self.collapsed.iter().collect();
         keys.sort();
         let temporary = path.with_extension(format!("{}.tmp", std::process::id()));
-        let ok = serde_json::to_vec(&json!({"collapsed": keys})).ok().is_some_and(|bytes| {
+        let ok = serde_json::to_vec(&json!({"collapsed": keys, "settledExpanded": self.settled})).ok().is_some_and(|bytes| {
             path.parent().is_none_or(|p| std::fs::create_dir_all(p).is_ok()) && std::fs::write(&temporary, bytes).is_ok() && std::fs::rename(&temporary, &path).is_ok()
         });
         if !ok {
@@ -255,7 +286,10 @@ impl State {
 
 /// Reads the saved folder state once, before the first frame that shows folders.
 pub fn ensure_loaded(s: &mut App) {
-    s.ui.shell.sidebar.folders.load();
+    let ui = &mut s.ui.shell.sidebar;
+    if ui.folders.load() && ui.folders.settled {
+        ui.expanded.insert(super::Shelf::Settled);
+    }
 }
 
 /// Rows a folder shows: all when open, else only the open thread.
@@ -345,6 +379,9 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
         .on_secondary_press(move |s: &mut App, at: PointerPress, _: &mut Tx| s.ui.shell.sidebar.folders.menu = Some((menu_key.clone(), at.x, at.y)))
         // `sidebarTree`: Right opens a folder, Left folds it.
         .on_key(move |s: &mut App, e: &rune::KeyEvent, _: &mut Tx| {
+            if e.mods.shift || e.mods.ctrl || e.mods.alt || e.mods.logo || e.mods.cmd {
+                return false;
+            }
             let open = match e.key {
                 rune::Key::Right => true,
                 rune::Key::Left => false,
@@ -359,6 +396,7 @@ pub fn header(s: &App, t: &T, model: &Model, folder: &Folder) -> El {
         let new = super::row::hover_action(t, format!("sb-folder-new-{}", g.key), &i::SQUARE_PEN, 14.0, None, 6.0)
             .role("button")
             .label(format!("New thread in {}", g.label))
+            .help(format!("New thread in {}", g.label))
             .on_press(move |s: &mut App| new_thread_in(s, &project));
         li = li.child(new.pin(None, Some(4.0), Some(24.0), None));
     }
@@ -427,7 +465,7 @@ mod tests {
     use super::*;
 
     fn grouping(mode: &str) -> Grouping {
-        Grouping { mode: mode.into(), overrides: json!({}), environment: "env".into() }
+        Grouping { mode: mode.into(), overrides: json!({}), environment: "env".into(), local: "env".into() }
     }
 
     fn project(id: &str, title: &str, root: &str, identity: Value) -> Value {
@@ -462,6 +500,30 @@ mod tests {
         assert!(built[0].pinned, "any pinned member pins the group");
         assert_eq!(built[1].label, "Other");
         assert_eq!(groups(&projects, &grouping("separate")).len(), 3);
+    }
+
+    #[test]
+    fn one_repository_groups_across_environments_and_this_machine_represents_it() {
+        let identity = json!({"canonicalKey": "github.com/acme/app", "name": "app", "rootPath": "/src/app"});
+        let remote = |mut p: Value| {
+            p[crate::env::TAG] = json!("box");
+            p
+        };
+        let projects = vec![
+            remote(project("r", "app", "/src/app", identity.clone())),
+            project("l", "app", "/src/app", identity),
+            remote(project("rn", "notes", "/notes", Value::Null)),
+            project("ln", "notes", "/notes", Value::Null),
+        ];
+        let built = groups(&projects, &grouping("repository"));
+        assert_eq!(built.iter().map(|g| g.key.as_str()).collect::<Vec<_>>(), vec!["github.com/acme/app", "box:/notes", "env:/notes"]);
+        assert_eq!(built[0].members, vec!["r", "l"]);
+        assert_eq!(built[0].representative, "l", "the local copy represents a group listed remote-first");
+        let mut on_remote = grouping("repository");
+        on_remote.environment = "box".into();
+        let mut local = projects[3].clone();
+        local[crate::env::TAG] = json!(crate::env::LOCAL);
+        assert_eq!(on_remote.key(&local), "env:/notes", "this machine's rows keep its id while a remote is on screen");
     }
 
     fn thread(id: &str, project: &str, created: i64, latest: Option<i64>) -> Thread {

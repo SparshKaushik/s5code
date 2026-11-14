@@ -228,10 +228,12 @@ pub struct ProjectChoice {
     pub unavailable: Option<String>,
 }
 
-/// pullRequestFilterProjects then PullRequestFiltersMenu's order: one project per repository (the
-/// chosen one where two share it), shared titles told apart by server, then folder, then id,
-/// sorted by title, and the projects whose listing failed last.
-pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, errors: &[Value]) -> Vec<ProjectChoice> {
+/// pullRequestFilterProjects then PullRequestFiltersMenuInSidebarOrder: one project per repository
+/// (the chosen one where two share it), shared titles told apart by server name, then folder, then
+/// environment id, then project id, sorted by title, then in the sidebar's project order (its
+/// scope menu: open projects as the server lists them, archived ones after), and the projects
+/// whose listing failed last.
+pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, environment: &str, errors: &[Value]) -> Vec<ProjectChoice> {
     let mut kept: Vec<&Value> = Vec::new();
     let mut at: HashMap<String, usize> = HashMap::new();
     for p in projects.iter().filter(|p| p["isScratch"] != true) {
@@ -250,7 +252,7 @@ pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, errors
         }
     }
     let mut titled: Vec<(String, &Value)> = kept.into_iter().map(|p| (field(p, "title").to_string(), p)).collect();
-    for stage in 0..3 {
+    for stage in 0..4 {
         let mut counts: HashMap<String, usize> = HashMap::new();
         for (title, _) in &titled {
             *counts.entry(title.clone()).or_default() += 1;
@@ -260,6 +262,7 @@ pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, errors
                 let suffix = match stage {
                     0 => server,
                     1 => field(p, "workspaceRoot"),
+                    2 => environment,
                     _ => field(p, "id"),
                 };
                 *title = format!("{title} · {suffix}");
@@ -267,6 +270,8 @@ pub fn projects(projects: &[Value], selected: Option<&str>, server: &str, errors
         }
     }
     titled.sort_by(|a, b| by_name(&a.0, &b.0));
+    let sidebar: Vec<&str> = projects.iter().filter(|p| p["archivedAt"].is_null()).map(|p| field(p, "id")).collect();
+    titled.sort_by_key(|(_, p)| sidebar.iter().position(|id| *id == field(p, "id")).unwrap_or(sidebar.len()));
     let mut out: Vec<ProjectChoice> = titled
         .into_iter()
         .map(|(title, p)| {
@@ -289,20 +294,45 @@ pub fn project_entries(s: &App, t: &T, choices: &[ProjectChoice]) -> Vec<MenuEnt
     ];
     for c in choices {
         let checked = chosen == Some(c.id.as_str());
-        let mut line = choice(t, format!("pr-project-{}", c.id), "menuitemradio", c.title.clone(), checked)
+        let key = format!("pr-project-{}", c.id);
+        let favicon = crate::shell::sidebar::favicon::mark(s, t, &c.id, &c.title, false, 14.0);
+        if let Some(why) = &c.unavailable {
+            out.push(unavailable_option(t, key, favicon, c.title.clone(), checked, true, why.clone()));
+            continue;
+        }
+        let id = c.id.clone();
+        let line = choice(t, key, "menuitemradio", c.title.clone(), checked)
             .fill(if checked { t.c.foreground.alpha_mul(0.08) } else { Color::TRANSPARENT })
-            .child(crate::shell::sidebar::favicon::mark(s, t, &c.id, &c.title, false, 14.0))
-            .child(text(c.title.clone()).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0));
-        line = match &c.unavailable {
-            Some(why) => line.child(text("· Unavailable").font(theme::TEXT_SM).color(t.c.foreground).shrink()).child(tick(t, checked)).disabled(true).focusable(false).opacity(0.64).help(why.clone()),
-            None => {
-                let id = c.id.clone();
-                line.child(tick(t, checked)).on_press(move |s: &mut App| s.ui.pages.pull_requests.filters.project = Some(id.clone()))
-            }
-        };
+            .child(favicon)
+            .child(text(c.title.clone()).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0))
+            .child(tick(t, checked))
+            .on_press(move |s: &mut App| s.ui.pages.pull_requests.filters.project = Some(id.clone()));
         out.push(MenuEntry::Row(line));
     }
     out
+}
+
+/// A menu item's icon slot, as `MenuItem::icon` draws it, for rows built by hand.
+pub fn menu_glyph(t: &T, glyph: &'static rune::Icon) -> El {
+    el().size(12.0, 16.0).child(icon(glyph, 16.0).absolute(-2.0, 0.0).color(t.c.contrast_icon_muted).opacity(0.8))
+}
+
+/// A project's favicon in a menu item's icon slot (PullRequestFilterOptionIcon's ProjectFavicon).
+pub fn menu_favicon(s: &App, t: &T, id: &str, title: &str) -> El {
+    el().size(12.0, 16.0).child(crate::shell::sidebar::favicon::mark(s, t, id, title, false, 14.0).absolute(-1.0, 1.0))
+}
+
+/// An option the menu can't pick (PullRequestFilterRadioGroup's `unavailable`): greyed out with
+/// the reason on hover, and "· Unavailable" after its name where `tagged` (the Filters menu; the
+/// compact menus show the name alone).
+pub fn unavailable_option(t: &T, key: String, lead: El, label: String, checked: bool, tagged: bool, why: String) -> MenuEntry {
+    let line = choice(t, key, "menuitemradio", label.clone(), checked)
+        .fill(if checked { t.c.foreground.alpha_mul(0.08) } else { Color::TRANSPARENT })
+        .child(lead)
+        .child(text(label).font(theme::TEXT_SM).color(t.c.foreground).truncate().grow(1.0).shrink().min_w(0.0))
+        .children(tagged.then(|| text("· Unavailable").font(theme::TEXT_SM).color(t.c.foreground).shrink()))
+        .child(tick(t, checked));
+    MenuEntry::Row(line.disabled(true).focusable(false).opacity(0.64).help(why))
 }
 
 /// The search sent for `text`: trimmed and capped at the input's 100 characters.
@@ -585,22 +615,28 @@ mod tests {
 
     #[test]
     fn project_choices_keep_one_per_repository_tell_titles_apart_and_put_failures_last() {
-        let p = |id: &str, title: &str, key: Option<&str>, root: &str| json!({"id": id, "title": title, "workspaceRoot": root, "repositoryIdentity": key.map(|k| json!({"canonicalKey": k}))});
+        let p = |id: &str, title: &str, key: Option<&str>, root: &str| json!({"id": id, "title": title, "workspaceRoot": root, "repositoryIdentity": key.map(|k| json!({"canonicalKey": k})), "archivedAt": null});
+        let mut archived = p("z", "Archive", None, "/w/old");
+        archived["archivedAt"] = json!("2026-01-01T00:00:00Z");
         let list = [
+            archived,
+            p("e", "Docs", None, "/w/docs"),
             p("a", "web", Some("github.com/acme/web"), "/w/web"),
             p("b", "web copy", Some("GitHub.com/acme/web"), "/w/web2"),
             p("c", "api", None, "/w/api"),
             p("d", "api", None, "/x/api"),
-            p("e", "Docs", None, "/w/docs"),
             json!({"id": "s", "title": "Scratch", "isScratch": true}),
         ];
         let errors = [json!({"projectId": "c", "projectTitle": "api", "message": "gh is not authenticated."})];
-        let choices = projects(&list, None, "This machine", &errors);
+        let choices = projects(&list, None, "nucbox-1", "env-nucbox", &errors);
         let shown: Vec<(&str, &str)> = choices.iter().map(|c| (c.id.as_str(), c.title.as_str())).collect();
-        assert_eq!(shown, [("d", "api · This machine · /x/api"), ("e", "Docs"), ("a", "web"), ("c", "api · This machine · /w/api")]);
-        assert_eq!(choices[3].unavailable.as_deref(), Some("gh is not authenticated."));
-        let chosen: Vec<String> = projects(&list, Some("b"), "This machine", &[]).into_iter().map(|c| c.id).collect();
-        assert_eq!(chosen, ["c", "d", "e", "b"]);
+        assert_eq!(shown, [("e", "Docs"), ("a", "web"), ("d", "api · nucbox-1 · /x/api"), ("z", "Archive"), ("c", "api · nucbox-1 · /w/api")]);
+        assert_eq!(choices[4].unavailable.as_deref(), Some("gh is not authenticated."));
+        let chosen: Vec<String> = projects(&list, Some("b"), "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.id).collect();
+        assert_eq!(chosen, ["e", "b", "c", "d", "z"]);
+        let twins = [p("f", "t3code", None, "/work/main"), p("g", "t3code", None, "/work/main")];
+        let titles: Vec<String> = projects(&twins, None, "nucbox-1", "env-nucbox", &[]).into_iter().map(|c| c.title).collect();
+        assert_eq!(titles, ["t3code · nucbox-1 · /work/main · env-nucbox · f", "t3code · nucbox-1 · /work/main · env-nucbox · g"]);
     }
 
     #[test]

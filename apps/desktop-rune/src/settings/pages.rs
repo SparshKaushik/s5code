@@ -16,7 +16,7 @@ pub fn specs() -> &'static Value {
 /// Provider sign-in status fails per instance (e.g. a CLI that isn't installed); like web,
 /// the auth section reports it inline instead of hiding the Providers page.
 fn blocks_page(method: &str) -> bool {
-    method != "provider.auth.subscribe"
+    method != "provider.auth.subscribe" && method != "server.getStorageCleanupReport"
 }
 
 pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
@@ -130,6 +130,15 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
                     page = page.child(section);
                 }
             }
+            if path == "maintenance" && title == "Updates" {
+                page = page.child(super::background::view(s, cx, t));
+                for section in super::storage::maintenance(s, cx, t) {
+                    page = page.child(section);
+                }
+            }
+            if path == "worktrees" && title == "Branches" {
+                page = page.child(super::storage::worktree_cleanup(s, cx, t));
+            }
         }
         return page;
     }
@@ -147,7 +156,7 @@ pub fn view(s: &App, cx: &mut Cx<App>, t: &T, path: &str) -> El {
     })
 }
 
-fn advanced_trigger(path: String, open: bool, t: &T) -> El {
+pub(super) fn advanced_trigger(path: String, open: bool, t: &T) -> El {
     rune::row()
         .w_full()
         .min_h(40.0)

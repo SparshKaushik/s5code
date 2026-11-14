@@ -10,6 +10,10 @@ mod macos;
 #[cfg(unix)]
 pub mod cli;
 pub mod exposure;
+pub mod locale;
+pub mod recovery;
+#[cfg(unix)]
+pub mod shell_path;
 pub mod single;
 #[cfg(target_os = "linux")]
 mod url_handler;
@@ -40,9 +44,9 @@ const SETTINGS_TITLE: &str = "Settings…";
 const QUIT_TITLE: &str = "Quit S5 Code";
 #[cfg(target_os = "macos")]
 const UPDATES_TITLE: &str = "Check for Updates...";
+const UPDATES_UNAVAILABLE: &str = "Automatic updates are not available right now.";
 /// Electron's reason for a build without `app-update.yml`, which every Rune build is.
-#[cfg(target_os = "macos")]
-const NO_UPDATE_FEED: &str = "Automatic updates are not available because no update feed is configured.";
+pub const NO_UPDATE_FEED: &str = "Automatic updates are not available because no update feed is configured.";
 /// Chromium's zoom: each step is half a level, a level is a factor of 1.2.
 const ZOOM_STEP: f32 = 0.5;
 const ZOOM_LEVELS: (f32, f32) = (-7.5, 8.5);
@@ -53,6 +57,8 @@ pub struct Ui {
     /// The bundled server's URL and token, kept for Reload.
     pub server: Option<(String, String)>,
     pub exposure: exposure::State,
+    /// Why the bundled server keeps failing before it ever started, for the recovery screen.
+    pub startup_failure: Option<crate::host::StartupFailure>,
     #[cfg(unix)]
     pub cli: cli::State,
     zoom_level: f32,
@@ -67,6 +73,9 @@ pub struct Ui {
     saved: Option<Bounds>,
     due: Option<(i64, Bounds)>,
     prefs_loaded: bool,
+    /// The appearance last handed to AppKit.
+    #[cfg(target_os = "macos")]
+    appearance: Option<crate::Appearance>,
 }
 
 /// What a launch restores: the size in points, and off macOS and Wayland the outer position in
@@ -78,7 +87,7 @@ struct Bounds {
 }
 
 impl Ui {
-    fn zoom_factor(&self) -> f32 {
+    pub(crate) fn zoom_factor(&self) -> f32 {
         1.2f32.powf(self.zoom_level)
     }
 
@@ -175,8 +184,8 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
     let key = |s: &str| s.parse::<Shortcut>().expect("valid accelerator");
     app.standard_menus()
         .menu_item(MenuItem::new(SETTINGS_TITLE, |s: &mut App, _: &mut Tx| open_settings(s)).id("settings").key_equivalent(key("cmd+,")).keys_first())
-        .menu_item(MenuItem::new(UPDATES_TITLE, |_: &mut App, _: &mut Tx| check_for_updates()).id("check-for-updates"))
-        .menu_item(MenuItem::new(UPDATES_TITLE, |_: &mut App, _: &mut Tx| check_for_updates()).id("help-check-for-updates").menu("Help"))
+        .menu_item(MenuItem::new(UPDATES_TITLE, |s: &mut App, _: &mut Tx| check_for_updates(s)).id("check-for-updates"))
+        .menu_item(MenuItem::new(UPDATES_TITLE, |s: &mut App, _: &mut Tx| check_for_updates(s)).id("help-check-for-updates").menu("Help"))
         .menu_item(MenuItem::new(QUIT_TITLE, |s: &mut App, tx: &mut Tx| crate::shell::quit::menu_quit(s, tx)).id("quit").key_equivalent(key("cmd+q")).keys_first())
         .menu_item(MenuItem::new("Close Window", |_: &mut App, tx: &mut Tx| tx.close_window()).id("close-window").menu("File"))
         .menu_item(MenuItem::new("Reload", |s: &mut App, _: &mut Tx| reload(s, false)).id("reload").menu("View").key_equivalent(key("cmd+r")).keys_first())
@@ -187,10 +196,17 @@ fn mac_menu(app: RuneApp<App>) -> RuneApp<App> {
         .menu_item(MenuItem::new("Zoom Out", |s: &mut App, tx: &mut Tx| zoom(s, tx, Some(-ZOOM_STEP))).id("zoom-out").menu("View").key_equivalent(key("cmd+-")).keys_first())
 }
 
-/// App menu and Help › Check for Updates..., as Electron's with updates disabled.
-#[cfg(target_os = "macos")]
-fn check_for_updates() {
-    macos::alert("Automatic updates are not available right now.", NO_UPDATE_FEED);
+/// Check for Updates, as Electron's with no feed configured: its reason, in an alert on macOS
+/// (App and Help menus) and in the app's toast elsewhere (About and the command palette, since
+/// Rune has no menu bar there).
+pub fn check_for_updates(s: &mut App) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = s;
+        macos::alert(UPDATES_UNAVAILABLE, NO_UPDATE_FEED);
+    }
+    #[cfg(not(target_os = "macos"))]
+    crate::shell::palette::toast(s, UPDATES_UNAVAILABLE, Some(NO_UPDATE_FEED));
 }
 
 fn open_settings(s: &mut App) {
@@ -278,6 +294,24 @@ pub fn poll(s: &mut App, tx: &mut Tx) -> bool {
         #[cfg(unix)]
         ui.cli.load();
         changed = ui.zoom_level != 0.0;
+        #[cfg(unix)]
+        shell_path::warm(s.ui.panel.waker.clone());
+    }
+    #[cfg(unix)]
+    if !s.ui.desktop.cli.login_path && shell_path::get().is_some() {
+        s.ui.desktop.cli.load();
+        changed = true;
+    }
+    changed |= exposure::poll(s);
+    let ui = &mut s.ui.desktop;
+    #[cfg(target_os = "macos")]
+    if ui.appearance != Some(s.appearance) && !rune::is_headless() {
+        ui.appearance = Some(s.appearance);
+        macos::set_appearance(match s.appearance {
+            crate::Appearance::System => None,
+            crate::Appearance::Light => Some(false),
+            crate::Appearance::Dark => Some(true),
+        });
     }
     if let Some(origin) = ui.origin.filter(|o| *o != [0, 0])
         && let Some(restored) = ui.restored.take()
